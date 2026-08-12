@@ -84,18 +84,6 @@ class PoolCursor:
                 raise RuntimeError("simulated read-only connection loss")
             row = self.connection.materials.get(material_id)
             self.rows = [] if row is None else [row]
-        elif "ads_facebook_violations" in sql:
-            material_id = str(params[0])
-            if material_id in self.connection.query_error_material_ids:
-                raise RuntimeError("simulated read-only connection loss")
-            self.rows = [
-                {
-                    "facebook_count": self.connection.violations.get(material_id, 0),
-                    "tiktok_count": 0,
-                    "twitter_count": 0,
-                    "resource_audit_count": 0,
-                }
-            ]
         elif "resource_tags" in sql:
             self.rows = [
                 {"tag_name": value}
@@ -133,7 +121,6 @@ class PoolConnection:
             str(material_id): material_row(material_id)
             for material_id in material_ids
         }
-        self.violations = {}
         self.material_tags = {}
         self.drama_rows = {}
         self.deploy_rows = {}
@@ -343,9 +330,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
             ["drama_deploy_time_missing", "drama_deploy_time_invalid"],
         )
 
-    def test_item_level_safety_rejections_are_reported_and_scanning_continues(self):
+    def test_violation_history_is_ignored_while_safety_rejections_still_apply(self):
         connection = PoolConnection(range(1, 7))
-        connection.violations["1"] = 1
         connection.materials["2"]["source_tag_name"] = "sexual_content"
         connection.material_tags["3"] = ["blood_gore"]
         connection.drama_rows["4"] = [
@@ -361,14 +347,22 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 for material_id in range(1, 7)
             ],
             "2026-07-22",
-            limit=1,
+            limit=2,
         )
 
-        self.assertEqual([item["material_id"] for item in selected], ["6"])
+        self.assertEqual([item["material_id"] for item in selected], ["1", "6"])
+        self.assertTrue(
+            all(
+                item["facebook_violation_count"] == 0
+                and item["tiktok_violation_count"] == 0
+                and item["twitter_violation_count"] == 0
+                and item["resource_audit_count"] == 0
+                for item in selected
+            )
+        )
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
-                "material_has_violation",
                 "material_source_tag_unsafe",
                 "material_tag_unsafe",
                 "drama_mapping_ambiguous",
@@ -381,6 +375,10 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 == {"pool_item_id", "material_id", "error_code", "error_message"}
                 for item in rejections
             )
+        )
+        statements = [sql for sql, _params in connection.calls]
+        self.assertTrue(
+            all("violations" not in sql and "resource_audit" not in sql for sql in statements)
         )
 
     def test_sexual_or_violent_drama_labels_are_allowed(self):

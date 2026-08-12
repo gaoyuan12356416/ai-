@@ -1065,6 +1065,8 @@ def ensure_storage(db_path):
                 CREATE TABLE IF NOT EXISTS x_post_manual_run (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     idempotency_key TEXT NOT NULL UNIQUE,
+                    trigger_source TEXT NOT NULL DEFAULT 'manual'
+                        CHECK(trigger_source IN ('manual','auto_template')),
                     run_date TEXT NOT NULL,
                     source_date TEXT NOT NULL,
                     account_ids_json TEXT NOT NULL,
@@ -1092,6 +1094,16 @@ def ensure_storage(db_path):
                 )
                 """
             )
+            manual_run_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(x_post_manual_run)")
+            }
+            if "trigger_source" not in manual_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_manual_run ADD COLUMN "
+                    "trigger_source TEXT NOT NULL DEFAULT 'manual' "
+                    "CHECK(trigger_source IN ('manual','auto_template'))"
+                )
             conn.execute(
                 """
             CREATE TABLE IF NOT EXISTS x_post_queue (
@@ -1793,8 +1805,11 @@ def ensure_storage(db_path):
                     )
 
             duplicate_material = conn.execute(
-                "SELECT material_key,COUNT(*) AS total FROM x_post_queue "
-                "WHERE material_key<>'' GROUP BY material_key HAVING COUNT(*)>1 LIMIT 1"
+                "SELECT q.material_key,COUNT(*) AS total FROM x_post_queue q "
+                "WHERE q.material_key<>'' AND NOT EXISTS("
+                "SELECT 1 FROM x_post_manual_run mr "
+                "WHERE mr.id=q.manual_run_id AND mr.trigger_source='manual'"
+                ") GROUP BY q.material_key HAVING COUNT(*)>1 LIMIT 1"
             ).fetchone()
             if duplicate_material:
                 raise XPostError(
@@ -1815,8 +1830,9 @@ def ensure_storage(db_path):
                     500,
                 )
 
+            conn.execute("DROP INDEX IF EXISTS ux_x_post_queue_material_key")
             conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_material_key "
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_material_key "
                 "ON x_post_queue(material_key) WHERE material_key<>''"
             )
             conn.execute("DROP INDEX IF EXISTS ux_x_post_queue_account_run_date")
@@ -2385,6 +2401,47 @@ def ensure_storage(db_path):
                 """
             )
             conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_pool_insert")
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_material_dedupe_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_material_dedupe_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.material_key<>''
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_manual_run mr
+                       WHERE mr.id=NEW.manual_run_id
+                         AND mr.trigger_source='manual'
+                  )
+                  AND EXISTS(
+                      SELECT 1 FROM x_post_queue q
+                       WHERE q.material_key=NEW.material_key
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue material occupied');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_material_dedupe_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_material_dedupe_update
+                BEFORE UPDATE OF material_key,manual_run_id ON x_post_queue
+                WHEN NEW.material_key<>''
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_manual_run mr
+                       WHERE mr.id=NEW.manual_run_id
+                         AND mr.trigger_source='manual'
+                  )
+                  AND EXISTS(
+                      SELECT 1 FROM x_post_queue q
+                       WHERE q.material_key=NEW.material_key
+                         AND q.id<>OLD.id
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue material occupied');
+                END
+                """
+            )
             conn.execute(
                 """
                 CREATE TRIGGER trg_x_post_queue_pool_insert
@@ -2422,6 +2479,11 @@ def ensure_storage(db_path):
                 CREATE TRIGGER trg_x_post_queue_pool_required_insert
                 BEFORE INSERT ON x_post_queue
                 WHEN NEW.pool_item_id IS NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_manual_run mr
+                       WHERE mr.id=NEW.manual_run_id
+                         AND mr.trigger_source='manual'
+                  )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
                        WHERE material_key=NEW.material_key
@@ -2435,8 +2497,13 @@ def ensure_storage(db_path):
             conn.execute(
                 """
                 CREATE TRIGGER trg_x_post_queue_pool_required_update
-                BEFORE UPDATE OF pool_item_id,material_key ON x_post_queue
+                BEFORE UPDATE OF pool_item_id,material_key,manual_run_id ON x_post_queue
                 WHEN NEW.pool_item_id IS NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_manual_run mr
+                       WHERE mr.id=NEW.manual_run_id
+                         AND mr.trigger_source='manual'
+                  )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
                        WHERE material_key=NEW.material_key
@@ -6132,24 +6199,6 @@ class XPostStore:
                 result["created"] = False
                 return result
 
-            placeholders = ",".join("?" for _item in material_ids)
-            in_pool = conn.execute(
-                "SELECT material_key FROM x_post_material_pool "
-                "WHERE material_key IN (%s) LIMIT 1" % placeholders,
-                tuple(material_ids),
-            ).fetchone()
-            already_used = conn.execute(
-                "SELECT material_key FROM x_post_queue "
-                "WHERE material_key IN (%s) LIMIT 1" % placeholders,
-                tuple(material_ids),
-            ).fetchone()
-            if in_pool or already_used:
-                conn.rollback()
-                raise XPostError(
-                    "x_post_manual_material_unavailable",
-                    "所选素材已进入素材池或已被发布队列占用",
-                    409,
-                )
             config = conn.execute(
                 "SELECT body_template FROM x_post_schedule_config "
                 "WHERE source_type='material'",
@@ -6488,31 +6537,6 @@ class XPostStore:
                     409,
                 )
 
-            material_placeholders = ",".join("?" for _item in material_ids)
-            if conn.execute(
-                "SELECT 1 FROM x_post_material_pool "
-                "WHERE material_key IN (%s) LIMIT 1"
-                % material_placeholders,
-                tuple(material_ids),
-            ).fetchone():
-                conn.rollback()
-                raise XPostError(
-                    "x_post_manual_material_unavailable",
-                    "所选素材已进入素材池",
-                    409,
-                )
-            if conn.execute(
-                "SELECT 1 FROM x_post_queue "
-                "WHERE material_key IN (%s) LIMIT 1"
-                % material_placeholders,
-                tuple(material_ids),
-            ).fetchone():
-                conn.rollback()
-                raise XPostError(
-                    "x_post_material_already_used",
-                    "所选素材已被其他发布队列占用",
-                    409,
-                )
             account_placeholders = ",".join("?" for _item in account_ids)
             if conn.execute(
                 "SELECT 1 FROM x_post_publish_log l "

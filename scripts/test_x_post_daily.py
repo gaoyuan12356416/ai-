@@ -89,23 +89,13 @@ class FakeCursor:
         self.connection.calls.append((sql, tuple(params)))
         if "ads_custom_source_insight" in sql:
             self.rows = self.connection.base_rows
-        elif "ads_facebook_violations" in sql:
+        elif "resource_tags" in sql:
             material_id = str(params[0])
             if material_id in self.connection.query_error_material_ids:
                 raise RuntimeError("simulated read-only connection loss")
-            count = self.connection.violations.get(material_id, 0)
-            self.rows = [
-                {
-                    "facebook_count": count,
-                    "tiktok_count": 0,
-                    "twitter_count": 0,
-                    "resource_audit_count": 0,
-                }
-            ]
-        elif "resource_tags" in sql:
             self.rows = [
                 {"tag_name": value}
-                for value in self.connection.material_tags.get(str(params[0]), [])
+                for value in self.connection.material_tags.get(material_id, [])
             ]
         elif "ads_drama_resource" in sql:
             material_id = str(params[0]).lstrip("C")
@@ -125,7 +115,6 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self, rows):
         self.base_rows = rows
-        self.violations = {}
         self.material_tags = {}
         self.drama_rows = {}
         self.query_error_material_ids = set()
@@ -195,7 +184,7 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual([item["material_id"] for item in selected], ["22"])
 
-    def test_selector_excludes_used_violating_unsafe_and_ambiguous_rows(self):
+    def test_selector_ignores_violation_history_but_excludes_unsafe_and_ambiguous_rows(self):
         connection = FakeConnection(
             [
                 base_row(1, 600),
@@ -206,7 +195,6 @@ class SelectorTests(unittest.TestCase):
                 base_row(6, 100),
             ]
         )
-        connection.violations["2"] = 1
         connection.material_tags["3"] = ["violent"]
         connection.drama_rows["4"] = [
             drama_row(4, "One mapping"),
@@ -220,11 +208,23 @@ class SelectorTests(unittest.TestCase):
             limit=2,
             scan_limit=100,
         )
-        self.assertEqual([item["material_id"] for item in selected], ["5", "6"])
-        self.assertEqual([item["spend"] for item in selected], [200.0, 100.0])
+        self.assertEqual([item["material_id"] for item in selected], ["2", "5"])
+        self.assertEqual([item["spend"] for item in selected], [500.0, 200.0])
+        self.assertTrue(
+            all(
+                item["facebook_violation_count"] == 0
+                and item["tiktok_violation_count"] == 0
+                and item["twitter_violation_count"] == 0
+                and item["resource_audit_count"] == 0
+                for item in selected
+            )
+        )
         self.assertTrue(all(item["material_key"] == item["material_id"] for item in selected))
         statements = [sql for sql, _params in connection.calls]
         self.assertTrue(all(sql.lstrip().upper().startswith("SELECT") for sql in statements))
+        self.assertTrue(
+            all("violations" not in sql and "resource_audit" not in sql for sql in statements)
+        )
         base_sql, base_params = connection.calls[0]
         self.assertNotIn("2026-07-22", base_sql)
         self.assertIn("2026-07-22", base_params)
