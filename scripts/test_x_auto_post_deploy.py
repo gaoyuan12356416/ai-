@@ -52,6 +52,19 @@ class XAutoPostDeployTests(unittest.TestCase):
         self.assertIn("ReadWritePaths=/run/x-auto-post /run/x-post-daily", unit)
         self.assertNotIn("/run/x-auto-post/runner.lock", env + runner + unit)
 
+    def test_sidecar_declares_and_checks_the_shared_ffprobe_dependency(self):
+        env = self.text("deploy/x-auto-post.env.example")
+        unit = self.text("deploy/x-auto-post-service.service")
+        expected = "/mnt/data-disk/x-post-automation/bin/ffprobe"
+        self.assertIn("X_POST_FFPROBE_BIN=" + expected, env)
+        self.assertIn("ExecStartPre=/usr/bin/test -x " + expected, unit)
+        self.assertIn(
+            "RequiresMountsFor=/mnt/data-disk/x-auto-post-publisher "
+            "/mnt/data-disk/x-post-automation",
+            unit,
+        )
+        self.assertNotIn("/usr/bin/ffprobe", env + unit)
+
     def test_shared_lock_directories_have_one_persistent_tmpfiles_owner(self):
         tmpfiles = self.text("deploy/x-post-runtime-tmpfiles.conf")
         auto_tmpfiles = self.text("deploy/x-auto-post-tmpfiles.conf")

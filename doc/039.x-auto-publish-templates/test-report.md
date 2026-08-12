@@ -116,3 +116,16 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
 - 最终既有 X 账本保持 queue/log/published `187/187/186`、unknown/active manual
   `0/0`，最新既有 Post ID 仍为 `2087476109495386331`；本次部署与验收新增 X Post
   为 0。
+
+## BUG-006 ffprobe 依赖缺失（2026-08-12）
+
+- 操作员 Run `1` 于 18:14:35 创建，18:15:16 明确失败。任务错误为
+  `media_probe_failed`：进程回退到不存在的 `/usr/bin/ffprobe`。
+- 事件链为 material `6120551` 临时预留 → canonical auto-template run `9` 创建 →
+  媒体探测失败 → 临时预留释放 → task/run 失败。canonical run `9` 为
+  `failed_preflight`、queued/published/unknown 均为 0；没有 queue/log/Post 或模糊写入。
+- 生产已有 `/mnt/data-disk/x-post-automation/bin/ffprobe`，SHA256 为
+  `4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d`，
+  `x-post-daily` 用户和同等 systemd 沙箱均可执行。遗漏只发生在 X Auto 独立环境。
+- 修复为独立环境显式设置该路径，并由 unit `ExecStartPre` 在 sidecar 启动前验证；
+  不修改或重放 Run `1`。部署结果与零额外 Post 复核在发布后补充。

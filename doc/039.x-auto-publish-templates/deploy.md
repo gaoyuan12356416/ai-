@@ -173,3 +173,19 @@
    只重启 `x-auto-post-service.service`，再恢复 timer/path 原状态。
 4. 保留当前两份 SQLite 与 Token；尤其在用户已手动执行后，不得用部署前数据库
    备份覆盖新 run/queue/log/Post 事实。
+
+## BUG-006 ffprobe 依赖修复
+
+1. 保留 Run `1`、task `1`、canonical auto-template run `9` 和全部事件；禁止重试、
+   删除或恢复数据库覆盖本次明确失败事实。
+2. 变更前在线备份两份 SQLite，记录 queue/log/Post/unknown、X Auto run/task/ledger、
+   当前 unit/env/release、ffprobe 哈希与 Token 组合哈希。
+3. 从 exact GitHub commit 构建不可变 release；服务器先运行聚焦回归。仅替换
+   `/etc/systemd/system/x-auto-post-service.service`，并在 `/etc/x-auto-post.env`
+   增加 `X_POST_FFPROBE_BIN=/mnt/data-disk/x-post-automation/bin/ffprobe`。
+4. 暂停 X Auto scheduler/runner timer/path 并等待 oneshot 空闲；原子切换 release，
+   daemon-reload 后只重启 X Auto sidecar，再恢复 timer/path 原状态。
+5. 验收以服务用户和 unit 同等沙箱解析离线短视频、只读 preview、自然 scheduler/
+   runner、健康与账本对比为准；不调用 `run-now` 或 publish/canary。
+6. 回滚恢复旧 unit/env、切回旧 release 并只重启 X Auto；始终保留当前 SQLite 与
+   Token，尤其不得覆盖用户随后创建的新运行或 Post。

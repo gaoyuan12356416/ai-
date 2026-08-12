@@ -142,3 +142,13 @@ TT 推广平台已有独立的“自动发布模板”能力，可以按账号�
 5. 账号展示统一按 token 会员类型呈现：Basic/Premium/Premium+ 只显示会员类型，
    不再附加视频时长或“支持长视频”；无会员或会员资格未知时保留“最长 140 秒”。
    这只是展示规则，不得放宽后台会员与媒体时长门禁。
+
+## 媒体探测运行依赖
+
+1. X Auto 独立 sidecar 不加载含既有发布 bearer 的 `/etc/x-post-daily.env`，但必须在
+   自己的非密钥环境中显式声明现有只读静态探测器
+   `X_POST_FFPROBE_BIN=/mnt/data-disk/x-post-automation/bin/ffprobe`。
+2. `x-auto-post-service.service` 启动前必须以服务沙箱检查该绝对路径可执行；缺失或
+   无权限时服务不得进入 active，不能等到首个真实任务才暴露依赖缺失。
+3. 修复依赖不得重放既有失败任务。确定性 `failed_preflight` 且没有 canonical queue、
+   log、Post 或 unknown 证据时，保留原 Run/事件链并允许操作员另建新 Run。

@@ -16,6 +16,7 @@ EnvironmentFile=/etc/x-post-schedule.env
 EnvironmentFile=-/etc/x-post-media-repair.token
 EnvironmentFile=/etc/x-auto-post.env
 EnvironmentFile=/etc/x-auto-post.secrets
+ExecStartPre=/usr/bin/test -x /mnt/data-disk/x-post-automation/bin/ffprobe
 ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_auto_post_service.py
 Restart=on-failure
 RestartSec=5

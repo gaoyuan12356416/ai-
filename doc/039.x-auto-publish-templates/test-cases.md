@@ -66,3 +66,11 @@
 | TC-037 | 模板最小时长高于账号上限 | 返回 `x_auto_no_eligible_material` / `no_candidate`，不创建 X queue 或 Post | P0 | 通过 |
 | TC-038 | 手动执行生产门禁 | 三门禁关闭时仍为 409 且零 run；就绪审计后开启时不影响停用模板的自动调度 | P0 | 通过 |
 | TC-039 | 账号会员展示 | 会员账号只显示 Basic/Premium/Premium+；无会员/未知账号显示“最长 140 秒”，后台资格逻辑不变 | P1 | 通过 |
+
+## BUG-006 增量用例
+
+| 编号 | 场景 | 预期结果 | 优先级 | 状态 |
+| --- | --- | --- | --- | --- |
+| TC-040 | X Auto 独立环境未继承 daily env | `x-auto-post.env` 显式设置共享 ffprobe 绝对路径 | P0 | 通过 |
+| TC-041 | ffprobe 缺失或服务用户不可执行 | `ExecStartPre` 阻止 sidecar 启动，不接受真实运行 | P0 | 通过 |
+| TC-042 | 既有 Run 1 明确预检失败 | 保留失败 run/bridge run，零 queue/log/Post/unknown，不自动重放 | P0 | 通过 |
