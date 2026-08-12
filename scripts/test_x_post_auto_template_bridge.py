@@ -68,6 +68,8 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
         self.assertEqual(auto["template_ref"], "template-17")
         self.assertEqual(auto["template_version"], 3)
         self.assertEqual(len(auto["body_template_sha256"]), 64)
+        self.assertEqual(auto["publish_mode"], "immediate")
+        self.assertEqual(auto["scheduled_at"], "")
 
         for changed in (
             {"template_version": 4},
@@ -105,6 +107,47 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
             set(self.store.active_manual_account_ids()),
             {2, 3},
         )
+
+    def test_manual_and_auto_template_active_reservations_are_mutually_exclusive(self):
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T06:00:00Z",
+        ):
+            manual = self.store.create_manual_run(
+                ["710"],
+                [2],
+                "manual-scheduled-710",
+                ACTOR,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-12T15:00:00+08:00",
+            )
+        with self.assertRaises(service.XPostError) as auto_blocked:
+            self.create_auto(material_id="710", external_task_key="task-710")
+        self.assertEqual(
+            auto_blocked.exception.code,
+            "x_post_auto_template_material_unavailable",
+        )
+
+        auto = self.create_auto(material_id="711", external_task_key="task-711")
+        with self.assertRaises(service.XPostError) as manual_blocked:
+            self.store.create_manual_run(
+                ["711"],
+                [3],
+                "manual-711",
+                ACTOR,
+            )
+        self.assertEqual(
+            manual_blocked.exception.code,
+            "x_post_manual_material_unavailable",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            active = conn.execute(
+                "SELECT manual_run_id,material_key FROM "
+                "x_post_manual_material_reservation WHERE state='active' "
+                "ORDER BY material_key"
+            ).fetchall()
+        self.assertEqual(active, [(manual["id"], "710"), (auto["id"], "711")])
 
     def test_auto_plan_caps_duration_and_global_queue_labels_and_deduplicates(self):
         auto = self.create_auto()
@@ -202,6 +245,23 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
             ["901"],
         )
         self.assertEqual(self.store.query_material_keys(["901"]), [])
+
+        reserved = self.store.create_manual_run(
+            ["902"],
+            [2],
+            "manual-reserved-query-902",
+            ACTOR,
+        )
+        self.assertEqual(
+            self.store.query_material_keys(["900", "901", "902"]),
+            ["902"],
+        )
+        self.store.record_manual_failure(
+            reserved["id"],
+            "x_post_manual_source_preflight_failed",
+            "offline test release",
+        )
+        self.assertEqual(self.store.query_material_keys(["902"]), [])
 
     def test_exact_auto_recovery_never_claims_another_or_manual_run(self):
         first = self.create_auto(

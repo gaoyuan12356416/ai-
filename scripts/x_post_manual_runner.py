@@ -95,6 +95,21 @@ def _manual_identity(raw):
     account_ids = raw.get("account_ids")
     material_ids = raw.get("material_ids")
     expected_count = raw.get("expected_count")
+    publish_mode = str(raw.get("publish_mode", "") or "")
+    scheduled_at = str(raw.get("scheduled_at", "") or "")
+    scheduled_timezone = str(raw.get("scheduled_timezone", "") or "")
+    timing_invalid = (
+        publish_mode not in {"immediate", "scheduled"}
+        or scheduled_timezone != "Asia/Shanghai"
+        or (publish_mode == "immediate" and scheduled_at != "")
+        or (
+            publish_mode == "scheduled"
+            and not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:00Z",
+                scheduled_at,
+            )
+        )
+    )
     if (
         not isinstance(account_ids, list)
         or not isinstance(material_ids, list)
@@ -118,6 +133,7 @@ def _manual_identity(raw):
         or expected_count != len(account_ids)
         or raw.get("status") not in _RUN_STATUSES
         or raw.get("trigger_source") != "manual"
+        or timing_invalid
         or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(raw.get("run_date", "")))
         or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(raw.get("source_date", "")))
         or not isinstance(raw.get("body_template"), str)

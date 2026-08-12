@@ -2855,6 +2855,9 @@ def _public_manual_run(item):
         "id",
         "run_date",
         "source_date",
+        "publish_mode",
+        "scheduled_at",
+        "scheduled_timezone",
         "account_ids",
         "material_ids",
         "status",
@@ -3183,6 +3186,8 @@ def create_post_manual_run_request(payload):
             [int(account["id"]) for account in accounts],
             payload.get("idempotency_key"),
             actor,
+            publish_mode=payload.get("publish_mode", "immediate"),
+            scheduled_at=payload.get("scheduled_at", ""),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)

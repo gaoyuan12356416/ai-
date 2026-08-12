@@ -231,6 +231,9 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
             "manualRunCounts",
             "manualQueueRows",
             "manualPublishSubmit",
+            "manualScheduleField",
+            "manualScheduledAt",
+            "manualScheduleHint",
         }
         for element_id in required_ids:
             self.assertIn(f'id="{element_id}"', MATERIAL)
@@ -259,6 +262,16 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("material_ids: materialIds", MATERIAL)
         self.assertIn("account_ids: accountIds.map(Number)", MATERIAL)
         self.assertIn("idempotency_key: idempotencyKey", MATERIAL)
+        self.assertIn('name="manualPublishMode" value="immediate"', MATERIAL)
+        self.assertIn('name="manualPublishMode" value="scheduled"', MATERIAL)
+        self.assertIn('type="datetime-local" step="60"', MATERIAL)
+        self.assertIn('const BEIJING_TIME_ZONE = "Asia/Shanghai"', MATERIAL)
+        self.assertIn('scheduledAt = `${raw}:00+08:00`', MATERIAL)
+        self.assertIn("publish_mode: state.manual.publishMode", MATERIAL)
+        self.assertIn("scheduled_at: timing.scheduledAt", MATERIAL)
+        self.assertIn("manualPollDelay(run)", MATERIAL)
+        self.assertIn("等待定时发布", MATERIAL)
+        self.assertIn("确认定时发布", MATERIAL)
         self.assertIn(
             "/api/admin/x-posts/material-pool/manual-runs/${encodeURIComponent(runId)}",
             MATERIAL,

@@ -235,6 +235,33 @@
       font-size: 13px;
       line-height: 1.55;
     }
+    .manual-mode-options {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .manual-mode-option {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: #344760;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .manual-mode-option:has(input:checked) {
+      border-color: #86a8f8;
+      color: #2457b8;
+      background: #f3f7ff;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, .08);
+    }
+    .manual-mode-option input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .manual-schedule-field input { width: 100%; }
     .manual-mapping, .manual-status-box {
       display: grid;
       gap: 7px;
@@ -537,8 +564,8 @@
   <dialog id="manualPublishDialog" class="manual-dialog" aria-labelledby="manualPublishTitle">
     <div class="manual-dialog-head">
       <div>
-        <h2 id="manualPublishTitle">手动立即发布</h2>
-        <p>本批素材不会进入素材池；允许复用已在素材池或历史队列中的素材，后台完成整批预检和原子建队列后，按顺序向所选 X 个号各发布一次。</p>
+        <h2 id="manualPublishTitle">手动发布</h2>
+        <p>可立即发布，也可按北京时间定时发布。本批素材不会进入素材池，并允许复用已在素材池或历史队列中的素材；到达执行时间后，后台完成整批预检和原子建队列，再按顺序向所选 X 个号各发布一次。</p>
       </div>
       <button id="manualDialogCloseTop" class="button small" type="button" aria-label="关闭手动发布弹窗">关闭</button>
     </div>
@@ -548,6 +575,24 @@
         <div class="field">
           <strong id="manualMaterialSummary">尚未选择素材。</strong>
           <span class="helper">必须选择相同数量且不重复的账号；整批预检会在所选账号之间按视频时长路由，最终保证每个账号一条。下方两列只展示所选集合，不代表固定配对；弹窗选择不会改动自动发布设置。</span>
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label>发布时间</label>
+          <div class="manual-mode-options" role="radiogroup" aria-label="选择手动发布时间">
+            <label class="manual-mode-option">
+              <input type="radio" name="manualPublishMode" value="immediate" checked />
+              <span>立即发布</span>
+            </label>
+            <label class="manual-mode-option">
+              <input type="radio" name="manualPublishMode" value="scheduled" />
+              <span>定时发布</span>
+            </label>
+          </div>
+        </div>
+        <div id="manualScheduleField" class="field manual-schedule-field hidden" style="margin-top: 12px">
+          <label for="manualScheduledAt">定时发布时间（北京时间）</label>
+          <input id="manualScheduledAt" class="time-input" type="datetime-local" step="60" />
+          <div id="manualScheduleHint" class="helper">请选择晚于当前时间的日期和分钟。</div>
         </div>
         <div class="field" style="margin-top: 12px">
           <label for="manualAccountSearch">本批目标 X 个号</label>
@@ -603,6 +648,7 @@
         manual: {
           materialIds: [],
           accountIds: new Set(),
+          publishMode: "immediate",
           submitting: false,
           runId: 0,
           run: null,
@@ -613,6 +659,7 @@
       const byId = id => document.getElementById(id);
       const MANUAL_LAST_RUN_STORAGE_KEY = "xPostMaterialManualLastRunV1";
       const MANUAL_DRAFT_STORAGE_KEY = "xPostMaterialManualDraftV1";
+      const BEIJING_TIME_ZONE = "Asia/Shanghai";
       const MANUAL_TERMINAL_STATUSES = new Set([
         "completed",
         "completed_with_errors",
@@ -778,8 +825,13 @@
         if (!suffix) suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
         return `x-post-manual-ui-${suffix}`;
       }
-      function stableManualIdempotencyKey(materialIds, accountIds) {
-        const fingerprint = JSON.stringify({ material_ids: materialIds, account_ids: accountIds });
+      function stableManualIdempotencyKey(materialIds, accountIds, publishMode, scheduledAt) {
+        const fingerprint = JSON.stringify({
+          material_ids: materialIds,
+          account_ids: accountIds,
+          publish_mode: publishMode,
+          scheduled_at: scheduledAt,
+        });
         try {
           const stored = JSON.parse(sessionRead(MANUAL_DRAFT_STORAGE_KEY) || "{}");
           if (stored.fingerprint === fingerprint && typeof stored.key === "string" && stored.key) {
@@ -791,6 +843,78 @@
         const key = newManualIdempotencyKey();
         sessionWrite(MANUAL_DRAFT_STORAGE_KEY, JSON.stringify({ fingerprint, key }));
         return key;
+      }
+      function beijingInputValue(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        if (Number.isNaN(date.getTime())) return "";
+        const parts = Object.fromEntries(
+          new Intl.DateTimeFormat("en-CA", {
+            timeZone: BEIJING_TIME_ZONE,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          }).formatToParts(date).filter(part => part.type !== "literal").map(part => [part.type, part.value])
+        );
+        return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+      }
+      function nextManualScheduleValue() {
+        const interval = 5 * 60 * 1000;
+        const earliest = Date.now() + interval;
+        return beijingInputValue(new Date(Math.ceil(earliest / interval) * interval));
+      }
+      function manualScheduleValidation() {
+        if (state.manual.publishMode !== "scheduled") {
+          return { valid: true, scheduledAt: "", normalized: "", message: "" };
+        }
+        const raw = String(byId("manualScheduledAt").value || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) {
+          return { valid: false, scheduledAt: "", normalized: "", message: "请选择完整的日期和分钟。" };
+        }
+        const scheduledAt = `${raw}:00+08:00`;
+        const date = new Date(scheduledAt);
+        if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+          return { valid: false, scheduledAt: "", normalized: "", message: "定时发布时间必须晚于当前时间。" };
+        }
+        return {
+          valid: true,
+          scheduledAt,
+          normalized: date.toISOString().replace(".000Z", "Z"),
+          message: `将于北京时间 ${raw.replace("T", " ")} 开始执行。`,
+        };
+      }
+      function formatBeijingTime(value) {
+        if (!value) return "—";
+        const date = new Date(String(value));
+        if (Number.isNaN(date.getTime())) return String(value);
+        return new Intl.DateTimeFormat("zh-CN", {
+          timeZone: BEIJING_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(date);
+      }
+      function renderManualTiming() {
+        const scheduled = state.manual.publishMode === "scheduled";
+        byId("manualScheduleField").classList.toggle("hidden", !scheduled);
+        byId("manualScheduledAt").disabled = state.manual.submitting || !scheduled;
+        document.querySelectorAll('input[name="manualPublishMode"]').forEach(input => {
+          input.disabled = state.manual.submitting;
+          input.checked = input.value === state.manual.publishMode;
+        });
+        const validation = manualScheduleValidation();
+        setText(
+          byId("manualScheduleHint"),
+          scheduled ? validation.message : "",
+          ""
+        );
+        byId("manualScheduleHint").classList.toggle("error", scheduled && !validation.valid);
+        syncManualSelection();
       }
       function showManualDialog() {
         const dialog = byId("manualPublishDialog");
@@ -842,6 +966,7 @@
       function syncManualSelection() {
         const expected = state.manual.materialIds.length;
         const selected = state.manual.accountIds.size;
+        const timing = manualScheduleValidation();
         setText(
           byId("manualMaterialSummary"),
           expected
@@ -855,7 +980,14 @@
         );
         byId("manualPublishSubmit").disabled = state.manual.submitting
           || expected < 1
-          || selected !== expected;
+          || selected !== expected
+          || !timing.valid;
+        if (!state.manual.submitting) {
+          setText(
+            byId("manualPublishSubmit"),
+            state.manual.publishMode === "scheduled" ? "确认定时发布" : "确认并立即发布"
+          );
+        }
         renderManualMapping();
       }
       function renderManualAccountOptions() {
@@ -910,7 +1042,15 @@
         });
         syncManualSelection();
       }
-      function manualStatusLabel(status) {
+      function manualStatusLabel(status, run) {
+        if (
+          String(status || "") === "queued"
+          && run
+          && run.publish_mode === "scheduled"
+          && run.scheduled_at
+        ) {
+          return `等待定时发布（北京时间 ${formatBeijingTime(run.scheduled_at)}）`;
+        }
         return ({
           queued: "等待后台处理",
           running: "正在预检或发布",
@@ -930,7 +1070,8 @@
         byId("manualRunPanel").classList.remove("hidden");
         byId("manualPublishSubmit").classList.add("hidden");
         setText(byId("manualDialogClose"), "关闭");
-        setText(byId("manualRunTitle"), `任务 #${run.id} · ${manualStatusLabel(run.status)}`, "");
+        const modeLabel = run.publish_mode === "scheduled" ? "定时发布" : "立即发布";
+        setText(byId("manualRunTitle"), `任务 #${run.id} · ${modeLabel} · ${manualStatusLabel(run.status, run)}`, "");
         const expected = Number(run.expected_count || 0);
         const published = Number(run.published_count || 0);
         const failed = Number(run.failed_count || 0);
@@ -950,7 +1091,10 @@
         if (!queues.length) {
           const waiting = document.createElement("div");
           waiting.className = "helper";
-          setText(waiting, state.manual.terminal ? "本任务未生成发布队列。" : "后台正在执行整批预检，尚未生成发布队列。", "");
+          const waitingText = !state.manual.terminal && run.publish_mode === "scheduled" && run.status === "queued"
+            ? `任务已保留所选素材，将于北京时间 ${formatBeijingTime(run.scheduled_at)} 到点后开始预检。`
+            : (state.manual.terminal ? "本任务未生成发布队列。" : "后台正在执行整批预检，尚未生成发布队列。");
+          setText(waiting, waitingText, "");
           queueRows.appendChild(waiting);
         } else {
           queues.forEach(queue => {
@@ -986,9 +1130,17 @@
         if (!state.manual.runId || state.manual.terminal) return;
         state.manual.pollTimer = window.setTimeout(pollManualRun, delay);
       }
+      function manualPollDelay(run) {
+        if (run && run.status === "queued" && run.publish_mode === "scheduled" && run.scheduled_at) {
+          const remaining = new Date(run.scheduled_at).getTime() - Date.now();
+          if (Number.isFinite(remaining) && remaining > 60000) return Math.min(30000, Math.max(5000, remaining - 30000));
+        }
+        return 2500;
+      }
       async function pollManualRun() {
         const runId = Number(state.manual.runId || 0);
         if (!runId || state.manual.terminal) return;
+        let nextDelay = 5000;
         try {
           const result = await api(`/api/admin/x-posts/material-pool/manual-runs/${encodeURIComponent(runId)}`);
           if (runId !== state.manual.runId) return;
@@ -997,15 +1149,16 @@
           const wasTerminal = state.manual.terminal;
           renderManualRun(run);
           if (!wasTerminal && state.manual.terminal) {
-            showToast(`手动发布任务 #${runId}：${manualStatusLabel(run.status)}。`, !["completed"].includes(String(run.status || "")));
+            showToast(`手动发布任务 #${runId}：${manualStatusLabel(run.status, run)}。`, !["completed"].includes(String(run.status || "")));
           }
+          nextDelay = manualPollDelay(run);
         } catch (error) {
           if (runId !== state.manual.runId) return;
           const errorNode = byId("manualRunError");
           setText(errorNode, `状态查询失败，将自动重试：${error.message}`, "");
           errorNode.classList.remove("hidden");
         }
-        scheduleManualPoll(state.manual.terminal ? 0 : 2500);
+        scheduleManualPoll(state.manual.terminal ? 0 : nextDelay);
       }
       function resetManualSelection(materialIds) {
         if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
@@ -1016,6 +1169,7 @@
             return accountEligible(item);
           })
         );
+        state.manual.publishMode = "immediate";
         state.manual.submitting = false;
         state.manual.runId = 0;
         state.manual.run = null;
@@ -1024,9 +1178,12 @@
         byId("manualSelectionPanel").classList.remove("hidden");
         byId("manualRunPanel").classList.add("hidden");
         byId("manualPublishSubmit").classList.remove("hidden");
-        setText(byId("manualPublishSubmit"), "确认并立即发布");
         setText(byId("manualDialogClose"), "取消");
         byId("manualAccountSearch").value = "";
+        const scheduledInput = byId("manualScheduledAt");
+        scheduledInput.min = beijingInputValue(new Date(Date.now() + 60000));
+        scheduledInput.value = nextManualScheduleValue();
+        renderManualTiming();
         renderManualAccountOptions();
       }
       function openManualPublish() {
@@ -1053,6 +1210,7 @@
         if (state.manual.submitting) return;
         const materialIds = state.manual.materialIds.slice();
         const accountIds = selectedManualAccounts();
+        const timing = manualScheduleValidation();
         if (!materialIds.length || accountIds.length !== materialIds.length) {
           showToast("手动发布的素材数量必须与目标账号数量一致。", true);
           return;
@@ -1065,11 +1223,21 @@
           showToast("所选账号中存在当前不可发布的账号，请刷新后重新选择。", true);
           return;
         }
+        if (!timing.valid) {
+          showToast(timing.message || "定时发布时间无效。", true);
+          return;
+        }
         state.manual.submitting = true;
+        renderManualTiming();
         renderManualAccountOptions();
         const button = byId("manualPublishSubmit");
         setText(button, "正在创建任务…");
-        const idempotencyKey = stableManualIdempotencyKey(materialIds, accountIds);
+        const idempotencyKey = stableManualIdempotencyKey(
+          materialIds,
+          accountIds,
+          state.manual.publishMode,
+          timing.scheduledAt
+        );
         try {
           const result = await api("/api/admin/x-posts/material-pool/manual-publish", {
             method: "POST",
@@ -1077,6 +1245,8 @@
               material_ids: materialIds,
               account_ids: accountIds.map(Number),
               idempotency_key: idempotencyKey,
+              publish_mode: state.manual.publishMode,
+              scheduled_at: timing.scheduledAt,
             }),
           });
           const run = scheduleItem(result);
@@ -1086,6 +1256,8 @@
             !/^\d+$/.test(String(run.id || ""))
             || JSON.stringify(returnedMaterials) !== JSON.stringify(materialIds)
             || JSON.stringify(returnedAccounts) !== JSON.stringify(accountIds.map(Number))
+            || String(run.publish_mode || "immediate") !== state.manual.publishMode
+            || String(run.scheduled_at || "") !== timing.normalized
           ) {
             throw new Error("后台返回的手动发布任务与本次选择不一致，请勿重复更换参数，直接重试");
           }
@@ -1094,12 +1266,17 @@
           byId("materialIds").value = "";
           state.manual.submitting = false;
           renderManualRun(run);
-          showToast(`手动发布任务 #${run.id} 已创建，后台将先完成整批预检。`, false);
-          scheduleManualPoll(800);
+          showToast(
+            run.publish_mode === "scheduled"
+              ? `定时发布任务 #${run.id} 已创建，将于北京时间 ${formatBeijingTime(run.scheduled_at)} 执行。`
+              : `手动发布任务 #${run.id} 已创建，后台将先完成整批预检。`,
+            false
+          );
+          scheduleManualPoll(run.publish_mode === "scheduled" ? manualPollDelay(run) : 800);
         } catch (error) {
           state.manual.submitting = false;
+          renderManualTiming();
           renderManualAccountOptions();
-          setText(button, "确认并立即发布");
           showToast(`手动发布任务创建失败：${error.message}`, true);
         }
       }
@@ -1830,6 +2007,14 @@
         deleteMaterial(button.dataset.poolId, button.dataset.materialId);
       });
       byId("manualAccountSearch").addEventListener("input", renderManualAccountOptions);
+      document.querySelectorAll('input[name="manualPublishMode"]').forEach(input => {
+        input.addEventListener("change", event => {
+          if (state.manual.submitting || !event.target.checked) return;
+          state.manual.publishMode = event.target.value === "scheduled" ? "scheduled" : "immediate";
+          renderManualTiming();
+        });
+      });
+      byId("manualScheduledAt").addEventListener("input", renderManualTiming);
       byId("manualAccountOptions").addEventListener("change", event => {
         const checkbox = event.target.closest("input[data-manual-account-id]");
         if (!checkbox || checkbox.disabled || state.manual.submitting) return;

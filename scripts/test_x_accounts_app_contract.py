@@ -806,6 +806,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             create_route,
         )
         self.assertIn("create_x_post_manual_run(", create_route)
+        self.assertIn('"publish_mode",', create_route)
+        self.assertIn('"scheduled_at",', create_route)
+        self.assertIn("publish_mode=requested_publish_mode", create_route)
+        self.assertIn("scheduled_at=requested_scheduled_at", create_route)
         self.assertIn('"create_x_post_manual_run"', create_route)
         self.assertIn('"create_x_post_manual_run_failed"', create_route)
         self.assertIn("json_response(self, 202", create_route)

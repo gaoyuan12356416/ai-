@@ -13,6 +13,7 @@ from features.x_posts import XPostError
 class FakeStore:
     def __init__(self):
         self.candidates = None
+        self.created_manual = None
         self.queue = {
             "id": 81,
             "run_id": None,
@@ -37,6 +38,36 @@ class FakeStore:
     def create_manual_plan(self, run_id, candidates, trigger_source="manual"):
         self.candidates = list(candidates)
         return {"id": int(run_id), "queues": []}
+
+    def create_manual_run(
+        self,
+        material_ids,
+        account_ids,
+        idempotency_key,
+        actor,
+        publish_mode="immediate",
+        scheduled_at="",
+    ):
+        self.created_manual = {
+            "material_ids": list(material_ids),
+            "account_ids": list(account_ids),
+            "idempotency_key": idempotency_key,
+            "actor": dict(actor),
+            "publish_mode": publish_mode,
+            "scheduled_at": scheduled_at,
+        }
+        return {
+            "id": 17,
+            "publish_mode": publish_mode,
+            "scheduled_at": "2026-08-12T07:30:00Z" if scheduled_at else "",
+            "scheduled_timezone": "Asia/Shanghai",
+            "account_ids": list(account_ids),
+            "material_ids": list(material_ids),
+            "status": "queued",
+            "expected_count": len(account_ids),
+            "queues": [],
+            "created": True,
+        }
 
     def get_queue(self, queue_id):
         return dict(self.queue, id=int(queue_id))
@@ -82,6 +113,9 @@ class XPostManualSidecarTests(unittest.TestCase):
                 "id": 17,
                 "account_ids": [202],
                 "material_ids": ["501"],
+                "publish_mode": "scheduled",
+                "scheduled_at": "2026-08-12T07:30:00Z",
+                "scheduled_timezone": "Asia/Shanghai",
                 "status": "queued",
                 "idempotency_key": "secret-idempotency",
                 "body_template": "secret-template",
@@ -100,10 +134,41 @@ class XPostManualSidecarTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["id"], 17)
+        self.assertEqual(result["publish_mode"], "scheduled")
+        self.assertEqual(result["scheduled_at"], "2026-08-12T07:30:00Z")
+        self.assertEqual(result["scheduled_timezone"], "Asia/Shanghai")
         self.assertNotIn("idempotency_key", result)
         self.assertNotIn("body_template", result)
         self.assertNotIn("future_secret", result)
         self.assertNotIn("material_url", result["queues"][0])
+
+    def test_create_manual_run_forwards_scheduled_timing_to_store(self):
+        actor = {"user_id": "admin-1", "name": "Admin", "role": "admin"}
+        account = self.account()
+        with mock.patch.object(
+            service,
+            "_material_pool_actor",
+            return_value=actor,
+        ), mock.patch.object(
+            service,
+            "_manual_publish_accounts",
+            return_value=[account],
+        ):
+            result = service.create_post_manual_run_request(
+                {
+                    "material_ids": ["501"],
+                    "account_ids": [202],
+                    "idempotency_key": "scheduled-sidecar-1",
+                    "publish_mode": "scheduled",
+                    "scheduled_at": "2026-08-12T15:30:00+08:00",
+                }
+            )
+        self.assertEqual(self.store.created_manual["publish_mode"], "scheduled")
+        self.assertEqual(
+            self.store.created_manual["scheduled_at"],
+            "2026-08-12T15:30:00+08:00",
+        )
+        self.assertEqual(result["item"]["scheduled_at"], "2026-08-12T07:30:00Z")
 
     def test_plan_rechecks_account_and_overwrites_untrusted_identity(self):
         candidate = {

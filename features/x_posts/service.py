@@ -65,6 +65,7 @@ AUTO_TEMPLATE_TRIGGER_SOURCE = "auto_template"
 MANUAL_TRIGGER_SOURCES = frozenset(
     {MANUAL_TRIGGER_SOURCE, AUTO_TEMPLATE_TRIGGER_SOURCE}
 )
+MANUAL_PUBLISH_MODES = frozenset({"immediate", "scheduled"})
 AUTO_TEMPLATE_MAX_DURATION_SECONDS = 600.0
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
@@ -1086,6 +1087,11 @@ def ensure_storage(db_path):
                     template_version INTEGER NOT NULL DEFAULT 0
                         CHECK(template_version>=0),
                     body_template_sha256 TEXT NOT NULL DEFAULT '',
+                    publish_mode TEXT NOT NULL DEFAULT 'immediate'
+                        CHECK(publish_mode IN ('immediate','scheduled')),
+                    scheduled_at TEXT NOT NULL DEFAULT '',
+                    scheduled_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(scheduled_timezone='Asia/Shanghai'),
                     run_date TEXT NOT NULL,
                     source_date TEXT NOT NULL,
                     account_ids_json TEXT NOT NULL,
@@ -1110,6 +1116,22 @@ def ensure_storage(db_path):
                     finished_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_manual_material_reservation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manual_run_id INTEGER NOT NULL,
+                    material_key TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'active'
+                        CHECK(state IN ('active','consumed','released')),
+                    release_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(manual_run_id,material_key),
+                    FOREIGN KEY(manual_run_id) REFERENCES x_post_manual_run(id)
                 )
                 """
             )
@@ -1649,6 +1671,15 @@ def ensure_storage(db_path):
                     "INTEGER NOT NULL DEFAULT 0 CHECK(template_version>=0)"
                 ),
                 "body_template_sha256": "TEXT NOT NULL DEFAULT ''",
+                "publish_mode": (
+                    "TEXT NOT NULL DEFAULT 'immediate' "
+                    "CHECK(publish_mode IN ('immediate','scheduled'))"
+                ),
+                "scheduled_at": "TEXT NOT NULL DEFAULT ''",
+                "scheduled_timezone": (
+                    "TEXT NOT NULL DEFAULT 'Asia/Shanghai' "
+                    "CHECK(scheduled_timezone='Asia/Shanghai')"
+                ),
             }
             for name, definition in manual_run_additive_columns.items():
                 if name not in manual_run_columns:
@@ -2031,6 +2062,21 @@ def ensure_storage(db_path):
                 "ON x_post_manual_run(trigger_source,status,created_at,id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_due "
+                "ON x_post_manual_run("
+                "trigger_source,status,publish_mode,scheduled_at,created_at,id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ux_x_post_manual_reservation_active_material "
+                "ON x_post_manual_material_reservation(material_key) "
+                "WHERE state='active'"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_manual_reservation_run "
+                "ON x_post_manual_material_reservation(manual_run_id,state,id)"
+            )
+            conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
                 "ux_x_post_manual_run_auto_external_task "
                 "ON x_post_manual_run(external_task_key) "
@@ -2199,7 +2245,8 @@ def ensure_storage(db_path):
                 CREATE TRIGGER trg_x_post_manual_run_identity_update
                 BEFORE UPDATE OF idempotency_key,trigger_source,
                     external_task_key,template_ref,template_version,
-                    body_template_sha256,run_date,source_date,
+                    body_template_sha256,publish_mode,scheduled_at,
+                    scheduled_timezone,run_date,source_date,
                     account_ids_json,material_ids_json,body_template,
                     actor_user_id,actor_name
                 ON x_post_manual_run
@@ -2209,6 +2256,9 @@ def ensure_storage(db_path):
                   OR NEW.template_ref<>OLD.template_ref
                   OR NEW.template_version<>OLD.template_version
                   OR NEW.body_template_sha256<>OLD.body_template_sha256
+                  OR NEW.publish_mode<>OLD.publish_mode
+                  OR NEW.scheduled_at<>OLD.scheduled_at
+                  OR NEW.scheduled_timezone<>OLD.scheduled_timezone
                   OR NEW.run_date<>OLD.run_date
                   OR NEW.source_date<>OLD.source_date
                   OR NEW.account_ids_json<>OLD.account_ids_json
@@ -2218,6 +2268,135 @@ def ensure_storage(db_path):
                   OR NEW.actor_name<>OLD.actor_name
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_manual_run identity is immutable');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_x_post_manual_run_timing_insert"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_run_timing_insert
+                BEFORE INSERT ON x_post_manual_run
+                WHEN NEW.scheduled_timezone<>'Asia/Shanghai'
+                  OR NEW.publish_mode NOT IN ('immediate','scheduled')
+                  OR (NEW.publish_mode='immediate' AND NEW.scheduled_at<>'')
+                  OR (NEW.publish_mode='scheduled' AND NEW.scheduled_at='')
+                  OR (
+                      NEW.publish_mode='scheduled'
+                      AND (
+                          length(NEW.scheduled_at)<>20
+                          OR NEW.scheduled_at NOT GLOB
+                             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:00Z'
+                          OR strftime(
+                              '%Y-%m-%dT%H:%M:00Z',
+                              NEW.scheduled_at
+                          ) IS NULL
+                          OR strftime(
+                              '%Y-%m-%dT%H:%M:00Z',
+                              NEW.scheduled_at
+                          )<>NEW.scheduled_at
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_manual_run timing invalid');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_manual_reservation_insert_guard"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_reservation_insert_guard
+                BEFORE INSERT ON x_post_manual_material_reservation
+                WHEN NEW.state<>'active'
+                  OR NEW.release_reason<>''
+                  OR NOT EXISTS(
+                      SELECT 1 FROM x_post_manual_run
+                       WHERE id=NEW.manual_run_id
+                         AND status IN ('queued','running')
+                  )
+                  OR (
+                      NOT EXISTS(
+                          SELECT 1 FROM x_post_manual_run
+                           WHERE id=NEW.manual_run_id
+                             AND trigger_source='manual'
+                      )
+                      AND (
+                          EXISTS(
+                              SELECT 1 FROM x_post_material_pool
+                               WHERE material_key=NEW.material_key
+                          )
+                          OR EXISTS(
+                              SELECT 1 FROM x_post_queue
+                               WHERE material_key=NEW.material_key
+                          )
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_manual_material_reservation invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_manual_reservation_identity_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_reservation_identity_update
+                BEFORE UPDATE OF manual_run_id,material_key,created_at
+                ON x_post_manual_material_reservation
+                WHEN NEW.manual_run_id<>OLD.manual_run_id
+                  OR NEW.material_key<>OLD.material_key
+                  OR NEW.created_at<>OLD.created_at
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_manual_material_reservation identity immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_manual_reservation_state_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_reservation_state_update
+                BEFORE UPDATE OF state,release_reason
+                ON x_post_manual_material_reservation
+                WHEN OLD.state<>'active'
+                  OR NEW.state NOT IN ('consumed','released')
+                  OR (NEW.state='consumed' AND NEW.release_reason<>'')
+                  OR (NEW.state='released' AND NEW.release_reason='')
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_manual_material_reservation transition invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_manual_reservation_delete_guard"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_reservation_delete_guard
+                BEFORE DELETE ON x_post_manual_material_reservation
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_manual_material_reservation history immutable'
+                    );
                 END
                 """
             )
@@ -2780,9 +2959,63 @@ def ensure_storage(db_path):
                 WHEN EXISTS(
                     SELECT 1 FROM x_post_queue
                      WHERE material_key=NEW.material_key
+                ) OR EXISTS(
+                    SELECT 1 FROM x_post_manual_material_reservation
+                     WHERE material_key=NEW.material_key
+                       AND state='active'
                 )
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_material_pool material occupied');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_queue_manual_reservation_insert"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_manual_reservation_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_manual_material_reservation r
+                     WHERE r.material_key=NEW.material_key
+                       AND r.state='active'
+                       AND (
+                           NEW.manual_run_id IS NULL
+                           OR r.manual_run_id<>NEW.manual_run_id
+                       )
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_queue material reserved by manual run'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_queue_manual_reservation_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_manual_reservation_update
+                BEFORE UPDATE OF material_key,manual_run_id ON x_post_queue
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_manual_material_reservation r
+                     WHERE r.material_key=NEW.material_key
+                       AND r.state='active'
+                       AND (
+                           NEW.manual_run_id IS NULL
+                           OR r.manual_run_id<>NEW.manual_run_id
+                       )
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_queue material reserved by manual run'
+                    );
                 END
                 """
             )
@@ -2941,6 +3174,57 @@ def _manual_idempotency_key(value):
             "idempotency_key无效",
             400,
         ) from None
+
+
+def _manual_publish_timing(publish_mode=None, scheduled_at=None):
+    mode = str(publish_mode or "immediate").strip().lower()
+    if mode not in MANUAL_PUBLISH_MODES:
+        raise XPostError(
+            "invalid_request",
+            "publish_mode必须为immediate或scheduled",
+            400,
+        )
+    raw = str(scheduled_at or "").strip()
+    if mode == "immediate":
+        if raw:
+            raise XPostError(
+                "invalid_request",
+                "立即发布不能设置scheduled_at",
+                400,
+            )
+        return mode, "", None
+    if not raw:
+        raise XPostError(
+            "invalid_request",
+            "定时发布必须设置scheduled_at",
+            400,
+        )
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError(
+            "invalid_request",
+            "scheduled_at必须是带时区的ISO时间",
+            400,
+        ) from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise XPostError(
+            "invalid_request",
+            "scheduled_at必须包含时区",
+            400,
+        )
+    if parsed.second or parsed.microsecond:
+        raise XPostError(
+            "invalid_request",
+            "scheduled_at必须精确到分钟",
+            400,
+        )
+    normalized = parsed.astimezone(timezone.utc)
+    return (
+        mode,
+        normalized.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        normalized,
+    )
 
 
 def _manual_trigger_source(value):
@@ -4517,6 +4801,23 @@ class XPostStore:
                         "该素材已被X发布队列占用",
                         409,
                     )
+                reservation = conn.execute(
+                    "SELECT manual_run_id "
+                    "FROM x_post_manual_material_reservation "
+                    "WHERE material_key=? AND state='active'",
+                    (values["material_key"],),
+                ).fetchone()
+                if reservation and (
+                    values["manual_run_id"] is None
+                    or int(reservation["manual_run_id"])
+                    != int(values["manual_run_id"])
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_manual_material_unavailable",
+                        "该素材已被待执行的X手动发布任务占用",
+                        409,
+                    )
             else:
                 drama = conn.execute(
                     "SELECT * FROM x_post_drama_pool WHERE id=?",
@@ -4728,6 +5029,20 @@ class XPostStore:
                         }
                     )
                     continue
+                if conn.execute(
+                    "SELECT id FROM x_post_manual_material_reservation "
+                    "WHERE material_key=? AND state='active'",
+                    (material_key_value,),
+                ).fetchone():
+                    already_used_count += 1
+                    skipped_items.append(
+                        {
+                            "material_id": material_key_value,
+                            "code": "x_post_pool_material_manual_reserved",
+                            "message": "素材已被待执行的X手动发布任务占用，已跳过",
+                        }
+                    )
+                    continue
                 try:
                     cursor = conn.execute(
                         "INSERT INTO x_post_material_pool("
@@ -4808,6 +5123,9 @@ class XPostStore:
                 "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
                 "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
+                "AND NOT EXISTS("
+                "SELECT 1 FROM x_post_manual_material_reservation r "
+                "WHERE r.material_key=p.material_key AND r.state='active') "
                 "ORDER BY p.created_at DESC,p.id DESC LIMIT ?"
                 % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                 (limit,),
@@ -4880,6 +5198,7 @@ class XPostStore:
             "WHEN q.id IS NOT NULL AND COALESCE(l.status,q.status)='failed' "
             "THEN 'failed' "
             "WHEN q.id IS NOT NULL THEN 'occupied' "
+            "WHEN r.id IS NOT NULL THEN 'occupied' "
             "WHEN p.last_error_code<>'' AND p.last_error_code NOT IN %s "
             "THEN 'validation_failed' "
             "ELSE 'available' END"
@@ -4916,6 +5235,8 @@ class XPostStore:
             "LEFT JOIN x_post_queue q "
             "ON q.pool_item_id=p.id OR q.material_key=p.material_key "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
+            " LEFT JOIN x_post_manual_material_reservation r "
+            "ON r.material_key=p.material_key AND r.state='active'"
         )
         select_sql = (
             "SELECT p.id,p.material_key,p.material_id,p.status,p.published_at,"
@@ -4951,9 +5272,11 @@ class XPostStore:
                 "SUM(CASE WHEN p.status='unpublished' THEN 1 ELSE 0 END) AS unpublished,"
                 "SUM(CASE WHEN p.status='published' THEN 1 ELSE 0 END) AS published,"
                 "SUM(CASE WHEN p.status='unpublished' AND q.id IS NULL "
+                "AND r.id IS NULL "
                 "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "THEN 1 ELSE 0 END) AS available,"
-                "SUM(CASE WHEN p.status='unpublished' AND q.id IS NOT NULL "
+                "SUM(CASE WHEN p.status='unpublished' "
+                "AND (q.id IS NOT NULL OR r.id IS NOT NULL) "
                 "THEN 1 ELSE 0 END) AS occupied"
                 % _NONBLOCKING_MATERIAL_VALIDATION_SQL
                 + join_sql
@@ -6481,6 +6804,21 @@ class XPostStore:
         item["trigger_source"] = _manual_trigger_source(
             item.get("trigger_source")
         )
+        (
+            item["publish_mode"],
+            item["scheduled_at"],
+            _scheduled_datetime,
+        ) = _manual_publish_timing(
+            item.get("publish_mode"),
+            item.get("scheduled_at"),
+        )
+        if str(item.get("scheduled_timezone") or "") != SCHEDULE_TIMEZONE:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "X手动发布任务时区无效",
+                500,
+            )
+        item["scheduled_timezone"] = SCHEDULE_TIMEZONE
         item["account_ids"] = _schedule_account_ids(
             _json_array(item.pop("account_ids_json"), "account_ids"),
         )
@@ -6554,6 +6892,8 @@ class XPostStore:
         account_ids,
         idempotency_key,
         actor=None,
+        publish_mode="immediate",
+        scheduled_at="",
     ):
         material_ids = _manual_material_ids(material_ids)
         account_ids = _schedule_account_ids(account_ids)
@@ -6564,6 +6904,10 @@ class XPostStore:
                 400,
             )
         idempotency_key = _manual_idempotency_key(idempotency_key)
+        publish_mode, scheduled_at, scheduled_datetime = _manual_publish_timing(
+            publish_mode,
+            scheduled_at,
+        )
         actor = actor if isinstance(actor, dict) else {}
         actor_user_id = str(actor.get("user_id", "") or "").strip()[:255]
         actor_name = str(
@@ -6579,12 +6923,18 @@ class XPostStore:
                 "手动发布操作人无效",
                 400,
             )
-        run_date = _beijing_today()
+        timestamp = utc_now()
+        current_datetime = datetime.fromisoformat(
+            timestamp.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+        effective_datetime = scheduled_datetime or current_datetime
+        run_date = effective_datetime.astimezone(BEIJING_TZ).strftime(
+            "%Y-%m-%d"
+        )
         source_date = (
             datetime.strptime(run_date, "%Y-%m-%d").date()
             - timedelta(days=1)
         ).isoformat()
-        timestamp = utc_now()
         accounts_json = json.dumps(account_ids, separators=(",", ":"))
         materials_json = json.dumps(material_ids, separators=(",", ":"))
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -6597,6 +6947,10 @@ class XPostStore:
                 same = bool(
                     str(existing["trigger_source"])
                     == MANUAL_TRIGGER_SOURCE
+                    and str(existing["publish_mode"]) == publish_mode
+                    and str(existing["scheduled_at"]) == scheduled_at
+                    and str(existing["scheduled_timezone"])
+                    == SCHEDULE_TIMEZONE
                     and str(existing["run_date"]) == run_date
                     and str(existing["source_date"]) == source_date
                     and str(existing["account_ids_json"]) == accounts_json
@@ -6616,6 +6970,32 @@ class XPostStore:
                 result["created"] = False
                 return result
 
+            if (
+                publish_mode == "scheduled"
+                and scheduled_datetime <= current_datetime
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "invalid_request",
+                    "定时发布时间必须晚于当前时间",
+                    400,
+                )
+
+            placeholders = ",".join("?" for _item in material_ids)
+            already_reserved = conn.execute(
+                "SELECT material_key "
+                "FROM x_post_manual_material_reservation "
+                "WHERE state='active' AND material_key IN (%s) LIMIT 1"
+                % placeholders,
+                tuple(material_ids),
+            ).fetchone()
+            if already_reserved:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_material_unavailable",
+                    "所选素材已被其他待执行任务占用",
+                    409,
+                )
             config = conn.execute(
                 "SELECT body_template FROM x_post_schedule_config "
                 "WHERE source_type='material'",
@@ -6634,14 +7014,18 @@ class XPostStore:
             try:
                 cursor = conn.execute(
                     "INSERT INTO x_post_manual_run("
-                    "idempotency_key,trigger_source,run_date,source_date,"
+                    "idempotency_key,trigger_source,publish_mode,scheduled_at,"
+                    "scheduled_timezone,run_date,source_date,"
                     "account_ids_json,"
                     "material_ids_json,body_template,actor_user_id,actor_name,"
                     "status,expected_count,created_at,updated_at"
-                    ") VALUES(?,? ,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (
                         idempotency_key,
                         MANUAL_TRIGGER_SOURCE,
+                        publish_mode,
+                        scheduled_at,
+                        SCHEDULE_TIMEZONE,
                         run_date,
                         source_date,
                         accounts_json,
@@ -6654,14 +7038,27 @@ class XPostStore:
                         timestamp,
                     ),
                 )
+                run_id = int(cursor.lastrowid)
+                for material_key in material_ids:
+                    conn.execute(
+                        "INSERT INTO x_post_manual_material_reservation("
+                        "manual_run_id,material_key,state,release_reason,"
+                        "created_at,updated_at) VALUES(?,?,'active','',?,?)",
+                        (run_id, material_key, timestamp, timestamp),
+                    )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
+                if "x_post_manual_material_reservation" in str(exc):
+                    raise XPostError(
+                        "x_post_manual_material_unavailable",
+                        "所选素材已被其他待执行任务占用",
+                        409,
+                    ) from exc
                 raise XPostError(
                     "x_post_storage_conflict",
                     "手动发布任务唯一约束冲突",
                     409,
                 ) from exc
-            run_id = int(cursor.lastrowid)
             conn.commit()
         result = self.get_manual_run(run_id)
         result["created"] = True
@@ -6786,7 +7183,12 @@ class XPostStore:
                 "WHERE material_key=? LIMIT 1",
                 (material_key,),
             ).fetchone()
-            if in_pool or already_used:
+            already_reserved = conn.execute(
+                "SELECT 1 FROM x_post_manual_material_reservation "
+                "WHERE material_key=? AND state='active' LIMIT 1",
+                (material_key,),
+            ).fetchone()
+            if in_pool or already_used or already_reserved:
                 conn.rollback()
                 raise XPostError(
                     "x_post_auto_template_material_unavailable",
@@ -6820,14 +7222,26 @@ class XPostStore:
                         timestamp,
                     ),
                 )
+                run_id = int(cursor.lastrowid)
+                conn.execute(
+                    "INSERT INTO x_post_manual_material_reservation("
+                    "manual_run_id,material_key,state,release_reason,"
+                    "created_at,updated_at) VALUES(?,?,'active','',?,?)",
+                    (run_id, material_key, timestamp, timestamp),
+                )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
+                if "x_post_manual_material_reservation" in str(exc):
+                    raise XPostError(
+                        "x_post_auto_template_material_unavailable",
+                        "selected material is reserved by another X task",
+                        409,
+                    ) from exc
                 raise XPostError(
                     "x_post_storage_conflict",
                     "auto template run unique constraint conflict",
                     409,
                 ) from exc
-            run_id = int(cursor.lastrowid)
             conn.commit()
         result = self.get_manual_run(
             run_id,
@@ -6848,9 +7262,13 @@ class XPostStore:
                 "SELECT * FROM x_post_manual_run "
                 "WHERE trigger_source=? "
                 "AND status IN ('queued','running') "
+                "AND (status='running' OR publish_mode='immediate' "
+                "OR (publish_mode='scheduled' AND scheduled_at<>'' "
+                "AND scheduled_at<=?)) "
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
-                "created_at,id LIMIT 1",
-                (trigger_source,),
+                "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
+                "ELSE created_at END,created_at,id LIMIT 1",
+                (trigger_source, timestamp),
             ).fetchone()
             if not row:
                 conn.commit()
@@ -7186,6 +7604,12 @@ class XPostStore:
                     409,
                 )
             conn.execute(
+                "UPDATE x_post_manual_material_reservation "
+                "SET state='released',release_reason=?,updated_at=? "
+                "WHERE manual_run_id=? AND state='active'",
+                (code, timestamp, run_id),
+            )
+            conn.execute(
                 "UPDATE x_post_manual_run SET status='failed_preflight',"
                 "queued_count=0,published_count=0,failed_count=0,"
                 "unknown_count=0,error_code=?,error_message=?,"
@@ -7354,6 +7778,23 @@ class XPostStore:
                 result = self.get_manual_run(run_id, trigger_source)
                 result["created"] = False
                 return result
+            reservation_rows = conn.execute(
+                "SELECT material_key,state "
+                "FROM x_post_manual_material_reservation "
+                "WHERE manual_run_id=? ORDER BY material_key",
+                (run_id,),
+            ).fetchall()
+            if reservation_rows and (
+                {str(item["material_key"]) for item in reservation_rows}
+                != set(material_ids)
+                or any(str(item["state"]) != "active" for item in reservation_rows)
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "手动发布素材占用状态与冻结任务不一致",
+                    500,
+                )
             if str(run["status"]) not in {"queued", "running"}:
                 conn.rollback()
                 raise XPostError(
@@ -7425,6 +7866,17 @@ class XPostStore:
                         tuple(values[field] for field in columns)
                         + (timestamp, timestamp),
                     )
+                if reservation_rows:
+                    consumed = conn.execute(
+                        "UPDATE x_post_manual_material_reservation "
+                        "SET state='consumed',release_reason='',updated_at=? "
+                        "WHERE manual_run_id=? AND state='active'",
+                        (timestamp, run_id),
+                    )
+                    if int(consumed.rowcount or 0) != len(material_ids):
+                        raise sqlite3.IntegrityError(
+                            "x_post_manual_material_reservation consume mismatch"
+                        )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError(
@@ -10837,6 +11289,16 @@ class XPostStore:
                     str(row["material_key"])
                     for row in conn.execute(
                         "SELECT material_key FROM x_post_queue WHERE material_key IN (%s)"
+                        % placeholders,
+                        tuple(batch),
+                    ).fetchall()
+                )
+                occupied.update(
+                    str(row["material_key"])
+                    for row in conn.execute(
+                        "SELECT material_key "
+                        "FROM x_post_manual_material_reservation "
+                        "WHERE state='active' AND material_key IN (%s)"
                         % placeholders,
                         tuple(batch),
                     ).fetchall()

@@ -40,6 +40,9 @@ def manual_run(queues=None):
         "trigger_source": "manual",
         "run_date": "2026-08-11",
         "source_date": "2026-08-10",
+        "publish_mode": "immediate",
+        "scheduled_at": "",
+        "scheduled_timezone": "Asia/Shanghai",
         "account_ids": [11, 12],
         "material_ids": ["501", "502"],
         "body_template": "{{drama_name}}\n{{desc}}\n{{url}}",
@@ -117,6 +120,18 @@ def planned_candidates():
 
 
 class XPostManualRunnerTests(unittest.TestCase):
+    def test_manual_response_parser_accepts_canonical_scheduled_identity(self):
+        scheduled = manual_run()
+        scheduled["publish_mode"] = "scheduled"
+        scheduled["scheduled_at"] = "2026-08-12T07:30:00Z"
+        parsed = _manual_identity(scheduled)
+        self.assertEqual(parsed["publish_mode"], "scheduled")
+        self.assertEqual(parsed["scheduled_at"], "2026-08-12T07:30:00Z")
+
+        scheduled["scheduled_at"] = "2026-08-12T07:30:01Z"
+        with self.assertRaises(SidecarError):
+            _manual_identity(scheduled)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.config = make_config(self.temporary.name)

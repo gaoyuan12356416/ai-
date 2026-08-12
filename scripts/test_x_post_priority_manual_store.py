@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,9 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
             ACTOR,
         )
         self.assertTrue(run["created"])
+        self.assertEqual(run["publish_mode"], "immediate")
+        self.assertEqual(run["scheduled_at"], "")
+        self.assertEqual(run["scheduled_timezone"], "Asia/Shanghai")
         replay = self.store.create_manual_run(
             ["101", "102"],
             [2, 3],
@@ -351,6 +355,315 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
                 0,
             )
 
+    def test_manual_reservation_prevents_pool_race_and_failure_releases_material(self):
+        run = self.store.create_manual_run(
+            ["201", "202"],
+            [2, 3],
+            "manual-race",
+            ACTOR,
+        )
+        blocked = self.store.add_pool_materials(
+            ["202"],
+            ACTOR,
+            validation_checks=[
+                {"material_id": "202", "error_code": "", "error_message": ""}
+            ],
+        )
+        self.assertEqual(blocked["added_count"], 0)
+        self.assertEqual(blocked["already_used_count"], 1)
+        self.assertEqual(
+            blocked["skipped_items"][0]["code"],
+            "x_post_pool_material_manual_reserved",
+        )
+        plan = self.store.create_manual_plan(
+            run["id"],
+            [
+                material_candidate(run, 2, "201"),
+                material_candidate(run, 3, "202"),
+            ],
+        )
+        self.assertEqual(len(plan["queues"]), 2)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_manual_material_reservation "
+                    "WHERE manual_run_id=? AND state='consumed'",
+                    (run["id"],),
+                ).fetchone()[0],
+                2,
+            )
+
+        failed_run = self.store.create_manual_run(
+            ["203"],
+            [4],
+            "manual-release",
+            ACTOR,
+        )
+        failed = self.store.record_manual_failure(
+            failed_run["id"],
+            "x_post_manual_source_preflight_failed",
+            "one selected material became unavailable",
+        )
+        self.assertEqual(failed["status"], "failed_preflight")
+        self.assertEqual(failed["queued_count"], 0)
+        released = self.store.add_pool_materials(
+            ["203"],
+            ACTOR,
+            validation_checks=[
+                {"material_id": "203", "error_code": "", "error_message": ""}
+            ],
+        )
+        self.assertEqual(released["added_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            reservation = conn.execute(
+                "SELECT state,release_reason "
+                "FROM x_post_manual_material_reservation WHERE manual_run_id=?",
+                (failed_run["id"],),
+            ).fetchone()
+        self.assertEqual(reservation, ("released", "x_post_manual_source_preflight_failed"))
+
+    def test_scheduled_manual_run_is_durable_and_not_claimed_before_due_time(self):
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T06:00:00Z",
+        ):
+            run = self.store.create_manual_run(
+                ["211"],
+                [2],
+                "manual-scheduled-1",
+                ACTOR,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-13T00:05:00+08:00",
+            )
+        self.assertTrue(run["created"])
+        self.assertEqual(run["publish_mode"], "scheduled")
+        self.assertEqual(run["scheduled_at"], "2026-08-12T16:05:00Z")
+        self.assertEqual(run["scheduled_timezone"], "Asia/Shanghai")
+        self.assertEqual(run["run_date"], "2026-08-13")
+        self.assertEqual(run["source_date"], "2026-08-12")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            reservation = conn.execute(
+                "SELECT material_key,state FROM x_post_manual_material_reservation "
+                "WHERE manual_run_id=?",
+                (run["id"],),
+            ).fetchone()
+        self.assertEqual(reservation, ("211", "active"))
+
+        direct = material_candidate(run, 2, "211")
+        direct["body_template"] = run["body_template"]
+        values = self.store._queue_payload(
+            direct,
+            run_date=run["run_date"],
+            candidate_rank=1,
+            require_compliance=True,
+        )
+        values["idempotency_key"] = "direct-queue-reservation-bypass"
+        columns = ("idempotency_key",) + service.QUEUE_LEDGER_FIELDS + service.QUEUE_FIELDS
+        timestamp = "2026-08-12T06:01:00Z"
+        with contextlib.closing(service._connect(self.db_path)) as conn:
+            placeholders = ",".join("?" for _field in columns)
+            with self.assertRaises(sqlite3.IntegrityError) as guarded:
+                conn.execute(
+                    "INSERT INTO x_post_queue("
+                    + ",".join(columns)
+                    + ",status,created_at,updated_at) VALUES("
+                    + placeholders
+                    + ",'queued',?,?)",
+                    tuple(values[field] for field in columns)
+                    + (timestamp, timestamp),
+                )
+        self.assertIn("reserved by manual run", str(guarded.exception))
+
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T16:04:59Z",
+        ):
+            self.assertFalse(self.store.claim_manual_run()["found"])
+        self.assertEqual(self.store.get_manual_run(run["id"])["status"], "queued")
+
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T16:05:00Z",
+        ):
+            claimed = self.store.claim_manual_run()
+        self.assertTrue(claimed["found"])
+        self.assertEqual(claimed["run"]["id"], run["id"])
+        self.assertEqual(claimed["run"]["status"], "running")
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T16:05:01Z",
+        ):
+            resumed = self.store.claim_manual_run()
+        self.assertTrue(resumed["found"])
+        self.assertEqual(resumed["run"]["id"], run["id"])
+        self.assertEqual(resumed["run"]["status"], "running")
+
+    def test_scheduled_manual_preserves_pool_and_history_reuse_contract(self):
+        added = self.store.add_pool_materials(
+            ["212"],
+            ACTOR,
+            validation_checks=[
+                {"material_id": "212", "error_code": "", "error_message": ""}
+            ],
+        )
+        self.assertEqual(added["added_count"], 1)
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T06:00:00Z",
+        ):
+            run = self.store.create_manual_run(
+                ["212"],
+                [2],
+                "manual-scheduled-pool-reuse",
+                ACTOR,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-13T00:05:00+08:00",
+            )
+        self.assertEqual(self.store.available_pool_items(10), [])
+        pool = self.store.query_pool({"material_id": "212"})["items"]
+        self.assertEqual(len(pool), 1)
+        self.assertEqual(pool[0]["availability"], "occupied")
+
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T16:05:00Z",
+        ):
+            claimed = self.store.claim_manual_run()
+            plan = self.store.create_manual_plan(
+                claimed["run"]["id"],
+                [material_candidate(run, 2, "212")],
+            )
+        self.assertTrue(plan["created"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT state FROM x_post_manual_material_reservation "
+                    "WHERE manual_run_id=?",
+                    (run["id"],),
+                ).fetchone(),
+                ("consumed",),
+            )
+
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T16:06:00Z",
+        ):
+            replay = self.store.create_manual_run(
+                ["212"],
+                [3],
+                "manual-scheduled-history-reuse",
+                ACTOR,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-13T00:10:00+08:00",
+            )
+        self.assertTrue(replay["created"])
+        self.assertEqual(replay["publish_mode"], "scheduled")
+        self.assertEqual(replay["scheduled_at"], "2026-08-12T16:10:00Z")
+
+    def test_scheduled_manual_time_validation_fails_closed_without_rows(self):
+        invalid_timing = (
+            {"publish_mode": "later", "scheduled_at": ""},
+            {"publish_mode": "scheduled", "scheduled_at": ""},
+            {
+                "publish_mode": "immediate",
+                "scheduled_at": "2026-08-12T15:00:00+08:00",
+            },
+            {
+                "publish_mode": "scheduled",
+                "scheduled_at": "2026-08-12T15:00:00",
+            },
+            {
+                "publish_mode": "scheduled",
+                "scheduled_at": "2026-08-12T15:00:01+08:00",
+            },
+            {
+                "publish_mode": "scheduled",
+                "scheduled_at": "2026-08-12T13:59:00+08:00",
+            },
+        )
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T06:00:00Z",
+        ):
+            for index, timing in enumerate(invalid_timing, 1):
+                with self.subTest(timing=timing), self.assertRaises(
+                    service.XPostError
+                ) as rejected:
+                    self.store.create_manual_run(
+                        [str(230 + index)],
+                        [index],
+                        "manual-invalid-time-%s" % index,
+                        ACTOR,
+                        **timing,
+                    )
+                self.assertEqual(rejected.exception.code, "invalid_request")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_manual_run").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_manual_material_reservation"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_scheduled_manual_idempotency_replays_after_due_and_rejects_changes(self):
+        create_args = (
+            ["221"],
+            [2],
+            "manual-scheduled-idempotent",
+            ACTOR,
+        )
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T06:00:00Z",
+        ):
+            created = self.store.create_manual_run(
+                *create_args,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-12T15:00:00+08:00",
+            )
+        with mock.patch.object(
+            service,
+            "utc_now",
+            return_value="2026-08-12T08:00:00Z",
+        ):
+            replay = self.store.create_manual_run(
+                *create_args,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-12T15:00:00+08:00",
+            )
+            with self.assertRaises(service.XPostError) as past:
+                self.store.create_manual_run(
+                    ["222"],
+                    [3],
+                    "manual-scheduled-past",
+                    ACTOR,
+                    publish_mode="scheduled",
+                    scheduled_at="2026-08-12T15:00:00+08:00",
+                )
+        self.assertFalse(replay["created"])
+        self.assertEqual(replay["id"], created["id"])
+        self.assertEqual(past.exception.code, "invalid_request")
+        with self.assertRaises(service.XPostError) as conflict:
+            self.store.create_manual_run(
+                *create_args,
+                publish_mode="scheduled",
+                scheduled_at="2026-08-12T15:05:00+08:00",
+            )
+        self.assertEqual(conflict.exception.code, "x_post_idempotency_conflict")
+
     def test_manual_run_aggregates_known_success_and_failure_without_x_calls(self):
         run = self.store.create_manual_run(
             ["301", "302"],
@@ -434,6 +747,7 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
                 )
             }
             self.assertIn("x_post_manual_run", tables)
+            self.assertIn("x_post_manual_material_reservation", tables)
             queue_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")
             }
@@ -442,6 +756,15 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
                 for row in conn.execute("PRAGMA table_info(x_post_drama_pool)")
             }
             self.assertIn("manual_run_id", queue_columns)
+            manual_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(x_post_manual_run)")
+            }
+            self.assertTrue(
+                {"publish_mode", "scheduled_at", "scheduled_timezone"}.issubset(
+                    manual_columns
+                )
+            )
             self.assertTrue(
                 {"priority_at", "priority_by_user_id", "priority_by_name"}.issubset(
                     drama_columns
@@ -458,13 +781,47 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
                     "ux_x_post_queue_manual_account",
                     "idx_x_post_queue_manual",
                     "idx_x_post_manual_run_status",
+                    "idx_x_post_manual_run_due",
+                    "ux_x_post_manual_reservation_active_material",
                     "idx_x_post_drama_pool_priority",
                     "trg_x_post_queue_manual_insert",
                     "trg_x_post_queue_manual_update",
                     "trg_x_post_queue_batch_parent_insert",
                     "trg_x_post_queue_batch_parent_update",
+                    "trg_x_post_manual_run_timing_insert",
+                    "trg_x_post_manual_reservation_insert_guard",
+                    "trg_x_post_queue_manual_reservation_insert",
                 }.issubset(objects)
             )
+            with self.assertRaises(sqlite3.IntegrityError) as invalid_timing:
+                conn.execute(
+                    "INSERT INTO x_post_manual_run("
+                    "idempotency_key,trigger_source,publish_mode,scheduled_at,"
+                    "scheduled_timezone,run_date,source_date,account_ids_json,"
+                    "material_ids_json,body_template,actor_user_id,actor_name,"
+                    "status,expected_count,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "direct-noncanonical-timing",
+                        "manual",
+                        "scheduled",
+                        "2026-08-12T15:00:00+08:00",
+                        "Asia/Shanghai",
+                        "2026-08-12",
+                        "2026-08-11",
+                        "[2]",
+                        '["991"]',
+                        "{{drama_name}} {{desc}}",
+                        "admin-1",
+                        "Admin",
+                        "queued",
+                        1,
+                        "2026-08-12T06:00:00Z",
+                        "2026-08-12T06:00:00Z",
+                    ),
+                )
+            self.assertIn("timing invalid", str(invalid_timing.exception))
+            conn.rollback()
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
 

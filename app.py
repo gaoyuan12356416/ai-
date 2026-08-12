@@ -98683,22 +98683,39 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             session = self._session() or {}
             requested_material_ids = []
             requested_account_ids = []
+            requested_publish_mode = "immediate"
+            requested_scheduled_at = ""
             try:
                 payload = self._read_json()
-                if set(payload) != {
+                required_fields = {
                     "material_ids",
                     "account_ids",
                     "idempotency_key",
-                }:
+                }
+                allowed_fields = required_fields | {
+                    "publish_mode",
+                    "scheduled_at",
+                }
+                if not required_fields.issubset(payload) or not set(payload).issubset(
+                    allowed_fields
+                ):
                     raise ValueError("手动发布请求字段不完整或包含未知字段")
                 requested_material_ids = list(payload.get("material_ids") or [])
                 requested_account_ids = list(payload.get("account_ids") or [])
+                requested_publish_mode = str(
+                    payload.get("publish_mode", "immediate") or "immediate"
+                )
+                requested_scheduled_at = str(
+                    payload.get("scheduled_at", "") or ""
+                )
                 result = create_x_post_manual_run(
                     requested_material_ids,
                     requested_account_ids,
                     payload.get("idempotency_key"),
                     x_accounts_actor(session),
                     navigation_item="xPostMaterialPool",
+                    publish_mode=requested_publish_mode,
+                    scheduled_at=requested_scheduled_at,
                 )
                 item = result.get("item", {}) if isinstance(result, dict) else {}
                 audit_recorded = True
@@ -98713,6 +98730,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             "account_ids": requested_account_ids,
                             "expected_count": int(item.get("expected_count", 0) or 0),
                             "created": bool(item.get("created")),
+                            "publish_mode": str(
+                                item.get("publish_mode", "immediate")
+                                or "immediate"
+                            ),
+                            "scheduled_at": str(
+                                item.get("scheduled_at", "") or ""
+                            ),
                         },
                     )
                 except Exception:
@@ -98733,6 +98757,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         {
                             "material_ids": requested_material_ids[:50],
                             "account_ids": requested_account_ids[:50],
+                            "publish_mode": requested_publish_mode,
+                            "scheduled_at": requested_scheduled_at,
                             "error": error_payload["error"],
                         },
                     )
