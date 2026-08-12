@@ -436,6 +436,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
             "501",
             "2026-08-10",
             allow_long_duration=False,
+            max_duration_seconds=600,
         )
 
     def test_auto_create_accepts_only_fixed_service_actor_and_records_internal_actor(self):

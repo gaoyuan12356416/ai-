@@ -61,7 +61,7 @@ REPAIRABLE_MEDIA_CODES = frozenset(
         "invalid_media_duration",
     }
 )
-DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v3"
+DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v4"
 MAX_DAILY_ACCOUNTS = 50
 POSITIVE_REPAIR_MATERIAL_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
 DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")

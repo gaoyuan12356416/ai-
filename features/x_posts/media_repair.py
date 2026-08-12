@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - exercised only outside Linux.
     fcntl = None
 
 
-REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v3"
+REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v4"
 REPAIR_PATH = "/internal/x-post-media-repair"
 HEALTH_PATH = "/health"
 REPAIRABLE_TRIGGER_CODES = frozenset(
@@ -51,9 +51,9 @@ REPAIRABLE_TRIGGER_CODES = frozenset(
 )
 MIN_DURATION_SECONDS = 0.5
 STANDARD_MAX_DURATION_SECONDS = 140.0
-PREMIUM_MAX_DURATION_SECONDS = 600.0
+PREMIUM_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 STANDARD_TRIM_TARGET_SECONDS = 139.0
-PREMIUM_TRIM_TARGET_SECONDS = 599.0
+PREMIUM_TRIM_TARGET_SECONDS = PREMIUM_MAX_DURATION_SECONDS - 1.0
 # Backward-compatible names remain the strict standard-account contract.
 MAX_DURATION_SECONDS = STANDARD_MAX_DURATION_SECONDS
 TRIM_TARGET_SECONDS = STANDARD_TRIM_TARGET_SECONDS

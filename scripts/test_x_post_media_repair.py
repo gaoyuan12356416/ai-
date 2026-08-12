@@ -308,21 +308,21 @@ class MediaRepairTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "source_not_repairable")
 
-    def test_premium_duration_policy_preserves_140_to_600_seconds(self):
+    def test_premium_duration_policy_preserves_sources_through_four_hours(self):
         premium = media_repair.inspect_source(
-            source_probe(duration="300"),
+            source_probe(duration="763.938"),
             "invalid_media_codec",
             "premium",
         )
         self.assertFalse(premium["trim_applied"])
-        self.assertEqual(premium["output_duration"], 300.0)
+        self.assertEqual(premium["output_duration"], 763.938)
         self.assertEqual(
             premium["max_duration"],
             media_repair.PREMIUM_MAX_DURATION_SECONDS,
         )
 
         premium_over_limit = media_repair.inspect_source(
-            source_probe(duration="600.001"),
+            source_probe(duration="14400.001"),
             "invalid_media_duration",
             "premium",
         )
@@ -337,7 +337,7 @@ class MediaRepairTests(unittest.TestCase):
             self.root / "output.mp4",
             premium_over_limit,
         )
-        self.assertIn("599.000", command)
+        self.assertIn("14399.000", command)
 
         standard = media_repair.inspect_source(
             source_probe(duration="300"),
