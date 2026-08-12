@@ -50,8 +50,8 @@
 
 ## 验证命令与结果
 
-X Auto/bridge/UI 150 项通过（1 项 Windows 跳过）；既有 X 发布与账号 236/236；权限/UI 61/61；素材/剧集/媒体 129/129；catch-up/schedule 恢复 138 项通过（1 项 Windows 跳过）。Python/JavaScript 语法检查与 `git diff --check` 通过。生产 Chrome 安全验收待部署后执行。
+X Auto/bridge/UI 150 项通过（1 项 Windows 跳过）；既有 X 发布与账号 236/236；权限/UI 61/61；素材/剧集/媒体 129/129；catch-up/schedule 恢复 138 项通过（1 项 Windows 跳过）。Python/JavaScript 语法检查与 `git diff --check` 通过。生产 release 聚焦 123/123 通过；Chrome 实际选中六个已批准且 active 的账号，未保存模板，账本零增量。
 
 ## 回归结论
 
-代码与离线回归完成，无评审 blocker；待部署和生产 Chrome/账本零增量验收。
+已修复、已部署、已验收。六个账号可选且已在交付标签页选中；未批准账号仍置灰，模板/run/queue/log/Post 均无增量，三道 gate 保持关闭。

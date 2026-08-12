@@ -101,9 +101,25 @@
 2. 主 API、主静态文件和公开静态文件均从上述备份目录的 `files/` 对应路径恢复；移除 `80-x-auto-post.conf` 后仅重启 `drama-material-api.service`。保留新 SQLite，不用备份覆盖任何当前账本。
 3. 现有 X sidecar 的 forward-compatible schema/来源隔离代码默认保留。只有在确认 auto run/task/queue/unknown 全为 0 时，才可把 `/opt/x-post-automation/current` 原子切回 `db67fc71a73702feaa88689273356f1a21883bdc` 并仅重启 `x-post-automation.service`。
 
-## BUG-004 账号资格刷新待部署验收（未执行）
+## BUG-004 账号资格刷新生产验收（2026-08-12）
 
-- 状态：待实现、待部署、待生产验收；以下内容是验收清单，不代表已经通过。
+- 运行时 commit/release：`49b42bbeb5902fd7662732bafa333c89bb8dcf8d`，路径 `/mnt/data-disk/x-post-automation/releases/49b42bbeb5902fd7662732bafa333c89bb8dcf8d`；GitHub 远端分支与 release marker 一致。
+- 回滚包：`/mnt/data-disk/x-post-automation/backups/20260812T115222+0800-x-auto-account-refresh-49b42bb`；两份 SQLite online backup 均 `quick_check=ok`，manifest SHA256 为 `c93fdfc4610aec76cc1d036547b53f756e3d24ce801b34e1aef9a267efc6b871`。
+- 部署顺序为现有 X sidecar → X Auto sidecar →主 API/两份静态根目录；相关 timer/path 在无 active oneshot 时短暂停止，验证后全部恢复 active。三个服务 active，公开 HTML/CSS 200，HTML `Cache-Control: no-store, max-age=0`，静态 cache-buster 为 `20260812account1`。
+- 生产 release 聚焦回归 123/123 通过；已部署 app/module/两份静态文件与 release 逐项一致。部署前后 Token 文件哈希不变。
+- 部署前 online backup 已显示六个获批账号 `1,5,13,14,15,16` 在 `11:30 CST` 完成既有账号生命周期刷新并处于 active；因此本次 Chrome 打开页时刷新按钮正确显示零候选且没有再次轮换 Token。
+- Chrome 登录会话实际显示六个账号可发布，并通过“选择当前结果”选中 `1,5,13,14,15,16`，摘要为“已选 6 个”；未点击保存模板。模板列表和运行列表的登录/权限门、空态、筛选入口继续正常。
+- 最终 X 账本 queue/log/published/failed 为 `182/182/181/1`，active/unknown/auto-template run 为 `0/0/0`；X Auto template/version/plan/run/task/ledger/event 全为 0，三道 gate 全为 false，两份 SQLite `quick_check=ok`。
+- 恢复计时器后自然 manual 持续 `no_pending`、schedule 持续 `no_due`、claim 为 0；X Auto scheduler/runner succeeded，相关 journal 无 warning..alert。本次部署/验收未创建模板、run、queue、log 或 Post。
+
+### 本次回滚
+
+1. 先确认 X Auto 与现有 X active/unknown 均为 0，暂停相关 timer/path并等待 oneshot 结束。
+2. 将 `/opt/x-post-automation/current` 原子切回 `c4bc4e70adf926f2e58fa70d9af86dd03ff63ff7`，从本次回滚包恢复 main `app.py`、`features/x_auto_posts/{client,service,x_sidecar}.py` 及两份静态根目录的八个资产；依次重启现有 X sidecar、X Auto sidecar、main API。
+3. 保留当前 X/X Auto SQLite 与 Token；若未来已通过新入口成功轮换 Token，禁止使用本次备份覆盖。恢复 timer/path 后复核自然 `no_pending/no_due`、账本与 gate。
+
+### 原验收清单（已完成）
+
 - 部署前记录 X Auto template/version/plan/run/task/ledger/event 计数、现有 X queue/log/Post/active/unknown 计数、三道 gate 与账号/Token 非秘密哈希；为变更代码、静态文件和相关 unit 建立可回滚备份。
 - 验证 GET `/api/admin/x-auto-publish/accounts` 不调用 X、不改 Token；只有具备模板导航权限的登录操作员可通过 POST `/api/admin/x-auto-publish/accounts/{id}/verify` 对已批准账号执行显式刷新。动态状态为 `refresh_required` 时才访问 X；竞态下已 active 时只幂等回读，未批准账号失败关闭。
 - 若进行生产目标账号刷新，必须先记录明确账号 ID 和审批状态；成功后只允许该账号 Token/刷新时间等预期字段变化，并回读 `active + approved + publish_eligible`。临时错误应保持 `refresh_required`，明确撤销应提示重新授权。

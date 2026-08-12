@@ -17,9 +17,9 @@
 | loopback API、scheduler/runner/metric | `features/x_auto_posts/service.py`、`scripts/x_auto_post_*.py` | 已完成 |
 | 主 API 代理与权限 | `features/x_auto_posts/client.py`、`app.py` | 已完成 |
 | 页面与导航 | `static/x-auto-publish-*`、`static/navigation.json`、`static/quick-nav.js` | 已完成 |
-| 有模板导航权限的操作员逐账号刷新资格与编辑器可选状态恢复 | `features/x_auto_posts/service.py`、X sidecar bridge、`static/x-auto-publish-template.*` | 代码与本地回归完成；待部署验收 |
+| 有模板导航权限的操作员逐账号刷新资格与编辑器可选状态恢复 | `features/x_auto_posts/service.py`、X sidecar bridge、`static/x-auto-publish-template.*` | 已完成并生产验收 |
 | systemd/env/tmpfiles | `deploy/x-auto-post-*`、`.env.example` | 已完成 |
-| 测试与文档 | `scripts/test_x_auto_*`、`doc/039.*` | BUG-004 离线回归完成；待生产证据 |
+| 测试与文档 | `scripts/test_x_auto_*`、`doc/039.*` | BUG-004 离线与生产证据完成 |
 
 ## 编译 / 构建命令
 

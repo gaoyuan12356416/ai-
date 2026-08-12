@@ -69,7 +69,7 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
 
 ### 当前结论
 
-代码、离线测试与独立评审通过；部署和生产 Chrome 验收尚未完成。本节只记录已经执行的离线事实。
+代码、离线测试、独立评审、部署和生产 Chrome 验收均通过。
 
 ### 离线执行结果
 
@@ -79,10 +79,10 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
 - Python 编译、4 个 X Auto JavaScript 语法检查、`git diff --check` 均通过；独立代码评审结论为无 blocker。
 - 所有离线 X HTTP 写入均为 mock/fake；未连接真实 X 发布接口。
 
-### 生产待验证项目
+### 生产验收结果
 
-- GET 账号列表零 X 调用、零 Token 写入。
-- 仅有模板导航权限的登录操作员可触发，页面只对 `refresh_required + publish_approved=true` 账号逐个串行刷新；成功后回读 `active + approved + publish_eligible` 才可选择。
-- 未批准/非目标状态失败关闭；临时错误保持可重试，明确撤销要求重新授权。
-- 创建、编辑、启用、执行与最终发布严格校验不放宽。
-- 验收不创建模板/run/task/queue/log/Post，三道 gate 与既有发布账本保持不变。
+- 生产精确 release 的聚焦套件 123/123 通过，三个服务和六个 timer/path active；GET 与页面初始读取没有触发新 Token 轮换。
+- 部署前六个已批准账号已由既有账号生命周期于 11:30 CST 恢复 active；Chrome 显示六个可发布账号，并实际选中 `1,5,13,14,15,16`，摘要为“已选 6 个”。因此新按钮在本时点正确为零刷新候选，没有人为重复刷新。
+- 未批准账号仍显示“未批准发布”并置灰；离线用例证明其在 X 网络调用前被拒绝，临时错误保留 `refresh_required`，模板与最终发布严格校验不放宽。
+- 未保存模板、未创建 run/task/queue/log/Post，三道 gate 均 false；最终现有 X 账本 `182/182/181/1`、active/unknown `0/0`，X Auto 七类业务表全为 0。
+- 部署前后 Token 文件哈希相同；两份 SQLite `quick_check=ok`。自然 manual `no_pending`、schedule `no_due`、claim 0，X Auto scheduler/runner succeeded。
