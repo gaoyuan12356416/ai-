@@ -102,6 +102,34 @@ class TTAutoPublishAppContractTests(unittest.TestCase):
         self.assertNotIn("access_token", route.lower())
         self.assertNotIn("internal_token", route.lower())
 
+    def test_force_close_proxy_is_log_permission_gated_and_audited(self):
+        start = APP_SOURCE.index("        tt_auto_force_close_match = re.fullmatch(")
+        end = APP_SOURCE.index("        tt_auto_template_match = re.fullmatch(", start)
+        route = APP_SOURCE[start:end]
+        self.assertIn('r"/tasks/([1-9][0-9]*)/force-close"', route)
+        self.assertIn('"ttAutoPublishRuns"', route)
+        self.assertIn("self._require_same_origin_json()", route)
+        self.assertIn('set(request_payload) != {"reason"}', route)
+        self.assertIn('outbound_payload["_actor"]', route)
+        self.assertIn('"force_close_tt_auto_publish_task"', route)
+        self.assertIn("no_store=True", route)
+
+    def test_force_close_overlay_preserves_x_manual_publish_timing_fields(self):
+        start = APP_SOURCE.index(
+            '        if parsed.path == "/api/admin/x-posts/material-pool/manual-publish":'
+        )
+        end = APP_SOURCE.index("        x_drama_priority_match = re.fullmatch(", start)
+        route = APP_SOURCE[start:end]
+        self.assertIn("required_fields = {", route)
+        self.assertIn("allowed_fields = required_fields | {", route)
+        self.assertIn('"publish_mode",', route)
+        self.assertIn('"scheduled_at",', route)
+        self.assertIn("required_fields.issubset(payload)", route)
+        self.assertIn("not set(payload).issubset(", route)
+        self.assertIn("allowed_fields\n", route)
+        self.assertIn("publish_mode=requested_publish_mode", route)
+        self.assertIn("scheduled_at=requested_scheduled_at", route)
+
     def test_client_query_and_route_allowlists_fail_closed(self):
         self.assertEqual(
             parse_admin_query(
@@ -193,6 +221,30 @@ class TTAutoPublishAppContractTests(unittest.TestCase):
         self.assertFalse(session.trust_env)
         self.assertFalse(kwargs["allow_redirects"])
         session.close.assert_called_once_with()
+
+    @mock.patch("features.tt_auto_posts.client.requests.Session")
+    def test_client_allows_only_exact_force_close_route(self, session_factory):
+        session = session_factory.return_value
+        session.request.return_value = FakeResponse(
+            200, {"ok": True, "task": {"id": 12, "status": "canceled"}}
+        )
+        result = request_admin(
+            "POST",
+            TT_AUTO_ADMIN_PREFIX + "/tasks/12/force-close",
+            payload={
+                "reason": "operator close",
+                "_actor": {"user_id": "803", "name": "operator"},
+            },
+            environ=self._environ(),
+        )
+        self.assertEqual(result["task"]["status"], "canceled")
+        with self.assertRaises(TTAutoPostAdminClientError):
+            request_admin(
+                "POST",
+                TT_AUTO_ADMIN_PREFIX + "/tasks/12/cancel",
+                payload={"reason": "wrong route"},
+                environ=self._environ(),
+            )
 
     @mock.patch("features.tt_auto_posts.client.requests.Session")
     def test_sensitive_sidecar_response_is_rejected_and_secret_error_redacted(
