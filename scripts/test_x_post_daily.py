@@ -2170,7 +2170,7 @@ class RunnerTests(unittest.TestCase):
             )
         )
 
-    def test_manual_premium_over_600_source_keeps_original_media(self):
+    def test_material_pool_premium_over_600_source_keeps_original_media(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = replace(test_config(account_ids=(13,)), work_dir=temporary)
             account = {
@@ -2182,8 +2182,8 @@ class RunnerTests(unittest.TestCase):
                 "long_video_eligible": True,
             }
             item = candidate(5286820, 0)
-            item["pool_item_id"] = None
-            item["manual_item_id"] = 1
+            item["pool_item_id"] = 1
+            item.pop("manual_item_id", None)
 
             class Repair:
                 def repair(self, _payload):

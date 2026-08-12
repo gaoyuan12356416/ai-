@@ -16,7 +16,11 @@ SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 DEFAULT_SCHEMA = "kunlunads_dev"
 DEFAULT_PRODUCT = "Dramawave"
 DEFAULT_DRAMAWAVE_APP_ID = 1479
-MAX_X_SOURCE_DURATION_SECONDS = 600
+# The material pool must not impose the former 600-second ceiling on a source
+# that can be routed to a token-confirmed Premium account.  Keep only the
+# platform/API upload boundary used by the final account-aware preflight.
+MAX_X_SOURCE_DURATION_SECONDS = 4 * 60 * 60
+AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS = 600
 MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
@@ -333,20 +337,28 @@ class DramawaveCandidateSelector:
         """.format(schema=self.schema)
         return _cursor_rows(self.connection, sql, (content_id, series_code, language))
 
-    def _pool_material_rows(self, material_id, *, allow_long_duration=False):
+    def _pool_material_rows(
+        self,
+        material_id,
+        *,
+        allow_long_duration=False,
+        max_duration_seconds=None,
+    ):
         """Load one eligible video directly from the custom material library.
 
-        Automatic pool selection keeps the 600-second source ceiling. An
-        explicit manual batch may hydrate a longer positive-duration source so
-        the account-aware media preflight can either route the original file to
-        a token-confirmed Premium account or reject the whole batch before
-        queue reservation.
+        Material-pool and manual selection may hydrate a positive-duration
+        source through the X API's four-hour upload boundary.  The later
+        account-aware preflight is authoritative: standard accounts still fail
+        closed above 140 seconds, while only a token-confirmed Premium account
+        may keep the long source.
         """
         duration_predicate = (
             "AND cs.video_duration >= %s"
             if allow_long_duration
             else "AND cs.video_duration BETWEEN %s AND %s"
         )
+        if max_duration_seconds is None:
+            max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
         sql = """
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
@@ -371,7 +383,7 @@ class DramawaveCandidateSelector:
         duration_params = (
             (1,)
             if allow_long_duration
-            else (1, MAX_X_SOURCE_DURATION_SECONDS)
+            else (1, int(max_duration_seconds))
         )
         return _cursor_rows(
             self.connection,
@@ -471,10 +483,12 @@ class DramawaveCandidateSelector:
         source_date,
         *,
         allow_long_duration=False,
+        max_duration_seconds=None,
     ):
         material_rows = self._pool_material_rows(
             material_id,
             allow_long_duration=allow_long_duration,
+            max_duration_seconds=max_duration_seconds,
         )
         if len(material_rows) != 1:
             raise PoolCandidateRejection(
@@ -1000,7 +1014,7 @@ class DramawaveCandidateSelector:
         return selected, rejections
 
     def select_auto_template(self, material_ids, source_date, limit=1):
-        """Hydrate one exact automatic material under the 600-second ceiling.
+        """Hydrate one exact auto-template material under its 600-second ceiling.
 
         The execution bridge deliberately resembles the manual exact-ID flow,
         but it must never inherit the operator-only long-source exception.
@@ -1023,6 +1037,7 @@ class DramawaveCandidateSelector:
                 candidate_id,
                 source_date,
                 allow_long_duration=False,
+                max_duration_seconds=AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS,
             )
         except CandidateQueryError:
             raise
@@ -1122,7 +1137,7 @@ def select_auto_template_candidates(
     schema=DEFAULT_SCHEMA,
     now=None,
 ):
-    """Hydrate one exact auto-template material without the manual >600s gate."""
+    """Hydrate one exact auto-template material under its separate 600s gate."""
     return DramawaveCandidateSelector(
         connection,
         schema=schema,

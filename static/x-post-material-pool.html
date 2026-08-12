@@ -400,7 +400,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。超过 140 秒的视频只会分配给通过个号 token 确认有 X Basic、Premium 或 Premium+ 的账号，自动发布最长支持 600 秒。每个账号会在每个发布时间点各发布一篇。</p>
+            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。超过 140 秒的视频只会分配给通过个号 token 确认有 X Basic、Premium 或 Premium+ 的账号；会员账号不再受素材池原 600 秒上限限制，仍按 X 接口的 4 小时、512 MiB 门禁执行。每个账号会在每个发布时间点各发布一篇。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
@@ -543,7 +543,7 @@
       <button id="manualDialogCloseTop" class="button small" type="button" aria-label="关闭手动发布弹窗">关闭</button>
     </div>
     <div class="manual-dialog-body">
-      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。遇到限流或未知结果会停止后续发布，需先人工核对。人工选择的超长源视频仅在目标账号通过 token 确认为 Premium 时进入原片预检；当前按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。自动素材池的 600 秒入池上限不变。</div>
+      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。遇到限流或未知结果会停止后续发布，需先人工核对。手动和素材池自动发布使用同一会员时长规则：超过 140 秒仅在最终发布账号通过 token 确认为 Premium 时进入原片预检；会员账号不再受原 600 秒上限限制，当前统一按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。</div>
       <div id="manualSelectionPanel">
         <div class="field">
           <strong id="manualMaterialSummary">尚未选择素材。</strong>

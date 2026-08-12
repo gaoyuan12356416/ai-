@@ -237,7 +237,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertIn("cs.id = %s", material_sql)
         self.assertIn("cs.type = %s", material_sql)
         self.assertIn("cs.product = %s", material_sql)
-        self.assertEqual(material_params, ("30", "Dramawave", 2, 0, 1, 600))
+        self.assertEqual(material_params, ("30", "Dramawave", 2, 0, 1, 14400))
         drama_calls = [
             (sql, params)
             for sql, params in connection.calls
@@ -250,6 +250,30 @@ class ManualPoolSelectorTests(unittest.TestCase):
             if "ads_drama_info i" in sql
         ]
         self.assertEqual(deploy_calls[0][1], ("C30", 1479, "en"))
+
+    def test_automatic_pool_hydrates_over_600_source_for_premium_routing(self):
+        connection = PoolConnection([5286820])
+        connection.materials["5286820"]["video_duration"] = 763.938
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [pool_item(1, 5286820, "2026-08-12T00:00:00Z")],
+            "2026-08-12",
+            limit=1,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual([item["material_id"] for item in selected], ["5286820"])
+        material_sql, material_params = next(
+            (sql, params)
+            for sql, params in connection.calls
+            if "ads_custom_source cs" in sql
+        )
+        self.assertIn("cs.video_duration BETWEEN %s AND %s", material_sql)
+        self.assertEqual(
+            material_params,
+            ("5286820", "Dramawave", 2, 0, 1, 14400),
+        )
 
     def test_future_deploy_time_is_skipped_until_the_boundary_passes(self):
         shanghai = timezone(timedelta(hours=8))
