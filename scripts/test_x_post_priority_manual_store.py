@@ -218,7 +218,7 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
         self.assertEqual(rejected["priority_by_user_id"], "")
         self.assertEqual(rejected["priority_by_name"], "")
 
-    def test_manual_run_is_idempotent_pool_free_atomic_and_globally_deduplicated(self):
+    def test_manual_run_is_idempotent_pool_free_atomic_and_allows_history_reuse(self):
         run = self.store.create_manual_run(
             ["101", "102"],
             [2, 3],
@@ -271,14 +271,35 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
             )
         self.assertEqual(self.store.query_pool({})["pagination"]["total"], 0)
 
-        with self.assertRaises(service.XPostError) as reused:
-            self.store.create_manual_run(
-                ["102"],
-                [4],
-                "manual-key-reused",
-                ACTOR,
+        reused = self.store.create_manual_run(
+            ["102"],
+            [4],
+            "manual-key-reused",
+            ACTOR,
+        )
+        reused_plan = self.store.create_manual_plan(
+            reused["id"],
+            [material_candidate(reused, 4, "102")],
+        )
+        self.assertTrue(reused_plan["created"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT material_key,pool_item_id FROM x_post_queue "
+                    "WHERE manual_run_id=?",
+                    (reused["id"],),
+                ).fetchone(),
+                ("102", None),
             )
-        self.assertEqual(reused.exception.code, "x_post_manual_material_unavailable")
+        service.ensure_storage(self.db_path)
+        service.ensure_storage(self.db_path)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE material_key='102'"
+                ).fetchone()[0],
+                2,
+            )
 
         second_run = self.store.create_manual_run(
             ["105", "106"],
@@ -295,13 +316,7 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(second_plan["queues"]), 2)
 
-    def test_manual_plan_race_rolls_back_whole_batch_and_failure_is_durable(self):
-        run = self.store.create_manual_run(
-            ["201", "202"],
-            [2, 3],
-            "manual-race",
-            ACTOR,
-        )
+    def test_manual_plan_allows_pool_material_without_binding_pool_row(self):
         self.store.add_pool_materials(
             ["202"],
             ACTOR,
@@ -309,25 +324,32 @@ class XPostPriorityManualStoreTests(unittest.TestCase):
                 {"material_id": "202", "error_code": "", "error_message": ""}
             ],
         )
-        with self.assertRaises(service.XPostError) as raced:
-            self.store.create_manual_plan(
-                run["id"],
-                [
-                    material_candidate(run, 2, "201"),
-                    material_candidate(run, 3, "202"),
-                ],
-            )
-        self.assertEqual(raced.exception.code, "x_post_manual_material_unavailable")
-        current = self.store.get_manual_run(run["id"])
-        self.assertEqual(current["queues"], [])
-        self.assertEqual(current["status"], "queued")
-        failed = self.store.record_manual_failure(
-            run["id"],
-            "x_post_manual_source_preflight_failed",
-            "one selected material became unavailable",
+        run = self.store.create_manual_run(
+            ["201", "202"],
+            [2, 3],
+            "manual-pool-reuse",
+            ACTOR,
         )
-        self.assertEqual(failed["status"], "failed_preflight")
-        self.assertEqual(failed["queued_count"], 0)
+        plan = self.store.create_manual_plan(
+            run["id"],
+            [
+                material_candidate(run, 2, "201"),
+                material_candidate(run, 3, "202"),
+            ],
+        )
+        current = self.store.get_manual_run(run["id"])
+        self.assertEqual(current["status"], "running")
+        self.assertEqual(len(current["queues"]), 2)
+        self.assertTrue(plan["created"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue "
+                    "WHERE manual_run_id=? AND pool_item_id IS NOT NULL",
+                    (run["id"],),
+                ).fetchone()[0],
+                0,
+            )
 
     def test_manual_run_aggregates_known_success_and_failure_without_x_calls(self):
         run = self.store.create_manual_run(

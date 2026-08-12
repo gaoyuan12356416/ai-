@@ -137,16 +137,33 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
         logs = self.store.query_logs({"material_id": "701"})["items"]
         self.assertEqual(logs[0]["batch_kind"], "auto_template")
 
-        with self.assertRaises(service.XPostError) as used:
-            self.store.create_manual_run(
-                ["701"],
-                [4],
-                "manual-reuse-701",
-                {"user_id": "admin-1", "name": "Admin"},
+        reused = self.store.create_manual_run(
+            ["701"],
+            [4],
+            "manual-reuse-701",
+            {"user_id": "admin-1", "name": "Admin"},
+        )
+        reused_plan = self.store.create_manual_plan(
+            reused["id"],
+            [material_candidate(reused, 4, "701")],
+        )
+        self.assertEqual(len(reused_plan["queues"]), 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE material_key='701'"
+                ).fetchone()[0],
+                2,
+            )
+        with self.assertRaises(service.XPostError) as automatic_reuse:
+            self.create_auto(
+                material_id="701",
+                account_id=5,
+                external_task_key="task-701-reuse",
             )
         self.assertEqual(
-            used.exception.code,
-            "x_post_manual_material_unavailable",
+            automatic_reuse.exception.code,
+            "x_post_auto_template_material_unavailable",
         )
 
         log = self.store.reserve_log(queue["id"])
