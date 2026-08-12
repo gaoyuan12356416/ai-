@@ -22,6 +22,9 @@
 | CR-005 | P1 | live gate 关闭会连对账一起停止 | 闭门只领取 reconcile-only；禁止 selection/plan/publish | 已关闭 |
 | CR-006 | P1 | 发布桥接超时短于 X 分片上传，可能提前释放共享锁 | 查询/发布超时拆分为 120/9000 秒，强制 `publish+300≤execute`、`execute+300≤lease` | 已关闭 |
 | CR-007 | P1 | auto actor 请求结构与桥接校验不一致 | 客户端固定字符串，服务端固定内部审计身份，不信任请求用户 | 已关闭 |
+| CR-008 | P1 | 静态部署 glob 漏掉 CSS，浏览器还可能复用旧 HTML/JS | 精确静态清单、统一 cache-buster、三个 HTML 的 Nginx `no-store` | 已关闭 |
+| CR-009 | P1 | 多个 oneshot 共享 `RuntimeDirectory` 会删除 flock 目录并替换 inode | tmpfiles 单一持久 owner；相关 units 去除 `RuntimeDirectory` 并 fail-close | 已关闭 |
+| CR-010 | P2 | 模板/运行页读取了不存在或过时的 DTO 字段 | 返回真实最近/下次事实，统一任务字段、状态、摘要和中文错误 | 已关闭 |
 
 ## 编译 / 验证结果
 
@@ -30,3 +33,4 @@
 - 既有 X manual/daily/schedule/pool/account 套件 244/244 通过。
 - X accounts app contract 28/28 通过。
 - 所有发布 HTTP 均为 fake/mock；未连接真实 X 写接口。
+- 2026-08-12 Chrome 修复增量：本地 X auto 119 项通过（1 项 Windows 跳过），既有 X 回归 281/281；生产不可变 release 135/135。

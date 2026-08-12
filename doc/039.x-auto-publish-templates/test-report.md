@@ -46,3 +46,21 @@
 ## 发布建议
 
 保持当前三 gate 全关、模板为空的交付状态。任何真实模板启用须另行授权；若未来存在 auto active/unknown row，不得直接回滚为不识别来源的旧 sidecar。
+
+## 2026-08-12 Chrome 实测增量
+
+### 结论
+
+Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共享 flock 目录竞态均已修复并部署。两个页面最终验收通过；未创建模板、运行或 X Post。
+
+### 执行证据
+
+- 本地：X auto/部署/UI 119 项通过、1 项因 Windows 跳过；既有 X bridge/manual/daily/schedule/catchup/account 281/281 通过；Python 编译与 JavaScript 语法检查通过。
+- 服务器最终 release：135/135 通过；`nginx -t` 通过。
+- Chrome：模板页与运行页加载 139 条 CSS 规则，登录/权限门隐藏；统计为 0，刷新/筛选/重置正常；新建页标题和运行 404 中文错误正确。
+- 生产自然运行：10:31–10:45 的 X auto scheduler/runner 全部 succeeded，既有 manual 持续 `no_pending`、schedule 持续 `no_due`；共享目录 inode 不变。
+- 最终状态：现有 queue/log/published/failed 为 `182/182/181/1`，active/unknown 为 `0/0`；X auto 七类业务表均为 0；Token 哈希不变。
+
+### 发布结论
+
+生产 release `c4bc4e70adf926f2e58fa70d9af86dd03ff63ff7` 可保留。三道 gate 继续全关，当前 15 个账号均为 `refresh_required` 并在编辑器中置灰；账号刷新与真实模板启用仍需另行授权。

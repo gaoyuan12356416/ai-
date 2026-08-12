@@ -47,4 +47,4 @@ X Auto 与既有 X 多个 unit 同时把共享路径声明为各自 `RuntimeDire
 
 ## 回归结论
 
-源码已修复；部署必须暂停相关 timers/path，并同批更新所有 owner unit，之后以自然 oneshot 验证 inode 稳定。三 gate 继续全关且 X Auto 表全空。
+已部署。10:31–10:45 的 X auto scheduler/runner 与既有 schedule/manual 多轮自然 oneshot 全部成功，两个目录 inode 始终为 `41385288/41385290`。三 gate 继续全关且 X Auto 表全空。

@@ -39,6 +39,10 @@
 | TC-023 | 关闭 live gate 后对账 | pending 不领取；已有 queue/run 只 reconcile，不 publish | P0 | 通过 |
 | TC-024 | Linux 共享 flock | existing daily 持锁时 x_auto execute 必须跳过 | P0 | 生产通过 |
 | TC-025 | 跨进程响应丢失 | 8810 响应丢失/重启后 busy 收敛到终态，publish 计数始终 1 | P0 | 离线通过；未做生产故障注入 |
+| TC-026 | 生产 Chrome 页面样式与权限门 | CSS 200 且有规则；已登录管理员不显示登录/无权限提示 | P0 | 生产通过 |
+| TC-027 | 模板/运行 DTO 显示 | 最近/下次执行、准备时长、任务状态、摘要和错误中文均读取真实字段 | P1 | 离线契约通过；生产空态与错误映射通过 |
+| TC-028 | 静态缓存升级 | HTML `no-store`，CSS/JS 带统一 cache-buster；普通 reload 后不再复用旧脚本 | P1 | 生产通过 |
+| TC-029 | 共享锁目录生命周期 | 多轮 X auto 与既有 X oneshot 后目录存在且 inode 不变 | P0 | Linux、生产通过 |
 
 ## 回归范围
 
