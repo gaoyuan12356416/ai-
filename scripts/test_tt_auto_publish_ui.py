@@ -218,6 +218,10 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn(
             'configValue("video_template", DEFAULT_VIDEO_TEMPLATE)', script
         )
+        self.assertIn(
+            'src="/tt-auto-publish-template.js?v=20260812-outro-required-v1"',
+            page,
+        )
 
     def test_resource_type_v2_is_optional_chinese_enum_multiselect(self):
         page = PAGES["template"]

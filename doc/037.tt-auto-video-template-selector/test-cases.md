@@ -16,7 +16,7 @@ CPU/GPU 生产状态和浏览器可见行为。
 
 | 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| TC-01 | 新模板默认 | 请求省略字段 | normalize | 输出 `random_overlay` | P0 | 通过 |
+| TC-01 | 旧缓存写请求 | 新建/更新请求省略字段 | normalize | `tt_auto_video_template_required` / HTTP 409，不保存 | P0 | 通过 |
 | TC-02 | 两个合法枚举 | 分别传两个值 | normalize | 精确保留 | P0 | 通过 |
 | TC-03 | 未知枚举 | 传任意第三值 | normalize | HTTP/错误码 fail closed | P0 | 通过 |
 | TC-04 | 历史配置执行 | 版本 JSON 缺字段 | prepare | 使用 random client/profile/trim=0 | P0 | 通过 |
@@ -33,6 +33,7 @@ CPU/GPU 生产状态和浏览器可见行为。
 | TC-15 | 生产 GPU health | 两服务已启动 | 调用两个 loopback health | mode/profile/asset ready 准确 | P0 | 通过 |
 | TC-16 | 生产无副作用 | 部署前后 | 对比 DB/PID/ledger | 无新 run/task/publish，原 random PID 不变 | P0 | 通过 |
 | TC-17 | 真实浏览器 | 登录态 Chrome | 打开模板 1 编辑页 | 两选项可见，默认随机，未保存 | P0 | 通过 |
+| TC-18 | 静态资源版本 | HTML 更新而旧 JS 已缓存 | 重新打开编辑页 | 版本化 JS URL 强制获取当前保存逻辑 | P0 | 通过 |
 
 ## 回归范围
 

@@ -300,10 +300,17 @@ def normalize_video_template(value: Any = None, *, missing: bool = False) -> str
 
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
+    if "video_template" not in value:
+        raise ValidationError(
+            "tt_auto_video_template_required",
+            "视频制作模板字段缺失，请强制刷新页面后重新保存",
+            409,
+        )
     required = {
         "name",
         "account_ids",
         "caption_template",
+        "video_template",
         "drama_rule",
         "material_rule",
         "schedule",
@@ -313,7 +320,6 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "drama_launch_window_days",
         "cooldown_days",
         "platform",
-        "video_template",
     }
     _keys(value, required=required, optional=optional, label="模板")
     accounts = value.get("account_ids")
@@ -336,9 +342,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "name": _text(value.get("name"), "模板名称", minimum=1, maximum=120),
         "account_ids": account_ids,
         "caption_template": _caption_template(value.get("caption_template")),
-        "video_template": normalize_video_template(
-            value.get("video_template"), missing="video_template" not in value
-        ),
+        "video_template": normalize_video_template(value.get("video_template")),
         "metric_window_days": _integer(
             value.get("metric_window_days", 7), "指标统计窗口", 1, 30
         ),

@@ -38,7 +38,7 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
    - `random_overlay`：随机排重（当前模板，无片尾、不裁尾）；
    - `direct_outro`：拼接结尾（历史模板，固定教程片尾与转场）。
 2. 新模板默认 `random_overlay`。
-3. 历史配置缺少 `video_template` 时，读取和执行均默认 `random_overlay`。
+3. 历史数据库配置缺少 `video_template` 时，读取和执行均默认 `random_overlay`；新建或更新请求缺少该字段时拒绝保存，避免旧缓存页面静默保存成无片尾。
 4. API 只接受上述两个精确值；未知值 fail closed。
 5. 模板复制保留原视频制作模板；模板更新生成新版本，不修改旧版本。
 6. 已创建运行继续引用原 `template_id + template_version`；后续编辑不能改变其路由。
@@ -47,7 +47,7 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
 
 1. 页面加载模板时回填选择；历史模板显示“随机排重”。
 2. 用户选择后，保存摘要同步展示所选制作模板。
-3. 保存请求写入 `video_template`；保存本身不创建运行或发布任务。
+3. 保存请求必须显式写入 `video_template`；保存本身不创建运行或发布任务。
 4. 运行创建后，执行器从任务引用的不可变模板版本解析路由。
 5. `random_overlay` 走现有 GPU 通道；`direct_outro` 走新增 loopback 通道。
 
@@ -76,7 +76,7 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
 
 ### API / 接口
 
-- 创建/更新模板请求新增可选 `video_template`；省略时兼容为 `random_overlay`。
+- 创建/更新模板请求必须显式包含 `video_template`；省略时返回 `tt_auto_video_template_required`，HTTP 409。
 - 模板详情/列表中的 `config.video_template` 对新保存版本为显式值。
 - 健康接口保留现有 `profile`/`source_trim_tail_seconds`，新增不含 URL/凭据的
   `video_templates` 路由摘要。
@@ -84,6 +84,7 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
 
 ### 异常与边界
 
+- 新建/更新请求缺少制作模板：`tt_auto_video_template_required`，HTTP 409，提示强制刷新编辑页。
 - 未知制作模板：`invalid_request`，HTTP 400。
 - 模板支持但执行路由未配置：`tt_auto_video_template_unavailable`，HTTP 503，
   不调用 GPU/TikTok。
@@ -106,6 +107,7 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
 
 - 风险：错误复用单一 GPU URL 会在发布/核对阶段找不到对应 manifest。通过每个制作模板
   固定独立 client 与 work root 规避。
+- 风险：HTML 已更新但浏览器复用旧 JS，旧请求会漏掉新字段。编辑页脚本 URL 使用版本参数，后端同时拒绝缺字段的新写请求。
 - 风险：端口冲突。部署前验证 GPU `8832` 与 CPU `18834` 未占用。
 - 风险：历史 pending 任务可能由旧 profile 创建。部署门禁要求 in-flight 为 0；
   不恢复旧 SQLite 覆盖后续发布事实。

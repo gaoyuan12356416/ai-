@@ -178,6 +178,7 @@ def template_payload(*, name="Template A", mode="fixed", account_ids=None):
         "name": name,
         "account_ids": list(account_ids or ["640", "641"]),
         "caption_template": "Drama {{content_id}}\n{desc}\n{url}",
+        "video_template": VIDEO_TEMPLATE_RANDOM_OVERLAY,
         "metric_window_days": 7,
         "drama_launch_window_days": 0,
         "cooldown_days": 3,
@@ -303,6 +304,22 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(
             normalized["video_template"], VIDEO_TEMPLATE_RANDOM_OVERLAY
         )
+
+        missing_video_template = template_payload()
+        missing_video_template.pop("video_template")
+        with self.assertRaises(ValidationError) as missing:
+            normalize_template_payload(missing_video_template)
+        self.assertEqual(
+            missing.exception.code, "tt_auto_video_template_required"
+        )
+        self.assertEqual(missing.exception.status, 409)
+        service, _executor = self.service()
+        with self.assertRaises(ValidationError) as stale_write:
+            service.create_template(self.actor(missing_video_template))
+        self.assertEqual(
+            stale_write.exception.code, "tt_auto_video_template_required"
+        )
+        self.assertEqual(self.store.list_templates(), [])
 
         direct_outro = template_payload()
         direct_outro["video_template"] = VIDEO_TEMPLATE_DIRECT_OUTRO

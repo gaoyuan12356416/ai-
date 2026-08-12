@@ -13,12 +13,12 @@
 - `random_overlay`：`tt-post-random-overlay-hevc-720x1280-v3`，trim `0`；
 - `direct_outro`：`tt-post-direct-outro-hevc-720x1280-v2`，trim `4.333333`。
 
-兼容规则：省略字段时规范化为 `random_overlay`；未知值返回 `invalid_request`。
+写请求规则：字段必填；省略时返回 `tt_auto_video_template_required`、HTTP 409，未知值返回 `invalid_request`、HTTP 400。
 
 ## 模板响应
 
-新保存版本在 `template.config.video_template` 返回显式值。历史版本不做数据库回填；服务执行和
-页面回填按 `random_overlay` 兼容。
+新保存版本在 `template.config.video_template` 返回显式值。历史数据库版本不做回填；服务执行和
+页面回填仍按 `random_overlay` 兼容。该历史读取兼容不适用于新的创建/更新请求。
 
 ## Health
 
