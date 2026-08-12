@@ -128,4 +128,16 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
   `4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d`，
   `x-post-daily` 用户和同等 systemd 沙箱均可执行。遗漏只发生在 X Auto 独立环境。
 - 修复为独立环境显式设置该路径，并由 unit `ExecStartPre` 在 sidecar 启动前验证；
-  不修改或重放 Run `1`。部署结果与零额外 Post 复核在发布后补充。
+  不修改或重放 Run `1`。
+- GitHub exact commit 与生产 release 均为
+  `b89797362417eafc52970c36e6b99301fe1de487`；本地 159 项通过、1 项 Windows 跳过，
+  服务器 160/160 通过。回滚包
+  `/mnt/data-disk/x-post-automation/backups/20260812T183705+0800-x-auto-ffprobe-b897973`
+  中两份 SQLite 均 `quick_check=ok`。
+- unit 启动前检查状态为 0，进程环境读取到精确 ffprobe 路径；`x-post-daily` 用户对本地
+  1 秒 H.264/yuv420p + AAC 视频执行真实公共 `probe_media` 成功。
+- 首次切换因部署脚本误判健康 JSON 自动回滚；服务启动本身成功。把断言改为解析
+  `ok=true` 与三道 gate 后再次切换成功，证明回滚链和正式切换链均有效。
+- `/health` 全开，只读 preview 为 `reserved=false`；18:41–18:43 三轮自然
+  scheduler/runner 成功。X Auto 仍仅有原失败 run/task，ledger 为 0；X queue/log/
+  published/failed/unknown 保持 `187/187/186/1/0`，新增 X Post 为 0。

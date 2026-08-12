@@ -189,3 +189,31 @@
    runner、健康与账本对比为准；不调用 `run-now` 或 publish/canary。
 6. 回滚恢复旧 unit/env、切回旧 release 并只重启 X Auto；始终保留当前 SQLite 与
    Token，尤其不得覆盖用户随后创建的新运行或 Post。
+
+### 2026-08-12 生产结果
+
+- GitHub/runtime：`b89797362417eafc52970c36e6b99301fe1de487`，生产路径
+  `/mnt/data-disk/x-post-automation/releases/b89797362417eafc52970c36e6b99301fe1de487`。
+- 回滚包：
+  `/mnt/data-disk/x-post-automation/backups/20260812T183705+0800-x-auto-ffprobe-b897973`；
+  两份 SQLite backup `quick_check=ok`，5 项 `SHA256SUMS` 已生成。
+- 服务器聚焦回归 160/160，systemd unit verify 通过。第一次切换因验收脚本错误检查
+  `status=ok` 而自动回滚；新服务实际已启动。改为解析真实 `ok=true` 与三道 gate 后，
+  第二次切换成功。
+- 只重启 `x-auto-post-service.service`；`x-post-automation.service` PID 仍为 `3255023`，
+  启动时间仍为 15:50:48。两个 timer 恢复 active，runner path 恢复 enabled + inactive。
+- `ExecStartPre` 状态 0，服务进程包含精确 ffprobe 环境；服务用户真实解析本地 1 秒
+  H.264/AAC 视频成功。只读 preview 成功、`reserved=false`，未调用 `run-now`。
+- 18:41–18:43 自然 scheduler/runner 全部 succeeded；最终 X Auto 只有原失败 Run `1`/
+  task `1`，ledger 0。X queue/log/published/failed/unknown 为 `187/187/186/1/0`，新增
+  X Post 为 0。
+
+### BUG-006 精确回滚
+
+1. 确认 X Auto 和既有 X 没有 active/unknown；停止 X Auto scheduler/runner timer/path，
+   等待 oneshot 结束后停止 X Auto sidecar。
+2. 从上述回滚包恢复 `/etc/x-auto-post.env` 与
+   `/etc/systemd/system/x-auto-post-service.service`，把 current 原子切回
+   `/mnt/data-disk/x-post-automation/releases/0a27b66ff9651d665a19675ac01c8e6c44713283`。
+3. `systemctl daemon-reload` 后只启动 X Auto sidecar，并恢复 timer/path 原状态；复核健康、
+   自然 timer 与账本。保留当前 SQLite 和 Token，不得用 backup 覆盖后续运行或 Post。

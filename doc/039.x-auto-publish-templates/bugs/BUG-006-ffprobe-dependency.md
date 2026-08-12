@@ -1,6 +1,6 @@
 # BUG-006：X Auto 首次真实运行缺少 ffprobe 路径
 
-状态：已定位，待完成生产修复验收。
+状态：已修复并完成生产验收。
 
 ## 现象与影响
 
@@ -39,3 +39,22 @@
 - 只读 preview 必须成功且 `reserved=false`；自然 timer 成功。
 - 不调用 Run `1`、`run-now`、publish 或 X canary；X queue/log/Post/unknown 不得因
   部署验收增加。
+
+## 生产结果
+
+- GitHub exact commit 与生产 release 均为
+  `b89797362417eafc52970c36e6b99301fe1de487`；服务器聚焦回归 160/160 通过。
+- 回滚包为
+  `/mnt/data-disk/x-post-automation/backups/20260812T183705+0800-x-auto-ffprobe-b897973`；
+  两份 SQLite online backup 均 `quick_check=ok`，`SHA256SUMS` 共 5 项。
+- unit 的 `ExecStartPre` 在 18:40:53 以状态 0 通过；X Auto 进程环境只新增预期的
+  `X_POST_FFPROBE_BIN=/mnt/data-disk/x-post-automation/bin/ffprobe`。服务用户对本地生成的
+  1 秒 H.264/yuv420p + AAC 视频调用真实 `probe_media`，返回 320×180、30fps、1.0 秒。
+- 首次切换时新服务已正常启动，但部署脚本误把健康返回断言为 `status=ok`，而接口实际为
+  `ok=true`；回滚钩子完整恢复旧 release/env/unit/timer。修正为 JSON 解析并校验三道 gate
+  后，第二次切换成功。
+- `/health` 为 `ok=true`、三道 gate 与 `is_open` 全为 true；只读 preview 成功且
+  `reserved=false`。18:41–18:43 自然 scheduler/runner 全部成功，没有创建新 run/task。
+- Run `1`、task `1` 与 canonical run `9` 原样保留；最终 X Auto run/task/ledger 为
+  `1/1/0`，唯一 run/task 仍是明确失败。canonical queue/log/published/failed/unknown 为
+  `187/187/186/1/0`，本次修复与验收新增 X Post 为 0。
