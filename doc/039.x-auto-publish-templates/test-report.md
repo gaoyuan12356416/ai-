@@ -100,4 +100,19 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
   类型，无会员/未知账号显示“最长 140 秒”；静态契约用例防止文案回退。
 - 本地 X Auto/bridge/UI/app-contract 聚焦套件 159 项执行、158 项通过、
   1 项仅因 Windows 平台跳过；新增账号时长测试全部通过。
-- 本节生产部署结果、exact commit/release、备份与零额外 Post 账本证据在部署完成后补充。
+- GitHub exact commit 与生产 release 均为
+  `0a27b66ff9651d665a19675ac01c8e6c44713283`；服务器不可变 release 再跑
+  159/159 通过。回滚包为
+  `/mnt/data-disk/x-post-automation/backups/20260812T180553+0800-x-auto-run-now-readiness-0a27b66`，
+  manifest 复核通过，两份 SQLite online backup 均 `quick_check=ok`。
+- `/health` 回读三门禁与 `is_open` 全为 true。只读 preview 返回 200、
+  `reserved=false`，账号 `1` 选中素材 `6120551`、时长 92 秒，不再选择原 270 秒
+  候选；未调用 `run-now` 或 publish/canary。
+- 模板 `1` 仍为停用；恢复 timer 后 scheduler/runner 于 18:09、18:10 自然执行成功，
+  X Auto run/task/ledger 继续为 `0/0/0`。X Sidecar 未重启，Token 组合哈希未变化，
+  服务日志无 warning..alert。
+- 两份静态根目录与 release 哈希一致，七个公开页面/资产均返回 200，HTML 为
+  `Cache-Control: no-store, max-age=0`，cache-buster 为 `20260812run1`。
+- 最终既有 X 账本保持 queue/log/published `187/187/186`、unknown/active manual
+  `0/0`，最新既有 Post ID 仍为 `2087476109495386331`；本次部署与验收新增 X Post
+  为 0。

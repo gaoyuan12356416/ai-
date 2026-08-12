@@ -146,3 +146,30 @@
    既有 X 自然/运营发布与本次 X Auto 修复；本次新增 X Auto Post 必须为 0。
 8. 回滚先把三门禁恢复为 0，再切回旧 release 并重启 X Auto sidecar。保留所有
    当前账本；若用户随后已创建真实运行，只做代码/配置回滚，不恢复 SQLite 备份。
+
+### 2026-08-12 生产结果
+
+- GitHub/runtime：`0a27b66ff9651d665a19675ac01c8e6c44713283`，生产路径
+  `/mnt/data-disk/x-post-automation/releases/0a27b66ff9651d665a19675ac01c8e6c44713283`。
+- 回滚包：
+  `/mnt/data-disk/x-post-automation/backups/20260812T180553+0800-x-auto-run-now-readiness-0a27b66`；
+  `SHA256SUMS` 复核通过，两份 SQLite 备份 `quick_check=ok`。
+- 服务器聚焦回归 159/159；X Auto 服务与两个 timer active，runner path 恢复为原
+  `enabled + inactive`。X Sidecar 进程仍是 15:50:48 启动的原进程，主 API、X
+  Sidecar 和 Nginx 均未重启。
+- 三门禁全开，模板 `1` 保持停用；preview 只读选中 92 秒素材且未预留，恢复后两轮
+  自然 scheduler/runner 成功，X Auto run/task/ledger 为 `0/0/0`。
+- 最终 X queue/log/published 为 `187/187/186`，unknown/active manual 为 `0/0`；
+  Token 哈希不变，本次未调用 `run-now`，未创建真实 X Post。
+
+### 精确回滚
+
+1. 先确认没有 active/unknown X Auto 或既有 X 运行；停止 X Auto 两个 timer 和
+   runner path，并等待 oneshot 结束。
+2. 把 `/etc/x-auto-post.env` 的三门禁恢复为 0；从上述回滚包恢复七个静态文件到
+   `/root/drama_material_service/static` 与 `/usr/share/nginx/html`。
+3. 将 `/opt/x-post-automation/current` 原子切回
+   `/mnt/data-disk/x-post-automation/releases/11db78a96af86ea776af85be96f225caf47eb21b`，
+   只重启 `x-auto-post-service.service`，再恢复 timer/path 原状态。
+4. 保留当前两份 SQLite 与 Token；尤其在用户已手动执行后，不得用部署前数据库
+   备份覆盖新 run/queue/log/Post 事实。
