@@ -51,13 +51,13 @@
 
 ### 结论
 
-Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共享 flock 目录竞态均已修复并部署。两个页面最终验收通过；未创建模板、运行或 X Post。
+Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共享 flock 目录竞态均已修复并部署。两个页面最终验收通过；本次 X Auto 部署与验收未创建模板或运行，也未额外触发 X Post。期间账本增加的 5 条发布事实来自既有 X 自然 schedule。
 
 ### 执行证据
 
-- 本地：X auto/部署/UI 119 项通过、1 项因 Windows 跳过；既有 X bridge/manual/daily/schedule/catchup/account 281/281 通过；Python 编译与 JavaScript 语法检查通过。
+- 本地：完整 X auto/admin UI/app-contract 聚焦套件 129 项通过、1 项因 Windows 跳过；既有 X bridge/manual/daily/schedule/catchup/account 281/281 通过；Python 编译与 JavaScript 语法检查通过。
 - 服务器最终 release：135/135 通过；`nginx -t` 通过。
-- Chrome：模板页与运行页加载 139 条 CSS 规则，登录/权限门隐藏；统计为 0，刷新/筛选/重置正常；新建页标题和运行 404 中文错误正确。
+- Chrome：模板页与运行页加载的目标 X Auto 样式表包含 139 条 CSS 规则，登录/权限门隐藏；统计为 0，刷新/筛选/重置正常；新建页标题和运行 404 中文错误正确。
 - 生产自然运行：10:31–10:45 的 X auto scheduler/runner 全部 succeeded，既有 manual 持续 `no_pending`、schedule 持续 `no_due`；共享目录 inode 不变。
 - 最终状态：现有 queue/log/published/failed 为 `182/182/181/1`，active/unknown 为 `0/0`；X auto 七类业务表均为 0；Token 哈希不变。
 

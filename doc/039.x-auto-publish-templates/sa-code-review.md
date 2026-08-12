@@ -33,4 +33,4 @@
 - 既有 X manual/daily/schedule/pool/account 套件 244/244 通过。
 - X accounts app contract 28/28 通过。
 - 所有发布 HTTP 均为 fake/mock；未连接真实 X 写接口。
-- 2026-08-12 Chrome 修复增量：本地 X auto 119 项通过（1 项 Windows 跳过），既有 X 回归 281/281；生产不可变 release 135/135。
+- 2026-08-12 Chrome 修复增量：本地完整 X auto/admin UI/app-contract 聚焦套件 129 项通过（1 项 Windows 跳过），既有 X 回归 281/281；生产不可变 release 135/135。

@@ -42,7 +42,7 @@
 
 ## 验证命令与结果
 
-- X auto 聚焦回归连同部署/静态契约：119 项通过，1 项按 Windows 平台跳过。
+- 完整 X auto/admin UI/app-contract 聚焦回归连同部署/静态契约：129 项通过，1 项按 Windows 平台跳过。
 - 既有 X bridge/manual/daily/schedule/catchup/account 回归：281/281 通过。
 - `py_compile` 与两个 JavaScript `node --check` 通过。
 

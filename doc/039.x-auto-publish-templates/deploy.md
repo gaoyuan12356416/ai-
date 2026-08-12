@@ -75,7 +75,7 @@
 - 使用已登录生产 Chrome 会话实际打开模板页和运行记录页时，发现 `/x-auto-publish.css` 返回 404；HTML/API/登录权限本身正常，但页面无样式，且 `.hidden` 失效造成登录与无权限提示错误显示。
 - 根因是首次静态部署使用 `x-auto-publish-*` glob；该模式能匹配三个页面及其 JS，却不会匹配点号紧跟在 `publish` 后面的 `x-auto-publish.css`。
 - 已从当前不可变 release `0e03210cd2c5c80b134884f9e96304797efa2545` 精确安装同一份 CSS 到应用 static 与 Nginx docroot。补正备份为 `/mnt/data-disk/x-post-automation/backups/20260812T100843+0800-x-auto-css-missing-0e03210cd2c5c80b134884f9e96304797efa2545`，其 manifest 文件 SHA256 为 `40411dcc5dcbff185f0440bfad426a57fa20dea4ae06de22063a7dd18c253f17`。
-- 补正后公开 CSS 为 200、`text/css`、14750 字节，与 release SHA256 一致；`nginx -t` 通过，未 reload Nginx、未重启任何服务、未创建模板或运行、未开启 gate、未触发 X Post。
+- 补正后公开 CSS 为 200、`text/css`、14750 字节，与 release SHA256 一致；`nginx -t` 通过，未 reload Nginx、未重启任何服务、未创建模板或运行、未开启 gate；本次 CSS 补正未额外触发 X Post。
 - Chrome 复测确认两个列表页样式加载、登录/权限提示隐藏、空状态与统计正确，刷新、查询、筛选、重置正常；新建模板页可读取 15 个账号快照，其中 5 个当前可发布，固定/随机发布时间切换正常，但未保存模板。
 
 ## Chrome 与共享锁最终修复证据（2026-08-12）
@@ -86,7 +86,7 @@
 - Chrome 实际登录会话验证模板/运行列表布局、空态、统计、刷新、筛选、查询和重置；新建页标题从误写“编辑”修为“创建”；不存在的运行详情从英文修为“运行记录不存在或已不可访问”。新运行页无 console error；旧标签仅有 Chrome 扩展 message-channel 噪声。
 - 最终账号安全快照为 15 个 `refresh_required`，页面均正确置灰；没有为验收刷新 Token。早先第一轮页面读取曾显示 5 个可发布账号，属于验收时点快照，不作为启用依据。
 - 共享目录由 `/etc/tmpfiles.d/x-post-runtime.conf` 单一持久管理，均为 `0700 x-post-daily:x-post-daily`；10:31–10:45 多轮 X auto 和既有 X oneshot 后 inode 始终为 `41385288/41385290`，未再出现 runner unexpected。
-- 最终账本仍为 queue/log `182/182`、published `181`、failed `1`、active `0`、unknown `0`；X auto template/version/plan/run/task/ledger/event 全为 `0`，三道 gate 全关。Token 文件哈希与部署前完全一致；未创建模板、run 或真实 X Post。
+- 最终账本仍为 queue/log `182/182`、published `181`、failed `1`、active `0`、unknown `0`；X auto template/version/plan/run/task/ledger/event 全为 `0`，三道 gate 全关。Token 文件哈希与部署前完全一致；本次 X Auto 部署与验收未创建模板或 run，也未额外触发 X Post，期间新增 5 条来自既有 X 自然 schedule。
 
 ### 本次精确回滚
 
