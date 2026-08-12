@@ -30,3 +30,12 @@ OK (skipped=1)
 
 - 官方 API 契约已经离线验证，但当前 X 应用套餐和真实目标账号的 Repost 写能力仍需首次自然任务证明。
 - 生产部署必须备份并演练迁移，首条自然中转需要逐阶段核对调用和账本；任何未知结果都停止，不人工盲重跑。
+
+## 2026-08-12 集成与生产验收补充
+
+- 清洁集成分支全量 X unittest：`Ran 619 tests`，`OK (skipped=2)`，即 617 通过、0 失败。
+- CPU 生产兼容关键集：`Ran 263 tests`，全部通过；生产 SQLite 副本迁移演练通过。
+- GPU 媒体修复专项：17/17 通过。
+- CPU/GPU health 均确认 `x-h264-nvenc-720-duration-policy-v4`；CPU 主 API、X sidecar、X 自动模板 sidecar 均 active。
+- 公开素材池页和日志页返回 200 且与 release 内容一致；未登录素材池 API 返回 401。
+- 部署后 queue/log 仍为 182/182，活动/未知均为 0；未执行真实 X Post/Repost。

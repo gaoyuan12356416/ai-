@@ -31,3 +31,7 @@ Python 编译通过；素材池页面内联 JavaScript 由 UI 回归中的 `node
 ## 发布建议
 
 代码具备发布条件。生产部署必须 CPU/GPU 同步切换 v4 profile，并在无活跃上传窗口执行；本次开发不自动部署。
+
+## 2026-08-12 生产验收结果
+
+已部署生产。清洁集成分支全量 X unittest 为 619 项、617 通过、2 项环境跳过、0 失败；CPU 关键兼容集 263/263、GPU 媒体修复 17/17。生产迁移后数据库 `quick_check=ok`、外键违规 0，queue/log 保持 182/182，活动发布与未知结果均为 0。恢复 timer 后仅观察到 `no_due` / `no_pending`，没有创建真实 Post/Repost；CPU/GPU 最近验收窗口无错误级日志。
