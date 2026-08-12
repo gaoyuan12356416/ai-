@@ -28,3 +28,19 @@
 - 使用显式 `direct_outro` 验证新版本保存和执行路由合同。
 - 生产部署只更新 TT auto CPU 服务和模板编辑静态页；不重启 GPU，不触发 run-now，
   不创建真实 TikTok Post。
+
+## 生产处置记录
+
+- 模板 `2` 已修正为版本 `3`、`video_template=direct_outro`，并保持 disabled；未触发 run-now。
+- 修复 commit/release：`8df092b80cad6737dc11af375f27da13ea8bf234`。
+- CPU 备份：
+  `/mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b`。
+- 公网 HTML 改用
+  `/tt-auto-publish-template.js?v=20260812-outro-required-v1`；HTML/JS SHA256 分别为
+  `4e876c353abd4b88bb1cb476079ccc7964713e164b7d0a8e5c19140e815751a8`、
+  `639c82490303bf7238e10f8f1f4a64658386e055941174b425027f4a3f0fbc8a`。
+- 生产负向校验在不存在的模板 ID 上发送完整配置但省略 `video_template`，返回
+  HTTP 409 / `tt_auto_video_template_required`；模板/版本/run/task/publish_id 计数保持
+  `2/15/28/158/113`，SQLite `quick_check=ok`。
+- 切换时先等待任务 `156` 的 GPU 成片自然完成并释放租约；没有终止、重试或补发任务。
+  19:35 恢复 timer/path 后，任务 `156`、`157`、`158` 由新版本自然续跑。

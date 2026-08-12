@@ -49,3 +49,13 @@
 ## 发布建议
 
 已按 `deploy.md` 完成备份、精确 commit 部署和只读生产验收，可正常使用。
+
+## 2026-08-12 缓存事件回归
+
+- 本地 TT auto 回归：136/136 通过；`py_compile`、`node --check`、`git diff --check` 通过。
+- GitHub exact release 上线前聚焦回归：127/127 通过。
+- 生产环境全量测试中的 3 个环境失败（runner 测试环境变量、代码 broker 端口 18832 被占用）
+  可在部署前 release 精确复现，不属于本次变更回归。
+- 生产缺字段负向校验：HTTP 409 / `tt_auto_video_template_required`；事实计数不变。
+- 公网版本化 JS 返回 HTTP 200，HTML/JS SHA 与 release 一致；SQLite `quick_check=ok`。
+- 未执行 run-now、未创建真实 TikTok 验收帖；已有自然任务未被中断。

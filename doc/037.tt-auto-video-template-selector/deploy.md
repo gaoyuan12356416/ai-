@@ -111,3 +111,39 @@ systemctl daemon-reload
 ```
 
 数据库事实未变化，常规回滚不得恢复 SQLite 备份覆盖线上账本。
+
+## 2026-08-12 片尾缓存事件修复部署记录
+
+- GitHub/runtime commit：`8df092b80cad6737dc11af375f27da13ea8bf234`。
+- CPU release：
+  `/opt/tt-auto-post/releases/8df092b80cad6737dc11af375f27da13ea8bf234`；
+  `tt-auto-post-service.service` active，`/health` 返回 `ok=true`。
+- 部署前 release：
+  `/opt/tt-auto-post/releases/08262a5e47b2b6b484c5878a7a6ee01d342fcd30`。
+- CPU 备份：
+  `/mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b`；
+  online SQLite backup 的 `quick_check=ok`。
+- 模板 `2` 修正为 v3、`video_template=direct_outro`、disabled；模板/版本/run/task/publish_id
+  为 `2/15/28/158/113`。未执行 run-now，未创建部署 canary Post。
+- 公网 HTML 使用版本化 JS URL；HTML/JS SHA256 为
+  `4e876c353abd4b88bb1cb476079ccc7964713e164b7d0a8e5c19140e815751a8` /
+  `639c82490303bf7238e10f8f1f4a64658386e055941174b425027f4a3f0fbc8a`。
+- 生产负向校验返回 HTTP 409 / `tt_auto_video_template_required`，校验前后上述事实计数不变。
+- 切换前等待已有任务 `156` 完成 GPU 成片并释放租约；恢复 scheduler/runner timer/path 后，
+  19:35 自然周期由新 release 继续领取 `156`、`157`、`158`，未人工触发发布。
+- GPU random/direct 服务均未重启，已有制作路由保持不变。
+
+精确代码/静态回滚（不得恢复 SQLite 覆盖新发布事实）：
+
+```bash
+systemctl stop tt-auto-post-runner.path tt-auto-post-runner.timer tt-auto-post-scheduler.timer
+systemctl stop tt-auto-post-service.service
+ln -s /opt/tt-auto-post/releases/08262a5e47b2b6b484c5878a7a6ee01d342fcd30 /opt/tt-auto-post/.current-outro-cache-rollback
+mv -Tf /opt/tt-auto-post/.current-outro-cache-rollback /opt/tt-auto-post/current
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b/static-app/tt-auto-publish-template.html /root/drama_material_service/static/tt-auto-publish-template.html
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b/static-app/tt-auto-publish-template.js /root/drama_material_service/static/tt-auto-publish-template.js
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b/static-nginx/tt-auto-publish-template.html /usr/share/nginx/html/tt-auto-publish-template.html
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T191228+0800-outro-cache-fix-pre-8df092b/static-nginx/tt-auto-publish-template.js /usr/share/nginx/html/tt-auto-publish-template.js
+systemctl start tt-auto-post-service.service
+systemctl start tt-auto-post-scheduler.timer tt-auto-post-runner.timer tt-auto-post-runner.path
+```
