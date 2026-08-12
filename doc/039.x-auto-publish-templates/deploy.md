@@ -100,3 +100,12 @@
 1. 先验证新 SQLite 没有 queued/running/unknown 事实，再执行 `systemctl disable --now x-auto-post-scheduler.timer x-auto-post-runner.timer x-auto-post-runner.path` 和 `systemctl disable --now x-auto-post-service.service`。
 2. 主 API、主静态文件和公开静态文件均从上述备份目录的 `files/` 对应路径恢复；移除 `80-x-auto-post.conf` 后仅重启 `drama-material-api.service`。保留新 SQLite，不用备份覆盖任何当前账本。
 3. 现有 X sidecar 的 forward-compatible schema/来源隔离代码默认保留。只有在确认 auto run/task/queue/unknown 全为 0 时，才可把 `/opt/x-post-automation/current` 原子切回 `db67fc71a73702feaa88689273356f1a21883bdc` 并仅重启 `x-post-automation.service`。
+
+## BUG-004 账号资格刷新待部署验收（未执行）
+
+- 状态：待实现、待部署、待生产验收；以下内容是验收清单，不代表已经通过。
+- 部署前记录 X Auto template/version/plan/run/task/ledger/event 计数、现有 X queue/log/Post/active/unknown 计数、三道 gate 与账号/Token 非秘密哈希；为变更代码、静态文件和相关 unit 建立可回滚备份。
+- 验证 GET `/api/admin/x-auto-publish/accounts` 不调用 X、不改 Token；只有具备模板导航权限的登录操作员可通过 POST `/api/admin/x-auto-publish/accounts/{id}/verify` 对已批准账号执行显式刷新。动态状态为 `refresh_required` 时才访问 X；竞态下已 active 时只幂等回读，未批准账号失败关闭。
+- 若进行生产目标账号刷新，必须先记录明确账号 ID 和审批状态；成功后只允许该账号 Token/刷新时间等预期字段变化，并回读 `active + approved + publish_eligible`。临时错误应保持 `refresh_required`，明确撤销应提示重新授权。
+- Chrome 只验证按钮、状态回读和复选框解锁；不保存模板、不创建 run、不执行 Post。三道 gate 保持原值，既有 X queue/log/Post 与 X Auto 各业务表不得因本验收增加。
+- 回滚只恢复本次代码和静态资产，保留当前账号数据库与 Token；若已成功轮换 Token，禁止用部署前 Token 备份覆盖。

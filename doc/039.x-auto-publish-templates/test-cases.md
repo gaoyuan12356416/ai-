@@ -43,6 +43,11 @@
 | TC-027 | 模板/运行 DTO 显示 | 最近/下次执行、准备时长、任务状态、摘要和错误中文均读取真实字段 | P1 | 离线契约通过；生产空态与错误映射通过 |
 | TC-028 | 静态缓存升级 | HTML `no-store`，CSS/JS 带统一 cache-buster；普通 reload 后不再复用旧脚本 | P1 | 生产通过 |
 | TC-029 | 共享锁目录生命周期 | 多轮 X auto 与既有 X oneshot 后目录存在且 inode 不变 | P0 | Linux、生产通过 |
+| TC-030 | 账号列表保持只读 | GET 返回 `publish_approved/publish_eligible/status` 安全快照，X verify/Token 写入调用均为 0 | P0 | 离线通过；生产待验收 |
+| TC-031 | 已批准过期账号逐个刷新 | 仅有导航权限的登录操作员可触发，页面逐账号串行刷新；成功回读 `active + approved + publish_eligible` 后复选框才可选 | P0 | 离线通过；生产待验收 |
+| TC-032 | 未批准或非过期账号刷新 | 未批准、disabled、revoked、missing-scope/token 等账号不刷新且不可选；竞态下已 active 账号只幂等回读、不访问 X | P0 | 离线通过 |
+| TC-033 | 刷新失败状态收敛 | 超时/限流/临时上游错误保持 `refresh_required` 可重试；明确撤销进入需重授权状态 | P0 | 离线通过 |
+| TC-034 | 刷新与模板发布隔离 | 刷新动作不创建模板/run/task/queue/log/Post、不改三 gate；创建/编辑/启用/执行/最终发布严格校验保持不变 | P0 | 离线通过；生产待验收 |
 
 ## 回归范围
 
@@ -50,3 +55,4 @@
 - `features/x_posts` material/drama/schedule/manual/queue/log/media repair。
 - `app.py` TT auto routes、X pool routes和未知 PUT/POST/GET 分发。
 - quick-nav 用户权限和现有页面链接。
+- X accounts 管理员身份、`publish_approved`、`refresh_required`、账号锁、Token 原子轮换及撤销/临时错误状态机。

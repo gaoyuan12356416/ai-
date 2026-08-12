@@ -38,6 +38,7 @@ class Clock:
 
 class FakeBridge:
     def __init__(self):
+        self.verify_calls = []
         self.accounts_by_id = {
             "101": {
                 "id": 101,
@@ -45,6 +46,7 @@ class FakeBridge:
                 "username": "account101",
                 "display_name": "Account 101",
                 "status": "active",
+                "publish_approved": True,
                 "publish_eligible": True,
                 "subscription_type": "premium",
                 "long_video_eligible": True,
@@ -55,6 +57,7 @@ class FakeBridge:
                 "username": "account102",
                 "display_name": "Account 102",
                 "status": "active",
+                "publish_approved": True,
                 "publish_eligible": True,
                 "subscription_type": "unknown",
                 "long_video_eligible": False,
@@ -64,7 +67,8 @@ class FakeBridge:
     def accounts(self):
         return [dict(value) for value in self.accounts_by_id.values()]
 
-    def verify_account(self, account_id):
+    def verify_account(self, account_id, **kwargs):
+        self.verify_calls.append((int(account_id), dict(kwargs)))
         value = self.accounts_by_id.get(str(account_id))
         if value is None:
             raise AutoPostServiceError("x_auto_account_missing", "missing", 404)
@@ -132,6 +136,46 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertFalse(created["enabled"])
         self.assertEqual(created["config"]["language"], "en")
         self.assertNotIn("access_token", repr(accounts).lower())
+
+    def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
+        service = self.service()
+        accounts = service.accounts()
+        self.assertEqual(accounts["total"], 2)
+        self.assertEqual(self.bridge.verify_calls, [])
+        self.assertTrue(all(item["publish_approved"] for item in accounts["items"]))
+
+        result = service.refresh_account(101)
+        self.assertTrue(result["account"]["publish_eligible"])
+        self.assertEqual(
+            self.bridge.verify_calls,
+            [
+                (
+                    101,
+                    {
+                        "only_refresh_required": True,
+                        "preserve_transient_status": True,
+                        "require_publish_approved": True,
+                    },
+                )
+            ],
+        )
+
+    def test_account_refresh_rejects_bridge_mismatch_and_non_publishable_result(self):
+        service = self.service()
+        self.bridge.accounts_by_id["101"]["id"] = 999
+        with self.assertRaises(AutoPostServiceError) as mismatched:
+            service.refresh_account(101)
+        self.assertEqual(mismatched.exception.code, "x_auto_x_bridge_response_invalid")
+
+        self.bridge.accounts_by_id["101"].update(
+            id=101,
+            status="refresh_required",
+            publish_approved=True,
+            publish_eligible=False,
+        )
+        with self.assertRaises(AutoPostServiceError) as unavailable:
+            service.refresh_account(101)
+        self.assertEqual(unavailable.exception.code, "x_auto_account_not_publishable")
 
     def test_copy_starts_disabled_and_update_creates_immutable_version(self):
         service = self.service()

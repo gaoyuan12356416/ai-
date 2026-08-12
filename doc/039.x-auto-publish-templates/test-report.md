@@ -64,3 +64,25 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
 ### 发布结论
 
 生产 release `c4bc4e70adf926f2e58fa70d9af86dd03ff63ff7` 可保留。三道 gate 继续全关，当前 15 个账号均为 `refresh_required` 并在编辑器中置灰；账号刷新与真实模板启用仍需另行授权。
+
+## BUG-004 账号资格刷新增量
+
+### 当前结论
+
+代码、离线测试与独立评审通过；部署和生产 Chrome 验收尚未完成。本节只记录已经执行的离线事实。
+
+### 离线执行结果
+
+- X Auto/bridge/UI：150 项通过，1 项仅因 Windows 平台跳过。
+- 既有 X 发布与账号：236/236；现有权限/UI：61/61。
+- 素材/剧集/媒体链路：129/129；catch-up/schedule 恢复链路：138 项通过，1 项仅因 Windows 平台跳过。
+- Python 编译、4 个 X Auto JavaScript 语法检查、`git diff --check` 均通过；独立代码评审结论为无 blocker。
+- 所有离线 X HTTP 写入均为 mock/fake；未连接真实 X 发布接口。
+
+### 生产待验证项目
+
+- GET 账号列表零 X 调用、零 Token 写入。
+- 仅有模板导航权限的登录操作员可触发，页面只对 `refresh_required + publish_approved=true` 账号逐个串行刷新；成功后回读 `active + approved + publish_eligible` 才可选择。
+- 未批准/非目标状态失败关闭；临时错误保持可重试，明确撤销要求重新授权。
+- 创建、编辑、启用、执行与最终发布严格校验不放宽。
+- 验收不创建模板/run/task/queue/log/Post，三道 gate 与既有发布账本保持不变。

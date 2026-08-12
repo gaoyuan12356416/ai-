@@ -17,8 +17,9 @@
 | loopback API、scheduler/runner/metric | `features/x_auto_posts/service.py`、`scripts/x_auto_post_*.py` | 已完成 |
 | 主 API 代理与权限 | `features/x_auto_posts/client.py`、`app.py` | 已完成 |
 | 页面与导航 | `static/x-auto-publish-*`、`static/navigation.json`、`static/quick-nav.js` | 已完成 |
+| 有模板导航权限的操作员逐账号刷新资格与编辑器可选状态恢复 | `features/x_auto_posts/service.py`、X sidecar bridge、`static/x-auto-publish-template.*` | 代码与本地回归完成；待部署验收 |
 | systemd/env/tmpfiles | `deploy/x-auto-post-*`、`.env.example` | 已完成 |
-| 测试与文档 | `scripts/test_x_auto_*`、`doc/039.*` | 已完成 |
+| 测试与文档 | `scripts/test_x_auto_*`、`doc/039.*` | BUG-004 离线回归完成；待生产证据 |
 
 ## 编译 / 构建命令
 
@@ -44,3 +45,4 @@ git diff --check
 ## 完成记录
 
 - 2026-08-11：完成独立控制面、既有 X 精确桥接、页面、服务单元和失败关闭状态机；专项、新旧发布及 UI/代理回归通过，未连接真实 X 发帖接口。
+- 2026-08-12：完成显式账号资格刷新链路、UI、审计与测试。GET 保持只读，未批准账号在 X 网络调用前失败，模板/发布门不放宽；生产部署与 Chrome 验收尚待执行。

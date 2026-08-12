@@ -97866,6 +97866,88 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        x_auto_account_verify_match = re.fullmatch(
+            re.escape(X_AUTO_ADMIN_PREFIX)
+            + r"/accounts/([1-9][0-9]*)/verify",
+            parsed.path,
+        )
+        if x_auto_account_verify_match:
+            if not self._require_cookie_navigation_item(
+                "xAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_auto_account_verify_match.group(1)
+            try:
+                request_payload = self._read_json()
+                if request_payload != {}:
+                    raise XAutoPostAdminClientError(
+                        "invalid_request",
+                        "账号资格刷新请求体必须为空对象",
+                        400,
+                    )
+                result = x_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload={},
+                )
+                refreshed = (
+                    result.get("account")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("account"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "refresh_x_auto_publish_account",
+                        "x_authorized_account",
+                        account_id,
+                        {
+                            "account_id": account_id,
+                            "status": str(refreshed.get("status") or "")[:64],
+                            "publish_eligible": bool(
+                                refreshed.get("publish_eligible")
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish account refresh audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except XAutoPostAdminClientError as exc:
+                status, payload = x_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "refresh_x_auto_publish_account_failed",
+                        "x_authorized_account",
+                        account_id,
+                        {"account_id": account_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish account refresh failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("X auto publish account refresh request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
         x_auto_template_match = re.fullmatch(
             re.escape(X_AUTO_ADMIN_PREFIX)
             + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?",

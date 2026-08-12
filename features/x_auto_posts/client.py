@@ -131,6 +131,11 @@ def _route_allowed(method: str, path: str) -> bool:
         return False
     if path == f"{X_AUTO_ADMIN_PREFIX}/templates":
         return True
+    if re.fullmatch(
+        rf"{re.escape(X_AUTO_ADMIN_PREFIX)}/accounts/[1-9][0-9]*/verify",
+        path,
+    ):
+        return True
     return bool(
         re.fullmatch(
             rf"{re.escape(X_AUTO_ADMIN_PREFIX)}/templates/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?",

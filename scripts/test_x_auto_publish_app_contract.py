@@ -110,6 +110,24 @@ class XAutoPublishAppContractTests(unittest.TestCase):
         self.assertNotIn("access_token", route.lower())
         self.assertNotIn("internal_token", route.lower())
 
+    def test_account_refresh_proxy_is_explicit_same_origin_audited_and_no_store(self):
+        start = APP_SOURCE.index("        x_auto_account_verify_match = re.fullmatch(")
+        end = APP_SOURCE.index("        x_auto_template_match = re.fullmatch(", start)
+        route = APP_SOURCE[start:end]
+        self.assertIn(r'accounts/([1-9][0-9]*)/verify', route)
+        self.assertIn('"xAutoPublishTemplates"', route)
+        self.assertIn("self._require_cookie_navigation_item(", route)
+        self.assertIn("self._require_same_origin_json()", route)
+        self.assertIn("if request_payload != {}:", route)
+        self.assertIn('x_auto_post_service_request(\n                    "POST"', route)
+        self.assertIn('payload={}', route)
+        self.assertIn('"refresh_x_auto_publish_account"', route)
+        self.assertIn('"refresh_x_auto_publish_account_failed"', route)
+        self.assertGreaterEqual(route.count("append_audit_log("), 2)
+        self.assertGreaterEqual(route.count("no_store=True"), 3)
+        self.assertNotIn("access_token", route.lower())
+        self.assertNotIn("refresh_token", route.lower())
+
     def test_client_namespace_query_and_route_allowlists_fail_closed(self):
         self.assertEqual(X_AUTO_ADMIN_PREFIX, "/api/admin/x-auto-publish")
         self.assertIn('DEFAULT_SERVICE_URL = "http://127.0.0.1:18833"', CLIENT_SOURCE)
@@ -152,10 +170,54 @@ class XAutoPublishAppContractTests(unittest.TestCase):
         with self.assertRaises(XAutoPostAdminClientError):
             request_admin(
                 "GET",
+                X_AUTO_ADMIN_PREFIX + "/accounts/12/verify",
+                environ=self._environ(),
+            )
+        with self.assertRaises(XAutoPostAdminClientError):
+            request_admin(
+                "GET",
                 X_AUTO_ADMIN_PREFIX + "/accounts",
                 query={"unexpected": "1"},
                 environ=self._environ(),
             )
+
+    @mock.patch("features.x_auto_posts.client.requests.Session")
+    def test_client_forwards_explicit_account_refresh_to_exact_loopback(self, session_factory):
+        session = session_factory.return_value
+        session.request.return_value = FakeResponse(
+            200,
+            {
+                "ok": True,
+                "account": {
+                    "id": 12,
+                    "status": "active",
+                    "publish_approved": True,
+                    "publish_eligible": True,
+                },
+            },
+        )
+        result = request_admin(
+            "POST",
+            X_AUTO_ADMIN_PREFIX + "/accounts/12/verify",
+            payload={},
+            environ=self._environ(),
+        )
+        self.assertTrue(result["account"]["publish_eligible"])
+        args, kwargs = session.request.call_args
+        self.assertEqual(
+            args,
+            (
+                "POST",
+                "http://127.0.0.1:18833"
+                + X_AUTO_ADMIN_PREFIX
+                + "/accounts/12/verify",
+            ),
+        )
+        self.assertEqual(kwargs["json"], {})
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer " + "x" * 48)
+        self.assertFalse(session.trust_env)
+        self.assertFalse(kwargs["allow_redirects"])
+        session.close.assert_called_once_with()
 
     @mock.patch("features.x_auto_posts.client.requests.Session")
     def test_client_rejects_non_exact_loopback_and_placeholder_bearers(self, session_factory):

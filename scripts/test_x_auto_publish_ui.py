@@ -28,7 +28,7 @@ PAGES = {name: path.read_text(encoding="utf-8") for name, path in PAGE_PATHS.ite
 SCRIPTS = {name: path.read_text(encoding="utf-8") for name, path in SCRIPT_PATHS.items()}
 QUICK_NAV = (STATIC / "quick-nav.js").read_text(encoding="utf-8")
 NAVIGATION = json.loads((STATIC / "navigation.json").read_text(encoding="utf-8"))
-ASSET_VERSION = "20260812chrome2"
+ASSET_VERSION = "20260812account1"
 
 
 class IdParser(HTMLParser):
@@ -228,6 +228,46 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn("最多出现一次", script)
         self.assertIn("ads_setting.ads_facebook_post_blacklist", page)
         self.assertIn("历史素材永久排除", page)
+
+    def test_editor_refreshes_only_approved_expired_accounts_before_selection(self):
+        ids = parse_page(PAGES["template"]).ids
+        self.assertIn("refreshAccountEligibility", ids)
+        self.assertIn("accountRefreshStatus", ids)
+        page = PAGES["template"]
+        source = SCRIPTS["template"]
+        self.assertIn("刷新可选账号资格", page)
+        self.assertIn("未批准账号不会被自动开放", page)
+
+        refreshable = source[
+            source.index("  function accountRefreshable(item) {") :
+            source.index("  function accountEligibilityText(item) {")
+        ]
+        self.assertIn("!accountEligible(item)", refreshable)
+        self.assertIn("accountApproved(item)", refreshable)
+        self.assertIn('=== "refresh_required"', refreshable)
+
+        load_accounts = source[
+            source.index("  async function loadAccounts() {") :
+            source.index("  async function refreshAccountEligibility() {")
+        ]
+        self.assertIn("`${ui.API_BASE}/accounts`", load_accounts)
+        self.assertNotIn("/verify", load_accounts)
+        self.assertNotIn('method: "POST"', load_accounts)
+
+        refresh = source[
+            source.index("  async function refreshAccountEligibility() {") :
+            source.index("  async function loadTemplate() {")
+        ]
+        self.assertIn("const candidates = refreshableAccounts();", refresh)
+        self.assertIn("for (let index = 0; index < candidates.length; index += 1)", refresh)
+        self.assertIn("/accounts/${encodeURIComponent(id)}/verify", refresh)
+        self.assertIn('method: "POST"', refresh)
+        self.assertIn('body: "{}"', refresh)
+        self.assertIn("if (accountEligible(account)) refreshed += 1", refresh)
+        self.assertNotIn("Promise.all(candidates", refresh)
+
+        self.assertIn("checkbox.disabled = !eligible && !checkbox.checked", source)
+        self.assertIn('checkbox.dataset.accountEligible !== "1"', source)
 
     def test_editor_omits_tt_only_content_and_account_fields(self):
         combined = PAGES["template"] + SCRIPTS["template"]

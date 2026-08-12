@@ -334,6 +334,28 @@ class XAutoPostService:
         items = self.account_bridge.accounts()
         return {"ok": True, "accounts": items, "items": items, "total": len(items)}
 
+    def refresh_account(self, account_id: Any) -> Dict[str, Any]:
+        expected_id = _positive_id(account_id, "account ID")
+        account = self.account_bridge.verify_account(
+            expected_id,
+            only_refresh_required=True,
+            preserve_transient_status=True,
+            require_publish_approved=True,
+        )
+        if str(account.get("id") or "") != str(expected_id):
+            raise AutoPostServiceError(
+                "x_auto_x_bridge_response_invalid",
+                "X account refresh returned an invalid account",
+                502,
+            )
+        if not bool(account.get("publish_eligible")):
+            raise AutoPostServiceError(
+                "x_auto_account_not_publishable",
+                "X account is still not currently publishable",
+                409,
+            )
+        return {"ok": True, "account": account, "item": account}
+
     def templates(self, query: Mapping[str, Sequence[str]]) -> Dict[str, Any]:
         status = _query_one(query, "status")
         if status not in {"", "enabled", "disabled"}:
@@ -1318,6 +1340,15 @@ class XAutoPostRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query, keep_blank_values=True)
         if self.command == "GET" and path == X_AUTO_ADMIN_PREFIX + "/accounts":
             return 200, service.accounts()
+        match = re.fullmatch(
+            re.escape(X_AUTO_ADMIN_PREFIX) + r"/accounts/([1-9][0-9]*)/verify", path
+        )
+        if self.command == "POST" and match:
+            if self._body():
+                raise AutoPostServiceError(
+                    "invalid_request", "account refresh body must be empty", 400
+                )
+            return 200, service.refresh_account(match.group(1))
         if self.command == "GET" and path == X_AUTO_ADMIN_PREFIX + "/templates":
             return 200, service.templates(query)
         match = re.fullmatch(

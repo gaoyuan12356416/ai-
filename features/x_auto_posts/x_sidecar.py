@@ -240,12 +240,32 @@ class XPostAutoBridgeClient:
             )
         return [dict(item) for item in items]
 
-    def verify_account(self, account_id: Any) -> Dict[str, Any]:
+    def verify_account(
+        self,
+        account_id: Any,
+        *,
+        only_refresh_required: bool = False,
+        preserve_transient_status: bool = False,
+        require_publish_approved: bool = False,
+    ) -> Dict[str, Any]:
         account = int(account_id)
         if account <= 0:
             raise XPostBridgeError("invalid_request", "account ID is invalid", 400)
         result = self._post(
-            f"/internal/posts/auto-template/accounts/{account}/verify"
+            f"/internal/posts/auto-template/accounts/{account}/verify",
+            {
+                "only_refresh_required": bool(only_refresh_required),
+                "preserve_transient_status": bool(preserve_transient_status),
+                "require_publish_approved": bool(require_publish_approved),
+            }
+            if any(
+                (
+                    only_refresh_required,
+                    preserve_transient_status,
+                    require_publish_approved,
+                )
+            )
+            else {},
         )
         return dict(result.get("item") or {})
 

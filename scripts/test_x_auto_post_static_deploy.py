@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy" / "x-auto-post-static-files.txt"
 STATIC_ROOT = ROOT / "static"
-ASSET_VERSION = "20260812chrome2"
+ASSET_VERSION = "20260812account1"
 
 
 class XAutoPostStaticDeployContractTests(unittest.TestCase):

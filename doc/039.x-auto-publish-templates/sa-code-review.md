@@ -2,7 +2,7 @@
 
 ## 结论
 
-通过。新控制面与既有 X 发布面隔离，最终写入仍归既有 queue/log/token 锁；所有已发现 P0/P1 已修复并有离线回归。首次部署必须保持三道 live gate 为 0，禁止真实 Post canary。
+原发布范围与 BUG-004 代码评审通过。新控制面与既有 X 发布面隔离，显式刷新保持只读 GET、发布审批门和账号锁，最终发布仍归既有 queue/log/token 锁。三道 live gate 必须保持原值，禁止用真实 Post 验收。
 
 ## 评审范围
 
@@ -25,6 +25,7 @@
 | CR-008 | P1 | 静态部署 glob 漏掉 CSS，浏览器还可能复用旧 HTML/JS | 精确静态清单、统一 cache-buster、三个 HTML 的 Nginx `no-store` | 已关闭 |
 | CR-009 | P1 | 多个 oneshot 共享 `RuntimeDirectory` 会删除 flock 目录并替换 inode | tmpfiles 单一持久 owner；相关 units 去除 `RuntimeDirectory` 并 fail-close | 已关闭 |
 | CR-010 | P2 | 模板/运行页读取了不存在或过时的 DTO 字段 | 返回真实最近/下次事实，统一任务字段、状态、摘要和中文错误 | 已关闭 |
+| CR-011 | P1 | 所有账号变成 `refresh_required` 后编辑器只置灰，没有安全恢复入口；若改成 GET 自动刷新又会产生隐式 X/Token 写入 | 增加有模板导航权限的操作员显式刷新并逐账号串行请求；服务端复核发布审批，动态过期时才刷新，临时错误可重试、撤销需重授权；现有模板和发布严格校验不放宽 | 已关闭 |
 
 ## 编译 / 验证结果
 
@@ -34,3 +35,4 @@
 - X accounts app contract 28/28 通过。
 - 所有发布 HTTP 均为 fake/mock；未连接真实 X 写接口。
 - 2026-08-12 Chrome 修复增量：本地完整 X auto/admin UI/app-contract 聚焦套件 129 项通过（1 项 Windows 跳过），既有 X 回归 281/281；生产不可变 release 135/135。
+- 2026-08-12 BUG-004：X Auto/bridge/UI 150 项通过（1 项 Windows 跳过）；既有 X 发布与账号 236/236、权限/UI 61/61、素材/剧集/媒体 129/129、catch-up/schedule 恢复 138 项通过（1 项 Windows 跳过）。独立评审未发现 P0/P1 blocker。

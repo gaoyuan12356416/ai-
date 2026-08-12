@@ -1087,11 +1087,42 @@ class XAccountsTestCase(unittest.TestCase):
                 self.owner,
                 only_refresh_required=True,
                 preserve_transient_status=True,
+                require_publish_approved=True,
             )
         self.assertEqual(verified["status"], "active")
         read_mock.assert_called_once_with(item["x_user_id"])
         refresh_mock.assert_not_called()
         user_mock.assert_not_called()
+
+    def test_auto_verify_refuses_unapproved_account_before_refresh_network_calls(self):
+        item = self.complete(
+            username="unapproved_refresh_guard",
+            publish_approved=False,
+        )
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", item["id"]),
+            )
+            conn.commit()
+        with mock.patch.object(service, "token_request") as refresh_mock, mock.patch.object(
+            service, "user_request"
+        ) as user_mock:
+            with self.assertRaises(service.ServiceError) as caught:
+                service.verify_account(
+                    item["id"],
+                    service.AUTO_TEMPLATE_ACTOR,
+                    "all",
+                    only_refresh_required=True,
+                    preserve_transient_status=True,
+                    require_publish_approved=True,
+                )
+        self.assertEqual(caught.exception.code, "x_account_publish_not_approved")
+        refresh_mock.assert_not_called()
+        user_mock.assert_not_called()
+        current = service.find_account(item["id"])
+        self.assertEqual(current["status"], "refresh_required")
+        self.assertIs(current["publish_approved"], False)
 
     def test_auto_verify_preserves_refresh_required_after_transient_failure(self):
         item = self.complete()
@@ -1116,6 +1147,7 @@ class XAccountsTestCase(unittest.TestCase):
                     self.owner,
                     only_refresh_required=True,
                     preserve_transient_status=True,
+                    require_publish_approved=True,
                 )
         self.assertEqual(caught.exception.code, "x_post_rate_limited")
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:

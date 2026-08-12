@@ -1148,6 +1148,7 @@ def verify_account(
     *,
     only_refresh_required=False,
     preserve_transient_status=False,
+    require_publish_approved=False,
 ):
     account_id = int(account_id)
     actor, scope = normalize_account_scope(actor, scope)
@@ -1163,6 +1164,12 @@ def verify_account(
         if stored_status == "revoke_pending":
             raise ServiceError("x_disconnect_pending", "X账号存在旧退出待处理状态，请先完成停用", 409)
         item = row_to_item(row)
+        if require_publish_approved and item.get("publish_approved") is not True:
+            raise ServiceError(
+                "x_account_publish_not_approved",
+                "该X账号尚未勾选允许发布",
+                409,
+            )
         if only_refresh_required and item.get("status") != "refresh_required":
             return item
         try:
@@ -2434,6 +2441,7 @@ def _safe_post_account(account):
             account.get("profile_image_url", "") or ""
         ),
         "status": str(account.get("status", "") or ""),
+        "publish_approved": bool(account.get("publish_approved")),
         "publish_eligible": bool(account.get("publish_eligible")),
         "subscription_type": str(
             account.get("subscription_type", "unknown") or "unknown"
@@ -2460,11 +2468,24 @@ def auto_template_accounts_request(_payload):
     return {"items": items, "total": len(items), "updated_at": iso_utc()}
 
 
-def verify_auto_template_account_request(_payload, account_id):
+def verify_auto_template_account_request(payload, account_id):
+    payload = payload if isinstance(payload, dict) else {}
+    allowed = {
+        "only_refresh_required",
+        "preserve_transient_status",
+        "require_publish_approved",
+    }
+    if set(payload).difference(allowed) or any(
+        not isinstance(payload.get(key), bool) for key in payload
+    ):
+        raise ServiceError("invalid_request", "账号校验请求无效", 400)
     account = verify_account(
         account_id,
         AUTO_TEMPLATE_ACTOR,
         "all",
+        only_refresh_required=payload.get("only_refresh_required") is True,
+        preserve_transient_status=payload.get("preserve_transient_status") is True,
+        require_publish_approved=payload.get("require_publish_approved") is True,
     )
     return {"item": _safe_post_account(account)}
 

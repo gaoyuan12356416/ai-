@@ -113,6 +113,44 @@ class XPostAutoBridgeClientTests(unittest.TestCase):
         result = self.client(session).unavailable_material_ids(["1", "2", "3"])
         self.assertEqual(result, ["1", "3"])
 
+    def test_account_verify_forwards_refresh_and_approval_guards_only_when_requested(self):
+        session = mock.Mock()
+        session.post.return_value = FakeResponse(
+            payload={
+                "item": {
+                    "id": 42,
+                    "status": "active",
+                    "publish_approved": True,
+                    "publish_eligible": True,
+                }
+            }
+        )
+        client = self.client(session)
+
+        item = client.verify_account(
+            42,
+            only_refresh_required=True,
+            preserve_transient_status=True,
+            require_publish_approved=True,
+        )
+        self.assertTrue(item["publish_eligible"])
+        args, kwargs = session.post.call_args
+        self.assertEqual(
+            args[0],
+            "http://127.0.0.1:8810/internal/posts/auto-template/accounts/42/verify",
+        )
+        self.assertEqual(
+            kwargs["json"],
+            {
+                "only_refresh_required": True,
+                "preserve_transient_status": True,
+                "require_publish_approved": True,
+            },
+        )
+
+        client.verify_account(42)
+        self.assertEqual(session.post.call_args.kwargs["json"], {})
+
     def test_plan_transport_loss_is_marked_unknown(self):
         session = mock.Mock()
         session.post.side_effect = requests.ConnectionError("lost")

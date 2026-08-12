@@ -365,12 +365,54 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
             "display_name": "Auto Account",
             "profile_image_url": "",
             "status": "active",
+            "publish_approved": True,
             "publish_eligible": True,
             "subscription_type": "premium" if long_video else "unknown",
             "premium_subscriber": bool(long_video),
             "long_video_eligible": bool(long_video),
             "long_video_publish_eligible": bool(long_video),
         }
+
+    def test_auto_account_verify_boundary_forwards_safe_refresh_guards_and_dto(self):
+        account = self.account()
+        account.update(
+            access_token="must-not-leak",
+            refresh_token="must-not-leak-either",
+        )
+        payload = {
+            "only_refresh_required": True,
+            "preserve_transient_status": True,
+            "require_publish_approved": True,
+        }
+        with mock.patch.object(
+            oauth_service,
+            "verify_account",
+            return_value=account,
+        ) as verify_mock:
+            result = oauth_service.verify_auto_template_account_request(payload, 202)
+
+        verify_mock.assert_called_once_with(
+            202,
+            oauth_service.AUTO_TEMPLATE_ACTOR,
+            "all",
+            only_refresh_required=True,
+            preserve_transient_status=True,
+            require_publish_approved=True,
+        )
+        self.assertIs(result["item"]["publish_approved"], True)
+        self.assertIs(result["item"]["publish_eligible"], True)
+        self.assertNotIn("access_token", result["item"])
+        self.assertNotIn("refresh_token", result["item"])
+
+        for invalid in (
+            {"only_refresh_required": "true"},
+            {"unexpected": True},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                oauth_service.ServiceError
+            ) as caught:
+                oauth_service.verify_auto_template_account_request(invalid, 202)
+            self.assertEqual(caught.exception.code, "invalid_request")
 
     def test_auto_selector_uses_strict_existing_compliance_path(self):
         selector = DramawaveCandidateSelector(object())

@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <title>编辑 X Post 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/x-auto-publish.css?v=20260812chrome2" />
+  <link rel="stylesheet" href="/x-auto-publish.css?v=20260812account1" />
 </head>
 <body>
   <div class="app">
@@ -98,13 +98,14 @@
                 </div>
                 <div class="account-toolbar">
                   <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称、账号 ID 或订阅类型" />
+                  <button id="refreshAccountEligibility" class="button small" type="button" disabled>刷新可选账号资格</button>
                   <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
                   <button id="clearAccounts" class="button small" type="button">清空</button>
                 </div>
                 <div id="accountList" class="account-list" role="group" aria-label="选择 X 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
-                <p class="helper">账号发布资格和 token-scoped 订阅类型会明确展示；前端显示不替代服务端最终校验。</p>
+                <p id="accountRefreshStatus" class="helper" aria-live="polite">Token 过期但已批准发布的账号可在此显式刷新；刷新成功后才会解锁选择。未批准账号不会被自动开放，前端显示也不替代服务端最终校验。</p>
               </section>
 
               <section class="panel">
@@ -277,7 +278,7 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js"></script>
-  <script src="/x-auto-publish-common.js?v=20260812chrome2"></script>
-  <script src="/x-auto-publish-template.js?v=20260812chrome2"></script>
+  <script src="/x-auto-publish-common.js?v=20260812account1"></script>
+  <script src="/x-auto-publish-template.js?v=20260812account1"></script>
 </body>
 </html>

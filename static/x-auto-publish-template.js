@@ -38,6 +38,7 @@
     template: null,
     version: 0,
     busy: false,
+    accountRefreshBusy: false,
     dirty: false,
   };
 
@@ -59,6 +60,42 @@
     return status === "active" && ui.boolValue(item && item.publish_approved);
   }
 
+  function accountApproved(item) {
+    return ui.boolValue(item && item.publish_approved);
+  }
+
+  function accountRefreshable(item) {
+    return !accountEligible(item)
+      && accountApproved(item)
+      && String(item && item.status || "").trim().toLowerCase() === "refresh_required";
+  }
+
+  function accountEligibilityText(item) {
+    if (accountEligible(item)) return "可发布";
+    const status = String(item && item.status || "").trim().toLowerCase();
+    if (!accountApproved(item)) return status === "refresh_required" ? "待刷新 / 未批准发布" : "未批准发布";
+    if (status === "refresh_required") return "Token 已过期，可刷新";
+    if (["revoked", "token_missing", "disconnected"].includes(status)) return "需重新授权";
+    if (status === "scope_missing") return "授权范围不完整";
+    if (status === "disabled") return "账号已停用";
+    if (status === "error") return "账号校验异常";
+    return "当前不可发布";
+  }
+
+  function refreshableAccounts() {
+    return state.accounts.filter(accountRefreshable);
+  }
+
+  function updateAccountRefreshButton() {
+    const button = ui.byId("refreshAccountEligibility");
+    if (!button) return;
+    const count = refreshableAccounts().length;
+    button.disabled = state.accountRefreshBusy || count === 0;
+    button.textContent = state.accountRefreshBusy
+      ? "正在刷新账号资格…"
+      : `刷新可选账号资格${count ? `（${count}）` : ""}`;
+  }
+
   function statusText(item) {
     if (!item || !item.id) return "新模板";
     return ui.boolValue(item.enabled) || item.status === "enabled" ? "已启用" : "已停用";
@@ -75,6 +112,7 @@
     if (!visible.length) {
       list.appendChild(ui.element("div", { className: "empty", text: "没有匹配的账号。" }));
       updateSummary();
+      updateAccountRefreshButton();
       return;
     }
     visible.forEach(item => {
@@ -96,13 +134,14 @@
       const subscription = accountSubscription(item);
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
-        text: eligible ? "可发布" : "当前不可发布",
+        text: accountEligibilityText(item),
       }));
       meta.appendChild(ui.element("span", { className: "secondary", text: `订阅 ${subscription}` }));
       label.append(checkbox, details, meta);
       list.appendChild(label);
     });
     updateSummary();
+    updateAccountRefreshButton();
   }
 
   function selectedScheduleMode() {
@@ -393,6 +432,63 @@
     state.accounts = ui.readItems(payload, ["accounts", "items"]);
   }
 
+  async function refreshAccountEligibility() {
+    if (state.accountRefreshBusy || state.busy) return;
+    const candidates = refreshableAccounts();
+    if (!candidates.length) {
+      ui.showToast("没有已批准且需要刷新的账号。", false);
+      return;
+    }
+    state.accountRefreshBusy = true;
+    ui.byId("saveTemplate").disabled = true;
+    updateAccountRefreshButton();
+    let refreshed = 0;
+    const failures = [];
+    try {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
+        const id = accountId(candidate);
+        ui.setText(
+          ui.byId("accountRefreshStatus"),
+          `正在刷新 ${accountName(candidate)}（${index + 1}/${candidates.length}）…`,
+          "",
+        );
+        try {
+          const payload = await ui.api(`${ui.API_BASE}/accounts/${encodeURIComponent(id)}/verify`, {
+            method: "POST",
+            body: "{}",
+          });
+          const account = ui.readItem(payload, ["account", "item"]);
+          const position = state.accounts.findIndex(item => accountId(item) === id);
+          if (position >= 0 && accountId(account) === id) state.accounts[position] = account;
+          if (accountEligible(account)) refreshed += 1;
+          else failures.push(`${accountName(candidate)}：刷新后仍不可发布`);
+        } catch (error) {
+          failures.push(`${accountName(candidate)}：${error.message || "刷新失败"}`);
+          if (error.status === 429 || error.code === "x_post_rate_limited") break;
+        } finally {
+          renderAccounts();
+        }
+      }
+      try {
+        await loadAccounts();
+      } catch (_) {
+        // Keep the verified response already returned by the write request.
+      }
+      renderAccounts();
+      const message = failures.length
+        ? `已恢复 ${refreshed} 个可选账号，${failures.length} 个未恢复。${failures[0]}`
+        : `已恢复 ${refreshed} 个可选账号。`;
+      ui.setText(ui.byId("accountRefreshStatus"), message, "");
+      ui.byId("accountRefreshStatus").className = failures.length ? "helper warning-text" : "helper success-text";
+      ui.showToast(message, failures.length > 0);
+    } finally {
+      state.accountRefreshBusy = false;
+      ui.byId("saveTemplate").disabled = false;
+      updateAccountRefreshButton();
+    }
+  }
+
   async function loadTemplate() {
     if (!templateId) return null;
     const payload = await ui.api(`${ui.API_BASE}/templates/${templateId}`);
@@ -401,7 +497,7 @@
 
   async function saveTemplate(event) {
     event.preventDefault();
-    if (state.busy) return;
+    if (state.busy || state.accountRefreshBusy) return;
     let payload;
     try {
       payload = buildPayload();
@@ -464,6 +560,7 @@
       if (event.key === "Escape") setResourceTypeMenuOpen(false);
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
+    ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
       if (!checkbox) return;
@@ -510,7 +607,7 @@
       updateSummary();
     });
     window.addEventListener("beforeunload", event => {
-      if (!state.dirty || state.busy) return;
+      if (!state.dirty || state.busy || state.accountRefreshBusy) return;
       event.preventDefault();
       event.returnValue = "";
     });

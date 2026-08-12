@@ -302,7 +302,10 @@ tbody tr:hover td { background: #fbfdff; }
 .range-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .compact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 
-.account-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.account-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+.account-toolbar input { flex: 1 1 360px; }
+.success-text { color: #197047; }
+.warning-text { color: #9a5d00; }
 .account-list {
   max-height: 300px;
   overflow: auto;
