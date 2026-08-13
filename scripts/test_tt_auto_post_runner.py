@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -40,14 +41,19 @@ class TTAutoPostRunnerTests(unittest.TestCase):
     def setUp(self):
         FakeSidecarClient.calls = []
         FakeSidecarClient.tick_fails = False
+        lock_root = (
+            Path("/run/tt-auto-post")
+            if os.name != "nt"
+            else Path.cwd()
+        )
         self.config = RunnerConfig(
             internal_url="http://127.0.0.1:18831",
             internal_token="i" * 48,
             worker_id="runner-test",
             timeout=30,
             execute_timeout=120,
-            lock_path=str(Path.cwd() / "runner-test.lock"),
-            scheduler_lock_path=str(Path.cwd() / "scheduler-test.lock"),
+            lock_path=str(lock_root / "runner-test.lock"),
+            scheduler_lock_path=str(lock_root / "scheduler-test.lock"),
             worker_count=3,
             max_tasks_per_worker=1,
             publish_poll_seconds=2,

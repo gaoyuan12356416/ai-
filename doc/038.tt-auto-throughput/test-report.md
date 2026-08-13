@@ -21,6 +21,7 @@ python scripts/test_tt_posts_app_contract.py    # 15 passed
 
 - 第二轮中发现测试方法插入位置错误，已修正后 Service 20 项通过；未影响生产代码。
 - TT Post 契约脚本直接执行时未自动加入仓库根目录，首次报 `ModuleNotFoundError`；设置仓库根 `PYTHONPATH` 后 15 项通过，未修改生产代码。
+- Linux 候选 release 首轮 runner 测试发现测试夹具使用当前目录锁路径，不符合生产只允许 `/run/tt-auto-post/` 的校验；已改为按操作系统选择测试锁目录，生产代码不变。
 
 ## 发布建议
 
