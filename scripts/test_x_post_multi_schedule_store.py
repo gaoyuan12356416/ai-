@@ -2476,6 +2476,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         error_code="x_token_missing",
         *,
         source_type="material",
+        error_message="Account preflight failed before any queue or X write",
     ):
         saved = self.save_schedule(source_type, [2], ["09:00"])
         self._add_recovery_account(2)
@@ -2489,7 +2490,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             saved["version"],
             [2],
             error_code,
-            "Account preflight failed before any queue or X write",
+            error_message,
         )
         self.assertEqual(failed["status"], "failed_preflight")
         return failed
@@ -2561,6 +2562,72 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
         self.assertEqual(
             repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_failed_preflight_recovery_accepts_proven_material_capacity_fix(self):
+        failed = self._failed_schedule_run(
+            "x_post_schedule_material_preflight_shortage",
+            error_message=(
+                "not enough FIFO material candidates passed media preflight"
+            ),
+        )
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_material_preflight_shortage",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=datetime(
+                2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+            ),
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "claimed",
+        )
+
+    def test_failed_preflight_recovery_accepts_proven_dimension_fix(self):
+        failed = self._failed_schedule_run(
+            "invalid_media_dimensions",
+            source_type="drama",
+            error_message=(
+                "episode BOoD0GOWhX:1 media preflight failed: "
+                "素材分辨率或宽高比不符合X"
+            ),
+        )
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "invalid_media_dimensions",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=datetime(
+                2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+            ),
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "claimed",
+        )
+
+    def test_failed_preflight_config_recovery_rejects_unproven_message(self):
+        failed = self._failed_schedule_run(
+            "x_post_schedule_material_preflight_shortage",
+            error_message="unrelated candidate selection failure",
+        )
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_material_preflight_shortage",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
             "x_post_failed_preflight_recovery_conflict",
         )
 

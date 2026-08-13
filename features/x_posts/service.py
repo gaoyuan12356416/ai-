@@ -101,10 +101,19 @@ PRE_X_RECOVERABLE_ERROR_CODES = frozenset(
     }
 )
 FAILED_PREFLIGHT_RECOVERY_REASON = "operator_same_day_compensation_v1"
+FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES = {
+    "x_post_schedule_material_preflight_shortage": (
+        "not enough FIFO material candidates passed media preflight",
+    ),
+    "invalid_media_dimensions": (
+        "media preflight failed: 素材分辨率或宽高比不符合X",
+    ),
+}
 FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
     {
         "x_token_missing",
         "x_upstream_error",
+        *FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES,
     }
 )
 DRAMA_POOL_RETRYABLE_VALIDATION_CODES = frozenset(
@@ -8466,6 +8475,19 @@ class XPostStore:
                 (run_id,),
             ).fetchone()
             previous_error_message = str(run["error_message"] or "")
+            initial_recovery_message_matches = bool(
+                initial_recovery
+                and (
+                    expected_error_code
+                    not in FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES
+                    or any(
+                        fragment in previous_error_message
+                        for fragment in FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES[
+                            expected_error_code
+                        ]
+                    )
+                )
+            )
             corrective_message_matches = bool(
                 corrective_recovery
                 and any(
@@ -8572,6 +8594,7 @@ class XPostStore:
                         or drama_capability_audit is not None
                         or token_refresh_audit is not None
                         or transient_media_audit is not None
+                        or not initial_recovery_message_matches
                     )
                 )
                 or (
