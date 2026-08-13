@@ -215,6 +215,7 @@ class TTAutoPostService:
         now_fn=lambda: datetime.now(UTC),
         runner_kick_path: Any = "/run/tt-auto-post/manual-kick",
         schedule_grace_seconds: int = 600,
+        prepare_ahead_seconds: int = 0,
     ):
         self.store = store
         self.legacy_reader = legacy_reader
@@ -225,11 +226,18 @@ class TTAutoPostService:
         self.now_fn = now_fn
         self.runner_kick_path = str(runner_kick_path or "").strip()
         self.schedule_grace_seconds = int(schedule_grace_seconds)
+        self.prepare_ahead_seconds = int(prepare_ahead_seconds)
         self._schedule_lock = threading.Lock()
         self._run_create_lock = threading.Lock()
         if not 60 <= self.schedule_grace_seconds <= 3600:
             raise AutoPostServiceError(
                 "tt_auto_schedule_config_invalid", "调度宽限时间无效", 500
+            )
+        if not 0 <= self.prepare_ahead_seconds <= 43200:
+            raise AutoPostServiceError(
+                "tt_auto_schedule_config_invalid",
+                "prepare ahead window is invalid",
+                500,
             )
 
     def health(self) -> Dict[str, Any]:
@@ -253,6 +261,7 @@ class TTAutoPostService:
             "gates": self.executor.gates.as_dict(),
             "profile": self.executor.media_profile_version,
             "source_trim_tail_seconds": self.executor.source_trim_tail_seconds,
+            "prepare_ahead_seconds": self.prepare_ahead_seconds,
             "video_templates": video_templates,
         }
 
@@ -785,17 +794,23 @@ class TTAutoPostService:
         try:
             now = self._now()
             shanghai = now.astimezone(BEIJING_TZ)
-            day = shanghai.date().isoformat()
+            cutoff_shanghai = (
+                now + timedelta(seconds=self.prepare_ahead_seconds)
+            ).astimezone(BEIJING_TZ)
+            days = [shanghai.date().isoformat()]
+            if cutoff_shanghai.date() != shanghai.date():
+                days.append(cutoff_shanghai.date().isoformat())
             created = []
             for template in self.store.list_templates(enabled=True):
-                for publish_time in self._schedule_times(template, day):
+                for day, publish_time in (
+                    (day, publish_time)
+                    for day in days
+                    for publish_time in self._schedule_times(template, day)
+                ):
                     hour, minute = (int(value) for value in publish_time.split(":"))
-                    slot = shanghai.replace(
-                        hour=hour,
-                        minute=minute,
-                        second=0,
-                        microsecond=0,
-                    ).astimezone(UTC)
+                    slot = datetime.fromisoformat(
+                        day + "T%02d:%02d:00" % (hour, minute)
+                    ).replace(tzinfo=BEIJING_TZ).astimezone(UTC)
                     try:
                         enabled_at = datetime.fromisoformat(
                             str(template.enabled_at_utc).replace("Z", "+00:00")
@@ -809,7 +824,10 @@ class TTAutoPostService:
                     if slot < enabled_at:
                         continue
                     age = (now - slot).total_seconds()
-                    if age < 0 or age > self.schedule_grace_seconds:
+                    if (
+                        age < -self.prepare_ahead_seconds
+                        or age > self.schedule_grace_seconds
+                    ):
                         continue
                     try:
                         run, was_created = self._create_run(
@@ -836,6 +854,7 @@ class TTAutoPostService:
                 "created_runs": sorted(set(created)),
                 "current_shanghai_minute": shanghai.strftime("%Y-%m-%d %H:%M"),
                 "grace_seconds": self.schedule_grace_seconds,
+                "prepare_ahead_seconds": self.prepare_ahead_seconds,
                 "gates": self.executor.gates.as_dict(),
             }
         finally:
@@ -1088,9 +1107,24 @@ class TTAutoPostService:
 
     def execute_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
-        if set(payload) != {"worker_id"}:
+        if (
+            set(payload).difference({"worker_id", "phases"})
+            or "worker_id" not in payload
+        ):
             raise AutoPostServiceError("invalid_request", "执行器参数无效", 400)
-        return self.executor.execute_next(payload.get("worker_id"))
+        phases = payload.get("phases")
+        if phases is not None and (
+            isinstance(phases, (str, bytes))
+            or not isinstance(phases, list)
+            or not phases
+            or any(not isinstance(value, str) for value in phases)
+        ):
+            raise AutoPostServiceError(
+                "invalid_request", "executor phases are invalid", 400
+            )
+        return self.executor.execute_next(
+            payload.get("worker_id"), allowed_phases=phases
+        )
 
 
 def _required_env(source: Mapping[str, str], name: str) -> str:
@@ -1284,6 +1318,9 @@ def build_service_from_env(
             "随机排重GPU路由的profile或trim配置不一致",
             500,
         )
+    prepare_ahead_seconds = int(
+        source.get("TT_AUTO_POST_PREPARE_AHEAD_SECONDS", "0")
+    )
     executor = AutoPostExecutor(
         store,
         selector,
@@ -1323,6 +1360,7 @@ def build_service_from_env(
             ),
         },
         max_concurrent_tasks=int(source.get("TT_AUTO_POST_WORKER_COUNT", "4")),
+        prepare_ahead_seconds=prepare_ahead_seconds,
     )
     return TTAutoPostService(
         store,
@@ -1339,6 +1377,7 @@ def build_service_from_env(
         schedule_grace_seconds=int(
             source.get("TT_AUTO_POST_SCHEDULE_GRACE_SECONDS", "600")
         ),
+        prepare_ahead_seconds=prepare_ahead_seconds,
     )
 
 

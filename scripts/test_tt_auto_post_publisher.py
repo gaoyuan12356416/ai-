@@ -31,6 +31,7 @@ from features.tt_auto_posts.publisher import (  # noqa: E402
     AutoPostExecutor,
     VideoTemplateRoute,
 )
+from features.tt_auto_posts.selector import NoEligibleMaterial  # noqa: E402
 from features.tt_auto_posts.validation import (  # noqa: E402
     VIDEO_TEMPLATE_DIRECT_OUTRO,
     VIDEO_TEMPLATE_RANDOM_OVERLAY,
@@ -89,7 +90,14 @@ class FakeAccountSource:
 
 
 class FakeGPU:
-    def __init__(self, *, prepare_failures=0, publish_results=None, reconcile_result=None):
+    def __init__(
+        self,
+        *,
+        prepare_failures=0,
+        publish_results=None,
+        reconcile_result=None,
+        creator_max_duration=600,
+    ):
         self.prepare_failures = int(prepare_failures)
         self.publish_results = list(publish_results or [])
         self.reconcile_result = reconcile_result or {
@@ -101,6 +109,7 @@ class FakeGPU:
         self.creator_calls = []
         self.publish_calls = []
         self.reconcile_calls = []
+        self.creator_max_duration = int(creator_max_duration)
 
     def prepare(self, **kwargs):
         self.prepare_calls.append(dict(kwargs))
@@ -118,6 +127,8 @@ class FakeGPU:
             "output_sha256": "a" * 64,
             "output_size": 123456,
             "probe": {"duration": 28.25},
+            "reused": False,
+            "stage_timings_ms": {"transcode": 123, "total": 456},
         }
 
     def creator_info(self, **kwargs):
@@ -127,7 +138,7 @@ class FakeGPU:
             "comment_disabled": False,
             "duet_disabled": False,
             "stitch_disabled": False,
-            "max_video_post_duration_sec": 600,
+            "max_video_post_duration_sec": self.creator_max_duration,
         }
 
     def publish(self, **kwargs):
@@ -273,6 +284,42 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             },
         )
         return self.store.get_task(task.id)
+
+    def pending_task(self, *, suffix="pending"):
+        template = self.store.create_template(
+            name="Template " + suffix,
+            config=template_config(),
+            actor=AuditActor("803", "operator"),
+            confirmation={"accepted": True},
+        )
+        run = self.store.create_run(
+            run_key="publisher-test-" + suffix,
+            template_id=template.id,
+            template_version=template.version,
+            trigger_type="manual",
+            scheduled_at_utc=self.clock(),
+            shanghai_date="2026-08-05",
+            publish_time="18:00",
+            blacklist_snapshot={"sha256": "b" * 64},
+            actor=AuditActor("803", "operator"),
+        )
+        return self.store.create_task(
+            run_id=run.id,
+            account_id="640",
+            account_username="account640",
+            account_display_name="Account 640",
+            drama_language="en",
+            account_setting_version=3,
+            account_settings={
+                "privacy_level": "PUBLIC_TO_EVERYONE",
+                "allow_comment": True,
+                "allow_duet": False,
+                "allow_stitch": False,
+                "brand_content_toggle": False,
+                "brand_organic_toggle": False,
+                "is_aigc": True,
+            },
+        )
 
     def executor(self, gpu, code_broker=None, **overrides):
         return AutoPostExecutor(
@@ -460,6 +507,15 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         self.assertEqual(prepared["task"]["status"], "ready")
         self.assertEqual(len(gpu.prepare_calls), 1)
         self.assertEqual(len(gpu.publish_calls), 0)
+        ready_event = next(
+            event
+            for event in self.store.list_events(task_id=task.id)
+            if event["event_type"] == "task_preparation_ready"
+        )
+        self.assertEqual(
+            ready_event["details"]["stage_timings_ms"],
+            {"transcode": 123, "total": 456},
+        )
 
         result = executor.execute_next("worker-2")
         final = self.store.get_task(task.id)
@@ -479,6 +535,30 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         self.assertTrue(
             (Path(self.temp.name) / "s2l" / "tt-auto" / ("%d.html" % task.id)).is_file()
         )
+
+    def test_selection_caps_material_duration_before_gpu_prepare(self):
+        task = self.pending_task(suffix="duration-preflight")
+        gpu = FakeGPU(creator_max_duration=60)
+        executor = self.executor(gpu)
+
+        class CaptureSelector:
+            def __init__(self):
+                self.request = None
+
+            def select_and_reserve(self, request):
+                self.request = request
+                raise NoEligibleMaterial({"captured": 1})
+
+        capture = CaptureSelector()
+        executor._phase_selector = lambda _token: capture
+        with self.assertRaises(NoEligibleMaterial):
+            executor._select(task, "claim-token")
+        self.assertEqual(
+            str(capture.request.rules.material.duration_seconds.maximum),
+            "60",
+        )
+        self.assertEqual(len(gpu.creator_calls), 1)
+        self.assertEqual(gpu.prepare_calls, [])
 
     def test_concurrent_run_start_conflict_is_idempotent(self):
         task = self.reserved_task(suffix="run-start-race")

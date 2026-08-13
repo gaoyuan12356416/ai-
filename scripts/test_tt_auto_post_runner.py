@@ -50,6 +50,7 @@ class TTAutoPostRunnerTests(unittest.TestCase):
             scheduler_lock_path=str(Path.cwd() / "scheduler-test.lock"),
             worker_count=3,
             max_tasks_per_worker=1,
+            publish_poll_seconds=2,
         )
 
     @mock.patch(
@@ -63,10 +64,42 @@ class TTAutoPostRunnerTests(unittest.TestCase):
         execute_calls = [
             call for call in FakeSidecarClient.calls if call[0].endswith("execute-next")
         ]
-        self.assertEqual(len(execute_calls), 3)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in execute_calls
+                    if "prepare" in call[1]["worker_id"]
+                ]
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            len(
+                [
+                    call
+                    for call in execute_calls
+                    if call[1]["worker_id"].endswith("-publish")
+                ]
+            ),
+            1,
+        )
         self.assertEqual(
             {call[1]["worker_id"] for call in execute_calls},
-            {"runner-test-1", "runner-test-2", "runner-test-3"},
+            {
+                "runner-test-prepare-1",
+                "runner-test-prepare-2",
+                "runner-test-publish",
+            },
+        )
+        self.assertEqual(
+            {
+                tuple(call[1].get("phases") or []) for call in execute_calls
+            },
+            {
+                ("selection", "prepare"),
+                ("publish", "reconcile"),
+            },
         )
 
     @mock.patch(
@@ -76,7 +109,10 @@ class TTAutoPostRunnerTests(unittest.TestCase):
         result = run_once(self.config)
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["execute"]), 3)
-        self.assertTrue(all(len(items) == 1 for items in result["execute"]))
+        self.assertEqual(
+            sorted(len(items) for items in result["execute"]),
+            [0, 1, 1],
+        )
 
     def test_worker_batch_is_fixed_to_one_task_per_oneshot(self):
         invalid = RunnerConfig(

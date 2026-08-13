@@ -46,6 +46,7 @@ class RunnerConfig:
     scheduler_lock_path: str
     worker_count: int
     max_tasks_per_worker: int
+    publish_poll_seconds: int
 
     @classmethod
     def from_env(
@@ -61,8 +62,12 @@ class RunnerConfig:
             max_tasks_per_worker = int(
                 source.get("TT_AUTO_POST_MAX_TASKS_PER_WORKER", "1")
             )
+            publish_poll_seconds = int(
+                source.get("TT_AUTO_POST_PUBLISH_POLL_SECONDS", "15")
+            )
         except (TypeError, ValueError, OverflowError):
             timeout = execute_timeout = worker_count = max_tasks_per_worker = 0
+            publish_poll_seconds = 0
         return cls(
             internal_url=str(
                 source.get("TT_AUTO_POST_INTERNAL_URL", DEFAULT_URL)
@@ -91,6 +96,7 @@ class RunnerConfig:
             ).strip(),
             worker_count=worker_count,
             max_tasks_per_worker=max_tasks_per_worker,
+            publish_poll_seconds=publish_poll_seconds,
         )
 
     def validate(self) -> None:
@@ -129,6 +135,11 @@ class RunnerConfig:
         if not 1 <= self.worker_count <= 16 or self.max_tasks_per_worker != 1:
             raise RunnerError(
                 "tt_auto_post_runner_config_invalid", "worker limits are invalid"
+            )
+        if not 2 <= self.publish_poll_seconds <= 60:
+            raise RunnerError(
+                "tt_auto_post_runner_config_invalid",
+                "publish poll interval is invalid",
             )
         for raw_lock in (self.lock_path, self.scheduler_lock_path):
             lock = Path(raw_lock)
@@ -267,14 +278,19 @@ def execute_pending(config: RunnerConfig) -> list[list[Dict[str, Any]]]:
     executed = []
     failures = []
 
-    def worker(index: int) -> list[Dict[str, Any]]:
+    def worker(
+        worker_id: str,
+        phases: Optional[list[str]] = None,
+    ) -> list[Dict[str, Any]]:
         worker_client = SidecarClient(config)
-        worker_id = "%s-%d" % (config.worker_id, index)
         results = []
         for _ in range(config.max_tasks_per_worker):
+            payload: Dict[str, Any] = {"worker_id": worker_id}
+            if phases is not None:
+                payload["phases"] = list(phases)
             result = worker_client.post(
                 "/internal/tt-auto-post/execute-next",
-                {"worker_id": worker_id},
+                payload,
                 timeout=config.execute_timeout,
             )
             results.append(result)
@@ -282,16 +298,64 @@ def execute_pending(config: RunnerConfig) -> list[list[Dict[str, Any]]]:
                 break
         return results
 
+    if config.worker_count == 1:
+        try:
+            return [worker(config.worker_id + "-1")]
+        except RunnerError as exc:
+            raise RunnerError(
+                "tt_auto_post_runner_partial_failure",
+                "runner phase failed (execute:%s)" % exc.code,
+                exc.status,
+            ) from None
+
+    prepare_worker_count = config.worker_count - 1
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=config.worker_count,
+        max_workers=prepare_worker_count,
         thread_name_prefix="tt-auto-post",
     ) as pool:
-        futures = [pool.submit(worker, index + 1) for index in range(config.worker_count)]
+        futures = [
+            pool.submit(
+                worker,
+                "%s-prepare-%d" % (config.worker_id, index + 1),
+                ["selection", "prepare"],
+            )
+            for index in range(prepare_worker_count)
+        ]
+        publish_results: list[Dict[str, Any]] = []
+        publish_client = SidecarClient(config)
+        while True:
+            try:
+                result = publish_client.post(
+                    "/internal/tt-auto-post/execute-next",
+                    {
+                        "worker_id": config.worker_id + "-publish",
+                        "phases": ["publish", "reconcile"],
+                    },
+                    timeout=config.execute_timeout,
+                )
+            except RunnerError as exc:
+                failures.append(("publish", exc.code, exc.status))
+                break
+            claimed = bool(result.get("claimed"))
+            if claimed:
+                publish_results.append(result)
+            all_done = all(future.done() for future in futures)
+            if all_done and not claimed:
+                break
+            if not claimed:
+                pending = [future for future in futures if not future.done()]
+                if pending:
+                    concurrent.futures.wait(
+                        pending,
+                        timeout=config.publish_poll_seconds,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
         for future in futures:
             try:
                 executed.append(future.result())
             except RunnerError as exc:
                 failures.append(("execute", exc.code, exc.status))
+        executed.append(publish_results)
     if failures:
         summary = ",".join("%s:%s" % (phase, code) for phase, code, _ in failures)
         raise RunnerError(

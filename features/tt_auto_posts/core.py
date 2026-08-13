@@ -2015,6 +2015,8 @@ class TTAutoPostStore:
         worker_id: Any,
         lease_seconds: Any,
         now: Optional[Any] = None,
+        prepare_ahead_seconds: Any = 0,
+        allowed_phases: Optional[Iterable[Any]] = None,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2030,6 +2032,33 @@ class TTAutoPostStore:
             raise TTAutoPostStoreError("tt_auto_lease_invalid", "lease seconds is too large", 400)
         current_dt = self._now() if now is None else _utc_datetime(now)
         current = current_dt.isoformat(timespec="seconds")
+        ahead_seconds = _nonnegative_int(
+            prepare_ahead_seconds, "prepare ahead seconds"
+        )
+        if ahead_seconds > 43200:
+            raise TTAutoPostStoreError(
+                "tt_auto_prepare_ahead_invalid",
+                "prepare ahead seconds is too large",
+                400,
+            )
+        prepare_cutoff = (
+            current_dt + timedelta(seconds=ahead_seconds)
+        ).isoformat(timespec="seconds")
+        phase_filter = None
+        if allowed_phases is not None:
+            if isinstance(allowed_phases, (str, bytes)):
+                raise TTAutoPostStoreError(
+                    "tt_auto_claim_phases_invalid", "claim phases are invalid", 400
+                )
+            phase_filter = {
+                str(value or "").strip() for value in allowed_phases
+            }
+            if not phase_filter or not phase_filter.issubset(
+                {"selection", "prepare", "publish", "reconcile"}
+            ):
+                raise TTAutoPostStoreError(
+                    "tt_auto_claim_phases_invalid", "claim phases are invalid", 400
+                )
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         active_placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
@@ -2049,7 +2078,11 @@ class TTAutoPostStore:
                         AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
-                    OR (status='ready' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
+                    OR (
+                        status='ready'
+                        AND scheduled_at_utc<=?
+                        AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
+                    )
                     OR (
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
@@ -2067,12 +2100,48 @@ class TTAutoPostStore:
                     id ASC
                 LIMIT 500
                 """,
-                (current, current, current, current, current, current, current, current),
+                (
+                    prepare_cutoff,
+                    current,
+                    current,
+                    current,
+                    current,
+                    current,
+                    current,
+                    current,
+                    current,
+                ),
             ).fetchall()
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
+                candidate_previous_phase = str(candidate["claim_phase"] or "")
+                if candidate_status in {"pending", "selecting"}:
+                    candidate_phase = "selection"
+                elif candidate_status in {"reserved", "preparing"}:
+                    candidate_phase = "prepare"
+                elif candidate_status == "retry_wait":
+                    candidate_phase = candidate_previous_phase
+                    if candidate_phase not in {
+                        "selection", "prepare", "publish", "reconcile"
+                    }:
+                        candidate_phase = (
+                            "publish"
+                            if str(candidate["prepared_media_url"] or "")
+                            else "prepare"
+                            if str(candidate["material_id"] or "")
+                            else "selection"
+                        )
+                elif candidate_status == "ready":
+                    candidate_phase = "publish"
+                else:
+                    candidate_phase = "reconcile"
+                if (
+                    phase_filter is not None
+                    and candidate_phase not in phase_filter
+                ):
+                    continue
                 others = conn.execute(
                     """
                     SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
@@ -2567,6 +2636,7 @@ class TTAutoPostStore:
         updates: Optional[Mapping[str, Any]] = None,
         event_type: Any = "task_status_changed",
         message: Any = "",
+        event_details: Optional[Mapping[str, Any]] = None,
     ) -> TaskRecord:
         normalized_id = _positive_int(task_id, "task id")
         target = str(to_status or "").strip()
@@ -2758,6 +2828,7 @@ class TTAutoPostStore:
                 from_status=current,
                 to_status=target,
                 message=message,
+                details=event_details,
             )
             result = conn.execute("SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)).fetchone()
         assert result is not None

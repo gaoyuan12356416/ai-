@@ -1747,6 +1747,19 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         result = processor.prepare(request)
         self.assertEqual(result["status"], "ready")
+        self.assertEqual(
+            set(result["stage_timings_ms"]),
+            {
+                "asset_snapshot",
+                "download",
+                "source_probe",
+                "gpu_queue_wait",
+                "transcode",
+                "output_verify",
+                "upload",
+                "total",
+            },
+        )
         self.assertEqual(result["profile"], worker.RANDOM_OVERLAY_PROFILE)
         self.assertTrue(result["direct_post_eligible"])
         recipe = result["random_overlay_recipe"]
@@ -1785,6 +1798,9 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertIn("[o3][corners]", graph)
         reused = processor.prepare(request)
         self.assertTrue(reused["reused"])
+        self.assertEqual(
+            reused["stage_timings_ms"], result["stage_timings_ms"]
+        )
         self.assertEqual(reused["random_overlay_recipe"], recipe)
         self.assertEqual(len(calls), 1)
 

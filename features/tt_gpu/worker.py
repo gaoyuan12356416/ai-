@@ -3796,6 +3796,32 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         "status": "ready",
         "transition": config.preparation_transition(),
     }
+    raw_timings = result.get("stage_timings_ms")
+    if isinstance(raw_timings, dict):
+        allowed_timing_keys = {
+            "asset_snapshot",
+            "download",
+            "source_probe",
+            "gpu_queue_wait",
+            "transcode",
+            "output_verify",
+            "upload",
+            "total",
+        }
+        timings = {}
+        try:
+            for key, value in raw_timings.items():
+                if key not in allowed_timing_keys or isinstance(value, bool):
+                    raise ValueError("invalid timing")
+                milliseconds = int(value)
+                if milliseconds < 0 or milliseconds > 86_400_000:
+                    raise ValueError("invalid timing")
+                timings[key] = milliseconds
+        except (TypeError, ValueError, OverflowError):
+            raise TTGPUError(
+                "manifest_invalid", "prepare manifest timings are invalid", 500
+            ) from None
+        response["stage_timings_ms"] = timings
     if response_assets is not None:
         response["assets"] = response_assets
     if config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
@@ -4210,6 +4236,15 @@ class TTPostGPUProcessor:
         manifest_path,
     ):
         job_id = request["job_id"]
+        pipeline_started = self._monotonic_fn()
+        stage_timings_ms = {}
+
+        def record_stage(name, started):
+            stage_timings_ms[name] = max(
+                0,
+                int(round((self._monotonic_fn() - started) * 1000)),
+            )
+
         if self.config.storage_backend == "local":
             required_bytes = int(self.config.max_source_bytes)
             if self.config.media_mode != SOURCE_DIRECT_MEDIA_MODE:
@@ -4235,6 +4270,7 @@ class TTPostGPUProcessor:
         random_overlay_paths = None
         local_orphan = None
         try:
+            asset_snapshot_started = self._monotonic_fn()
             if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
                 try:
                     selected = selected_asset_paths(
@@ -4329,6 +4365,8 @@ class TTPostGPUProcessor:
                 )
                 os.chmod(drama_text_path, 0o600)
                 os.chmod(tutorial_text_path, 0o600)
+            record_stage("asset_snapshot", asset_snapshot_started)
+            download_started = self._monotonic_fn()
             source_actual = self.downloader(
                 request["source_url"],
                 source_path,
@@ -4337,6 +4375,7 @@ class TTPostGPUProcessor:
                 self.config,
                 deadline,
             )
+            record_stage("download", download_started)
             if not isinstance(source_actual, dict):
                 source_sha, source_size = _file_sha256(
                     source_path,
@@ -4364,6 +4403,7 @@ class TTPostGPUProcessor:
                 "source_size": source_size,
                 "transition": self.config.preparation_transition(),
             }
+            source_probe_started = self._monotonic_fn()
             source_probe = probe_media(
                 self.config,
                 source_path,
@@ -4403,6 +4443,7 @@ class TTPostGPUProcessor:
                     + outro_info["duration"]
                     - DEFAULT_TRANSITION_SECONDS
                 )
+            record_stage("source_probe", source_probe_started)
             if expected_duration > float(self.config.max_duration_seconds):
                 raise TTGPUError(
                     "prepared_duration_exceeded",
@@ -4414,8 +4455,11 @@ class TTPostGPUProcessor:
                 # it to the already verified TikTok URL Property origin; no
                 # FFmpeg command, trim, overlay, transition, or re-encode runs.
                 output_path = source_path
+                stage_timings_ms["gpu_queue_wait"] = 0
+                stage_timings_ms["transcode"] = 0
             else:
                 deadline.check()
+                gpu_queue_started = self._monotonic_fn()
                 acquired_gpu = self._gpu_slot.acquire(
                     timeout=deadline.remaining()
                 )
@@ -4425,6 +4469,8 @@ class TTPostGPUProcessor:
                         "GPU prepare exceeded the total execution budget",
                         504,
                     )
+                record_stage("gpu_queue_wait", gpu_queue_started)
+                transcode_started = self._monotonic_fn()
                 try:
                     deadline.check()
                     if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
@@ -4504,6 +4550,8 @@ class TTPostGPUProcessor:
                         )
                 finally:
                     self._gpu_slot.release()
+                record_stage("transcode", transcode_started)
+            output_verify_started = self._monotonic_fn()
             output_sha, output_size = _file_sha256(
                 output_path,
                 deadline=deadline,
@@ -4531,7 +4579,9 @@ class TTPostGPUProcessor:
                 self.config.max_output_bytes,
                 expected_duration,
             )
+            record_stage("output_verify", output_verify_started)
             storage_key = self._storage_key(job_id, output_sha)
+            upload_started = self._monotonic_fn()
             reused = self._object_store().upload(
                 storage_key,
                 output_path,
@@ -4557,6 +4607,8 @@ class TTPostGPUProcessor:
                     "prepared URL is outside the configured pull origin",
                     500,
                 )
+            record_stage("upload", upload_started)
+            record_stage("total", pipeline_started)
             result = {
                 "brand_overlay_review_required": (
                     self.config.brand_overlay_review_required()
@@ -4571,6 +4623,7 @@ class TTPostGPUProcessor:
                 "output_url": output_url,
                 "probe": safe_probe,
                 "profile": self.config.profile,
+                "stage_timings_ms": stage_timings_ms,
             }
             if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
                 result["random_overlay_recipe"] = reuse_contract[

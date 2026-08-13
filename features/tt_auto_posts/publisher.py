@@ -12,8 +12,9 @@ import math
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
@@ -270,6 +271,13 @@ def _stable_gpu_job_id(task: TaskRecord) -> str:
     return "ttauto-%d-%s" % (task.id, digest)
 
 
+def _creator_preflight_job_id(task: TaskRecord) -> str:
+    digest = hashlib.sha256(
+        (str(task.id) + "|" + task.account_id + "|creator-info").encode("utf-8")
+    ).hexdigest()[:24]
+    return "ttauto-preflight-%d-%s" % (task.id, digest)
+
+
 class _ClaimedSelectionStore:
     """Inject the task claim token into the selector's atomic reservation."""
 
@@ -310,6 +318,7 @@ class AutoPostExecutor:
         ] = None,
         lease_seconds: int = 10800,
         max_concurrent_tasks: int = 4,
+        prepare_ahead_seconds: int = 0,
     ):
         self.store = store
         self.selector = selector
@@ -380,6 +389,7 @@ class AutoPostExecutor:
         self.media_profile_version = default_route.media_profile_version
         self.lease_seconds = int(lease_seconds)
         self.max_concurrent_tasks = int(max_concurrent_tasks)
+        self.prepare_ahead_seconds = int(prepare_ahead_seconds)
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
         if (
             self.media_profile_version == SOURCE_DIRECT_MEDIA_PROFILE
@@ -403,6 +413,7 @@ class AutoPostExecutor:
             not Path(self.short_link_root).is_absolute()
             or not 120 <= self.lease_seconds <= 10800
             or not 1 <= self.max_concurrent_tasks <= 16
+            or not 0 <= self.prepare_ahead_seconds <= 43200
         ):
             raise AutoPostExecutionError(
                 "tt_auto_executor_config_invalid",
@@ -556,6 +567,46 @@ class AutoPostExecutor:
             task.template_id, version=task.template_version
         )
         rules = selector_rules(template.config)
+        video_route = self._video_route_for_task(task)
+        with self.account_source.publish_credentials(task.account_id) as credentials:
+            creator = self._creator_info(
+                video_route.gpu_client.creator_info(
+                    job_id=_creator_preflight_job_id(task),
+                    source_account_id=task.account_id,
+                    access_token=credentials.reveal_access_token(),
+                )
+            )
+        # Validate frozen account settings before reserving a one-shot material.
+        # Duration is checked by the effective selector cap below and again
+        # against the prepared output immediately before publishing.
+        self._assert_creator_settings(creator, task.account_settings, 0)
+        account_maximum = Decimal(
+            int(creator["max_video_post_duration_sec"])
+        )
+        configured_maximum = rules.material.duration_seconds.maximum
+        effective_maximum = (
+            account_maximum
+            if configured_maximum is None
+            else min(configured_maximum, account_maximum)
+        )
+        configured_minimum = rules.material.duration_seconds.minimum
+        if (
+            configured_minimum is not None
+            and configured_minimum > effective_maximum
+        ):
+            raise NoEligibleMaterial(
+                {"material_account_duration_limit": 1}
+            )
+        rules = replace(
+            rules,
+            material=replace(
+                rules.material,
+                duration_seconds=replace(
+                    rules.material.duration_seconds,
+                    maximum=effective_maximum,
+                ),
+            ),
+        )
         request = SelectionRequest(
             run_id=task.run_id,
             task_id=task.id,
@@ -683,6 +734,14 @@ class AutoPostExecutor:
                 "error_message": "",
             },
             event_type="task_preparation_ready",
+            event_details={
+                "gpu_reused": bool(prepared.get("reused")),
+                "stage_timings_ms": (
+                    dict(prepared.get("stage_timings_ms"))
+                    if isinstance(prepared.get("stage_timings_ms"), Mapping)
+                    else {}
+                ),
+            },
         )
 
     @staticmethod
@@ -1157,7 +1216,11 @@ class AutoPostExecutor:
                 return current
             raise
 
-    def execute_next(self, worker_id: Any) -> Dict[str, Any]:
+    def execute_next(
+        self,
+        worker_id: Any,
+        allowed_phases: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         if not self.gates.is_open:
             return {
                 "ok": True,
@@ -1177,6 +1240,8 @@ class AutoPostExecutor:
                 worker_id=worker,
                 lease_seconds=self.lease_seconds,
                 now=self._now(),
+                prepare_ahead_seconds=self.prepare_ahead_seconds,
+                allowed_phases=allowed_phases,
             )
             if claim is None:
                 return {"ok": True, "claimed": False, "gates": self.gates.as_dict()}

@@ -137,9 +137,11 @@ class FakeExecutor:
         self.source_trim_tail_seconds = 0.0
         self.execute_calls = []
 
-    def execute_next(self, worker_id):
-        self.execute_calls.append(worker_id)
-        raise AssertionError("admin/scheduler tests must not execute a publish task")
+    def execute_next(self, worker_id, allowed_phases=None):
+        self.execute_calls.append(
+            (worker_id, None if allowed_phases is None else list(allowed_phases))
+        )
+        return {"ok": True, "claimed": False}
 
     def video_template_summaries(self):
         return [
@@ -229,6 +231,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["profile"], "tt-post-source-direct-v1")
         self.assertEqual(result["source_trim_tail_seconds"], 0.0)
+        self.assertEqual(result["prepare_ahead_seconds"], 0)
         self.assertTrue(result["gates"]["is_open"])
         self.assertEqual(
             [item["key"] for item in result["video_templates"]],
@@ -246,7 +249,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "tt_auto_internal_bearer_invalid")
 
-    def service(self, *, gates=None):
+    def service(self, *, gates=None, prepare_ahead_seconds=0):
         executor = FakeExecutor(gates or AutoLiveGates(), self.store)
         service = TTAutoPostService(
             self.store,
@@ -257,6 +260,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
             now_fn=self.clock,
             runner_kick_path=Path(self.temp.name) / "run" / "manual-kick",
             schedule_grace_seconds=600,
+            prepare_ahead_seconds=prepare_ahead_seconds,
         )
         return service, executor
 
@@ -565,6 +569,62 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_runs()), 1)
         self.assertEqual(executor.execute_calls, [])
 
+    def test_fixed_schedule_is_created_ahead_with_original_publish_time(self):
+        self.clock.value = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
+        service, executor = self.service(
+            gates=AutoLiveGates(True, True, True),
+            prepare_ahead_seconds=7200,
+        )
+        payload = template_payload(account_ids=["640"])
+        payload["schedule"] = {"mode": "fixed", "times": ["18:00"]}
+        template = service.create_template(self.actor(payload))["template"]
+        service.set_enabled(
+            template["id"], True, self.actor({"expected_version": 1})
+        )
+        result = service.tick()
+        self.assertEqual(len(result["created_runs"]), 1)
+        run = self.store.get_run(result["created_runs"][0])
+        self.assertEqual(run.scheduled_at_utc, "2026-08-05T10:00:00+00:00")
+        self.assertEqual(result["prepare_ahead_seconds"], 7200)
+        self.assertEqual(executor.execute_calls, [])
+
+    def test_internal_executor_accepts_only_bounded_phase_lists(self):
+        service, executor = self.service()
+        result = service.execute_next(
+            {
+                "worker_id": "runner-publish",
+                "phases": ["publish", "reconcile"],
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            executor.execute_calls,
+            [("runner-publish", ["publish", "reconcile"])],
+        )
+        for invalid in ("publish", [], ["publish", 1]):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(AutoPostServiceError):
+                    service.execute_next(
+                        {"worker_id": "runner-invalid", "phases": invalid}
+                    )
+
+    def test_prepare_ahead_window_includes_next_beijing_day(self):
+        self.clock.value = datetime(2026, 8, 5, 15, 0, tzinfo=UTC)
+        service, _ = self.service(
+            gates=AutoLiveGates(True, True, True),
+            prepare_ahead_seconds=7200,
+        )
+        payload = template_payload(account_ids=["640"])
+        payload["schedule"] = {"mode": "fixed", "times": ["01:00"]}
+        template = service.create_template(self.actor(payload))["template"]
+        service.set_enabled(
+            template["id"], True, self.actor({"expected_version": 1})
+        )
+        result = service.tick()
+        self.assertEqual(len(result["created_runs"]), 1)
+        run = self.store.get_run(result["created_runs"][0])
+        self.assertEqual(run.shanghai_date, "2026-08-06")
+        self.assertEqual(run.scheduled_at_utc, "2026-08-05T17:00:00+00:00")
     def test_random_schedule_is_stable_and_does_not_execute(self):
         gates = AutoLiveGates(True, True, True)
         service, executor = self.service(gates=gates)

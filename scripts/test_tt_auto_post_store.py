@@ -451,6 +451,82 @@ class AutoPostStoreTests(unittest.TestCase):
         self.assertEqual(prepare_claim.claim_phase, "prepare")
         self.assertNotEqual(prepare_claim.task.id, auto_task.id)
 
+    def test_prepare_ahead_claims_work_but_never_publishes_early(self):
+        template = self.create_template()
+        template = self.store.set_template_enabled(
+            template.id,
+            True,
+            expected_version=template.version,
+            actor=self.actor,
+        )
+        scheduled = self.clock.value + timedelta(hours=1)
+        run = self.store.create_run(
+            run_key="prepare-ahead-run",
+            template_id=template.id,
+            template_version=template.version,
+            trigger_type="auto",
+            scheduled_at_utc=scheduled,
+            shanghai_date="2026-08-05",
+            publish_time="09:00",
+            blacklist_snapshot={"sha256": "a" * 64},
+            actor=self.actor,
+        )
+        task = self.create_task(run)
+        selection = self.store.claim_next_executable_task(
+            worker_id="prepare-ahead-selection",
+            lease_seconds=60,
+            prepare_ahead_seconds=7200,
+            allowed_phases=["selection", "prepare"],
+        )
+        self.assertEqual(selection.task.id, task.id)
+        self.assertEqual(selection.claim_phase, "selection")
+        self.store.reserve_material(
+            task_id=task.id,
+            material_id="prepare-ahead-material",
+            content_id="prepare-ahead-drama",
+            claim_token=selection.reveal_claim_token(),
+        )
+        self.store.release_task_claim(
+            task.id, selection.reveal_claim_token()
+        )
+        prepare = self.store.claim_next_executable_task(
+            worker_id="prepare-ahead-transcode",
+            lease_seconds=60,
+            prepare_ahead_seconds=7200,
+            allowed_phases=["selection", "prepare"],
+        )
+        self.assertEqual(prepare.claim_phase, "prepare")
+        self.store.transition_task(
+            task.id,
+            "ready",
+            expected_statuses={"preparing"},
+            claim_token=prepare.reveal_claim_token(),
+            updates={
+                "gpu_job_id": "ttauto-prepare-ahead-job",
+                "prepared_media_url": "https://example.invalid/video.mp4",
+                "prepared_output_sha256": "a" * 64,
+                "prepared_output_size": 123,
+                "prepared_duration_sec": 30,
+            },
+        )
+        self.assertIsNone(
+            self.store.claim_next_executable_task(
+                worker_id="publish-too-early",
+                lease_seconds=60,
+                prepare_ahead_seconds=7200,
+                allowed_phases=["publish", "reconcile"],
+            )
+        )
+        self.clock.value = scheduled
+        publish = self.store.claim_next_executable_task(
+            worker_id="publish-on-time",
+            lease_seconds=60,
+            prepare_ahead_seconds=7200,
+            allowed_phases=["publish", "reconcile"],
+        )
+        self.assertEqual(publish.task.id, task.id)
+        self.assertEqual(publish.claim_phase, "publish")
+
     def test_expired_publish_claim_recovers_as_unknown_reconcile_only(self):
         template = self.create_template()
         task = self.create_task(self.create_run(template, "recover-publish"))
