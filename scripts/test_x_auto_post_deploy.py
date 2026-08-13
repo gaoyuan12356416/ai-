@@ -65,6 +65,26 @@ class XAutoPostDeployTests(unittest.TestCase):
         )
         self.assertNotIn("/usr/bin/ffprobe", env + unit)
 
+    def test_sidecar_declares_the_gpu_repair_dependencies_it_does_not_inherit(self):
+        env = self.text("deploy/x-auto-post.env.example")
+        unit = self.text("deploy/x-auto-post-service.service")
+        self.assertIn(
+            "X_AUTO_POST_REPAIR_URL="
+            "http://127.0.0.1:18820/internal/x-post-media-repair",
+            env,
+        )
+        self.assertIn(
+            "X_AUTO_POST_REPAIR_PROFILE="
+            "x-h264-nvenc-720-duration-policy-v4",
+            env,
+        )
+        self.assertIn("X_AUTO_POST_MAX_REPAIRS_PER_RUN=1", env)
+        self.assertIn(
+            "EnvironmentFile=-/etc/x-post-media-repair.token",
+            unit,
+        )
+        self.assertNotIn("EnvironmentFile=/etc/x-post-daily.env", unit)
+
     def test_shared_lock_directories_have_one_persistent_tmpfiles_owner(self):
         tmpfiles = self.text("deploy/x-post-runtime-tmpfiles.conf")
         auto_tmpfiles = self.text("deploy/x-auto-post-tmpfiles.conf")
