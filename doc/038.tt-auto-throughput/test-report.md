@@ -25,4 +25,4 @@ python scripts/test_tt_posts_app_contract.py    # 15 passed
 
 ## 发布建议
 
-完成主应用 TT/X 契约后允许发布到空窗；不得用真实 TikTok 发帖验证。
+已在旧任务自然收尾后的空窗发布。CPU/GPU health、SQLite quick check、自然 run 30 的发布保留槽、账号时长预检和第一条 GPU 阶段计时均通过；未用人为 TikTok 发帖验证。
