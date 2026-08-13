@@ -251,6 +251,13 @@ NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
 _NONBLOCKING_MATERIAL_VALIDATION_SQL = "(" + ",".join(
     "'%s'" % code for code in sorted(NONBLOCKING_MATERIAL_VALIDATION_CODES)
 ) + ")"
+MATERIAL_FIFO_SKIP_CODES = frozenset(
+    {
+        "material_source_tag_unsafe",
+        "material_tag_unsafe",
+        "x_long_video_requires_premium",
+    }
+)
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -1004,6 +1011,68 @@ def _compliance_counts(payload, require_all=False):
 
 def _material_validation_is_blocking(error_code):
     return bool(error_code) and error_code not in NONBLOCKING_MATERIAL_VALIDATION_CODES
+
+
+def _material_fifo_selection_matches(
+    pool_rows,
+    prepared,
+    account_ids,
+    premium_account_ids,
+    *,
+    validation_cutoff="",
+):
+    """Replay the account-aware FIFO boundary from durable pool evidence."""
+    actual_by_pool = {
+        int(values["pool_item_id"]): values for values in prepared
+    }
+    account_id_set = {int(value) for value in account_ids}
+    try:
+        premium_ids = {
+            int(value) for value in (premium_account_ids or [])
+        }
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not premium_ids.issubset(account_id_set):
+        return False
+    remaining_premium_ids = set(premium_ids)
+    selected_pool_ids = set()
+    cutoff = str(validation_cutoff or "")
+    for pool in pool_rows:
+        if len(selected_pool_ids) == len(actual_by_pool):
+            break
+        pool_id = int(pool["id"])
+        values = actual_by_pool.get(pool_id)
+        if values is not None:
+            account_id = int(values["account_id"])
+            try:
+                duration = float(values.get("preflight_duration", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if (
+                not math.isfinite(duration)
+                or duration < 0
+                or (duration > 140.0 and account_id not in premium_ids)
+            ):
+                return False
+            selected_pool_ids.add(pool_id)
+            remaining_premium_ids.discard(account_id)
+            continue
+
+        error_code = str(pool["last_error_code"] or "")
+        checked_at = str(pool["last_checked_at"] or "")
+        checked_in_this_preflight = bool(
+            error_code in MATERIAL_FIFO_SKIP_CODES
+            and (not cutoff or (checked_at and checked_at >= cutoff))
+        )
+        if not checked_in_this_preflight:
+            return False
+        if (
+            error_code == "x_long_video_requires_premium"
+            and remaining_premium_ids
+        ):
+            return False
+
+    return selected_pool_ids == set(actual_by_pool)
 
 
 def ensure_storage(db_path):
@@ -9392,19 +9461,19 @@ class XPostStore:
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
-                    "ORDER BY p.created_at DESC,p.id DESC LIMIT ?"
+                    "ORDER BY p.created_at DESC,p.id DESC LIMIT 1000"
                     % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
-                    (len(prepared),),
                 ).fetchall()
-                expected_pool_ids = [
-                    int(pool["id"]) for pool in expected_pools
-                ]
-                actual_pool_ids = [
-                    int(values["pool_item_id"]) for values in prepared
-                ]
-                if (
-                    len(actual_pool_ids) != len(expected_pool_ids)
-                    or set(actual_pool_ids) != set(expected_pool_ids)
+                if not _material_fifo_selection_matches(
+                    expected_pools,
+                    prepared,
+                    account_ids,
+                    premium_account_ids,
+                    validation_cutoff=(
+                        str(existing["updated_at"] or "")
+                        if existing is not None
+                        else ""
+                    ),
                 ):
                     conn.rollback()
                     raise XPostError(

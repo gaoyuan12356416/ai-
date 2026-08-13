@@ -1258,6 +1258,110 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             {oldest_pool["id"], newest_pool["id"]},
         )
 
+    def test_material_schedule_replays_fifo_after_premium_capacity_is_full(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        added = self.store.add_pool_materials(
+            ["231", "232", "233", "234", "235"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "231", "error_code": ""},
+                {"material_id": "232", "error_code": ""},
+                {"material_id": "233", "error_code": ""},
+                {
+                    "material_id": "234",
+                    "error_code": "x_long_video_requires_premium",
+                    "error_message": "Premium capacity was already consumed",
+                },
+                {"material_id": "235", "error_code": ""},
+            ],
+        )["items"]
+        oldest, second_oldest, middle, _skipped_long, newest = added
+        premium = self.material_candidate(newest, 2)
+        premium["preflight_duration"] = 200.0
+        standard_one = self.material_candidate(middle, 3)
+        standard_one["preflight_duration"] = 100.0
+        standard_two = self.material_candidate(second_oldest, 4)
+        standard_two["preflight_duration"] = 100.0
+
+        created = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [premium, standard_one, standard_two],
+            premium_account_ids=[2],
+        )
+
+        self.assertTrue(created["created"])
+        self.assertEqual(
+            [queue["pool_item_id"] for queue in created["queues"]],
+            [newest["id"], middle["id"], second_oldest["id"]],
+        )
+        self.assertNotIn(
+            oldest["id"],
+            {queue["pool_item_id"] for queue in created["queues"]},
+        )
+
+    def test_material_schedule_cannot_skip_long_fifo_while_premium_remains(self):
+        self.save_schedule("material", [2], ["09:00"])
+        oldest, newest = self.store.add_pool_materials(
+            ["241", "242"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "241", "error_code": ""},
+                {
+                    "material_id": "242",
+                    "error_code": "x_long_video_requires_premium",
+                    "error_message": "A Premium account is still available",
+                },
+            ],
+        )["items"]
+        candidate = self.material_candidate(oldest, 2)
+        candidate["preflight_duration"] = 200.0
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [candidate],
+                premium_account_ids=[2],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_pool_fifo_conflict",
+        )
+        self.assertNotEqual(oldest["id"], newest["id"])
+
+    def test_material_fifo_replay_rejects_stale_skip_evidence(self):
+        self.assertFalse(
+            service._material_fifo_selection_matches(
+                [
+                    {
+                        "id": 2,
+                        "last_error_code": "material_source_tag_unsafe",
+                        "last_checked_at": "2026-07-27T00:00:00Z",
+                    },
+                    {
+                        "id": 1,
+                        "last_error_code": "",
+                        "last_checked_at": "",
+                    },
+                ],
+                [
+                    {
+                        "pool_item_id": 1,
+                        "account_id": 2,
+                        "preflight_duration": 100.0,
+                    }
+                ],
+                [2],
+                [],
+                validation_cutoff="2026-07-27T01:00:00Z",
+            )
+        )
+
     def test_material_schedule_accepts_newest_violation_audit_record(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(
