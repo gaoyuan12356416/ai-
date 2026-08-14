@@ -727,16 +727,76 @@ def actor_from_state(state_row):
 
 
 def status_for(scopes, access_expires_at, token=None, stored="active"):
+    scope_set = set(scopes)
+    missing = [scope for scope in REQUIRED_SCOPES if scope not in scope_set]
     if stored in EXPLICITLY_DISABLED_STATUSES:
-        return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
-    if access_expires_at and parse_iso_epoch(access_expires_at) <= now_epoch():
-        return "expired", [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
+        return stored, missing
     if stored in {"revoked", "error", "token_missing"}:
-        return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
-    missing = [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
+        return stored, missing
     if missing:
         return "scope_missing", missing
+    if not isinstance(token, dict):
+        return "token_missing", []
+    refreshable = bool(
+        "offline.access" in scope_set
+        and str(token.get("refresh_token", "") or "").strip()
+    )
+    access_token = str(token.get("access_token", "") or "").strip()
+    expired = bool(
+        access_expires_at
+        and parse_iso_epoch(access_expires_at) <= now_epoch()
+    )
+    if expired and not refreshable:
+        return "expired", []
+    if not access_token and not refreshable:
+        return "token_missing", []
     return "active", []
+
+
+def access_token_is_expired(access_expires_at, *, at_epoch=None):
+    if not access_expires_at:
+        return False
+    current = now_epoch() if at_epoch is None else int(at_epoch)
+    return parse_iso_epoch(access_expires_at) <= current
+
+
+def token_refresh_available(scopes, token):
+    return bool(
+        isinstance(token, dict)
+        and "offline.access" in set(scopes or ())
+        and str(token.get("refresh_token", "") or "").strip()
+    )
+
+
+def access_token_refresh_required(
+    access_expires_at,
+    token,
+    *,
+    leeway_seconds=120,
+    at_epoch=None,
+):
+    current = now_epoch() if at_epoch is None else int(at_epoch)
+    if not isinstance(token, dict) or not str(
+        token.get("access_token", "") or ""
+    ).strip():
+        return True
+    if not access_expires_at:
+        return False
+    return parse_iso_epoch(access_expires_at) <= current + int(
+        leeway_seconds
+    )
+
+
+def access_token_status(access_expires_at, token, *, refreshable=False):
+    access_token = bool(
+        isinstance(token, dict)
+        and str(token.get("access_token", "") or "").strip()
+    )
+    if not access_token:
+        return "missing_refreshable" if refreshable else "missing"
+    if access_token_is_expired(access_expires_at):
+        return "expired_refreshable" if refreshable else "expired"
+    return "valid"
 
 
 def optional_nonnegative_int(value):
@@ -975,18 +1035,26 @@ def row_to_item(row):
         except ServiceError:
             pass
     status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
-    if (
-        token is None
-        and stored_status not in terminal_statuses
-        and status != "expired"
-    ):
-        status = "token_missing"
     publish_approved = bool(int(item.get("publish_approved") or 0))
+    refresh_token_available = token_refresh_available(scopes, token)
+    authorization_refreshable = bool(
+        status == "active" and refresh_token_available
+    )
     item["status"] = status
     item["publish_approved"] = publish_approved
-    item["credential_publish_eligible"] = status not in EXPLICITLY_DISABLED_STATUSES
+    item["access_token_expired"] = access_token_is_expired(
+        item.get("access_expires_at", "")
+    )
+    item["refresh_token_available"] = refresh_token_available
+    item["authorization_refreshable"] = authorization_refreshable
+    item["access_token_status"] = access_token_status(
+        item.get("access_expires_at", ""),
+        token,
+        refreshable=authorization_refreshable,
+    )
+    item["credential_publish_eligible"] = status == "active"
     item["publish_eligible"] = (
-        status not in EXPLICITLY_DISABLED_STATUSES and publish_approved
+        status == "active" and publish_approved
     )
     item["subscription_type"] = normalize_subscription_type(
         item.get("subscription_type")
@@ -1299,16 +1367,30 @@ def verify_account(
                 "该X账号尚未勾选允许发布",
                 409,
             )
-        if only_refresh_required and item.get("status") != "expired":
-            return item
+        if require_publish_approved and item.get("status") != "active":
+            raise ServiceError(
+                "x_account_not_publishable",
+                "X账号授权当前不可用于发布，请先重新授权或校验",
+                409,
+            )
         try:
+            expires_at = item.get("access_expires_at", "")
+            refresh_required = bool(
+                item.get("access_token_status")
+                in {"missing", "missing_refreshable"}
+                or (
+                    expires_at
+                    and parse_iso_epoch(expires_at) <= now_epoch() + 120
+                )
+            )
+            if only_refresh_required and not refresh_required:
+                return item
             token = read_token_file(item["x_user_id"])
             timestamp = iso_utc()
             refresh_at = item.get("last_token_refresh_at", "")
-            expires_at = item.get("access_expires_at", "")
-            needs_token_refresh = not token.get("access_token") or (
-                expires_at
-                and parse_iso_epoch(expires_at) <= now_epoch() + 120
+            needs_token_refresh = access_token_refresh_required(
+                expires_at,
+                token,
             )
             if needs_token_refresh and not allow_token_refresh:
                 raise ServiceError(
@@ -1397,6 +1479,12 @@ def publish_credentials(account_id, actor, scope="mine"):
         item = row_to_item(row)
         if item["status"] in EXPLICITLY_DISABLED_STATUSES:
             raise ServiceError("x_account_disabled", "X账号已在后台停用，禁止用于发布", 409)
+        if item["status"] != "active":
+            raise ServiceError(
+                "x_account_not_publishable",
+                "X账号授权当前不可用于发布，请先重新授权或校验",
+                409,
+            )
         if item.get("publish_approved") is not True:
             raise ServiceError(
                 "x_account_publish_not_approved",
@@ -2546,7 +2634,6 @@ def publish_queue_request(
                     "all",
                     preserve_transient_status=True,
                     require_publish_approved=True,
-                    allow_token_refresh=False,
                 )
                 if frozen_drama_language and not same_drama_language(
                     verified_source.get("drama_language"),
@@ -2566,6 +2653,15 @@ def publish_queue_request(
                         "Long-video account is no longer eligible",
                         409,
                     )
+            else:
+                verify_account(
+                    source_account_id,
+                    actor,
+                    "all",
+                    only_refresh_required=True,
+                    preserve_transient_status=True,
+                    require_publish_approved=True,
+                )
             with publish_credentials(
                 source_account_id, actor, "all"
             ) as (account, access_token):
@@ -2637,6 +2733,14 @@ def publish_queue_request(
     try:
         from features.x_posts import XApiClient
 
+        verify_account(
+            target_account_id,
+            actor,
+            "all",
+            only_refresh_required=True,
+            preserve_transient_status=True,
+            require_publish_approved=True,
+        )
         with publish_credentials(
             target_account_id, actor, "all"
         ) as (target_account, target_access_token):
@@ -2749,6 +2853,18 @@ def _safe_post_account(account):
         "status": str(account.get("status", "") or ""),
         "publish_approved": bool(account.get("publish_approved")),
         "publish_eligible": bool(account.get("publish_eligible")),
+        "access_token_expired": bool(
+            account.get("access_token_expired")
+        ),
+        "refresh_token_available": bool(
+            account.get("refresh_token_available")
+        ),
+        "authorization_refreshable": bool(
+            account.get("authorization_refreshable")
+        ),
+        "access_token_status": str(
+            account.get("access_token_status", "") or ""
+        ),
         "drama_language": canonical_drama_language(
             account.get("drama_language", DEFAULT_DRAMA_LANGUAGE)
         ),
@@ -2794,7 +2910,6 @@ def _premium_relay_accounts(run_date, *, refresh=False, drama_language=None):
                 "all",
                 preserve_transient_status=True,
                 require_publish_approved=True,
-                allow_token_refresh=False,
             )
         except ServiceError:
             continue
@@ -4916,7 +5031,20 @@ class Handler(BaseHTTPRequestHandler):
                 item = (
                     find_account(account_id)
                     if payload.get("snapshot_only") is True
-                    else verify_account(account_id, actor, "all")
+                    else verify_account(
+                        account_id,
+                        actor,
+                        "all",
+                        only_refresh_required=(
+                            payload.get("only_refresh_required") is True
+                        ),
+                        preserve_transient_status=(
+                            payload.get("preserve_transient_status") is True
+                        ),
+                        require_publish_approved=(
+                            payload.get("require_publish_approved") is True
+                        ),
+                    )
                 )
                 if item.get("publish_eligible") is not True:
                     raise ServiceError(

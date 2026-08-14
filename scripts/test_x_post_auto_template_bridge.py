@@ -833,6 +833,15 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
             return_value=api,
         ), mock.patch.object(
             oauth_service,
+            "verify_account",
+            return_value={
+                "id": 51,
+                "status": "active",
+                "publish_approved": True,
+                "publish_eligible": True,
+            },
+        ), mock.patch.object(
+            oauth_service,
             "publish_credentials",
             side_effect=credentials,
         ):

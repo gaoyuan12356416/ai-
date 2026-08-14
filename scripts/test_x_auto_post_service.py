@@ -189,6 +189,7 @@ class XAutoPostServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(result["preview"][0]["ok"])
+        self.assertEqual(self.bridge.verify_calls, [])
         self.assertEqual(
             selector.request.rules.material.duration_seconds.as_dict()["max"],
             "140",
@@ -314,6 +315,27 @@ class XAutoPostServiceTests(unittest.TestCase):
         tasks = self.store.list_tasks(run_id=first["run_id"])
         self.assertEqual([task.account_id for task in tasks], ["101", "102"])
         self.assertEqual({task.language for task in tasks}, {"en"})
+        self.assertEqual(
+            self.bridge.verify_calls,
+            [
+                (
+                    101,
+                    {
+                        "only_refresh_required": False,
+                        "preserve_transient_status": True,
+                        "require_publish_approved": True,
+                    },
+                ),
+                (
+                    102,
+                    {
+                        "only_refresh_required": False,
+                        "preserve_transient_status": True,
+                        "require_publish_approved": True,
+                    },
+                ),
+            ],
+        )
 
     def test_closed_tick_creates_nothing(self):
         service = self.service()

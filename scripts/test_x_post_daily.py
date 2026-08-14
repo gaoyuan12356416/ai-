@@ -553,6 +553,39 @@ class RunnerTests(unittest.TestCase):
                 any(handler.proxies for handler in proxy_handlers)
             )
 
+    def test_sidecar_account_preflight_verifies_and_allows_safe_refresh(self):
+        client = SidecarClient(
+            "http://127.0.0.1:8810",
+            "secret",
+            timeout=30,
+        )
+        item = {
+            "id": 17,
+            "x_user_id": "170000000",
+            "username": "account17",
+            "status": "active",
+            "publish_eligible": True,
+        }
+        with mock.patch.object(
+            client, "post", return_value={"item": item}
+        ) as post_mock:
+            self.assertEqual(client.verify_account(17), item)
+        post_mock.assert_called_once_with(
+            "/internal/posts/accounts/17/verify",
+            {
+                "actor": {
+                    "tenant_key": "internal",
+                    "user_id": "x-post-daily",
+                    "name": "X Post Daily",
+                    "email": "",
+                    "role": "admin",
+                },
+                "scope": "all",
+                "preserve_transient_status": True,
+                "require_publish_approved": True,
+            },
+        )
+
     def test_repair_configuration_is_optional_but_independently_authenticated(self):
         disabled = test_config()
         disabled.validate()

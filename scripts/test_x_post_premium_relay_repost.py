@@ -557,6 +557,7 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
         queue = self.create_relay_plan()["queues"][0]
         source_calls = []
         repost_calls = []
+        verify_calls = []
 
         def fake_publish_canary(**kwargs):
             source_calls.append(int(kwargs["account"]["id"]))
@@ -590,6 +591,10 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
                 repost_calls.append((token, user_id, post_id))
                 return {"repost_id": "99001", "data": {"retweeted": True}}
 
+        def verify(account_id, *_args, **kwargs):
+            verify_calls.append((int(account_id), dict(kwargs)))
+            return self.account(account_id)
+
         with mock.patch.object(oauth_service, "POST_DB_PATH", self.db_path), mock.patch.object(
             oauth_service,
             "_x_posts_api",
@@ -597,7 +602,7 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
         ), mock.patch.object(
             oauth_service,
             "verify_account",
-            side_effect=lambda account_id, *_args, **_kwargs: self.account(account_id),
+            side_effect=verify,
         ), mock.patch.object(
             oauth_service,
             "publish_credentials",
@@ -616,6 +621,9 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
         self.assertEqual(second, first)
         self.assertEqual(source_calls, [10])
         self.assertEqual(repost_calls, [("token-2", "2002", "9001")])
+        self.assertEqual([call[0] for call in verify_calls], [10, 2])
+        self.assertNotIn("only_refresh_required", verify_calls[0][1])
+        self.assertTrue(verify_calls[1][1]["only_refresh_required"])
 
     def test_sidecar_unknown_repost_never_republishes_source(self):
         queue = self.create_relay_plan()["queues"][0]

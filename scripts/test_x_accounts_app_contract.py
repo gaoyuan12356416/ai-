@@ -31,6 +31,9 @@ QUICK_NAV_SOURCE = (ROOT / "static" / "quick-nav.js").read_text(encoding="utf-8"
 X_ACCOUNT_LIST_SOURCE = (ROOT / "static" / "x-account-list.html").read_text(
     encoding="utf-8"
 )
+X_ACCOUNTS_PERSONAL_SOURCE = (ROOT / "static" / "x-accounts.html").read_text(
+    encoding="utf-8"
+)
 X_POST_LOGS_SOURCE = (ROOT / "static" / "x-post-logs.html").read_text(encoding="utf-8")
 X_POST_POOL_SOURCE = (ROOT / "static" / "x-post-material-pool.html").read_text(
     encoding="utf-8"
@@ -65,6 +68,21 @@ def source_between(start, end):
 
 
 class XAccountsAppContractTest(unittest.TestCase):
+    def test_account_pages_separate_authorization_from_short_access_token(self):
+        for source in (X_ACCOUNT_LIST_SOURCE, X_ACCOUNTS_PERSONAL_SOURCE):
+            self.assertIn("授权有效", source)
+            self.assertIn("Access Token / 自动续期", source)
+            self.assertIn("expired_refreshable", source)
+            self.assertIn("authorization_refreshable", source)
+            self.assertIn("已到期，可自动续期", source)
+            self.assertIn("已到期，需重新授权", source)
+            self.assertNotIn("Token 未到期", source)
+        self.assertIn("执行时自动续期", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn(
+            '<option value="expired">需重新授权</option>',
+            X_ACCOUNT_LIST_SOURCE,
+        )
+
     def test_x_post_schedule_template_is_forwarded_and_audited_without_plaintext(self):
         self.assertIn('"body_template",', X_ACCOUNTS_SIDECAR_SOURCE)
         self.assertIn('"schedule_mode",', X_ACCOUNTS_SIDECAR_SOURCE)

@@ -777,7 +777,7 @@ class SidecarClient:
         return value if isinstance(value, dict) else {}
 
     def verify_account(self, account_id):
-        """Load the current account snapshot without refreshing its X token."""
+        """Verify identity and refresh the account token before reservation."""
         result = self.post(
             "/internal/posts/accounts/%s/verify" % int(account_id),
             {
@@ -789,7 +789,8 @@ class SidecarClient:
                     "role": "admin",
                 },
                 "scope": "all",
-                "snapshot_only": True,
+                "preserve_transient_status": True,
+                "require_publish_approved": True,
             },
         )
         item = result.get("item")

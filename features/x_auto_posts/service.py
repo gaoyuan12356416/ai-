@@ -602,7 +602,20 @@ class XAutoPostService:
                 tasks.append(existing[account_id])
                 continue
             try:
-                account = self._account_snapshot(account_id)
+                account = dict(
+                    self.account_bridge.verify_account(
+                        account_id,
+                        only_refresh_required=False,
+                        preserve_transient_status=True,
+                        require_publish_approved=True,
+                    )
+                )
+                if str(account.get("id") or "") != str(account_id):
+                    raise AutoPostServiceError(
+                        "x_auto_x_bridge_response_invalid",
+                        "X account verification returned an invalid account",
+                        502,
+                    )
                 if not bool(account.get("publish_eligible")):
                     raise AutoPostServiceError(
                         "x_auto_account_not_publishable",

@@ -97,14 +97,14 @@
         <div id="oauthNotice" class="notice hidden"><span id="oauthNoticeText"></span><button id="dismissNotice" type="button" aria-label="关闭">×</button></div>
         <section class="stats">
           <article class="stat"><span>我的 X 账号</span><strong id="totalCount">0</strong></article>
-          <article class="stat"><span>Token 未到期</span><strong id="activeCount">0</strong></article>
+          <article class="stat"><span>授权有效</span><strong id="activeCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
           <article class="stat"><span>最近更新时间</span><strong id="latestUpdate" style="font-size:16px;line-height:1.5;">—</strong></article>
         </section>
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>我的已授权账号</h2><p>你可以授权多个 X 账号；只有“有效”账号可用于发布，停用账号可通过重新授权恢复。</p></div>
+            <div><h2>我的已授权账号</h2><p>你可以授权多个 X 账号；授权有效且允许发布的账号可用于发布，短期 Access Token 到期会在任务执行前自动续期。</p></div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
               <button id="reloadAccounts" class="button" type="button">刷新列表</button>
               <button id="authorizeAccount" class="button primary" type="button" disabled>授权新的 X 账号</button>
@@ -113,7 +113,7 @@
           <div id="configChips" class="config"></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次/最近授权</th><th>Token到期</th><th>最近刷新/校验</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次/最近授权</th><th>Access Token / 自动续期</th><th>最近刷新/校验</th><th>更新/停用时间</th><th>操作</th></tr></thead>
               <tbody id="accountRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -129,7 +129,7 @@
     (() => {
       const state = { auth: null, accounts: [], config: null, busy: false };
       const statusMeta = {
-        active: ["有效", "active"], expired: ["已到期", "expired"],
+        active: ["有效", "active"], expired: ["需重新授权", "expired"],
         scope_missing: ["权限不完整", "scope_missing"], revoked: ["授权已失效", "revoked"],
         token_missing: ["缺少Token", "token_missing"], revoke_pending: ["旧退出待处理", "error"],
         disabled: ["已停用", "disabled"], disconnected: ["已解除授权", "disconnected"],
@@ -156,6 +156,19 @@
         const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? raw : raw.replace(" ", "T") + "Z";
         const date = new Date(normalized);
         return Number.isNaN(date.getTime()) ? raw : new Intl.DateTimeFormat("zh-CN", { dateStyle:"medium", timeStyle:"medium", hour12:false }).format(date);
+      };
+      const accessTokenHtml = item => {
+        const labels = {
+          valid: "有效",
+          expired_refreshable: "已到期，可自动续期",
+          missing_refreshable: "缺失，可自动续期",
+          expired: "已到期，需重新授权",
+          missing: "缺失，需重新授权",
+        };
+        const status = String(item.access_token_status || "");
+        const label = labels[status] || "状态未知";
+        const renewal = item.authorization_refreshable === true ? "自动续期：可用" : "自动续期：不可用";
+        return `<div>Access Token：${escapeHtml(label)}</div><div class="subtle">到期：${escapeHtml(formatTime(item.access_expires_at))}</div><div class="subtle">${escapeHtml(renewal)}</div>`;
       };
 
       async function api(path, options = {}) {
@@ -232,7 +245,7 @@
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
             <td><div class="scope-list">${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("") || "—"}${missingScopes.map(scope => `<span class="chip missing">缺少 ${escapeHtml(scope)}</span>`).join("")}</div></td>
             <td><div>首次：${escapeHtml(formatTime(item.first_authorized_at))}</div><div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></td>
-            <td>${escapeHtml(formatTime(item.access_expires_at))}</td>
+            <td>${accessTokenHtml(item)}</td>
             <td>${refreshVerify}</td>
             <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">停用：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
             <td><div class="row-actions">${actions}</div></td>
