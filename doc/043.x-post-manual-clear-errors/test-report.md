@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-本地功能与回归测试通过；生产零发帖验收待部署后补录。
+本地功能、完整回归和生产零发帖验收全部通过。
 
 ## 测试范围
 
@@ -18,7 +18,7 @@
 
 ## 缺陷情况
 
-BUG-001 已修复；生产验收通过后关闭。
+BUG-001 已修复并关闭。
 
 ## 验证证据
 
@@ -26,6 +26,8 @@ BUG-001 已修复；生产验收通过后关闭。
 - `python -m unittest discover -s scripts -p "test_x_post*.py"`：410 项，OK，skip=1。
 - `test_x_posts.py`、`test_x_post_daily.py`、`test_x_post_ledger.py`：35/35、60/60、12/12。
 - 全程 fixture/mock，无 X 写请求。
+- 生产 CPU release 专项测试 59/59，GPU 生产解释器 media-repair 测试 18/18。
+- 生产自然 timer 连续返回 `no_pending`；queue/log 保持 253/243，unknown=0，未创建真实 X Post。
 
 ## 遗留风险
 
@@ -33,4 +35,4 @@ BUG-001 已修复；生产验收通过后关闭。
 
 ## 发布建议
 
-允许按 GitHub-first 流程部署；必须先备份，GPU/CPU 同 commit，且只用自然 `no_pending` 与账本不变验收。
+已按 GitHub-first 流程部署 `eb15510b75d9045d5b660b57f3971137044a3523`，生产验收通过。

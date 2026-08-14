@@ -12,7 +12,7 @@
 | 拆分修复结果消息 | Codex | `features/x_posts/media_repair.py` | 已完成 |
 | 归一手动 run 错误 | Codex | `scripts/x_post_manual_runner.py` | 已完成 |
 | 简化弹窗展示 | Codex | `static/x-post-material-pool.html` | 已完成 |
-| 自动化测试与部署 | Codex | `scripts/test_x_post_*.py`、生产 CPU/GPU | 进行中 |
+| 自动化测试与部署 | Codex | `scripts/test_x_post_*.py`、生产 CPU/GPU | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -29,3 +29,4 @@ python -m unittest scripts.test_x_post_material_pool_selector scripts.test_x_pos
 ## 完成记录
 
 - 2026-08-14：第一轮 59 项针对性测试通过。
+- 2026-08-14：完整回归通过，commit `eb15510b75d9045d5b660b57f3971137044a3523` 已部署到 CPU/GPU；生产零发帖验收通过。

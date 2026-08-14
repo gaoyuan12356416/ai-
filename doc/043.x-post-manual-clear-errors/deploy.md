@@ -35,4 +35,11 @@ CPU X release：selector、manual runner；GPU release：media repair；公共�
 
 ## 注意事项
 
-生产路径与备份名在实际部署后补录。
+## 生产部署结果
+
+- Git commit / CPU release / GPU release：`eb15510b75d9045d5b660b57f3971137044a3523`。
+- CPU 备份：`/mnt/data-disk/x-post-automation/backups/20260814T042057Z-manual-clear-errors-pre-eb15510`。
+- GPU 备份：`/data/x-post-media-repair/backups/20260814T042112Z-manual-clear-errors-pre-eb15510`。
+- CPU release 的 59 项专项测试、GPU 生产解释器的 18 项 media-repair 测试均通过。
+- 主站、公共静态页、Sidecar、GPU worker 和 CPU 到 GPU 隧道健康；静态页三处 SHA-256 均为 `2fe0ab0e6d466ce8a2cc327c22162c4d3ce8d53ce2208e48b49e06d1d03a605c`。
+- 自然 timer 连续返回 `no_pending`；queue/log 保持 `253/243`，unknown、active manual、active schedule、active reservation 均为 0；未创建真实 X Post。
