@@ -329,7 +329,10 @@ class AutoPostExecutor:
                 "verified X account does not match the frozen task",
                 409,
             )
-        if not bool(account.get("publish_eligible")):
+        status = str(account.get("status") or "").strip().lower()
+        if status in {"disabled", "disconnected", "revoke_pending"} or not bool(
+            account.get("publish_approved")
+        ):
             raise AutoPostExecutionError(
                 "x_auto_account_not_publishable",
                 "X account is not currently publishable",
@@ -473,9 +476,7 @@ class AutoPostExecutor:
         )
         body_template = str(template.config.get("body_template") or "")
         body_hash = hashlib.sha256(body_template.encode("utf-8")).hexdigest()
-        account = self._validate_account(
-            task, self.bridge.verify_account(int(task.account_id))
-        )
+        account = self._validate_account(task, task.account_snapshot)
         if task.status != "preparing":
             task = self.store.transition_task(
                 task.id,

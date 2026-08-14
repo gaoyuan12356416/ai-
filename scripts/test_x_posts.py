@@ -323,6 +323,19 @@ class XPostsTests(unittest.TestCase):
                         )
                     self.assertTrue(caught.exception.unknown_outcome)
 
+    def test_x_401_has_stable_token_invalid_login_message(self):
+        client = ScriptedHttpClient(
+            [response(401, {"title": "Unauthorized", "detail": "expired"})]
+        )
+        with self.assertRaises(service.XPostError) as caught:
+            service.XApiClient(http_client=client).create_post(
+                "expired-token", "url\ndesc", "media1"
+            )
+        self.assertEqual(caught.exception.code, "x_token_invalid")
+        self.assertEqual(str(caught.exception), "Token失效，请重新登陆")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertFalse(caught.exception.unknown_outcome)
+
     def test_x_rate_limit_has_stable_429_code_and_is_not_retried(self):
         for upstream in (
             response(429, {"title": "Too Many Requests"}),

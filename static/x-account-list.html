@@ -62,7 +62,7 @@
     .status { display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; }
     .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
     .status.active { color:#08734f; background:#e8f8f1; }
-    .status.refresh_required { color:#9a6000; background:#fff5dd; }
+    .status.expired { color:#9a6000; background:#fff5dd; }
     .status.disabled,.status.disconnected { color:#687894; background:#edf1f6; }
     .status.scope_missing,.status.revoked,.status.token_missing,.status.error { color:#ad2f3b; background:#ffedef; }
     .chip-list { display:flex; flex-wrap:wrap; gap:5px; max-width:300px; }
@@ -105,14 +105,14 @@
       <div id="pageRoot" class="hidden">
         <section class="stats">
           <article class="stat"><span>全部 X 账号</span><strong id="totalCount">0</strong></article>
-          <article class="stat"><span>状态有效</span><strong id="activeCount">0</strong></article>
+          <article class="stat"><span>Token 未到期</span><strong id="activeCount">0</strong></article>
           <article class="stat"><span>已停用/解除授权</span><strong id="disconnectedCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
         </section>
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>全部授权账号</h2><p>只有勾选“允许发布”且账号状态有效的账号，才会出现在发布池中；新授权账号默认不勾选。</p></div>
+            <div><h2>全部授权账号</h2><p>勾选“允许发布”且未被后台停用的账号会出现在发布池中；Token 到期仅展示“已到期”，发布失败时需重新登录。</p></div>
             <button id="reloadAccounts" class="button" type="button">刷新列表</button>
           </div>
           <div class="filters">
@@ -120,7 +120,7 @@
             <select id="statusFilter" aria-label="按授权状态筛选">
               <option value="">全部状态</option>
               <option value="active">有效</option>
-              <option value="refresh_required">待刷新</option>
+              <option value="expired">已到期</option>
               <option value="scope_missing">权限不完整</option>
               <option value="revoke_pending">旧退出待处理</option>
               <option value="disabled">已停用</option>
@@ -149,7 +149,7 @@
     (() => {
       const state = { auth:null, accounts:[] };
       const statusMeta = {
-        active:["有效","active"], refresh_required:["待刷新","refresh_required"],
+        active:["有效","active"], expired:["已到期","expired"],
         scope_missing:["权限不完整","scope_missing"], revoked:["授权已失效","revoked"],
         token_missing:["缺少Token","token_missing"], revoke_pending:["旧退出待处理","error"],
         disabled:["已停用","disabled"], disconnected:["已解除授权","disconnected"],
@@ -278,7 +278,7 @@
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
             <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
-            <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? "发布池可选" : (publishApproved ? "账号状态有效后可选" : "发布池不可选")}</div></td>
+            <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.status === "expired" ? "发布池可选；Token 已到期" : "发布池可选") : (publishApproved ? "账号停用，发布池不可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
             <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>

@@ -63,6 +63,10 @@ TRANSIENT_VERIFY_ERROR_CODES = frozenset(
         "x_accounts_unavailable",
     }
 )
+EXPLICITLY_DISABLED_STATUSES = frozenset(
+    {"disabled", "disconnected", "revoke_pending"}
+)
+TOKEN_INVALID_LOGIN_MESSAGE = "Token失效，请重新登陆"
 
 
 def load_env_file(path):
@@ -711,13 +715,15 @@ def actor_from_state(state_row):
 
 
 def status_for(scopes, access_expires_at, token=None, stored="active"):
-    if stored in {"revoked", "error", "token_missing", "revoke_pending", "disabled", "disconnected"}:
+    if stored in EXPLICITLY_DISABLED_STATUSES:
+        return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
+    if access_expires_at and parse_iso_epoch(access_expires_at) <= now_epoch():
+        return "expired", [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
+    if stored in {"revoked", "error", "token_missing"}:
         return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     missing = [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     if missing:
         return "scope_missing", missing
-    if access_expires_at and parse_iso_epoch(access_expires_at) <= now_epoch():
-        return ("refresh_required" if token and token.get("refresh_token") else "revoked"), []
     return "active", []
 
 
@@ -938,20 +944,26 @@ def row_to_item(row):
         scopes = []
     stored_status = item.get("status", "active")
     token = None
-    terminal_statuses = {"revoke_pending", "disabled", "disconnected"}
+    terminal_statuses = EXPLICITLY_DISABLED_STATUSES
     if stored_status not in terminal_statuses:
         try:
             token = read_token_file(item["x_user_id"])
         except ServiceError:
             pass
     status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
-    if token is None and stored_status not in terminal_statuses:
+    if (
+        token is None
+        and stored_status not in terminal_statuses
+        and status != "expired"
+    ):
         status = "token_missing"
     publish_approved = bool(int(item.get("publish_approved") or 0))
     item["status"] = status
     item["publish_approved"] = publish_approved
-    item["credential_publish_eligible"] = status == "active"
-    item["publish_eligible"] = status == "active" and publish_approved
+    item["credential_publish_eligible"] = status not in EXPLICITLY_DISABLED_STATUSES
+    item["publish_eligible"] = (
+        status not in EXPLICITLY_DISABLED_STATUSES and publish_approved
+    )
     item["subscription_type"] = normalize_subscription_type(
         item.get("subscription_type")
     )
@@ -1149,6 +1161,7 @@ def verify_account(
     only_refresh_required=False,
     preserve_transient_status=False,
     require_publish_approved=False,
+    allow_token_refresh=True,
 ):
     account_id = int(account_id)
     actor, scope = normalize_account_scope(actor, scope)
@@ -1170,14 +1183,22 @@ def verify_account(
                 "该X账号尚未勾选允许发布",
                 409,
             )
-        if only_refresh_required and item.get("status") != "refresh_required":
+        if only_refresh_required and item.get("status") != "expired":
             return item
         try:
             token = read_token_file(item["x_user_id"])
             timestamp = iso_utc()
             refresh_at = item.get("last_token_refresh_at", "")
             expires_at = item.get("access_expires_at", "")
-            if not token.get("access_token") or (expires_at and parse_iso_epoch(expires_at) <= now_epoch() + 120):
+            needs_token_refresh = not token.get("access_token") or (
+                expires_at
+                and parse_iso_epoch(expires_at) <= now_epoch() + 120
+            )
+            if needs_token_refresh and not allow_token_refresh:
+                raise ServiceError(
+                    "x_token_invalid", TOKEN_INVALID_LOGIN_MESSAGE, 409
+                )
+            if needs_token_refresh:
                 refresh_token = token.get("refresh_token")
                 if not refresh_token:
                     raise ServiceError("x_token_revoked", "X Refresh Token缺失，请重新授权", 409)
@@ -1258,20 +1279,32 @@ def publish_credentials(account_id, actor, scope="mine"):
     with account_lock("x:" + x_user_id):
         row = find_scoped_account_row(account_id, actor, scope)
         item = row_to_item(row)
-        if item["status"] == "disabled":
+        if item["status"] in EXPLICITLY_DISABLED_STATUSES:
             raise ServiceError("x_account_disabled", "X账号已在后台停用，禁止用于发布", 409)
-        if item["status"] != "active":
-            raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
         if item.get("publish_approved") is not True:
             raise ServiceError(
                 "x_account_publish_not_approved",
                 "该X账号尚未勾选允许发布",
                 409,
             )
-        token = read_token_file(x_user_id)
+        expires_at = str(item.get("access_expires_at", "") or "")
+        if expires_at and parse_iso_epoch(expires_at) <= now_epoch():
+            raise ServiceError(
+                "x_token_invalid", TOKEN_INVALID_LOGIN_MESSAGE, 409
+            )
+        try:
+            token = read_token_file(x_user_id)
+        except ServiceError as exc:
+            if exc.code in {"x_token_missing", "x_token_revoked"}:
+                raise ServiceError(
+                    "x_token_invalid", TOKEN_INVALID_LOGIN_MESSAGE, 409
+                ) from None
+            raise
         access_token = str(token.get("access_token", "") or "")
         if not access_token:
-            raise ServiceError("x_token_missing", "X账号Access Token不存在，请重新授权", 409)
+            raise ServiceError(
+                "x_token_invalid", TOKEN_INVALID_LOGIN_MESSAGE, 409
+            )
         yield item, access_token
 
 
@@ -1694,7 +1727,15 @@ def publish_canary_request(payload):
         raise ServiceError("invalid_request", "account_id无效", 400)
 
     actor = dict(CANARY_ACTOR)
-    verify_account(account_id, actor, "all")
+    snapshot = find_account(account_id)
+    if snapshot.get("status") in EXPLICITLY_DISABLED_STATUSES:
+        raise ServiceError(
+            "x_account_disabled", "X账号已在后台停用，禁止用于发布", 409
+        )
+    if snapshot.get("publish_approved") is not True:
+        raise ServiceError(
+            "x_account_publish_not_approved", "该X账号尚未勾选允许发布", 409
+        )
     candidate = {
         field: payload.get(field)
         for field in (
@@ -1845,7 +1886,7 @@ def create_daily_plan_request(
     trusted = []
     for raw, account_id in zip(candidates, requested_accounts):
         account = find_account(account_id)
-        if account.get("status") != "active" or not account.get("publish_eligible"):
+        if not account.get("publish_eligible"):
             raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
         _require_candidate_duration_capability(raw, account)
         candidate = dict(raw)
@@ -2067,7 +2108,7 @@ def create_catchup_plan_request(
     trusted = []
     for raw, account_id in zip(candidates, requested_account_ids):
         account = find_account(account_id)
-        if account.get("status") != "active" or not account.get("publish_eligible"):
+        if not account.get("publish_eligible"):
             raise ServiceError(
                 "x_account_not_publishable",
                 "X catch-up target account is not publishable",
@@ -2366,46 +2407,28 @@ def publish_queue_request(
             else queue["account_id"]
         )
         try:
-            verified_source = verify_account(source_account_id, actor, "all")
-            if relay_delivery and (
-                not verified_source.get("long_video_publish_eligible")
-                or verified_source.get("protected") is not False
-            ):
-                eligible = _premium_relay_accounts(
-                    queue["run_date"],
-                    refresh=True,
+            try:
+                duration = float(queue.get("preflight_duration", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                duration = 0.0
+            if relay_delivery or duration > 140.0:
+                verified_source = verify_account(
+                    source_account_id,
+                    actor,
+                    "all",
+                    preserve_transient_status=True,
+                    require_publish_approved=True,
+                    allow_token_refresh=False,
                 )
-                queue = store.reassign_premium_relay(
-                    int(queue["id"]), eligible
-                )
-                source_account_id = int(queue["relay_account_id"])
-        except ServiceError as exc:
-            if relay_delivery:
-                eligible = _premium_relay_accounts(
-                    queue["run_date"],
-                    refresh=True,
-                )
-                try:
-                    queue = store.reassign_premium_relay(
-                        int(queue["id"]), eligible
+                if (
+                    not verified_source.get("long_video_publish_eligible")
+                    or verified_source.get("protected") is not False
+                ):
+                    raise ServiceError(
+                        "x_post_premium_relay_unavailable",
+                        "Long-video account is no longer eligible",
+                        409,
                     )
-                except XPostError as storage_exc:
-                    _raise_x_post_error(storage_exc)
-                source_account_id = int(queue["relay_account_id"])
-            else:
-                try:
-                    store.mark_failed_if_reserved(
-                        log["id"],
-                        exc.code,
-                        str(exc),
-                    )
-                except XPostError as storage_exc:
-                    _raise_x_post_error(storage_exc)
-                raise
-        except XPostError as exc:
-            _raise_x_post_error(exc)
-
-        try:
             with publish_credentials(
                 source_account_id, actor, "all"
             ) as (account, access_token):
@@ -2443,13 +2466,12 @@ def publish_queue_request(
                 except XPostError as exc:
                     _raise_x_post_error(exc, (access_token,))
         except ServiceError as exc:
-            if not relay_delivery:
-                try:
-                    store.mark_failed_if_reserved(
-                        log["id"], exc.code, str(exc)
-                    )
-                except XPostError as storage_exc:
-                    _raise_x_post_error(storage_exc)
+            try:
+                store.mark_failed_if_reserved(
+                    log["id"], exc.code, str(exc)
+                )
+            except XPostError as storage_exc:
+                _raise_x_post_error(storage_exc)
             raise
         if not relay_delivery:
             return _safe_canary_result(result)
@@ -2466,7 +2488,6 @@ def publish_queue_request(
             )
         )
     target_account_id = int(queue["account_id"])
-    verify_account(target_account_id, actor, "all")
     try:
         from features.x_posts import XApiClient
 
@@ -2585,7 +2606,7 @@ def _safe_post_account(account):
     }
 
 
-def _premium_relay_accounts(run_date, *, refresh):
+def _premium_relay_accounts(run_date):
     with _DB_LOCK:
         conn = db_connect()
         try:
@@ -2597,23 +2618,21 @@ def _premium_relay_accounts(run_date, *, refresh):
     accounts = []
     for row in rows:
         account = row_to_item(row)
-        if account.get("status") != "active" or not account.get(
-            "publish_eligible"
-        ):
+        if not account.get("publish_eligible"):
             continue
-        if refresh:
-            try:
-                account = verify_account(
-                    int(account["id"]),
-                    CANARY_ACTOR,
-                    "all",
-                    preserve_transient_status=True,
-                )
-            except ServiceError:
-                continue
+        try:
+            account = verify_account(
+                int(account["id"]),
+                CANARY_ACTOR,
+                "all",
+                preserve_transient_status=True,
+                require_publish_approved=True,
+                allow_token_refresh=False,
+            )
+        except ServiceError:
+            continue
         if (
-            account.get("status") == "active"
-            and account.get("publish_eligible")
+            account.get("publish_eligible")
             and account.get("long_video_publish_eligible")
             and account.get("protected") is False
         ):
@@ -2645,7 +2664,7 @@ def premium_relay_accounts_request(payload):
         datetime.strptime(run_date, "%Y-%m-%d")
     except (TypeError, ValueError):
         raise ServiceError("invalid_request", "run_date is invalid", 400) from None
-    return {"items": _premium_relay_accounts(run_date, refresh=True)}
+    return {"items": _premium_relay_accounts(run_date)}
 
 
 def auto_template_accounts_request(_payload):
@@ -2775,8 +2794,7 @@ def save_post_schedule_request(payload, source_type, navigation_item):
     eligible_ids = [
         int(account["id"])
         for account in (row_to_item(row) for row in rows)
-        if account.get("status") == "active"
-        and account.get("publish_eligible")
+        if account.get("publish_eligible")
     ]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
@@ -2835,9 +2853,7 @@ def _manual_publish_accounts(account_ids):
         if account_id <= 0 or account_id in seen:
             raise ServiceError("invalid_request", "account_ids不能重复", 400)
         account = find_account(account_id)
-        if account.get("status") != "active" or not account.get(
-            "publish_eligible"
-        ):
+        if not account.get("publish_eligible"):
             raise ServiceError(
                 "x_account_not_publishable",
                 "X账号当前不可用于手动发布",
@@ -3657,9 +3673,7 @@ def create_post_schedule_plan_request(payload):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
         account = find_account(account_id)
-        if account.get("status") != "active" or not account.get(
-            "publish_eligible"
-        ):
+        if not account.get("publish_eligible"):
             raise ServiceError(
                 "x_account_not_publishable",
                 "X账号当前状态不可用于发布",
@@ -3679,10 +3693,7 @@ def create_post_schedule_plan_request(payload):
         )
         if relay_required:
             if premium_relay_accounts is None:
-                premium_relay_accounts = _premium_relay_accounts(
-                    run_date,
-                    refresh=False,
-                )
+                premium_relay_accounts = _premium_relay_accounts(run_date)
             selectable_relays = [
                 relay
                 for relay in premium_relay_accounts
@@ -4652,22 +4663,25 @@ class Handler(BaseHTTPRequestHandler):
                         "X自动发布只能校验当前配置的账号",
                         403,
                     )
-                self.send_json(
-                    200,
-                    {
-                        "item": verify_account(
-                            account_id,
-                            {
-                                "tenant_key": "internal",
-                                "user_id": "x-post-daily",
-                                "name": "X Post Daily",
-                                "email": "",
-                                "role": "admin",
-                            },
-                            "all",
-                        )
-                    },
+                actor = {
+                    "tenant_key": "internal",
+                    "user_id": "x-post-daily",
+                    "name": "X Post Daily",
+                    "email": "",
+                    "role": "admin",
+                }
+                item = (
+                    find_account(account_id)
+                    if payload.get("snapshot_only") is True
+                    else verify_account(account_id, actor, "all")
                 )
+                if item.get("publish_eligible") is not True:
+                    raise ServiceError(
+                        "x_account_not_publishable",
+                        "X account is not approved for publishing",
+                        409,
+                    )
+                self.send_json(200, {"item": item})
                 return
             if daily_publish_match:
                 if internal_role == "daily":

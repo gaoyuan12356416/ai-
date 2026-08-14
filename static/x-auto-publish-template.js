@@ -67,7 +67,8 @@
   function accountEligible(item) {
     if (item && item.publish_eligible !== undefined) return ui.boolValue(item.publish_eligible);
     const status = String(item && item.status || "").toLowerCase();
-    return status === "active" && ui.boolValue(item && item.publish_approved);
+    return !["disabled", "disconnected", "revoke_pending"].includes(status)
+      && ui.boolValue(item && item.publish_approved);
   }
 
   function accountApproved(item) {
@@ -75,16 +76,15 @@
   }
 
   function accountRefreshable(item) {
-    return !accountEligible(item)
-      && accountApproved(item)
-      && String(item && item.status || "").trim().toLowerCase() === "refresh_required";
+    return accountApproved(item)
+      && String(item && item.status || "").trim().toLowerCase() === "expired";
   }
 
   function accountEligibilityText(item) {
-    if (accountEligible(item)) return "可发布";
     const status = String(item && item.status || "").trim().toLowerCase();
-    if (!accountApproved(item)) return status === "refresh_required" ? "待刷新 / 未批准发布" : "未批准发布";
-    if (status === "refresh_required") return "Token 已过期，可刷新";
+    if (!accountApproved(item)) return status === "expired" ? "已到期 / 未批准发布" : "未批准发布";
+    if (status === "expired") return "可尝试发布 / Token 已到期";
+    if (accountEligible(item)) return "可发布";
     if (["revoked", "token_missing", "disconnected"].includes(status)) return "需重新授权";
     if (status === "scope_missing") return "授权范围不完整";
     if (status === "disabled") return "账号已停用";

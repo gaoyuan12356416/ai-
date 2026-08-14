@@ -334,6 +334,22 @@ class XAutoPostService:
         items = self.account_bridge.accounts()
         return {"ok": True, "accounts": items, "items": items, "total": len(items)}
 
+    def _account_snapshot(self, account_id: Any) -> Dict[str, Any]:
+        loader = getattr(self.account_bridge, "account_snapshot", None)
+        if callable(loader):
+            return dict(loader(account_id))
+        expected = int(account_id)
+        matches = [
+            dict(item)
+            for item in self.account_bridge.accounts()
+            if int(item.get("id") or 0) == expected
+        ]
+        if len(matches) != 1:
+            raise AutoPostServiceError(
+                "x_auto_account_not_found", "X account was not found", 404
+            )
+        return matches[0]
+
     def refresh_account(self, account_id: Any) -> Dict[str, Any]:
         expected_id = _positive_id(account_id, "account ID")
         account = self.account_bridge.verify_account(
@@ -390,7 +406,7 @@ class XAutoPostService:
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
         for account_id in config.get("account_ids") or []:
-            account = self.account_bridge.verify_account(account_id)
+            account = self._account_snapshot(account_id)
             if str(account.get("id") or "") != str(account_id) or not bool(
                 account.get("publish_eligible")
             ):
@@ -522,7 +538,7 @@ class XAutoPostService:
         results = []
         for index, account_id in enumerate(account_ids, start=1):
             try:
-                account = self.account_bridge.verify_account(account_id)
+                account = self._account_snapshot(account_id)
                 if not bool(account.get("publish_eligible")):
                     raise AutoPostServiceError(
                         "x_auto_account_not_publishable",
@@ -568,7 +584,7 @@ class XAutoPostService:
                 tasks.append(existing[account_id])
                 continue
             try:
-                account = self.account_bridge.verify_account(account_id)
+                account = self._account_snapshot(account_id)
                 if not bool(account.get("publish_eligible")):
                     raise AutoPostServiceError(
                         "x_auto_account_not_publishable",
