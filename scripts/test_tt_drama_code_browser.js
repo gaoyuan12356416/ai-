@@ -27,7 +27,12 @@ const ASSET_DIRECTORY = path.join(
 const SCRIPT_ASSET_NAME = fs.readdirSync(ASSET_DIRECTORY).find(name => (
   /^tt-drama-code-search\.[a-f0-9]{12}\.js$/.test(name)
 ));
+const GUIDE_ASSET_NAME = fs.readdirSync(ASSET_DIRECTORY).find(name => (
+  /^tt-code-location-guide\.[a-f0-9]{12}\.webp$/.test(name)
+));
 assert.ok(SCRIPT_ASSET_NAME);
+assert.ok(GUIDE_ASSET_NAME);
+const GUIDE_ASSET = fs.readFileSync(path.join(ASSET_DIRECTORY, GUIDE_ASSET_NAME));
 
 function localeForAcceptLanguage(value) {
   const primary = String(value || "")
@@ -152,6 +157,14 @@ function startServer() {
           ? { "Cache-Control": "public, max-age=31536000, immutable" }
           : {}
       );
+    } else if (url.pathname === "/tt-drama-code-assets/" + GUIDE_ASSET_NAME) {
+      send(
+        response,
+        200,
+        "image/webp",
+        GUIDE_ASSET,
+        { "Cache-Control": "public, max-age=31536000, immutable" }
+      );
     } else if (url.pathname === bridge.FEATURED_PATH) {
       send(
         response,
@@ -199,7 +212,8 @@ async function openPage(
   locale,
   entryPath = "/tt",
   viewport = { width: 720, height: 900 },
-  acceptLanguage = ""
+  acceptLanguage = "",
+  blockGuideImage = false
 ) {
   const context = await browser.newContext({
     locale,
@@ -214,6 +228,12 @@ async function openPage(
         }
       });
     });
+  }
+  if (blockGuideImage) {
+    await context.route(
+      origin + "/tt-drama-code-assets/" + GUIDE_ASSET_NAME,
+      route => route.fulfill({ status: 404, contentType: "text/plain", body: "missing" })
+    );
   }
   await context.route("https://static-v1.mydramawave.com/**", route => {
     route.abort();
@@ -230,10 +250,16 @@ async function openPage(
   return { context, page, response };
 }
 
-async function openStaticFirstPaint(browser, origin, locale, entryPath = "/tt") {
+async function openStaticFirstPaint(
+  browser,
+  origin,
+  locale,
+  entryPath = "/tt",
+  viewport = { width: 390, height: 844 }
+) {
   const context = await browser.newContext({
     locale,
-    viewport: { width: 390, height: 844 }
+    viewport
   });
   await context.route(origin + "/tt-drama-code-assets/**", route => {
     route.abort();
@@ -280,6 +306,28 @@ async function main() {
     checks += 1;
     assert.equal(await english.page.locator("#stories").getAttribute("aria-busy"), "false");
     checks += 1;
+    assert.equal(await english.page.locator("#code-guide").getAttribute("open"), null);
+    checks += 1;
+    assert.equal(
+      await english.page.locator("#code-guide-title").textContent(),
+      "Where to find the code"
+    );
+    checks += 1;
+    await english.page.locator("#code-guide summary").focus();
+    await english.page.keyboard.press("Enter");
+    assert.equal(await english.page.locator("#code-guide").getAttribute("open"), "");
+    checks += 1;
+    await english.page.waitForFunction(() => {
+      const image = document.querySelector(".code-guide-image");
+      return image && image.complete && image.naturalWidth === 720;
+    });
+    checks += 1;
+    if (process.env.TT_CODE_GUIDE_SCREENSHOT_PATH) {
+      await english.page.screenshot({
+        path: process.env.TT_CODE_GUIDE_SCREENSHOT_PATH,
+        fullPage: true
+      });
+    }
     if (process.env.TT_CODE_EN_SCREENSHOT_PATH) {
       await english.page.screenshot({
         path: process.env.TT_CODE_EN_SCREENSHOT_PATH,
@@ -289,10 +337,29 @@ async function main() {
     await english.page.locator("#drama-query").fill("a1b2");
     await english.page.locator("#search-form").evaluate(form => form.requestSubmit());
     await english.page.locator("#result.visible").waitFor();
+    assert.equal(await english.page.locator("#code-guide").isVisible(), false);
+    checks += 1;
+    assert.equal(await english.page.locator("#code-guide").getAttribute("open"), null);
+    checks += 1;
     assert.match(
       await english.page.locator("#continue-link").getAttribute("href"),
       /af_channel=TT/
     );
+    checks += 1;
+    await english.page.locator("#drama-query").fill("bad");
+    await english.page.locator("#search-form").evaluate(form => form.requestSubmit());
+    assert.equal(await english.page.locator("#result").isVisible(), false);
+    checks += 1;
+    assert.equal(
+      await english.page.locator("#search-helper").evaluate(element =>
+        element.classList.contains("error")
+      ),
+      true
+    );
+    checks += 1;
+    assert.equal(await english.page.locator("#code-guide").isVisible(), true);
+    checks += 1;
+    assert.equal(await english.page.locator("#code-guide").getAttribute("open"), null);
     checks += 1;
     await english.context.close();
 
@@ -312,7 +379,49 @@ async function main() {
     checks += 1;
     assert.equal(await staticChinese.page.locator("#drama-query").isVisible(), true);
     checks += 1;
+    assert.equal(
+      await staticChinese.page.locator("#code-guide-title").textContent(),
+      "在哪里找代码"
+    );
+    checks += 1;
+    await staticChinese.page.locator("#code-guide summary").click();
+    assert.equal(
+      await staticChinese.page.locator("#code-guide").getAttribute("open"),
+      ""
+    );
+    checks += 1;
     await staticChinese.context.close();
+
+    const compactLocaleTags = [
+      "en-US", "es-ES", "pt-BR", "th-TH", "id-ID", "ja-JP", "tr-TR",
+      "fr-FR", "ar-SA", "de-DE", "pl-PL", "ko-KR", "ru-RU", "it-IT",
+      "vi-VN", "ro-RO", "cs-CZ", "fil-PH", "hi-IN", "el-GR", "ms-MY",
+      "zh-CN", "zh-TW"
+    ];
+    for (const localeTag of compactLocaleTags) {
+      const compactLocale = await openStaticFirstPaint(
+        browser,
+        origin,
+        localeTag,
+        "/tt",
+        { width: 320, height: 568 }
+      );
+      assert.equal(
+        await compactLocale.page.evaluate(() =>
+          document.documentElement.scrollWidth <= window.innerWidth
+        ),
+        true,
+        localeTag + " guide layout overflowed at 320px"
+      );
+      checks += 1;
+      assert.equal(
+        await compactLocale.page.locator("#code-guide summary").isVisible(),
+        true,
+        localeTag + " guide summary is not visible"
+      );
+      checks += 1;
+      await compactLocale.context.close();
+    }
 
     const chinese = await openPage(browser, origin, "zh-CN");
     assert.equal(
@@ -323,6 +432,11 @@ async function main() {
     assert.equal(
       await chinese.page.locator("#page-title").textContent(),
       "输入代码，继续观看"
+    );
+    checks += 1;
+    assert.equal(
+      await chinese.page.locator("#code-guide-title").textContent(),
+      "在哪里找代码"
     );
     checks += 1;
     assert.equal(
@@ -421,6 +535,11 @@ async function main() {
     assert.equal(await arabic.page.locator("#stories").getAttribute("dir"), "ltr");
     checks += 1;
     assert.equal(
+      await arabic.page.locator("#code-guide-title").textContent(),
+      "أين تجد الرمز"
+    );
+    checks += 1;
+    assert.equal(
       await arabic.page.locator("#stories").getAttribute("data-language"),
       "ar"
     );
@@ -475,7 +594,59 @@ async function main() {
       true
     );
     checks += 1;
+    await mobile.page.locator("#code-guide summary").click();
+    assert.equal(
+      await mobile.page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth
+      ),
+      true
+    );
+    checks += 1;
+    if (process.env.TT_CODE_MOBILE_GUIDE_SCREENSHOT_PATH) {
+      await mobile.page.screenshot({
+        path: process.env.TT_CODE_MOBILE_GUIDE_SCREENSHOT_PATH,
+        fullPage: true
+      });
+    }
     await mobile.context.close();
+
+    const compactMobile = await openPage(
+      browser,
+      origin,
+      "en-US",
+      "/tt",
+      { width: 320, height: 568 }
+    );
+    await compactMobile.page.locator("#code-guide summary").click();
+    assert.equal(
+      await compactMobile.page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth
+      ),
+      true
+    );
+    checks += 1;
+    await compactMobile.context.close();
+
+    const brokenGuideImage = await openPage(
+      browser,
+      origin,
+      "en-US",
+      "/tt",
+      { width: 390, height: 844 },
+      "",
+      true
+    );
+    await brokenGuideImage.page.locator("#drama-query").fill("a1b2");
+    await brokenGuideImage.page.locator("#search-form").evaluate(form => {
+      form.requestSubmit();
+    });
+    await brokenGuideImage.page.locator("#result.visible").waitFor();
+    assert.equal(
+      await brokenGuideImage.page.locator("#stories .story").count(),
+      5
+    );
+    checks += 1;
+    await brokenGuideImage.context.close();
 
     const featuredRequests = local.requests.filter(value =>
       value.includes("source=Featured")

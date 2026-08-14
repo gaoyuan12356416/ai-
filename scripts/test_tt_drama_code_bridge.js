@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const childProcess = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const bridge = require("../static/tt-drama-code-search.js");
@@ -721,6 +722,13 @@ ok(html.includes('id="stories-previous"'));
 ok(html.includes('id="stories-next"'));
 ok(html.includes("Enter the code and"));
 ok(/id="page-title-accent"[^>]*>keep watching<\/span>/.test(html));
+ok(html.includes('id="code-guide"'));
+ok(html.includes('data-i18n-key="guideTitle"'));
+ok(html.includes('data-i18n-key="guideNote"'));
+ok(html.includes('data-i18n-attr-alt="guideImageAlt"'));
+ok(html.includes('/tt-drama-code-assets/tt-code-location-guide.0b42fbc64ab4.webp'));
+ok(html.includes('loading="lazy"'));
+ok(html.includes(".result.visible + .code-guide { display: none; }"));
 ok(!html.includes('class="intro"'));
 ok(html.includes("overflow-x: auto;"));
 ok(html.includes("scroll-snap-type: x proximity;"));
@@ -778,6 +786,10 @@ ok(
 ok(codeNginx.includes("location = /tt-code {"));
 ok(codeNginx.includes("location = /tt-drama-code-search.js {"));
 ok(codeNginx.includes("/tt-drama-code-assets/tt-drama-code-search\\."));
+ok(codeNginx.includes(
+  "location = /tt-drama-code-assets/tt-code-location-guide.0b42fbc64ab4.webp"
+));
+ok(codeNginx.includes("default_type image/webp;"));
 ok(codeNginx.includes("location = /api/public/tt-code/resolve {"));
 ok(codeNginx.includes("location = /api/public/tt-drama/featured-by-language {"));
 ok(codeNginx.includes("featured-by-language/(?<tt_featured_language>"));
@@ -844,6 +856,22 @@ const assetFileNames = fs.readdirSync(generatedAssetDirectory).filter(name => (
   /^tt-drama-code-search\.[a-f0-9]{12}\.js$/.test(name)
 ));
 equal(assetFileNames.length, 1);
+const guideAssetFileNames = fs.readdirSync(generatedAssetDirectory).filter(name => (
+  /^tt-code-location-guide\.[a-f0-9]{12}\.webp$/.test(name)
+));
+equal(guideAssetFileNames.length, 1);
+const guideAssetBytes = fs.readFileSync(
+  path.join(generatedAssetDirectory, guideAssetFileNames[0])
+);
+const guideAssetDigest = crypto
+  .createHash("sha256")
+  .update(guideAssetBytes)
+  .digest("hex");
+equal(
+  guideAssetFileNames[0],
+  "tt-code-location-guide." + guideAssetDigest.slice(0, 12) + ".webp",
+  "the guide asset filename must match its content digest"
+);
 const englishGeneratedHtml = fs.readFileSync(
   path.join(generatedLocaleDirectory, "en.html"),
   "utf8"
@@ -851,7 +879,24 @@ const englishGeneratedHtml = fs.readFileSync(
 ok(englishGeneratedHtml.includes(
   'src="/tt-drama-code-assets/' + assetFileNames[0] + '"'
 ));
+ok(englishGeneratedHtml.includes("Where to find the code"));
+ok(englishGeneratedHtml.includes(
+  'alt="Example showing where the four-character code appears in a video caption"'
+));
 ok(!englishGeneratedHtml.includes("data-i18n-"));
+
+const guideAssetPath = "/tt-drama-code-assets/" + guideAssetFileNames[0];
+for (const localeFileName of localeFileNames) {
+  const localeHtml = fs.readFileSync(
+    path.join(generatedLocaleDirectory, localeFileName),
+    "utf8"
+  );
+  equal(
+    (localeHtml.split(guideAssetPath).length - 1),
+    2,
+    localeFileName + " must use the same guide asset for thumbnail and full image"
+  );
+}
 
 for (const args of [
   [

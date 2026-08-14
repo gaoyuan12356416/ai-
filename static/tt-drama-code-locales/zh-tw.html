@@ -11,7 +11,7 @@
     content="default-src 'self'; img-src 'self' https://ads-cdn.yingliang.tech https://cdn.usrgrow.com https://static.mydramawave.com https://static-v1.mydramawave.com https://static-v2.mydramawave.com data:; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
   >
   <title>輸入代碼繼續觀看 | DramaWave</title>
-  <script src="/tt-drama-code-assets/tt-drama-code-search.e907e1e2a988.js" defer></script>
+  <script src="/tt-drama-code-assets/tt-drama-code-search.45ea9a9af6ac.js" defer></script>
   <style>
     :root {
       color-scheme: dark;
@@ -266,6 +266,104 @@
     }
 
     .helper.error { color: #ff8eaf; }
+
+    .code-guide {
+      margin-top: 12px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background:
+        radial-gradient(circle at 92% 8%, rgba(255, 45, 112, .12), transparent 35%),
+        linear-gradient(155deg, rgba(31, 22, 47, .96), rgba(17, 12, 29, .94));
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .25);
+    }
+
+    .code-guide[open] {
+      border-color: rgba(255, 255, 255, .16);
+    }
+
+    .result.visible + .code-guide { display: none; }
+
+    .code-guide-summary {
+      display: grid;
+      grid-template-columns: 56px minmax(0, 1fr) 28px;
+      gap: 12px;
+      align-items: center;
+      padding: 10px;
+      list-style: none;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .code-guide-summary::-webkit-details-marker { display: none; }
+
+    .code-guide-summary:focus-visible {
+      outline: 2px solid rgba(255, 90, 140, .9);
+      outline-offset: -3px;
+      border-radius: 18px;
+    }
+
+    .code-guide-thumb {
+      width: 56px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .14);
+      border-radius: 11px;
+      aspect-ratio: 3 / 4;
+      background: #050505;
+      box-shadow: 0 8px 18px rgba(0, 0, 0, .3);
+    }
+
+    .code-guide-thumb img,
+    .code-guide-image {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .code-guide-thumb img {
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .code-guide-copy { min-width: 0; }
+
+    .code-guide-title {
+      display: block;
+      color: #fff;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .code-guide-note {
+      display: block;
+      margin-top: 4px;
+      color: #9b91a7;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .code-guide-chevron {
+      width: 20px;
+      height: 20px;
+      justify-self: center;
+      color: #a89eaf;
+      transition: transform .2s ease, color .2s ease;
+    }
+
+    .code-guide[open] .code-guide-chevron {
+      color: #ff7da5;
+      transform: rotate(180deg);
+    }
+
+    .code-guide-expanded {
+      padding: 0 10px 10px;
+    }
+
+    .code-guide-image {
+      border: 1px solid rgba(255, 255, 255, .11);
+      border-radius: 14px;
+      background: #000;
+    }
 
     .result {
       display: none;
@@ -735,6 +833,42 @@
             </svg>
           </a>
         </article>
+
+        <details class="code-guide" id="code-guide">
+          <summary class="code-guide-summary">
+            <span class="code-guide-thumb" aria-hidden="true">
+              <img
+                src="/tt-drama-code-assets/tt-code-location-guide.0b42fbc64ab4.webp"
+                width="720"
+                height="960"
+                alt=""
+                loading="lazy"
+                decoding="async"
+                fetchpriority="low"
+              >
+            </span>
+            <span class="code-guide-copy">
+              <strong class="code-guide-title" id="code-guide-title">在哪裡找代碼</strong>
+              <span class="code-guide-note" id="code-guide-note">在影片文案中找到 4 位代碼。</span>
+            </span>
+            <svg class="code-guide-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path d="m6 9 6 6 6-6"></path>
+            </svg>
+          </summary>
+          <div class="code-guide-expanded">
+            <img
+              class="code-guide-image"
+              src="/tt-drama-code-assets/tt-code-location-guide.0b42fbc64ab4.webp"
+              width="720"
+              height="960"
+              alt="範例：4 位代碼在影片文案中的位置"
+
+              loading="lazy"
+              decoding="async"
+              fetchpriority="low"
+            >
+          </div>
+        </details>
       </section>
 
       <section aria-labelledby="recent-title">

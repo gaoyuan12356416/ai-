@@ -84,7 +84,125 @@
     featuredStory: "Featured story"
   });
 
-  const COPY = Object.freeze({
+  const GUIDE_COPY = Object.freeze({
+    en: Object.freeze({
+      guideTitle: "Where to find the code",
+      guideNote: "Look in the video caption for a 4-character code.",
+      guideImageAlt: "Example showing where the four-character code appears in a video caption"
+    }),
+    es: Object.freeze({
+      guideTitle: "Dónde encontrar el código",
+      guideNote: "Busca en el texto del video un código de 4 caracteres.",
+      guideImageAlt: "Ejemplo que muestra dónde aparece el código de cuatro caracteres en el texto del video"
+    }),
+    pt: Object.freeze({
+      guideTitle: "Onde encontrar o código",
+      guideNote: "Procure na legenda do vídeo um código de 4 caracteres.",
+      guideImageAlt: "Exemplo mostrando onde o código de quatro caracteres aparece na legenda do vídeo"
+    }),
+    th: Object.freeze({
+      guideTitle: "ค้นหาโค้ดได้ที่ไหน",
+      guideNote: "ดูโค้ด 4 ตัวอักษรในคำบรรยายวิดีโอ",
+      guideImageAlt: "ตัวอย่างตำแหน่งที่โค้ด 4 ตัวอักษรปรากฏในคำบรรยายวิดีโอ"
+    }),
+    id: Object.freeze({
+      guideTitle: "Di mana menemukan kode",
+      guideNote: "Cari kode 4 karakter di keterangan video.",
+      guideImageAlt: "Contoh lokasi kode empat karakter di keterangan video"
+    }),
+    ja: Object.freeze({
+      guideTitle: "コードの確認場所",
+      guideNote: "動画のキャプションにある4文字のコードを確認してください。",
+      guideImageAlt: "動画のキャプションに4文字のコードが表示される場所の例"
+    }),
+    tr: Object.freeze({
+      guideTitle: "Kodu nerede bulabilirsiniz?",
+      guideNote: "Video açıklamasında 4 karakterli kodu bulun.",
+      guideImageAlt: "Dört karakterli kodun video açıklamasında göründüğü yeri gösteren örnek"
+    }),
+    fr: Object.freeze({
+      guideTitle: "Où trouver le code",
+      guideNote: "Cherchez un code à 4 caractères dans la légende de la vidéo.",
+      guideImageAlt: "Exemple montrant où apparaît le code à quatre caractères dans la légende de la vidéo"
+    }),
+    ar: Object.freeze({
+      guideTitle: "أين تجد الرمز",
+      guideNote: "ابحث في وصف الفيديو عن رمز مكوّن من 4 أحرف.",
+      guideImageAlt: "مثال يوضح مكان ظهور الرمز المكوّن من أربعة أحرف في وصف الفيديو"
+    }),
+    de: Object.freeze({
+      guideTitle: "Wo du den Code findest",
+      guideNote: "Suche in der Videobeschreibung nach einem 4-stelligen Code.",
+      guideImageAlt: "Beispiel, wo der vierstellige Code in der Videobeschreibung erscheint"
+    }),
+    pl: Object.freeze({
+      guideTitle: "Gdzie znaleźć kod",
+      guideNote: "Znajdź 4-znakowy kod w opisie filmu.",
+      guideImageAlt: "Przykład pokazujący, gdzie w opisie filmu znajduje się czteroznakowy kod"
+    }),
+    ko: Object.freeze({
+      guideTitle: "코드를 찾는 위치",
+      guideNote: "영상 캡션에서 4자리 코드를 확인하세요.",
+      guideImageAlt: "영상 캡션에 4자리 코드가 표시되는 위치의 예"
+    }),
+    ru: Object.freeze({
+      guideTitle: "Где найти код",
+      guideNote: "Найдите 4-значный код в описании видео.",
+      guideImageAlt: "Пример того, где в описании видео находится четырёхзначный код"
+    }),
+    it: Object.freeze({
+      guideTitle: "Dove trovare il codice",
+      guideNote: "Cerca un codice di 4 caratteri nella didascalia del video.",
+      guideImageAlt: "Esempio che mostra dove appare il codice di quattro caratteri nella didascalia del video"
+    }),
+    vi: Object.freeze({
+      guideTitle: "Tìm mã ở đâu",
+      guideNote: "Tìm mã gồm 4 ký tự trong chú thích video.",
+      guideImageAlt: "Ví dụ cho biết mã bốn ký tự xuất hiện ở đâu trong chú thích video"
+    }),
+    ro: Object.freeze({
+      guideTitle: "Unde găsești codul",
+      guideNote: "Caută un cod de 4 caractere în descrierea videoclipului.",
+      guideImageAlt: "Exemplu care arată unde apare codul de patru caractere în descrierea videoclipului"
+    }),
+    cs: Object.freeze({
+      guideTitle: "Kde najít kód",
+      guideNote: "V popisku videa najděte čtyřznakový kód.",
+      guideImageAlt: "Příklad ukazující, kde se v popisku videa nachází čtyřznakový kód"
+    }),
+    tl: Object.freeze({
+      guideTitle: "Saan makikita ang code",
+      guideNote: "Hanapin ang 4-character code sa caption ng video.",
+      guideImageAlt: "Halimbawa kung saan makikita ang apat na character na code sa caption ng video"
+    }),
+    hi: Object.freeze({
+      guideTitle: "कोड कहाँ मिलेगा",
+      guideNote: "वीडियो के कैप्शन में 4 अक्षरों वाला कोड देखें।",
+      guideImageAlt: "वीडियो के कैप्शन में चार अक्षरों वाला कोड कहाँ दिखाई देता है, इसका उदाहरण"
+    }),
+    el: Object.freeze({
+      guideTitle: "Πού θα βρείτε τον κωδικό",
+      guideNote: "Βρείτε τον κωδικό 4 χαρακτήρων στη λεζάντα του βίντεο.",
+      guideImageAlt: "Παράδειγμα που δείχνει πού εμφανίζεται ο κωδικός τεσσάρων χαρακτήρων στη λεζάντα του βίντεο"
+    }),
+    ms: Object.freeze({
+      guideTitle: "Tempat mencari kod",
+      guideNote: "Cari kod 4 aksara dalam kapsyen video.",
+      guideImageAlt: "Contoh yang menunjukkan tempat kod empat aksara muncul dalam kapsyen video"
+    }),
+    "zh-hans": Object.freeze({
+      guideTitle: "在哪里找代码",
+      guideNote: "在视频文案中找到 4 位代码。",
+      guideImageAlt: "示例：4 位代码在视频文案中的位置"
+    }),
+    "zh-tw": Object.freeze({
+      guideTitle: "在哪裡找代碼",
+      guideNote: "在影片文案中找到 4 位代碼。",
+      guideImageAlt: "範例：4 位代碼在影片文案中的位置"
+    })
+  });
+
+  const BASE_COPY = Object.freeze({
     en: EN_COPY,
     es: Object.freeze({
       documentTitle: "Ingresa el código y sigue viendo | DramaWave",
@@ -1034,6 +1152,19 @@
     })
   });
 
+  const COPY = Object.freeze(Object.keys(BASE_COPY).reduce(
+    function (result, locale) {
+      const copy = BASE_COPY[locale];
+      const guideCopy = GUIDE_COPY[locale];
+      if (!guideCopy) {
+        throw new Error("Missing guide copy for locale " + locale);
+      }
+      result[locale] = Object.freeze(Object.assign({}, copy, guideCopy));
+      return result;
+    },
+    {}
+  ));
+
   function normalizeLanguageTag(value) {
     const normalized = String(value == null ? "" : value)
       .trim()
@@ -1138,11 +1269,11 @@
   }
 
   function copyText(locale, key, values) {
-    const selected = COPY[locale] || EN_COPY;
+    const selected = COPY[locale] || COPY.en;
     let text = String(
       Object.prototype.hasOwnProperty.call(selected, key)
         ? selected[key]
-        : EN_COPY[key] || ""
+        : COPY.en[key] || ""
     );
     for (const [name, value] of Object.entries(values || {})) {
       text = text.split("{" + name + "}").join(String(value));
@@ -2164,6 +2295,9 @@
     setAttribute("#drama-query", "placeholder", "placeholder");
     setAttribute("#search-button", "aria-label", "findAria");
     setText("#search-helper", "helperInitial");
+    setText("#code-guide-title", "guideTitle");
+    setText("#code-guide-note", "guideNote");
+    setAttribute(".code-guide-image", "alt", "guideImageAlt");
     setText("#match-badge", "matchConfirmed");
     setText("#continue-text", "continueText");
     setText("#recent-title", "recentTitle");
@@ -2199,6 +2333,7 @@
     const searchButton = document.querySelector("#search-button");
     const helper = document.querySelector("#search-helper");
     const result = document.querySelector("#result");
+    const codeGuide = document.querySelector("#code-guide");
     const resultTitle = document.querySelector("#result-title");
     const resultMeta = document.querySelector("#result-meta");
     const resultDescription = document.querySelector("#result-description");
@@ -2303,6 +2438,9 @@
       continueText.textContent = copyText(locale, "continueText");
       result.dataset.routeMode = route.route_mode;
       result.dataset.queryType = route.query_type;
+      if (codeGuide) {
+        codeGuide.open = false;
+      }
       result.classList.add("visible");
       helper.classList.remove("error");
       helper.textContent = copyText(locale, "matchMessage");
