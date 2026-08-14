@@ -597,7 +597,7 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
         ), mock.patch.object(
             oauth_service,
             "verify_account",
-            side_effect=lambda account_id, *_args: self.account(account_id),
+            side_effect=lambda account_id, *_args, **_kwargs: self.account(account_id),
         ), mock.patch.object(
             oauth_service,
             "publish_credentials",
@@ -666,7 +666,7 @@ class PremiumRelaySidecarOrchestrationTests(PremiumRelayStoreTests):
         ), mock.patch.object(
             oauth_service,
             "verify_account",
-            side_effect=lambda account_id, *_args: self.account(account_id),
+            side_effect=lambda account_id, *_args, **_kwargs: self.account(account_id),
         ), mock.patch.object(
             oauth_service,
             "publish_credentials",

@@ -42158,6 +42158,7 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_manual_source_mismatch": (409, "手动发布素材来源日期发生变化"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
     "x_token_revoked": (409, "X授权已失效，请重新授权"),
+    "x_token_invalid": (409, "Token失效，请重新登陆"),
     "x_upstream_error": (502, "X API请求失败，请稍后重试"),
     "x_accounts_unavailable": (503, "X账号服务暂不可用"),
 }

@@ -1,3 +1,10 @@
+## 2026-08-14 X Token expiry without active publish gate
+
+- Changed the projected expired-token status from `refresh_required` to `expired` and rendered it as “已到期” from the stored X access-token expiry timestamp.
+- Removed `status=active` as a publishing eligibility requirement across manual, daily, catch-up, scheduled, and automatic-template publishing while retaining explicit publish approval and soft-disable controls.
+- Stopped automatic pre-publish token refresh; expired, missing, or upstream-401 credentials now fail normally as `x_token_invalid` with “Token失效，请重新登陆” persisted in the publish log.
+- Kept explicit account sync and OAuth reauthorization able to refresh the token and update its expiry timestamp, and retained no-refresh live entitlement checks for videos over 140 seconds.
+
 ## 2026-08-06 unified TT publishing logs
 
 - Added a standalone TT publishing-log page that combines material-pool and automatic-template tasks while keeping source and trigger semantics separate.

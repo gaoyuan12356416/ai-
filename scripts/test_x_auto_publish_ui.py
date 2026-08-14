@@ -242,9 +242,8 @@ class XAutoPublishUiTest(unittest.TestCase):
             source.index("  function accountRefreshable(item) {") :
             source.index("  function accountEligibilityText(item) {")
         ]
-        self.assertIn("!accountEligible(item)", refreshable)
         self.assertIn("accountApproved(item)", refreshable)
-        self.assertIn('=== "refresh_required"', refreshable)
+        self.assertIn('=== "expired"', refreshable)
 
         load_accounts = source[
             source.index("  async function loadAccounts() {") :

@@ -823,21 +823,14 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
 
         @contextlib.contextmanager
         def credentials(*_args, **_kwargs):
-            yield ({"id": 51}, "secret-token")
-
-        def recover_before_account_lock(*_args, **_kwargs):
             store.recover_auto_template_run(run["id"])
-            return {"id": 51}
+            yield ({"id": 51}, "secret-token")
 
         api = (service.XPostError, lambda _path: store, upstream_publish)
         with mock.patch.object(
             oauth_service,
             "_x_posts_api",
             return_value=api,
-        ), mock.patch.object(
-            oauth_service,
-            "verify_account",
-            side_effect=recover_before_account_lock,
         ), mock.patch.object(
             oauth_service,
             "publish_credentials",

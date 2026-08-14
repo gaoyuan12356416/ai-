@@ -118,6 +118,7 @@ FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES = {
 FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
     {
         "x_token_missing",
+        "x_token_invalid",
         "x_upstream_error",
         *FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES,
     }
@@ -13024,6 +13025,13 @@ def _json_response(response, expected_status, operation, unknown_on_success_shap
             429,
             False,
         )
+    if response.status == 401:
+        raise XPostError(
+            "x_token_invalid",
+            "Token失效，请重新登陆",
+            409,
+            False,
+        )
     if response.status != expected_status:
         detail = ""
         if isinstance(payload, dict):
@@ -13074,7 +13082,7 @@ class XApiClient:
 
     def _request(self, method, path, access_token, body=None, content_type=None, expected=200, operation="X API", unknown=False):
         if not access_token:
-            raise XPostError("x_token_missing", "X Access Token缺失", 409)
+            raise XPostError("x_token_invalid", "Token失效，请重新登陆", 409)
         headers = {"Authorization": "Bearer " + str(access_token), "Accept": "application/json"}
         if content_type:
             headers["Content-Type"] = content_type
@@ -13251,7 +13259,7 @@ def publish_canary(
     if not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
         raise XPostError("invalid_request", "X账号用户名无效", 400)
     if not access_token:
-        raise XPostError("x_token_missing", "X Access Token缺失", 409)
+        raise XPostError("x_token_invalid", "Token失效，请重新登陆", 409)
     store = XPostStore(db_path)
     queue = store.get_queue(queue_id)
     relay_delivery = bool(

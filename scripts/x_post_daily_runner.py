@@ -777,6 +777,7 @@ class SidecarClient:
         return value if isinstance(value, dict) else {}
 
     def verify_account(self, account_id):
+        """Load the current account snapshot without refreshing its X token."""
         result = self.post(
             "/internal/posts/accounts/%s/verify" % int(account_id),
             {
@@ -788,12 +789,13 @@ class SidecarClient:
                     "role": "admin",
                 },
                 "scope": "all",
+                "snapshot_only": True,
             },
         )
         item = result.get("item")
         if not isinstance(item, dict):
             raise SidecarError("x_account_invalid_response", "X account verification is invalid")
-        if item.get("status") != "active" or item.get("publish_eligible") is not True:
+        if item.get("publish_eligible") is not True:
             raise SidecarError(
                 "x_account_not_publishable",
                 "X account %s is not publishable" % int(account_id),

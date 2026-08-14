@@ -62,7 +62,7 @@
     .status { display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; }
     .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
     .status.active { color:#08734f; background:#e8f8f1; }
-    .status.refresh_required { color:#9a6000; background:#fff5dd; }
+    .status.expired { color:#9a6000; background:#fff5dd; }
     .status.disabled,.status.disconnected { color:#687894; background:#edf1f6; }
     .status.scope_missing,.status.revoked,.status.token_missing,.status.error { color:#ad2f3b; background:#ffedef; }
     .scope-list { display:flex; flex-wrap:wrap; gap:5px; max-width:290px; }
@@ -97,7 +97,7 @@
         <div id="oauthNotice" class="notice hidden"><span id="oauthNoticeText"></span><button id="dismissNotice" type="button" aria-label="关闭">×</button></div>
         <section class="stats">
           <article class="stat"><span>我的 X 账号</span><strong id="totalCount">0</strong></article>
-          <article class="stat"><span>状态有效</span><strong id="activeCount">0</strong></article>
+          <article class="stat"><span>Token 未到期</span><strong id="activeCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
           <article class="stat"><span>最近更新时间</span><strong id="latestUpdate" style="font-size:16px;line-height:1.5;">—</strong></article>
         </section>
@@ -129,7 +129,7 @@
     (() => {
       const state = { auth: null, accounts: [], config: null, busy: false };
       const statusMeta = {
-        active: ["有效", "active"], refresh_required: ["待刷新", "refresh_required"],
+        active: ["有效", "active"], expired: ["已到期", "expired"],
         scope_missing: ["权限不完整", "scope_missing"], revoked: ["授权已失效", "revoked"],
         token_missing: ["缺少Token", "token_missing"], revoke_pending: ["旧退出待处理", "error"],
         disabled: ["已停用", "disabled"], disconnected: ["已解除授权", "disconnected"],

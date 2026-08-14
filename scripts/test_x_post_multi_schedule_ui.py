@@ -92,7 +92,8 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('timezone: "Asia/Shanghai"', MATERIAL)
         self.assertIn("version: state.schedule.version", MATERIAL)
         self.assertIn("accountEligible(item)", MATERIAL)
-        self.assertIn('item.status === "active"', MATERIAL)
+        self.assertNotIn('item.status === "active"', MATERIAL)
+        self.assertIn("item.publish_eligible === true", MATERIAL)
         self.assertIn("item.publish_eligible === true", MATERIAL)
         self.assertIn("每日最多", MATERIAL)
 
@@ -138,7 +139,7 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("历史发布账号 · 免费剧集已完成", DRAMA)
         self.assertIn("state.schedule.nextDueAt", DRAMA)
         self.assertIn(
-            "不可发布，请校验或重新授权",
+            "不可发布，请重新授权",
             DRAMA,
         )
         self.assertNotIn("不可发布，请移除", DRAMA)
@@ -185,26 +186,11 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('setTableEmpty("dramaRows", 10,', DRAMA)
         self.assertNotIn('setTableEmpty("dramaRows", 9,', DRAMA)
 
-    def test_drama_pool_auto_verifies_only_refresh_required_accounts(self):
-        self.assertIn(
-            'item.status === "refresh_required"',
-            DRAMA,
-        )
-        self.assertIn("const AUTO_VERIFY_CONCURRENCY = 3", DRAMA)
-        self.assertIn("async function autoVerifyAccountOptions()", DRAMA)
-        self.assertIn(
-            "/api/admin/x-posts/drama-pool/account-options/${id}/verify",
-            DRAMA,
-        )
-        self.assertIn('{ method: "POST", body: "{}" }', DRAMA)
-        self.assertIn("await autoVerifyAccountOptions()", DRAMA)
-        self.assertIn("state.accountVerifyBusy", DRAMA)
-        self.assertIn('error.code === "x_post_rate_limited"', DRAMA)
-        self.assertIn("stopRequested = true", DRAMA)
-        self.assertIn("deferred: Math.max(0, targets.length - attempted)", DRAMA)
-        self.assertIn("busy: true", DRAMA)
-        self.assertIn("button.disabled = state.accountVerifyBusy", DRAMA)
-        self.assertIn('item.status === "active"', DRAMA)
+    def test_drama_pool_does_not_auto_refresh_expired_accounts(self):
+        self.assertNotIn("AUTO_VERIFY_CONCURRENCY", DRAMA)
+        self.assertNotIn("autoVerifyAccountOptions", DRAMA)
+        self.assertNotIn("/account-options/${id}/verify", DRAMA)
+        self.assertNotIn('item.status === "active"', DRAMA)
         self.assertIn("item.publish_eligible === true", DRAMA)
 
     def test_drama_pool_exposes_reversible_high_priority_without_rewriting_age(self):

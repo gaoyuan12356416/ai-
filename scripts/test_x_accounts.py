@@ -935,14 +935,27 @@ class XAccountsTestCase(unittest.TestCase):
         service.set_account_drama_language(
             japanese["id"], "ja", self.admin
         )
-        items = service._premium_relay_accounts(
-            "2026-08-14",
-            refresh=False,
-            drama_language="jp",
-        )
+        with mock.patch.object(
+            service,
+            "verify_account",
+            side_effect=lambda account_id, *_args, **_kwargs: service.find_account(
+                account_id
+            ),
+        ) as verify:
+            items = service._premium_relay_accounts(
+                "2026-08-14",
+                refresh=False,
+                drama_language="jp",
+            )
         self.assertEqual([item["id"] for item in items], [japanese["id"]])
         self.assertEqual(items[0]["drama_language"], "ja")
         self.assertNotIn(english["id"], [item["id"] for item in items])
+        self.assertTrue(
+            all(
+                call.kwargs.get("allow_token_refresh") is False
+                for call in verify.call_args_list
+            )
+        )
 
     def test_drama_language_update_supports_split_post_database_atomically(self):
         item = self.complete(username="split_language_guard")
@@ -1031,7 +1044,7 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual(token_file.read_text(encoding="utf-8"), "not-json")
         self.assertIn("authorization_url", service.create_authorization(self.owner))
 
-    def test_publish_credentials_require_active_status_and_access_token(self):
+    def test_publish_credentials_ignore_projected_status_but_require_access_token(self):
         item = self.complete(username="publishable")
         with service.publish_credentials(item["id"], self.owner) as (account, access_token):
             self.assertTrue(account["publish_eligible"])
@@ -1041,10 +1054,9 @@ class XAccountsTestCase(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
             conn.execute("UPDATE x_authorized_account SET status='error' WHERE id=?", (item["id"],))
             conn.commit()
-        with self.assertRaises(service.ServiceError) as not_publishable:
-            with service.publish_credentials(item["id"], self.owner):
-                self.fail("non-active account must not yield publishing credentials")
-        self.assertEqual(not_publishable.exception.code, "x_account_not_publishable")
+        with service.publish_credentials(item["id"], self.owner) as (account, access_token):
+            self.assertEqual(account["status"], "error")
+            self.assertEqual(access_token, "access-secret")
 
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
             conn.execute("UPDATE x_authorized_account SET status='active' WHERE id=?", (item["id"],))
@@ -1055,9 +1067,10 @@ class XAccountsTestCase(unittest.TestCase):
         with self.assertRaises(service.ServiceError) as token_missing:
             with service.publish_credentials(item["id"], self.owner):
                 self.fail("account without access token must not publish")
-        self.assertEqual(token_missing.exception.code, "x_token_missing")
+        self.assertEqual(token_missing.exception.code, "x_token_invalid")
+        self.assertEqual(str(token_missing.exception), "Token失效，请重新登陆")
 
-    def test_canary_refreshes_expired_token_and_publishes_under_account_lock(self):
+    def test_canary_does_not_refresh_expired_token(self):
         item = self.complete(username="old_username")
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
             conn.execute(
@@ -1065,44 +1078,18 @@ class XAccountsTestCase(unittest.TestCase):
                 ("2000-01-01T00:00:00Z", item["id"]),
             )
             conn.commit()
-        refreshed = {
-            "access_token": "new-access-secret",
-            "refresh_token": "new-refresh-secret",
-            "token_type": "bearer",
-            "expires_in": 7200,
-            "scope": " ".join(service.SCOPES),
-        }
-        profile = {
-            "data": {
-                "id": item["x_user_id"],
-                "username": "canary_user",
-                "name": "Canary User",
-            }
-        }
         captured = {}
         fake_api = self.fake_x_posts_api(captured)
-        with mock.patch.object(service, "token_request", return_value=refreshed) as refresh_mock, \
-                mock.patch.object(service, "user_request", return_value=profile), \
+        with mock.patch.object(service, "token_request") as refresh_mock, \
+                mock.patch.object(service, "user_request") as user_mock, \
                 mock.patch.object(service, "_x_posts_api", return_value=fake_api):
-            result = service.publish_canary_request(self.canary_payload(item))
-
-        refresh_mock.assert_called_once_with(
-            {"grant_type": "refresh_token", "refresh_token": "refresh-secret"}
-        )
-        self.assertEqual(captured["publish_calls"], 1)
-        self.assertEqual(captured["publish_kwargs"]["access_token"], "new-access-secret")
-        self.assertEqual(captured["enqueued"]["account_id"], item["id"])
-        self.assertEqual(captured["enqueued"]["account_username"], "canary_user")
-        self.assertNotIn("queue_id", captured["enqueued"])
-        self.assertNotIn("source_queue_id", captured["enqueued"])
-        self.assertNotIn("idempotency_key", captured["enqueued"])
-        self.assertEqual(captured["enqueued"]["page_name"], "Canary User")
-        self.assertEqual(captured["enqueued"]["page_id"], item["x_user_id"])
-        self.assertEqual(captured["publish_kwargs"]["account"]["username"], "canary_user")
-        self.assertEqual(result["status"], "published")
-        self.assertNotIn("access_token", result)
-        saved = json.loads(service.token_path(item["x_user_id"]).read_text(encoding="utf-8"))
-        self.assertEqual(saved["refresh_token"], "new-refresh-secret")
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_canary_request(self.canary_payload(item))
+        self.assertEqual(caught.exception.code, "x_token_invalid")
+        self.assertEqual(str(caught.exception), "Token失效，请重新登陆")
+        refresh_mock.assert_not_called()
+        user_mock.assert_not_called()
+        self.assertNotIn("publish_calls", captured)
 
     def test_canary_disabled_account_fails_before_queue_or_upstream(self):
         item = self.complete(username="disabled_canary")
@@ -1232,7 +1219,7 @@ class XAccountsTestCase(unittest.TestCase):
                 ("2000-01-01T00:00:00Z", item["id"]),
             )
             conn.commit()
-        self.assertEqual(service.find_account(item["id"])["status"], "refresh_required")
+        self.assertEqual(service.find_account(item["id"])["status"], "expired")
         refreshed = {
             "access_token": "new-access-secret",
             "refresh_token": "new-refresh-secret",
@@ -1250,6 +1237,29 @@ class XAccountsTestCase(unittest.TestCase):
         refresh_mock.assert_called_once()
         saved = json.loads((service.TOKENS_DIR / "123456789.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["refresh_token"], "new-refresh-secret")
+
+    def test_publish_time_verification_never_refreshes_expired_token(self):
+        item = self.complete(username="no_publish_refresh")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", item["id"]),
+            )
+            conn.commit()
+        with mock.patch.object(service, "token_request") as refresh_mock, mock.patch.object(
+            service, "user_request"
+        ) as user_mock:
+            with self.assertRaises(service.ServiceError) as caught:
+                service.verify_account(
+                    item["id"],
+                    self.owner,
+                    allow_token_refresh=False,
+                )
+        self.assertEqual(caught.exception.code, "x_token_invalid")
+        self.assertEqual(str(caught.exception), "Token失效，请重新登陆")
+        refresh_mock.assert_not_called()
+        user_mock.assert_not_called()
+        self.assertEqual(service.find_account(item["id"])["status"], "expired")
 
     def test_auto_verify_skips_accounts_that_no_longer_need_refresh(self):
         item = self.complete()
@@ -1298,10 +1308,10 @@ class XAccountsTestCase(unittest.TestCase):
         refresh_mock.assert_not_called()
         user_mock.assert_not_called()
         current = service.find_account(item["id"])
-        self.assertEqual(current["status"], "refresh_required")
+        self.assertEqual(current["status"], "expired")
         self.assertIs(current["publish_approved"], False)
 
-    def test_auto_verify_preserves_refresh_required_after_transient_failure(self):
+    def test_auto_verify_preserves_expired_after_transient_failure(self):
         item = self.complete()
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
             conn.execute(
@@ -1334,7 +1344,7 @@ class XAccountsTestCase(unittest.TestCase):
             ).fetchone()
         self.assertEqual(stored_status, "active")
         self.assertIn("rate limit", last_error)
-        self.assertEqual(service.find_account(item["id"])["status"], "refresh_required")
+        self.assertEqual(service.find_account(item["id"])["status"], "expired")
 
     def test_manual_verify_keeps_existing_transient_failure_status_semantics(self):
         item = self.complete()
@@ -1355,7 +1365,7 @@ class XAccountsTestCase(unittest.TestCase):
         ):
             with self.assertRaises(service.ServiceError):
                 service.verify_account(item["id"], self.owner)
-        self.assertEqual(service.find_account(item["id"])["status"], "error")
+        self.assertEqual(service.find_account(item["id"])["status"], "expired")
 
     def test_invalid_grant_marks_account_revoked(self):
         item = self.complete()
@@ -1365,7 +1375,7 @@ class XAccountsTestCase(unittest.TestCase):
         with mock.patch.object(service, "token_request", side_effect=service.ServiceError("x_token_revoked", "X授权已失效", 409)):
             with self.assertRaises(service.ServiceError):
                 service.verify_account(item["id"], self.owner)
-        self.assertEqual(service.find_account(item["id"])["status"], "revoked")
+        self.assertEqual(service.find_account(item["id"])["status"], "expired")
 
     def test_authorization_and_verify_events_are_sanitized(self):
         item = self.complete()
@@ -2677,13 +2687,13 @@ class XAccountsTestCase(unittest.TestCase):
 
         store = XPostStore(service.POST_DB_PATH)
         queue = store.enqueue(payload)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET status='disabled' WHERE id=?",
+                (account["id"],),
+            )
+            conn.commit()
         with mock.patch.object(
-            service,
-            "verify_account",
-            side_effect=service.ServiceError(
-                "x_account_disabled", "disabled after plan", 409
-            ),
-        ), mock.patch.object(
             service,
             "_x_posts_api",
             return_value=(XPostError, XPostStore, publish_canary),
@@ -2715,17 +2725,20 @@ class XAccountsTestCase(unittest.TestCase):
 
         store = XPostStore(service.POST_DB_PATH)
         queue = store.enqueue(payload)
-        changed = dict(account, drama_language="ja")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET drama_language='ja' WHERE id=?",
+                (account["id"],),
+            )
+            conn.commit()
         with mock.patch.object(
-            service, "verify_account", return_value=changed
-        ), mock.patch.object(
             service,
             "_x_posts_api",
-            return_value=(XPostError, XPostStore, publish_canary),
-        ), mock.patch.object(
-            service,
-            "publish_credentials",
-            side_effect=AssertionError("language mismatch must not reach X credentials"),
+            return_value=(
+                XPostError,
+                XPostStore,
+                mock.Mock(side_effect=AssertionError("must not write to X")),
+            ),
         ):
             with self.assertRaises(service.ServiceError) as caught:
                 service.publish_queue_request(queue["id"])
@@ -2740,7 +2753,7 @@ class XAccountsTestCase(unittest.TestCase):
             log["error_code"], "x_post_account_language_mismatch"
         )
 
-    def test_publish_verify_rate_limit_marks_daily_run_stopped(self):
+    def test_expired_token_marks_daily_publish_log_failed(self):
         accounts = [
             self.complete("3101", "rate_one", actor=self.owner),
             self.complete("3102", "rate_two", actor=self.owner),
@@ -2781,25 +2794,22 @@ class XAccountsTestCase(unittest.TestCase):
             candidates,
         )
         first_queue = plan["queues"][0]
-        with mock.patch.object(
-            service,
-            "verify_account",
-            side_effect=service.ServiceError(
-                "x_post_rate_limited",
-                "X API usage cap",
-                429,
-            ),
-        ):
-            with self.assertRaises(service.ServiceError) as limited:
-                service.publish_queue_request(first_queue["id"])
-        self.assertEqual(limited.exception.code, "x_post_rate_limited")
-        self.assertEqual(limited.exception.status, 429)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", accounts[0]["id"]),
+            )
+            conn.commit()
+        with self.assertRaises(service.ServiceError) as limited:
+            service.publish_queue_request(first_queue["id"])
+        self.assertEqual(limited.exception.code, "x_token_invalid")
+        self.assertEqual(str(limited.exception), "Token失效，请重新登陆")
         log = store.query_logs(
             {"account_id": accounts[0]["id"], "page": 1, "page_size": 10}
         )["items"][0]
         self.assertEqual(log["status"], "failed")
-        self.assertEqual(log["error_code"], "x_post_rate_limited")
-        self.assertEqual(store.get_run(plan["id"])["status"], "stopped")
+        self.assertEqual(log["error_code"], "x_token_invalid")
+        self.assertEqual(log["error_message"], "Token失效，请重新登陆")
 
     def test_frozen_username_mismatch_after_reservation_is_known_failure(self):
         account = self.complete("3004", "renamed_after_plan", actor=self.owner)
@@ -2911,7 +2921,7 @@ class XAccountsTestCase(unittest.TestCase):
             thread.join(timeout=5)
 
     def test_verify_client_forwards_auto_verify_guards(self):
-        expected = {"item": {"id": 12, "status": "refresh_required"}}
+        expected = {"item": {"id": 12, "status": "expired"}}
         with mock.patch.object(client, "_request", return_value=expected) as request_mock:
             result = client.verify_x_account(
                 12,

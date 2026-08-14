@@ -823,7 +823,7 @@
         return /^\d+$/.test(String(value || "")) && Number(value) > 0 ? String(value) : "";
       }
       function accountEligible(item) {
-        return !!item && item.status === "active" && item.publish_eligible === true;
+        return !!item && item.publish_eligible === true;
       }
       function subscriptionLabel(item) {
         return ({
