@@ -46,3 +46,13 @@
 - 仅切 current 不会更新 Nginx docroot；current 与 live 文件必须成对处理。
 - current 同时被 Featured asset service 读取，未评审脚本不得变化。
 - 不重启 API、Redis、TT 发布或 Featured 服务，不触发任何真实发布任务。
+
+## 生产记录
+
+- 发布提交：`b0775bc5cbaac53d47529ac366b05ed744fe5731`
+- 活动 release：`/mnt/data-disk/tt-code-performance/releases/b0775bc5cbaac53d47529ac366b05ed744fe5731`
+- 回滚包：`/mnt/data-disk/tt-code-performance/backups/20260814T182647+0800-pre-guide-6af3939`
+- 新 JS：`tt-drama-code-search.45ea9a9af6ac.js`，SHA-256 `45ea9a9af6aceeebfa1efcab7a65f38ff3defc17803291ba09c67afea52c6d8c`
+- 新 WebP：`tt-code-location-guide.0b42fbc64ab4.webp`，SHA-256 `0b42fbc64ab49e1c58a6f478a8c8c8f64c90427ce5ef78d06f8b0b145433b2c0`
+- Nginx仅reload；master PID `2164`不变，`NRestarts=0`。
+- 首次自动门禁因reload后立即命中旧worker响应头而触发完整回滚；加入最多5秒短轮询后重试成功。回滚包两次校验均通过。

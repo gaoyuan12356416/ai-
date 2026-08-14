@@ -14,7 +14,7 @@ TT Code Bridge 搜索区的 code 位置引导、23 语静态构建、同源 WebP
 | 23 语 copy 和静态构建 | Codex | JS/build/locales | 已完成 |
 | Nginx immutable 路由 | Codex | `deploy/nginx/` | 已完成 |
 | 自动化及视觉验收 | Codex | bridge/browser tests | 已完成 |
-| GitHub-first 生产发布 | Codex | 43.166.187.96 | 待执行 |
+| GitHub-first 生产发布 | Codex | 43.166.187.96 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -41,3 +41,4 @@ git diff --check
 - 2026-08-14：从干净的 `7c0141fa` worktree 新建 `codex/tt-code-location-guide-20260814`。
 - 2026-08-14：WebP 从 467,659 bytes 优化到 46,114 bytes，内容与 3:4 比例不变。
 - 2026-08-14：本地静态构建、WebP hash/23语引用门禁、233 项 bridge 断言和 107 项真实 Chrome 检查通过。
+- 2026-08-14：提交 `b0775bc5cbaac53d47529ac366b05ed744fe5731` 已推送并部署；生产Chrome、Search、Featured、404、响应头和日志验收通过。

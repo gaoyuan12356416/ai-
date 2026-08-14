@@ -10,6 +10,9 @@ const origin = String(
 ).replace(/\/$/, "");
 const executablePath = process.env.TT_CODE_CHROMIUM_EXECUTABLE || undefined;
 const expectedTitle = "\u8f93\u5165\u4ee3\u7801\uff0c\u7ee7\u7eed\u89c2\u770b";
+const expectedGuideTitle = "\u5728\u54ea\u91cc\u627e\u4ee3\u7801";
+const guideAssetPattern =
+  /^\/tt-drama-code-assets\/tt-code-location-guide\.[a-f0-9]{12}\.webp$/;
 const expectedDirectRouteMode = String(
   process.env.TT_CODE_EXPECT_DIRECT_ROUTE_MODE || "generic_fallback"
 );
@@ -132,6 +135,11 @@ async function openChinesePage(browser, disableCache) {
   assert.ok(responseHtml.includes('data-initial-locale="zh-hans"'));
   assert.ok(responseHtml.includes("\u8f93\u5165\u4ee3\u7801\uff0c"));
   assert.ok(responseHtml.includes("\u7ee7\u7eed\u89c2\u770b"));
+  assert.ok(responseHtml.includes(expectedGuideTitle));
+  assert.equal(
+    (responseHtml.match(/tt-code-location-guide\.[a-f0-9]{12}\.webp/g) || []).length,
+    2
+  );
   assert.ok(!responseHtml.includes("Enter the code and keep watching"));
   await page.waitForFunction(() => {
     const stories = document.querySelector("#stories");
@@ -169,6 +177,11 @@ async function openChinesePage(browser, disableCache) {
       new URL(url).pathname
     )
   )));
+  assert.equal(
+    requests.filter(url => guideAssetPattern.test(new URL(url).pathname)).length,
+    1,
+    "the thumbnail and expanded guide must share one network request"
+  );
   return {
     context,
     page,
@@ -197,6 +210,43 @@ async function main() {
       coldTimings.push(run.timings);
       await run.context.close();
     }
+
+    const guide = await openChinesePage(browser, false);
+    assert.equal(
+      await guide.page.locator("#code-guide-title").textContent(),
+      expectedGuideTitle
+    );
+    assert.equal(await guide.page.locator("#code-guide").getAttribute("open"), null);
+    assert.equal(
+      await guide.page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth
+      ),
+      true
+    );
+    await guide.page.locator("#code-guide summary").click();
+    await guide.page.waitForFunction(() => {
+      const image = document.querySelector(".code-guide-image");
+      return image && image.complete && image.naturalWidth === 720;
+    });
+    assert.equal(
+      await guide.page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth
+      ),
+      true
+    );
+    await guide.page.locator("#code-guide summary").click();
+    await guide.page.locator("#drama-query").fill("ZZZZ");
+    await guide.page.locator("#search-form").evaluate(form => {
+      form.requestSubmit();
+    });
+    await guide.page.waitForFunction(() => {
+      const helper = document.querySelector("#search-helper");
+      return helper && helper.classList.contains("error");
+    });
+    assert.equal(await guide.page.locator("#code-guide").isVisible(), true);
+    assert.equal(await guide.page.locator("#code-guide").getAttribute("open"), null);
+    assert.equal(guide.redirectedTargets.length, 0);
+    await guide.context.close();
 
     const featured = await openChinesePage(browser, false);
     const firstStory = featured.page.locator("#stories .story-link").first();
@@ -227,6 +277,8 @@ async function main() {
       form.requestSubmit();
     });
     await search.page.locator("#result.visible").waitFor({ timeout: 15000 });
+    assert.equal(await search.page.locator("#code-guide").isVisible(), false);
+    assert.equal(await search.page.locator("#code-guide").getAttribute("open"), null);
     const searchResult = search.resolverResults.find(result => (
       result.source === "Search"
     ));
@@ -255,6 +307,8 @@ async function main() {
       cold_runs: coldTimings,
       featured_content_id: featuredContentId,
       direct_route_mode: expectedDirectRouteMode,
+      guide_asset_requests_per_page: 1,
+      guide_invalid_code: "retained",
       featured_redirect: "intercepted",
       search_redirect: "intercepted"
     }, null, 2));
