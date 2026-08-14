@@ -13,7 +13,7 @@
 | X Auto 建 Run 前刷新 | Codex | `features/x_auto_posts/service.py` | 已完成 |
 | UI 状态与说明 | Codex | `static/x-account-list.html`, `static/x-accounts.html` | 已完成 |
 | 单元/契约/UI 回归 | Codex | `scripts/test_x*.py` | 已完成 |
-| GitHub-first 部署与回滚验证 | Codex | `doc/045...`、生产 release/backup | 待执行 |
+| GitHub-first 部署与回滚验证 | Codex | `doc/045...`、生产 release/backup | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -33,3 +33,5 @@ node --check static/quick-nav.js
 
 - 2026-08-14：生产基线与定时器原状态已留档，建立独立修复分支和工作区。
 - 2026-08-14：667 项 X 回归通过，2 项既有条件跳过；编译、JS 语法和差异检查通过。
+- 2026-08-14：GitHub 精确提交 `ddc6c0b09a5040d9b024ff1532b81c79698f4945` 已部署，服务器 216 项聚焦回归通过。
+- 2026-08-14：18:45 自然调度刷新 2 个到期账号，18:46 runner 正常结束；两个任务均为无可用素材，未创建 Queue、Log 或 X Post。

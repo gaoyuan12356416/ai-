@@ -14,6 +14,7 @@ X 账号授权、Token 刷新、素材/短剧/人工排期、X Auto、Premium re
 | --- | --- | --- | --- | --- |
 | X Python 回归 | 667 | 665 | 0 | 0 |
 | 既有条件跳过 | 2 | 2 | 0 | 0 |
+| 服务器精确 release 聚焦回归 | 216 | 216 | 0 | 0 |
 | Python 编译 | 1 | 1 | 0 | 0 |
 | JS/HTML 脚本语法 | 4 | 4 | 0 | 0 |
 | Git 差异检查 | 1 | 1 | 0 | 0 |
@@ -30,6 +31,9 @@ X 账号授权、Token 刷新、素材/短剧/人工排期、X Auto、Premium re
 - 瞬时刷新失败时发布函数调用数为 0、账号仍可续期、日志为已知失败。
 - X Auto Preview verify 调用数为 0；真实 Run 对每个账号 verify 一次后冻结 Task。
 - Relay source 完整校验、target 按需刷新，第二次幂等读取不重复执行。
+- 生产自然调度只轮换 2 份目标 Token；账号汇总为 17 个 `active/publish_eligible`，其中 2 个 `valid`、15 个 `expired_refreshable`。
+- Run 10 的两个任务均为 `x_auto_no_eligible_material`，主 X Queue/Log/Published/unknown 保持 `254/244/242/0`，无 Queue/Log/Post 标识和未知结果。
+- X/X Auto SQLite 均 `quick_check=ok`、FK 违规为 0；17 份 Token 均保持 `0600` 与服务属主。
 
 ## 遗留风险
 
