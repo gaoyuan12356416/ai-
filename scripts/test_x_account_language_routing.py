@@ -287,6 +287,28 @@ class XAccountLanguageRoutingTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(json.loads(completed.stdout)["mode"], "dry_run")
 
+    def test_oauth_sidecar_cli_imports_from_systemd_script_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            script_path = (
+                Path(__file__).resolve().parents[1]
+                / "features"
+                / "x_accounts"
+                / "oauth_service.py"
+            )
+            completed = subprocess.run(
+                [sys.executable, str(script_path), "--help"],
+                cwd=temporary,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("X OAuth account sidecar", completed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

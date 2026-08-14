@@ -30,7 +30,11 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from features.x_accounts.language import (
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from features.x_accounts.language import (  # noqa: E402
     DEFAULT_DRAMA_LANGUAGE,
     canonical_drama_language,
     same_drama_language,
