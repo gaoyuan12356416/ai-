@@ -43,7 +43,7 @@
     .filters input:focus,.filters select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
     .result-count { margin-left:auto; color:var(--muted); font-size:13px; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
-    table { width:100%; min-width:2220px; border-collapse:collapse; background:#fff; }
+    table { width:100%; min-width:2380px; border-collapse:collapse; background:#fff; }
     th,td { padding:13px 14px; border-bottom:1px solid #e8eef6; vertical-align:top; text-align:left; font-size:13px; }
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
@@ -53,6 +53,10 @@
     .publish-toggle input { width:18px; height:18px; margin:0; accent-color:var(--blue); cursor:pointer; }
     .publish-toggle input:disabled { cursor:wait; }
     .auto-publish-col { min-width:120px; white-space:nowrap; }
+    .drama-language-col { min-width:150px; }
+    .drama-language-select { min-width:125px; min-height:34px; padding:0 30px 0 10px; border:1px solid var(--line); border-radius:9px; background:#fff; color:var(--ink); }
+    .drama-language-select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); outline:none; }
+    .drama-language-select:disabled { opacity:.6; cursor:wait; }
     .account-avatar { width:42px; height:42px; flex:0 0 auto; display:grid; place-items:center; overflow:hidden; border-radius:50%; background:#12233f; color:#fff; font-weight:800; }
     .account-avatar img { width:100%; height:100%; object-fit:cover; }
     .account strong,.account span { display:block; }
@@ -133,8 +137,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="13" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="14" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -148,6 +152,14 @@
   <script>
     (() => {
       const state = { auth:null, accounts:[] };
+      const dramaLanguages = [
+        ["en","English"], ["es","Español"], ["pt-br","Português (Brasil)"],
+        ["fr","Français"], ["de","Deutsch"], ["ru","Русский"],
+        ["ja","日本語"], ["ko","한국어"], ["ar","العربية"],
+        ["th","ไทย"], ["id","Bahasa Indonesia"], ["vi","Tiếng Việt"],
+        ["zh","中文"], ["tr","Türkçe"], ["it","Italiano"],
+        ["ms","Bahasa Melayu"], ["fil","Filipino"],
+      ];
       const statusMeta = {
         active:["有效","active"], refresh_required:["待刷新","refresh_required"],
         scope_missing:["权限不完整","scope_missing"], revoked:["授权已失效","revoked"],
@@ -162,6 +174,17 @@
       const profileUrl = value => {
         const username = String(value || "").trim().replace(/^@/, "");
         return /^[A-Za-z0-9_]{1,50}$/.test(username) ? `https://x.com/${encodeURIComponent(username)}` : "";
+      };
+      const canonicalLanguage = value => {
+        const parts = String(value || "en").trim().toLowerCase().replaceAll("_", "-").split("-");
+        if (parts[0] === "jp") parts[0] = "ja";
+        return parts.join("-");
+      };
+      const dramaLanguageOptions = value => {
+        const current = canonicalLanguage(value);
+        const options = dramaLanguages.slice();
+        if (!options.some(([code]) => code === current)) options.unshift([current, current]);
+        return options.map(([code,label]) => `<option value="${escapeHtml(code)}" ${code === current ? "selected" : ""}>${escapeHtml(label)} (${escapeHtml(code)})</option>`).join("");
       };
       const formatTime = value => {
         if (!value) return "—";
@@ -215,7 +238,7 @@
           if (!query) return true;
           const ownerName = item.owner_name || item.authorized_by_name || "";
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
-          return [item.display_name,item.username,item.x_user_id,ownerName,ownerEmail,item.location,item.subscription_type]
+          return [item.display_name,item.username,item.x_user_id,ownerName,ownerEmail,item.location,item.subscription_type,item.drama_language]
             .some(value => String(value || "").toLocaleLowerCase().includes(query));
         });
       }
@@ -253,7 +276,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="13" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="14" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -278,6 +301,7 @@
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
             <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
+            <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? "发布池可选" : (publishApproved ? "账号状态有效后可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
             <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
@@ -294,13 +318,13 @@
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="13" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="14" class="empty">正在加载…</td></tr>`;
         try {
           const result = await api("/api/admin/x-accounts");
           state.accounts = Array.isArray(result.items) ? result.items : [];
           renderStats(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="13" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="14" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }
@@ -336,6 +360,21 @@
         }
       }
 
+      async function setDramaLanguage(id, dramaLanguage, select) {
+        select.disabled = true;
+        try {
+          await api(`/api/admin/x-accounts/${encodeURIComponent(id)}/drama-language`, {
+            method:"POST",
+            body:JSON.stringify({ drama_language:canonicalLanguage(dramaLanguage) }),
+          });
+          toast(`剧语言已更新为 ${canonicalLanguage(dramaLanguage)}`);
+        } catch (error) {
+          toast(`保存失败：${error.message}`);
+        } finally {
+          await loadData();
+        }
+      }
+
       async function init() {
         try { state.auth = await api("/api/ui/topbar"); }
         catch (_) { state.auth = { authenticated:false, login_url:"/api/auth/feishu/login" }; }
@@ -357,6 +396,11 @@
         if (button) verifyAccount(button.dataset.verifyId, button);
       });
       el("accountRows").addEventListener("change", event => {
+        const languageSelect = event.target.closest("[data-drama-language-id]");
+        if (languageSelect) {
+          setDramaLanguage(languageSelect.dataset.dramaLanguageId, languageSelect.value, languageSelect);
+          return;
+        }
         const checkbox = event.target.closest("[data-publish-approval-id]");
         if (checkbox) setPublishApproval(checkbox.dataset.publishApprovalId, checkbox.checked, checkbox);
       });

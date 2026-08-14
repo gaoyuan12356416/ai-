@@ -27,6 +27,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from features.x_accounts.language import (
+    DEFAULT_DRAMA_LANGUAGE,
+    canonical_drama_language,
+    same_drama_language,
+)
+
 
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
 X_API_BASE_URL = "https://api.x.com"
@@ -196,6 +202,8 @@ QUEUE_LEDGER_FIELDS = (
     "run_date",
     "source_type",
     "body_template",
+    "account_drama_language",
+    "account_drama_language_frozen",
     "delivery_mode",
     "relay_account_id",
     "relay_account_username",
@@ -1227,6 +1235,9 @@ def ensure_storage(db_path):
                 pool_created_at TEXT NOT NULL DEFAULT '',
                 account_id INTEGER NOT NULL,
                 account_username TEXT NOT NULL,
+                account_drama_language TEXT NOT NULL DEFAULT 'en',
+                account_drama_language_frozen INTEGER NOT NULL DEFAULT 0
+                    CHECK(account_drama_language_frozen IN (0,1)),
                 source_date TEXT NOT NULL,
                 material_id TEXT NOT NULL,
                 content_id TEXT NOT NULL,
@@ -1676,6 +1687,11 @@ def ensure_storage(db_path):
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "source_type": "TEXT NOT NULL DEFAULT 'material'",
                 "body_template": "TEXT NOT NULL DEFAULT ''",
+                "account_drama_language": "TEXT NOT NULL DEFAULT 'en'",
+                "account_drama_language_frozen": (
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(account_drama_language_frozen IN (0,1))"
+                ),
                 "delivery_mode": (
                     "TEXT NOT NULL DEFAULT 'direct' "
                     "CHECK(delivery_mode IN "
@@ -4463,6 +4479,48 @@ class XPostStore:
         for field in QUEUE_FIELDS[3:]:
             limit = 4096 if field in {"material_url", "description"} else 500
             result[field] = _clean_text(payload.get(field), field, limit)
+        explicit_account_language = "account_drama_language" in payload
+        try:
+            candidate_language = canonical_drama_language(
+                result["material_language"]
+            )
+        except ValueError:
+            candidate_language = None
+        try:
+            account_language = canonical_drama_language(
+                payload.get(
+                    "account_drama_language",
+                    candidate_language or DEFAULT_DRAMA_LANGUAGE,
+                )
+            )
+        except ValueError as exc:
+            raise XPostError(
+                "x_account_drama_language_invalid",
+                str(exc),
+                400,
+            ) from None
+        if explicit_account_language and candidate_language is None:
+            raise XPostError(
+                "x_account_drama_language_invalid",
+                "candidate language is not a routable language tag",
+                400,
+            )
+        if (
+            explicit_account_language
+            and not same_drama_language(account_language, candidate_language)
+        ):
+            raise XPostError(
+                "x_post_account_language_mismatch",
+                "X account drama language does not match the candidate language",
+                409,
+            )
+        result["account_drama_language"] = account_language
+        # The marker distinguishes language-routed queues from historical or
+        # manual queues that predate this contract.  Existing rows migrate as
+        # 0, so adding the language column never changes their publish rules.
+        result["account_drama_language_frozen"] = (
+            1 if explicit_account_language else 0
+        )
         material = urllib.parse.urlsplit(result["material_url"])
         if material.scheme != "https" or not material.hostname or material.username or material.password or material.fragment:
             raise XPostError("invalid_media_url", "素材地址必须是HTTPS URL", 400)
@@ -5686,9 +5744,29 @@ class XPostStore:
         conn,
         account_ids,
         limit,
+        account_languages=None,
         premium_account_ids=None,
     ):
         account_ids = _schedule_account_ids(account_ids)
+        raw_account_languages = (
+            account_languages if isinstance(account_languages, dict) else {}
+        )
+        normalized_account_languages = {}
+        for account_id in account_ids:
+            raw_language = raw_account_languages.get(
+                account_id,
+                raw_account_languages.get(str(account_id), DEFAULT_DRAMA_LANGUAGE),
+            )
+            try:
+                normalized_account_languages[account_id] = (
+                    canonical_drama_language(raw_language)
+                )
+            except ValueError as exc:
+                raise XPostError(
+                    "x_account_drama_language_invalid",
+                    str(exc),
+                    400,
+                ) from None
         premium_account_ids = (
             set(_schedule_account_ids(premium_account_ids))
             if premium_account_ids
@@ -5747,6 +5825,15 @@ class XPostStore:
                     "同一X账号绑定了多部未完成短剧",
                     500,
                 )
+            if not same_drama_language(
+                row["language"],
+                normalized_account_languages[owner_id],
+            ):
+                raise XPostError(
+                    "x_post_drama_account_language_mismatch",
+                    "Bound drama language does not match its X account language",
+                    409,
+                )
             owned_by_account[owner_id] = row
         free_account_ids = [
             account_id
@@ -5773,7 +5860,19 @@ class XPostStore:
             # A prior long-video entitlement rejection no longer pins this
             # drama to a Premium target. The target keeps normal FIFO affinity;
             # a distinct Premium relay source is selected later if needed.
-            account_id = remaining_accounts[0]
+            account_id = next(
+                (
+                    candidate_account_id
+                    for candidate_account_id in remaining_accounts
+                    if same_drama_language(
+                        row["language"],
+                        normalized_account_languages[candidate_account_id],
+                    )
+                ),
+                None,
+            )
+            if account_id is None:
+                continue
             selected_by_account[account_id] = row
             remaining_accounts.remove(account_id)
         assignments = []
@@ -5792,6 +5891,7 @@ class XPostStore:
         self,
         limit=50,
         account_ids=None,
+        account_languages=None,
         premium_account_ids=None,
     ):
         try:
@@ -5823,6 +5923,7 @@ class XPostStore:
                     conn,
                     account_ids,
                     limit,
+                    account_languages=account_languages,
                     premium_account_ids=premium_account_ids,
                 )
             rows = conn.execute(
@@ -5838,6 +5939,36 @@ class XPostStore:
                 (limit,),
             ).fetchall()
             return [_row_dict(row) for row in rows]
+
+    def assert_account_drama_language_change(self, account_id, drama_language):
+        """Reject changes that would orphan an unfinished bound drama."""
+        account_id = _positive_int(account_id, "account_id")
+        try:
+            normalized_language = canonical_drama_language(drama_language)
+        except ValueError as exc:
+            raise XPostError(
+                "x_account_drama_language_invalid",
+                str(exc),
+                400,
+            ) from None
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT content_id,language FROM x_post_drama_pool "
+                "WHERE assigned_account_id=? "
+                "AND status IN ('pending','active') "
+                "AND next_sub_number<=free_episode_count "
+                "ORDER BY created_at,id LIMIT 1",
+                (account_id,),
+            ).fetchone()
+        if row and not same_drama_language(
+            row["language"], normalized_language
+        ):
+            raise XPostError(
+                "x_account_drama_language_conflict",
+                "Account has an unfinished bound drama in another language",
+                409,
+            )
+        return True
 
     def premium_relay_account_loads(self, run_date, account_ids):
         """Return eligible relay accounts ordered by durable lifetime load."""

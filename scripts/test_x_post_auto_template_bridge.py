@@ -444,6 +444,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
             "status": "active",
             "publish_approved": True,
             "publish_eligible": True,
+            "drama_language": "en",
             "subscription_type": "premium" if long_video else "unknown",
             "premium_subscriber": bool(long_video),
             "long_video_eligible": bool(long_video),
@@ -619,13 +620,33 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
         ), mock.patch.object(oauth_service, "preflight_post_storage_request"):
             accepted = oauth_service.create_post_auto_template_plan_request(
                 {
-                    "run_id": 1,
-                    "candidates": [
-                        {"material_id": "501", "preflight_duration": 600.0}
-                    ],
-                }
-            )
+                        "run_id": 1,
+                        "candidates": [
+                            {
+                                "material_id": "501",
+                                "material_language": "en",
+                                "preflight_duration": 600.0,
+                            }
+                        ],
+                    }
+                )
             self.assertEqual(accepted["item"]["trigger_source"], "auto_template")
+            self.assertEqual(
+                store.candidates[0]["account_drama_language"], "en"
+            )
+            with self.assertRaises(oauth_service.ServiceError) as language_mismatch:
+                oauth_service.create_post_auto_template_plan_request(
+                    {
+                        "run_id": 1,
+                        "candidates": [
+                            {
+                                "material_id": "501",
+                                "material_language": "ja",
+                                "preflight_duration": 90.0,
+                            }
+                        ],
+                    }
+                )
             with self.assertRaises(oauth_service.ServiceError) as exceeded:
                 oauth_service.create_post_auto_template_plan_request(
                     {
@@ -635,6 +656,10 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
                         ],
                     }
                 )
+        self.assertEqual(
+            language_mismatch.exception.code,
+            "x_auto_account_language_mismatch",
+        )
         self.assertEqual(
             exceeded.exception.code,
             "x_post_auto_template_duration_exceeded",

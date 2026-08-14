@@ -42069,6 +42069,7 @@ from features.x_accounts.client import (
     logout_x_account,
     save_x_post_schedule,
     set_x_post_drama_pool_priority,
+    set_x_account_drama_language,
     set_x_account_publish_approval,
     start_x_authorization,
     verify_x_account,
@@ -42110,6 +42111,8 @@ X_ACCOUNTS_ERROR_META = {
     "invalid_post_template": (400, "X Post描述模板无效"),
     "invalid_request": (400, "请求参数无效"),
     "x_account_disabled": (409, "X账号已在后台停用，请重新授权后再使用"),
+    "x_account_drama_language_conflict": (409, "该账号仍绑定其他语言的未完结短剧，暂不能修改剧语言"),
+    "x_account_drama_language_invalid": (400, "剧语言代码无效"),
     "x_account_not_publishable": (409, "X账号当前状态不可用于发布"),
     "x_account_not_found": (404, "X账号记录不存在"),
     "x_account_owned_by_other": (409, "该X账号已归属其他后台用户，请联系管理员处理"),
@@ -42119,6 +42122,7 @@ X_ACCOUNTS_ERROR_META = {
     "x_identity_mismatch": (409, "X Token账号身份不匹配，请重新授权"),
     "x_oauth_not_configured": (503, "X OAuth客户端尚未完整配置"),
     "x_post_pool_item_not_found": (404, "X素材池记录不存在"),
+    "x_post_account_language_mismatch": (409, "X账号剧语言与待发布内容不一致"),
     "x_post_pool_item_occupied": (409, "素材已被发布队列占用，不能删除或重复使用"),
     "x_post_pool_item_published": (409, "已发布素材必须保留审计记录"),
     "x_post_pool_item_unavailable": (409, "素材池记录已发布、已变更或不可用"),
@@ -42135,6 +42139,7 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_schedule_run_exists": (409, "该时间点已存在不同的冻结发布批次"),
     "x_post_schedule_version_conflict": (409, "自动发布设置已被修改，请刷新后重试"),
     "x_post_drama_already_used": (409, "该短剧已有X发布历史"),
+    "x_post_drama_account_language_mismatch": (409, "短剧语言与已绑定X账号的剧语言不一致"),
     "x_post_drama_episode_already_used": (409, "该短剧集数已被发布队列占用"),
     "x_post_drama_pool_item_exists": (409, "该短剧已在短剧池中"),
     "x_post_drama_pool_item_not_found": (404, "短剧池记录不存在"),
@@ -99594,6 +99599,67 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     {"error": error_payload["error"]},
                 )
                 json_response(self, status, error_payload, no_store=True)
+            return
+
+        x_admin_drama_language_match = re.match(
+            r"^/api/admin/x-accounts/(\d+)/drama-language$",
+            parsed.path,
+        )
+        if x_admin_drama_language_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_drama_language_match.group(1)
+            try:
+                payload = self._read_json()
+                if not isinstance(payload, dict) or set(payload) != {
+                    "drama_language"
+                }:
+                    raise ValueError(
+                        "JSON body must contain only drama_language"
+                    )
+                result = set_x_account_drama_language(
+                    account_id,
+                    payload.get("drama_language"),
+                    x_accounts_actor(session),
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_drama_language",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "account_id": int(account_id),
+                        "drama_language": item.get("drama_language", ""),
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_drama_language_failed",
+                    "x_account",
+                    account_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(
+                    self, status, error_payload, no_store=True
+                )
             return
 
         x_verify_match = re.match(r"^/api/x-accounts/(\d+)/verify$", parsed.path)

@@ -28,7 +28,7 @@ PAGES = {name: path.read_text(encoding="utf-8") for name, path in PAGE_PATHS.ite
 SCRIPTS = {name: path.read_text(encoding="utf-8") for name, path in SCRIPT_PATHS.items()}
 QUICK_NAV = (STATIC / "quick-nav.js").read_text(encoding="utf-8")
 NAVIGATION = json.loads((STATIC / "navigation.json").read_text(encoding="utf-8"))
-ASSET_VERSION = "20260812run1"
+ASSET_VERSION = "20260814language1"
 
 
 class IdParser(HTMLParser):

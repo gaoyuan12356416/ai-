@@ -32,6 +32,7 @@ from features.x_posts.drama_selector import (  # noqa: E402
     DramaSelectionError,
     select_drama_pool_episodes,
 )
+from features.x_accounts.language import canonical_drama_language  # noqa: E402
 from features.x_posts.selector import (  # noqa: E402
     CandidateSelectionError,
     DEFAULT_SCHEMA,
@@ -781,10 +782,14 @@ class ScheduleSidecarClient(SidecarClient):
         # The selector performs the full identity/FIFO validation.
         return [dict(item) if isinstance(item, dict) else item for item in items]
 
-    def premium_relay_accounts(self, run_date):
+    def premium_relay_accounts(self, run_date, drama_language="en"):
+        normalized_language = canonical_drama_language(drama_language)
         result = self.post(
             DEFAULT_PREMIUM_RELAY_ACCOUNTS_PATH,
-            {"run_date": str(run_date)},
+            {
+                "run_date": str(run_date),
+                "drama_language": normalized_language,
+            },
         )
         items = result.get("items") if isinstance(result, dict) else None
         if not isinstance(items, list) or len(items) > MAX_DAILY_ACCOUNTS:
@@ -802,6 +807,11 @@ class ScheduleSidecarClient(SidecarClient):
                     "Premium relay account response is invalid",
                 )
             account = _safe_account(raw)
+            if account["drama_language"] != normalized_language:
+                raise SidecarError(
+                    "x_post_premium_relay_accounts_invalid_response",
+                    "Premium relay account language is invalid",
+                )
             account["publish_eligible"] = raw.get("publish_eligible") is True
             account["long_video_publish_eligible"] = (
                 raw.get("long_video_publish_eligible") is True
@@ -1131,7 +1141,7 @@ def _drama_candidates(
         rejected_ids = set()
         preflight_cache = {}
         refresh_accounts = False
-        relay_accounts = None
+        relay_accounts = {}
 
         def preflight_one(candidate, account, rank, temporary):
             cache_key = (
@@ -1329,16 +1339,29 @@ def _drama_candidates(
                             code == "x_long_video_requires_premium"
                             and not account.get("long_video_eligible")
                         ):
-                            if relay_accounts is None:
-                                relay_accounts = sidecar.premium_relay_accounts(
-                                    datetime.fromtimestamp(
-                                        timestamp, BEIJING_TZ
-                                    ).date().isoformat()
-                                )
+                            drama_language = canonical_drama_language(
+                                candidate.get("material_language")
+                                or candidate.get("language")
+                            )
+                            if drama_language not in relay_accounts:
+                                relay_run_date = datetime.fromtimestamp(
+                                    timestamp, BEIJING_TZ
+                                ).date().isoformat()
+                                try:
+                                    relay_accounts[drama_language] = sidecar.premium_relay_accounts(
+                                        relay_run_date,
+                                        drama_language,
+                                    )
+                                except TypeError:
+                                    # Backward-compatible injected sidecar
+                                    # adapters used by offline operators/tests.
+                                    relay_accounts[drama_language] = sidecar.premium_relay_accounts(
+                                        relay_run_date
+                                    )
                             relay_account = next(
                                 (
                                     relay
-                                    for relay in relay_accounts
+                                    for relay in relay_accounts[drama_language]
                                     if int(relay["id"])
                                     != int(account["id"])
                                 ),

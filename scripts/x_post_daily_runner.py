@@ -33,6 +33,11 @@ from features.x_posts.selector import (  # noqa: E402
     select_pool_candidates,
     shanghai_now,
 )
+from features.x_accounts.language import (  # noqa: E402
+    DEFAULT_DRAMA_LANGUAGE,
+    canonical_drama_language,
+    same_drama_language,
+)
 from features.x_posts.service import (  # noqa: E402
     DEFAULT_SHORT_BASE_URL,
     PREMIUM_MAX_DURATION_SECONDS,
@@ -1336,11 +1341,26 @@ def _safe_account(item):
         "subscription_type": subscription_type,
         "premium_subscriber": long_video_eligible,
         "long_video_eligible": long_video_eligible,
+        "drama_language": canonical_drama_language(
+            item.get("drama_language", DEFAULT_DRAMA_LANGUAGE)
+        ),
     }
 
 
 def _plan_candidate(account, candidate, rank, timestamp):
     item = dict(candidate)
+    account_language = canonical_drama_language(
+        account.get("drama_language", DEFAULT_DRAMA_LANGUAGE)
+    )
+    candidate_language = canonical_drama_language(
+        item.get("material_language") or item.get("language")
+    )
+    if not same_drama_language(account_language, candidate_language):
+        raise XPostError(
+            "x_post_account_language_mismatch",
+            "X account drama language does not match the candidate language",
+            409,
+        )
     item.update(
         {
             "account_id": account["id"],
@@ -1348,6 +1368,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
             "page_name": account["display_name"],
             "page_id": account["x_user_id"],
             "candidate_rank": rank,
+            "account_drama_language": account_language,
         }
     )
     build_w2a_url(
@@ -1653,14 +1674,51 @@ def _preflight_candidates(
         for candidate in candidates:
             if len(accepted_by_account) == target_count:
                 break
+            routing_accounts = list(remaining_accounts)
             if material_routing:
+                try:
+                    candidate_language = canonical_drama_language(
+                        candidate.get("material_language")
+                        or candidate.get("language")
+                    )
+                except (AttributeError, ValueError) as exc:
+                    failures.append(
+                        {
+                            "pool_item_id": candidate.get("pool_item_id")
+                            if isinstance(candidate, dict)
+                            else None,
+                            "manual_item_id": candidate.get("manual_item_id")
+                            if isinstance(candidate, dict)
+                            else None,
+                            "material_id": str(
+                                candidate.get("material_id", "")
+                                if isinstance(candidate, dict)
+                                else ""
+                            ),
+                            "error_code": "x_account_drama_language_invalid",
+                            "error_message": redact_text(str(exc), 240),
+                        }
+                    )
+                    continue
+                routing_accounts = [
+                    item
+                    for item in remaining_accounts
+                    if same_drama_language(
+                        item.get("drama_language"), candidate_language
+                    )
+                ]
+                # The candidate is still valid for another language pool; it
+                # is not a validation failure merely because this run has no
+                # remaining account for that language.
+                if not routing_accounts:
+                    continue
                 account = next(
                     (
                         item
-                        for item in remaining_accounts
+                        for item in routing_accounts
                         if not item.get("long_video_eligible")
                     ),
-                    remaining_accounts[0],
+                    routing_accounts[0],
                 )
             else:
                 account = remaining_accounts[0]
@@ -1703,7 +1761,7 @@ def _preflight_candidates(
                         premium_account = next(
                             (
                                 candidate_account
-                                for candidate_account in remaining_accounts
+                                for candidate_account in routing_accounts
                                 if candidate_account.get(
                                     "long_video_eligible"
                                 )

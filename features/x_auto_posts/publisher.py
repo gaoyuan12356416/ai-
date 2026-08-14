@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from features.x_accounts.language import same_drama_language
+
 from .client import safe_public_message
 from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
 from .selector import (
@@ -333,6 +335,14 @@ class AutoPostExecutor:
             raise AutoPostExecutionError(
                 "x_auto_account_not_publishable",
                 "X account is not currently publishable",
+                409,
+            )
+        if not same_drama_language(
+            account.get("drama_language"), task.language
+        ):
+            raise AutoPostExecutionError(
+                "x_auto_account_language_mismatch",
+                "X account drama language no longer matches the frozen task language",
                 409,
             )
         return account

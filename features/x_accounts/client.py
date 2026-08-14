@@ -18,6 +18,8 @@ SAFE_ERROR_CODES = {
     "x_account_publish_not_approved",
     "x_account_owned_by_other",
     "x_account_not_found",
+    "x_account_drama_language_conflict",
+    "x_account_drama_language_invalid",
     "x_admin_required",
     "x_accounts_unavailable",
     "x_disconnect_failed",
@@ -26,6 +28,7 @@ SAFE_ERROR_CODES = {
     "x_internal_auth_failed",
     "x_oauth_not_configured",
     "x_post_account_day_already_reserved",
+    "x_post_account_language_mismatch",
     "x_post_daily_candidate_shortage",
     "x_post_daily_run_exists",
     "x_post_idempotency_conflict",
@@ -50,6 +53,7 @@ SAFE_ERROR_CODES = {
     "x_post_schedule_run_not_found",
     "x_post_schedule_version_conflict",
     "x_post_drama_already_used",
+    "x_post_drama_account_language_mismatch",
     "x_post_drama_episode_already_used",
     "x_post_drama_pool_item_exists",
     "x_post_drama_pool_item_not_found",
@@ -226,6 +230,23 @@ def set_x_account_publish_approval(account_id, approved, actor):
             "actor": normalize_actor(actor),
             "scope": "all",
             "approved": approved,
+        },
+    )
+
+
+def set_x_account_drama_language(account_id, drama_language, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError(
+            "invalid_request", "X account record ID is invalid", 400
+        )
+    return _request(
+        "/internal/accounts/%s/drama-language" % account_id,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "drama_language": drama_language,
         },
     )
 

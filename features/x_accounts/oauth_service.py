@@ -30,6 +30,12 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from features.x_accounts.language import (
+    DEFAULT_DRAMA_LANGUAGE,
+    canonical_drama_language,
+    same_drama_language,
+)
+
 
 DEFAULT_ENV_FILE = "/etc/x-post-automation.env"
 EXPECTED_SCOPE_DEFAULT = "tweet.read tweet.write users.read offline.access media.write"
@@ -274,6 +280,7 @@ def ensure_storage():
                     scopes_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'active',
                     publish_approved INTEGER NOT NULL DEFAULT 0,
+                    drama_language TEXT NOT NULL DEFAULT 'en',
                     first_authorized_at TEXT NOT NULL,
                     last_authorized_at TEXT NOT NULL,
                     access_expires_at TEXT NOT NULL DEFAULT '',
@@ -357,6 +364,7 @@ def ensure_storage():
                 "disconnected_by_user_id": "TEXT NOT NULL DEFAULT ''",
                 "disconnected_by_name": "TEXT NOT NULL DEFAULT ''",
                 "publish_approved": "INTEGER NOT NULL DEFAULT 0",
+                "drama_language": "TEXT NOT NULL DEFAULT 'en'",
             }
             existing = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
             for column, definition in account_columns.items():
@@ -932,6 +940,18 @@ def complete_authorization(code, raw_state):
 
 def row_to_item(row):
     item = dict(row)
+    raw_drama_language = item.get(
+        "drama_language", DEFAULT_DRAMA_LANGUAGE
+    )
+    try:
+        item["drama_language"] = canonical_drama_language(
+            raw_drama_language
+        )
+    except ValueError:
+        # Keep corrupt/manual values visible to administrators and invalid to
+        # routing checks.  Silently coercing them to ``en`` could misroute a
+        # Post, whereas the additive migration itself always writes valid en.
+        item["drama_language"] = str(raw_drama_language or "")
     try:
         scopes = parse_scopes(json.loads(item.pop("scopes_json", "[]")))
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -1114,6 +1134,98 @@ def set_account_publish_approval(account_id, approved, actor):
                 conn.close()
     safe_record_event(
         "publish_approval_enabled" if approved else "publish_approval_disabled",
+        "completed",
+        actor,
+        x_user_id=x_user_id,
+    )
+    return find_account(account_id)
+
+
+def set_account_drama_language(account_id, drama_language, actor):
+    try:
+        normalized_language = canonical_drama_language(drama_language)
+    except ValueError as exc:
+        raise ServiceError(
+            "x_account_drama_language_invalid",
+            clean_text(exc),
+            400,
+        ) from None
+    account_id = int(account_id)
+    actor, _scope = normalize_account_scope(actor, "all")
+    initial_row = find_scoped_account_row(account_id, actor, "all")
+    x_user_id = str(initial_row["x_user_id"])
+    with account_lock("x:" + x_user_id):
+        current = row_to_item(
+            find_scoped_account_row(account_id, actor, "all")
+        )
+        if same_drama_language(
+            current.get("drama_language"), normalized_language
+        ):
+            return current
+        XPostError, XPostStore, _publish_canary = _x_posts_api()
+        try:
+            # Ensure the X Post schema exists before entering the cross-table
+            # transaction below.  Production keeps both tables in one DB; an
+            # attached DB preserves the same atomic check-and-update contract
+            # for supported split-path configurations.
+            XPostStore(POST_DB_PATH)
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+        timestamp = iso_utc()
+        with _DB_LOCK:
+            conn = db_connect()
+            attached = False
+            try:
+                account_db = os.path.normcase(os.path.abspath(str(DB_PATH)))
+                post_db = os.path.normcase(os.path.abspath(str(POST_DB_PATH)))
+                drama_table = "x_post_drama_pool"
+                if account_db != post_db:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS xpost_language_guard",
+                        (str(POST_DB_PATH),),
+                    )
+                    attached = True
+                    drama_table = (
+                        "xpost_language_guard.x_post_drama_pool"
+                    )
+                conn.execute("BEGIN IMMEDIATE")
+                bound = conn.execute(
+                    "SELECT content_id,language FROM %s "
+                    "WHERE assigned_account_id=? "
+                    "AND status IN ('pending','active') "
+                    "AND next_sub_number<=free_episode_count "
+                    "ORDER BY created_at,id LIMIT 1" % drama_table,
+                    (account_id,),
+                ).fetchone()
+                if bound and not same_drama_language(
+                    bound["language"], normalized_language
+                ):
+                    conn.rollback()
+                    raise ServiceError(
+                        "x_account_drama_language_conflict",
+                        "Account has an unfinished bound drama in another language",
+                        409,
+                    )
+                cursor = conn.execute(
+                    "UPDATE x_authorized_account "
+                    "SET drama_language=?,updated_at=? WHERE id=?",
+                    (normalized_language, timestamp, account_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ServiceError(
+                        "x_account_not_found",
+                        "X account record does not exist",
+                        404,
+                    )
+                conn.commit()
+            finally:
+                if conn.in_transaction:
+                    conn.rollback()
+                if attached:
+                    conn.execute("DETACH DATABASE xpost_language_guard")
+                conn.close()
+    safe_record_event(
+        "drama_language_changed",
         "completed",
         actor,
         x_user_id=x_user_id,
@@ -2359,6 +2471,18 @@ def publish_queue_request(
         if expected_manual_trigger_source == "auto_template"
         else CANARY_ACTOR
     )
+    frozen_drama_language = None
+    if int(queue.get("account_drama_language_frozen") or 0) == 1:
+        try:
+            frozen_drama_language = canonical_drama_language(
+                queue.get("account_drama_language")
+            )
+        except ValueError as exc:
+            raise ServiceError(
+                "x_post_account_language_mismatch",
+                clean_text(exc),
+                409,
+            ) from None
     if log["status"] == "reserved":
         source_account_id = int(
             queue["relay_account_id"]
@@ -2367,6 +2491,15 @@ def publish_queue_request(
         )
         try:
             verified_source = verify_account(source_account_id, actor, "all")
+            if frozen_drama_language and not same_drama_language(
+                verified_source.get("drama_language"),
+                frozen_drama_language,
+            ):
+                raise ServiceError(
+                    "x_post_account_language_mismatch",
+                    "X account drama language no longer matches the frozen queue",
+                    409,
+                )
             if relay_delivery and (
                 not verified_source.get("long_video_publish_eligible")
                 or verified_source.get("protected") is not False
@@ -2374,6 +2507,7 @@ def publish_queue_request(
                 eligible = _premium_relay_accounts(
                     queue["run_date"],
                     refresh=True,
+                    drama_language=frozen_drama_language,
                 )
                 queue = store.reassign_premium_relay(
                     int(queue["id"]), eligible
@@ -2384,6 +2518,7 @@ def publish_queue_request(
                 eligible = _premium_relay_accounts(
                     queue["run_date"],
                     refresh=True,
+                    drama_language=frozen_drama_language,
                 )
                 try:
                     queue = store.reassign_premium_relay(
@@ -2410,6 +2545,15 @@ def publish_queue_request(
                 source_account_id, actor, "all"
             ) as (account, access_token):
                 try:
+                    if frozen_drama_language and not same_drama_language(
+                        account.get("drama_language"),
+                        frozen_drama_language,
+                    ):
+                        raise XPostError(
+                            "x_post_account_language_mismatch",
+                            "X account drama language no longer matches the frozen queue",
+                            409,
+                        )
                     if relay_delivery and (
                         not account.get("long_video_publish_eligible")
                         or account.get("protected") is not False
@@ -2466,13 +2610,31 @@ def publish_queue_request(
             )
         )
     target_account_id = int(queue["account_id"])
-    verify_account(target_account_id, actor, "all")
+    verified_target = verify_account(target_account_id, actor, "all")
+    if frozen_drama_language and not same_drama_language(
+        verified_target.get("drama_language"),
+        frozen_drama_language,
+    ):
+        raise ServiceError(
+            "x_post_account_language_mismatch",
+            "X account drama language no longer matches the frozen queue",
+            409,
+        )
     try:
         from features.x_posts import XApiClient
 
         with publish_credentials(
             target_account_id, actor, "all"
         ) as (target_account, target_access_token):
+            if frozen_drama_language and not same_drama_language(
+                target_account.get("drama_language"),
+                frozen_drama_language,
+            ):
+                raise ServiceError(
+                    "x_post_account_language_mismatch",
+                    "X account drama language no longer matches the frozen queue",
+                    409,
+                )
             relay = store.mark_reposting(int(queue["id"]))
             try:
                 reposted = XApiClient(
@@ -2573,6 +2735,9 @@ def _safe_post_account(account):
         "status": str(account.get("status", "") or ""),
         "publish_approved": bool(account.get("publish_approved")),
         "publish_eligible": bool(account.get("publish_eligible")),
+        "drama_language": canonical_drama_language(
+            account.get("drama_language", DEFAULT_DRAMA_LANGUAGE)
+        ),
         "subscription_type": str(
             account.get("subscription_type", "unknown") or "unknown"
         ),
@@ -2585,7 +2750,12 @@ def _safe_post_account(account):
     }
 
 
-def _premium_relay_accounts(run_date, *, refresh):
+def _premium_relay_accounts(run_date, *, refresh, drama_language=None):
+    normalized_language = (
+        canonical_drama_language(drama_language)
+        if drama_language not in (None, "")
+        else None
+    )
     with _DB_LOCK:
         conn = db_connect()
         try:
@@ -2599,6 +2769,10 @@ def _premium_relay_accounts(run_date, *, refresh):
         account = row_to_item(row)
         if account.get("status") != "active" or not account.get(
             "publish_eligible"
+        ):
+            continue
+        if normalized_language and not same_drama_language(
+            account.get("drama_language"), normalized_language
         ):
             continue
         if refresh:
@@ -2645,7 +2819,21 @@ def premium_relay_accounts_request(payload):
         datetime.strptime(run_date, "%Y-%m-%d")
     except (TypeError, ValueError):
         raise ServiceError("invalid_request", "run_date is invalid", 400) from None
-    return {"items": _premium_relay_accounts(run_date, refresh=True)}
+    try:
+        drama_language = canonical_drama_language(payload.get("drama_language"))
+    except ValueError as exc:
+        raise ServiceError(
+            "x_account_drama_language_invalid",
+            clean_text(exc),
+            400,
+        ) from None
+    return {
+        "items": _premium_relay_accounts(
+            run_date,
+            refresh=True,
+            drama_language=drama_language,
+        )
+    }
 
 
 def auto_template_accounts_request(_payload):
@@ -3098,6 +3286,25 @@ def create_post_auto_template_plan_request(payload):
     candidate = candidates[0]
     if not isinstance(candidate, dict):
         raise ServiceError("invalid_request", "candidate must be an object", 400)
+    try:
+        candidate_language = canonical_drama_language(
+            candidate.get("material_language")
+            or candidate.get("language")
+        )
+    except ValueError as exc:
+        raise ServiceError(
+            "x_account_drama_language_invalid",
+            clean_text(exc),
+            400,
+        ) from None
+    if not same_drama_language(
+        account.get("drama_language"), candidate_language
+    ):
+        raise ServiceError(
+            "x_auto_account_language_mismatch",
+            "X account drama language does not match the frozen auto task language",
+            409,
+        )
     _require_candidate_duration_capability(candidate, account)
     try:
         duration = float(candidate.get("preflight_duration", 0) or 0)
@@ -3122,6 +3329,9 @@ def create_post_auto_template_plan_request(payload):
                 or ""
             ),
             "page_id": str(account.get("x_user_id", "") or ""),
+            "account_drama_language": canonical_drama_language(
+                account.get("drama_language")
+            ),
         }
     )
     preflight_post_storage_request(1)
@@ -3399,6 +3609,12 @@ def available_post_drama_pool_request(payload):
             "items": XPostStore(POST_DB_PATH).available_drama_pool_items(
                 payload.get("limit", 50),
                 account_ids=account_ids,
+                account_languages={
+                    int(account["id"]): account.get(
+                        "drama_language", DEFAULT_DRAMA_LANGUAGE
+                    )
+                    for account in accounts
+                },
                 premium_account_ids=[
                     int(account["id"])
                     for account in accounts
@@ -3650,7 +3866,7 @@ def create_post_schedule_plan_request(payload):
         raise ServiceError("invalid_request", "account_ids无效", 400)
     trusted = []
     premium_account_ids = []
-    premium_relay_accounts = None
+    premium_relay_accounts = {}
     source_type = str(payload.get("source_type", "") or "").strip().lower()
     run_date = str(payload.get("run_date", "") or "").strip()
     for candidate, account_id in zip(candidates, requested_ids):
@@ -3666,6 +3882,25 @@ def create_post_schedule_plan_request(payload):
                 409,
             )
         try:
+            candidate_language = canonical_drama_language(
+                candidate.get("material_language")
+                or candidate.get("language")
+            )
+        except ValueError as exc:
+            raise ServiceError(
+                "x_account_drama_language_invalid",
+                clean_text(exc),
+                400,
+            ) from None
+        if not same_drama_language(
+            account.get("drama_language"), candidate_language
+        ):
+            raise ServiceError(
+                "x_post_account_language_mismatch",
+                "X account drama language does not match the candidate language",
+                409,
+            )
+        try:
             duration = float(candidate.get("preflight_duration", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             raise ServiceError(
@@ -3678,14 +3913,15 @@ def create_post_schedule_plan_request(payload):
             and not account.get("long_video_publish_eligible")
         )
         if relay_required:
-            if premium_relay_accounts is None:
-                premium_relay_accounts = _premium_relay_accounts(
+            if candidate_language not in premium_relay_accounts:
+                premium_relay_accounts[candidate_language] = _premium_relay_accounts(
                     run_date,
                     refresh=False,
+                    drama_language=candidate_language,
                 )
             selectable_relays = [
                 relay
-                for relay in premium_relay_accounts
+                for relay in premium_relay_accounts[candidate_language]
                 if int(relay["id"]) != int(account["id"])
             ]
             if not selectable_relays:
@@ -3711,6 +3947,9 @@ def create_post_schedule_plan_request(payload):
                     or ""
                 ),
                 "page_id": str(account.get("x_user_id", "") or ""),
+                "account_drama_language": canonical_drama_language(
+                    account.get("drama_language")
+                ),
             }
         )
         if relay_required:
@@ -3742,7 +3981,11 @@ def create_post_schedule_plan_request(payload):
             payload.get("version"),
             trusted,
             premium_account_ids=premium_account_ids,
-            premium_relay_accounts=(premium_relay_accounts or []),
+            premium_relay_accounts=[
+                account
+                for accounts in premium_relay_accounts.values()
+                for account in accounts
+            ],
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -4704,6 +4947,22 @@ class Handler(BaseHTTPRequestHandler):
                         "item": set_account_publish_approval(
                             match.group(1),
                             payload.get("approved"),
+                            payload.get("actor", {}),
+                        )
+                    },
+                )
+                return
+            match = re.fullmatch(
+                r"/internal/accounts/([0-9]+)/drama-language",
+                parsed.path,
+            )
+            if match:
+                self.send_json(
+                    200,
+                    {
+                        "item": set_account_drama_language(
+                            match.group(1),
+                            payload.get("drama_language"),
                             payload.get("actor", {}),
                         )
                     },

@@ -54,6 +54,24 @@
     return String(item && (item.subscription_type || item.membership_type) || "unknown").trim().toLowerCase();
   }
 
+  function canonicalLanguage(value) {
+    const parts = String(value || "en").trim().toLowerCase().replaceAll("_", "-").split("-");
+    if (parts[0] === "jp") parts[0] = "ja";
+    return parts.join("-");
+  }
+
+  function accountLanguage(item) {
+    return canonicalLanguage(item && item.drama_language || "en");
+  }
+
+  function selectedTemplateLanguage() {
+    return canonicalLanguage(ui.byId("templateLanguage").value || "en");
+  }
+
+  function accountLanguageMatches(item) {
+    return accountLanguage(item) === selectedTemplateLanguage();
+  }
+
   function accountMembershipLabel(item) {
     return ({
       basic: "X Basic",
@@ -117,7 +135,7 @@
     const query = ui.byId("accountSearch").value.trim().toLowerCase();
     const visible = state.accounts.filter(item => {
       if (!query) return true;
-      return `${accountId(item)} ${accountName(item)} ${accountSubscription(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
+      return `${accountId(item)} ${accountName(item)} ${accountSubscription(item)} ${accountLanguage(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
     });
     if (!visible.length) {
       list.appendChild(ui.element("div", { className: "empty", text: "没有匹配的账号。" }));
@@ -130,13 +148,19 @@
       if (!id) return;
       const label = ui.element("label", { className: "account-option" });
       const eligible = accountEligible(item);
+      const languageMatches = accountLanguageMatches(item);
       const checkbox = ui.element("input", {
         type: "checkbox",
         attributes: { "aria-label": `选择 ${accountName(item)}` },
-        dataset: { accountId: id, accountEligible: eligible ? "1" : "0" },
+        dataset: {
+          accountId: id,
+          accountEligible: eligible ? "1" : "0",
+          accountLanguageMatches: languageMatches ? "1" : "0",
+        },
       });
       checkbox.checked = state.selectedAccountIds.has(id);
       checkbox.disabled = !eligible && !checkbox.checked;
+      if (!checkbox.disabled) checkbox.disabled = !languageMatches && !checkbox.checked;
       const details = ui.element("div");
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
@@ -146,6 +170,10 @@
         text: accountEligibilityText(item),
       }));
       meta.appendChild(ui.element("span", { className: "secondary", text: accountMembershipLabel(item) }));
+      meta.appendChild(ui.element("span", {
+        className: `language-chip${languageMatches ? "" : " badge warning"}`,
+        text: `剧语言 ${accountLanguage(item)}${languageMatches ? "" : " · 与模板不一致"}`,
+      }));
       label.append(checkbox, details, meta);
       list.appendChild(label);
     });
@@ -358,6 +386,11 @@
     if (language.length < 2 || language.length > 32 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(language)) throw new Error("模板剧语言必须为 2–32 位语言代码，例如 en 或 en-us。");
     if (!state.selectedAccountIds.size) throw new Error("请至少选择一个 X 账号。");
     if (state.selectedAccountIds.size > 100) throw new Error("一个模板最多选择 100 个 X 账号。");
+    const mismatchedAccounts = state.accounts.filter(item =>
+      state.selectedAccountIds.has(accountId(item))
+        && accountLanguage(item) !== canonicalLanguage(language)
+    );
+    if (mismatchedAccounts.length) throw new Error(`所选 X 账号剧语言必须与模板 ${canonicalLanguage(language)} 一致。`);
     const bodyTemplate = ui.byId("bodyTemplate").value.replace(/\r\n?/g, "\n").trim();
     if (!bodyTemplate) throw new Error("请填写 X Post 正文模板。");
     if (bodyTemplate.length > 2000) throw new Error("X Post 正文模板不能超过 2000 个字符。");
@@ -569,6 +602,7 @@
       if (event.key === "Escape") setResourceTypeMenuOpen(false);
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
+    ui.byId("templateLanguage").addEventListener("input", renderAccounts);
     ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -580,7 +614,7 @@
     });
     ui.byId("selectVisibleAccounts").addEventListener("click", () => {
       ui.byId("accountList").querySelectorAll("input[data-account-id]").forEach(checkbox => {
-        if (checkbox.dataset.accountEligible !== "1") return;
+        if (checkbox.dataset.accountEligible !== "1" || checkbox.dataset.accountLanguageMatches !== "1") return;
         checkbox.checked = true;
         state.selectedAccountIds.add(checkbox.dataset.accountId);
       });

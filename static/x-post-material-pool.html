@@ -1061,7 +1061,7 @@
           setText(strong, accountTitle(item));
           const username = String(item.username || "").trim().replace(/^@/, "");
           const secondary = document.createElement("span");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · ${subscriptionLabel(item)}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")} · ${subscriptionLabel(item)}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
@@ -1409,7 +1409,7 @@
           setText(strong, accountTitle(item));
           const username = String(item.username || "").trim().replace(/^@/, "");
           const secondary = document.createElement("span");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · ${subscriptionLabel(item)}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")} · ${subscriptionLabel(item)}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";

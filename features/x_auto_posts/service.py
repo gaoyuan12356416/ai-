@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from features.x_posts.selector import connect_read_only
+from features.x_accounts.language import same_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from .core import AuditActor, XAutoPostStore
@@ -399,6 +400,20 @@ class XAutoPostService:
                     "selected X account is not currently publishable",
                     409,
                 )
+            self._assert_account_language(account, config.get("language"))
+
+    @staticmethod
+    def _assert_account_language(
+        account: Mapping[str, Any], template_language: Any
+    ) -> None:
+        if not same_drama_language(
+            account.get("drama_language"), template_language
+        ):
+            raise AutoPostServiceError(
+                "x_auto_account_language_mismatch",
+                "selected X account drama language does not match the template language",
+                409,
+            )
 
     @staticmethod
     def _confirmation(actor: AuditActor, now: datetime) -> Dict[str, Any]:
@@ -529,6 +544,9 @@ class XAutoPostService:
                         "selected X account is not currently publishable",
                         409,
                     )
+                self._assert_account_language(
+                    account, template.config.get("language")
+                )
                 selection = self._preview_selector().select_and_reserve(
                     SelectionRequest(
                         run_id=index,
@@ -575,6 +593,9 @@ class XAutoPostService:
                         "selected X account is not currently publishable",
                         409,
                     )
+                self._assert_account_language(
+                    account, config.get("language")
+                )
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,

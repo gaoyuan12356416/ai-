@@ -844,6 +844,122 @@ class XAccountsTestCase(unittest.TestCase):
             ],
         )
 
+    def test_drama_language_defaults_to_en_and_admin_updates_canonical_value(self):
+        item = self.complete(username="language_guard")
+        self.assertEqual(item["drama_language"], "en")
+        with self.assertRaises(service.ServiceError) as owner_denied:
+            service.set_account_drama_language(item["id"], "ja", self.owner)
+        self.assertEqual(owner_denied.exception.code, "x_admin_required")
+        updated = service.set_account_drama_language(
+            item["id"], "JP", self.admin
+        )
+        self.assertEqual(updated["drama_language"], "ja")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            stored = conn.execute(
+                "SELECT drama_language FROM x_authorized_account WHERE id=?",
+                (item["id"],),
+            ).fetchone()[0]
+        self.assertEqual(stored, "ja")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            pool_cursor = conn.execute(
+                "INSERT INTO x_post_drama_pool("
+                "content_id,drama_name,description,language,labels,name_tag,"
+                "status,free_episode_count,next_sub_number,created_at,updated_at"
+                ") VALUES('bound-ja','Bound JA','description','ja','tag',"
+                "'name-tag','active',3,1,'2026-08-14T00:00:00+00:00',"
+                "'2026-08-14T00:00:00+00:00')"
+            )
+            pool_id = int(pool_cursor.lastrowid)
+            conn.commit()
+        XPostStore = service._x_posts_api()[1]
+        queue = XPostStore(service.POST_DB_PATH).enqueue(
+            {
+                "source_type": "drama",
+                "account_id": item["id"],
+                "account_username": item["username"],
+                "account_drama_language": "ja",
+                "source_date": "2026-08-13",
+                "material_id": "bound-ja-episode-1",
+                "content_id": "bound-ja",
+                "material_url": "https://media.example.com/bound-ja.mp4",
+                "material_name": "Bound JA episode 1",
+                "material_language": "jp",
+                "drama_name": "Bound JA",
+                "tag": "tag",
+                "description": "description",
+                "page_name": item["display_name"],
+                "page_id": item["x_user_id"],
+                "drama_pool_item_id": pool_id,
+                "drama_pool_created_at": "2026-08-14T00:00:00+00:00",
+                "episode_number": 1,
+                "drama_replay_generation": 1,
+                "name_tag": "name-tag",
+            }
+        )
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "DROP TRIGGER trg_x_post_drama_pool_assignment_evidence"
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET assigned_account_id=?,"
+                "assigned_at='2026-08-14T00:01:00+00:00',"
+                "assigned_source_queue_id=? "
+                "WHERE content_id='bound-ja'",
+                (item["id"], queue["id"]),
+            )
+            conn.commit()
+        with self.assertRaises(service.ServiceError) as conflict:
+            service.set_account_drama_language(item["id"], "en", self.admin)
+        self.assertEqual(
+            conflict.exception.code, "x_account_drama_language_conflict"
+        )
+        self.assertEqual(service.find_account(item["id"])["drama_language"], "ja")
+
+    def test_premium_relay_accounts_are_filtered_by_drama_language(self):
+        english = self.complete(
+            x_user_id="910000001",
+            username="premium_en",
+            account_fields={
+                "subscription_type": "premium",
+                "protected": False,
+            },
+        )
+        japanese = self.complete(
+            x_user_id="910000002",
+            username="premium_ja",
+            account_fields={
+                "subscription_type": "premium",
+                "protected": False,
+            },
+        )
+        service.set_account_drama_language(
+            japanese["id"], "ja", self.admin
+        )
+        items = service._premium_relay_accounts(
+            "2026-08-14",
+            refresh=False,
+            drama_language="jp",
+        )
+        self.assertEqual([item["id"] for item in items], [japanese["id"]])
+        self.assertEqual(items[0]["drama_language"], "ja")
+        self.assertNotIn(english["id"], [item["id"] for item in items])
+
+    def test_drama_language_update_supports_split_post_database_atomically(self):
+        item = self.complete(username="split_language_guard")
+        service.POST_DB_PATH = self.root / "posts.sqlite3"
+        XPostStore = service._x_posts_api()[1]
+        XPostStore(service.POST_DB_PATH)
+        updated = service.set_account_drama_language(
+            item["id"], "ja", self.admin
+        )
+        self.assertEqual(updated["drama_language"], "ja")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            stored = conn.execute(
+                "SELECT drama_language FROM x_authorized_account WHERE id=?",
+                (item["id"],),
+            ).fetchone()[0]
+        self.assertEqual(stored, "ja")
+
     def test_logout_soft_disables_idempotently_without_touching_token_or_x(self):
         item = self.complete(
             username="logout_user",
@@ -2582,6 +2698,48 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual(log["error_code"], "x_account_disabled")
         self.assertFalse(log["unknown_outcome"])
 
+    def test_pre_publish_language_change_fails_frozen_queue_without_x_write(self):
+        account = self.complete("3004", "language_changed", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "language_changed",
+                "account_drama_language": "en",
+                "material_language": "en",
+                "page_name": "Language Changed",
+                "page_id": "3004",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore, publish_canary
+
+        store = XPostStore(service.POST_DB_PATH)
+        queue = store.enqueue(payload)
+        changed = dict(account, drama_language="ja")
+        with mock.patch.object(
+            service, "verify_account", return_value=changed
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(XPostError, XPostStore, publish_canary),
+        ), mock.patch.object(
+            service,
+            "publish_credentials",
+            side_effect=AssertionError("language mismatch must not reach X credentials"),
+        ):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_queue_request(queue["id"])
+        self.assertEqual(
+            caught.exception.code, "x_post_account_language_mismatch"
+        )
+        log = store.query_logs(
+            {"account_id": account["id"], "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(
+            log["error_code"], "x_post_account_language_mismatch"
+        )
+
     def test_publish_verify_rate_limit_marks_daily_run_stopped(self):
         accounts = [
             self.complete("3101", "rate_one", actor=self.owner),
@@ -2790,6 +2948,27 @@ class XAccountsTestCase(unittest.TestCase):
                 "actor": client.normalize_actor(self.admin),
                 "scope": "all",
                 "approved": True,
+            },
+        )
+
+    def test_drama_language_client_forwards_admin_scope_and_value(self):
+        expected = {"item": {"id": 12, "drama_language": "ja"}}
+        with mock.patch.object(
+            client, "_request", return_value=expected
+        ) as request_mock:
+            result = client.set_x_account_drama_language(
+                12,
+                "ja",
+                self.admin,
+            )
+        self.assertEqual(result, expected)
+        request_mock.assert_called_once_with(
+            "/internal/accounts/12/drama-language",
+            method="POST",
+            payload={
+                "actor": client.normalize_actor(self.admin),
+                "scope": "all",
+                "drama_language": "ja",
             },
         )
 

@@ -253,7 +253,10 @@ class ScheduleRunnerTests(unittest.TestCase):
             [
                 (
                     "/internal/posts/premium-relay/accounts",
-                    {"run_date": "2026-08-12"},
+                    {
+                        "run_date": "2026-08-12",
+                        "drama_language": "en",
+                    },
                     False,
                 )
             ],

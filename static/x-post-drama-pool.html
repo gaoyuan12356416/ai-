@@ -735,7 +735,7 @@ Episode {{episode_number}}
           setText(strong, accountTitle(item));
           const secondary = document.createElement("span");
           const username = String(item.username || "").trim().replace(/^@/, "");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
