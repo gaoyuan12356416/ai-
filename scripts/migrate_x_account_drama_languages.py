@@ -7,7 +7,12 @@ import argparse
 import contextlib
 import json
 import sqlite3
+import sys
 from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from features.x_accounts.language import canonical_drama_language
 

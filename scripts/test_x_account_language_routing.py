@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import sqlite3
 import contextlib
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -245,6 +249,43 @@ class XAccountLanguageRoutingTests(unittest.TestCase):
                     "ORDER BY id"
                 ).fetchall()
             self.assertEqual(rows, [(19, "ja"), (20, "ja"), (21, "en")])
+
+    def test_migration_cli_runs_outside_repository_without_pythonpath(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            db_path = root / "accounts.sqlite3"
+            with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
+                conn.execute(
+                    "CREATE TABLE x_authorized_account("
+                    "id INTEGER PRIMARY KEY,username TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT INTO x_authorized_account(id,username) VALUES(19,'japanese19')"
+                )
+                conn.commit()
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            script_path = Path(__file__).with_name(
+                "migrate_x_account_drama_languages.py"
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "--db",
+                    str(db_path),
+                    "--set",
+                    "19=jp",
+                ],
+                cwd=str(root),
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout)["mode"], "dry_run")
 
 
 if __name__ == "__main__":
