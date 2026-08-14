@@ -19,6 +19,7 @@ from scripts.x_post_daily_runner import SidecarError  # noqa: E402
 from scripts.x_post_manual_runner import (  # noqa: E402
     ManualRunError,
     _manual_identity,
+    _manual_rejection_fields,
     execute_manual_tick,
 )
 
@@ -120,6 +121,64 @@ def planned_candidates():
 
 
 class XPostManualRunnerTests(unittest.TestCase):
+    def test_manual_rejection_fields_are_specific_chinese_and_include_material(self):
+        cases = [
+            (
+                {
+                    "material_id": "6179846",
+                    "error_code": "repaired_media_invalid",
+                    "error_message": "repaired media size is outside the configured limit",
+                },
+                "repaired_media_too_large",
+                "素材 6179846：修复后视频超过512MB上限",
+            ),
+            (
+                {
+                    "material_id": "6194023",
+                    "error_code": "material_duration_missing",
+                    "error_message": "素材 6194023 的视频时长缺失或为0秒",
+                },
+                "material_duration_missing",
+                "素材 6194023 的视频时长缺失或为0秒",
+            ),
+            (
+                {
+                    "material_id": "88",
+                    "error_code": "repaired_media_invalid",
+                    "error_message": "修复后视频文件为空",
+                },
+                "repaired_media_empty",
+                "素材 88：修复后视频文件为空",
+            ),
+            (
+                {
+                    "material_id": "89",
+                    "error_code": "source_not_repairable",
+                    "error_message": "视频时长不足0.5秒",
+                },
+                "invalid_media_duration",
+                "素材 89：视频时长不足0.5秒",
+            ),
+            (
+                {
+                    "material_id": "99",
+                    "error_code": "x_long_video_requires_premium",
+                    "error_message": "Videos longer than 140 seconds require Premium",
+                },
+                "x_long_video_requires_premium",
+                "素材 99：视频超过140秒，所选账号没有长视频会员资格",
+            ),
+        ]
+        for raw, expected_code, expected_message in cases:
+            with self.subTest(code=expected_code):
+                code, message = _manual_rejection_fields(
+                    raw,
+                    "x_post_manual_preflight_failed",
+                    "发布前检查失败",
+                )
+                self.assertEqual(code, expected_code)
+                self.assertEqual(message, expected_message)
+
     def test_manual_response_parser_accepts_canonical_scheduled_identity(self):
         scheduled = manual_run()
         scheduled["publish_mode"] = "scheduled"

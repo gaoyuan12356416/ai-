@@ -26,6 +26,8 @@ def material_row(material_id, **overrides):
     row = {
         "material_id": str(material_id),
         "product": "Dramawave",
+        "material_type": 2,
+        "material_is_deleted": 0,
         "material_url": "https://media.example.test/%s.mp4" % material_id,
         "material_name": "material-%s.mp4" % material_id,
         "material_language": "en",
@@ -177,12 +179,39 @@ class ManualPoolSelectorTests(unittest.TestCase):
             for sql, params in connection.calls
             if "ads_custom_source cs" in sql
         )
-        self.assertIn("cs.video_duration >= %s", material_sql)
-        self.assertNotIn("cs.video_duration BETWEEN %s AND %s", material_sql)
-        self.assertEqual(
-            material_params,
-            ("5286820", "Dramawave", 2, 0, 1),
+        self.assertNotIn("cs.video_duration", material_sql.split("WHERE", 1)[1])
+        self.assertEqual(material_params, ("5286820",))
+
+    def test_direct_manual_selection_reports_each_source_rejection_precisely(self):
+        connection = PoolConnection([20, 30, 40, 50])
+        connection.materials["20"]["video_duration"] = 0
+        connection.materials["30"]["video_duration"] = 14401
+        connection.materials["40"]["material_type"] = 1
+        connection.materials["50"]["material_is_deleted"] = 1
+
+        selected, rejections = select_manual_candidates(
+            connection,
+            ["10", "20", "30", "40", "50"],
+            "2026-08-14",
+            limit=5,
         )
+
+        self.assertEqual(selected, [])
+        self.assertEqual(
+            [item["error_code"] for item in rejections],
+            [
+                "material_not_found",
+                "material_duration_missing",
+                "material_duration_exceeds_limit",
+                "material_not_video",
+                "material_inactive",
+            ],
+        )
+        self.assertEqual(
+            [item["material_id"] for item in rejections],
+            ["10", "20", "30", "40", "50"],
+        )
+        self.assertTrue(all("素材 " in item["error_message"] for item in rejections))
 
     def test_direct_manual_selection_rejects_normalized_duplicates_before_queries(self):
         connection = PoolConnection([10])
@@ -222,9 +251,9 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertEqual([params[0] for _sql, params in material_calls], ["30", "20"])
         material_sql, material_params = material_calls[0]
         self.assertIn("cs.id = %s", material_sql)
-        self.assertIn("cs.type = %s", material_sql)
-        self.assertIn("cs.product = %s", material_sql)
-        self.assertEqual(material_params, ("30", "Dramawave", 2, 0, 1, 14400))
+        self.assertNotIn("cs.type = %s", material_sql)
+        self.assertNotIn("cs.product = %s", material_sql)
+        self.assertEqual(material_params, ("30",))
         drama_calls = [
             (sql, params)
             for sql, params in connection.calls
@@ -256,11 +285,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
             for sql, params in connection.calls
             if "ads_custom_source cs" in sql
         )
-        self.assertIn("cs.video_duration BETWEEN %s AND %s", material_sql)
-        self.assertEqual(
-            material_params,
-            ("5286820", "Dramawave", 2, 0, 1, 14400),
-        )
+        self.assertNotIn("cs.video_duration BETWEEN %s AND %s", material_sql)
+        self.assertEqual(material_params, ("5286820",))
 
     def test_future_deploy_time_is_skipped_until_the_boundary_passes(self):
         shanghai = timezone(timedelta(hours=8))
@@ -481,7 +507,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(
             [item["error_code"] for item in rejections],
-            ["pool_item_invalid", "material_not_found_or_ineligible"],
+            ["pool_item_invalid", "material_not_found"],
         )
 
     def test_non_dramawave_material_is_rejected_fail_closed(self):

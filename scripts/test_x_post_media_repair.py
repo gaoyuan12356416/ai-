@@ -301,6 +301,7 @@ class MediaRepairTests(unittest.TestCase):
                         "invalid_media_duration",
                     )
                 self.assertEqual(caught.exception.code, "source_not_repairable")
+                self.assertIn("时长", str(caught.exception))
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             media_repair.inspect_source(
                 source_probe(duration="140"),
@@ -477,6 +478,38 @@ class MediaRepairTests(unittest.TestCase):
                 trim_applied=True,
             )
         self.assertEqual(caught.exception.code, "repaired_media_invalid")
+        self.assertIn("时长与预期不一致", str(caught.exception))
+
+    def test_output_validation_reports_empty_oversize_and_duration_separately(self):
+        empty = self.root / "empty.mp4"
+        empty.write_bytes(b"")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_output(
+                repaired_probe(), empty, (720, 1280), 1024
+            )
+        self.assertEqual(caught.exception.code, "repaired_media_invalid")
+        self.assertIn("文件为空", str(caught.exception))
+
+        oversized = self.root / "oversized.mp4"
+        oversized.write_bytes(b"12345")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_output(
+                repaired_probe(), oversized, (720, 1280), 4
+            )
+        self.assertEqual(caught.exception.code, "repaired_media_invalid")
+        self.assertIn("512MB", str(caught.exception))
+
+        duration = self.root / "duration.mp4"
+        duration.write_bytes(b"video")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_output(
+                repaired_probe(duration="141.0"),
+                duration,
+                (720, 1280),
+                1024,
+            )
+        self.assertEqual(caught.exception.code, "repaired_media_invalid")
+        self.assertIn("140秒", str(caught.exception))
 
     def test_end_to_end_repair_uploads_verifies_manifests_and_reuses(self):
         source = b"source-video"
@@ -666,6 +699,7 @@ class MediaRepairTests(unittest.TestCase):
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             processor.repair(make_request(source))
         self.assertEqual(caught.exception.code, "repaired_media_invalid")
+        self.assertIn("时长与预期不一致", str(caught.exception))
         self.assertEqual(cos.upload_calls, [])
 
     def test_ready_manifest_binds_job_key_and_rejects_a_different_request(self):

@@ -293,6 +293,81 @@ def _failure_fields(exc):
     return code, redact_text(str(exc), 240)
 
 
+def _manual_rejection_fields(raw, default_code, default_message):
+    raw = raw if isinstance(raw, dict) else {}
+    code = str(raw.get("error_code") or default_code)
+    message = redact_text(raw.get("error_message") or default_message, 180)
+    material_id = str(raw.get("material_id") or "").strip()
+    lower_message = message.lower()
+
+    # Translate legacy/coarse worker responses while mixed releases drain.
+    # New selector and repair-worker releases already emit the precise codes.
+    if code == "repaired_media_invalid":
+        if "512mb" in lower_message or "size" in lower_message:
+            code = "repaired_media_too_large"
+            message = "修复后视频超过512MB上限"
+        elif "文件为空" in message:
+            code = "repaired_media_empty"
+            message = "修复后视频文件为空"
+        elif "文件不存在" in message or "missing" in lower_message:
+            code = "repaired_media_missing"
+            message = "修复后视频文件不存在"
+        elif "时长与预期" in message or "does not preserve" in lower_message:
+            code = "repaired_media_duration_mismatch"
+            message = "修复后视频时长与预期不一致"
+        elif "duration" in lower_message or "时长" in message:
+            code = "repaired_media_duration_invalid"
+            if "4小时" in message:
+                message = "修复后视频时长超过4小时上限"
+            elif "140秒" in message:
+                message = "修复后视频时长超过140秒上限"
+            elif "0.5秒" in message:
+                message = "修复后视频时长不足0.5秒"
+            else:
+                message = "修复后视频时长不符合发布要求"
+        else:
+            message = "修复后视频不符合发布要求"
+    elif code == "media_too_large":
+        message = "视频超过512MB上限"
+    elif code == "invalid_media_duration":
+        if "4 hour" in lower_message:
+            message = "视频时长超过4小时上限"
+        elif "0.5" in lower_message:
+            message = "视频时长不足0.5秒"
+        else:
+            message = "视频时长不符合发布要求"
+    elif code == "x_long_video_requires_premium":
+        message = "视频超过140秒，所选账号没有长视频会员资格"
+    elif code == "invalid_media_codec":
+        message = "视频编码或音频格式不符合X要求"
+    elif code == "invalid_media_dimensions":
+        message = "视频分辨率或画面比例不符合X要求"
+    elif code == "invalid_media_scan":
+        message = "视频不是逐行扫描格式"
+    elif code == "invalid_media_type":
+        message = "素材文件不是视频"
+    elif code == "media_download_failed":
+        message = "视频下载失败"
+    elif code == "media_probe_failed":
+        message = "无法读取视频信息"
+    elif code == "source_not_repairable":
+        if "duration" in lower_message or "时长" in message:
+            code = "invalid_media_duration"
+            message = (
+                message
+                if "时长" in message
+                else "视频时长不符合发布要求"
+            )
+        else:
+            message = "视频无法自动修复"
+    elif code == "material_not_found_or_ineligible":
+        message = "素材不存在、不是有效视频或时长数据缺失"
+
+    if material_id and not message.startswith("素材 %s" % material_id):
+        message = "素材 %s：%s" % (material_id, message)
+    return code[:64], redact_text(message, 240)
+
+
 def _record_failure_best_effort(sidecar, run_id, exc):
     code, message = _failure_fields(exc)
     try:
@@ -342,10 +417,14 @@ def _manual_candidates(
             close()
     if selector_rejections or len(candidates) != len(run["material_ids"]):
         first = selector_rejections[0] if selector_rejections else {}
+        code, message = _manual_rejection_fields(
+            first,
+            "x_post_manual_source_preflight_failed",
+            "所选素材未通过发布前检查",
+        )
         raise ManualRunError(
-            first.get("error_message")
-            or "Not every selected material passed source and compliance checks",
-            first.get("error_code") or "x_post_manual_source_preflight_failed",
+            message,
+            code,
         )
     for candidate in candidates:
         candidate["body_template"] = run["body_template"]
@@ -363,10 +442,14 @@ def _manual_candidates(
     )
     if preflight_rejections or len(planned) != len(accounts):
         first = preflight_rejections[0] if preflight_rejections else {}
+        code, message = _manual_rejection_fields(
+            first,
+            "x_post_manual_media_preflight_failed",
+            "所选视频未通过发布前检查",
+        )
         raise ManualRunError(
-            first.get("error_message")
-            or "Not every selected material passed media preflight",
-            first.get("error_code") or "x_post_manual_media_preflight_failed",
+            message,
+            code,
         )
     if {str(item.get("material_id")) for item in planned} != set(
         run["material_ids"]

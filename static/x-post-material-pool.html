@@ -667,6 +667,40 @@
         "stopped",
         "failed_preflight",
       ]);
+      const MANUAL_ERROR_LABELS = Object.freeze({
+        material_not_found: "素材不存在",
+        material_source_ambiguous: "素材源数据重复",
+        material_product_mismatch: "素材不属于Dramawave",
+        material_not_video: "素材不是视频",
+        material_inactive: "素材已删除或不可用",
+        material_duration_invalid: "视频时长数据无效",
+        material_duration_missing: "视频时长缺失或为0秒",
+        material_duration_exceeds_limit: "视频时长超过4小时上限",
+        material_metadata_invalid: "素材信息不完整",
+        material_url_not_https: "素材地址不可用",
+        material_source_tag_invalid: "素材标签无法检查",
+        material_source_tag_unsafe: "素材标签包含禁发内容",
+        invalid_media_type: "素材文件不是视频",
+        invalid_media_codec: "视频编码或音频格式不符合X要求",
+        invalid_media_dimensions: "视频分辨率或画面比例不符合X要求",
+        invalid_media_scan: "视频不是逐行扫描格式",
+        invalid_media_duration: "视频时长不符合发布要求",
+        x_long_video_requires_premium: "视频超过140秒，所选账号没有长视频会员资格",
+        media_too_large: "视频超过512MB上限",
+        repaired_media_too_large: "修复后视频超过512MB上限",
+        repaired_media_empty: "修复后视频文件为空",
+        repaired_media_missing: "修复后视频文件不存在",
+        repaired_media_duration_invalid: "修复后视频时长不符合发布要求",
+        repaired_media_duration_too_long: "修复后视频时长超过账号上限",
+        repaired_media_duration_mismatch: "修复后视频时长与预期不一致",
+        media_download_failed: "视频下载失败",
+        media_probe_failed: "无法读取视频信息",
+        source_not_repairable: "视频无法自动修复",
+        x_post_storage_unavailable: "发布服务存储不可用",
+        x_post_manual_account_mismatch: "所选账号与任务不一致",
+        x_post_manual_material_mismatch: "所选素材与任务不一致",
+        material_not_found_or_ineligible: "素材不存在、不是有效视频或时长数据缺失",
+      });
       const setText = (node, value, fallback = "—") => {
         node.textContent = value == null || value === "" ? fallback : String(value);
       };
@@ -1053,13 +1087,41 @@
         }
         return ({
           queued: "等待后台处理",
-          running: "正在预检或发布",
+          running: "正在检查视频或发布",
           completed: "全部发布成功",
           completed_with_errors: "已结束，部分失败",
           needs_review: "已停止，存在未知结果待核对",
           stopped: "已停止，后续未继续发布",
-          failed_preflight: "整批预检失败，未开始发布",
+          failed_preflight: "发布前检查未通过，未发布",
         })[String(status || "")] || String(status || "状态未知");
+      }
+      function manualFailureReason(run) {
+        const code = String(run && run.error_code || "").trim();
+        const message = String(run && run.error_message || "").trim();
+        const lowerMessage = message.toLowerCase();
+        const materialMatch = message.match(/素材\s+(\d+)/);
+        const prefix = materialMatch ? `素材 ${materialMatch[1]}：` : "";
+
+        if (code === "repaired_media_invalid") {
+          if (lowerMessage.includes("size")) return `${prefix}修复后视频超过512MB上限`;
+          if (lowerMessage.includes("duration")) return `${prefix}修复后视频时长不符合发布要求`;
+          return `${prefix}修复后视频不符合发布要求`;
+        }
+        if (code === "invalid_media_duration") {
+          if (lowerMessage.includes("4 hour") || message.includes("4小时")) return `${prefix}视频时长超过4小时上限`;
+          if (lowerMessage.includes("0.5")) return `${prefix}视频时长不足0.5秒`;
+        }
+        if (code === "repaired_media_duration_invalid" || code === "repaired_media_duration_too_long") {
+          if (message.includes("4小时")) return `${prefix}修复后视频时长超过4小时上限`;
+          if (message.includes("140秒")) return `${prefix}修复后视频时长超过140秒上限`;
+          if (message.includes("0.5秒")) return `${prefix}修复后视频时长不足0.5秒`;
+        }
+        const label = MANUAL_ERROR_LABELS[code];
+        if (label) return `${prefix}${label}`;
+        if (message && /[\u3400-\u9fff]/.test(message) && message.length <= 80) {
+          return message;
+        }
+        return code || message ? "发布前检查失败，请联系技术人员" : "";
       }
       function renderManualRun(run) {
         if (!run || !/^\d+$/.test(String(run.id || ""))) return;
@@ -1082,7 +1144,8 @@
           ""
         );
         const errorNode = byId("manualRunError");
-        const error = [run.error_code, run.error_message].filter(Boolean).join("：");
+        const reason = manualFailureReason(run);
+        const error = reason ? `拦截原因：${reason}` : "";
         setText(errorNode, error, "");
         errorNode.classList.toggle("hidden", !error);
         const queueRows = byId("manualQueueRows");
@@ -1093,7 +1156,7 @@
           waiting.className = "helper";
           const waitingText = !state.manual.terminal && run.publish_mode === "scheduled" && run.status === "queued"
             ? `任务已保留所选素材，将于北京时间 ${formatBeijingTime(run.scheduled_at)} 到点后开始预检。`
-            : (state.manual.terminal ? "本任务未生成发布队列。" : "后台正在执行整批预检，尚未生成发布队列。");
+            : (state.manual.terminal ? "本次没有开始发布。" : "后台正在检查所选视频，尚未开始发布。");
           setText(waiting, waitingText, "");
           queueRows.appendChild(waiting);
         } else {

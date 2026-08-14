@@ -694,7 +694,7 @@ def inspect_source(payload, trigger_code="", duration_policy="standard"):
     if duration < MIN_DURATION_SECONDS:
         raise MediaRepairError(
             "source_not_repairable",
-            "source duration is outside the X post contract",
+            "视频时长不足0.5秒",
             422,
         )
     trim_applied = duration > max_duration
@@ -905,10 +905,21 @@ def validate_output(
         )
     format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
     duration = _positive_number(format_data.get("duration") or video.get("duration"))
-    if duration < MIN_DURATION_SECONDS or duration > max_duration_seconds:
+    if duration < MIN_DURATION_SECONDS:
         raise MediaRepairError(
             "repaired_media_invalid",
-            "repaired media duration is outside the X post contract",
+            "修复后视频时长不足0.5秒",
+            500,
+        )
+    if duration > max_duration_seconds:
+        limit_label = (
+            "4小时"
+            if max_duration_seconds == PREMIUM_MAX_DURATION_SECONDS
+            else "140秒"
+        )
+        raise MediaRepairError(
+            "repaired_media_invalid",
+            "修复后视频时长超过%s上限" % limit_label,
             500,
         )
     source_duration = _positive_number(expected_duration)
@@ -920,17 +931,25 @@ def validate_output(
     if source_duration and abs(duration - source_duration) > duration_tolerance:
         raise MediaRepairError(
             "repaired_media_invalid",
-            "repaired media duration does not preserve the source",
+            "修复后视频时长与预期不一致",
             500,
         )
     try:
         size = Path(output_path).stat().st_size
     except OSError:
-        raise MediaRepairError("repaired_media_invalid", "repaired media is missing", 500) from None
-    if size <= 0 or size > int(max_output_bytes):
+        raise MediaRepairError(
+            "repaired_media_invalid", "修复后视频文件不存在", 500
+        ) from None
+    if size <= 0:
         raise MediaRepairError(
             "repaired_media_invalid",
-            "repaired media size is outside the configured limit",
+            "修复后视频文件为空",
+            500,
+        )
+    if size > int(max_output_bytes):
+        raise MediaRepairError(
+            "repaired_media_invalid",
+            "修复后视频超过512MB上限",
             500,
         )
     return {
@@ -1294,10 +1313,16 @@ class MediaRepairProcessor:
                 "media_transcode_failed",
             )
             output_sha256, output_size = _file_sha256(output_path)
-            if output_size <= 0 or output_size > int(self.config.max_output_bytes):
+            if output_size <= 0:
                 raise MediaRepairError(
                     "repaired_media_invalid",
-                    "repaired media size is outside the configured limit",
+                    "修复后视频文件为空",
+                    500,
+                )
+            if output_size > int(self.config.max_output_bytes):
+                raise MediaRepairError(
+                    "repaired_media_invalid",
+                    "修复后视频超过512MB上限",
                     500,
                 )
             output_probe = _probe_payload(self.config, output_path, self.runner)

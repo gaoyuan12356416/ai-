@@ -277,9 +277,59 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
             MATERIAL,
         )
         self.assertIn("MANUAL_TERMINAL_STATUSES", MATERIAL)
+        self.assertIn("function manualFailureReason(run)", MATERIAL)
+        self.assertIn('repaired_media_too_large: "修复后视频超过512MB上限"', MATERIAL)
+        self.assertIn('material_duration_missing: "视频时长缺失或为0秒"', MATERIAL)
+        self.assertIn('const error = reason ? `拦截原因：${reason}` : "";', MATERIAL)
+        self.assertNotIn(
+            '[run.error_code, run.error_message].filter(Boolean).join',
+            MATERIAL,
+        )
         self.assertNotIn(
             "state.schedule.accountIds = state.manual.accountIds",
             MATERIAL,
+        )
+
+    def test_manual_failure_reason_hides_codes_and_translates_legacy_runs(self):
+        start = MATERIAL.index("const MANUAL_ERROR_LABELS")
+        end = MATERIAL.index("function renderManualRun(run)")
+        snippet = MATERIAL[start:end]
+        cases = [
+            {
+                "error_code": "repaired_media_invalid",
+                "error_message": "repaired media size is outside the configured limit",
+            },
+            {
+                "error_code": "material_duration_missing",
+                "error_message": "素材 6194023 的视频时长缺失或为0秒",
+            },
+            {
+                "error_code": "invalid_media_duration",
+                "error_message": "Premium X video duration must not exceed 4 hours",
+            },
+        ]
+        program = (
+            snippet
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases, ensure_ascii=False)
+            + ".map(manualFailureReason)));"
+        )
+        completed = subprocess.run(
+            ["node", "-e", program],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [
+                "修复后视频超过512MB上限",
+                "素材 6194023：视频时长缺失或为0秒",
+                "视频时长超过4小时上限",
+            ],
         )
 
     def test_material_and_drama_templates_are_rendered_exactly(self):

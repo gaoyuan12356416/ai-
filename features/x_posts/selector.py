@@ -322,25 +322,20 @@ class DramawaveCandidateSelector:
         allow_long_duration=False,
         max_duration_seconds=None,
     ):
-        """Load one eligible video directly from the custom material library.
+        """Load one material directly from the custom material library.
 
-        Material-pool and manual selection may hydrate a positive-duration
-        source through the X API's four-hour upload boundary.  The later
-        account-aware preflight is authoritative: standard accounts still fail
-        closed above 140 seconds, while only a token-confirmed Premium account
-        may keep the long source.
+        Eligibility is checked in Python after the exact ID lookup so a manual
+        run can persist a precise rejection such as missing material, non-video
+        material, inactive material, missing duration, or duration overflow.
+        The later account-aware media preflight remains authoritative for the
+        downloaded file and the selected account's current entitlement.
         """
-        duration_predicate = (
-            "AND cs.video_duration >= %s"
-            if allow_long_duration
-            else "AND cs.video_duration BETWEEN %s AND %s"
-        )
-        if max_duration_seconds is None:
-            max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
         sql = """
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
                 cs.product AS product,
+                cs.type AS material_type,
+                cs.is_delete AS material_is_deleted,
                 cs.url AS material_url,
                 cs.name AS material_name,
                 cs.language AS material_language,
@@ -349,30 +344,12 @@ class DramawaveCandidateSelector:
                 cs.video_duration AS video_duration
              FROM `{schema}`.ads_custom_source cs
              WHERE cs.id = %s
-               AND cs.product = %s
-               AND cs.type = %s
-               AND cs.is_delete = %s
-               {duration_predicate}
-             LIMIT 2
-        """.format(
-            schema=self.schema,
-            duration_predicate=duration_predicate,
-        )
-        duration_params = (
-            (1,)
-            if allow_long_duration
-            else (1, int(max_duration_seconds))
-        )
+              LIMIT 2
+        """.format(schema=self.schema)
         return _cursor_rows(
             self.connection,
             sql,
-            (
-                material_id,
-                DEFAULT_PRODUCT,
-                2,
-                0,
-            )
-            + duration_params,
+            (material_id,),
         )
 
     def _pool_drama_rows(self, content_id, language):
@@ -468,10 +445,15 @@ class DramawaveCandidateSelector:
             allow_long_duration=allow_long_duration,
             max_duration_seconds=max_duration_seconds,
         )
+        if not material_rows:
+            raise PoolCandidateRejection(
+                "material_not_found",
+                "素材 %s 不存在" % material_id,
+            )
         if len(material_rows) != 1:
             raise PoolCandidateRejection(
-                "material_not_found_or_ineligible",
-                "material is missing or is not an eligible active video",
+                "material_source_ambiguous",
+                "素材 %s 存在重复源数据" % material_id,
             )
         row = material_rows[0]
         try:
@@ -480,11 +462,10 @@ class DramawaveCandidateSelector:
             if key != material_id:
                 raise CandidateSelectionError("material identity mismatch")
             product = _text(row.get("product"), "product", limit=64)
-            if product != DEFAULT_PRODUCT:
-                raise PoolCandidateRejection(
-                    "material_product_mismatch",
-                    "material does not belong to Dramawave",
-                )
+            material_type = _integer(row.get("material_type"), "material_type")
+            material_is_deleted = _integer(
+                row.get("material_is_deleted"), "material_is_deleted"
+            )
             material_language = _text(
                 row.get("material_language"), "material_language", limit=32
             )
@@ -500,8 +481,53 @@ class DramawaveCandidateSelector:
         except CandidateSelectionError as exc:
             raise PoolCandidateRejection(
                 "material_metadata_invalid",
-                "material metadata is incomplete or invalid: %s" % exc,
+                "素材 %s 的基础信息不完整" % material_id,
             ) from None
+        if product != DEFAULT_PRODUCT:
+            raise PoolCandidateRejection(
+                "material_product_mismatch",
+                "素材 %s 不属于Dramawave" % material_id,
+            )
+        if material_type != 2:
+            raise PoolCandidateRejection(
+                "material_not_video",
+                "素材 %s 不是视频" % material_id,
+            )
+        if material_is_deleted != 0:
+            raise PoolCandidateRejection(
+                "material_inactive",
+                "素材 %s 已删除或不可用" % material_id,
+            )
+        try:
+            source_duration = _float(row.get("video_duration"), "video_duration")
+        except CandidateSelectionError:
+            raise PoolCandidateRejection(
+                "material_duration_invalid",
+                "素材 %s 的视频时长数据无效" % material_id,
+            ) from None
+        if source_duration <= 0:
+            raise PoolCandidateRejection(
+                "material_duration_missing",
+                "素材 %s 的视频时长缺失或为0秒" % material_id,
+            )
+        if max_duration_seconds is None:
+            max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
+        try:
+            duration_limit = float(max_duration_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise CandidateSelectionError("material duration limit is invalid") from None
+        if not math.isfinite(duration_limit) or duration_limit <= 0:
+            raise CandidateSelectionError("material duration limit is invalid")
+        if source_duration > duration_limit:
+            limit_label = (
+                "4小时"
+                if duration_limit == MAX_X_SOURCE_DURATION_SECONDS
+                else "%d秒" % int(duration_limit)
+            )
+            raise PoolCandidateRejection(
+                "material_duration_exceeds_limit",
+                "素材 %s 的视频时长超过%s上限" % (material_id, limit_label),
+            )
         if not material_url.startswith("https://"):
             raise PoolCandidateRejection(
                 "material_url_not_https",
