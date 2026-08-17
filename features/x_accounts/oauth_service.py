@@ -4033,7 +4033,7 @@ def create_post_schedule_plan_request(payload):
                 "invalid_request", "preflight_duration is invalid", 400
             ) from None
         relay_required = bool(
-            source_type == "drama"
+            source_type in {"drama", "material"}
             and math.isfinite(duration)
             and duration > 140.0
             and not account.get("long_video_publish_eligible")
@@ -4056,6 +4056,28 @@ def create_post_schedule_plan_request(payload):
                     "No currently eligible public Premium relay account is available",
                     409,
                 )
+            selected_relay = selectable_relays[0]
+            if source_type == "material":
+                try:
+                    requested_relay_id = int(
+                        candidate.get("relay_account_id") or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    requested_relay_id = 0
+                selected_relay = next(
+                    (
+                        relay
+                        for relay in selectable_relays
+                        if int(relay["id"]) == requested_relay_id
+                    ),
+                    None,
+                )
+                if selected_relay is None:
+                    raise ServiceError(
+                        "x_post_premium_relay_unavailable",
+                        "Frozen same-language material relay account is no longer eligible",
+                        409,
+                    )
         else:
             _require_candidate_duration_capability(candidate, account)
         if account.get("long_video_eligible"):
@@ -4082,9 +4104,9 @@ def create_post_schedule_plan_request(payload):
             item.update(
                 {
                     "delivery_mode": "premium_relay_repost",
-                    "relay_account_id": int(selectable_relays[0]["id"]),
+                    "relay_account_id": int(selected_relay["id"]),
                     "relay_account_username": str(
-                        selectable_relays[0]["username"]
+                        selected_relay["username"]
                     ),
                 }
             )

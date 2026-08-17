@@ -9,9 +9,11 @@ the X sidecar, and publishes only queue identities returned by that plan.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import json
 import os
+import random
 import re
 import sys
 import tempfile
@@ -32,7 +34,10 @@ from features.x_posts.drama_selector import (  # noqa: E402
     DramaSelectionError,
     select_drama_pool_episodes,
 )
-from features.x_accounts.language import canonical_drama_language  # noqa: E402
+from features.x_accounts.language import (  # noqa: E402
+    canonical_drama_language,
+    same_drama_language,
+)
 from features.x_posts.selector import (  # noqa: E402
     CandidateSelectionError,
     DEFAULT_SCHEMA,
@@ -61,7 +66,6 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     _connect_from_config,
     _parse_hosts,
     _preflight_candidate,
-    _preflight_candidates,
     _record_pool_checks_best_effort,
     _safe_account,
     process_lock,
@@ -112,6 +116,7 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
         "x_post_daily_copy_validation_failed",
     }
 )
+MATERIAL_ASSIGNMENT_VERSION = "material-random-relay-v1"
 
 
 class ScheduleRunError(RuntimeError):
@@ -1027,6 +1032,242 @@ def _retrying_media_downloader(
     return download
 
 
+def _stable_shuffled(values, seed_parts, shuffle_fn=None):
+    """Return a reproducible shuffle without using process-randomized hash()."""
+    payload = json.dumps(
+        [MATERIAL_ASSIGNMENT_VERSION]
+        + [str(value) for value in seed_parts],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    seed = hashlib.sha256(payload).hexdigest()
+    items = list(values)
+    if shuffle_fn is not None:
+        shuffled = shuffle_fn(list(items), seed)
+        if (
+            not isinstance(shuffled, list)
+            or len(shuffled) != len(items)
+            or sorted(str(item) for item in shuffled)
+            != sorted(str(item) for item in items)
+        ):
+            raise ScheduleRunError(
+                "material assignment shuffler returned an invalid permutation",
+                "x_post_schedule_material_assignment_invalid",
+            )
+        return shuffled
+    random.Random(int(seed, 16)).shuffle(items)
+    return items
+
+
+def _material_assignment_seed_parts(identity, accounts, language, purpose):
+    identity = identity if isinstance(identity, dict) else {}
+    return (
+        purpose,
+        identity.get("source_type", "material"),
+        identity.get("run_date", ""),
+        identity.get("publish_time", ""),
+        identity.get("version", ""),
+        canonical_drama_language(language),
+        ",".join(str(int(account["id"])) for account in accounts),
+    )
+
+
+def _preflight_material_candidates(
+    config,
+    sidecar,
+    candidates,
+    accounts,
+    *,
+    source_date,
+    timestamp,
+    downloader,
+    prober,
+    repair_client,
+    assignment_identity,
+    stable_shuffler=_stable_shuffled,
+):
+    """FIFO-scan material and stably randomize same-language target pairing."""
+    target_count = len(accounts)
+    accepted_by_account = {}
+    failures = []
+    repair_state = {"attempted": 0}
+    accounts_by_language = {}
+    for account in accounts:
+        language = canonical_drama_language(account.get("drama_language"))
+        accounts_by_language.setdefault(language, []).append(account)
+    target_order = {
+        language: stable_shuffler(
+            language_accounts,
+            _material_assignment_seed_parts(
+                assignment_identity,
+                accounts,
+                language,
+                "target",
+            ),
+        )
+        for language, language_accounts in accounts_by_language.items()
+    }
+    relay_cache = {}
+    work_root = Path(config.work_dir)
+    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
+        raise ScheduleRunError(
+            "schedule media work directory is unavailable",
+            "x_post_storage_unavailable",
+        )
+    with tempfile.TemporaryDirectory(
+        prefix="x-post-schedule-material-", dir=str(work_root)
+    ) as temporary:
+        root = Path(temporary)
+        for candidate in candidates:
+            if len(accepted_by_account) == target_count:
+                break
+            try:
+                language = canonical_drama_language(
+                    candidate.get("material_language")
+                    or candidate.get("language")
+                )
+            except (AttributeError, ValueError) as exc:
+                failures.append(
+                    {
+                        "pool_item_id": (
+                            candidate.get("pool_item_id")
+                            if isinstance(candidate, dict)
+                            else None
+                        ),
+                        "material_id": str(
+                            candidate.get("material_id", "")
+                            if isinstance(candidate, dict)
+                            else ""
+                        ),
+                        "error_code": "x_account_drama_language_invalid",
+                        "error_message": redact_text(str(exc), 240),
+                    }
+                )
+                continue
+            remaining_targets = [
+                account
+                for account in target_order.get(language, [])
+                if int(account["id"]) not in accepted_by_account
+            ]
+            if not remaining_targets:
+                continue
+            target = remaining_targets[0]
+            material_id = str(candidate.get("material_id", "") or "")
+            destination = root / ("%s.mp4" % material_id)
+            rank = len(accepted_by_account) + 1
+            try:
+                try:
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        target,
+                        rank,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
+                except (
+                    XPostError,
+                    CandidatePreflightError,
+                    http.client.HTTPException,
+                    OSError,
+                    ValueError,
+                ) as direct_error:
+                    if not (
+                        str(getattr(direct_error, "code", "") or "")
+                        == "x_long_video_requires_premium"
+                        and not target.get("long_video_eligible")
+                    ):
+                        raise
+                    if language not in relay_cache:
+                        relay_cache[language] = sidecar.premium_relay_accounts(
+                            str(assignment_identity.get("run_date") or ""),
+                            language,
+                        )
+                    relay_options = [
+                        relay
+                        for relay in relay_cache[language]
+                        if int(relay["id"]) != int(target["id"])
+                        and same_drama_language(
+                            relay.get("drama_language"), language
+                        )
+                    ]
+                    relay_options = stable_shuffler(
+                        relay_options,
+                        _material_assignment_seed_parts(
+                            assignment_identity,
+                            accounts,
+                            language,
+                            "relay:%s:%s"
+                            % (int(target["id"]), material_id),
+                        ),
+                    )
+                    if not relay_options:
+                        raise ScheduleRunError(
+                            "no currently eligible same-language public Premium relay account is available",
+                            "x_post_premium_relay_unavailable",
+                        ) from None
+                    relay = relay_options[0]
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        relay,
+                        rank,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
+                    item.update(
+                        {
+                            "account_id": int(target["id"]),
+                            "account_username": str(target["username"]),
+                            "page_name": str(
+                                target.get("display_name", "")
+                                or target["username"]
+                            ),
+                            "page_id": str(target["x_user_id"]),
+                            "delivery_mode": "premium_relay_repost",
+                            "relay_account_id": int(relay["id"]),
+                            "relay_account_username": str(relay["username"]),
+                        }
+                    )
+            except (
+                XPostError,
+                CandidatePreflightError,
+                http.client.HTTPException,
+                OSError,
+                ValueError,
+            ) as exc:
+                failures.append(
+                    {
+                        "pool_item_id": candidate.get("pool_item_id"),
+                        "material_id": material_id,
+                        "error_code": str(
+                            getattr(exc, "code", "media_preflight_failed")
+                        )[:64],
+                        "error_message": redact_text(str(exc), 240),
+                    }
+                )
+                continue
+            item["source_type"] = "material"
+            item["source_date"] = source_date
+            accepted_by_account[int(target["id"])] = item
+    accepted = []
+    for account in accounts:
+        item = accepted_by_account.get(int(account["id"]))
+        if item is None:
+            continue
+        item["candidate_rank"] = len(accepted) + 1
+        accepted.append(item)
+    return accepted, failures
+
+
 def _material_candidates(
     config,
     sidecar,
@@ -1038,6 +1279,8 @@ def _material_candidates(
     prober,
     repair_client,
     timestamp,
+    assignment_identity=None,
+    stable_shuffler=_stable_shuffled,
 ):
     pool_items = sidecar.available_pool_items(
         config.material_pool_path, config.scan_limit
@@ -1065,14 +1308,23 @@ def _material_candidates(
         config,
         selector_rejections,
     )
-    planned, preflight_rejections = _preflight_candidates(
+    identity = dict(assignment_identity or {})
+    identity.setdefault("source_type", "material")
+    identity.setdefault("run_date", source_date)
+    identity.setdefault("publish_time", "legacy")
+    identity.setdefault("version", 1)
+    planned, preflight_rejections = _preflight_material_candidates(
         config,
+        sidecar,
         candidates,
         accounts,
-        timestamp,
-        downloader,
-        prober,
-        repair_client,
+        source_date=source_date,
+        timestamp=timestamp,
+        downloader=downloader,
+        prober=prober,
+        repair_client=repair_client,
+        assignment_identity=identity,
+        stable_shuffler=stable_shuffler,
     )
     _record_pool_checks_best_effort(
         sidecar,
@@ -1084,9 +1336,6 @@ def _material_candidates(
             "not enough FIFO material candidates passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
-    for item in planned:
-        item["source_type"] = "material"
-        item["source_date"] = source_date
     return planned
 
 
@@ -1638,16 +1887,21 @@ def execute_schedule_tick(
             source_date = previous_source_date(current)
             timestamp = max(1, int(current.timestamp()))
             if identity["source_type"] == "material":
+                material_loader_options = {
+                    "source_date": source_date,
+                    "connection_factory": connection_factory,
+                    "downloader": retrying_downloader,
+                    "prober": prober,
+                    "repair_client": repair_client,
+                    "timestamp": timestamp,
+                }
+                if material_candidate_loader is _material_candidates:
+                    material_loader_options["assignment_identity"] = identity
                 candidates = material_candidate_loader(
                     config,
                     sidecar,
                     accounts,
-                    source_date=source_date,
-                    connection_factory=connection_factory,
-                    downloader=retrying_downloader,
-                    prober=prober,
-                    repair_client=repair_client,
-                    timestamp=timestamp,
+                    **material_loader_options,
                 )
             else:
                 candidates = drama_candidate_loader(

@@ -242,6 +242,7 @@ QUEUE_LEDGER_FIELDS = (
 
 DIRECT_DELIVERY_MODE = "direct"
 PREMIUM_RELAY_REPOST_MODE = "premium_relay_repost"
+MATERIAL_RELAY_ASSIGNMENT_VERSION = "material-random-relay-v1"
 DELIVERY_MODES = frozenset(
     {DIRECT_DELIVERY_MODE, PREMIUM_RELAY_REPOST_MODE}
 )
@@ -1080,10 +1081,26 @@ def _material_fifo_selection_matches(
                 duration = float(values.get("preflight_duration", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 return False
+            delivery_mode = str(
+                values.get("delivery_mode", DIRECT_DELIVERY_MODE) or ""
+            )
+            relay_account_id = int(values.get("relay_account_id") or 0)
             if (
                 not math.isfinite(duration)
                 or duration < 0
-                or (duration > 140.0 and account_id not in premium_ids)
+                or (
+                    duration > STANDARD_MAX_DURATION_SECONDS
+                    and delivery_mode == DIRECT_DELIVERY_MODE
+                    and account_id not in premium_ids
+                )
+                or (
+                    delivery_mode == PREMIUM_RELAY_REPOST_MODE
+                    and (
+                        duration <= STANDARD_MAX_DURATION_SECONDS
+                        or relay_account_id <= 0
+                        or relay_account_id == account_id
+                    )
+                )
             ):
                 return False
             selected_pool_ids.add(pool_id)
@@ -1103,7 +1120,11 @@ def _material_fifo_selection_matches(
             and remaining_premium_ids
         ):
             return False
-
+        if error_code == "x_long_video_requires_premium":
+            # Stable random pairing may not bypass a newer eligible long row
+            # with an older short row. The runner must fail the whole batch
+            # when that long row has no same-language relay capacity.
+            return False
     return selected_pool_ids == set(actual_by_pool)
 
 
@@ -2621,7 +2642,11 @@ def ensure_storage(db_path):
                 ) OR (
                     NEW.delivery_mode='premium_relay_repost'
                     AND (
-                        NEW.source_type<>'drama'
+                        NEW.source_type NOT IN ('drama','material')
+                        OR (
+                            NEW.source_type='material'
+                            AND NEW.schedule_run_id IS NULL
+                        )
                         OR NEW.preflight_duration<=140
                         OR NEW.relay_account_id<=0
                         OR NEW.relay_account_id=NEW.account_id
@@ -2659,7 +2684,7 @@ def ensure_storage(db_path):
                 CREATE TRIGGER trg_x_post_queue_relay_update
                 BEFORE UPDATE OF delivery_mode,relay_account_id,
                     relay_account_username,source_type,preflight_duration,
-                    account_id ON x_post_queue
+                    account_id,schedule_run_id ON x_post_queue
                 WHEN (
                     NEW.delivery_mode='direct'
                     AND (
@@ -2669,7 +2694,11 @@ def ensure_storage(db_path):
                 ) OR (
                     NEW.delivery_mode='premium_relay_repost'
                     AND (
-                        NEW.source_type<>'drama'
+                        NEW.source_type NOT IN ('drama','material')
+                        OR (
+                            NEW.source_type='material'
+                            AND NEW.schedule_run_id IS NULL
+                        )
                         OR NEW.preflight_duration<=140
                         OR NEW.relay_account_id<=0
                         OR NEW.relay_account_id=NEW.account_id
@@ -4490,7 +4519,12 @@ class XPostStore:
         return {"items": items, "checked_at": current.isoformat(timespec="seconds")}
 
     def _queue_payload(
-        self, payload, run_date=None, candidate_rank=None, require_compliance=False
+        self,
+        payload,
+        run_date=None,
+        candidate_rank=None,
+        require_compliance=False,
+        allow_material_relay=False,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
@@ -4826,7 +4860,8 @@ class XPostStore:
                     400,
                 )
         elif (
-            source_type != "drama"
+            source_type not in {"drama", "material"}
+            or (source_type == "material" and not allow_material_relay)
             or result["preflight_duration"]
             <= STANDARD_MAX_DURATION_SECONDS
             or result["relay_account_id"] <= 0
@@ -4835,7 +4870,7 @@ class XPostStore:
         ):
             raise XPostError(
                 "invalid_request",
-                "Premium relay delivery requires a long drama and a distinct relay account",
+                "Premium relay delivery requires eligible long schedule content and a distinct relay account",
                 400,
             )
         if preflight_sha256 and not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
@@ -9325,8 +9360,28 @@ class XPostStore:
                 raise XPostError(
                     "invalid_request", "Premium relay account is invalid", 400
                 )
+            relay_language = None
+            if raw.get("drama_language") not in (None, ""):
+                try:
+                    relay_language = canonical_drama_language(
+                        raw.get("drama_language")
+                    )
+                except ValueError as exc:
+                    raise XPostError(
+                        "x_account_drama_language_invalid",
+                        str(exc),
+                        400,
+                    ) from None
+            elif source_type == "material":
+                raise XPostError(
+                    "x_account_drama_language_invalid",
+                    "Material relay account drama_language is required",
+                    400,
+                )
             relay_ids.add(relay_id)
-            relay_options.append((relay_id, relay_username))
+            relay_options.append(
+                (relay_id, relay_username, relay_language)
+            )
         frozen = self.query_schedule_plan(
             source_type,
             run_date,
@@ -9402,6 +9457,7 @@ class XPostStore:
                 run_date=run_date,
                 candidate_rank=index,
                 require_compliance=True,
+                allow_material_relay=(source_type == "material"),
             )
             if values["account_id"] != account_ids[index - 1]:
                 raise XPostError(
@@ -9494,6 +9550,16 @@ class XPostStore:
                             values["account_id"],
                             values["material_key"],
                             values["episode_key"],
+                            (
+                                values["delivery_mode"]
+                                if source_type == "material"
+                                else ""
+                            ),
+                            (
+                                int(values["relay_account_id"] or 0)
+                                if source_type == "material"
+                                else 0
+                            ),
                         )
                         for values in prepared
                     ]
@@ -9502,6 +9568,16 @@ class XPostStore:
                             int(row["account_id"]),
                             str(row["material_key"]),
                             str(row["episode_key"]),
+                            (
+                                str(row["delivery_mode"])
+                                if source_type == "material"
+                                else ""
+                            ),
+                            (
+                                int(row["relay_account_id"] or 0)
+                                if source_type == "material"
+                                else 0
+                            ),
                         )
                         for row in existing_queues
                     ]
@@ -9771,27 +9847,17 @@ class XPostStore:
                 if values["delivery_mode"] == PREMIUM_RELAY_REPOST_MODE
             ]
             if relay_values:
-                eligible_options = [
-                    option
-                    for option in relay_options
-                    if all(
-                        option[0] != int(values["account_id"])
-                        for values in relay_values
-                    )
-                ]
-                if not eligible_options:
+                if not relay_options:
                     conn.rollback()
                     raise XPostError(
                         "x_post_premium_relay_unavailable",
                         "No currently eligible Premium relay account is available",
                         409,
                     )
-                relay_placeholders = ",".join(
-                    "?" for _option in eligible_options
-                )
+                relay_placeholders = ",".join("?" for _ in relay_options)
                 relay_counts = {
                     account_id: 0
-                    for account_id, _username in eligible_options
+                    for account_id, _username, _language in relay_options
                 }
                 for row in conn.execute(
                     "SELECT relay_account_id,COUNT(*) AS assignment_count "
@@ -9800,30 +9866,61 @@ class XPostStore:
                     % relay_placeholders,
                     tuple(
                         account_id
-                        for account_id, _username in eligible_options
+                        for account_id, _username, _language in relay_options
                     ),
                 ).fetchall():
                     relay_counts[int(row["relay_account_id"])] = int(
                         row["assignment_count"]
                     )
-                username_by_id = dict(eligible_options)
                 for values in relay_values:
                     selectable = [
-                        account_id
-                        for account_id, _username in eligible_options
-                        if account_id != int(values["account_id"])
+                        option
+                        for option in relay_options
+                        if option[0] != int(values["account_id"])
+                        and (
+                            option[2] is None
+                            or same_drama_language(
+                                option[2], values["account_drama_language"]
+                            )
+                        )
                     ]
-                    relay_account_id = min(
-                        selectable,
-                        key=lambda account_id: (
-                            relay_counts[account_id],
-                            account_id,
-                        ),
-                    )
+                    if not selectable:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_premium_relay_unavailable",
+                            "No same-language eligible Premium relay account is available",
+                            409,
+                        )
+                    if source_type == "material":
+                        requested_relay_id = int(
+                            values["relay_account_id"] or 0
+                        )
+                        selected = next(
+                            (
+                                option
+                                for option in selectable
+                                if option[0] == requested_relay_id
+                            ),
+                            None,
+                        )
+                        if selected is None:
+                            conn.rollback()
+                            raise XPostError(
+                                "x_post_premium_relay_unavailable",
+                                "Frozen material relay account is no longer eligible",
+                                409,
+                            )
+                    else:
+                        selected = min(
+                            selectable,
+                            key=lambda option: (
+                                relay_counts[option[0]],
+                                option[0],
+                            ),
+                        )
+                    relay_account_id, relay_username, _relay_language = selected
                     values["relay_account_id"] = relay_account_id
-                    values["relay_account_username"] = username_by_id[
-                        relay_account_id
-                    ]
+                    values["relay_account_username"] = relay_username
                     relay_counts[relay_account_id] += 1
 
             if schedule_run_id is None:
@@ -11058,8 +11155,18 @@ class XPostStore:
             username = str(raw.get("username", "") or "").strip().lstrip("@")
             if account_id in seen or not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
                 raise XPostError("invalid_request", "eligible account is invalid", 400)
+            relay_language = None
+            if raw.get("drama_language") not in (None, ""):
+                try:
+                    relay_language = canonical_drama_language(
+                        raw.get("drama_language")
+                    )
+                except ValueError as exc:
+                    raise XPostError(
+                        "x_account_drama_language_invalid", str(exc), 400
+                    ) from None
             seen.add(account_id)
-            options.append((account_id, username))
+            options.append((account_id, username, relay_language))
         timestamp = utc_now()
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -11067,6 +11174,15 @@ class XPostStore:
                 "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
             ).fetchone()
             ledger = self._assert_relay_queue_binding(conn, queue)
+            if str(queue["source_type"] or "") == "material" and any(
+                option[2] is None for option in options
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_account_drama_language_invalid",
+                    "Material relay account drama_language is required",
+                    400,
+                )
             log = conn.execute(
                 "SELECT * FROM x_post_publish_log WHERE queue_id=?",
                 (queue_id,),
@@ -11093,6 +11209,12 @@ class XPostStore:
                 option
                 for option in options
                 if option[0] != int(queue["account_id"])
+                and (
+                    option[2] is None
+                    or same_drama_language(
+                        option[2], queue["account_drama_language"]
+                    )
+                )
             ]
             if not options:
                 conn.rollback()
@@ -11102,22 +11224,46 @@ class XPostStore:
                     409,
                 )
             placeholders = ",".join("?" for _item in options)
-            counts = {account_id: 0 for account_id, _username in options}
+            counts = {
+                account_id: 0
+                for account_id, _username, _language in options
+            }
             for row in conn.execute(
                 "SELECT relay_account_id,COUNT(*) AS assignment_count "
                 "FROM x_post_repost_ledger WHERE id<>? "
                 "AND relay_account_id IN (%s) GROUP BY relay_account_id"
                 % placeholders,
                 (ledger["id"],)
-                + tuple(account_id for account_id, _username in options),
+                + tuple(
+                    account_id
+                    for account_id, _username, _language in options
+                ),
             ).fetchall():
                 counts[int(row["relay_account_id"])] = int(
                     row["assignment_count"]
                 )
-            selected_id, selected_username = min(
-                options,
-                key=lambda option: (counts[option[0]], option[0]),
-            )
+            if str(queue["source_type"] or "") == "material":
+                selection_key = "|".join(
+                    (
+                        MATERIAL_RELAY_ASSIGNMENT_VERSION,
+                        str(queue["run_date"]),
+                        str(queue["schedule_run_id"] or 0),
+                        str(queue["id"]),
+                        str(queue["account_drama_language"]),
+                    )
+                )
+                selected = min(
+                    options,
+                    key=lambda option: hashlib.sha256(
+                        (selection_key + "|" + str(option[0])).encode("utf-8")
+                    ).digest(),
+                )
+            else:
+                selected = min(
+                    options,
+                    key=lambda option: (counts[option[0]], option[0]),
+                )
+            selected_id, selected_username, _selected_language = selected
             conn.execute(
                 "UPDATE x_post_queue SET relay_account_id=?,"
                 "relay_account_username=?,updated_at=? WHERE id=?",
@@ -11196,6 +11342,7 @@ class XPostStore:
                 (queue_id,),
             ).fetchone()
             if str(ledger["status"]) == "reposted":
+                self._mark_pool_published(conn, queue_id, timestamp)
                 conn.commit()
                 return _row_dict(ledger)
             if (
@@ -11242,6 +11389,7 @@ class XPostStore:
                 (queue_id,),
             ).fetchone()
             if str(ledger["status"]) == "reposted":
+                self._mark_pool_published(conn, queue_id, timestamp)
                 conn.commit()
                 return _row_dict(ledger)
             if (
@@ -11271,6 +11419,7 @@ class XPostStore:
                 "WHERE id=?",
                 (timestamp, queue_id),
             )
+            self._mark_pool_published(conn, queue_id, timestamp)
             self._mark_drama_episode_published(conn, queue_id, timestamp)
             self._sync_run(conn, queue_id, timestamp)
             conn.commit()

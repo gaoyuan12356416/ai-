@@ -1258,7 +1258,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             {oldest_pool["id"], newest_pool["id"]},
         )
 
-    def test_material_schedule_replays_fifo_after_premium_capacity_is_full(self):
+    def test_material_schedule_cannot_bypass_long_fifo_after_premium_target_used(self):
         self.save_schedule("material", [2, 3, 4], ["09:00"])
         added = self.store.add_pool_materials(
             ["231", "232", "233", "234", "235"],
@@ -1283,24 +1283,22 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         standard_two = self.material_candidate(second_oldest, 4)
         standard_two["preflight_duration"] = 100.0
 
-        created = self.store.create_schedule_plan(
-            "material",
-            "2026-07-27",
-            "09:00",
-            2,
-            [premium, standard_one, standard_two],
-            premium_account_ids=[2],
-        )
-
-        self.assertTrue(created["created"])
-        self.assertEqual(
-            [queue["pool_item_id"] for queue in created["queues"]],
-            [newest["id"], middle["id"], second_oldest["id"]],
-        )
-        self.assertNotIn(
-            oldest["id"],
-            {queue["pool_item_id"] for queue in created["queues"]},
-        )
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [premium, standard_one, standard_two],
+                premium_account_ids=[2],
+            )
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
+                0,
+            )
+        self.assertNotEqual(oldest["id"], second_oldest["id"])
 
     def test_material_schedule_cannot_skip_long_fifo_while_premium_remains(self):
         self.save_schedule("material", [2], ["09:00"])
