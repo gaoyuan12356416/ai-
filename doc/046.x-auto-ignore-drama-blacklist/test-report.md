@@ -3,7 +3,7 @@
 ## 测试结论
 
 本地测试通过，代码满足“X Auto 忽略剧黑名单、继续执行素材黑名单”的需求，
-未发起真实 X 请求。
+生产部署和自然轮询验证通过，未发起真实 X Post。
 
 ## 测试范围
 
@@ -17,10 +17,12 @@ X Auto selector、全部 `test_x*.py` 回归、Python 编译和差异检查。
 | X 全量 Python 回归 | 670 | 668 | 0 | 0 |
 | 条件跳过 | 2 | 2 | 0 | 0 |
 | 编译/差异检查 | 2 | 2 | 0 | 0 |
+| 服务器聚焦回归 | 125 | 125 | 0 | 0 |
+| 生产健康/账本/Token 不变量 | 1 | 1 | 0 | 0 |
 
 ## 缺陷情况
 
-未发现确认缺陷，未创建 BUG 文件。
+发现并修复部署打包权限缺陷 BUG-001；未影响数据和发布任务。
 
 ## 验证证据
 
@@ -30,6 +32,9 @@ Ran 22 tests ... OK
 
 python -m unittest discover -s scripts -p "test_x*.py"
 Ran 670 tests ... OK (skipped=2)
+
+server exact release focused tests
+Ran 125 tests ... OK
 ```
 
 ## 遗留风险
@@ -39,4 +44,4 @@ Ran 670 tests ... OK (skipped=2)
 
 ## 发布建议
 
-建议发布。先备份生产状态，服务器精确 release 复测通过后仅重启 X Auto 服务。
+已发布。生产健康、自然 timer、账本完整性和 Token 不变量均通过。
