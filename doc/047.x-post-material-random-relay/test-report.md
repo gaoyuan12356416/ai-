@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-专项、focused 与全量 X 回归通过。
+专项、focused 与全量 X 回归通过；Business/SA Gate 与 QA Gate 均为 PASS，GitHub-first 生产发布门禁通过。
 
 ## 测试范围
 
@@ -43,8 +43,11 @@ exit 0（仅显示 Git 的 LF/CRLF 转换提示，无 whitespace error）
 ## 遗留风险
 
 - 未在生产 Token/媒体/网络上执行真实写入验证，符合授权边界。
-- relay entitlement 是动态事实，生产需按 deploy.md 再验证自然运行状态。
+- relay entitlement 是动态事实，运行时仍会在建计划与最终写入前按当前 Token 复核。
+- Linux 临时目录无法通过生产固定 data-disk work-directory guard；服务器改用 182 条核心 focused 回归并独立验证真实 workdir，未为测试放宽安全边界。
+- 切换首分钟 X Auto 与 sidecar 同秒启动出现一次瞬时 unavailable；后续自然周期自行恢复且连续成功。
+- 16:59 的既有自然 material run `217` 在交付收口时仍处于媒体预检：第二个修复输出约 456 MB，GPU 转码已完成并在上传 COS；配置的单次 repair timeout 为 3600 秒。此后台任务 queue=0、log/unknown 无新增，不中断、不人工重试，也不作为代码/部署验收的阻塞门禁。
 
 ## 发布建议
 
-全量 X tests、py_compile、diff check 全绿，建议进入 GitHub review；本任务不部署。
+已按 deploy.md 部署 exact commit；禁止额外真实 Post/Repost canary，以自然 timer 与 ledger 不变量作为生产验收。
