@@ -1388,6 +1388,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
             "material_id": item["material_id"],
             "queue_id": 1,
             "content_id": item["content_id"],
+            "video_duration_seconds": STANDARD_MAX_DURATION_SECONDS,
         }
     )
     build_post_text(
@@ -1629,6 +1630,23 @@ def _preflight_candidate(
         item["preflight_size"] = final_size
         item["preflight_duration"] = float(
             probe.get("duration", 0) or 0
+        )
+        build_w2a_url(
+            {
+                "username": item["account_username"],
+                "timestamp": timestamp,
+                "material_language": item["material_language"],
+                "drama_name": item["drama_name"],
+                "tag": item["tag"],
+                "log_id": 1,
+                "page_name": item["page_name"],
+                "page_id": item["page_id"],
+                "material_name": item["material_name"],
+                "material_id": item["material_id"],
+                "queue_id": 1,
+                "content_id": item["content_id"],
+                "video_duration_seconds": item["preflight_duration"],
+            }
         )
         item["preflight_width"] = int(probe.get("width", 0) or 0)
         item["preflight_height"] = int(probe.get("height", 0) or 0)

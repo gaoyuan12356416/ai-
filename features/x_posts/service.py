@@ -114,6 +114,9 @@ FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES = {
     "invalid_media_dimensions": (
         "media preflight failed: 素材分辨率或宽高比不符合X",
     ),
+    "x_publish_unknown": (
+        "存在待人工确认的发布结果，已暂停后续短剧发布",
+    ),
 }
 FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
     {
@@ -138,6 +141,9 @@ FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES = {
     ),
     "x_long_video_requires_premium": (
         "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+    ),
+    "x_publish_unknown": (
+        "存在待人工确认的发布结果，已暂停后续短剧发布",
     ),
 }
 FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON = (
@@ -331,6 +337,22 @@ def _positive_int(value, label):
     return parsed
 
 
+def _w2a_channel_for_duration(value):
+    if isinstance(value, bool):
+        raise XPostError("invalid_request", "视频时长无效", 400)
+    try:
+        duration = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError("invalid_request", "视频时长无效", 400) from None
+    if (
+        not math.isfinite(duration)
+        or duration < 0.5
+        or duration > PREMIUM_MAX_DURATION_SECONDS
+    ):
+        raise XPostError("invalid_request", "视频时长无效", 400)
+    return "long" if duration > STANDARD_MAX_DURATION_SECONDS else "short"
+
+
 def build_w2a_url(params):
     """Build the exact Dramawave W2A attribution URL with fixed field order."""
     if not isinstance(params, dict):
@@ -338,7 +360,7 @@ def build_w2a_url(params):
     required = {
         "username", "timestamp", "material_language", "drama_name", "tag",
         "log_id", "page_name", "page_id", "material_name", "material_id",
-        "queue_id", "content_id",
+        "queue_id", "content_id", "video_duration_seconds",
     }
     missing = sorted(required.difference(params))
     unknown = sorted(set(params).difference(required))
@@ -359,6 +381,7 @@ def build_w2a_url(params):
     material_id = _clean_token(params["material_id"], "素材ID", 128)
     queue_id = _positive_int(params["queue_id"], "队列ID")
     content_id = _clean_token(params["content_id"], "content_id", 128)
+    channel = _w2a_channel_for_duration(params["video_duration_seconds"])
 
     campaign = "yingliang_post_CLV_VL_%s*%snone%s*%s*%s*%s" % (
         username, timestamp, language, drama_name, tag, log_id,
@@ -370,7 +393,7 @@ def build_w2a_url(params):
             ("af_adset_id", page_id),
             ("af_ad", "%s_contentid[%s]" % (material_name, content_id)),
             ("af_ad_id", material_id),
-            ("af_channel", "AIpost"),
+            ("af_channel", channel),
             ("af_c_id", str(queue_id)),
             ("af_dp", content_id),
         ),
@@ -393,7 +416,7 @@ def _validate_w2a_url(url):
     expected = ["c", "af_adset", "af_adset_id", "af_ad", "af_ad_id", "af_channel", "af_c_id", "af_dp"]
     if [key for key, _value in pairs] != expected or any(not value for _key, value in pairs):
         raise XPostError("invalid_short_link_target", "W2A参数不完整", 400)
-    if dict(pairs).get("af_channel") != "AIpost":
+    if dict(pairs).get("af_channel") not in {"AIpost", "short", "long"}:
         raise XPostError("invalid_short_link_target", "W2A渠道无效", 400)
     return str(url)
 
@@ -4369,6 +4392,7 @@ class XPostStore:
                     "FROM x_post_queue q "
                     "WHERE q.source_type='drama' "
                     "AND q.drama_pool_item_id IS NOT NULL "
+                    "AND q.status<>'published' "
                     "AND q.schedule_run_id IN (%s))"
                     % stale_placeholders,
                     (
@@ -13131,11 +13155,18 @@ class XApiClient:
             for segment_index in range(total_segments):
                 chunk = handle.read(self.chunk_bytes)
                 boundary, multipart = _multipart_segment(segment_index, chunk)
-                self._request(
-                    "POST", "/2/media/upload/%s/append" % urllib.parse.quote(media_id, safe=""),
-                    access_token, multipart, "multipart/form-data; boundary=%s" % boundary,
-                    operation="X媒体分片上传",
-                )
+                for append_attempt in range(3):
+                    try:
+                        self._request(
+                            "POST", "/2/media/upload/%s/append" % urllib.parse.quote(media_id, safe=""),
+                            access_token, multipart, "multipart/form-data; boundary=%s" % boundary,
+                            operation="X媒体分片上传",
+                        )
+                        break
+                    except XPostError as exc:
+                        if exc.code != "x_upstream_error" or append_attempt >= 2:
+                            raise
+                        self.sleeper(2 ** append_attempt)
         finalized = self._request(
             "POST", "/2/media/upload/%s/finalize" % urllib.parse.quote(media_id, safe=""),
             access_token, body=b"", operation="X媒体完成上传",
@@ -13292,27 +13323,13 @@ def publish_canary(
     confirmed_post_url = ""
     confirmed_media_id = ""
     try:
+        expected_duration = float(queue.get("preflight_duration", 0) or 0)
+        prepare_link_after_probe = not bool(log["long_url"]) and expected_duration <= 0
         if log["long_url"]:
             long_url = log["long_url"]
             short_url = log["short_url"]
             post_text = log["post_text"]
         else:
-            long_url = build_w2a_url(
-                {
-                    "username": queue["account_username"],
-                    "timestamp": int(time.time()),
-                    "material_language": queue["material_language"],
-                    "drama_name": queue["drama_name"],
-                    "tag": queue["tag"],
-                    "log_id": log["id"],
-                    "page_name": queue["page_name"],
-                    "page_id": queue["page_id"],
-                    "material_name": queue["material_name"],
-                    "material_id": queue["material_id"],
-                    "queue_id": queue["id"],
-                    "content_id": queue["content_id"],
-                }
-            )
             short_url = _build_short_url(short_base_url, log["id"])
             if queue.get("source_type") == "drama":
                 post_text = build_drama_episode_post_text(
@@ -13329,17 +13346,34 @@ def publish_canary(
                     queue["description"],
                     queue.get("body_template"),
                 )
-            log = store.prepare_log(log["id"], long_url, short_url, post_text)
-
-        if callable(storage_guard):
-            storage_guard()
-        write_short_redirect(
-            public_root,
-            log["id"],
-            long_url,
-            durable_storage=durable_storage,
-        )
-
+            if not prepare_link_after_probe:
+                long_url = build_w2a_url(
+                    {
+                        "username": queue["account_username"],
+                        "timestamp": int(time.time()),
+                        "material_language": queue["material_language"],
+                        "drama_name": queue["drama_name"],
+                        "tag": queue["tag"],
+                        "log_id": log["id"],
+                        "page_name": queue["page_name"],
+                        "page_id": queue["page_id"],
+                        "material_name": queue["material_name"],
+                        "material_id": queue["material_id"],
+                        "queue_id": queue["id"],
+                        "content_id": queue["content_id"],
+                        "video_duration_seconds": expected_duration,
+                    }
+                )
+                log = store.prepare_log(log["id"], long_url, short_url, post_text)
+        if not prepare_link_after_probe:
+            if callable(storage_guard):
+                storage_guard()
+            write_short_redirect(
+                public_root,
+                log["id"],
+                long_url,
+                durable_storage=durable_storage,
+            )
         if durable_storage is not None:
             layout = _validate_post_storage_layout(
                 public_root,
@@ -13393,9 +13427,6 @@ def publish_canary(
             timeout=timeout,
             max_duration_seconds=duration_limit,
         )
-        expected_duration = float(
-            queue.get("preflight_duration", 0) or 0
-        )
         if expected_duration > 0 and abs(
             expected_duration - float(media_probe["duration"])
         ) > 0.05:
@@ -13403,6 +13434,43 @@ def publish_canary(
                 "media_preflight_changed",
                 "素材时长与建计划前的预检记录不一致",
                 409,
+            )
+        if expected_duration > 0 and (
+            expected_duration > STANDARD_MAX_DURATION_SECONDS
+        ) != (
+            float(media_probe["duration"]) > STANDARD_MAX_DURATION_SECONDS
+        ):
+            raise XPostError(
+                "media_preflight_changed",
+                "素材时长跨越140秒归因边界",
+                409,
+            )
+        if prepare_link_after_probe:
+            long_url = build_w2a_url(
+                {
+                    "username": queue["account_username"],
+                    "timestamp": int(time.time()),
+                    "material_language": queue["material_language"],
+                    "drama_name": queue["drama_name"],
+                    "tag": queue["tag"],
+                    "log_id": log["id"],
+                    "page_name": queue["page_name"],
+                    "page_id": queue["page_id"],
+                    "material_name": queue["material_name"],
+                    "material_id": queue["material_id"],
+                    "queue_id": queue["id"],
+                    "content_id": queue["content_id"],
+                    "video_duration_seconds": media_probe["duration"],
+                }
+            )
+            log = store.prepare_log(log["id"], long_url, short_url, post_text)
+            if callable(storage_guard):
+                storage_guard()
+            write_short_redirect(
+                public_root,
+                log["id"],
+                long_url,
+                durable_storage=durable_storage,
             )
         media_category = (
             PREMIUM_MEDIA_CATEGORY

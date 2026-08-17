@@ -532,6 +532,7 @@ class XPostLedgerTests(unittest.TestCase):
                     "material_id": queue["material_id"],
                     "queue_id": queue["id"],
                     "content_id": queue["content_id"],
+                    "video_duration_seconds": 140.0,
                 }
             ),
             "https://ai.yingliangads.com/s2l/%s.html" % log["id"],

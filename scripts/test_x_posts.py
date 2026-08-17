@@ -67,6 +67,7 @@ def candidate(account_id=2, username="ShortsDramhx"):
         "description": "A contract marriage becomes an unexpected romance.",
         "page_name": "Short Drama",
         "page_id": "2076951197916037120",
+        "preflight_duration": 45.25,
     }
 
 
@@ -243,6 +244,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "88001",
                 "queue_id": 7,
                 "content_id": "32001",
+                "video_duration_seconds": 140.0,
             }
         )
         parsed = urllib.parse.urlsplit(url)
@@ -262,8 +264,42 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(values["af_ad"], "best_video_contentid[32001]")
         self.assertEqual(values["af_c_id"], "7")
         self.assertEqual(values["af_dp"], "32001")
+        self.assertEqual(values["af_channel"], "short")
         with self.assertRaises(service.XPostError):
             service.build_w2a_url({"username": "bad name"})
+
+    def test_w2a_channel_uses_exact_published_video_duration_boundary(self):
+        params = {
+            "username": "ShortsDramhx",
+            "timestamp": 1784736000,
+            "material_language": "en",
+            "drama_name": "The Contract Bride",
+            "tag": "romance",
+            "log_id": 9,
+            "page_name": "Short Drama",
+            "page_id": "2076951197916037120",
+            "material_name": "best_video",
+            "material_id": "88001",
+            "queue_id": 7,
+            "content_id": "32001",
+        }
+        for duration, expected_channel in ((140.0, "short"), (140.000001, "long")):
+            with self.subTest(duration=duration):
+                url = service.build_w2a_url(
+                    {**params, "video_duration_seconds": duration}
+                )
+                query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+                self.assertEqual(query["af_channel"], expected_channel)
+                self.assertEqual(service._validate_w2a_url(url), url)
+
+        historical_url = service.build_w2a_url(
+            {**params, "video_duration_seconds": 140.0}
+        ).replace("af_channel=short", "af_channel=AIpost")
+        self.assertEqual(service._validate_w2a_url(historical_url), historical_url)
+        with self.assertRaises(service.XPostError):
+            service._validate_w2a_url(
+                historical_url.replace("af_channel=AIpost", "af_channel=other")
+            )
 
     def test_short_link_base_is_fixed_to_g2flow_host(self):
         self.assertEqual(
@@ -289,6 +325,7 @@ class XPostsTests(unittest.TestCase):
                 "page_name": "Short Drama", "page_id": "2076951197916037120",
                 "material_name": material_name, "material_id": "5221348", "queue_id": 4,
                 "content_id": "3CRScaBEY0",
+                "video_duration_seconds": 140.0,
             }
         )
         values = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
@@ -432,7 +469,7 @@ class XPostsTests(unittest.TestCase):
                 "username": "ShortsDramhx", "timestamp": 1784736000, "material_language": "en",
                 "drama_name": "Drama", "tag": "safe", "log_id": 1, "page_name": "Page",
                 "page_id": "123", "material_name": "asset", "material_id": "9", "queue_id": 2,
-                "content_id": "3",
+                "content_id": "3", "video_duration_seconds": 140.0,
             }
         )
         short_root = self.root / "s2l"
@@ -465,6 +502,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "9",
                 "queue_id": 2,
                 "content_id": "3",
+                "video_duration_seconds": 140.0,
             }
         )
         tracker = mock.Mock()
@@ -707,6 +745,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "9",
                 "queue_id": 2,
                 "content_id": "3",
+                "video_duration_seconds": 140.0,
             }
         )
         with mock.patch.object(service.os.path, "ismount", return_value=False):
@@ -945,8 +984,14 @@ class XPostsTests(unittest.TestCase):
                     urllib.parse.urlsplit(conn.execute("SELECT long_url FROM x_post_publish_log").fetchone()[0]).query
                 )
             )["af_c_id"]
+            af_channel = dict(
+                urllib.parse.parse_qsl(
+                    urllib.parse.urlsplit(conn.execute("SELECT long_url FROM x_post_publish_log").fetchone()[0]).query
+                )
+            )["af_channel"]
         self.assertIn("yingliang_post_CLV_VL_ShortsDramhx*", c_value)
         self.assertEqual(af_c_id, str(queue["id"]))
+        self.assertEqual(af_channel, "short")
         self.assertNotIn("secret-token", dump)
 
     def test_premium_long_publish_uses_amplify_video_category(self):
@@ -998,6 +1043,55 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(
             json.loads(initialize["body"].decode("utf-8"))["media_category"],
             "amplify_video",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            long_url = conn.execute(
+                "SELECT long_url FROM x_post_publish_log WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()[0]
+        self.assertEqual(
+            dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(long_url).query))[
+                "af_channel"
+            ],
+            "long",
+        )
+
+    def test_publish_fails_if_final_probe_crosses_140_second_channel_boundary(self):
+        queue = self.enqueue(preflight_duration=140.0)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                )
+            ]
+        )
+        with mock.patch.object(
+            service, "probe_media", return_value={"duration": 140.01}
+        ):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=queue["id"],
+                    account={
+                        "id": 2,
+                        "username": "ShortsDramhx",
+                        "subscription_type": "premium",
+                    },
+                    access_token="secret-token",
+                    public_root=self.root / "boundary-public" / "s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=client,
+                    timeout=5,
+                )
+        self.assertEqual(caught.exception.code, "media_preflight_changed")
+        self.assertFalse(
+            any(
+                request["url"].endswith("/2/media/upload/initialize")
+                for request in client.requests
+            )
         )
 
     def test_nonpremium_long_publish_fails_before_media_upload(self):
