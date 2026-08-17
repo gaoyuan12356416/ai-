@@ -491,24 +491,16 @@ class TwoStageSelectionTests(unittest.TestCase):
         self.assertEqual(selected.drama.content_id, "C5")
         self.assertEqual(selected.material.source.material_id, "502")
 
-    def test_blacklist_types_do_not_cross_match(self):
+    def test_drama_blacklist_is_ignored_but_material_blacklist_still_blocks(self):
         source = FakeSource(
             [drama("C1", series_code="SERIES")],
             {"C1": [material("101", "C1")]},
             [
-                blacklist(dramas={"C1"}, materials={"101"}),
+                blacklist(dramas={"SERIES"}),
             ],
         )
         selected = selector(source, FakeMetricStore([])).select_and_reserve(request())
         self.assertEqual(selected.material.source.material_id, "101")
-
-        blocked_drama = FakeSource(
-            [drama("C1", series_code="SERIES")],
-            {"C1": [material("101", "C1")]},
-            [blacklist(dramas={"SERIES"})],
-        )
-        with self.assertRaises(NoEligibleMaterial):
-            selector(blocked_drama, FakeMetricStore([])).select_and_reserve(request())
 
         blocked_material = FakeSource(
             [drama("C1", series_code="SERIES")],
@@ -620,7 +612,21 @@ class TwoStageSelectionTests(unittest.TestCase):
         self.assertEqual(selected.material.source.material_id, "104")
         self.assertEqual([item["material_id"] for item in store.reserve_calls], ["103", "104"])
 
-    def test_final_blacklist_refresh_skips_newly_blocked_drama(self):
+    def test_final_blacklist_refresh_ignores_newly_blocked_drama(self):
+        source = FakeSource(
+            [drama("C1", series_code="S1")],
+            {"C1": [material("101", "C1")]},
+            [
+                blacklist(marker="a"),
+                blacklist(dramas={"S1"}, marker="b"),
+            ],
+        )
+        selected = selector(source, FakeMetricStore([])).select_and_reserve(request())
+        self.assertEqual(selected.drama.content_id, "C1")
+        self.assertEqual(selected.initial_blacklist_sha256, "a" * 64)
+        self.assertEqual(selected.final_blacklist_sha256, "b" * 64)
+
+    def test_final_blacklist_refresh_skips_newly_blocked_material(self):
         source = FakeSource(
             [drama("C1", series_code="S1"), drama("C2", series_code="S2")],
             {
@@ -629,7 +635,7 @@ class TwoStageSelectionTests(unittest.TestCase):
             },
             [
                 blacklist(marker="a"),
-                blacklist(dramas={"S1"}, marker="b"),
+                blacklist(materials={"C1"}, marker="b"),
                 blacklist(marker="c"),
             ],
         )

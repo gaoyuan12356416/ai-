@@ -693,7 +693,6 @@ class TwoStageSelector:
         self,
         request: SelectionRequest,
         rows: Sequence[DramaSourceRow],
-        blacklist: BlacklistSnapshot,
         metrics: MetricWindowSnapshot,
         rejection_counts: Dict[str, int],
     ) -> List[DramaCandidate]:
@@ -715,9 +714,6 @@ class TwoStageSelector:
                 or (allowed_types and row.resource_type_v2 not in allowed_types)
             ):
                 self._reject(rejection_counts, "drama_hard_gate")
-                continue
-            if row.series_code in blacklist.drama_series_codes:
-                self._reject(rejection_counts, "drama_blacklist")
                 continue
             grouped.setdefault(row.content_id, []).append(row)
 
@@ -936,7 +932,6 @@ class TwoStageSelector:
         dramas = self._eligible_dramas(
             request,
             drama_rows,
-            initial_blacklist,
             metric_snapshot,
             rejection_counts,
         )
@@ -967,14 +962,12 @@ class TwoStageSelector:
                     self._reject(rejection_counts, "material_strict_rejected")
                     continue
 
-                # Blacklist and published history can change after initial
-                # ranking.  Re-read both immediately before the atomic local
-                # reservation.  Cross-system mutual exclusion is deliberately
-                # not introduced; this is a fresh exclusion check only.
+                # The material blacklist and published history can change
+                # after initial ranking.  Re-read both immediately before the
+                # atomic local reservation.  Cross-system mutual exclusion is
+                # deliberately not introduced; this is a fresh exclusion
+                # check only.
                 final_blacklist = self.source.blacklist_snapshot()
-                if drama.series_code in final_blacklist.drama_series_codes:
-                    self._reject(rejection_counts, "drama_blacklist_final")
-                    break
                 if drama.content_id in final_blacklist.material_data_source_ids:
                     self._reject(rejection_counts, "material_blacklist_final")
                     break
