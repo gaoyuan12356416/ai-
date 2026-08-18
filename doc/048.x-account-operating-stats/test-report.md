@@ -18,7 +18,7 @@
 - `python -m unittest scripts.test_x_post_ledger scripts.test_x_post_material_random_relay -q`：27/27。
 - py_compile、`node --check static/quick-nav.js`、抽取 `x-account-list.html` 内联脚本后 `node --check -`、`git diff --check`：通过。
 
-首轮评审、NO-GO 复审及第二轮差异评审均已关闭，无遗留 bug 文件。MySQL 5.7 官方语法确认 binary 转换会按字节区分大小写和尾随空格；真实表 `campaign` 基数/查询耗时/总金额、systemd/Nginx 和登录态视觉验收待部署阶段完成。`Intl.NumberFormat` 两位 USD 的极端超大金额仍受浏览器 Number 精度限制。
+首轮评审、NO-GO 复审及第二轮差异评审均已关闭。生产只读 canary 曾发现 MySQL 5.7 ERROR 1055，现已改为完整 binary Base64 投影别名 GROUP/ORDER，并加入 `ONLY_FULL_GROUP_BY` 合约断言；EXPLAIN 已确认使用 `idx_site_event_time`。修复后的真实聚合 canary、总金额、systemd/Nginx 和登录态视觉验收仍待部署门禁重验。`Intl.NumberFormat` 两位 USD 的极端超大金额仍受浏览器 Number 精度限制。
 
 ## 发布建议
 

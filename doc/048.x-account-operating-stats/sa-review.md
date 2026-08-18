@@ -16,7 +16,8 @@
 | SA-008 | P1 | 仅校验 mysql.real 名称不足以阻止其他漂移目标 | `/usr/bin/mysql` 必须精确 resolve 到批准 wrapper | 已关闭 |
 | SA-009 | P2 | 仅 TTL 无法识别跨北京日/未来时钟 cache | 加业务日与 5 分钟未来偏差门禁，UI 显示口径日期 | 已关闭 |
 | SA-010 | P1 | failed/reserved log 不应产生收入归属 | 仅确认 published + post ID 建 campaign map | 已关闭 |
-| SA-011 | P1 | 默认 collation 可能合并大小写或尾随空格不同的 campaign | SELECT/GROUP/ORDER 全部使用同一 binary 转换表达式 | 已关闭 |
+| SA-011 | P1 | 默认 collation 可能合并大小写或尾随空格不同的 campaign | binary 转换后完整 Base64 投影，以投影别名 GROUP/ORDER | 已关闭 |
 | SA-012 | P1 | cache 日期缺失或不连续仍可能显示 fresh | 规范 ISO 解析并校验昨日等于业务日前一天 | 已关闭 |
+| SA-013 | P1 | MySQL 5.7 ONLY_FULL_GROUP_BY 不认可外层 Base64 投影依赖内层 GROUP 表达式 | 按完整投影别名 `campaign_b64` GROUP/ORDER | 已关闭 |
 
 以上决策已同步需求、代码、测试和部署文档。

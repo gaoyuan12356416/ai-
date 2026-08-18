@@ -18,7 +18,7 @@
 2. Premium relay 原 Post：存在确认的 `source_post_id/source_published_at`，actor 为 `q.relay_account_id`；目标 Repost 失败不抹去已存在原 Post。
 3. Repost：仅 `x_post_repost_ledger.status='reposted'`，归属 `target_account_id`。
 4. 昨日为北京时间自然日；UTC ledger 时间转换到 `Asia/Shanghai` 后判断。
-5. 收入只读 `kunlunads_dev.ads_drama_bills`，严格 `site_id='2116'`、`event_revenue_usd`；收入表归属列为 `campaign`，用同一 `CONVERT(COALESCE(campaign,'') USING binary)` 表达式 SELECT/GROUP/ORDER，按字节区分大小写和尾随空格，并强制使用已确认索引 `idx_site_event_time`。昨日为 DB `+08:00` 下 `DATE(FROM_UNIXTIME(event_time))`。
+5. 收入只读 `kunlunads_dev.ads_drama_bills`，严格 `site_id='2116'`、`event_revenue_usd`；收入表归属列为 `campaign`，先将 `CONVERT(COALESCE(campaign,'') USING binary)` 完整 Base64 投影为 `campaign_b64`，再按该别名 GROUP/ORDER，既按字节区分大小写和尾随空格，也兼容 MySQL 5.7 `ONLY_FULL_GROUP_BY`。强制使用已确认索引 `idx_site_event_time`。昨日为 DB `+08:00` 下 `DATE(FROM_UNIXTIME(event_time))`。
 6. 仅从确认发布的 log（`status='published'` 且 `x_post_id` 非空）读取 `long_url` 中唯一、非空的 W2A 参数 `c`，再与收入表 `campaign` 精确等值匹配并归属对应 `q.account_id`。同一 W2A c 指向多账号、缺失或收入侧不匹配均进入“未归属”，不得猜测或分摊；failed/reserved log 不提供归属证据。
 7. Decimal 聚合，缓存保存 6 位小数字符串，页面显示 USD 两位。
 

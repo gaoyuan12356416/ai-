@@ -19,7 +19,7 @@
 | TC-015 | cache 跨日/未来 | TTL 内跨北京日、未来 10 分钟、未来 2 分钟 | P0 | 通过：前两者 stale，允许 2 分钟偏差 |
 | TC-016 | 收入 schema/index | `campaign` 列、强制 idx_site_event_time、不把 W2A `c` 当作表列 | P0 | 通过 |
 | TC-017 | 未确认 log | failed log 与已发布 log 使用同一 W2A c | P0 | 通过：只采用已发布账号 |
-| TC-018 | binary campaign | `Exact`/`exact`/`exact ` 三行 | P0 | 通过：SQL 表达式一致，解析/归属独立 |
+| TC-018 | binary campaign / ONLY_FULL_GROUP_BY | `Exact`/`exact`/`exact ` 三行 | P0 | 通过：完整 Base64 别名分组，解析/归属独立 |
 | TC-019 | cache 日期结构 | 缺失、畸形、非规范、昨日不连续 | P0 | 通过：全部 missing/null |
 
 全部使用临时 SQLite、Decimal fixture 和 mocked subprocess；不连接生产 MySQL，不创建 X Post。UI 明示 `business_date/yesterday_date`。

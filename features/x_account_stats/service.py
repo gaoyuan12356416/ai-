@@ -212,14 +212,14 @@ def revenue_query(yesterday: date) -> str:
     day = yesterday.isoformat()
     campaign_binary = "CONVERT(COALESCE(campaign,'') USING binary)"
     return f"""SET SESSION time_zone = '+08:00';
-SELECT REPLACE(TO_BASE64({campaign_binary}),CHAR(10),''),
+SELECT REPLACE(TO_BASE64({campaign_binary}),CHAR(10),'') AS campaign_b64,
        CAST(COALESCE(SUM(event_revenue_usd),0) AS CHAR),
        CAST(COALESCE(SUM(CASE WHEN DATE(FROM_UNIXTIME(event_time))='{day}'
             THEN event_revenue_usd ELSE 0 END),0) AS CHAR)
 FROM ads_drama_bills FORCE INDEX(idx_site_event_time)
 WHERE site_id='2116'
-GROUP BY {campaign_binary}
-ORDER BY {campaign_binary};
+GROUP BY campaign_b64
+ORDER BY campaign_b64;
 """
 
 
