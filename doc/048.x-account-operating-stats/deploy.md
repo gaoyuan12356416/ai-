@@ -3,8 +3,8 @@
 ## 部署前门禁
 
 1. 基于 exact Git commit 备份主 API/static/unit 并记录 SHA/回滚点。
-2. 确认 `/usr/bin/mysql` 解析到 `/usr/local/bin/mysql-gated`，不得用 mysql.real/PyMySQL。
-3. 确认只读 63350、`kunlunads_dev`、site_id 索引；不输出密码。
+2. 确认 `/usr/bin/mysql` 精确解析到 `/usr/local/bin/mysql-gated`；mysql.real、mariadb、其他二进制/路径和 PyMySQL 均不允许。
+3. 确认只读 63350、`kunlunads_dev.ads_drama_bills.campaign` 和 `idx_site_event_time`；EXPLAIN 应保持已确认的约 8k 行 ref 扫描，不输出密码。
 4. `install -d -m 0750 /mnt/data-disk/x-account-operating-stats` 并确认数据盘挂载。
 5. 记录原 `/api/admin/x-accounts`、页面和 timer；保留 X SQLite/Token。
 

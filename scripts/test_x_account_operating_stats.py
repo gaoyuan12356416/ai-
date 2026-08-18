@@ -13,6 +13,7 @@ from unittest import mock
 
 from features.x_account_stats.service import (
     StatsRefreshError,
+    assert_approved_mysql_entry,
     build_snapshot,
     campaign_from_long_url,
     merge_account_stats,
@@ -38,7 +39,8 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 """
                 CREATE TABLE x_post_queue(
                     id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
-                    delivery_mode TEXT NOT NULL
+                    delivery_mode TEXT NOT NULL,
+                    relay_account_id INTEGER NOT NULL
                 );
                 CREATE TABLE x_post_publish_log(
                     id INTEGER PRIMARY KEY, queue_id INTEGER NOT NULL,
@@ -56,23 +58,31 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 """
             )
             queues = [
-                (1, 10, "direct"),
-                (2, 10, "direct"),
-                (3, 10, "direct"),
-                (4, 20, "premium_relay_repost"),
-                (5, 30, "direct"),
+                (1, 10, "direct", 0),
+                (2, 10, "direct", 0),
+                (3, 10, "direct", 0),
+                (4, 20, "premium_relay_repost", 99),
+                (5, 30, "direct", 0),
+                (6, 40, "premium_relay_repost", 88),
+                (7, 10, "direct", 0),
+                (8, 30, "direct", 0),
             ]
-            conn.executemany("INSERT INTO x_post_queue VALUES(?,?,?)", queues)
+            conn.executemany("INSERT INTO x_post_queue VALUES(?,?,?,?)", queues)
             logs = [
                 (1, 1, "published", "p1", "2026-08-16T16:00:00Z", "https://w/?c=camp%2Bexact"),
                 (2, 2, "published", "p2", "2026-08-17T15:59:59Z", "https://w/?c=only-ten"),
                 (3, 3, "published", "p3", "2026-08-17T16:00:00Z", "https://w/?c=next-day"),
                 (4, 4, "published", "source", "2026-08-17T15:00:00Z", "https://w/?c=relay-target"),
                 (5, 5, "failed", "", "", "https://w/?c=camp%2Bexact"),
+                (6, 7, "published", "p7", "2026-08-17T16:00:00Z", "https://w/?c=conflicting"),
+                (7, 8, "published", "p8", "2026-08-17T16:00:00Z", "https://w/?c=conflicting"),
             ]
             conn.executemany("INSERT INTO x_post_publish_log VALUES(?,?,?,?,?,?)", logs)
             conn.execute(
                 "INSERT INTO x_post_repost_ledger VALUES(1,4,99,20,'reposted','source','2026-08-16T15:59:59Z','2026-08-17T15:59:59Z')"
+            )
+            conn.execute(
+                "INSERT INTO x_post_repost_ledger VALUES(2,6,77,40,'reposted','mismatch','2026-08-17T10:00:00Z','2026-08-17T11:00:00Z')"
             )
             conn.commit()
 
@@ -83,16 +93,20 @@ class XAccountOperatingStatsTests(unittest.TestCase):
             metrics, campaigns, evidence = read_ledger_metrics(
                 db_path, date(2026, 8, 17)
             )
-        self.assertEqual(metrics[10]["published_posts_total"], 3)
+        self.assertEqual(metrics[10]["published_posts_total"], 4)
         self.assertEqual(metrics[10]["published_posts_yesterday"], 2)
         self.assertEqual(metrics[99]["published_posts_total"], 1)
         self.assertEqual(metrics[99]["published_posts_yesterday"], 0)
         self.assertEqual(metrics[20]["reposts_total"], 1)
         self.assertEqual(metrics[20]["reposts_yesterday"], 1)
         self.assertNotIn(20, {key for key, item in metrics.items() if item["published_posts_total"]})
-        self.assertNotIn("camp+exact", campaigns)  # conflicting q.account_id is fail-closed
+        self.assertEqual(campaigns["camp+exact"], 10)  # failed q5 log is ignored
         self.assertEqual(campaigns["relay-target"], 20)
         self.assertEqual(evidence["conflicts"], 1)
+        self.assertEqual(evidence["unconfirmed"], 1)
+        self.assertEqual(evidence["ledger_conflicts"], 1)
+        self.assertNotIn(77, metrics)
+        self.assertNotIn(88, metrics)
 
     def test_campaign_value_is_exact_and_duplicate_c_is_rejected(self):
         self.assertEqual(campaign_from_long_url("https://w/?x=1&c=A%2BB"), "A+B")
@@ -104,8 +118,13 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertIn("SET SESSION time_zone = '+08:00'", query)
         self.assertIn("DATE(FROM_UNIXTIME(event_time))='2026-08-17'", query)
         self.assertIn("WHERE site_id='2116'", query)
+        self.assertIn("FROM ads_drama_bills FORCE INDEX(idx_site_event_time)", query)
         self.assertIn("SUM(event_revenue_usd)", query)
         self.assertIn("REPLACE(TO_BASE64", query)
+        self.assertIn("COALESCE(campaign,'')", query)
+        self.assertIn("GROUP BY campaign", query)
+        self.assertIn("ORDER BY campaign", query)
+        self.assertNotRegex(query, r"\bc\b")
         self.assertNotIn("LIKE", query.upper())
 
     @mock.patch("features.x_account_stats.service.subprocess.run")
@@ -139,6 +158,24 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 mysql_binary="/usr/bin/mysql.real",
             )
 
+    def test_mysql_gate_target_must_match_exact_approved_wrapper(self):
+        approved = assert_approved_mysql_entry(
+            resolver=lambda _entry: Path("/usr/local/bin/mysql-gated")
+        )
+        self.assertEqual(approved, Path("/usr/local/bin/mysql-gated"))
+        for drift in (
+            "/usr/bin/mysql.real",
+            "/usr/bin/mariadb",
+            "/opt/vendor/mysql",
+            "/usr/local/bin/mysql-gated-copy",
+        ):
+            with self.subTest(drift=drift), self.assertRaises(StatsRefreshError):
+                assert_approved_mysql_entry(resolver=lambda _entry, value=drift: Path(value))
+        with self.assertRaises(StatsRefreshError):
+            assert_approved_mysql_entry(
+                "/usr/bin/mariadb",
+                resolver=lambda _entry: Path("/usr/local/bin/mysql-gated"),
+            )
     def test_exact_attribution_unallocated_and_money_precision(self):
         snapshot = build_snapshot(
             ledger_metrics={
@@ -186,13 +223,62 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertEqual(stale["operating_stats_meta"]["status"], "stale")
         self.assertEqual(stale["items"][0]["operating_stats"]["published_posts_total"], 0)
 
+    def test_cache_business_date_and_future_clock_boundaries(self):
+        base = {"items": [{"id": 7}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "current.json"
+            prior_day = build_snapshot(
+                ledger_metrics={}, campaign_accounts={},
+                campaign_evidence={}, revenue_rows=[],
+                now=datetime(2026, 8, 17, 15, 50, tzinfo=timezone.utc),
+            )
+            write_snapshot_atomic(prior_day, cache, root)
+            crossed = merge_account_stats(
+                base, cache,
+                now=datetime(2026, 8, 17, 16, 10, tzinfo=timezone.utc),
+            )
+            self.assertEqual(crossed["operating_stats_meta"]["status"], "stale")
+            self.assertIn("business_date", crossed["operating_stats_meta"]["stale_reasons"])
+            self.assertEqual(crossed["operating_stats_meta"]["yesterday_date"], "2026-08-16")
+
+            future = build_snapshot(
+                ledger_metrics={}, campaign_accounts={},
+                campaign_evidence={}, revenue_rows=[],
+                now=datetime(2026, 8, 18, 0, 10, tzinfo=timezone.utc),
+            )
+            write_snapshot_atomic(future, cache, root)
+            future_result = merge_account_stats(
+                base, cache,
+                now=datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc),
+            )
+            self.assertEqual(future_result["operating_stats_meta"]["status"], "stale")
+            self.assertIn("future_generated_at", future_result["operating_stats_meta"]["stale_reasons"])
+
+            small_skew = build_snapshot(
+                ledger_metrics={}, campaign_accounts={},
+                campaign_evidence={}, revenue_rows=[],
+                now=datetime(2026, 8, 18, 0, 2, tzinfo=timezone.utc),
+            )
+            write_snapshot_atomic(small_skew, cache, root)
+            accepted = merge_account_stats(
+                base, cache,
+                now=datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc),
+            )
+        self.assertEqual(accepted["operating_stats_meta"]["status"], "fresh")
+
     def test_ui_fields_public_metric_removals_and_usd_format(self):
         for label in (
-            "累计 Post", "昨日 Post", "累计 Repost", "昨日 Repost",
-            "累计收入", "昨日收入", "未归属 X 收入（累计）", "未归属 X 收入（昨日）",
+            "累计 Post", "累计 Repost", "累计收入",
+            "未归属 X 收入（累计）", "未归属 X 收入（昨日）",
         ):
             self.assertIn(label, UI_SOURCE)
+        self.assertIn("`${yesterday} Post`", UI_SOURCE)
+        self.assertIn("`${yesterday} Repost`", UI_SOURCE)
+        self.assertIn("`${yesterday} 收入`", UI_SOURCE)
         self.assertIn('currency:"USD"', UI_SOURCE)
+        self.assertIn("meta.yesterday_date", UI_SOURCE)
+        self.assertIn("昨日口径", UI_SOURCE)
         self.assertIn('["粉丝", "followers_count"]', UI_SOURCE)
         self.assertIn('["帖子", "tweet_count"]', UI_SOURCE)
         self.assertIn('["喜欢", "like_count"]', UI_SOURCE)
@@ -209,7 +295,7 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertIn('cache:"no-store"', UI_SOURCE)
         self.assertIn("/usr/bin/mysql", SERVICE_UNIT)
         self.assertNotIn("mysql.real", SERVICE_UNIT)
-        self.assertIn('resolved_mysql.name == "mysql.real"', REFRESH_SOURCE)
+        self.assertIn("assert_approved_mysql_entry()", REFRESH_SOURCE)
         self.assertIn("/mnt/data-disk/x-account-operating-stats", SERVICE_UNIT)
         self.assertIn("09:10:00 Asia/Shanghai", TIMER_UNIT)
         self.assertIn("21:10:00 Asia/Shanghai", TIMER_UNIT)

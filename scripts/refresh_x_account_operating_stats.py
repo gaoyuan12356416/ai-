@@ -17,6 +17,7 @@ from features.x_account_stats.service import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
     SHANGHAI,
     StatsRefreshError,
+    assert_approved_mysql_entry,
     build_snapshot,
     read_ledger_metrics,
     revenue_query,
@@ -35,10 +36,7 @@ def _required(name: str) -> str:
 
 def main() -> int:
     try:
-        mysql_entry = Path("/usr/bin/mysql")
-        resolved_mysql = mysql_entry.resolve(strict=True)
-        if resolved_mysql.name == "mysql.real":
-            raise StatsRefreshError("拒绝绕过宿主 SQL gate")
+        assert_approved_mysql_entry()
         now = utc_now()
         yesterday = now.astimezone(SHANGHAI).date() - timedelta(days=1)
         ledger_metrics, campaign_accounts, campaign_evidence = read_ledger_metrics(

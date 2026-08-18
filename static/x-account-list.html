@@ -123,7 +123,7 @@
 
         <section class="operating-summary" aria-label="X 运营收入归属摘要">
           <article class="stat"><span>未归属 X 收入（累计）</span><strong id="unallocatedRevenueTotal">—</strong></article>
-          <article class="stat"><span>未归属 X 收入（昨日）</span><strong id="unallocatedRevenueYesterday">—</strong></article>
+          <article class="stat"><span id="unallocatedYesterdayLabel">未归属 X 收入（昨日）</span><strong id="unallocatedRevenueYesterday">—</strong></article>
           <article class="stat"><span>运营统计缓存</span><strong id="statsCacheStatus">待刷新</strong><div id="statsCacheDetail" class="cache-state">尚未读取统计缓存</div></article>
         </section>
 
@@ -304,10 +304,11 @@
 
       function operatingMetricsHtml(item) {
         const stats = item.operating_stats || {};
+        const yesterday = state.statsMeta && state.statsMeta.yesterday_date ? `昨日 ${state.statsMeta.yesterday_date}` : "昨日";
         const metrics = [
-          ["累计 Post", formatCount(stats.published_posts_total)], ["昨日 Post", formatCount(stats.published_posts_yesterday)],
-          ["累计 Repost", formatCount(stats.reposts_total)], ["昨日 Repost", formatCount(stats.reposts_yesterday)],
-          ["累计收入", formatUsd(stats.revenue_total_usd)], ["昨日收入", formatUsd(stats.revenue_yesterday_usd)],
+          ["累计 Post", formatCount(stats.published_posts_total)], [`${yesterday} Post`, formatCount(stats.published_posts_yesterday)],
+          ["累计 Repost", formatCount(stats.reposts_total)], [`${yesterday} Repost`, formatCount(stats.reposts_yesterday)],
+          ["累计收入", formatUsd(stats.revenue_total_usd)], [`${yesterday} 收入`, formatUsd(stats.revenue_yesterday_usd)],
         ];
         return `<div class="operating-metrics">${metrics.map(([label,value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>`;
       }
@@ -315,6 +316,7 @@
       function renderOperatingSummary() {
         const meta = state.statsMeta || {};
         const revenue = meta.unallocated_revenue || {};
+        el("unallocatedYesterdayLabel").textContent = meta.yesterday_date ? `未归属 X 收入（昨日 ${meta.yesterday_date}）` : "未归属 X 收入（昨日）";
         el("unallocatedRevenueTotal").textContent = formatUsd(revenue.total_usd);
         el("unallocatedRevenueYesterday").textContent = formatUsd(revenue.yesterday_usd);
         const labels = { fresh:"已更新", stale:"已过期", missing:"待刷新" };
@@ -322,7 +324,8 @@
         const detail = el("statsCacheDetail");
         detail.classList.toggle("stale", meta.status === "stale");
         const generated = meta.generated_at_utc ? ` · 生成于 ${formatTime(meta.generated_at_utc)}` : "";
-        detail.textContent = `${meta.message || "运营统计缓存不可用"}${generated}`;
+        const period = meta.business_date ? ` · 统计日 ${meta.business_date} · 昨日口径 ${meta.yesterday_date || "—"}` : "";
+        detail.textContent = `${meta.message || "运营统计缓存不可用"}${generated}${period}`;
       }
 
       function renderRows() {

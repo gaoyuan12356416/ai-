@@ -18,10 +18,13 @@
     "status": "fresh",
     "available": true,
     "stale": false,
+    "stale_reasons": [],
     "generated_at_utc": "2026-08-18T01:10:00Z",
+    "business_date": "2026-08-18",
+    "yesterday_date": "2026-08-17",
     "unallocated_revenue": {"total_usd": "7.000000", "yesterday_usd": "1.000000"}
   }
 }
 ```
 
-cache missing 时仍为 200、`status=missing`、六项 null；有效缓存中无历史账号六项为 0；stale 保留旧值并标记。无新增 HTTP 路由。
+cache missing 时仍为 200、`status=missing`、六项 null；有效缓存中无历史账号六项为 0。TTL 超限、跨北京业务日或生成时间超前超过 5 分钟时 stale，保留旧值并返回原因；页面直接显示 snapshot 的 `yesterday_date`。无新增 HTTP 路由。

@@ -29,6 +29,9 @@ SHANGHAI = ZoneInfo(BUSINESS_TIMEZONE)
 DEFAULT_CACHE_ROOT = Path("/mnt/data-disk/x-account-operating-stats")
 DEFAULT_CACHE_PATH = DEFAULT_CACHE_ROOT / "current.json"
 DEFAULT_MAX_AGE_SECONDS = 15 * 60 * 60
+DEFAULT_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+APPROVED_MYSQL_ENTRY = Path("/usr/bin/mysql")
+APPROVED_MYSQL_TARGET = Path("/usr/local/bin/mysql-gated")
 ZERO = Decimal("0")
 
 
@@ -116,7 +119,13 @@ def read_ledger_metrics(
         }
     )
     campaign_accounts: dict[str, set[int]] = defaultdict(set)
-    campaign_evidence = {"campaigns": 0, "conflicts": 0, "missing": 0}
+    campaign_evidence = {
+        "campaigns": 0,
+        "conflicts": 0,
+        "missing": 0,
+        "unconfirmed": 0,
+        "ledger_conflicts": 0,
+    }
     with contextlib.closing(_open_ledger(db_path)) as conn:
         rows = conn.execute(
             """
@@ -128,15 +137,21 @@ def read_ledger_metrics(
         ).fetchall()
         for row in rows:
             account_id = int(row["account_id"])
-            campaign = campaign_from_long_url(row["long_url"])
-            if campaign:
-                campaign_accounts[campaign].add(account_id)
+            confirmed = (
+                str(row["status"] or "") == "published"
+                and bool(str(row["x_post_id"] or ""))
+            )
+            if confirmed:
+                campaign = campaign_from_long_url(row["long_url"])
+                if campaign:
+                    campaign_accounts[campaign].add(account_id)
+                else:
+                    campaign_evidence["missing"] += 1
             else:
-                campaign_evidence["missing"] += 1
+                campaign_evidence["unconfirmed"] += 1
             if (
                 str(row["delivery_mode"] or "direct") == "direct"
-                and str(row["status"] or "") == "published"
-                and str(row["x_post_id"] or "")
+                and confirmed
             ):
                 metrics[account_id]["published_posts_total"] += 1
                 if _is_beijing_date(row["published_at"], yesterday):
@@ -144,21 +159,39 @@ def read_ledger_metrics(
 
         relay_rows = conn.execute(
             """
-            SELECT relay_account_id,target_account_id,status,source_post_id,
-                   source_published_at,reposted_at
-            FROM x_post_repost_ledger
+            SELECT r.relay_account_id AS ledger_relay_account_id,
+                   r.target_account_id AS ledger_target_account_id,
+                   r.status,r.source_post_id,r.source_published_at,r.reposted_at,
+                   q.id AS queue_id,q.account_id AS queue_target_account_id,
+                   q.relay_account_id AS queue_relay_account_id,
+                   q.delivery_mode AS queue_delivery_mode
+            FROM x_post_repost_ledger r
+            LEFT JOIN x_post_queue q ON q.id=r.queue_id
             """
         ).fetchall()
         for row in relay_rows:
+            consistent = (
+                row["queue_id"] is not None
+                and str(row["queue_delivery_mode"] or "")
+                == "premium_relay_repost"
+                and int(row["queue_relay_account_id"] or 0) > 0
+                and int(row["queue_relay_account_id"] or 0)
+                == int(row["ledger_relay_account_id"] or 0)
+                and int(row["queue_target_account_id"] or 0)
+                == int(row["ledger_target_account_id"] or 0)
+            )
+            if not consistent:
+                campaign_evidence["ledger_conflicts"] += 1
+                continue
             if str(row["source_post_id"] or "") and _parse_utc(
                 row["source_published_at"]
             ):
-                relay_id = int(row["relay_account_id"])
+                relay_id = int(row["queue_relay_account_id"])
                 metrics[relay_id]["published_posts_total"] += 1
                 if _is_beijing_date(row["source_published_at"], yesterday):
                     metrics[relay_id]["published_posts_yesterday"] += 1
             if str(row["status"] or "") == "reposted":
-                target_id = int(row["target_account_id"])
+                target_id = int(row["queue_target_account_id"])
                 metrics[target_id]["reposts_total"] += 1
                 if _is_beijing_date(row["reposted_at"], yesterday):
                     metrics[target_id]["reposts_yesterday"] += 1
@@ -178,15 +211,32 @@ def revenue_query(yesterday: date) -> str:
 
     day = yesterday.isoformat()
     return f"""SET SESSION time_zone = '+08:00';
-SELECT REPLACE(TO_BASE64(CAST(COALESCE(c,'') AS BINARY)),CHAR(10),''),
+SELECT REPLACE(TO_BASE64(CAST(COALESCE(campaign,'') AS BINARY)),CHAR(10),''),
        CAST(COALESCE(SUM(event_revenue_usd),0) AS CHAR),
        CAST(COALESCE(SUM(CASE WHEN DATE(FROM_UNIXTIME(event_time))='{day}'
             THEN event_revenue_usd ELSE 0 END),0) AS CHAR)
-FROM ads_drama_bills
+FROM ads_drama_bills FORCE INDEX(idx_site_event_time)
 WHERE site_id='2116'
-GROUP BY c
-ORDER BY c;
+GROUP BY campaign
+ORDER BY campaign;
 """
+
+
+def assert_approved_mysql_entry(
+    mysql_entry: str = "/usr/bin/mysql", *, resolver=None
+) -> Path:
+    """Require the host-gated entry and its exact approved resolved target."""
+
+    entry = Path(str(mysql_entry))
+    if entry != APPROVED_MYSQL_ENTRY:
+        raise StatsRefreshError("MySQL客户端必须使用宿主受控入口 /usr/bin/mysql")
+    try:
+        resolved = Path(resolver(entry) if resolver else entry.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        raise StatsRefreshError("无法验证宿主 SQL gate") from None
+    if resolved != APPROVED_MYSQL_TARGET:
+        raise StatsRefreshError("宿主 SQL gate 入口不符合批准配置")
+    return resolved
 
 
 def run_gated_mysql(
@@ -368,6 +418,7 @@ def read_snapshot(
     *,
     now: datetime | None = None,
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
     now = (now or utc_now()).astimezone(timezone.utc)
     try:
@@ -393,8 +444,17 @@ def read_snapshot(
             "generated_at_utc": "",
             "message": "运营统计缓存尚未生成，请等待定时刷新",
         }
-    age_seconds = max(0, int((now - generated).total_seconds()))
-    stale = age_seconds > max(1, int(max_age_seconds))
+    expected_business_date = now.astimezone(SHANGHAI).date().isoformat()
+    age_delta = (now - generated).total_seconds()
+    age_seconds = max(0, int(age_delta))
+    stale_reasons = []
+    if age_seconds > max(1, int(max_age_seconds)):
+        stale_reasons.append("age")
+    if str(snapshot.get("business_date") or "") != expected_business_date:
+        stale_reasons.append("business_date")
+    if age_delta < -max(1, int(max_future_skew_seconds)):
+        stale_reasons.append("future_generated_at")
+    stale = bool(stale_reasons)
     return snapshot, {
         "status": "stale" if stale else "fresh",
         "available": True,
@@ -403,6 +463,7 @@ def read_snapshot(
         "business_date": snapshot.get("business_date", ""),
         "yesterday_date": snapshot.get("yesterday_date", ""),
         "age_seconds": age_seconds,
+        "stale_reasons": stale_reasons,
         "message": "运营统计缓存已过期，请检查定时刷新" if stale else "运营统计已更新",
     }
 
@@ -413,12 +474,16 @@ def merge_account_stats(
     *,
     now: datetime | None = None,
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
 ) -> dict[str, object]:
     """Return a new admin DTO with cache-only operating metrics."""
 
     result = copy.deepcopy(payload if isinstance(payload, dict) else {})
     snapshot, meta = read_snapshot(
-        cache_path, now=now, max_age_seconds=max_age_seconds
+        cache_path,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        max_future_skew_seconds=max_future_skew_seconds,
     )
     cached_accounts = snapshot.get("accounts", {}) if snapshot else {}
     empty = {
