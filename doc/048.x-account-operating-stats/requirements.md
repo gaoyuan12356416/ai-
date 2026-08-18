@@ -18,7 +18,7 @@
 2. Premium relay 原 Post：存在确认的 `source_post_id/source_published_at`，actor 为 `q.relay_account_id`；目标 Repost 失败不抹去已存在原 Post。
 3. Repost：仅 `x_post_repost_ledger.status='reposted'`，归属 `target_account_id`。
 4. 昨日为北京时间自然日；UTC ledger 时间转换到 `Asia/Shanghai` 后判断。
-5. 收入只读 `kunlunads_dev.ads_drama_bills`，严格 `site_id='2116'`、`event_revenue_usd`；收入表归属列为 `campaign`，并强制使用已确认索引 `idx_site_event_time`。昨日为 DB `+08:00` 下 `DATE(FROM_UNIXTIME(event_time))`。
+5. 收入只读 `kunlunads_dev.ads_drama_bills`，严格 `site_id='2116'`、`event_revenue_usd`；收入表归属列为 `campaign`，用同一 `CONVERT(COALESCE(campaign,'') USING binary)` 表达式 SELECT/GROUP/ORDER，按字节区分大小写和尾随空格，并强制使用已确认索引 `idx_site_event_time`。昨日为 DB `+08:00` 下 `DATE(FROM_UNIXTIME(event_time))`。
 6. 仅从确认发布的 log（`status='published'` 且 `x_post_id` 非空）读取 `long_url` 中唯一、非空的 W2A 参数 `c`，再与收入表 `campaign` 精确等值匹配并归属对应 `q.account_id`。同一 W2A c 指向多账号、缺失或收入侧不匹配均进入“未归属”，不得猜测或分摊；failed/reserved log 不提供归属证据。
 7. Decimal 聚合，缓存保存 6 位小数字符串，页面显示 USD 两位。
 
@@ -29,7 +29,7 @@
 - 缓存固定 `/mnt/data-disk/x-account-operating-stats/current.json`；验证根目录、fsync 临时文件并原子替换。
 - 只执行 `/usr/bin/mysql`，且该入口必须精确解析到 `/usr/local/bin/mysql-gated`；任何 mysql.real、ELF/其他 binary、mariadb 或漂移路径均 fail closed。密码仅进入子进程 `MYSQL_PWD`。
 - relay 统计把 ledger 与 queue 按 `queue_id` JOIN，并校验 target/relay/delivery mode 一致；actor 最终取 queue 冻结的 `q.relay_account_id`。冲突只记录证据，不计入任何账号。
-- API 继续 Cookie 管理员门禁和 no-store；缓存缺失不阻断账号列表。15 小时未刷新、snapshot 北京业务日不等于当前业务日，或 `generated_at` 超前超过 5 分钟均标 stale。UI 明示 snapshot 的 `yesterday_date`，保留旧值并告警。
+- API 继续 Cookie 管理员门禁和 no-store；缓存缺失不阻断账号列表。缓存日期必须是规范 ISO 日期且 `yesterday_date = business_date - 1 天`，否则按 invalid/missing fail closed。15 小时未刷新、snapshot 北京业务日不等于当前业务日，或 `generated_at` 超前超过 5 分钟均标 stale。UI 明示 snapshot 的 `yesterday_date`，保留合法旧值并告警。
 
 ## 验收标准
 

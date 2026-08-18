@@ -115,15 +115,19 @@ class XAccountOperatingStatsTests(unittest.TestCase):
 
     def test_revenue_query_uses_exact_site_and_db_beijing_date_definition(self):
         query = revenue_query(date(2026, 8, 17))
+        binary_campaign = "CONVERT(COALESCE(campaign,'') USING binary)"
         self.assertIn("SET SESSION time_zone = '+08:00'", query)
         self.assertIn("DATE(FROM_UNIXTIME(event_time))='2026-08-17'", query)
         self.assertIn("WHERE site_id='2116'", query)
         self.assertIn("FROM ads_drama_bills FORCE INDEX(idx_site_event_time)", query)
         self.assertIn("SUM(event_revenue_usd)", query)
         self.assertIn("REPLACE(TO_BASE64", query)
-        self.assertIn("COALESCE(campaign,'')", query)
-        self.assertIn("GROUP BY campaign", query)
-        self.assertIn("ORDER BY campaign", query)
+        self.assertEqual(query.count(binary_campaign), 3)
+        self.assertIn(f"TO_BASE64({binary_campaign})", query)
+        self.assertIn(f"GROUP BY {binary_campaign}", query)
+        self.assertIn(f"ORDER BY {binary_campaign}", query)
+        self.assertNotIn("GROUP BY campaign\n", query)
+        self.assertNotIn("ORDER BY campaign;", query)
         self.assertNotRegex(query, r"\bc\b")
         self.assertNotIn("LIKE", query.upper())
 
@@ -157,6 +161,32 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 database="kunlunads_dev", query="SELECT 1",
                 mysql_binary="/usr/bin/mysql.real",
             )
+
+    @mock.patch("features.x_account_stats.service.subprocess.run")
+    def test_binary_campaign_rows_keep_case_and_trailing_spaces_distinct(self, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout=(
+                "RXhhY3Q=\t1.00\t0.10\n"
+                "ZXhhY3Q=\t2.00\t0.20\n"
+                "ZXhhY3Qg\t3.00\t0.30\n"
+            ),
+            stderr="",
+        )
+        rows = run_gated_mysql(
+            host="reader", port=63350, user="readonly", password="secret",
+            database="kunlunads_dev", query=revenue_query(date(2026, 8, 17)),
+        )
+        self.assertEqual([row[0] for row in rows], ["Exact", "exact", "exact "])
+        snapshot = build_snapshot(
+            ledger_metrics={},
+            campaign_accounts={"Exact": 1, "exact": 2, "exact ": 3},
+            campaign_evidence={}, revenue_rows=rows,
+            now=datetime(2026, 8, 18, 2, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot["accounts"]["1"]["revenue_total_usd"], "1.000000")
+        self.assertEqual(snapshot["accounts"]["2"]["revenue_total_usd"], "2.000000")
+        self.assertEqual(snapshot["accounts"]["3"]["revenue_total_usd"], "3.000000")
 
     def test_mysql_gate_target_must_match_exact_approved_wrapper(self):
         approved = assert_approved_mysql_entry(
@@ -266,6 +296,35 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 now=datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc),
             )
         self.assertEqual(accepted["operating_stats_meta"]["status"], "fresh")
+
+    def test_cache_rejects_missing_malformed_or_mismatched_business_dates(self):
+        base = {"items": [{"id": 7}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "current.json"
+            valid = build_snapshot(
+                ledger_metrics={}, campaign_accounts={}, campaign_evidence={},
+                revenue_rows=[], now=datetime(2026, 8, 18, 2, tzinfo=timezone.utc),
+            )
+            cases = (
+                ("missing_business", {key: value for key, value in valid.items() if key != "business_date"}),
+                ("missing_yesterday", {key: value for key, value in valid.items() if key != "yesterday_date"}),
+                ("malformed_business", {**valid, "business_date": "2026/08/18"}),
+                ("malformed_yesterday", {**valid, "yesterday_date": "2026/08/17"}),
+                ("noncanonical", {**valid, "business_date": "20260818"}),
+                ("mismatch", {**valid, "yesterday_date": "2026-08-16"}),
+            )
+            for name, snapshot in cases:
+                with self.subTest(name=name):
+                    write_snapshot_atomic(snapshot, cache, root)
+                    result = merge_account_stats(
+                        base, cache,
+                        now=datetime(2026, 8, 18, 2, tzinfo=timezone.utc),
+                    )
+                    self.assertEqual(result["operating_stats_meta"]["status"], "missing")
+                    self.assertIsNone(
+                        result["items"][0]["operating_stats"]["published_posts_total"]
+                    )
 
     def test_ui_fields_public_metric_removals_and_usd_format(self):
         for label in (

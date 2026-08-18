@@ -27,4 +27,4 @@
 }
 ```
 
-cache missing 时仍为 200、`status=missing`、六项 null；有效缓存中无历史账号六项为 0。TTL 超限、跨北京业务日或生成时间超前超过 5 分钟时 stale，保留旧值并返回原因；页面直接显示 snapshot 的 `yesterday_date`。无新增 HTTP 路由。
+cache missing 或日期结构无效时仍为 200、`status=missing`、六项 null；日期必须是规范 ISO 且 `yesterday_date = business_date - 1 天`。有效缓存中无历史账号六项为 0。TTL 超限、跨北京业务日或生成时间超前超过 5 分钟时 stale，保留合法旧值并返回原因；页面直接显示 snapshot 的 `yesterday_date`。无新增 HTTP 路由。

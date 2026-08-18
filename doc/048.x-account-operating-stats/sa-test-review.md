@@ -12,6 +12,8 @@
 | TR-004 | cache 缺失与陈旧不同 | 分别验证空值/旧值告警 | 已关闭 |
 | TR-005 | gate 仅拒绝 mysql.real 覆盖不足 | 增加 mariadb/ELF/其他路径对抗用例 | 已关闭 |
 | TR-006 | failed log 可能污染 campaign map | 增加同 c 的 confirmed/failed 对抗 fixture | 已关闭 |
+| TR-007 | campaign 大小写/尾空格可能被 SQL 合并 | 校验三处 binary 表达式，并经 gated-output parser/build fixture 保持三行独立 | 已关闭 |
+| TR-008 | 缺失/畸形/不连续 cache 日期可能 fresh | 四类 invalid fixture 均断言 missing/null | 已关闭 |
 | TR-007 | relay ledger 可与 queue 不一致 | 增加 queue 冻结字段和 mismatch fixture | 已关闭 |
 | TR-008 | TTL 内跨日仍可能口径错误 | 增加北京时间跨日及未来时钟边界 | 已关闭 |
 

@@ -210,15 +210,16 @@ def revenue_query(yesterday: date) -> str:
     """Return the fixed-site, Beijing-session aggregate query."""
 
     day = yesterday.isoformat()
+    campaign_binary = "CONVERT(COALESCE(campaign,'') USING binary)"
     return f"""SET SESSION time_zone = '+08:00';
-SELECT REPLACE(TO_BASE64(CAST(COALESCE(campaign,'') AS BINARY)),CHAR(10),''),
+SELECT REPLACE(TO_BASE64({campaign_binary}),CHAR(10),''),
        CAST(COALESCE(SUM(event_revenue_usd),0) AS CHAR),
        CAST(COALESCE(SUM(CASE WHEN DATE(FROM_UNIXTIME(event_time))='{day}'
             THEN event_revenue_usd ELSE 0 END),0) AS CHAR)
 FROM ads_drama_bills FORCE INDEX(idx_site_event_time)
 WHERE site_id='2116'
-GROUP BY campaign
-ORDER BY campaign;
+GROUP BY {campaign_binary}
+ORDER BY {campaign_binary};
 """
 
 
@@ -436,6 +437,20 @@ def read_snapshot(
         generated = _parse_utc(snapshot.get("generated_at_utc"))
         if not generated:
             raise ValueError("invalid generated time")
+        business_date_raw = snapshot.get("business_date")
+        yesterday_date_raw = snapshot.get("yesterday_date")
+        if not isinstance(business_date_raw, str) or not isinstance(
+            yesterday_date_raw, str
+        ):
+            raise ValueError("invalid business dates")
+        business_date = date.fromisoformat(business_date_raw)
+        yesterday_date = date.fromisoformat(yesterday_date_raw)
+        if (
+            business_date.isoformat() != business_date_raw
+            or yesterday_date.isoformat() != yesterday_date_raw
+            or yesterday_date != business_date - timedelta(days=1)
+        ):
+            raise ValueError("invalid business dates")
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return None, {
             "status": "missing",
@@ -450,7 +465,7 @@ def read_snapshot(
     stale_reasons = []
     if age_seconds > max(1, int(max_age_seconds)):
         stale_reasons.append("age")
-    if str(snapshot.get("business_date") or "") != expected_business_date:
+    if business_date.isoformat() != expected_business_date:
         stale_reasons.append("business_date")
     if age_delta < -max(1, int(max_future_skew_seconds)):
         stale_reasons.append("future_generated_at")

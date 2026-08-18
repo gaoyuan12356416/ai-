@@ -15,5 +15,7 @@
 | CR-007 | P2 | cache 初版只有 age 判定 | 加北京 business_date 与 5 分钟 future skew，UI 明示 yesterday_date | 已关闭 |
 | CR-008 | P1 | 收入初版误用列 `c` | 改为真实 `campaign`，并 FORCE INDEX | 已关闭 |
 | CR-009 | P1 | failed/reserved log 初版参与 campaign map | 仅 confirmed published log 建映射 | 已关闭 |
+| CR-010 | P1 | GROUP BY 原表 collation 会破坏冻结 campaign 精确语义 | 三处复用 `CONVERT(COALESCE(campaign,'') USING binary)`；大小写/尾空格对抗测试通过 | 已关闭 |
+| CR-011 | P1 | cache 未校验日期格式及连续关系 | 规范 ISO + `yesterday_date = business_date - 1`，无效缓存按 missing | 已关闭 |
 
 最终验证结果以 test-report 为准；禁改 `oauth_service.py` 持续零 diff。
