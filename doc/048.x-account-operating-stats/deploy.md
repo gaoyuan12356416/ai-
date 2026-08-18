@@ -1,4 +1,4 @@
-# 部署文档（待单独授权）
+# 部署文档
 
 ## 部署前门禁
 
@@ -19,4 +19,10 @@
 
 停用新增 timer/service，恢复 app/static/env/unit 并仅重启主 API。缓存可保留；禁止恢复/修改 X SQLite/Token。
 
-当前未部署、未推送、未运行生产收入查询、未创建真实 X Post。
+## 2026-08-18 生产结果
+
+- GitHub-first 分支 `codex/x-account-stats-20260818`；生产功能提交为 `9f84ee3c30ac372de7ffcc45ff385af99ecddbb7`，备份目录为 `/mnt/data-disk/x-account-operating-stats/backups/20260818-1528-pre-9c515ed`。
+- refresh oneshot 成功，缓存为 `0640 root:root`；16 个账号、410 条已发布 Post、31 次 Repost，账本冲突 0。
+- `site_id=2116` 收入合计 `$5,822.28`：可归属 `$5,092.57`，未归属 `$729.71`；昨日合计 `$637.09`，未归属 `$0.00`。
+- `drama-material-api.service` 已仅重启主 API；`x-post-automation.service` PID 未变化。timer 已启用，下一次为 2026-08-18 21:10 CST。
+- Nginx 配置、public page 200、未登录 admin API 401、生产静态资产的 1600/1280 布局验收均通过；未创建真实 X Post，未修改 X SQLite/Token/OAuth。

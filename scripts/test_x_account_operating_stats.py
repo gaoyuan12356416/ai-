@@ -359,6 +359,11 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertNotIn("mysql.real", SERVICE_UNIT)
         self.assertIn("assert_approved_mysql_entry()", REFRESH_SOURCE)
         self.assertIn("/mnt/data-disk/x-account-operating-stats", SERVICE_UNIT)
+        self.assertIn("CapabilityBoundingSet=CAP_DAC_READ_SEARCH", SERVICE_UNIT)
+        self.assertIn("AmbientCapabilities=CAP_DAC_READ_SEARCH", SERVICE_UNIT)
+        self.assertNotIn("CAP_DAC_OVERRIDE", SERVICE_UNIT)
+        self.assertIn("/var/lib/sql-connection-gate/session-locks", SERVICE_UNIT)
+        self.assertIn("InaccessiblePaths=/var/lib/x-post-automation/tokens /etc/ssh", SERVICE_UNIT)
         self.assertIn("09:10:00 Asia/Shanghai", TIMER_UNIT)
         self.assertIn("21:10:00 Asia/Shanghai", TIMER_UNIT)
 
