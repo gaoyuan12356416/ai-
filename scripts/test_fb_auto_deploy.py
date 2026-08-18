@@ -19,6 +19,10 @@ class DeployContractTests(unittest.TestCase):
             self.assertIn("User=fb-auto-post", text)
             self.assertIn("EnvironmentFile=/etc/fb-auto-post.env", text)
             self.assertIn("/opt/fb-auto-post/current", text)
+        service = (ROOT / "deploy" / "fb-auto-post-service.service").read_text(encoding="utf-8")
+        self.assertIn("RuntimeDirectory=fb-auto-post", service)
+        env = (ROOT / "deploy" / "fb-auto-post.env.example").read_text(encoding="utf-8")
+        self.assertIn("FB_AUTO_METRIC_LOCK_PATH=/run/fb-auto-post/metric.lock", env)
 
     def test_publish_and_reconcile_have_bounded_workers_and_long_runtime(self):
         for name in ("fb-auto-post-runner.service", "fb-auto-post-reconcile.service"):

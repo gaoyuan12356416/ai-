@@ -18,7 +18,7 @@
 2. 服务器记录 `drama-material-api.service` 当前 SHA/PID，备份 `app.py`、`.env` 元数据（不复制到 Git）、两张静态页、navigation、units。
 3. 若任一 SQLite 已存在，分别用 Python online backup 到时间戳目录，执行 `PRAGMA quick_check` 和 SHA-256；不得在回滚时覆盖更新后的发布事实。
 4. 从 GitHub checkout 精确 SHA 到 `/opt/fb-auto-post/releases/<sha>`，原子切换 `/opt/fb-auto-post/current`。
-5. 创建 `fb-auto-post` 系统用户、0700 数据目录、0600 env；GPU Python 环境确认可导入 `qcloud_cos`（COS SDK 配置固定 timeout、KeepAlive=false、retry=0）；安装 unit，`systemctl daemon-reload`。
+5. 创建 `fb-auto-post` 系统用户、0700 数据目录、0600 env；sidecar unit 创建 0700 的 `/run/fb-auto-post`，指标锁固定为 `/run/fb-auto-post/metric.lock`；GPU Python 环境确认可导入 `qcloud_cos`（COS SDK 配置固定 timeout、KeepAlive=false、retry=0）；安装 unit，`systemctl daemon-reload`。
 6. 保持 live gate=0，启动 sidecar；可启动 metric 只读 timer。scheduler/plan/prepare/runner/reconcile 会返回 gate closed，不手动创建运行。
 7. Scheduler 必须在 60 秒内只完成 SQLite future due-slot 规划；耗时的 Page/素材冻结由 plan unit 完成，GPU 制作由 prepare unit 完成。验证 future frontier 为当前时间后 14,400 秒。
    - Graph execute/reconcile unit 每轮最多4任务并发，任务 lease=1200、loopback HTTP=1300、RuntimeMaxSec=1500，覆盖8个Token最坏路径。
