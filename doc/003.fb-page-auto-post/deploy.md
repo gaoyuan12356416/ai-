@@ -2,7 +2,17 @@
 
 ## 变更内容
 
-新增独立 FB Page 自动发布 sidecar、scheduler/plan/prepare/runner/reconcile 与 metric refresh/repair timers、主 API 代理、两张静态页和 `fb_page_posts` 权限。当前仅为部署候选，未部署。
+新增独立 FB Page 自动发布 sidecar、scheduler/plan/prepare/runner/reconcile 与 metric refresh/repair timers、主 API 代理、两张静态页和 `fb_page_posts` 权限。2026-08-18 已完成 closed-gate 生产部署，真实发布仍关闭。
+
+## 生产部署结果（2026-08-18）
+
+- GitHub 分支 `codex/fb-page-auto-post-20260817`；CPU/GPU current release 均为 `02dc36c090b02f968596991124bdac3a3c1585b8`。
+- CPU current：`/opt/fb-auto-post/current`；GPU current：`/opt/fb-page-random-overlay/current`。
+- 最终切换前 CPU online SQLite 备份：`/mnt/data-disk/fb-auto-post-deploy/backups/20260818T122418+0800-pre-02dc36c`；GPU service-state 备份：`/data/fb-page-random-overlay/backups/20260818T122155+0800-pre-02dc36c`。首次部署前完整文件备份仍保留在 `20260818T115333+0800-pre-7e8a436`（CPU）和 `20260818T115629+0800-pre-7e8a436`（GPU）。
+- `FB_AUTO_POST_LIVE_ENABLED=0`；35 个Page池、4279个Page、1289个可发布、2990个缺健康Token。模板/run/task/due-slot/attempt/ledger 均为0。
+- 指标 cache 已完成 2026-07-19 至 2026-08-17 的30个READY active pointer，共669,299行；hourly `:37` 与每日repair timers已启用。
+- prepare-only GPU canary：3秒源素材，首次17.218秒，H.264 High 720×1280 成片3.33MB；公开HTTPS HEAD=200、`video/mp4`、size/SHA/profile元数据匹配；同job复用0.002秒。没有调用Graph。
+- canary发现并关闭 BUG-005（MySQL/Python content排序）与 BUG-006（COS Metadata header前缀）。失败canary产生的无引用COS孤立对象和失败job目录已按精确身份清理并验证404；成功job仅保留manifest。
 
 ## 配置项
 
@@ -14,7 +24,7 @@
 
 ## 部署步骤
 
-1. 本地完成全部验证，commit/push `codex/...`，记录完整 SHA；本任务尚未执行。
+1. 本地完成全部验证，commit/push `codex/...`，记录完整 SHA。
 2. 服务器记录 `drama-material-api.service` 当前 SHA/PID，备份 `app.py`、`.env` 元数据（不复制到 Git）、两张静态页、navigation、units。
 3. 若任一 SQLite 已存在，分别用 Python online backup 到时间戳目录，执行 `PRAGMA quick_check` 和 SHA-256；不得在回滚时覆盖更新后的发布事实。
 4. 从 GitHub checkout 精确 SHA 到 `/opt/fb-auto-post/releases/<sha>`，原子切换 `/opt/fb-auto-post/current`。
@@ -26,7 +36,7 @@
 8. 增量部署主 API `app.py`、`features/fb_auto_posts/`、两张 HTML、quick-nav 和 navigation 合并；不得覆盖独立推进的 X/TT 包或线上 navigation 其他项。
 9. 重启仅 `fb-auto-post-service.service` 和 `drama-material-api.service`；静态发布后验证 no-store。
 
-部署前只读门禁：对 Page/group/token、旧队列冲突、素材候选 SQL 做 `EXPLAIN` 和小范围 SELECT；确认 `g.user_id`、`ads_setting` 黑名单、目标 app/product 映射和响应大小。指标 SQL 的修正版生产只读 EXPLAIN 已通过（ONLY_FULL_GROUP_BY 合法，未执行刷新）；不得打印 Token。
+部署前只读门禁：对 Page/group/token、旧队列冲突、素材候选 SQL 做 `EXPLAIN` 和小范围 SELECT；确认 `g.user_id`、`ads_setting` 黑名单、目标 app/product 映射和响应大小。指标 SQL 的修正版生产只读 EXPLAIN 与30日实际刷新均已通过；不得打印 Token。
 
 ## 验证步骤
 
@@ -48,9 +58,9 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 
 ## 注意事项
 
-- GitHub-first，备份先于切换；本任务没有 commit/push/deploy。
+- GitHub-first，备份先于切换；上述 production SHA 已完成 commit/push/deploy。
 - `active/running` 不等于业务完成；必须核对 health、timer、ledger、旧队列、Graph 处理状态。
 - 开 live gate、创建生产模板或真实 Page 帖子均需单独明确授权。
 - Graph v22.0 已对既有视频对象完成只读 status 验证；真实发帖 canary 仍须单独审批，禁止用本部署验收创建帖子。
-- GPU 使用独立 `fb-page-random-overlay-gpu.service` 与 `fb-page-random-overlay-tunnel.service`，端口 `8836→18836`、work root `/data/fb-page-random-overlay`、真实 H.264 profile `tt-post-random-overlay-h264-720x1280-v3`。unit 指向本仓库 `scripts/fb_random_overlay_gpu_worker.py`；不得在本任务启动。COS真实配置只放root只读env，key为 `.../fb-page-random-overlay-h264-v3/{sha前2位}/{sha}.mp4`。失败 job 仅在 `work_root/jobs` 下按严格 job 名清理，默认保留48小时、启动和每小时有界清理，不跟随符号链接且成功 manifest 永不删。开 gate 前须对实际资产 manifest、COS public-read只读回源、NVENC耗时做集成和吞吐基准，并据此评审 `FB_AUTO_MAX_JOBS_PER_SLOT`，无基准不得上调默认20。
-- 当前没有已验证的GPU目录总字节硬水位；开 live gate 前必须以数据盘可用空间大于 `max_source_bytes × 单槽任务上限` 作为外部门禁并配置磁盘告警。未完成水位验收不得开启真实发布。
+- GPU 使用独立 `fb-page-random-overlay-gpu.service` 与 `fb-page-random-overlay-tunnel.service`，端口 `8836→18836`、work root `/data/fb-page-random-overlay`、真实 H.264 profile `tt-post-random-overlay-h264-720x1280-v3`。unit 指向本仓库 `scripts/fb_random_overlay_gpu_worker.py`。COS真实配置只放root只读env，key为 `.../fb-page-random-overlay-h264-v3/{sha前2位}/{sha}.mp4`。失败 job 仅在 `work_root/jobs` 下按严格 job 名清理，默认保留48小时、启动和每小时有界清理，不跟随符号链接且成功 manifest 永不删。实际资产/COS/NVENC单任务canary已通过；无并发吞吐基准前不得上调默认20。
+- GPU `/data` 当前可用101G，高于 `2GB × 20 = 40GB` 的外部门禁快照；仍需配置持续磁盘告警，并在开启live前复核当时水位。

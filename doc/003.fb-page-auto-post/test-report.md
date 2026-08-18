@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-通过（本地实现与 closed-gate 部署候选）。已完成生产只读 MySQL 和页面/定时器闭锁验收，未调用 Meta。真实发布仍保持关闭。
+通过。已完成本地161项回归、CPU/GPU closed-gate生产部署、30日指标回填和prepare-only GPU→COS canary；未调用 Meta，真实发布仍保持关闭。
 
 ## 测试范围
 
@@ -27,15 +27,19 @@ BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG
 - `python -m py_compile ... app.py`：PASS。
 - `node --check static/quick-nav.js`、navigation JSON 解析：PASS。
 - 最终 inline JS、diff 和敏感扫描见本次交付命令输出。
+- 生产页面：模板页与发布记录页均HTTP 200；已登录DOM显示视频制作模板=随机排重模板、Page池/素材条件/固定或每日随机频率；管理API匿名访问401。
+- 生产闭锁：scheduler/plan/prepare/runner/reconcile自然timer均返回 `live_gate_closed`，六张发布操作表始终为0；sidecar/main API/GPU/tunnel `NRestarts=0`。
+- 指标：2026-07-19至2026-08-17共30个active READY pointer、669,299日明细行、0 building，两个SQLite `quick_check=ok`。
+- GPU/COS：首次17.218秒、二次0.002秒复用；公开HEAD 200、`video/mp4`、3,306,811 bytes，SHA/profile元数据一致；成功job仅manifest，GPU数据盘101G可用。
 
 ## 遗留风险
 
-- 修复前 SQL 已由生产只读 EXPLAIN 复现 `ONLY_FULL_GROUP_BY` 1055；候选改为分组内的 material ID 长度+字符串数值序后，已完成生产只读 EXPLAIN：不再报 1055，命中 `pss(product,dt,series_code)`，估算 353,504 行；未执行真实刷新。
+- 修复前 SQL 已由生产只读 EXPLAIN 复现 `ONLY_FULL_GROUP_BY` 1055；候选修复后生产只读 EXPLAIN、单日23,765行和最近30日完整刷新均通过。content ID 使用binary canonical排序，素材ID使用ASCII正整数长度+字符串数值序。
 - Graph v22.0 已对既有视频对象完成只读 `GET fields=id,status` canary，当前解析可识别 `video_status=ready / processing complete / publishing complete / publish_status=published`；没有创建或修改帖子。
 - 首发不支持跨产品，服务端固定 Dramawave `app_id=1479/data_source=6/metric_product=Dramawave/platform=0`，未知映射 fail closed。
-- GPU NVENC真实单任务耗时尚无本轮基准；默认 `20 jobs/slot` 不得在无基准时上调。
-- GPU worker虽已有仓库内prepare-only入口、失败目录保留/清理和真实 COS 合同，实际资产 manifest、COS public-read HTTPS 回源、NVENC 与 Graph 拉取仍待部署前集成，不在本地 fake 覆盖范围。
-- GPU processor和prepare unit已统一为串行1任务；尚无GPU目录总字节硬水位，live前必须完成数据盘可用空间门禁/告警验收。
+- GPU已有单任务基准，但尚无20任务/同槽连续吞吐基准；默认 `20 jobs/slot` 不得上调。
+- 实际资产manifest、COS public-read HTTPS回源与NVENC已通过；Graph真实发帖仍未执行，需另行明确审批。
+- GPU processor和prepare unit统一为串行1任务；当前101G可用满足40G静态门禁，但持续磁盘告警与live前水位复核仍需完成。
 
 ## 发布建议
 
