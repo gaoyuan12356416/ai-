@@ -35,8 +35,10 @@ def _required(name: str) -> str:
 
 
 def main() -> int:
+    stage = "startup"
     try:
         assert_approved_mysql_entry()
+        stage = "ledger"
         now = utc_now()
         yesterday = now.astimezone(SHANGHAI).date() - timedelta(days=1)
         ledger_metrics, campaign_accounts, campaign_evidence = read_ledger_metrics(
@@ -46,6 +48,7 @@ def main() -> int:
             ),
             yesterday,
         )
+        stage = "revenue"
         revenue_rows = run_gated_mysql(
             host=_required("X_ACCOUNT_STATS_MYSQL_HOST"),
             port=int(os.environ.get("X_ACCOUNT_STATS_MYSQL_PORT", "63350")),
@@ -63,6 +66,7 @@ def main() -> int:
                 os.environ.get("X_ACCOUNT_STATS_MYSQL_QUERY_TIMEOUT", "300")
             ),
         )
+        stage = "snapshot"
         snapshot = build_snapshot(
             ledger_metrics=ledger_metrics,
             campaign_accounts=campaign_accounts,
@@ -70,6 +74,7 @@ def main() -> int:
             revenue_rows=revenue_rows,
             now=now,
         )
+        stage = "cache"
         write_snapshot_atomic(
             snapshot,
             os.environ.get("X_ACCOUNT_STATS_CACHE_PATH", str(DEFAULT_CACHE_PATH)),
@@ -85,7 +90,10 @@ def main() -> int:
         )
         return 0
     except (StatsRefreshError, OSError, ValueError):
-        print("x_account_operating_stats_refresh_failed", file=sys.stderr)
+        print(
+            "x_account_operating_stats_refresh_failed stage=%s" % stage,
+            file=sys.stderr,
+        )
         return 1
 
 
