@@ -18,7 +18,7 @@ FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU 
 
 ## 缺陷情况
 
-BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055 已修复并回归。无未关闭本地缺陷。
+BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容均已修复并回归。无未关闭本地缺陷。
 
 ## 验证证据
 

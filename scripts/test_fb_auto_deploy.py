@@ -48,6 +48,7 @@ class DeployContractTests(unittest.TestCase):
 
     def test_gpu_unit_points_to_versioned_repo_entrypoint(self):
         unit=(ROOT/"deploy"/"fb-page-random-overlay-gpu.service").read_text(encoding="utf-8")
+        self.assertIn("/root/miniconda3/envs/drama-voice/bin/python", unit)
         self.assertIn("scripts/fb_random_overlay_gpu_worker.py",unit); self.assertTrue((ROOT/"scripts"/"fb_random_overlay_gpu_worker.py").exists())
 
 
