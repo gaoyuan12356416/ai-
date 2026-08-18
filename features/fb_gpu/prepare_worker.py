@@ -130,7 +130,7 @@ class CosObjectStore:
         else:
             try:
                 with Path(path).open("rb") as body:
-                    self.client.put_object(Bucket=self.config.cos_bucket,Key=key,Body=body,ACL="public-read",ContentType="video/mp4",Metadata={"sha256":sha256,"profile":PROFILE})
+                    self.client.put_object(Bucket=self.config.cos_bucket,Key=key,Body=body,ACL="public-read",ContentType="video/mp4",Metadata={"x-cos-meta-sha256":sha256,"x-cos-meta-profile":PROFILE})
             except PrepareWorkerError: raise
             except Exception: raise PrepareWorkerError("fb_gpu_cos_upload_failed","COS upload failed",502) from None
             head=self._head(key)

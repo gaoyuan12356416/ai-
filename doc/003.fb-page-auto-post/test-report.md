@@ -18,7 +18,7 @@ FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU 
 
 ## 缺陷情况
 
-BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容、BUG-004 oneshot 忽略 `RuntimeMaxSec`、BUG-005 MySQL/Python跨content排序语义不一致均已修复并回归。无未关闭本地缺陷。
+BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容、BUG-004 oneshot 忽略 `RuntimeMaxSec`、BUG-005 MySQL/Python跨content排序语义不一致、BUG-006 COS SDK自定义元数据键缺少协议前缀均已修复并回归。无未关闭本地缺陷。
 
 ## 验证证据
 

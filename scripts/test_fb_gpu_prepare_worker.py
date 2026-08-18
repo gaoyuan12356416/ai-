@@ -60,7 +60,7 @@ class WorkerTests(unittest.TestCase):
             path=Path(tmp)/"o.mp4"; path.write_bytes(b"abc"); client=Client(); store=CosObjectStore(config(Path(tmp)),client)
             first=store.upload(path,"fb-page-"+"a"*48,"b"*64,3); second=store.upload(path,"fb-page-"+"a"*48,"b"*64,3)
             self.assertEqual(client.uploads,1); self.assertEqual(first["key"],second["key"]); self.assertTrue(first["key"].startswith("fb-page-random-overlay-h264-v3/bb/")); self.assertTrue(first["url"].startswith("https://")); self.assertTrue(second["reused"]); self.assertEqual(client.kwargs["ACL"],"public-read"); self.assertEqual(client.kwargs["ContentType"],"video/mp4")
-            self.assertEqual(client.kwargs["Metadata"],{"sha256":"b"*64,"profile":PROFILE})
+            self.assertEqual(client.kwargs["Metadata"],{"x-cos-meta-sha256":"b"*64,"x-cos-meta-profile":PROFILE})
 
     def test_cos_unknown_upload_result_recovers_by_head_on_same_key(self):
         class Missing(Exception):
