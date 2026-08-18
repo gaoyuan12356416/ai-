@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconcile accepted FB video submissions
+After=fb-auto-post-service.service
+Requires=fb-auto-post-service.service
+
+[Service]
+Type=oneshot
+User=fb-auto-post
+Group=fb-auto-post
+WorkingDirectory=/opt/fb-auto-post/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 scripts/fb_auto_post_runner.py reconcile --workers 4 --max-tasks 4 --lease-seconds 1200
+RuntimeMaxSec=1500
+UMask=0077

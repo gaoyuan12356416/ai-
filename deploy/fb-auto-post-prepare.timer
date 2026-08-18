@@ -1,0 +1,10 @@
+[Unit]
+Description=Drain FB random-overlay preparation work every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:20
+Persistent=true
+Unit=fb-auto-post-prepare.service
+
+[Install]
+WantedBy=timers.target

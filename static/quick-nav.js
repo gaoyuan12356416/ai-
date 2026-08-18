@@ -213,6 +213,36 @@
       ],
     },
     {
+      key: "facebook_platform",
+      label: "Facebook 社媒",
+      order: 38,
+      module: "fb_page_posts",
+      items: [
+        {
+          key: "fbAutoPublishTemplates",
+          label: "FB Page 自动发布模板",
+          description: "按Page池维护视频选材和发布时间模板",
+          kind: "page",
+          href: "/fb-auto-publish-templates.html",
+          module: "fb_page_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "fbAutoPublishRuns",
+          label: "FB Page 发布记录",
+          description: "查看Page冻结、跳过原因和Graph发布结果",
+          kind: "page",
+          href: "/fb-auto-publish-runs.html",
+          module: "fb_page_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 20,
+        },
+      ],
+    },
+    {
       key: "x_platform",
       label: "X平台推广",
       order: 40,
@@ -474,6 +504,8 @@
     ttPostPool: "/tt-post-pool.html",
     ttAutoPublishTemplates: "/tt-auto-publish-templates.html",
     ttAutoPublishRuns: "/tt-publish-logs.html",
+    fbAutoPublishTemplates: "/fb-auto-publish-templates.html",
+    fbAutoPublishRuns: "/fb-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
     xAutoPublishTemplates: "/x-auto-publish-templates.html",
@@ -587,6 +619,44 @@
       });
     }
     const xPlatform = normalized.find(group => group && group.key === "x_platform");
+    let facebookPlatform = normalized.find(group => group && group.key === "facebook_platform");
+    if (!facebookPlatform) {
+      facebookPlatform = {
+        key: "facebook_platform",
+        label: "Facebook 社媒",
+        order: 38,
+        module: "fb_page_posts",
+        items: [],
+      };
+      normalized.push(facebookPlatform);
+    }
+    if (!Array.isArray(facebookPlatform.items)) facebookPlatform.items = [];
+    if (!facebookPlatform.items.some(item => item && item.key === "fbAutoPublishTemplates")) {
+      facebookPlatform.items.push({
+        key: "fbAutoPublishTemplates",
+        label: "FB Page 自动发布模板",
+        description: "按Page池维护视频选材和发布时间模板",
+        kind: "page",
+        href: "/fb-auto-publish-templates.html",
+        module: "fb_page_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 10,
+      });
+    }
+    if (!facebookPlatform.items.some(item => item && item.key === "fbAutoPublishRuns")) {
+      facebookPlatform.items.push({
+        key: "fbAutoPublishRuns",
+        label: "FB Page 发布记录",
+        description: "查看Page冻结、跳过原因和Graph发布结果",
+        kind: "page",
+        href: "/fb-auto-publish-runs.html",
+        module: "fb_page_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 20,
+      });
+    }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
       const xAutoPublishTemplatesExists = xPlatform.items.some(

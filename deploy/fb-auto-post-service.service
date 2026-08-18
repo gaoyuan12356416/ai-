@@ -1,0 +1,19 @@
+[Unit]
+Description=FB Page automatic publishing loopback sidecar
+After=network-online.target
+
+[Service]
+Type=simple
+User=fb-auto-post
+Group=fb-auto-post
+WorkingDirectory=/opt/fb-auto-post/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 /opt/fb-auto-post/current/scripts/fb_auto_post_service.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

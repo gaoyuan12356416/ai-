@@ -1,0 +1,11 @@
+[Unit]
+Description=Repair FB metric cache during low traffic
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+RandomizedDelaySec=60
+Unit=fb-auto-post-metric-repair.service
+
+[Install]
+WantedBy=timers.target

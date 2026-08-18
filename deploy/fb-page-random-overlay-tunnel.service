@@ -1,0 +1,19 @@
+[Unit]
+Description=Dedicated reverse tunnel for FB Page prepare-only GPU worker
+After=network-online.target fb-page-random-overlay-gpu.service
+Requires=fb-page-random-overlay-gpu.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/ssh -i /root/.ssh/id_ed25519_gpu_worker -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -R 127.0.0.1:18836:127.0.0.1:8836 root@43.166.187.96
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/root/.ssh
+
+[Install]
+WantedBy=multi-user.target

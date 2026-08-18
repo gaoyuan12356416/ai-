@@ -1,0 +1,10 @@
+[Unit]
+Description=Check FB Page auto-post schedules every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+Unit=fb-auto-post-scheduler.service
+
+[Install]
+WantedBy=timers.target

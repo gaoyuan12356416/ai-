@@ -1,0 +1,10 @@
+[Unit]
+Description=Drain FB Page auto-post work every two minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/2:20
+Persistent=true
+Unit=fb-auto-post-runner.service
+
+[Install]
+WantedBy=timers.target

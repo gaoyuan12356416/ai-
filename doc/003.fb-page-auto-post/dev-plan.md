@@ -1,0 +1,34 @@
+# 开发计划
+
+## 开发范围
+
+隔离 sidecar、只读 MySQL、Graph 提交/对账、主 API 权限代理、两张页面、systemd、测试和文档。
+
+## 任务拆分
+
+| 任务 | 负责人 | 文件/模块 | 状态 |
+| --- | --- | --- | --- |
+| 模板/账本/租约 | Codex | `features/fb_auto_posts/core.py` | 完成 |
+| Page/素材只读源 | Codex | `repositories.py` | 完成 |
+| Token/Graph/对账 | Codex | `publisher.py` | 完成 |
+| Sidecar/API代理 | Codex | `service.py`、`client.py`、`app.py` | 完成 |
+| UI/导航/权限 | Codex | 两张 HTML、导航、权限 | 完成 |
+| 部署/测试/文档 | Codex | deploy、scripts、doc | 完成 |
+
+## 编译 / 构建命令
+
+```powershell
+python -m py_compile features\fb_auto_posts\__init__.py features\fb_auto_posts\validation.py features\fb_auto_posts\repositories.py features\fb_auto_posts\core.py features\fb_auto_posts\client.py features\fb_auto_posts\publisher.py features\fb_auto_posts\service.py scripts\fb_auto_post_service.py scripts\fb_auto_post_runner.py app.py
+python -m unittest scripts.test_fb_auto_validation scripts.test_fb_auto_repositories scripts.test_fb_auto_store scripts.test_fb_auto_publisher scripts.test_fb_auto_service scripts.test_fb_auto_app_contract scripts.test_fb_auto_deploy scripts.test_x_accounts_app_contract scripts.test_tt_auto_publish_app_contract scripts.test_x_auto_publish_app_contract -v
+node --check static\quick-nav.js
+```
+
+## 风险与依赖
+
+生产依赖只读 MySQL、独立 service 用户/运行与指标数据盘文件、root-only env，以及实际资产 manifest/COS public-read/NVENC 集成。Graph v22.0 既有视频 status 已完成只读验证；真实发帖 live gate 未获批准不得开启。
+
+## 完成记录
+
+2026-08-17：本地候选完成；未提交、未推送、未部署。
+
+2026-08-18 V2：按确认口径加入受控 Dramawave 映射、独立日指标缓存、未来 due-slot 调度、提前 GPU prepare、strict random_overlay、稳定 Page job ID、容量门禁与新 units。继续保持未提交、未推送、未部署、未调用生产/MySQL/Meta/GPU。

@@ -3613,6 +3613,7 @@ MODULE_PERMISSIONS = {
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
     "tt_posts": "TikTok 社媒发布",
+    "fb_page_posts": "Facebook Page 自动发布",
 
 
 
@@ -3669,6 +3670,7 @@ DEFAULT_USER_PERMISSIONS = {
     "voiceover_drama_tasks": False,
     "x_accounts": False,
     "tt_posts": False,
+    "fb_page_posts": False,
     "settings": False,
 }
 
@@ -41500,6 +41502,47 @@ from features.x_auto_posts.client import (
     parse_admin_query as x_auto_posts_query_params,
     request_admin as x_auto_post_service_request,
 )
+from features.fb_auto_posts.client import (
+    FB_AUTO_ADMIN_PREFIX,
+    FBAutoPostAdminClientError,
+    error_payload as fb_auto_posts_error_payload,
+    parse_admin_query as fb_auto_posts_query_params,
+    request_admin as fb_auto_post_service_request,
+)
+
+
+def fb_auto_post_actor_scope(session):
+    """Map a Cookie session to the durable Page-pool owner scope."""
+    session = session or {}
+    is_admin = session.get("role") == "admin"
+    email = str(session.get("email") or "").strip()
+    owner_user_id = ""
+    if email:
+        database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+        try:
+            rows = run_mysql(
+                "SELECT DISTINCT CAST(sub_user_id AS CHAR) "
+                "FROM `%s`.admin_user_group WHERE email='%s' "
+                "AND status=0 AND sub_user_id IS NOT NULL LIMIT 2"
+                % (database.replace("`", "``"), mysql_escape_literal(email))
+            )
+            mapped = [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+            if len(set(mapped)) == 1:
+                owner_user_id = mapped[0]
+        except Exception:
+            logging.exception("FB auto publish owner mapping lookup failed")
+    if not is_admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner_user_id):
+        raise FBAutoPostAdminClientError(
+            "fb_auto_owner_mapping_missing",
+            "当前账号未唯一映射到Page池负责人",
+            403,
+        )
+    return {
+        "user_id": str(session.get("user_id") or "")[:128],
+        "name": str(session.get("name") or "")[:200],
+        "is_admin": is_admin,
+        "owner_user_id": owner_user_id,
+    }
 
 
 class TTPostAdminClientError(RuntimeError):
@@ -94391,6 +94434,39 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         if (
             parsed.path in {
+                FB_AUTO_ADMIN_PREFIX + "/groups",
+                FB_AUTO_ADMIN_PREFIX + "/templates",
+                FB_AUTO_ADMIN_PREFIX + "/runs",
+            }
+            or re.fullmatch(
+                re.escape(FB_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "fbAutoPublishRuns"
+                if parsed.path.startswith(FB_AUTO_ADMIN_PREFIX + "/runs")
+                else "fbAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = fb_auto_posts_query_params(parsed.path, parsed.query)
+                result = fb_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                    actor=fb_auto_post_actor_scope(self._session()),
+                )
+                json_response(self, 200, result, no_store=True)
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if (
+            parsed.path in {
                 X_AUTO_ADMIN_PREFIX + "/accounts",
                 X_AUTO_ADMIN_PREFIX + "/templates",
                 X_AUTO_ADMIN_PREFIX + "/runs",
@@ -97871,6 +97947,96 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+
+        fb_auto_template_match = re.fullmatch(
+            re.escape(FB_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:enable|disable|run-now))?)?",
+            parsed.path,
+        )
+        if fb_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "fbAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "enable": "enable_fb_auto_publish_template",
+                "disable": "disable_fb_auto_publish_template",
+                "run-now": "run_fb_auto_publish_template",
+                "templates": "create_fb_auto_publish_template",
+            }.get(action_suffix, "update_fb_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise FBAutoPostAdminClientError(
+                        "invalid_request", "请求体必须是对象", 400
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = fb_auto_post_actor_scope(session)
+                result = fb_auto_post_service_request(
+                    "POST", parsed.path, payload=outbound_payload
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                append_audit_log(
+                    session,
+                    action,
+                    "fb_auto_publish_template",
+                    target_id,
+                    {
+                        "template_id": target_id,
+                        "run_id": str(result.get("run_id") or ""),
+                        "due_slot_id": str(result.get("due_slot_id") or ""),
+                        "operation_id": str(result.get("operation_id") or "")[:100],
+                        "expected_version": str(
+                            request_payload.get("expected_version") or ""
+                        ),
+                    },
+                )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "fb_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception("FB auto publish audit write failed")
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("FB auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
 
         x_auto_account_verify_match = re.fullmatch(
             re.escape(X_AUTO_ADMIN_PREFIX)

@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare durable FB due slots every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:10
+Persistent=true
+Unit=fb-auto-post-plan.service
+
+[Install]
+WantedBy=timers.target

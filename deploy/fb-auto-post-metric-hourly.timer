@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh yesterday FB metrics hourly at :37
+
+[Timer]
+OnCalendar=*-*-* *:37:00
+Persistent=true
+RandomizedDelaySec=20
+Unit=fb-auto-post-metric-hourly.service
+
+[Install]
+WantedBy=timers.target

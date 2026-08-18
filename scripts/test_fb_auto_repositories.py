@@ -1,0 +1,118 @@
+import unittest
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from features.fb_auto_posts.repositories import MaterialRepository, PagePoolRepository, RepositoryError
+from features.fb_auto_posts.metrics import MetricTotals, MetricWindow
+from features.fb_auto_posts.validation import normalize_template_payload
+from scripts.test_fb_auto_validation import payload
+
+
+class FakeMySQL:
+    schema = "kunlunads_dev"
+    blacklist_schema = "ads_setting"
+    def __init__(self): self.calls = []
+    def select(self, sql, params):
+        self.calls.append((sql, tuple(params)))
+        if "GROUP BY g.id" in sql:
+            return [{"group_id": "6", "owner_user_id": "248", "group_type": 0, "group_name": "DW Post", "app_id": "1479", "product": "Dramawave", "total_pages": 3, "publishable_pages": 2}]
+        if "ads_facebook_page_group_ins" in sql:
+            return [
+                {"group_id": "6", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "eligible_token_count": 2},
+                {"group_id": "18", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "eligible_token_count": 2},
+            ]
+        if "page_access_token" in sql:
+            return [
+                {"credential_id": "1", "page_id": "10001", "fb_user_id": "7", "page_access_token": "secret-A"},
+                {"credential_id": "2", "page_id": "10001", "fb_user_id": "8", "page_access_token": "secret-A"},
+                {"credential_id": "3", "page_id": "10001", "fb_user_id": "8", "page_access_token": "secret-B"},
+            ]
+        return []
+
+
+class RepositoryTests(unittest.TestCase):
+    def test_group_query_uses_real_user_column_and_returns_counts(self):
+        mysql = FakeMySQL(); groups = PagePoolRepository(mysql).list_groups(is_admin=False, owner_user_id="248")
+        self.assertEqual((groups[0].name, groups[0].app_id, groups[0].publishable_pages), ("DW Post", "1479", 2))
+        self.assertIn("g.user_id", mysql.calls[0][0]); self.assertNotIn("g.owner_user_id", mysql.calls[0][0])
+        self.assertIn("g.type IN (0,1)", mysql.calls[0][0])
+
+    def test_overlapping_membership_becomes_one_page_with_lineage(self):
+        mysql = FakeMySQL(); pages = PagePoolRepository(mysql).list_pages(["6", "18"], is_admin=True, owner_user_id="")
+        self.assertEqual(len(pages), 1); self.assertEqual(pages[0].group_ids, ("6", "18"))
+        self.assertIn("g.type IN (0,1)", mysql.calls[0][0])
+
+    def test_credentials_dedupe_by_token_in_memory(self):
+        credentials = PagePoolRepository(FakeMySQL()).eligible_credentials("10001")
+        self.assertEqual([item.credential_id for item in credentials], ["1", "3"])
+        self.assertNotIn("secret", repr(credentials))
+
+    def test_legacy_conflict_detects_same_page_across_different_groups(self):
+        class MySQL(FakeMySQL):
+            def select(self,sql,params):
+                self.calls.append((sql,tuple(params)))
+                return [{"queue_id":"9","queue_name":"legacy","group_id":"18","selected_group_id":"6","overlap_page_id":"10001","execute_switch":"1"}]
+        mysql=MySQL(); conflicts=PagePoolRepository(mysql).legacy_conflicts(["6"])
+        self.assertEqual(conflicts[0]["group_id"],"18"); self.assertEqual(conflicts[0]["overlap_page_id"],"10001")
+        self.assertIn("si.page_id=li.page_id",mysql.calls[0][0]); self.assertIn("q.execute_switch=1",mysql.calls[0][0])
+
+    def test_material_query_pushes_filters_and_uses_drama_then_material_sort_before_limit(self):
+        class MaterialMySQL:
+            schema = "kunlunads_dev"; blacklist_schema = "ads_setting"
+            def __init__(self): self.calls=[]
+            def select(self, sql, params):
+                self.calls.append((sql, tuple(params)))
+                return [
+                    {"material_id":"1","content_id":"d1","media_url":"https://cdn.example/1.mp4","material_name":"one","drama_name":"low","language":"english","video_duration":30,"resource_type_v2":"1"},
+                    {"material_id":"6000","content_id":"d2","media_url":"https://cdn.example/2.mp4","material_name":"top","drama_name":"high","language":"english","video_duration":30,"resource_type_v2":"1"},
+                ]
+        class Metrics:
+            def load_metric_window(self, **_kwargs):
+                return MetricWindow((11,), ("2026-08-10",), {"d1":MetricTotals(Decimal("50"),Decimal("5")),"d2":MetricTotals(Decimal("100"),Decimal("5"))}, {("d1","1"):MetricTotals(Decimal("1"),Decimal("1")),("d2","6000"):MetricTotals(Decimal("10"),Decimal("1"))})
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc","spend_min":10,"resource_type_v2":["1"]}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"asc","spend_max":20})
+        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MaterialMySQL(); candidates=MaterialRepository(mysql,Metrics(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidates(config)
+        sql=mysql.calls[0][0]
+        self.assertEqual([item.material_id for item in candidates],["6000","1"])
+        self.assertNotIn("ads_custom_source_insight",sql); self.assertNotIn("mi.spend",sql)
+        self.assertLess(sql.index("s.video_duration>=%s"),sql.index("LIMIT %s")); self.assertIn("AND s.id>%s",sql); self.assertIn("ORDER BY s.id LIMIT %s",sql)
+        self.assertIn("ads_custom_source s FORCE INDEX(PRIMARY)",sql)
+        self.assertIn("EXISTS (SELECT 1",sql); self.assertIn("ads_drama_info d FORCE INDEX(ac)",sql)
+        self.assertNotIn("JOIN `kunlunads_dev`.ads_drama_info d ON",sql)
+        self.assertEqual(mysql.calls[0][1][2],"en")
+
+    def test_catalog_keyset_pagination_keeps_metric_top_after_5000(self):
+        class Store:
+            def load_metric_window(self,**_kwargs):
+                return MetricWindow((1,),("2026-08-16",),{"top":MetricTotals(Decimal("9999"),Decimal("1"))},{("top","6001"):MetricTotals(Decimal("9999"),Decimal("1"))})
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def __init__(self): self.calls=0; self.source_calls=0
+            def select(self,sql,params):
+                self.calls+=1
+                if "JOIN (SELECT d0.content_id" in sql:
+                    return [{"content_id":str(item),"drama_name":"d","resource_type_v2":"1","series_code":"s"} for item in params[3:]]
+                cursor=int(params[-2]); start=cursor+1
+                self.source_calls+=1
+                ids=list(range(start,start+1000)) if cursor<5000 else ([6001] if cursor==5000 else [])
+                return [{"material_id":str(i),"content_id":"top" if i==6001 else "zero","media_url":f"https://cdn.example/{i}.mp4","material_name":"m","drama_name":"d","language":"english","video_duration":30,"resource_type_v2":"1"} for i in ids]
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"desc"}); config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidate_snapshot(config)
+        self.assertEqual(result.candidates[0].material_id,"6001"); self.assertEqual(mysql.source_calls,6); self.assertEqual(mysql.calls,12); self.assertLessEqual(len(result.candidates),5000)
+
+    def test_catalog_scan_has_bounded_overall_deadline(self):
+        class Store:
+            def load_metric_window(self,**_kwargs): return MetricWindow((1,),('2026-08-16',),{}, {})
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def select(self,sql,params):
+                if "JOIN (SELECT d0.content_id" in sql: return [{"content_id":"d","drama_name":"d","resource_type_v2":"1","series_code":"s"}]
+                return [{"material_id":str(i),"content_id":"d","media_url":f"https://cdn.example/{i}.mp4","material_name":"m","language":"en","video_duration":30} for i in range(1,1001)]
+        ticks=iter((0,0,61))
+        repository=MaterialRepository(MySQL(),Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),monotonic_fn=lambda:next(ticks),catalog_deadline_seconds=60)
+        config=normalize_template_payload(payload()); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        with self.assertRaises(RepositoryError) as caught: repository.candidate_snapshot(config)
+        self.assertEqual(caught.exception.code,"fb_auto_catalog_scan_timeout")
+
+
+if __name__ == "__main__": unittest.main()
