@@ -31,6 +31,6 @@ RestrictSUIDSGID=true
 SystemCallArchitectures=native
 InaccessiblePaths=/var/lib/x-post-automation/tokens /etc/ssh
 ReadOnlyPaths=/root/drama_material_service /var/lib/x-post-automation /usr/bin/mysql /usr/local/bin/mysql-gated /opt/sql-connection-gate
-ReadWritePaths=/mnt/data-disk/x-account-operating-stats
+ReadWritePaths=/mnt/data-disk/x-account-operating-stats /var/lib/sql-connection-gate/session-locks
 UMask=0027
 TimeoutStartSec=10min
