@@ -8,5 +8,5 @@ Group=fb-auto-post
 WorkingDirectory=/opt/fb-auto-post/current
 EnvironmentFile=/etc/fb-auto-post.env
 ExecStart=/usr/bin/python3 scripts/fb_auto_post_metric_runner.py yesterday
-RuntimeMaxSec=600
+TimeoutStartSec=600
 UMask=0077

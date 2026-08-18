@@ -41,7 +41,7 @@ FB package、runner、main API、navigation/UI、units/env、docs/tests。
 | CR-27 | P1 | validation/UI | 默认english与生产code不匹配 | english→en，受限BCP47含zh-tw，UI code下拉 | 已修复 |
 | CR-28 | P1 | GPU work root | 失败job可长期堆积至磁盘满 | 严格根目录/名字、保留期和有界清理，不跟随链接 | 已修复 |
 | CR-29 | P0 | core.create_run | ahead future时隙可并发选中同Page同素材 | active预留纳入冷却；事务内重查、改选并插task | 已修复 |
-| CR-30 | P0 | runner/unit | 8 Token最坏960秒超过600秒HTTP及短对账租约 | execute/reconcile 1200租约、1300 HTTP、1500 unit，每轮4任务 | 已修复 |
+| CR-30 | P0 | runner/unit | 8 Token最坏960秒超过600秒HTTP及短对账租约 | execute/reconcile 1200租约、1300 HTTP、`TimeoutStartSec=1500`，每轮4任务 | 已修复 |
 
 ## 编译 / 验证结果
 

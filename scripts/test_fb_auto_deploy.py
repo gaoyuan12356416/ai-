@@ -28,7 +28,7 @@ class DeployContractTests(unittest.TestCase):
         for name in ("fb-auto-post-runner.service", "fb-auto-post-reconcile.service"):
             text = (ROOT / "deploy" / name).read_text(encoding="utf-8")
             self.assertIn("--workers 4 --max-tasks 4 --lease-seconds 1200", text)
-            self.assertIn("RuntimeMaxSec=1500", text)
+            self.assertIn("TimeoutStartSec=1500", text)
         runner=(ROOT/"scripts"/"fb_auto_post_runner.py").read_text(encoding="utf-8")
         self.assertIn('"/internal/fb-auto-post/execute-next": 1300',runner)
         self.assertIn('"/internal/fb-auto-post/reconcile-next": 1300',runner)
@@ -38,13 +38,13 @@ class DeployContractTests(unittest.TestCase):
         runner = (ROOT / "scripts" / "fb_auto_post_runner.py").read_text(encoding="utf-8")
         unit = (ROOT / "deploy" / "fb-auto-post-scheduler.service").read_text(encoding="utf-8")
         self.assertIn('choices=("tick", "plan", "prepare", "execute", "reconcile")', runner)
-        self.assertIn("TimeoutStartSec=60", unit); self.assertIn("RuntimeMaxSec=60", unit)
+        self.assertIn("TimeoutStartSec=60", unit); self.assertNotIn("RuntimeMaxSec=", unit)
         self.assertTrue((ROOT / "deploy" / "fb-auto-post-plan.service").exists())
         self.assertTrue((ROOT / "deploy" / "fb-auto-post-prepare.service").exists())
 
     def test_prepare_timeout_lease_and_unit_are_aligned(self):
         runner=(ROOT/"scripts"/"fb_auto_post_runner.py").read_text(encoding="utf-8"); unit=(ROOT/"deploy"/"fb-auto-post-prepare.service").read_text(encoding="utf-8")
-        self.assertIn('"/internal/fb-auto-post/prepare-next": 9600',runner); self.assertIn("--workers 1 --max-tasks 1 --lease-seconds 10200",unit); self.assertIn("RuntimeMaxSec=10800",unit)
+        self.assertIn('"/internal/fb-auto-post/prepare-next": 9600',runner); self.assertIn("--workers 1 --max-tasks 1 --lease-seconds 10200",unit); self.assertIn("TimeoutStartSec=10800",unit)
 
     def test_gpu_unit_points_to_versioned_repo_entrypoint(self):
         unit=(ROOT/"deploy"/"fb-page-random-overlay-gpu.service").read_text(encoding="utf-8")

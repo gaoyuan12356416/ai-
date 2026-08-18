@@ -10,5 +10,5 @@ Group=fb-auto-post
 WorkingDirectory=/opt/fb-auto-post/current
 EnvironmentFile=/etc/fb-auto-post.env
 ExecStart=/usr/bin/python3 scripts/fb_auto_post_runner.py plan --workers 1 --max-tasks 10 --lease-seconds 1800
-RuntimeMaxSec=3600
+TimeoutStartSec=3600
 UMask=0077

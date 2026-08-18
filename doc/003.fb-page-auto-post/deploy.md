@@ -21,7 +21,7 @@
 5. 创建 `fb-auto-post` 系统用户、0700 数据目录、0600 env；sidecar unit 创建 0700 的 `/run/fb-auto-post`，指标锁固定为 `/run/fb-auto-post/metric.lock`；GPU 固定使用现有 `/root/miniconda3/envs/drama-voice/bin/python`，并确认该环境可导入 `qcloud_cos`（COS SDK 配置固定 timeout、KeepAlive=false、retry=0）；安装 unit，`systemctl daemon-reload`。
 6. 保持 live gate=0，启动 sidecar；可启动 metric 只读 timer。scheduler/plan/prepare/runner/reconcile 会返回 gate closed，不手动创建运行。
 7. Scheduler 必须在 60 秒内只完成 SQLite future due-slot 规划；耗时的 Page/素材冻结由 plan unit 完成，GPU 制作由 prepare unit 完成。验证 future frontier 为当前时间后 14,400 秒。
-   - Graph execute/reconcile unit 每轮最多4任务并发，任务 lease=1200、loopback HTTP=1300、RuntimeMaxSec=1500，覆盖8个Token最坏路径。
+   - Graph execute/reconcile unit 每轮最多4任务并发，任务 lease=1200、loopback HTTP=1300、`TimeoutStartSec=1500`，覆盖8个Token最坏路径；oneshot 不使用该生产 systemd 会忽略的 `RuntimeMaxSec`。
    - GPU processor与prepare unit均按串行1任务运行，不以CPU线程数宣称GPU并行能力。
 8. 增量部署主 API `app.py`、`features/fb_auto_posts/`、两张 HTML、quick-nav 和 navigation 合并；不得覆盖独立推进的 X/TT 包或线上 navigation 其他项。
 9. 重启仅 `fb-auto-post-service.service` 和 `drama-material-api.service`；静态发布后验证 no-store。
