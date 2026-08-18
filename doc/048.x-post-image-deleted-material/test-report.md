@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-通过；可以按无真实发帖方案部署。
+通过；已部署并通过独立 QA，P0/P1/P2 均为 0。
 
 ## 测试范围
 
@@ -28,6 +28,10 @@
 - 结果：`Ran 436 tests ... OK (skipped=1)`；跳过项仅为 Windows 无 symlink 权限。
 - 图片完整 mock 发布验证：下载 JPEG、ffprobe 分支、`tweet_image` initialize、一次 mock create Post、`af_channel=short`。
 - 所有 X HTTP 均为离线脚本化响应，没有真实 Post。
+- 生产服务器聚焦回归 148 项全部通过（selector 18、pool 10、service 43、daily 62、relay 15）。
+- 生产源库只读样本确认活动图片和软删除视频分别返回 `image`、`video`，无 rejection。
+- 历史 87 条通用错误完成 selector 重检，79 条恢复，8 条精确拒绝；重检只更新素材校验审计，不建计划、不下载媒体、不调用 X。
+- 独立 QA：10 项定向回归通过；JPG/PNG/WEBP/GIF 真实 ffprobe、selector 正反例、3 组媒体类型错配、软删除视频正常 probe/零 repair 对抗矩阵全部通过。
 
 ## 遗留风险
 

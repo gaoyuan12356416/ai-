@@ -22,3 +22,7 @@ Selector 策略隔离、图片媒体守卫、预检/最终发布一致性、历�
 - `git diff --check`：通过。
 - `python -m unittest discover -s scripts -p "test_x_post*.py" -v`：执行 436 项，435 通过，0 失败，1 跳过。
 - 无真实 X API 写入；所有发布验证使用脚本化 HTTP mock。
+
+## 独立 QA
+
+CEO 编排的独立只读 QA 最终结论为 PASS，P0/P1/P2 均为 0。其额外执行 10 项定向回归和对抗矩阵：真实 ffmpeg 生成的 JPG/PNG/WEBP/GIF 均通过真实 ffprobe；活动图片、活动视频、软删除视频通过；删除图片和未知类型拒绝；3 组 MIME/媒体类型错配拒绝；软删除视频正常调用视频 probe 一次且 repair 零次。
