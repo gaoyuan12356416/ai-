@@ -2,7 +2,7 @@
 
 ## 结论
 
-本地候选通过；禁止直接上线。指标 SQL 修正版的生产只读 EXPLAIN 与 Graph 既有视频 status 只读 canary 已完成；仍须 GitHub review、GPU/COS/NVENC 集成和 live gate=0 部署。
+代码与closed-gate生产部署通过；禁止直接开启live。指标 SQL EXPLAIN/30日cache、Graph既有视频status只读canary和GPU/COS/NVENC prepare-only集成均已完成；真实Graph发帖仍须单独审批。
 
 ## 评审范围
 

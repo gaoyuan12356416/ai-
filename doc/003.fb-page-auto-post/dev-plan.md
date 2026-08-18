@@ -29,6 +29,8 @@ node --check static\quick-nav.js
 
 ## 完成记录
 
-2026-08-17：本地候选完成；未提交、未推送、未部署。
+2026-08-17 开发阶段：本地候选完成；当时未提交、未推送、未部署。
 
-2026-08-18 V2：按确认口径加入受控 Dramawave 映射、独立日指标缓存、未来 due-slot 调度、提前 GPU prepare、strict random_overlay、稳定 Page job ID、容量门禁与新 units。继续保持未提交、未推送、未部署、未调用生产/MySQL/Meta/GPU。
+2026-08-18 V2 开发阶段：按确认口径加入受控 Dramawave 映射、独立日指标缓存、未来 due-slot 调度、提前 GPU prepare、strict random_overlay、稳定 Page job ID、容量门禁与新 units。
+
+2026-08-18 部署阶段：GitHub-first commit/push、CPU/GPU备份及closed-gate生产部署完成；生产只读MySQL、30日指标cache与prepare-only GPU/COS/NVENC canary通过。未调用Meta，live gate保持0。

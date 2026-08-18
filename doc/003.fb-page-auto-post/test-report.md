@@ -43,4 +43,4 @@ BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG
 
 ## 发布建议
 
-不建议开启真实发布。完成 GitHub review、实际资产/COS/NVENC 集成与吞吐基准、备份及 live gate=0 部署后，再单独审批真实 Graph 发帖 canary；不得为本轮验收创建真实帖子。
+closed-gate 部署已完成，不建议开启真实发布。开 live 前仅剩持续磁盘告警/当时水位复核、同槽连续吞吐评审，并须单独审批真实 Graph 发帖 canary；不得把本轮验收当作真实发帖授权。
