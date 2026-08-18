@@ -116,7 +116,8 @@ class XAccountsAppContractTest(unittest.TestCase):
 
     def test_x_account_list_displays_drama_language_publish_approval_and_daily_status(self):
         self.assertIn(
-            '<th>X账号</th><th class="auto-publish-col">自动发布 Post</th>'
+            '<th>X账号</th><th>运营统计</th>'
+            '<th class="auto-publish-col">自动发布 Post</th>'
             '<th class="drama-language-col">剧语言</th>'
             '<th class="publish-approval-col">允许发布</th>',
             X_ACCOUNT_LIST_SOURCE,
@@ -124,6 +125,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertRegex(
             X_ACCOUNT_LIST_SOURCE,
             r'\$\{booleanChips\(item\)\}</div></div></td>\s*'
+            r'<td>\$\{operatingMetricsHtml\(item\)\}</td>\s*'
             r'<td class="auto-publish-col">',
         )
         self.assertIn("item.publish_approved === true", X_ACCOUNT_LIST_SOURCE)
@@ -152,9 +154,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             X_ACCOUNT_LIST_SOURCE,
         )
         self.assertGreaterEqual(
-            X_ACCOUNT_LIST_SOURCE.count('colspan="14"'),
+            X_ACCOUNT_LIST_SOURCE.count('colspan="15"'),
             4,
         )
+        self.assertNotIn('colspan="14"', X_ACCOUNT_LIST_SOURCE)
         self.assertNotIn('colspan="12"', X_ACCOUNT_LIST_SOURCE)
         self.assertNotIn("expected_count || 3", X_POST_LOGS_SOURCE)
         self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)

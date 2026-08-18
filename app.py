@@ -42117,6 +42117,7 @@ from features.x_accounts.client import (
     start_x_authorization,
     verify_x_account,
 )
+from features.x_account_stats.service import merge_account_stats
 from features.x_posts.drama_selector import (
     DramaSelectionError as XPostDramaSelectionError,
     audit_drama as audit_x_post_drama,
@@ -42134,6 +42135,20 @@ try:
 except (TypeError, ValueError):
     X_POST_AUTOMATION_INTERNAL_TIMEOUT = 30
 X_POST_AUTOMATION_INTERNAL_TIMEOUT = max(1, min(X_POST_AUTOMATION_INTERNAL_TIMEOUT, 120))
+
+X_ACCOUNT_STATS_CACHE_PATH = os.environ.get(
+    "X_ACCOUNT_STATS_CACHE_PATH",
+    "/mnt/data-disk/x-account-operating-stats/current.json",
+)
+try:
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = int(
+        os.environ.get("X_ACCOUNT_STATS_MAX_AGE_SECONDS", "54000") or "54000"
+    )
+except (TypeError, ValueError):
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = 54000
+X_ACCOUNT_STATS_MAX_AGE_SECONDS = max(
+    60, min(X_ACCOUNT_STATS_MAX_AGE_SECONDS, 7 * 24 * 60 * 60)
+)
 
 try:
     configure_x_accounts_client(
@@ -94642,7 +94657,17 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 session = self._session() or {}
-                json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="all"), no_store=True)
+                accounts = query_x_authorized_accounts(x_accounts_actor(session), scope="all")
+                json_response(
+                    self,
+                    200,
+                    merge_account_stats(
+                        accounts,
+                        X_ACCOUNT_STATS_CACHE_PATH,
+                        max_age_seconds=X_ACCOUNT_STATS_MAX_AGE_SECONDS,
+                    ),
+                    no_store=True,
+                )
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)

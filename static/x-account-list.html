@@ -43,7 +43,7 @@
     .filters input:focus,.filters select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
     .result-count { margin-left:auto; color:var(--muted); font-size:13px; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
-    table { width:100%; min-width:2380px; border-collapse:collapse; background:#fff; }
+    table { width:100%; min-width:2620px; border-collapse:collapse; background:#fff; }
     th,td { padding:13px 14px; border-bottom:1px solid #e8eef6; vertical-align:top; text-align:left; font-size:13px; }
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
@@ -77,14 +77,21 @@
     .metrics { display:grid; grid-template-columns:repeat(2,minmax(78px,1fr)); gap:6px 12px; min-width:190px; }
     .metric { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:12px; }
     .metric strong { color:var(--ink); font-size:12px; }
+    .operating-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
+    .operating-summary .stat { min-height:96px; }
+    .operating-summary .stat strong { font-size:22px; }
+    .operating-metrics { display:grid; grid-template-columns:repeat(2,minmax(118px,1fr)); gap:7px 14px; min-width:270px; }
+    .operating-metrics .metric { align-items:baseline; }
+    .cache-state { margin-top:6px; color:var(--muted); font-size:12px; }
+    .cache-state.stale { color:var(--amber); }
     .meta-stack { min-width:145px; line-height:1.55; }
     .owner { min-width:185px; }
     .error-text { max-width:260px; margin-top:7px; color:#b22d3b; font-size:12px; white-space:normal; word-break:break-word; }
     .empty { padding:44px 18px; text-align:center; color:var(--muted); }
     .toast { position:fixed; right:22px; bottom:22px; z-index:20; max-width:420px; padding:13px 16px; border-radius:12px; background:#152946; color:#fff; box-shadow:0 18px 45px rgba(20,37,65,.3); opacity:0; transform:translateY(12px); pointer-events:none; transition:.2s ease; }
     .toast.show { opacity:1; transform:none; }
-    @media (max-width:1100px) { .stats { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-    @media (max-width:820px) { .app { grid-template-columns:1fr; } .sidebar { padding:18px; } .main { padding:20px 16px 36px; } .stats { grid-template-columns:1fr; } .result-count { width:100%; margin-left:0; } }
+    @media (max-width:1100px) { .stats,.operating-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media (max-width:820px) { .app { grid-template-columns:1fr; } .sidebar { padding:18px; } .main { padding:20px 16px 36px; } .stats,.operating-summary { grid-template-columns:1fr; } .result-count { width:100%; margin-left:0; } }
   </style>
 </head>
 <body>
@@ -114,6 +121,12 @@
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
         </section>
 
+        <section class="operating-summary" aria-label="X 运营收入归属摘要">
+          <article class="stat"><span>未归属 X 收入（累计）</span><strong id="unallocatedRevenueTotal">—</strong></article>
+          <article class="stat"><span>未归属 X 收入（昨日）</span><strong id="unallocatedRevenueYesterday">—</strong></article>
+          <article class="stat"><span>运营统计缓存</span><strong id="statsCacheStatus">待刷新</strong><div id="statsCacheDetail" class="cache-state">尚未读取统计缓存</div></article>
+        </section>
+
         <section class="panel">
           <div class="section-head">
             <div><h2>全部授权账号</h2><p>勾选“允许发布”且授权有效的账号会进入发布池；短期 Access Token 到期时会在实际执行前自动续期，只有无法续期时才需要重新授权。</p></div>
@@ -137,8 +150,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Access Token / 自动续期</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="14" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Access Token / 自动续期</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="15" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -151,7 +164,7 @@
   <script src="/quick-nav.js"></script>
   <script>
     (() => {
-      const state = { auth:null, accounts:[] };
+      const state = { auth:null, accounts:[], statsMeta:null };
       const dramaLanguages = [
         ["en","English"], ["es","Español"], ["pt-br","Português (Brasil)"],
         ["fr","Français"], ["de","Deutsch"], ["ru","Русский"],
@@ -197,6 +210,11 @@
         if (value === null || value === undefined || value === "") return "—";
         const number = Number(value);
         return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : String(value);
+      };
+      const formatUsd = value => {
+        if (value === null || value === undefined || value === "") return "—";
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("en-US", { style:"currency", currency:"USD", minimumFractionDigits:2, maximumFractionDigits:2 }).format(number) : "—";
       };
       const metricValue = (item, key) => item[key] ?? (item.public_metrics && item.public_metrics[key]);
       const nullableBoolean = value => {
@@ -279,17 +297,39 @@
 
       function metricsHtml(item) {
         const metrics = [
-          ["粉丝", "followers_count"], ["关注", "following_count"], ["帖子", "tweet_count"],
-          ["列表", "listed_count"], ["喜欢", "like_count"], ["媒体", "media_count"],
+          ["粉丝", "followers_count"], ["帖子", "tweet_count"], ["喜欢", "like_count"],
         ];
         return `<div class="metrics">${metrics.map(([label,key]) => `<div class="metric"><span>${label}</span><strong>${escapeHtml(formatCount(metricValue(item,key)))}</strong></div>`).join("")}</div>`;
+      }
+
+      function operatingMetricsHtml(item) {
+        const stats = item.operating_stats || {};
+        const metrics = [
+          ["累计 Post", formatCount(stats.published_posts_total)], ["昨日 Post", formatCount(stats.published_posts_yesterday)],
+          ["累计 Repost", formatCount(stats.reposts_total)], ["昨日 Repost", formatCount(stats.reposts_yesterday)],
+          ["累计收入", formatUsd(stats.revenue_total_usd)], ["昨日收入", formatUsd(stats.revenue_yesterday_usd)],
+        ];
+        return `<div class="operating-metrics">${metrics.map(([label,value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>`;
+      }
+
+      function renderOperatingSummary() {
+        const meta = state.statsMeta || {};
+        const revenue = meta.unallocated_revenue || {};
+        el("unallocatedRevenueTotal").textContent = formatUsd(revenue.total_usd);
+        el("unallocatedRevenueYesterday").textContent = formatUsd(revenue.yesterday_usd);
+        const labels = { fresh:"已更新", stale:"已过期", missing:"待刷新" };
+        el("statsCacheStatus").textContent = labels[meta.status] || "待刷新";
+        const detail = el("statsCacheDetail");
+        detail.classList.toggle("stale", meta.status === "stale");
+        const generated = meta.generated_at_utc ? ` · 生成于 ${formatTime(meta.generated_at_utc)}` : "";
+        detail.textContent = `${meta.message || "运营统计缓存不可用"}${generated}`;
       }
 
       function renderRows() {
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="14" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="15" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -313,6 +353,7 @@
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
+            <td>${operatingMetricsHtml(item)}</td>
             <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
             <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.access_token_status === "expired_refreshable" || item.access_token_status === "missing_refreshable" ? "发布池可选；执行时自动续期" : "发布池可选") : (publishApproved ? "授权不可用，发布池不可选" : "发布池不可选")}</div></td>
@@ -331,13 +372,14 @@
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="14" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="15" class="empty">正在加载…</td></tr>`;
         try {
           const result = await api("/api/admin/x-accounts");
           state.accounts = Array.isArray(result.items) ? result.items : [];
-          renderStats(); renderRows();
+          state.statsMeta = result.operating_stats_meta || null;
+          renderStats(); renderOperatingSummary(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="14" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="15" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }

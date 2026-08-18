@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh X account operating statistics twice daily
+
+[Timer]
+OnCalendar=*-*-* 09:10:00 Asia/Shanghai
+OnCalendar=*-*-* 21:10:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=x-account-operating-stats.service
+
+[Install]
+WantedBy=timers.target

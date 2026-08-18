@@ -1,0 +1,36 @@
+[Unit]
+Description=Refresh cached X account operating statistics
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk/x-account-operating-stats
+ConditionPathIsMountPoint=/mnt/data-disk
+ConditionPathExists=/usr/bin/mysql
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=-/root/drama_material_service/.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/refresh_x_account_operating_stats.py
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+InaccessiblePaths=/var/lib/x-post-automation/tokens /etc/ssh
+ReadOnlyPaths=/root/drama_material_service /var/lib/x-post-automation /usr/bin/mysql /usr/local/bin/mysql-gated /opt/sql-connection-gate
+ReadWritePaths=/mnt/data-disk/x-account-operating-stats
+UMask=0027
+TimeoutStartSec=10min
