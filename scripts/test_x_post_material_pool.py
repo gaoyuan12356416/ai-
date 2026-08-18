@@ -109,6 +109,10 @@ class XPostMaterialPoolTests(unittest.TestCase):
             ],
             "validation_failed",
         )
+        self.assertIn(
+            "93",
+            [item["material_id"] for item in self.store.available_pool_items()],
+        )
         with self.assertRaises(service.XPostError):
             self.store.add_pool_materials(
                 ["94"],

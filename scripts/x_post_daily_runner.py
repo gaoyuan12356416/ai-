@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import secrets
 import sys
 import tempfile
 import urllib.error
@@ -47,6 +48,7 @@ from features.x_posts.service import (  # noqa: E402
     build_post_text,
     build_w2a_url,
     download_media,
+    probe_image,
     probe_media,
     redact_text,
 )
@@ -1525,6 +1527,7 @@ def _preflight_candidate(
     *,
     repair_client=None,
     repair_state=None,
+    image_prober=probe_image,
 ):
     """Validate one FIFO candidate and perform at most one repair attempt."""
     try:
@@ -1548,88 +1551,118 @@ def _preflight_candidate(
             max_bytes=config.max_media_bytes,
             timeout=config.media_timeout,
         )
-        try:
-            probe = prober(
+        expected_media_kind = str(
+            item.get("media_kind", "video") or "video"
+        ).strip().lower()
+        actual_media_kind = str(
+            media.get("media_kind")
+            or (
+                "image"
+                if str(media.get("media_type", "")).startswith("image/")
+                else "video"
+            )
+        ).strip().lower()
+        if expected_media_kind not in {"image", "video"} or not secrets.compare_digest(
+            expected_media_kind,
+            actual_media_kind,
+        ):
+            raise XPostError(
+                "invalid_media_type",
+                "素材下载类型与源素材类型不一致",
+                422,
+            )
+        if actual_media_kind == "image":
+            probe = image_prober(
                 destination,
+                media.get("media_type"),
                 max_bytes=config.max_media_bytes,
                 timeout=config.media_timeout,
-                max_duration_seconds=_duration_limit(account),
             )
-        except XPostError as exc:
-            trigger_code = str(getattr(exc, "code", "") or "")
-            state = repair_state if isinstance(repair_state, dict) else {}
-            repairs_attempted = int(state.get("attempted", 0) or 0)
-            if (
-                trigger_code not in REPAIRABLE_MEDIA_CODES
-                or repair_client is None
-                or repairs_attempted >= config.max_repairs_per_run
-            ):
-                raise
-            source_sha256, source_size = _media_fingerprint(media)
-            state["attempted"] = repairs_attempted + 1
-            original_url = str(item["material_url"])
-            duration_policy = _duration_policy(account)
-            job_key = _repair_job_key(
-                item,
-                source_sha256,
-                config.repair_profile,
-                duration_policy,
-            )
-            repaired = repair_client.repair(
-                {
-                    "job_key": job_key,
-                    "material_id": str(item["material_id"]),
-                    "pool_item_id": int(
-                        item.get("pool_item_id")
-                        or item.get("manual_item_id")
-                    ),
-                    "source_url": original_url,
-                    "source_sha256": source_sha256,
-                    "source_size": source_size,
-                    "trigger_code": trigger_code,
-                    "profile": config.repair_profile,
-                    "duration_policy": duration_policy,
+        else:
+            try:
+                probe = prober(
+                    destination,
+                    max_bytes=config.max_media_bytes,
+                    timeout=config.media_timeout,
+                    max_duration_seconds=_duration_limit(account),
+                )
+            except XPostError as exc:
+                trigger_code = str(getattr(exc, "code", "") or "")
+                state = repair_state if isinstance(repair_state, dict) else {}
+                repairs_attempted = int(state.get("attempted", 0) or 0)
+                if (
+                    trigger_code not in REPAIRABLE_MEDIA_CODES
+                    or repair_client is None
+                    or repairs_attempted >= config.max_repairs_per_run
+                ):
+                    raise
+                source_sha256, source_size = _media_fingerprint(media)
+                state["attempted"] = repairs_attempted + 1
+                original_url = str(item["material_url"])
+                duration_policy = _duration_policy(account)
+                job_key = _repair_job_key(
+                    item,
+                    source_sha256,
+                    config.repair_profile,
+                    duration_policy,
+                )
+                repaired = repair_client.repair(
+                    {
+                        "job_key": job_key,
+                        "material_id": str(item["material_id"]),
+                        "pool_item_id": int(
+                            item.get("pool_item_id")
+                            or item.get("manual_item_id")
+                        ),
+                        "source_url": original_url,
+                        "source_sha256": source_sha256,
+                        "source_size": source_size,
+                        "trigger_code": trigger_code,
+                        "profile": config.repair_profile,
+                        "duration_policy": duration_policy,
+                    }
+                )
+                _remove_preflight_file(destination)
+                item["material_url"] = repaired["output_url"]
+                repaired_media = downloader(
+                    item["material_url"],
+                    destination,
+                    config.media_allowed_hosts,
+                    max_bytes=config.max_media_bytes,
+                    timeout=config.media_timeout,
+                )
+                repaired_probe = prober(
+                    destination,
+                    max_bytes=config.max_media_bytes,
+                    timeout=config.media_timeout,
+                    max_duration_seconds=_duration_limit(account),
+                )
+                final_sha256, final_size, probe = _verify_repaired_download(
+                    repaired,
+                    repaired_media,
+                    repaired_probe,
+                    max_duration_seconds=_duration_limit(account),
+                )
+                media = {
+                    "sha256": final_sha256,
+                    "size": final_size,
                 }
-            )
-            _remove_preflight_file(destination)
-            item["material_url"] = repaired["output_url"]
-            repaired_media = downloader(
-                item["material_url"],
-                destination,
-                config.media_allowed_hosts,
-                max_bytes=config.max_media_bytes,
-                timeout=config.media_timeout,
-            )
-            repaired_probe = prober(
-                destination,
-                max_bytes=config.max_media_bytes,
-                timeout=config.media_timeout,
-                max_duration_seconds=_duration_limit(account),
-            )
-            final_sha256, final_size, probe = _verify_repaired_download(
-                repaired,
-                repaired_media,
-                repaired_probe,
-                max_duration_seconds=_duration_limit(account),
-            )
-            media = {
-                "sha256": final_sha256,
-                "size": final_size,
-            }
-            item.update(
-                {
-                    "original_material_url": original_url,
-                    "media_repair_trigger_code": trigger_code,
-                    "media_repair_job_key": job_key,
-                    "media_repair_profile": config.repair_profile,
-                    "media_repair_source_sha256": source_sha256,
-                }
-            )
+                item.update(
+                    {
+                        "original_material_url": original_url,
+                        "media_repair_trigger_code": trigger_code,
+                        "media_repair_job_key": job_key,
+                        "media_repair_profile": config.repair_profile,
+                        "media_repair_source_sha256": source_sha256,
+                    }
+                )
         final_sha256, final_size = _media_fingerprint(media)
         item["preflight_sha256"] = final_sha256
         item["preflight_size"] = final_size
-        item["preflight_duration"] = float(
-            probe.get("duration", 0) or 0
+        item["preflight_duration"] = (
+            0.0
+            if actual_media_kind == "image"
+            else float(probe.get("duration", 0) or 0)
         )
         build_w2a_url(
             {

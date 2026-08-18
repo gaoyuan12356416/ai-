@@ -17,6 +17,7 @@ from features.x_posts.selector import (  # noqa: E402
     CandidateQueryError,
     CandidateSelectionError,
     normalize_material_url,
+    select_auto_template_candidates,
     select_manual_candidates,
     select_pool_candidates,
 )
@@ -187,6 +188,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
         connection.materials["20"]["video_duration"] = 0
         connection.materials["30"]["video_duration"] = 14401
         connection.materials["40"]["material_type"] = 1
+        connection.materials["40"]["video_duration"] = 0
+        connection.materials["40"]["material_url"] = "https://media.example.test/40.jpg"
         connection.materials["50"]["material_is_deleted"] = 1
 
         selected, rejections = select_manual_candidates(
@@ -196,22 +199,74 @@ class ManualPoolSelectorTests(unittest.TestCase):
             limit=5,
         )
 
-        self.assertEqual(selected, [])
+        self.assertEqual(
+            [(item["material_id"], item["media_kind"]) for item in selected],
+            [("40", "image"), ("50", "video")],
+        )
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
                 "material_not_found",
                 "material_duration_missing",
                 "material_duration_exceeds_limit",
-                "material_not_video",
-                "material_inactive",
             ],
         )
         self.assertEqual(
             [item["material_id"] for item in rejections],
-            ["10", "20", "30", "40", "50"],
+            ["10", "20", "30"],
         )
         self.assertTrue(all("素材 " in item["error_message"] for item in rejections))
+
+    def test_pool_accepts_active_image_and_soft_deleted_video(self):
+        connection = PoolConnection([10, 20])
+        connection.materials["10"].update(
+            {
+                "material_type": 1,
+                "video_duration": 0,
+                "material_url": "https://media.example.test/10.png",
+                "material_name": "material-10.png",
+            }
+        )
+        connection.materials["20"]["material_is_deleted"] = 1
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [
+                pool_item(2, 20, "2026-08-18T00:00:02Z"),
+                pool_item(1, 10, "2026-08-18T00:00:01Z"),
+            ],
+            "2026-08-17",
+            limit=2,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual(
+            [(item["material_id"], item["media_kind"]) for item in selected],
+            [("20", "video"), ("10", "image")],
+        )
+
+    def test_auto_template_remains_active_video_only(self):
+        connection = PoolConnection([10, 20])
+        connection.materials["10"].update(
+            {
+                "material_type": 1,
+                "video_duration": 0,
+                "material_url": "https://media.example.test/10.png",
+            }
+        )
+        connection.materials["20"]["material_is_deleted"] = 1
+
+        selected, rejections = select_auto_template_candidates(
+            connection, ["10"], "2026-08-17", limit=1
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(rejections[0]["error_code"], "material_not_video")
+
+        selected, rejections = select_auto_template_candidates(
+            connection, ["20"], "2026-08-17", limit=1
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(rejections[0]["error_code"], "material_inactive")
 
     def test_direct_manual_selection_rejects_normalized_duplicates_before_queries(self):
         connection = PoolConnection([10])

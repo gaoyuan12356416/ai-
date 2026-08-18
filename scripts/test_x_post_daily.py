@@ -42,6 +42,7 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     MediaRepairError,
     SidecarClient,
     SidecarError,
+    _preflight_candidate,
     _preflight_candidates,
     _parse_account_ids,
     _record_pool_checks_best_effort,
@@ -497,6 +498,67 @@ class RunnerTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_image_preflight_bypasses_video_probe_and_repair(self):
+        config = test_config(account_ids=(2,))
+        image = candidate(10, 100)
+        image.update(
+            {
+                "material_url": "https://media.example.test/10.jpg",
+                "material_name": "material-10.jpg",
+                "media_kind": "image",
+            }
+        )
+        account = {
+            "id": 2,
+            "username": "account2",
+            "x_user_id": "2002",
+            "display_name": "Account 2",
+            "drama_language": "en",
+            "long_video_eligible": False,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "10.bin"
+
+            def downloader(_url, path, _hosts, max_bytes, timeout):
+                Path(path).write_bytes(b"jpeg")
+                return {
+                    "size": 4,
+                    "sha256": "a" * 64,
+                    "media_type": "image/jpeg",
+                    "media_kind": "image",
+                }
+
+            def reject_video_probe(*_args, **_kwargs):
+                raise AssertionError("image preflight must not call video probe")
+
+            def image_prober(path, media_type, max_bytes, timeout):
+                self.assertEqual(Path(path), destination)
+                self.assertEqual(media_type, "image/jpeg")
+                return {
+                    "media_category": "tweet_image",
+                    "width": 1200,
+                    "height": 1600,
+                }
+
+            result = _preflight_candidate(
+                config,
+                image,
+                account,
+                1,
+                1787040000,
+                destination,
+                downloader,
+                reject_video_probe,
+                repair_client=object(),
+                repair_state={"attempted": 0},
+                image_prober=image_prober,
+            )
+
+        self.assertEqual(result["preflight_duration"], 0.0)
+        self.assertEqual(result["preflight_sha256"], "a" * 64)
+        self.assertEqual((result["preflight_width"], result["preflight_height"]), (1200, 1600))
+        self.assertNotIn("media_repair_trigger_code", result)
 
     def test_pool_check_audit_is_chunked_to_sidecar_batch_limit(self):
         sidecar = FakeSidecar()

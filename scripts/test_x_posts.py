@@ -301,6 +301,29 @@ class XPostsTests(unittest.TestCase):
                 historical_url.replace("af_channel=AIpost", "af_channel=other")
             )
 
+    def test_w2a_image_zero_duration_uses_short_but_tiny_video_stays_invalid(self):
+        params = {
+            "username": "ShortsDramhx",
+            "timestamp": 1784736000,
+            "material_language": "en",
+            "drama_name": "Drama",
+            "tag": "safe",
+            "log_id": 1,
+            "page_name": "Page",
+            "page_id": "123",
+            "material_name": "image.jpg",
+            "material_id": "9",
+            "queue_id": 2,
+            "content_id": "3",
+            "video_duration_seconds": 0,
+        }
+        image_url = service.build_w2a_url(params)
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(image_url).query))
+        self.assertEqual(query["af_channel"], "short")
+        params["video_duration_seconds"] = 0.1
+        with self.assertRaises(service.XPostError):
+            service.build_w2a_url(params)
+
     def test_short_link_base_is_fixed_to_g2flow_host(self):
         self.assertEqual(
             service._build_short_url("https://gy.g2flow.com/s2l", 7),
@@ -587,6 +610,52 @@ class XPostsTests(unittest.TestCase):
             service.download_media("https://evil.example/a.mp4", target, ["media.example.com"], http_client=client)
         self.assertEqual(caught.exception.code, "media_host_not_allowed")
 
+    def test_download_accepts_image_and_enforces_x_image_size_cap(self):
+        target = self.root / "media-work" / "image.bin"
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "image/jpeg", "content-length": "4"},
+                    body=b"jpeg",
+                )
+            ]
+        )
+        result = service.download_media(
+            "https://media.example.com/a.jpg",
+            target,
+            ["media.example.com"],
+            max_bytes=service.DEFAULT_MAX_MEDIA_BYTES,
+            timeout=5,
+            http_client=client,
+        )
+        self.assertEqual(result["media_kind"], "image")
+        self.assertEqual(result["media_type"], "image/jpeg")
+        self.assertEqual(target.read_bytes(), b"jpeg")
+
+        oversized = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {
+                        "content-type": "image/png",
+                        "content-length": str(service.DEFAULT_MAX_IMAGE_BYTES + 1),
+                    },
+                    body=b"x",
+                )
+            ]
+        )
+        with self.assertRaises(service.XPostError) as caught:
+            service.download_media(
+                "https://media.example.com/a.png",
+                target,
+                ["media.example.com"],
+                max_bytes=service.DEFAULT_MAX_MEDIA_BYTES,
+                timeout=5,
+                http_client=oversized,
+            )
+        self.assertEqual(caught.exception.code, "media_too_large")
+
     def test_truncated_media_stream_is_a_known_download_failure(self):
         class TruncatedStream:
             def __init__(self):
@@ -662,9 +731,7 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "invalid_media_frame_rate")
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(media, runner=runner_for(valid_probe_payload(duration="140.1")))
-        self.assertEqual(
-            caught.exception.code, "x_long_video_requires_premium"
-        )
+        self.assertEqual(caught.exception.code, "x_long_video_requires_premium")
         premium_result = service.probe_media(
             media,
             runner=runner_for(valid_probe_payload(duration="763.938005")),
@@ -687,6 +754,43 @@ class XPostsTests(unittest.TestCase):
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(media, runner=runner_for(non_lc))
         self.assertEqual(caught.exception.code, "invalid_media_codec")
+
+    def test_image_probe_accepts_claimed_format_and_rejects_mismatch(self):
+        media = self.root / "image.jpg"
+        media.write_bytes(b"jpeg")
+
+        def runner_for(codec):
+            payload = {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": codec,
+                        "width": 1200,
+                        "height": 1600,
+                    }
+                ]
+            }
+            return lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+
+        result = service.probe_image(
+            media,
+            "image/jpeg",
+            runner=runner_for("mjpeg"),
+        )
+        self.assertEqual(result["media_category"], "tweet_image")
+        self.assertEqual((result["width"], result["height"]), (1200, 1600))
+        self.assertEqual(service.image_media_category("image/gif"), "tweet_gif")
+        with self.assertRaises(service.XPostError) as caught:
+            service.probe_image(
+                media,
+                "image/jpeg",
+                runner=runner_for("png"),
+            )
+        self.assertEqual(caught.exception.code, "invalid_image")
 
     def test_storage_preflight_requires_mount_and_atomic_write(self):
         mount = self.root / "mnt"
@@ -787,6 +891,28 @@ class XPostsTests(unittest.TestCase):
         self.assertIn("/2/media/upload?media_id=media123&command=STATUS", client.requests[4]["url"])
         post_payload = json.loads(client.requests[5]["body"].decode("utf-8"))
         self.assertEqual(post_payload["media"]["media_ids"], ["media123"])
+
+    def test_x_v2_image_upload_uses_tweet_image_category(self):
+        media = self.root / "image.png"
+        media.write_bytes(b"image")
+        client = ScriptedHttpClient(
+            [
+                response(200, {"data": {"id": "image123"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "image123"}}),
+            ]
+        )
+        api = service.XApiClient(http_client=client, sleeper=lambda _seconds: None)
+        uploaded = api.upload_media(
+            "secret-token",
+            media,
+            media_type="image/png",
+            media_category="tweet_image",
+        )
+        self.assertEqual(uploaded["media_id"], "image123")
+        initialize = json.loads(client.requests[0]["body"].decode("utf-8"))
+        self.assertEqual(initialize["media_type"], "image/png")
+        self.assertEqual(initialize["media_category"], "tweet_image")
 
     def test_create_post_transport_failure_is_unknown_outcome(self):
         client = ScriptedHttpClient([OSError("connection reset access_token=do-not-log")])
@@ -993,6 +1119,73 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(af_c_id, str(queue["id"]))
         self.assertEqual(af_channel, "short")
         self.assertNotIn("secret-token", dump)
+
+    def test_publish_image_uses_image_probe_category_and_short_attribution(self):
+        queue = self.enqueue(
+            material_id="88008",
+            material_url="https://media.example.com/image.jpg",
+            material_name="image.jpg",
+            preflight_duration=0,
+        )
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "image/jpeg", "content-length": "4"},
+                    body=b"jpeg",
+                ),
+                response(200, {"data": {"id": "image-media"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "image-media"}}),
+                response(201, {"data": {"id": "1900028", "text": "ok"}}),
+            ]
+        )
+        with mock.patch.object(
+            service,
+            "probe_image",
+            return_value={
+                "media_category": "tweet_image",
+                "width": 1200,
+                "height": 1600,
+            },
+        ) as image_probe, mock.patch.object(
+            service,
+            "probe_media",
+            side_effect=AssertionError("image publish must not use video probe"),
+        ):
+            result = service.publish_canary(
+                db_path=self.db_path,
+                queue_id=queue["id"],
+                account={"id": 2, "username": "ShortsDramhx"},
+                access_token="secret-token",
+                public_root=self.root / "image-public" / "s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
+                allowed_media_hosts=["media.example.com"],
+                http_client=client,
+                sleeper=lambda _seconds: None,
+                timeout=5,
+            )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(image_probe.call_args.args[1], "image/jpeg")
+        initialize = next(
+            request
+            for request in client.requests
+            if request["url"].endswith("/2/media/upload/initialize")
+        )
+        initialize_payload = json.loads(initialize["body"].decode("utf-8"))
+        self.assertEqual(initialize_payload["media_type"], "image/jpeg")
+        self.assertEqual(initialize_payload["media_category"], "tweet_image")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            long_url = conn.execute(
+                "SELECT long_url FROM x_post_publish_log WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()[0]
+        self.assertEqual(
+            dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(long_url).query))[
+                "af_channel"
+            ],
+            "short",
+        )
 
     def test_premium_long_publish_uses_amplify_video_category(self):
         queue = self.enqueue(preflight_duration=763.938005)

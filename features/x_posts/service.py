@@ -41,6 +41,8 @@ DEFAULT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
 DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_GIF_BYTES = 15 * 1024 * 1024
 STANDARD_MAX_DURATION_SECONDS = 140.0
 # X's Premium product contract currently permits videos up to four hours on
 # supported clients.  The v2 media API documents its own tighter 512 MiB byte
@@ -50,8 +52,18 @@ STANDARD_MAX_DURATION_SECONDS = 140.0
 PREMIUM_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 STANDARD_MEDIA_CATEGORY = "tweet_video"
 PREMIUM_MEDIA_CATEGORY = "amplify_video"
+IMAGE_MEDIA_CATEGORY = "tweet_image"
+GIF_MEDIA_CATEGORY = "tweet_gif"
 MEDIA_CATEGORIES = frozenset(
-    {STANDARD_MEDIA_CATEGORY, PREMIUM_MEDIA_CATEGORY}
+    {
+        STANDARD_MEDIA_CATEGORY,
+        PREMIUM_MEDIA_CATEGORY,
+        IMAGE_MEDIA_CATEGORY,
+        GIF_MEDIA_CATEGORY,
+    }
+)
+SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/webp", "image/gif"}
 )
 PREMIUM_SUBSCRIPTION_TYPES = frozenset(
     {"basic", "premium", "premium_plus"}
@@ -267,6 +279,19 @@ NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
 _NONBLOCKING_MATERIAL_VALIDATION_SQL = "(" + ",".join(
     "'%s'" % code for code in sorted(NONBLOCKING_MATERIAL_VALIDATION_CODES)
 ) + ")"
+# Historical selectors collapsed missing, image, and inactive-video outcomes
+# into these codes. They stay unavailable until revalidated, but candidate
+# scans may revisit them so the current selector can clear or refine the code.
+REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
+    {
+        "material_not_found_or_ineligible",
+        "material_not_video",
+        "material_inactive",
+    }
+)
+_REVALIDATABLE_MATERIAL_VALIDATION_SQL = "(" + ",".join(
+    "'%s'" % code for code in sorted(REVALIDATABLE_MATERIAL_VALIDATION_CODES)
+) + ")"
 MATERIAL_FIFO_SKIP_CODES = frozenset(
     {
         "material_source_tag_unsafe",
@@ -345,11 +370,13 @@ def _w2a_channel_for_duration(value):
         duration = float(value)
     except (TypeError, ValueError, OverflowError):
         raise XPostError("invalid_request", "视频时长无效", 400) from None
-    if (
-        not math.isfinite(duration)
-        or duration < 0.5
-        or duration > PREMIUM_MAX_DURATION_SECONDS
-    ):
+    if not math.isfinite(duration) or duration < 0 or duration > PREMIUM_MAX_DURATION_SECONDS:
+        raise XPostError("invalid_request", "视频时长无效", 400)
+    # Images have no video duration and retain the existing short-channel
+    # attribution contract. Sub-half-second non-zero videos remain invalid.
+    if duration == 0:
+        return "short"
+    if duration < 0.5:
         raise XPostError("invalid_request", "视频时长无效", 400)
     return "long" if duration > STANDARD_MAX_DURATION_SECONDS else "short"
 
@@ -5316,14 +5343,18 @@ class XPostStore:
                 "SELECT p.id,p.material_key,p.material_id,p.created_at "
                 "FROM x_post_material_pool p "
                 "WHERE p.status='unpublished' "
-                "AND (p.last_error_code='' OR p.last_error_code IN %s) "
+                "AND (p.last_error_code='' OR p.last_error_code IN %s "
+                "OR p.last_error_code IN %s) "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
                 "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
                 "AND NOT EXISTS("
                 "SELECT 1 FROM x_post_manual_material_reservation r "
                 "WHERE r.material_key=p.material_key AND r.state='active') "
                 "ORDER BY p.created_at DESC,p.id DESC LIMIT ?"
-                % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+                % (
+                    _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+                    _REVALIDATABLE_MATERIAL_VALIDATION_SQL,
+                ),
                 (limit,),
             ).fetchall()
         return [_row_dict(row) for row in rows]
@@ -12908,7 +12939,7 @@ def _allowed_host(hostname, allowed_hosts):
 def download_media(
     url, destination, allowed_hosts, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, http_client=None,
 ):
-    """Download one HTTPS video after strict host, type and byte-count checks."""
+    """Download one HTTPS image/video after strict host/type/size checks."""
     parsed = urllib.parse.urlsplit(str(url or ""))
     if (
         parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
@@ -12922,7 +12953,11 @@ def download_media(
     client = http_client or UrllibHttpClient()
     try:
         response = client.request(
-            "GET", str(url), headers={"Accept": "video/*,application/octet-stream;q=0.8"},
+            "GET",
+            str(url),
+            headers={
+                "Accept": "image/*,video/*,application/octet-stream;q=0.8"
+            },
             timeout=timeout, stream=True, max_response_bytes=max_bytes,
         )
     except XPostError:
@@ -12937,20 +12972,43 @@ def download_media(
     with response:
         if response.status != 200:
             raise XPostError("media_download_failed", "素材下载失败(HTTP %s)" % response.status, 502)
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        path_suffix = Path(parsed.path).suffix.lower()
+        suffix_types = {
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
+        if content_type == "application/octet-stream" and path_suffix in suffix_types:
+            content_type = suffix_types[path_suffix]
+        if content_type in {"image/jpg", "image/pjpeg"}:
+            content_type = "image/jpeg"
+        if content_type in SUPPORTED_IMAGE_MEDIA_TYPES:
+            media_limit = (
+                DEFAULT_MAX_GIF_BYTES
+                if content_type == "image/gif"
+                else DEFAULT_MAX_IMAGE_BYTES
+            )
+            effective_max_bytes = min(max_bytes, media_limit)
+        elif content_type.startswith("video/"):
+            effective_max_bytes = max_bytes
+        else:
+            raise XPostError(
+                "invalid_media_type", "素材响应不是支持的图片或视频", 415
+            )
         length = response.headers.get("content-length", "").strip()
         if length:
             try:
                 declared = int(length)
             except ValueError:
                 raise XPostError("invalid_media_response", "素材Content-Length无效", 502) from None
-            if declared <= 0 or declared > max_bytes:
+            if declared <= 0 or declared > effective_max_bytes:
                 raise XPostError("media_too_large", "素材大小超过限制", 413)
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        path_suffix = Path(parsed.path).suffix.lower()
-        if content_type == "application/octet-stream" and path_suffix in {".mp4", ".mov", ".webm"}:
-            content_type = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm"}[path_suffix]
-        if not content_type.startswith("video/"):
-            raise XPostError("invalid_media_type", "素材响应不是视频", 415)
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(".%s.%s.part" % (destination.name, secrets.token_hex(8)))
@@ -12963,7 +13021,7 @@ def download_media(
                         if not isinstance(chunk, (bytes, bytearray)):
                             raise XPostError("invalid_media_response", "素材响应分片无效", 502)
                         size += len(chunk)
-                        if size > max_bytes:
+                        if size > effective_max_bytes:
                             raise XPostError("media_too_large", "素材大小超过限制", 413)
                         handle.write(chunk)
                         digest.update(chunk)
@@ -12993,6 +13051,9 @@ def download_media(
         "size": size,
         "sha256": digest.hexdigest(),
         "media_type": content_type,
+        "media_kind": (
+            "image" if content_type in SUPPORTED_IMAGE_MEDIA_TYPES else "video"
+        ),
     }
 
 
@@ -13006,6 +13067,120 @@ def _frame_rate(value):
         return float(value)
     except (TypeError, ValueError, OverflowError, ZeroDivisionError):
         return 0.0
+
+
+def image_media_category(media_type):
+    media_type = str(media_type or "").strip().lower()
+    if media_type == "image/gif":
+        return GIF_MEDIA_CATEGORY
+    if media_type in SUPPORTED_IMAGE_MEDIA_TYPES:
+        return IMAGE_MEDIA_CATEGORY
+    raise XPostError("invalid_media_type", "素材不是支持的图片格式", 415)
+
+
+def probe_image(path, media_type, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None):
+    """Use ffprobe to verify that downloaded bytes decode as the claimed image."""
+    media_type = str(media_type or "").strip().lower()
+    category = image_media_category(media_type)
+    file_limit = (
+        DEFAULT_MAX_GIF_BYTES
+        if media_type == "image/gif"
+        else DEFAULT_MAX_IMAGE_BYTES
+    )
+    path = Path(path)
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        raise XPostError("invalid_media", "图片文件不存在", 400) from None
+    effective_limit = min(_positive_int(max_bytes, "素材大小上限"), file_limit)
+    if file_size <= 0 or file_size > effective_limit:
+        raise XPostError("media_too_large", "图片为空或超过X大小限制", 413)
+
+    ffprobe_bin = str(
+        os.environ.get("X_POST_FFPROBE_BIN", "/usr/bin/ffprobe")
+        or "/usr/bin/ffprobe"
+    ).strip()
+    if (
+        not ffprobe_bin
+        or "\x00" in ffprobe_bin
+        or not (Path(ffprobe_bin).is_absolute() or ffprobe_bin.startswith("/"))
+    ):
+        raise XPostError("media_probe_failed", "ffprobe路径配置无效", 500)
+    run = runner or subprocess.run
+    try:
+        completed = run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                str(path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(1, min(int(timeout), 120)),
+            check=False,
+            close_fds=True,
+            env={
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+            },
+        )
+    except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
+        raise XPostError(
+            "image_probe_failed", "图片解析失败: %s" % exc, 422
+        ) from None
+    if int(getattr(completed, "returncode", 1)) != 0:
+        raise XPostError("image_probe_failed", "图片无法解码", 422)
+    try:
+        payload = json.loads(str(getattr(completed, "stdout", "") or ""))
+    except (ValueError, json.JSONDecodeError):
+        raise XPostError("image_probe_failed", "图片解析结果无效", 422) from None
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    streams = streams if isinstance(streams, list) else []
+    image_streams = [
+        stream
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+    ]
+    if len(image_streams) != 1:
+        raise XPostError("invalid_image", "图片流数量无效", 422)
+    stream = image_streams[0]
+    expected_codecs = {
+        "image/jpeg": {"mjpeg"},
+        "image/png": {"png"},
+        "image/webp": {"webp"},
+        "image/gif": {"gif"},
+    }[media_type]
+    codec = str(stream.get("codec_name", "") or "").strip().lower()
+    if codec not in expected_codecs:
+        raise XPostError("invalid_image", "图片格式与响应类型不一致", 422)
+    try:
+        width = int(stream.get("width", 0) or 0)
+        height = int(stream.get("height", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        width = height = 0
+    if (
+        width <= 0
+        or height <= 0
+        or width > 65535
+        or height > 65535
+        or width * height > 100_000_000
+    ):
+        raise XPostError("invalid_image_dimensions", "图片尺寸无效", 422)
+    return {
+        "media_type": media_type,
+        "media_category": category,
+        "width": width,
+        "height": height,
+        "size": file_size,
+        "codec": codec,
+    }
 
 
 def _account_has_premium_video_entitlement(account):
@@ -13541,7 +13716,7 @@ def publish_canary(
         work_dir = Path(tempfile.mkdtemp(prefix="log-%s-" % log["id"], dir=str(work_root)))
 
         media = download_media(
-            queue["material_url"], work_dir / "material.mp4", allowed_media_hosts,
+            queue["material_url"], work_dir / "material.bin", allowed_media_hosts,
             max_bytes=max_media_bytes, timeout=timeout, http_client=http_client,
         )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
@@ -13562,37 +13737,59 @@ def publish_canary(
                 "素材内容与建计划前的预检指纹不一致",
                 409,
             )
-        premium_video_eligible = _account_has_premium_video_entitlement(
-            account
-        )
-        duration_limit = (
-            PREMIUM_MAX_DURATION_SECONDS
-            if premium_video_eligible
-            else STANDARD_MAX_DURATION_SECONDS
-        )
-        media_probe = probe_media(
-            media["path"],
-            max_bytes=max_media_bytes,
-            timeout=timeout,
-            max_duration_seconds=duration_limit,
-        )
-        if expected_duration > 0 and abs(
-            expected_duration - float(media_probe["duration"])
-        ) > 0.05:
-            raise XPostError(
-                "media_preflight_changed",
-                "素材时长与建计划前的预检记录不一致",
-                409,
+        if media.get("media_kind") == "image":
+            if expected_duration > 0 or relay_delivery:
+                raise XPostError(
+                    "media_preflight_changed",
+                    "素材媒体类型与建计划前的预检记录不一致",
+                    409,
+                )
+            media_probe = probe_image(
+                media["path"],
+                media["media_type"],
+                max_bytes=max_media_bytes,
+                timeout=timeout,
             )
-        if expected_duration > 0 and (
-            expected_duration > STANDARD_MAX_DURATION_SECONDS
-        ) != (
-            float(media_probe["duration"]) > STANDARD_MAX_DURATION_SECONDS
-        ):
-            raise XPostError(
-                "media_preflight_changed",
-                "素材时长跨越140秒归因边界",
-                409,
+            published_duration = 0.0
+            media_category = media_probe["media_category"]
+        else:
+            premium_video_eligible = _account_has_premium_video_entitlement(
+                account
+            )
+            duration_limit = (
+                PREMIUM_MAX_DURATION_SECONDS
+                if premium_video_eligible
+                else STANDARD_MAX_DURATION_SECONDS
+            )
+            media_probe = probe_media(
+                media["path"],
+                max_bytes=max_media_bytes,
+                timeout=timeout,
+                max_duration_seconds=duration_limit,
+            )
+            published_duration = float(media_probe["duration"])
+            if expected_duration > 0 and abs(
+                expected_duration - published_duration
+            ) > 0.05:
+                raise XPostError(
+                    "media_preflight_changed",
+                    "素材时长与建计划前的预检记录不一致",
+                    409,
+                )
+            if expected_duration > 0 and (
+                expected_duration > STANDARD_MAX_DURATION_SECONDS
+            ) != (
+                published_duration > STANDARD_MAX_DURATION_SECONDS
+            ):
+                raise XPostError(
+                    "media_preflight_changed",
+                    "素材时长跨越140秒归因边界",
+                    409,
+                )
+            media_category = (
+                PREMIUM_MEDIA_CATEGORY
+                if published_duration > STANDARD_MAX_DURATION_SECONDS
+                else STANDARD_MEDIA_CATEGORY
             )
         if prepare_link_after_probe:
             long_url = build_w2a_url(
@@ -13609,7 +13806,7 @@ def publish_canary(
                     "material_id": queue["material_id"],
                     "queue_id": queue["id"],
                     "content_id": queue["content_id"],
-                    "video_duration_seconds": media_probe["duration"],
+                    "video_duration_seconds": published_duration,
                 }
             )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
@@ -13621,12 +13818,6 @@ def publish_canary(
                 long_url,
                 durable_storage=durable_storage,
             )
-        media_category = (
-            PREMIUM_MEDIA_CATEGORY
-            if float(media_probe["duration"])
-            > STANDARD_MAX_DURATION_SECONDS
-            else STANDARD_MEDIA_CATEGORY
-        )
         if callable(storage_guard):
             storage_guard()
         store.mark_publishing(log["id"])
