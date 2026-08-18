@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-通过（本地实现候选）。未连接生产 MySQL，未调用 Meta，未部署。建议仅进入代码评审/closed-gate 部署准备。
+通过（本地实现与 closed-gate 部署候选）。已完成生产只读 MySQL 和页面/定时器闭锁验收，未调用 Meta。真实发布仍保持关闭。
 
 ## 测试范围
 
@@ -12,17 +12,17 @@ FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU 
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| FB V2 专项单元/契约 | 92 | 92 | 0 | 0 |
+| FB V2 专项单元/契约 | 95 | 95 | 0 | 0 |
 | X/TT 合并基线 | 66 | 66 | 0 | 0 |
-| 当前累计证据 | 158 | 158 | 0 | 0 |
+| 当前累计证据 | 161 | 161 | 0 | 0 |
 
 ## 缺陷情况
 
-BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容、BUG-004 oneshot 忽略 `RuntimeMaxSec` 均已修复并回归。无未关闭本地缺陷。
+BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容、BUG-004 oneshot 忽略 `RuntimeMaxSec`、BUG-005 MySQL/Python跨content排序语义不一致均已修复并回归。无未关闭本地缺陷。
 
 ## 验证证据
 
-- `python -m unittest discover -s scripts -p "test_fb_auto_*.py"`：77/77 PASS；`scripts.test_fb_gpu_prepare_worker`：15/15 PASS。
+- `python -m unittest discover -s scripts -p "test_fb_auto_*.py"`：80/80 PASS；`scripts.test_fb_gpu_prepare_worker`：15/15 PASS。
 - `scripts.test_x_accounts_app_contract scripts.test_tt_auto_publish_app_contract scripts.test_x_auto_publish_app_contract scripts.test_tt_posts_app_contract`：66/66 PASS。
 - `python -m py_compile ... app.py`：PASS。
 - `node --check static/quick-nav.js`、navigation JSON 解析：PASS。

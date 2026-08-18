@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -79,14 +80,16 @@ class MetricRefresher:
              WHERE s.product=%s AND s.platform=%s AND s.dt=%s
                AND s.data_source_id IS NOT NULL AND TRIM(s.data_source_id)<>''
                AND s.resource_id REGEXP '^[1-9][0-9]*$'
-             GROUP BY TRIM(s.data_source_id),TRIM(s.resource_id),CHAR_LENGTH(TRIM(s.resource_id))
-             ORDER BY TRIM(s.data_source_id),CHAR_LENGTH(TRIM(s.resource_id)),TRIM(s.resource_id)
+             GROUP BY TRIM(s.data_source_id),HEX(CONVERT(TRIM(s.data_source_id) USING utf8mb4)),
+                      TRIM(s.resource_id),CHAR_LENGTH(TRIM(s.resource_id))
+             ORDER BY HEX(CONVERT(TRIM(s.data_source_id) USING utf8mb4)),
+                      CHAR_LENGTH(TRIM(s.resource_id)),TRIM(s.resource_id)
         """
         def normalized_rows():
             for raw in self.mysql.iter_select(sql, (self.product, self.platform, day)):
                 content_id = str(raw.get("content_id") or "").strip()
                 material_id = str(raw.get("material_id") or "").strip()
-                if not content_id or not material_id.isdigit() or material_id == "0":
+                if not content_id or not re.fullmatch(r"[1-9][0-9]*", material_id):
                     raise RepositoryError("fb_auto_metric_row_invalid", "指标缓存行身份无效")
                 yield {
                     "content_id": content_id,

@@ -732,7 +732,7 @@ class FBAutoPostStore:
         for raw in rows:
             content_id, material_id = str(raw.get("content_id") or "").strip(), str(raw.get("material_id") or "").strip()
             key = (content_id, material_id)
-            if not content_id or not material_id.isdigit() or material_id == "0" or key in seen:
+            if not content_id or not re.fullmatch(r"[1-9][0-9]*", material_id) or key in seen:
                 raise StoreError("fb_auto_metric_row_invalid", "指标缓存行身份无效", 400)
             seen.add(key)
             canonical.append({"content_id": content_id, "material_id": material_id, "spend": format(nonnegative_decimal(raw.get("spend")), "f"), "af_revenue0": format(nonnegative_decimal(raw.get("af_revenue0")), "f")})
@@ -784,8 +784,9 @@ class FBAutoPostStore:
             generation_id = int(cursor.lastrowid)
             for raw in rows:
                 content_id, material_id = str(raw.get("content_id") or "").strip(), str(raw.get("material_id") or "").strip()
-                key = (content_id, int(material_id)) if material_id.isdigit() else (content_id, -1)
-                if not content_id or key[1] <= 0 or (previous is not None and key <= previous):
+                valid_material_id = bool(re.fullmatch(r"[1-9][0-9]*", material_id))
+                key = (content_id.encode("utf-8"), len(material_id), material_id)
+                if not content_id or not valid_material_id or (previous is not None and key <= previous):
                     raise StoreError("fb_auto_metric_row_invalid", "单日指标行无序、重复或身份无效", 400)
                 previous = key
                 spend, revenue = format(nonnegative_decimal(raw.get("spend")), "f"), format(nonnegative_decimal(raw.get("af_revenue0")), "f")

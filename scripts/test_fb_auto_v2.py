@@ -57,10 +57,11 @@ class MetricAndScheduleTests(unittest.TestCase):
             def iter_select(self,sql,params): self.calls.append((sql,params)); return iter([{"content_id":"d1","material_id":"1","spend":1,"af_revenue0":2}])
         mysql=MySQL(); MetricRefresher(mysql,self.store).refresh_day("2026-08-17",refreshed_at=self.clock())
         sql,params=mysql.calls[0]; normalized=" ".join(sql.split())
-        self.assertIn("s.dt=%s",sql); self.assertNotIn("s.dt>=",sql); self.assertNotIn("CAST(",sql)
+        self.assertIn("s.dt=%s",sql); self.assertNotIn("s.dt>=",sql)
         self.assertIn("CHAR_LENGTH(TRIM(s.resource_id)) AS material_id_digits",normalized)
-        self.assertIn("GROUP BY TRIM(s.data_source_id),TRIM(s.resource_id),CHAR_LENGTH(TRIM(s.resource_id))",normalized)
-        self.assertIn("ORDER BY TRIM(s.data_source_id),CHAR_LENGTH(TRIM(s.resource_id)),TRIM(s.resource_id)",normalized)
+        binary_key="HEX(CONVERT(TRIM(s.data_source_id) USING utf8mb4))"
+        self.assertIn(f"GROUP BY TRIM(s.data_source_id),{binary_key}, TRIM(s.resource_id),CHAR_LENGTH(TRIM(s.resource_id))",normalized)
+        self.assertIn(f"ORDER BY {binary_key}, CHAR_LENGTH(TRIM(s.resource_id)),TRIM(s.resource_id)",normalized)
         self.assertEqual(params,("Dramawave",0,"2026-08-17"))
 
     def test_metric_refresh_passes_lazy_iterator_to_streaming_writer(self):
@@ -96,6 +97,50 @@ class MetricAndScheduleTests(unittest.TestCase):
                 refreshed_at_utc="2026-08-18T03:00:00+00:00",
             )
         self.assertEqual(caught.exception.code,"fb_auto_metric_row_invalid")
+
+    def test_streaming_metric_writer_uses_binary_content_order(self):
+        rows = iter((
+            {"content_id":"Z","material_id":"1","spend":1,"af_revenue0":1},
+            {"content_id":"Z","material_id":"2","spend":1,"af_revenue0":1},
+            {"content_id":"Z","material_id":"10","spend":1,"af_revenue0":1},
+            {"content_id":"Z","material_id":"999999999999999999999999","spend":1,"af_revenue0":1},
+            {"content_id":"a","material_id":"1","spend":1,"af_revenue0":1},
+        ))
+        result = self.store.record_metric_generation_streaming(
+            platform=0, metric_date="2026-08-17", product="Dramawave", rows=rows,
+            refreshed_at_utc="2026-08-18T04:00:00+00:00",
+        )
+        self.assertEqual(result["row_count"],5)
+
+    def test_streaming_metric_writer_rejects_noncanonical_material_ids(self):
+        for offset, material_id in enumerate(("01","١"),5):
+            with self.subTest(material_id=material_id), self.assertRaises(StoreError) as caught:
+                self.store.record_metric_generation_streaming(
+                    platform=0, metric_date="2026-08-17", product="Dramawave",
+                    rows=iter(({"content_id":"d","material_id":material_id,"spend":1,"af_revenue0":1},)),
+                    refreshed_at_utc=f"2026-08-18T0{offset}:00:00+00:00",
+                )
+            self.assertEqual(caught.exception.code,"fb_auto_metric_row_invalid")
+
+    def test_streaming_metric_failure_rolls_back_and_preserves_active_pointer(self):
+        ready = self.store.record_metric_generation(
+            platform=0, metric_date="2026-08-17", product="Dramawave", rows=[],
+            refreshed_at_utc="2026-08-18T02:00:00+00:00",
+        )
+        rows = iter((
+            {"content_id":"d","material_id":"1","spend":1,"af_revenue0":1},
+            {"content_id":"d","material_id":"1","spend":1,"af_revenue0":1},
+        ))
+        with self.assertRaises(StoreError) as caught:
+            self.store.record_metric_generation_streaming(
+                platform=0, metric_date="2026-08-17", product="Dramawave", rows=rows,
+                refreshed_at_utc="2026-08-18T08:00:00+00:00",
+            )
+        self.assertEqual(caught.exception.code,"fb_auto_metric_row_invalid")
+        window = self.store.load_metric_window(product="Dramawave",platform=0,dates=["2026-08-17"])
+        self.assertEqual(window.generation_ids,(ready["id"],))
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fb_auto_metric_generation WHERE status='building'").fetchone()[0],0)
 
     def test_scheduler_persists_future_prepare_window_and_is_idempotent(self):
         actor=ActorScope("u","n",False,"248"); raw=payload(); raw["schedule"]={"mode":"fixed","times":["10:30"]}
