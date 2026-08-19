@@ -276,6 +276,7 @@ NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
         "material_has_violation",
         "material_source_tag_unsafe",
         "material_tag_unsafe",
+        "material_language_not_scheduled",
         "x_long_video_requires_premium",
     }
 )
@@ -299,6 +300,7 @@ MATERIAL_FIFO_SKIP_CODES = frozenset(
     {
         "material_source_tag_unsafe",
         "material_tag_unsafe",
+        "material_language_not_scheduled",
         "x_long_video_requires_premium",
     }
 )

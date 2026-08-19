@@ -2,7 +2,7 @@
 
 ## 变更内容
 
-CPU immutable release 增加 drama 同日范围补偿能力；不修改 GPU 代码和业务环境变量。
+CPU immutable release 增加 drama 同日范围补偿能力和素材语种 FIFO 一致性修复；不修改 GPU 代码和业务环境变量。
 
 ## 配置项
 

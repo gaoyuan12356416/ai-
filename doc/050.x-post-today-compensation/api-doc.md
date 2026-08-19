@@ -17,3 +17,5 @@
 ## 兼容性说明
 
 仅新增表和方法；既有 HTTP、队列、发布与归因合同不变。
+素材检查复用既有 `/internal/posts/material-pool/check`，新增安全错误码
+`material_language_not_scheduled`，不新增字段或路由。

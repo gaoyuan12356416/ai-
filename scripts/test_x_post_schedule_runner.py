@@ -19,12 +19,16 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     CandidatePreflightError,
     SidecarError,
 )
-from features.x_posts.service import XPostError  # noqa: E402
+from features.x_posts.service import (  # noqa: E402
+    XPostError,
+    _material_fifo_selection_matches,
+)
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
     ScheduleSidecarClient,
     _drama_candidates,
+    _preflight_material_candidates,
     _retrying_media_downloader,
     execute_schedule_tick,
 )
@@ -229,6 +233,95 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.config = make_config(self.temporary.name)
         self.now = datetime(2026, 7, 27, 10, 0, 30, tzinfo=BEIJING)
+
+    def test_material_language_without_target_is_current_fifo_skip(self):
+        candidates = [
+            {
+                "pool_item_id": 2,
+                "material_id": "ja-newest",
+                "material_language": "ja",
+            },
+            {
+                "pool_item_id": 1,
+                "material_id": "en-next",
+                "material_language": "en",
+            },
+        ]
+        accounts = [
+            {
+                "id": 11,
+                "username": "english11",
+                "drama_language": "en",
+            }
+        ]
+        def preflight(_config, candidate, account, *_args, **_kwargs):
+            return {
+                "pool_item_id": candidate["pool_item_id"],
+                "account_id": account["id"],
+                "preflight_duration": 100.0,
+            }
+
+        with mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            planned, failures = _preflight_material_candidates(
+                self.config,
+                mock.Mock(),
+                candidates,
+                accounts,
+                source_date="2026-07-27",
+                timestamp=1,
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+                assignment_identity={
+                    "source_type": "material",
+                    "run_date": "2026-07-27",
+                    "publish_time": "10:00",
+                    "version": 3,
+                },
+            )
+        self.assertEqual([item["pool_item_id"] for item in planned], [1])
+        self.assertEqual(
+            failures,
+            [
+                {
+                    "pool_item_id": 2,
+                    "material_id": "ja-newest",
+                    "error_code": "material_language_not_scheduled",
+                    "error_message": "当前发布账号不包含该素材语言",
+                }
+            ],
+        )
+
+    def test_fifo_replay_accepts_current_language_skip(self):
+        self.assertTrue(
+            _material_fifo_selection_matches(
+                [
+                    {
+                        "id": 2,
+                        "last_error_code": "material_language_not_scheduled",
+                        "last_checked_at": "2026-07-27T01:00:01Z",
+                    },
+                    {
+                        "id": 1,
+                        "last_error_code": "",
+                        "last_checked_at": "",
+                    },
+                ],
+                [
+                    {
+                        "pool_item_id": 1,
+                        "account_id": 11,
+                        "preflight_duration": 100.0,
+                    }
+                ],
+                [11],
+                [],
+                validation_cutoff="2026-07-27T01:00:00Z",
+            )
+        )
 
     def test_premium_relay_client_requires_exact_current_entitlement(self):
         eligible = {

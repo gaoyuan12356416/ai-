@@ -1150,6 +1150,16 @@ def _preflight_material_candidates(
                 if int(account["id"]) not in accepted_by_account
             ]
             if not remaining_targets:
+                failures.append(
+                    {
+                        "pool_item_id": candidate.get("pool_item_id"),
+                        "material_id": str(
+                            candidate.get("material_id", "") or ""
+                        ),
+                        "error_code": "material_language_not_scheduled",
+                        "error_message": "当前发布账号不包含该素材语言",
+                    }
+                )
                 continue
             target = remaining_targets[0]
             material_id = str(candidate.get("material_id", "") or "")

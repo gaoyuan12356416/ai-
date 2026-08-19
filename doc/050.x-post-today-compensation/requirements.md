@@ -2,11 +2,11 @@
 
 ## 背景与目标
 
-2026-08-19 短剧随机计划含 17 个英语账号和 2 个日语账号，但短剧池只有英语库存，01:18 整批在 X 写入前失败。目标是在保留原失败证据的前提下，按已经保存的新配置缩减为有同语种库存的账号，为漏发时段建立一次同日补偿，并让尚未生成 run 的今日未来时段使用新范围。
+2026-08-19 短剧随机计划含 17 个英语账号和 2 个日语账号，但短剧池只有英语库存，01:18 整批在 X 写入前失败；素材补偿恢复 GPU 隧道后又因无目标账号语种的素材未留下当轮跳过证据，连续触发 FIFO 重放冲突。目标是在保留原失败证据的前提下完成短剧范围补偿，并让素材预检与事务 FIFO 重放使用同一组可审计语种证据。
 
 ## 范围
 
-- 包含：短剧 `x_post_schedule_drama_shortage`、同日、随机计划、0 queue/0 log/0 unknown、严格有序子集、库存与账号就绪校验、审计表和 CLI。
+- 包含：短剧 `x_post_schedule_drama_shortage`、同日、随机计划、0 queue/0 log/0 unknown、严格有序子集、库存与账号就绪校验、审计表和 CLI；素材无目标语种的非阻断当轮跳过证据。
 - 不包含：历史日期重放、已有未来 run 的改写、正文/时刻改写、候选选择、直接调用 X、自动发布 ROAS 规则放宽。
 
 ## 业务规则与流程
@@ -22,6 +22,7 @@
 
 - `features/x_posts/service.py`：新增事务方法和只增审计表。
 - `scripts/x_post_schedule_drama_scope_compensate.py`：复用全局 runner 锁、报告路径守卫和原子报告写入。
+- `scripts/x_post_schedule_runner.py`：遇到当前账号范围不包含的素材语言时，记录 `material_language_not_scheduled`，事务层只接受本轮 cutoff 之后的该跳过证据。
 - 随机计划仅更新 `config_version/account_ids_json/body_template`；`publish_times_json` 保持不变。
 
 ## 验收标准
