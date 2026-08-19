@@ -1807,6 +1807,30 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_previous_day_resume_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_audit_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_previous_day_stale_claim_recovery_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL CHECK(length(deployed_commit)=40),
+                    previous_status TEXT NOT NULL CHECK(previous_status='stopped'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_post_schedule_stale_claim'),
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0,
+                    validated_log_count INTEGER NOT NULL DEFAULT 0,
+                    validated_published_count INTEGER NOT NULL DEFAULT 0,
+                    validated_queued_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(recovery_audit_id)
+                        REFERENCES x_post_schedule_previous_day_recovery_audit(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -2352,6 +2376,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_previous_day_recovery_created "
                 "ON x_post_schedule_previous_day_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_previous_day_resume_created "
+                "ON x_post_schedule_previous_day_resume_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_verified_repair_created "
@@ -8896,10 +8924,30 @@ class XPostStore:
                 (run_id,),
             ).fetchone()
             prior_audit = conn.execute(
-                "SELECT id FROM x_post_schedule_previous_day_recovery_audit "
+                "SELECT * FROM x_post_schedule_previous_day_recovery_audit "
                 "WHERE schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            resume_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_previous_day_resume_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+            prior_audit_matches = bool(
+                prior_audit is None
+                or (
+                    str(prior_audit["deployed_commit"]) == deployed_commit
+                    and str(prior_audit["run_date"]) == str(run["run_date"])
+                    and int(prior_audit["validated_queue_count"])
+                    == queue_count
+                    and int(prior_audit["validated_log_count"])
+                    == log_count
+                    and int(prior_audit["validated_published_count"])
+                    == published_queue_count
+                    and int(prior_audit["validated_queued_count"])
+                    == queued_queue_count
+                )
+            )
 
             placeholders = ",".join("?" for _item in account_ids)
             accounts = conn.execute(
@@ -8930,7 +8978,8 @@ class XPostStore:
                 or log_count != published_queue_count
                 or unresolved is not None
                 or non_published_log is not None
-                or prior_audit is not None
+                or not prior_audit_matches
+                or (prior_audit is not None and resume_audit is not None)
                 or ready_ids != set(account_ids)
             )
             if conflict:
@@ -8957,34 +9006,63 @@ class XPostStore:
                 "validate_only": validate_only,
                 "validated_count": 1,
                 "updated_count": 0,
+                "recovery_mode": (
+                    "claim_race_resume"
+                    if prior_audit is not None
+                    else "initial"
+                ),
             }
             if validate_only:
                 conn.rollback()
                 return result
 
-            conn.execute(
-                "INSERT INTO x_post_schedule_previous_day_recovery_audit("
-                "schedule_run_id,recovery_reason,actor,deployed_commit,"
-                "previous_status,previous_error_code,previous_error_message,"
-                "run_date,validated_queue_count,validated_log_count,"
-                "validated_published_count,validated_queued_count,created_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    run_id,
-                    PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
-                    actor,
-                    deployed_commit,
-                    str(run["status"]),
-                    str(run["error_code"]),
-                    str(run["error_message"] or ""),
-                    str(run["run_date"]),
-                    queue_count,
-                    log_count,
-                    published_queue_count,
-                    queued_queue_count,
-                    timestamp,
-                ),
-            )
+            if prior_audit is None:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_previous_day_recovery_audit("
+                    "schedule_run_id,recovery_reason,actor,deployed_commit,"
+                    "previous_status,previous_error_code,previous_error_message,"
+                    "run_date,validated_queue_count,validated_log_count,"
+                    "validated_published_count,validated_queued_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                        actor,
+                        deployed_commit,
+                        str(run["status"]),
+                        str(run["error_code"]),
+                        str(run["error_message"] or ""),
+                        str(run["run_date"]),
+                        queue_count,
+                        log_count,
+                        published_queue_count,
+                        queued_queue_count,
+                        timestamp,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_previous_day_resume_audit("
+                    "schedule_run_id,recovery_audit_id,recovery_reason,actor,"
+                    "deployed_commit,previous_status,previous_error_code,"
+                    "validated_queue_count,validated_log_count,"
+                    "validated_published_count,validated_queued_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        int(prior_audit["id"]),
+                        PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                        actor,
+                        deployed_commit,
+                        str(run["status"]),
+                        str(run["error_code"]),
+                        queue_count,
+                        log_count,
+                        published_queue_count,
+                        queued_queue_count,
+                        timestamp,
+                    ),
+                )
             next_status = "running" if queue_count else "claimed"
             cursor = conn.execute(
                 "UPDATE x_post_schedule_run SET status=?,error_code='',"

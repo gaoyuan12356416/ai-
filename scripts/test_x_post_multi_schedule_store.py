@@ -792,6 +792,39 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
         )
 
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='stopped',"
+                "error_code='x_post_schedule_stale_claim',"
+                "error_message='claim timer raced guarded recovery' WHERE id=?",
+                (run_id,),
+            )
+            conn.commit()
+        resumed = self.store.recover_previous_day_stale_claim_schedule_run(
+            run_id,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            now=now,
+        )
+        self.assertEqual(resumed["recovery_mode"], "claim_race_resume")
+        self.assertEqual(resumed["next_status"], "claimed")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            resume_audit = conn.execute(
+                "SELECT recovery_audit_id,recovery_reason,actor,"
+                "validated_queue_count FROM "
+                "x_post_schedule_previous_day_resume_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+        self.assertEqual(
+            resume_audit[1:],
+            (
+                service.PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                "codex_operator",
+                0,
+            ),
+        )
+
         with self.assertRaises(service.XPostError) as duplicate:
             self.store.recover_previous_day_stale_claim_schedule_run(
                 run_id,
