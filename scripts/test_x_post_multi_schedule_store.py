@@ -2929,6 +2929,48 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
         )
 
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_schedule_material_preflight_shortage",
+            "not enough FIFO material candidates passed media preflight",
+        )
+        post_capacity = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_material_preflight_shortage",
+            reason=service.FAILED_PREFLIGHT_POST_CAPACITY_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            now=recovery_now,
+        )
+        self.assertEqual(
+            post_capacity["recovery_mode"],
+            "post_capacity_transient",
+        )
+        self.assertEqual(post_capacity["updated_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            post_audit = conn.execute(
+                "SELECT recovery_reason,deployed_commit,"
+                "previous_error_code,validated_queue_count,"
+                "validated_log_count "
+                "FROM x_post_schedule_post_capacity_retry_audit "
+                "WHERE schedule_run_id=?",
+                (failed["id"],),
+            ).fetchone()
+        self.assertEqual(
+            post_audit,
+            (
+                service.FAILED_PREFLIGHT_POST_CAPACITY_RECOVERY_REASON,
+                "a" * 40,
+                "x_post_schedule_material_preflight_shortage",
+                0,
+                0,
+            ),
+        )
+
     def test_failed_preflight_corrective_retry_rejects_unproven_message(self):
         failed = self._failed_schedule_run()
         recovery_now = datetime(
