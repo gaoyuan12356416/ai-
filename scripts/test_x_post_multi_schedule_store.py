@@ -2856,6 +2856,42 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+    def test_zero_write_material_preflight_can_defer_for_drama_slot(self):
+        failed = self._failed_schedule_run()
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_schedule_operator_deferred_for_due_slot",
+            "operator deferred zero-write material preflight to protect "
+            "scheduled drama slot",
+        )
+
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_operator_deferred_for_due_slot",
+            reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "claimed",
+        )
+
     def test_failed_preflight_corrective_retry_rejects_unproven_message(self):
         failed = self._failed_schedule_run()
         recovery_now = datetime(

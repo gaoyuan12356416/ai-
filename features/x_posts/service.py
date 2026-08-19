@@ -145,6 +145,10 @@ FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON = (
     "operator_same_day_corrective_retry_v1"
 )
 FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES = {
+    "x_post_schedule_operator_deferred_for_due_slot": (
+        "operator deferred zero-write material preflight to protect "
+        "scheduled drama slot",
+    ),
     "x_post_pool_invalid_response": (
         "Material pool FIFO order is invalid",
     ),

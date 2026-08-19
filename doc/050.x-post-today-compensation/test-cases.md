@@ -23,6 +23,7 @@
 | TC-09 | schedule 修复容量覆盖 | daily=14、schedule=17 | 加载配置 | schedule 上限为 17，env example 同步固化 | P0 | 通过 |
 | TC-10 | 范围补偿子 run 零写重试 | 子 run 与补偿审计精确关联 | validate/apply 恢复 | 校验零写后只放行一次 | P0 | 通过 |
 | TC-11 | 未关联 off-plan run | 删除补偿审计关联 | 尝试恢复 | 409 失败关闭 | P0 | 通过 |
+| TC-12 | 为正常短剧时段让路 | 素材预检 0 queue/0 log，已有 initial 审计 | 记录延期后执行 corrective 恢复 | 只允许精确错误码/文本，恢复留审计 | P0 | 通过 |
 
 ## 回归范围
 
