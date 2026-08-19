@@ -21,3 +21,11 @@
 4. 重启 GPU、Sidecar 与 X Auto，验证反向隧道、健康接口和 profile。
 5. 恢复原 timer 状态；保留当前 SQLite、Token、队列和发布账本。
 
+## 2026-08-19 生产部署记录
+
+- GitHub 分支：`codex/x-post-repair-size-cap-20260819`；代码提交：`d87744902f2b8d06dff982df3dc0eeeb8d9ebcd8`。
+- CPU release：`/mnt/data-disk/x-post-automation/releases/d87744902f2b8d06dff982df3dc0eeeb8d9ebcd8`；部署备份：`/mnt/data-disk/x-post-automation/backups/20260819T114925+0800-repair-size-cap-d87744902f2b8d06dff982df3dc0eeeb8d9ebcd8`。
+- GPU release：`/opt/x-post-media-repair/releases/d87744902f2b8d06dff982df3dc0eeeb8d9ebcd8`；部署备份：`/data/x-post-media-repair/backups/20260819T115016+0800-repair-size-cap-d87744902f2b8d06dff982df3dc0eeeb8d9ebcd8`。
+- Drama 调度配置修复前备份：`/mnt/data-disk/x-post-automation/backups/20260819T113326+0800-drama-language-schedule-repair`。
+- CPU 回滚目标为部署前 release `c7cadcbcef1cea6040e54538d56acd619207df63`；GPU 回滚目标为 `eb15510b75d9045d5b660b57f3971137044a3523`。环境文件从上述 CPU 部署备份恢复，SQLite 与 Token 保留当前事实，不随代码回滚。
+- 上线时停止五个 timer，确认所有 oneshot runner 均已退出后切换；重启 X OAuth Sidecar、X Auto 与 GPU 修复服务，然后恢复原 timer 状态。
