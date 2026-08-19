@@ -149,7 +149,7 @@ def make_config(root):
         cos_domain="https://cos.example.com",
         cos_prefix="x-post-media-repair",
         max_source_bytes=1024 * 1024,
-        max_output_bytes=1024 * 1024,
+        max_output_bytes=media_repair.DEFAULT_OUTPUT_MAX_BYTES,
         download_timeout=30,
         probe_timeout=30,
         transcode_timeout=60,
@@ -350,6 +350,33 @@ class MediaRepairTests(unittest.TestCase):
             media_repair.STANDARD_TRIM_TARGET_SECONDS,
         )
 
+    def test_output_rate_control_preserves_short_defaults_and_caps_long_media(self):
+        maximum = media_repair.DEFAULT_OUTPUT_MAX_BYTES
+        short = media_repair.output_rate_control(maximum, 139.0)
+        self.assertEqual(short["video_bitrate_kbps"], 5000)
+        self.assertEqual(short["video_maxrate_kbps"], 6000)
+        self.assertEqual(short["video_bufsize_kbps"], 10000)
+
+        long_media = media_repair.output_rate_control(maximum, 900.0)
+        self.assertLess(long_media["video_bitrate_kbps"], 5000)
+        self.assertLess(long_media["video_maxrate_kbps"], 6000)
+        projected_maximum = (
+            long_media["video_maxrate_kbps"]
+            + long_media["audio_bitrate_kbps"]
+            + media_repair.OUTPUT_CONTAINER_OVERHEAD_KBPS
+        ) * 1000 * 900.0 / 8
+        self.assertLessEqual(
+            projected_maximum,
+            maximum * media_repair.OUTPUT_SIZE_BUDGET_RATIO,
+        )
+
+        four_hours = media_repair.output_rate_control(maximum, 14399.0)
+        self.assertGreaterEqual(
+            four_hours["video_bitrate_kbps"],
+            media_repair.MIN_VIDEO_BITRATE_KBPS,
+        )
+        self.assertLess(four_hours["video_maxrate_kbps"], 6000)
+
     def test_ffmpeg_command_is_nvenc_cfr30_gop60_pad_without_crop_and_adds_silence(self):
         config = make_config(self.root)
         source_info = media_repair.inspect_source(source_probe(audio=False))
@@ -371,9 +398,9 @@ class MediaRepairTests(unittest.TestCase):
         self.assertIn("-flags +cgop", joined)
         self.assertIn("-rc vbr", joined)
         self.assertIn("-cq 20", joined)
-        self.assertIn("-b:v 5M", joined)
-        self.assertIn("-maxrate 6M", joined)
-        self.assertIn("-bufsize 10M", joined)
+        self.assertIn("-b:v 5000k", joined)
+        self.assertIn("-maxrate 6000k", joined)
+        self.assertIn("-bufsize 10000k", joined)
         self.assertIn("-profile:a aac_low", joined)
         self.assertIn("-ar 48000", joined)
         self.assertIn("-ac 2", joined)
@@ -455,13 +482,17 @@ class MediaRepairTests(unittest.TestCase):
                 / (request["job_key"] + ".json")
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], 3)
+        self.assertEqual(manifest["version"], 4)
         self.assertEqual(
             manifest["repair"],
             {
                 "source_duration": 180.0,
                 "target_duration": 139.0,
                 "trim_applied": True,
+                "rate_control": media_repair.output_rate_control(
+                    config.max_output_bytes,
+                    139.0,
+                ),
             },
         )
 

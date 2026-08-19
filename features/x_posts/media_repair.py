@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - exercised only outside Linux.
     fcntl = None
 
 
-REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v4"
+REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v5"
 REPAIR_PATH = "/internal/x-post-media-repair"
 HEALTH_PATH = "/health"
 REPAIRABLE_TRIGGER_CODES = frozenset(
@@ -87,6 +87,13 @@ DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 SAFE_PREFIX_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,240}\Z")
 MAX_REQUEST_BYTES = 64 * 1024
 DEFAULT_OUTPUT_MAX_BYTES = DEFAULT_MAX_MEDIA_BYTES
+DEFAULT_VIDEO_BITRATE_KBPS = 5000
+DEFAULT_VIDEO_MAXRATE_KBPS = 6000
+DEFAULT_VIDEO_BUFSIZE_KBPS = 10000
+DEFAULT_AUDIO_BITRATE_KBPS = 128
+OUTPUT_SIZE_BUDGET_RATIO = 0.88
+OUTPUT_CONTAINER_OVERHEAD_KBPS = 32
+MIN_VIDEO_BITRATE_KBPS = 96
 DEFAULT_WORK_ROOT = Path("/data/x-post-media-repair")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8820
@@ -727,7 +734,63 @@ def inspect_source(payload, trigger_code="", duration_policy="standard"):
     }
 
 
+def output_rate_control(max_output_bytes, output_duration):
+    """Return a conservative NVENC rate budget that stays below the byte cap."""
+    try:
+        max_output_bytes = int(max_output_bytes)
+        output_duration = float(output_duration)
+    except (TypeError, ValueError, OverflowError):
+        raise MediaRepairError(
+            "invalid_configuration", "output size budget is invalid", 500
+        ) from None
+    if max_output_bytes <= 0 or output_duration < MIN_DURATION_SECONDS:
+        raise MediaRepairError(
+            "invalid_configuration", "output size budget is invalid", 500
+        )
+    total_budget_kbps = int(
+        max_output_bytes
+        * 8
+        * OUTPUT_SIZE_BUDGET_RATIO
+        / output_duration
+        / 1000
+    )
+    video_maxrate_kbps = min(
+        DEFAULT_VIDEO_MAXRATE_KBPS,
+        total_budget_kbps
+        - DEFAULT_AUDIO_BITRATE_KBPS
+        - OUTPUT_CONTAINER_OVERHEAD_KBPS,
+    )
+    if video_maxrate_kbps < MIN_VIDEO_BITRATE_KBPS:
+        raise MediaRepairError(
+            "source_not_repairable",
+            "video duration cannot fit the configured output size limit",
+            422,
+        )
+    video_bitrate_kbps = min(
+        DEFAULT_VIDEO_BITRATE_KBPS,
+        max(
+            MIN_VIDEO_BITRATE_KBPS,
+            int(video_maxrate_kbps * 0.85),
+        ),
+    )
+    video_bufsize_kbps = min(
+        DEFAULT_VIDEO_BUFSIZE_KBPS,
+        max(video_maxrate_kbps, video_maxrate_kbps * 2),
+    )
+    return {
+        "video_bitrate_kbps": video_bitrate_kbps,
+        "video_maxrate_kbps": video_maxrate_kbps,
+        "video_bufsize_kbps": video_bufsize_kbps,
+        "audio_bitrate_kbps": DEFAULT_AUDIO_BITRATE_KBPS,
+        "size_budget_ratio": OUTPUT_SIZE_BUDGET_RATIO,
+    }
+
+
 def build_ffmpeg_command(config, source_path, output_path, source_info):
+    rate_control = output_rate_control(
+        config.max_output_bytes,
+        source_info["output_duration"],
+    )
     canvas_width, canvas_height = source_info["canvas"]
     video_filter = (
         "yadif=mode=send_frame:parity=auto:deint=interlaced,"
@@ -783,11 +846,11 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
             "-cq",
             "20",
             "-b:v",
-            "5M",
+            "%dk" % rate_control["video_bitrate_kbps"],
             "-maxrate",
-            "6M",
+            "%dk" % rate_control["video_maxrate_kbps"],
             "-bufsize",
-            "10M",
+            "%dk" % rate_control["video_bufsize_kbps"],
             "-c:a",
             "aac",
             "-profile:a",
@@ -797,7 +860,7 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
             "-ac",
             "2",
             "-b:a",
-            "128k",
+            "%dk" % rate_control["audio_bitrate_kbps"],
             "-map_metadata",
             "-1",
             "-map_chapters",
@@ -1300,6 +1363,10 @@ class MediaRepairProcessor:
                 request["trigger_code"],
                 request["duration_policy"],
             )
+            rate_control = output_rate_control(
+                self.config.max_output_bytes,
+                source_info["output_duration"],
+            )
             command = build_ffmpeg_command(
                 self.config,
                 source_path,
@@ -1353,7 +1420,7 @@ class MediaRepairProcessor:
                 "probe": probe,
             }
             manifest = {
-                "version": 3,
+                "version": 4,
                 "status": "ready",
                 "request": request,
                 "cos_key": cos_key,
@@ -1362,6 +1429,7 @@ class MediaRepairProcessor:
                     "source_duration": source_info["duration"],
                     "target_duration": source_info["output_duration"],
                     "trim_applied": source_info["trim_applied"],
+                    "rate_control": rate_control,
                 },
                 "completed_at": _utc_now(),
             }

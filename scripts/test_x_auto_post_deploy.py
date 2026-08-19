@@ -75,7 +75,7 @@ class XAutoPostDeployTests(unittest.TestCase):
         )
         self.assertIn(
             "X_AUTO_POST_REPAIR_PROFILE="
-            "x-h264-nvenc-720-duration-policy-v4",
+            "x-h264-nvenc-720-duration-policy-v5",
             env,
         )
         self.assertIn("X_AUTO_POST_MAX_REPAIRS_PER_RUN=1", env)
