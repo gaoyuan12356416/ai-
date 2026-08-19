@@ -11,7 +11,7 @@ from scripts.x_post_schedule_drama_scope_compensate import execute_compensation
 
 class DramaScopeCompensationTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.temp = tempfile.TemporaryDirectory()
         self.db = Path(self.temp.name) / "x.sqlite3"
         self.store = XPostStore(self.db)
         with sqlite3.connect(str(self.db)) as conn:
@@ -91,7 +91,12 @@ class DramaScopeCompensationTest(unittest.TestCase):
             conn.commit()
 
     def tearDown(self):
-        self.temp.cleanup()
+        try:
+            self.temp.cleanup()
+        except PermissionError:
+            # Older Windows SQLite builds can retain a short-lived handle
+            # after migration-heavy tests. This is test cleanup only.
+            pass
 
     @contextlib.contextmanager
     def lock(self, _path):
