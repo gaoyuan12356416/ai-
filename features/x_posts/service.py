@@ -189,6 +189,9 @@ FAILED_PREFLIGHT_TOKEN_REFRESH_ERROR_MESSAGES = {
 FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON = (
     "operator_same_day_transient_media_retry_v1"
 )
+DRAMA_SCOPE_COMPENSATION_REASON = (
+    "operator_same_day_drama_scope_compensation_v1"
+)
 FAILED_PREFLIGHT_TRANSIENT_MEDIA_ERROR_MESSAGES = {
     "media_download_failed": (
         "素材下载响应中断:",
@@ -1665,6 +1668,32 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_drama_scope_compensation_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_schedule_run_id INTEGER NOT NULL UNIQUE,
+                    compensation_schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_drama_scope_compensation_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL
+                        CHECK(length(deployed_commit)=40),
+                    previous_config_version INTEGER NOT NULL,
+                    previous_account_ids_json TEXT NOT NULL,
+                    new_config_version INTEGER NOT NULL,
+                    new_account_ids_json TEXT NOT NULL,
+                    removed_account_ids_json TEXT NOT NULL,
+                    publish_times_json TEXT NOT NULL,
+                    compensation_publish_time TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(original_schedule_run_id)
+                        REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(compensation_schedule_run_id)
+                        REFERENCES x_post_schedule_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -2218,6 +2247,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_transient_media_recovery_created "
                 "ON x_post_schedule_transient_media_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_drama_scope_comp_created "
+                "ON x_post_schedule_drama_scope_compensation_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -9346,6 +9379,380 @@ class XPostStore:
                     409,
                 )
             conn.commit()
+            result["updated_count"] = 1
+            return result
+
+    def create_same_day_drama_scope_compensation(
+        self,
+        original_run_id,
+        expected_error_code,
+        *,
+        actor,
+        deployed_commit,
+        compensation_publish_time,
+        validate_only=False,
+        now=None,
+    ):
+        """Create one audited same-day child after a zero-write language shortage.
+
+        The original run and its frozen random plan evidence remain intact in
+        the audit row.  Only unclaimed future slots adopt the already-saved
+        replacement drama scope; the missed slot receives one separately keyed
+        claimed compensation run.  This method never selects media or calls X.
+        """
+        original_run_id = _positive_int(original_run_id, "original run id")
+        try:
+            expected_error_code = _clean_token(
+                expected_error_code, "expected error code", 64
+            )
+            actor = _clean_token(actor, "compensation actor", 128)
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "Drama scope compensation arguments are invalid",
+                400,
+            ) from None
+        deployed_commit = str(deployed_commit or "").strip().lower()
+        compensation_publish_time = _schedule_publish_time(
+            compensation_publish_time
+        )
+        if (
+            expected_error_code != "x_post_schedule_drama_shortage"
+            or not re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
+            or not isinstance(validate_only, bool)
+        ):
+            raise XPostError(
+                "x_post_drama_scope_compensation_not_allowed",
+                "This drama failure is not eligible for scope compensation",
+                409,
+            )
+
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        current_date = current.date().isoformat()
+        tomorrow = (current.date() + timedelta(days=1)).isoformat()
+        compensation_at = datetime.strptime(
+            "%s %s" % (current_date, compensation_publish_time),
+            "%Y-%m-%d %H:%M",
+        ).replace(tzinfo=BEIJING_TZ)
+        if compensation_at > current:
+            raise XPostError(
+                "x_post_drama_scope_compensation_not_allowed",
+                "Compensation publish time must already be due",
+                409,
+            )
+        timestamp = utc_now()
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?",
+                (original_run_id,),
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_run_not_found",
+                    "X schedule run was not found",
+                    404,
+                )
+            old_account_ids = _schedule_account_ids(
+                _json_array(run["account_ids_json"], "account_ids")
+            )
+            queue_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE schedule_run_id=?",
+                    (original_run_id,),
+                ).fetchone()[0]
+            )
+            log_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log l "
+                    "JOIN x_post_queue q ON q.id=l.queue_id "
+                    "WHERE q.schedule_run_id=?",
+                    (original_run_id,),
+                ).fetchone()[0]
+            )
+            plan_row = conn.execute(
+                "SELECT * FROM x_post_schedule_random_plan "
+                "WHERE source_type='drama' AND run_date=?",
+                (current_date,),
+            ).fetchone()
+            config_row = conn.execute(
+                "SELECT * FROM x_post_schedule_config WHERE source_type='drama'"
+            ).fetchone()
+            prior_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_drama_scope_compensation_audit "
+                "WHERE original_schedule_run_id=?",
+                (original_run_id,),
+            ).fetchone()
+            existing_compensation = conn.execute(
+                "SELECT id FROM x_post_schedule_run "
+                "WHERE source_type='drama' AND run_date=? AND publish_time=?",
+                (current_date, compensation_publish_time),
+            ).fetchone()
+            if not plan_row or not config_row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_scope_compensation_conflict",
+                    "Drama random plan or replacement config is unavailable",
+                    409,
+                )
+
+            plan_account_ids = _schedule_account_ids(
+                _json_array(plan_row["account_ids_json"], "account_ids")
+            )
+            plan_times = _schedule_publish_times(
+                _json_array(plan_row["publish_times_json"], "publish_times")
+            )
+            new_account_ids = _schedule_account_ids(
+                _json_array(config_row["account_ids_json"], "account_ids")
+            )
+            old_template = _normalize_post_template(
+                plan_row["body_template"], "drama"
+            )
+            new_template = _normalize_post_template(
+                config_row["body_template"], "drama"
+            )
+            new_id_set = set(new_account_ids)
+            removed_account_ids = [
+                account_id
+                for account_id in old_account_ids
+                if account_id not in new_id_set
+            ]
+            is_ordered_subset = new_account_ids == [
+                account_id
+                for account_id in old_account_ids
+                if account_id in new_id_set
+            ]
+
+            placeholders = ",".join("?" for _item in old_account_ids)
+            account_rows = conn.execute(
+                "SELECT id,status,publish_approved,token_store_key,drama_language "
+                "FROM x_authorized_account WHERE id IN (%s)" % placeholders,
+                tuple(old_account_ids),
+            ).fetchall()
+            account_by_id = {int(row["id"]): row for row in account_rows}
+            available_language_rows = conn.execute(
+                "SELECT language,SUM(free_episode_count) AS episode_count "
+                "FROM x_post_drama_pool "
+                "WHERE status IN ('pending','active') "
+                "AND free_episode_count>0 AND last_error_code='' "
+                "GROUP BY language"
+            ).fetchall()
+            available_by_language = {
+                canonical_drama_language(row["language"]): int(
+                    row["episode_count"] or 0
+                )
+                for row in available_language_rows
+            }
+            expected_new_ids = []
+            for account_id in old_account_ids:
+                row = account_by_id.get(account_id)
+                if row and available_by_language.get(
+                    canonical_drama_language(row["drama_language"]), 0
+                ) > 0:
+                    expected_new_ids.append(account_id)
+            all_ready = all(
+                account_id in account_by_id
+                and str(account_by_id[account_id]["status"]) == "active"
+                and int(account_by_id[account_id]["publish_approved"] or 0) == 1
+                and bool(str(account_by_id[account_id]["token_store_key"] or "").strip())
+                for account_id in new_account_ids
+            )
+            removed_have_no_inventory = all(
+                account_id in account_by_id
+                and available_by_language.get(
+                    canonical_drama_language(
+                        account_by_id[account_id]["drama_language"]
+                    ),
+                    0,
+                )
+                == 0
+                for account_id in removed_account_ids
+            )
+            total_kept_episodes = sum(available_by_language.values())
+            future_times = [
+                publish_time
+                for publish_time in plan_times
+                if datetime.strptime(
+                    "%s %s" % (current_date, publish_time),
+                    "%Y-%m-%d %H:%M",
+                ).replace(tzinfo=BEIJING_TZ)
+                > current
+            ]
+            future_run_count = 0
+            if future_times:
+                future_placeholders = ",".join("?" for _item in future_times)
+                future_run_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM x_post_schedule_run "
+                        "WHERE source_type='drama' AND run_date=? "
+                        "AND publish_time IN (%s)" % future_placeholders,
+                        (current_date, *future_times),
+                    ).fetchone()[0]
+                )
+            unresolved = conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.account_id IN (%s) "
+                "AND (COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
+                % ",".join("?" for _item in new_account_ids),
+                tuple(new_account_ids),
+            ).fetchone()
+            conflict = bool(
+                str(run["source_type"]) != "drama"
+                or str(run["run_date"]) != current_date
+                or str(run["status"]) != "failed_preflight"
+                or str(run["error_code"]) != expected_error_code
+                or "short-drama pool has fewer free episodes"
+                not in str(run["error_message"] or "")
+                or any(
+                    int(run[field] or 0) != 0
+                    for field in (
+                        "queued_count",
+                        "published_count",
+                        "failed_count",
+                        "unknown_count",
+                    )
+                )
+                or queue_count != 0
+                or log_count != 0
+                or prior_audit is not None
+                or existing_compensation is not None
+                or int(plan_row["config_version"]) != int(run["config_version"])
+                or plan_account_ids != old_account_ids
+                or str(run["publish_time"]) not in plan_times
+                or _schedule_mode(run["schedule_mode"]) != "random"
+                or _schedule_mode(config_row["schedule_mode"]) != "random"
+                or not bool(config_row["enabled"])
+                or int(config_row["version"]) <= int(plan_row["config_version"])
+                or str(config_row["random_effective_date"])
+                not in {current_date, tomorrow}
+                or old_template != new_template
+                or not new_account_ids
+                or not removed_account_ids
+                or not is_ordered_subset
+                or new_account_ids != expected_new_ids
+                or not all_ready
+                or not removed_have_no_inventory
+                or total_kept_episodes < len(new_account_ids)
+                or future_run_count != 0
+                or unresolved is not None
+            )
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_scope_compensation_conflict",
+                    "Run, plan, replacement scope, inventory, or ledger state changed",
+                    409,
+                )
+
+            result = {
+                "original_run_id": original_run_id,
+                "run_date": current_date,
+                "previous_config_version": int(plan_row["config_version"]),
+                "new_config_version": int(config_row["version"]),
+                "previous_account_count": len(old_account_ids),
+                "new_account_count": len(new_account_ids),
+                "removed_account_ids": removed_account_ids,
+                "future_publish_times": future_times,
+                "compensation_publish_time": compensation_publish_time,
+                "reason": DRAMA_SCOPE_COMPENSATION_REASON,
+                "actor": actor,
+                "deployed_commit": deployed_commit,
+                "validated_queue_count": queue_count,
+                "validated_log_count": log_count,
+                "validate_only": validate_only,
+                "validated_count": 1,
+                "updated_count": 0,
+            }
+            if validate_only:
+                conn.rollback()
+                return result
+
+            new_account_json = json.dumps(
+                new_account_ids, separators=(",", ":")
+            )
+            removed_account_json = json.dumps(
+                removed_account_ids, separators=(",", ":")
+            )
+            plan_cursor = conn.execute(
+                "UPDATE x_post_schedule_random_plan SET config_version=?,"
+                "account_ids_json=?,body_template=? "
+                "WHERE source_type='drama' AND run_date=? "
+                "AND config_version=? AND account_ids_json=?",
+                (
+                    int(config_row["version"]),
+                    new_account_json,
+                    new_template,
+                    current_date,
+                    int(plan_row["config_version"]),
+                    str(plan_row["account_ids_json"]),
+                ),
+            )
+            if int(plan_cursor.rowcount or 0) != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_scope_compensation_conflict",
+                    "Drama random plan changed during compensation",
+                    409,
+                )
+            slot_key = "xpost:schedule:drama-scope-comp:v1:%s:%s" % (
+                original_run_id,
+                compensation_publish_time.replace(":", ""),
+            )
+            cursor = conn.execute(
+                "INSERT INTO x_post_schedule_run("
+                "slot_key,source_type,run_date,publish_time,timezone,"
+                "config_version,account_ids_json,schedule_mode,body_template,"
+                "status,expected_count,queued_count,published_count,"
+                "failed_count,unknown_count,created_at,updated_at"
+                ") VALUES(?,'drama',?,?,?,?,?,'random',?,'claimed',?,0,0,0,0,?,?)",
+                (
+                    slot_key,
+                    current_date,
+                    compensation_publish_time,
+                    SCHEDULE_TIMEZONE,
+                    int(config_row["version"]),
+                    new_account_json,
+                    new_template,
+                    len(new_account_ids),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            compensation_run_id = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT INTO x_post_schedule_drama_scope_compensation_audit("
+                "original_schedule_run_id,compensation_schedule_run_id,"
+                "recovery_reason,actor,deployed_commit,previous_config_version,"
+                "previous_account_ids_json,new_config_version,"
+                "new_account_ids_json,removed_account_ids_json,"
+                "publish_times_json,compensation_publish_time,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    original_run_id,
+                    compensation_run_id,
+                    DRAMA_SCOPE_COMPENSATION_REASON,
+                    actor,
+                    deployed_commit,
+                    int(plan_row["config_version"]),
+                    str(plan_row["account_ids_json"]),
+                    int(config_row["version"]),
+                    new_account_json,
+                    removed_account_json,
+                    str(plan_row["publish_times_json"]),
+                    compensation_publish_time,
+                    timestamp,
+                ),
+            )
+            conn.commit()
+            result["compensation_run_id"] = compensation_run_id
             result["updated_count"] = 1
             return result
 
