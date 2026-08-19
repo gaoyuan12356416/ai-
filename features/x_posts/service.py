@@ -8800,6 +8800,12 @@ class XPostStore:
                 "WHERE schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            scope_compensation_audit = conn.execute(
+                "SELECT * FROM "
+                "x_post_schedule_drama_scope_compensation_audit "
+                "WHERE compensation_schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
             previous_error_message = str(run["error_message"] or "")
             initial_recovery_message_matches = bool(
                 initial_recovery
@@ -9025,12 +9031,53 @@ class XPostStore:
                     if plan_row
                     else None
                 )
+                scope_compensation_matches = False
+                if plan and scope_compensation_audit is not None:
+                    try:
+                        scope_compensation_matches = bool(
+                            str(run["source_type"]) == "drama"
+                            and int(
+                                scope_compensation_audit[
+                                    "new_config_version"
+                                ]
+                            )
+                            == int(run["config_version"])
+                            and _schedule_account_ids(
+                                _json_array(
+                                    scope_compensation_audit[
+                                        "new_account_ids_json"
+                                    ],
+                                    "new_account_ids",
+                                )
+                            )
+                            == account_ids
+                            and str(
+                                scope_compensation_audit[
+                                    "compensation_publish_time"
+                                ]
+                            )
+                            == str(run["publish_time"])
+                            and _schedule_publish_times(
+                                _json_array(
+                                    scope_compensation_audit[
+                                        "publish_times_json"
+                                    ],
+                                    "publish_times",
+                                )
+                            )
+                            == plan["publish_times"]
+                        )
+                    except XPostError:
+                        scope_compensation_matches = False
                 conflict = conflict or not bool(
                     plan
                     and int(plan["config_version"])
                     == int(run["config_version"])
                     and plan["account_ids"] == account_ids
-                    and str(run["publish_time"]) in plan["publish_times"]
+                    and (
+                        str(run["publish_time"]) in plan["publish_times"]
+                        or scope_compensation_matches
+                    )
                     and str(plan["body_template"])
                     == str(run["body_template"])
                 )

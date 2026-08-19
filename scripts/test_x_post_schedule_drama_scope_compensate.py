@@ -161,6 +161,72 @@ class DramaScopeCompensationTest(unittest.TestCase):
                 ("failed_preflight", "x_post_schedule_drama_shortage"),
             )
 
+    def test_zero_write_child_can_be_rearmed_through_scope_audit(self):
+        result = self.call()
+        child_id = result["compensation_run_id"]
+        with sqlite3.connect(str(self.db)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='failed_preflight',"
+                "error_code='invalid_media_dimensions',"
+                "error_message='episode C:1 media preflight failed: "
+                "素材分辨率或宽高比不符合X要求' WHERE id=?",
+                (child_id,),
+            )
+            conn.commit()
+
+        validated = self.store.recover_failed_preflight_schedule_run(
+            child_id,
+            "invalid_media_dimensions",
+            reason="operator_same_day_compensation_v1",
+            actor="codex_user_authorized_20260819",
+            validate_only=True,
+            now=self.now,
+        )
+        self.assertEqual(validated["updated_count"], 0)
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            child_id,
+            "invalid_media_dimensions",
+            reason="operator_same_day_compensation_v1",
+            actor="codex_user_authorized_20260819",
+            now=self.now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(child_id)["status"],
+            "claimed",
+        )
+
+    def test_unlinked_off_plan_child_still_fails_closed(self):
+        result = self.call()
+        child_id = result["compensation_run_id"]
+        with sqlite3.connect(str(self.db)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='failed_preflight',"
+                "error_code='invalid_media_dimensions',"
+                "error_message='episode C:1 media preflight failed: "
+                "素材分辨率或宽高比不符合X要求' WHERE id=?",
+                (child_id,),
+            )
+            conn.execute(
+                "DELETE FROM x_post_schedule_drama_scope_compensation_audit "
+                "WHERE compensation_schedule_run_id=?",
+                (child_id,),
+            )
+            conn.commit()
+
+        with self.assertRaises(XPostError) as raised:
+            self.store.recover_failed_preflight_schedule_run(
+                child_id,
+                "invalid_media_dimensions",
+                reason="operator_same_day_compensation_v1",
+                actor="codex_user_authorized_20260819",
+                now=self.now,
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_second_apply_fails_closed(self):
         self.call()
         with self.assertRaises(XPostError) as raised:
