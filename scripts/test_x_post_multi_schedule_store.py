@@ -718,6 +718,77 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_schedule_stale_claim",
         )
 
+    def test_previous_day_stale_claim_recovery_is_exact_and_audited(self):
+        self.save_schedule("material", [2], ["10:00"])
+        self._add_recovery_account(2)
+        claimed = self.store.due_schedule_slots(
+            datetime(2026, 7, 26, 10, 0, 10, tzinfo=service.BEIJING_TZ),
+            grace_seconds=90,
+        )["items"][0]
+        run_id = self.store.query_schedule_plan(
+            "material", "2026-07-26", "10:00"
+        )["run"]["id"]
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, 10, tzinfo=service.BEIJING_TZ),
+            grace_seconds=90,
+        )
+        now = datetime(2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ)
+        validated = self.store.recover_previous_day_stale_claim_schedule_run(
+            run_id,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            validate_only=True,
+            now=now,
+        )
+        self.assertEqual(validated["updated_count"], 0)
+        self.assertEqual(validated["validated_queue_count"], 0)
+        self.assertEqual(
+            self.store.get_schedule_run(run_id)["status"],
+            "stopped",
+        )
+
+        recovered = self.store.recover_previous_day_stale_claim_schedule_run(
+            run_id,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            now=now,
+        )
+        self.assertEqual(recovered["next_status"], "claimed")
+        restored = self.store.get_schedule_run(run_id)
+        self.assertEqual(restored["status"], "claimed")
+        self.assertEqual(restored["error_code"], "")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT recovery_reason,actor,previous_status,"
+                "previous_error_code,validated_queue_count,validated_log_count "
+                "FROM x_post_schedule_previous_day_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                "codex_operator",
+                "stopped",
+                "x_post_schedule_stale_claim",
+                0,
+                0,
+            ),
+        )
+
+        with self.assertRaises(service.XPostError) as duplicate:
+            self.store.recover_previous_day_stale_claim_schedule_run(
+                run_id,
+                actor="codex_operator",
+                deployed_commit="a" * 40,
+                now=now,
+            )
+        self.assertEqual(
+            duplicate.exception.code,
+            "x_post_previous_day_recovery_conflict",
+        )
+
     def test_previous_day_slot_remains_due_during_midnight_grace(self):
         self.save_schedule("material", [2], ["23:59"])
         claimed = self.store.due_schedule_slots(

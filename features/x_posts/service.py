@@ -213,6 +213,9 @@ FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON = (
 DRAMA_SCOPE_COMPENSATION_REASON = (
     "operator_same_day_drama_scope_compensation_v1"
 )
+PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON = (
+    "operator_previous_day_stale_claim_recovery_v1"
+)
 FAILED_PREFLIGHT_TRANSIENT_MEDIA_ERROR_MESSAGES = {
     "media_download_failed": (
         "素材下载响应中断:",
@@ -1781,6 +1784,29 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_previous_day_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_previous_day_stale_claim_recovery_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL CHECK(length(deployed_commit)=40),
+                    previous_status TEXT NOT NULL CHECK(previous_status='stopped'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_post_schedule_stale_claim'),
+                    previous_error_message TEXT NOT NULL,
+                    run_date TEXT NOT NULL,
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0,
+                    validated_log_count INTEGER NOT NULL DEFAULT 0,
+                    validated_published_count INTEGER NOT NULL DEFAULT 0,
+                    validated_queued_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -2322,6 +2348,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_post_capacity_created "
                 "ON x_post_schedule_post_capacity_retry_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_previous_day_recovery_created "
+                "ON x_post_schedule_previous_day_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_verified_repair_created "
@@ -8692,6 +8722,209 @@ class XPostStore:
         item = self.get_schedule_run(run_id)
         item["recorded"] = True
         return item
+
+    def recover_previous_day_stale_claim_schedule_run(
+        self,
+        run_id,
+        *,
+        actor,
+        deployed_commit,
+        validate_only=False,
+        now=None,
+    ):
+        """Re-arm one exact previous-day stale claim without calling X.
+
+        This is intentionally narrower than ordinary failed-preflight recovery:
+        only yesterday's system-stopped run is eligible, all durable queue/log
+        counts must reconcile, and no unresolved X outcome may exist.
+        """
+        run_id = _positive_int(run_id, "run_id")
+        if not isinstance(validate_only, bool):
+            raise XPostError("invalid_request", "validate_only must be a boolean", 400)
+        try:
+            actor = _clean_token(actor, "recovery actor", 128)
+            deployed_commit = _clean_token(
+                deployed_commit, "deployed commit", 40
+            ).lower()
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "Previous-day recovery arguments are invalid",
+                400,
+            ) from None
+        if not re.fullmatch(r"[a-f0-9]{40}", deployed_commit):
+            raise XPostError(
+                "x_post_previous_day_recovery_not_allowed",
+                "Previous-day recovery requires an exact deployed commit",
+                409,
+            )
+
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        expected_run_date = (current.date() - timedelta(days=1)).isoformat()
+        timestamp = utc_now()
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_run_not_found",
+                    "X schedule run was not found",
+                    404,
+                )
+
+            account_ids = _schedule_account_ids(
+                _json_array(run["account_ids_json"], "account_ids")
+            )
+            queue_rows = conn.execute(
+                "SELECT status,COUNT(*) AS count FROM x_post_queue "
+                "WHERE schedule_run_id=? GROUP BY status",
+                (run_id,),
+            ).fetchall()
+            queue_counts = {
+                str(row["status"]): int(row["count"]) for row in queue_rows
+            }
+            queue_count = sum(queue_counts.values())
+            published_queue_count = queue_counts.get("published", 0)
+            queued_queue_count = queue_counts.get("queued", 0)
+            log_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log l "
+                    "JOIN x_post_queue q ON q.id=l.queue_id "
+                    "WHERE q.schedule_run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            unresolved = conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.schedule_run_id=? AND (COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('reserved','media_uploading','post_creating',"
+                "'repost_creating')) LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            non_published_log = conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.schedule_run_id=? AND l.status!='published' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            prior_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_previous_day_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+
+            placeholders = ",".join("?" for _item in account_ids)
+            accounts = conn.execute(
+                "SELECT id,status,publish_approved,token_store_key "
+                "FROM x_authorized_account WHERE id IN (%s)" % placeholders,
+                tuple(account_ids),
+            ).fetchall()
+            ready_ids = {
+                int(row["id"])
+                for row in accounts
+                if str(row["status"]) == "active"
+                and int(row["publish_approved"] or 0) == 1
+                and bool(str(row["token_store_key"] or "").strip())
+            }
+
+            conflict = bool(
+                str(run["run_date"]) != expected_run_date
+                or str(run["status"]) != "stopped"
+                or str(run["error_code"]) != "x_post_schedule_stale_claim"
+                or int(run["expected_count"] or 0) != len(account_ids)
+                or int(run["queued_count"] or 0) != queue_count
+                or int(run["published_count"] or 0) != published_queue_count
+                or int(run["failed_count"] or 0) != 0
+                or int(run["unknown_count"] or 0) != 0
+                or set(queue_counts).difference({"queued", "published"})
+                or queue_count not in {0, len(account_ids)}
+                or queued_queue_count + published_queue_count != queue_count
+                or log_count != published_queue_count
+                or unresolved is not None
+                or non_published_log is not None
+                or prior_audit is not None
+                or ready_ids != set(account_ids)
+            )
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_previous_day_recovery_conflict",
+                    "Run, account, queue, log, or audit state is not an exact previous-day stale claim",
+                    409,
+                )
+
+            result = {
+                "run_id": run_id,
+                "source_type": str(run["source_type"]),
+                "run_date": str(run["run_date"]),
+                "publish_time": str(run["publish_time"]),
+                "expected_count": int(run["expected_count"]),
+                "reason": PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                "actor": actor,
+                "deployed_commit": deployed_commit,
+                "validated_queue_count": queue_count,
+                "validated_log_count": log_count,
+                "validated_published_count": published_queue_count,
+                "validated_queued_count": queued_queue_count,
+                "validate_only": validate_only,
+                "validated_count": 1,
+                "updated_count": 0,
+            }
+            if validate_only:
+                conn.rollback()
+                return result
+
+            conn.execute(
+                "INSERT INTO x_post_schedule_previous_day_recovery_audit("
+                "schedule_run_id,recovery_reason,actor,deployed_commit,"
+                "previous_status,previous_error_code,previous_error_message,"
+                "run_date,validated_queue_count,validated_log_count,"
+                "validated_published_count,validated_queued_count,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                    actor,
+                    deployed_commit,
+                    str(run["status"]),
+                    str(run["error_code"]),
+                    str(run["error_message"] or ""),
+                    str(run["run_date"]),
+                    queue_count,
+                    log_count,
+                    published_queue_count,
+                    queued_queue_count,
+                    timestamp,
+                ),
+            )
+            next_status = "running" if queue_count else "claimed"
+            cursor = conn.execute(
+                "UPDATE x_post_schedule_run SET status=?,error_code='',"
+                "error_message='',finished_at='',updated_at=? "
+                "WHERE id=? AND status='stopped' "
+                "AND error_code='x_post_schedule_stale_claim'",
+                (next_status, timestamp, run_id),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_previous_day_recovery_conflict",
+                    "Previous-day stale claim changed during recovery",
+                    409,
+                )
+            conn.commit()
+            result["updated_count"] = 1
+            result["next_status"] = next_status
+            return result
 
     def recover_failed_preflight_schedule_run(
         self,
