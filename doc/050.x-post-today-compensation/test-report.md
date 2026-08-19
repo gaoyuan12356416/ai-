@@ -12,7 +12,7 @@ drama 范围补偿事务/CLI、schedule runner/store、全部 X 模块测试。
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| 新增聚焦测试 | 5 | 5 | 0 | 0 |
+| 新增聚焦测试 | 6 | 6 | 0 | 0 |
 | 关键 schedule 回归 | 100 | 100 | 0 | 0 |
 | X 全量回归 | 699 | 697 | 0 | 0（2 跳过） |
 
@@ -23,7 +23,7 @@ drama 范围补偿事务/CLI、schedule runner/store、全部 X 模块测试。
 ## 验证证据
 
 - `python -m py_compile ...`：通过。
-- `python -m unittest scripts.test_x_post_schedule_drama_scope_compensate -v`：5/5 通过。
+- `python -m unittest scripts.test_x_post_schedule_drama_scope_compensate -v`：6/6 通过。
 - 关键 schedule 回归：100/100 通过。
 - `python -m unittest discover -s scripts -p "test_x*.py"`：699 tests，OK，2 skipped。
 - 生产 Python 兼容性：测试辅助代码不使用 Python 3.10+ 的

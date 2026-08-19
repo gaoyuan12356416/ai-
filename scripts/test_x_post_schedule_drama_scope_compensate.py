@@ -206,6 +206,20 @@ class DramaScopeCompensationTest(unittest.TestCase):
             "x_post_drama_scope_compensation_conflict",
         )
 
+    def test_kept_language_inventory_must_cover_every_account(self):
+        with sqlite3.connect(str(self.db)) as conn:
+            conn.execute(
+                "UPDATE x_post_drama_pool SET free_episode_count=1 "
+                "WHERE language='en'"
+            )
+            conn.commit()
+        with self.assertRaises(XPostError) as raised:
+            self.call(validate_only=True)
+        self.assertEqual(
+            raised.exception.code,
+            "x_post_drama_scope_compensation_conflict",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

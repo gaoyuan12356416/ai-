@@ -9574,7 +9574,19 @@ class XPostStore:
                 == 0
                 for account_id in removed_account_ids
             )
-            total_kept_episodes = sum(available_by_language.values())
+            kept_account_counts_by_language = {}
+            for account_id in new_account_ids:
+                kept_language = canonical_drama_language(
+                    account_by_id[account_id]["drama_language"]
+                )
+                kept_account_counts_by_language[kept_language] = (
+                    kept_account_counts_by_language.get(kept_language, 0) + 1
+                )
+            insufficient_kept_inventory = any(
+                available_by_language.get(language, 0) < required_count
+                for language, required_count in
+                kept_account_counts_by_language.items()
+            )
             future_times = [
                 publish_time
                 for publish_time in plan_times
@@ -9640,7 +9652,7 @@ class XPostStore:
                 or new_account_ids != expected_new_ids
                 or not all_ready
                 or not removed_have_no_inventory
-                or total_kept_episodes < len(new_account_ids)
+                or insufficient_kept_inventory
                 or future_run_count != 0
                 or unresolved is not None
             )
