@@ -757,6 +757,21 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         restored = self.store.get_schedule_run(run_id)
         self.assertEqual(restored["status"], "claimed")
         self.assertEqual(restored["error_code"], "")
+        recovered_due = self.store.previous_day_recovered_schedule_slots(
+            "2026-07-26",
+            "a" * 40,
+            now=now,
+        )
+        self.assertEqual(len(recovered_due["items"]), 1)
+        self.assertEqual(recovered_due["items"][0]["run_date"], "2026-07-26")
+        self.assertEqual(
+            self.store.previous_day_recovered_schedule_slots(
+                "2026-07-26",
+                "b" * 40,
+                now=now,
+            )["items"],
+            [],
+        )
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             audit = conn.execute(
                 "SELECT recovery_reason,actor,previous_status,"

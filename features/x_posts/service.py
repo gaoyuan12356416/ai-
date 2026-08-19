@@ -4703,6 +4703,85 @@ class XPostStore:
             )
         return {"items": items, "checked_at": current.isoformat(timespec="seconds")}
 
+    def previous_day_recovered_schedule_slots(
+        self,
+        run_date,
+        deployed_commit,
+        *,
+        now=None,
+    ):
+        """Return only yesterday's explicitly audited, re-armed schedule runs."""
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        try:
+            run_date = _date_value(run_date, "run_date")
+            deployed_commit = _clean_token(
+                deployed_commit, "deployed commit", 40
+            ).lower()
+        except ValueError:
+            raise XPostError(
+                "invalid_request", "Previous-day schedule scope is invalid", 400
+            ) from None
+        if (
+            run_date != (current.date() - timedelta(days=1)).isoformat()
+            or not re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
+        ):
+            raise XPostError(
+                "x_post_previous_day_runner_date_conflict",
+                "Previous-day schedule scope is not exact",
+                409,
+            )
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT r.* FROM x_post_schedule_run r "
+                "JOIN x_post_schedule_previous_day_recovery_audit a "
+                "ON a.schedule_run_id=r.id "
+                "WHERE r.run_date=? AND r.status IN ('claimed','running') "
+                "AND r.error_code='' AND a.recovery_reason=? "
+                "AND a.deployed_commit=? "
+                "ORDER BY r.publish_time DESC,r.source_type,r.id",
+                (
+                    run_date,
+                    PREVIOUS_DAY_STALE_CLAIM_RECOVERY_REASON,
+                    deployed_commit,
+                ),
+            ).fetchall()
+        items = []
+        for row in rows:
+            account_ids = _schedule_account_ids(
+                _json_array(row["account_ids_json"], "account_ids")
+            )
+            if len(account_ids) != int(row["expected_count"]):
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "X previous-day frozen run account count is inconsistent",
+                    500,
+                )
+            items.append(
+                {
+                    "source_type": str(row["source_type"]),
+                    "run_date": str(row["run_date"]),
+                    "publish_time": str(row["publish_time"]),
+                    "timezone": str(row["timezone"]),
+                    "version": int(row["config_version"]),
+                    "account_ids": account_ids,
+                    "schedule_mode": _schedule_mode(row["schedule_mode"]),
+                    "body_template": _normalize_post_template(
+                        row["body_template"], row["source_type"]
+                    ),
+                    "slot_key": str(row["slot_key"]),
+                    "frozen": True,
+                }
+            )
+        return {
+            "items": items,
+            "checked_at": current.isoformat(timespec="seconds"),
+        }
+
     def _queue_payload(
         self,
         payload,

@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from scripts.x_post_schedule_pre_x_recover import (  # noqa: E402
     _validate_recovery_report_path,
 )
 from scripts.x_post_schedule_runner import (  # noqa: E402
+    DEFAULT_PREVIOUS_DAY_DUE_PATH,
     ScheduleConfig,
     execute_schedule_tick,
 )
@@ -71,7 +73,12 @@ def main(argv=None):
                 409,
             )
         report_target = _validate_recovery_report_path(args.report_path)
-        config = ScheduleConfig.from_env()
+        config = replace(
+            ScheduleConfig.from_env(),
+            due_path=DEFAULT_PREVIOUS_DAY_DUE_PATH,
+            previous_day_recovery_reason=args.reason,
+            previous_day_deployed_commit=str(args.deployed_commit).lower(),
+        )
         with process_lock(config.lock_path) as acquired:
             if acquired is None:
                 result = {"status": "skipped_locked", "batches": []}

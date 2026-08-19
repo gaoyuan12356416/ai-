@@ -3946,6 +3946,59 @@ def due_post_schedules_request(payload):
     return {"items": list(result.get("items", []))[:limit]}
 
 
+def previous_day_due_post_schedules_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    reason = str(payload.get("operator_reason", "") or "")
+    deployed_commit = str(payload.get("deployed_commit", "") or "").lower()
+    if (
+        reason != "operator_previous_day_stale_claim_recovery_v1"
+        or not re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
+        or payload.get("grace_seconds") != 90
+    ):
+        raise ServiceError(
+            "x_post_previous_day_runner_not_allowed",
+            "跨日补偿请求未通过审计约束",
+            409,
+        )
+    try:
+        requested_now = datetime.fromisoformat(
+            str(payload.get("now", "") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        raise ServiceError("invalid_request", "now无效", 400) from None
+    if requested_now.tzinfo is None:
+        raise ServiceError("invalid_request", "now必须包含时区", 400)
+    requested_now = requested_now.astimezone(timezone(timedelta(hours=8)))
+    server_now = datetime.now(timezone(timedelta(hours=8)))
+    run_date = str(payload.get("run_date", "") or "")
+    if (
+        run_date != (server_now.date() - timedelta(days=1)).isoformat()
+        or requested_now.date().isoformat() != run_date
+    ):
+        raise ServiceError(
+            "x_post_previous_day_runner_date_conflict",
+            "跨日补偿日期范围无效",
+            409,
+        )
+    try:
+        limit = int(payload.get("limit", 4))
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "limit无效", 400) from None
+    if limit < 1 or limit > 10:
+        raise ServiceError("invalid_request", "limit无效", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).previous_day_recovered_schedule_slots(
+            run_date,
+            deployed_commit,
+            now=server_now,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"items": list(result.get("items", []))[:limit]}
+
+
 def query_post_schedule_plan_request(payload):
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
@@ -4565,6 +4618,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         schedule_exact_paths = {
             "/internal/posts/schedules/due",
+            "/internal/posts/schedules/previous-day-due",
             "/internal/posts/schedule-plan",
             "/internal/posts/schedule-plan/query",
             "/internal/posts/schedule-runs/record-failure",
@@ -4806,6 +4860,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/internal/posts/schedules/due":
                 self.send_json(200, due_post_schedules_request(payload))
+                return
+            if parsed.path == "/internal/posts/schedules/previous-day-due":
+                self.send_json(
+                    200,
+                    previous_day_due_post_schedules_request(payload),
+                )
                 return
             if parsed.path == "/internal/posts/schedule-plan/query":
                 self.send_json(

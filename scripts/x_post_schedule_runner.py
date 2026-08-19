@@ -76,6 +76,7 @@ BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 FIXED_TIMEZONE = "Asia/Shanghai"
 DEFAULT_GRACE_SECONDS = 90
 DEFAULT_DUE_PATH = "/internal/posts/schedules/due"
+DEFAULT_PREVIOUS_DAY_DUE_PATH = "/internal/posts/schedules/previous-day-due"
 DEFAULT_PLAN_QUERY_PATH = "/internal/posts/schedule-plan/query"
 DEFAULT_PLAN_PATH = "/internal/posts/schedule-plan"
 DEFAULT_FAILURE_PATH = "/internal/posts/schedule-runs/record-failure"
@@ -206,6 +207,8 @@ class ScheduleConfig:
     repair_profile: str = DEFAULT_REPAIR_PROFILE
     max_repairs_per_run: int = 6
     drama_app_id: int = DRAMAWAVE_APP_ID
+    previous_day_recovery_reason: str = ""
+    previous_day_deployed_commit: str = ""
 
     @property
     def pool_check_path(self):
@@ -431,6 +434,19 @@ class ScheduleConfig:
             raise ScheduleRunError("schedule runner must use the fixed data-disk work directory")
         if self.grace_seconds != DEFAULT_GRACE_SECONDS:
             raise ScheduleRunError("schedule grace window must remain exactly 90 seconds")
+        if bool(self.previous_day_recovery_reason) != bool(
+            self.previous_day_deployed_commit
+        ):
+            raise ScheduleRunError("previous-day recovery audit scope is incomplete")
+        if self.previous_day_recovery_reason and (
+            self.previous_day_recovery_reason
+            != "operator_previous_day_stale_claim_recovery_v1"
+            or not re.fullmatch(
+                r"[a-f0-9]{40}", self.previous_day_deployed_commit
+            )
+            or self.due_path != DEFAULT_PREVIOUS_DAY_DUE_PATH
+        ):
+            raise ScheduleRunError("previous-day recovery audit scope is invalid")
         for path in (
             self.due_path,
             self.plan_query_path,
@@ -523,15 +539,28 @@ def _scheduled_at(item):
 class ScheduleSidecarClient(SidecarClient):
     """Strict parser for the schedule-only internal API surface."""
 
-    def due_schedules(self, path, *, current, grace_seconds, limit):
+    def due_schedules(
+        self,
+        path,
+        *,
+        current,
+        grace_seconds,
+        limit,
+        operator_reason="",
+        deployed_commit="",
+    ):
+        payload = {
+            "now": current.isoformat(timespec="seconds"),
+            "run_date": current.date().isoformat(),
+            "grace_seconds": int(grace_seconds),
+            "limit": int(limit),
+        }
+        if operator_reason or deployed_commit:
+            payload["operator_reason"] = str(operator_reason)
+            payload["deployed_commit"] = str(deployed_commit)
         result = self.post(
             path,
-            {
-                "now": current.isoformat(timespec="seconds"),
-                "run_date": current.date().isoformat(),
-                "grace_seconds": int(grace_seconds),
-                "limit": int(limit),
-            },
+            payload,
         )
         raw_items = result.get("items") if isinstance(result, dict) else None
         if not isinstance(raw_items, list) or len(raw_items) > int(limit):
@@ -1845,12 +1874,19 @@ def execute_schedule_tick(
     if repair_client is None:
         repair_client = _repair_client(config)
 
-    due = sidecar.due_schedules(
-        config.due_path,
-        current=current,
-        grace_seconds=config.grace_seconds,
-        limit=config.max_due_batches,
-    )
+    due_options = {
+        "current": current,
+        "grace_seconds": config.grace_seconds,
+        "limit": config.max_due_batches,
+    }
+    if config.previous_day_recovery_reason:
+        due_options.update(
+            {
+                "operator_reason": config.previous_day_recovery_reason,
+                "deployed_commit": config.previous_day_deployed_commit,
+            }
+        )
+    due = sidecar.due_schedules(config.due_path, **due_options)
     accepted_due = [
         item
         for item in due
