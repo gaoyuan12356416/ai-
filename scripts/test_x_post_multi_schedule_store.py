@@ -2892,6 +2892,43 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "claimed",
         )
 
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_schedule_operator_deferred_for_due_slot",
+            "operator deferred zero-write material preflight to protect "
+            "scheduled drama slot",
+        )
+        capacity = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_operator_deferred_for_due_slot",
+            reason=service.FAILED_PREFLIGHT_CAPACITY_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(capacity["recovery_mode"], "capacity")
+        self.assertEqual(capacity["updated_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT recovery_reason,previous_error_code,"
+                "validated_queue_count,validated_log_count "
+                "FROM x_post_schedule_capacity_retry_audit "
+                "WHERE schedule_run_id=?",
+                (failed["id"],),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_CAPACITY_RECOVERY_REASON,
+                "x_post_schedule_operator_deferred_for_due_slot",
+                0,
+                0,
+            ),
+        )
+
     def test_failed_preflight_corrective_retry_rejects_unproven_message(self):
         failed = self._failed_schedule_run()
         recovery_now = datetime(

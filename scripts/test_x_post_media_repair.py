@@ -583,6 +583,7 @@ class MediaRepairTests(unittest.TestCase):
         self.assertEqual(result["probe"]["size"], result["output_size"])
         self.assertEqual(len(cos.upload_calls), 1)
         upload = cos.upload_calls[0]
+        self.assertEqual(upload["MAXThread"], media_repair.DEFAULT_COS_MAX_THREADS)
         self.assertEqual(
             upload["Metadata"]["x-cos-meta-sha256"],
             result["output_sha256"],

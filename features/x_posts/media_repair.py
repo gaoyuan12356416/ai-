@@ -103,6 +103,7 @@ DEFAULT_FFPROBE_BIN = "/opt/ffmpeg-nvenc/ffprobe"
 DEFAULT_TRANSCODE_TIMEOUT = 1800
 DEFAULT_PROBE_TIMEOUT = 120
 DEFAULT_DOWNLOAD_TIMEOUT = 120
+DEFAULT_COS_MAX_THREADS = 4
 
 _FALLBACK_LOCKS = {}
 _FALLBACK_LOCKS_GUARD = threading.Lock()
@@ -260,6 +261,7 @@ class WorkerConfig:
     download_timeout: int = DEFAULT_DOWNLOAD_TIMEOUT
     probe_timeout: int = DEFAULT_PROBE_TIMEOUT
     transcode_timeout: int = DEFAULT_TRANSCODE_TIMEOUT
+    cos_max_threads: int = DEFAULT_COS_MAX_THREADS
     profile: str = REPAIR_PROFILE
 
     @classmethod
@@ -361,6 +363,12 @@ class WorkerConfig:
                 DEFAULT_TRANSCODE_TIMEOUT,
                 30,
                 14400,
+            ),
+            cos_max_threads=_env_int(
+                "X_POST_MEDIA_REPAIR_COS_MAX_THREADS",
+                DEFAULT_COS_MAX_THREADS,
+                1,
+                16,
             ),
         )
 
@@ -1137,7 +1145,7 @@ class CosObjectStore:
                 Key=key,
                 LocalFilePath=str(local_path),
                 PartSize=8,
-                MAXThread=4,
+                MAXThread=self.config.cos_max_threads,
                 EnableMD5=True,
                 ACL="public-read",
                 ContentType="video/mp4",
