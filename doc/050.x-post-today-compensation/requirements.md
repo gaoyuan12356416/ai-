@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-2026-08-19 短剧随机计划含 17 个英语账号和 2 个日语账号，但短剧池只有英语库存，01:18 整批在 X 写入前失败；素材补偿恢复 GPU 隧道后又因无目标账号语种的素材未留下当轮跳过证据，连续触发 FIFO 重放冲突。目标是在保留原失败证据的前提下完成短剧范围补偿，并让素材预检与事务 FIFO 重放使用同一组可审计语种证据。
+2026-08-19 短剧随机计划含 17 个英语账号和 2 个日语账号，但短剧池只有英语库存，01:18 整批在 X 写入前失败；素材补偿恢复 GPU 隧道后又因无目标账号语种的素材未留下当轮跳过证据，连续触发 FIFO 重放冲突。短剧补偿首次预检又暴露了 schedule 批次为 17 个账号、但修复上限仍继承 legacy daily 值 14 的容量不匹配。目标是在保留原失败证据的前提下完成短剧范围补偿，并让素材预检与事务 FIFO 重放使用同一组可审计语种证据。
 
 ## 范围
 
@@ -23,6 +23,7 @@
 - `features/x_posts/service.py`：新增事务方法和只增审计表。
 - `scripts/x_post_schedule_drama_scope_compensate.py`：复用全局 runner 锁、报告路径守卫和原子报告写入。
 - `scripts/x_post_schedule_runner.py`：遇到当前账号范围不包含的素材语言时，记录 `material_language_not_scheduled`，事务层只接受本轮 cutoff 之后的该跳过证据。
+- `deploy/x-post-schedule.env.example`：明确 `X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN=17`，schedule 不再继承旧 daily 上限 14。
 - 随机计划仅更新 `config_version/account_ids_json/body_template`；`publish_times_json` 保持不变。
 
 ## 验收标准

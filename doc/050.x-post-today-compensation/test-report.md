@@ -15,7 +15,8 @@ drama 范围补偿事务/CLI、schedule runner/store、全部 X 模块测试。
 | 新增聚焦测试 | 6 | 6 | 0 | 0 |
 | 关键 schedule 回归 | 100 | 100 | 0 | 0 |
 | 素材语种 FIFO 聚焦 | 2 | 2 | 0 | 0 |
-| X 全量回归 | 702 | 700 | 0 | 0（2 跳过） |
+| schedule 修复容量 | 2 | 2 | 0 | 0 |
+| X 全量回归 | 704 | 702 | 0 | 0（2 跳过） |
 
 ## 缺陷情况
 
@@ -27,7 +28,8 @@ drama 范围补偿事务/CLI、schedule runner/store、全部 X 模块测试。
 - `python -m unittest scripts.test_x_post_schedule_drama_scope_compensate -v`：6/6 通过。
 - 关键 schedule 回归：100/100 通过。
 - 素材无目标语种与 FIFO 重放测试：2/2 通过。
-- `python -m unittest discover -s scripts -p "test_x*.py"`：702 tests，OK，2 skipped。
+- schedule 专用修复上限优先于 daily 回退值，且部署示例固化为 17：2/2 通过。
+- `python -m unittest discover -s scripts -p "test_x*.py"`：704 tests，OK，2 skipped。
 - 生产 Python 兼容性：测试辅助代码不使用 Python 3.10+ 的
   `TemporaryDirectory(ignore_cleanup_errors=...)` 参数。
 

@@ -73,6 +73,28 @@ def make_config(work_dir):
     )
 
 
+class ScheduleConfigTest(unittest.TestCase):
+    def test_schedule_repair_budget_overrides_legacy_daily_budget(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN": "17",
+                "X_POST_DAILY_MAX_REPAIRS_PER_RUN": "14",
+                "X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS": "media.example.test",
+            },
+            clear=True,
+        ):
+            config = ScheduleConfig.from_env()
+
+        self.assertEqual(config.max_repairs_per_run, 17)
+
+    def test_schedule_env_example_covers_full_batch_repair_budget(self):
+        example = (ROOT / "deploy" / "x-post-schedule.env.example").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN=17", example)
+
+
 def due_item(
     source_type="material",
     publish_time="10:00",
