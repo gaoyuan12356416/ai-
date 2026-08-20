@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <title>创建 FB Page 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/fb-auto-publish.css?v=20260820list1" />
+  <link rel="stylesheet" href="/fb-auto-publish.css?v=20260820-list-only-v2" />
 </head>
 <body>
   <div class="app">
@@ -27,7 +27,7 @@
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
-          <a class="button link-button" href="/fb-auto-publish-templates.html">返回模板列表</a>
+          <a class="button link-button" href="/fb-auto-publish-templates.html?v=20260820-list-only-v2">返回模板列表</a>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
           <button id="authButton" class="button" type="button">登录</button>
         </div>
@@ -170,7 +170,7 @@
               <div id="capacityEstimate" class="helper">请选择 Page 池后查看每日预计 GPU 任务和 Graph 发布量。</div>
               <div class="actions">
                 <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
-                <a class="button link-button" href="/fb-auto-publish-templates.html">取消并返回</a>
+                <a class="button link-button" href="/fb-auto-publish-templates.html?v=20260820-list-only-v2">取消并返回</a>
                 <span id="formMessage" class="status-line" role="status" aria-live="polite"></span>
               </div>
             </div>
@@ -183,8 +183,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
-  <script src="/fb-auto-publish-common.js?v=20260820list1"></script>
-  <script src="/fb-auto-publish-template.js?v=20260820list1"></script>
+  <script src="/quick-nav.js?v=20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-template.js?v=20260820-list-only-v2"></script>
 </body>
 </html>

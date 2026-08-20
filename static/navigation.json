@@ -250,7 +250,7 @@
         "label": "FB Page 自动发布模板",
         "description": "按Page池维护视频选材和发布时间模板",
         "kind": "page",
-        "href": "/fb-auto-publish-templates.html",
+        "href": "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
         "enabled": true,
         "order": 10,
         "module": "fb_page_posts",

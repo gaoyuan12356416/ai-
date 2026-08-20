@@ -160,7 +160,7 @@
       });
       ui.byId("formMessage").textContent = "保存成功，正在返回模板列表…";
       ui.byId("formMessage").className = "status-line success";
-      window.location.href = "/fb-auto-publish-templates.html";
+      window.location.href = "/fb-auto-publish-templates.html?v=20260820-list-only-v2";
     } catch (error) {
       ui.byId("formMessage").textContent = error.message || "模板保存失败";
       ui.byId("formMessage").className = "status-line error";

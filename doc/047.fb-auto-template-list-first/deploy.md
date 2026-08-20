@@ -72,3 +72,14 @@
 
 - 生产路径不是 Git 工作树；必须从已推送的精确提交导出文件，不能直接上传未提交工作区。
 - 本次验收不创建模板、不调用 run-now、不产生真实 Graph Post。
+
+## 旧合并页缓存修复发布步骤
+
+1. 提交并推送版本化导航、两张模板页、脚本、`navigation.json` 与 `deploy/nginx-fb-auto-publish.conf`，记录精确 GitHub SHA。
+2. 备份两个生产静态目录中的待覆盖文件、两个生产 `navigation.json`、`quick-nav.js`，以及现有 `/etc/nginx/default.d/fb-auto-publish.conf`（若不存在则记录 absent）。
+3. 从精确 release 安装变更文件；将 Nginx 配置安装为 `/etc/nginx/default.d/fb-auto-publish.conf`。
+4. 先执行 `nginx -t`；仅在通过后执行 `systemctl reload nginx`。无需重启主 API 或 FB sidecar。
+5. 验证版本化导航指向纯列表页，列表无 `templateForm`，创建按钮进入独立表单页；三个 HTML 响应均含 `Cache-Control: no-store`。
+6. 复核 `live_enabled=false`、sidecar PID/重启次数、六张运行表计数及 SQLite `quick_check` 与发布前一致。
+
+回滚：恢复备份的静态/导航文件；若 Nginx 配置发布前不存在，则将该单文件移入备份目录，若存在则恢复原文件；执行 `nginx -t` 后 reload。不得回滚 SQLite。

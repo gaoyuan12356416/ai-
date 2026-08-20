@@ -62,7 +62,7 @@
         '<td><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", "</span></td>",
         "<td>", ui.escapeHtml(scheduleText(config)), "</td>",
         '<td><div class="table-actions">',
-        '<a class="button small link-button" href="/fb-auto-publish-template.html?id=', id, '">编辑</a>',
+        '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
         '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', busy, ">手动执行</button>",
         "</div></td>",
