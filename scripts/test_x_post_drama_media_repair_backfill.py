@@ -264,6 +264,9 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
                 }
 
             with mock.patch(
+                "scripts.x_post_schedule_runner.DEFAULT_WORK_DIR",
+                str(Path(temporary).resolve()),
+            ), mock.patch(
                 "scripts.x_post_drama_media_repair_backfill."
                 "select_drama_pool_episodes",
                 side_effect=selector,
@@ -317,6 +320,9 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
                 "material_url": "https://media.example.test/source.mp4",
             }
             with mock.patch(
+                "scripts.x_post_schedule_runner.DEFAULT_WORK_DIR",
+                str(Path(temporary).resolve()),
+            ), mock.patch(
                 "scripts.x_post_drama_media_repair_backfill."
                 "select_drama_pool_episodes",
                 return_value=[candidate],
