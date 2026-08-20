@@ -54,3 +54,10 @@
 - 部署后 OAuth Sidecar、X Auto Sidecar、Drama Material API active；六个 X timer active；8810/18833 健康检查通过，8787 正常监听。
 - 在线两套 SQLite 均 `quick_check=ok`、外键异常 0、unknown 0。回滚只切代码并恢复模块，不回滚 SQLite/Token/账本。
 - 首次 18833 探针早于监听就绪，得到一次 connection refused；服务随后正常监听并通过重试健康检查，日志无启动异常，未触发回滚。
+
+## 2026-08-20 复查补丁
+
+- `10bb243` 已证明基础部分容量，但复查发现候选前 100 条截断和历史可复检错误 FIFO 冲突，不能作为最终保证版本。
+- 新补丁无 DDL、无新增配置；将重新执行 GitHub-first 提交、在线备份、不可变 release 切换和服务器专项。
+- 部署后必须用生产 SQLite 副本复现“第 101 条正常”和“历史异常恢复”两条路径，并观察下一自然素材/短剧时间点。
+- 新 commit、release、备份和验收证据待发布后补录。

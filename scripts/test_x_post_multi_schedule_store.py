@@ -1385,6 +1385,77 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
+    def test_material_schedule_atomically_clears_selected_revalidatable_error(self):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["211"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {
+                    "material_id": "211",
+                    "error_code": "material_not_found_or_ineligible",
+                    "error_message": "historical selector could not hydrate it",
+                }
+            ],
+        )["items"][0]
+
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.material_candidate(pool, 2)],
+        )
+
+        self.assertTrue(plan["created"])
+        self.assertEqual(len(plan["queues"]), 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            revalidated = conn.execute(
+                "SELECT last_checked_at,last_error_code,last_error_message "
+                "FROM x_post_material_pool WHERE id=?",
+                (pool["id"],),
+            ).fetchone()
+        self.assertTrue(revalidated["last_checked_at"])
+        self.assertEqual(revalidated["last_error_code"], "")
+        self.assertEqual(revalidated["last_error_message"], "")
+
+    def test_material_schedule_cannot_skip_unrevalidated_historical_error(self):
+        self.save_schedule("material", [2], ["09:00"])
+        oldest, newest = self.store.add_pool_materials(
+            ["212", "213"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "212", "error_code": ""},
+                {
+                    "material_id": "213",
+                    "error_code": "material_not_video",
+                    "error_message": "historical selector classified it as an image",
+                },
+            ],
+        )["items"]
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [self.material_candidate(oldest, 2)],
+            )
+
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT last_error_code FROM x_post_material_pool WHERE id=?",
+                (newest["id"],),
+            ).fetchone()
+            queue_count = conn.execute(
+                "SELECT COUNT(*) FROM x_post_queue"
+            ).fetchone()[0]
+        self.assertEqual(row[0], "material_not_video")
+        self.assertEqual(queue_count, 0)
+
     def test_material_schedule_allows_latest_set_to_follow_account_capability_order(self):
         self.save_schedule("material", [2, 3], ["09:00"])
         added = self.store.add_pool_materials(

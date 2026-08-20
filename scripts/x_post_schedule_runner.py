@@ -1138,12 +1138,16 @@ def _preflight_material_candidates(
     repair_client,
     assignment_identity,
     stable_shuffler=_stable_shuffled,
+    accepted_by_account=None,
+    repair_state=None,
 ):
-    """FIFO-scan material and stably randomize same-language target pairing."""
+    """FIFO-scan one page while preserving optional cross-page run state."""
     target_count = len(accounts)
-    accepted_by_account = {}
+    if accepted_by_account is None:
+        accepted_by_account = {}
+    if repair_state is None:
+        repair_state = {"attempted": 0}
     failures = []
-    repair_state = {"attempted": 0}
     accounts_by_language = {}
     for account in accounts:
         language = canonical_drama_language(account.get("drama_language"))
@@ -1353,47 +1357,61 @@ def _material_candidates(
             "manual material pool has no available item",
             "x_post_schedule_material_shortage",
         )
-    connection = _open_source_connection(config, connection_factory)
-    try:
-        candidates, selector_rejections = select_pool_candidates(
-            connection,
-            pool_items,
-            source_date,
-            limit=config.candidate_pool_limit,
-            schema=config.mysql_database,
-        )
-    finally:
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
-    _record_pool_checks_best_effort(
-        sidecar,
-        config,
-        selector_rejections,
-    )
     identity = dict(assignment_identity or {})
     identity.setdefault("source_type", "material")
     identity.setdefault("run_date", source_date)
     identity.setdefault("publish_time", "legacy")
     identity.setdefault("version", 1)
-    planned, preflight_rejections = _preflight_material_candidates(
-        config,
-        sidecar,
-        candidates,
-        accounts,
-        source_date=source_date,
-        timestamp=timestamp,
-        downloader=downloader,
-        prober=prober,
-        repair_client=repair_client,
-        assignment_identity=identity,
-        stable_shuffler=stable_shuffler,
-    )
-    _record_pool_checks_best_effort(
-        sidecar,
-        config,
-        preflight_rejections,
-    )
+    accepted_by_account = {}
+    repair_state = {"attempted": 0}
+    planned = []
+    connection = _open_source_connection(config, connection_factory)
+    try:
+        # candidate_pool_limit bounds one hydration/media-preflight page.  The
+        # fixed pool snapshot may continue through scan_limit until the frozen
+        # account scope is filled or every row has been inspected.
+        for start in range(0, len(pool_items), config.candidate_pool_limit):
+            if len(accepted_by_account) == len(accounts):
+                break
+            pool_batch = pool_items[
+                start : start + config.candidate_pool_limit
+            ]
+            candidates, selector_rejections = select_pool_candidates(
+                connection,
+                pool_batch,
+                source_date,
+                limit=config.candidate_pool_limit,
+                schema=config.mysql_database,
+            )
+            _record_pool_checks_best_effort(
+                sidecar,
+                config,
+                selector_rejections,
+            )
+            planned, preflight_rejections = _preflight_material_candidates(
+                config,
+                sidecar,
+                candidates,
+                accounts,
+                source_date=source_date,
+                timestamp=timestamp,
+                downloader=downloader,
+                prober=prober,
+                repair_client=repair_client,
+                assignment_identity=identity,
+                stable_shuffler=stable_shuffler,
+                accepted_by_account=accepted_by_account,
+                repair_state=repair_state,
+            )
+            _record_pool_checks_best_effort(
+                sidecar,
+                config,
+                preflight_rejections,
+            )
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
     if not planned:
         raise ScheduleRunError(
             "no FIFO material candidate passed media preflight",

@@ -28,6 +28,7 @@ from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleRunError,
     ScheduleSidecarClient,
     _drama_candidates,
+    _material_candidates,
     _preflight_material_candidates,
     _retrying_media_downloader,
     execute_schedule_tick,
@@ -316,6 +317,129 @@ class ScheduleRunnerTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_material_scan_continues_after_first_hydration_batch(self):
+        pool_items = [
+            {
+                "id": position,
+                "material_id": str(9000 + position),
+                "created_at": "2026-07-27T00:%02d:00+00:00" % position,
+            }
+            for position in range(1, 52)
+        ]
+        selector_batches = []
+        preflighted = []
+
+        class Connection:
+            def close(self):
+                return None
+
+        class Sidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__([due_item(accounts=[11])])
+                self.checks = []
+
+            def available_pool_items(self, path, limit):
+                self.request = (path, limit)
+                return list(pool_items)
+
+            def record_pool_checks(self, path, checks):
+                self.checks.extend((path, dict(item)) for item in checks)
+                return {"updated_count": len(checks)}
+
+            def verify_account(self, account_id):
+                item = super().verify_account(account_id)
+                item["drama_language"] = "en"
+                return item
+
+            def premium_relay_accounts(self, run_date, drama_language):
+                self.calls.append(
+                    ("relay_accounts", run_date, drama_language)
+                )
+                return []
+
+        def hydrate(_connection, items, _source_date, *, limit, schema):
+            del schema
+            selector_batches.append(
+                [str(item["material_id"]) for item in items]
+            )
+            self.assertEqual(limit, 50)
+            return [
+                {
+                    "pool_item_id": int(item["id"]),
+                    "pool_created_at": str(item["created_at"]),
+                    "material_id": str(item["material_id"]),
+                    "material_language": (
+                        "en" if int(item["id"]) >= 50 else "ja"
+                    ),
+                }
+                for item in items
+            ], []
+
+        def preflight(_config, candidate, account, *_args, **kwargs):
+            preflighted.append(
+                (
+                    str(candidate["material_id"]),
+                    int(account["id"]),
+                    id(kwargs["repair_state"]),
+                )
+            )
+            if str(candidate["material_id"]) == "9050":
+                raise CandidatePreflightError(
+                    "no same-language Premium relay is available",
+                    code="x_long_video_requires_premium",
+                )
+            return {
+                "pool_item_id": int(candidate["pool_item_id"]),
+                "pool_created_at": str(candidate["pool_created_at"]),
+                "material_id": str(candidate["material_id"]),
+                "account_id": int(account["id"]),
+                "preflight_duration": 100.0,
+            }
+
+        sidecar = Sidecar()
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_pool_candidates",
+            side_effect=hydrate,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            result = self.execute(
+                sidecar,
+                material_candidate_loader=_material_candidates,
+                connection_factory=lambda _config: Connection(),
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+            )
+
+        self.assertEqual(sidecar.request[1], self.config.scan_limit)
+        self.assertEqual(
+            [len(batch) for batch in selector_batches],
+            [50, 1],
+        )
+        self.assertEqual(
+            [item for batch in selector_batches for item in batch],
+            [str(item["material_id"]) for item in pool_items],
+        )
+        create_call = next(call for call in sidecar.calls if call[0] == "create")
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            [
+                (item["pool_item_id"], item["material_id"])
+                for item in create_call[2]["candidates"]
+            ],
+            [(51, "9051")],
+        )
+        self.assertEqual(
+            [
+                (material_id, account_id)
+                for material_id, account_id, _ in preflighted
+            ],
+            [("9050", 11), ("9051", 11)],
+        )
+        self.assertEqual(len({state_id for _, _, state_id in preflighted}), 1)
 
     def test_fifo_replay_accepts_current_language_skip(self):
         self.assertTrue(

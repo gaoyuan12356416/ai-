@@ -20,8 +20,11 @@
 - `x_post_schedule_account_mismatch`：候选账号不是配置范围的有序子集。
 - `x_post_schedule_material_preflight_shortage`：素材零条通过预检。
 - `x_post_schedule_drama_shortage`：短剧零条可用或通过预检。
+- `x_post_pool_fifo_conflict`：存在未被本轮有效证据覆盖的较新池记录，禁止越过建队。
 - 既有去重、归属、Premium、未知结果错误码保持不变。
 
 ## 兼容性说明
 
 完整批次行为不变。调用方如果仍提交完整账号列表会得到原有结果；新版本额外接受有序子集。无 DDL、无外部请求字段变化。
+
+素材池 available 接口仍一次返回最多 `scan_limit` 条固定 FIFO 快照；runner 内部分页不改变接口结构。

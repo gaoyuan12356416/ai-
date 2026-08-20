@@ -10844,14 +10844,18 @@ class XPostStore:
                 expected_pools = conn.execute(
                     "SELECT p.* FROM x_post_material_pool p "
                     "WHERE p.status='unpublished' "
-                    "AND (p.last_error_code='' OR p.last_error_code IN %s) "
+                    "AND (p.last_error_code='' OR p.last_error_code IN %s "
+                    "OR p.last_error_code IN %s) "
                     "AND NOT EXISTS("
                     "SELECT 1 FROM x_post_queue q "
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
                     "ORDER BY p.created_at DESC,p.id DESC LIMIT 1000"
-                    % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+                    % (
+                        _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+                        _REVALIDATABLE_MATERIAL_VALIDATION_SQL,
+                    ),
                 ).fetchall()
                 if not _material_fifo_selection_matches(
                     expected_pools,
@@ -10901,6 +10905,28 @@ class XPostStore:
                             "候选素材已被其他发布队列占用",
                             409,
                         )
+                    pool_error_code = str(pool["last_error_code"] or "")
+                    if pool_error_code in REVALIDATABLE_MATERIAL_VALIDATION_CODES:
+                        cleared = conn.execute(
+                            "UPDATE x_post_material_pool SET "
+                            "last_checked_at=?,last_error_code='',"
+                            "last_error_message='',updated_at=? "
+                            "WHERE id=? AND status='unpublished' "
+                            "AND last_error_code=?",
+                            (
+                                timestamp,
+                                timestamp,
+                                values["pool_item_id"],
+                                pool_error_code,
+                            ),
+                        )
+                        if int(cleared.rowcount or 0) != 1:
+                            conn.rollback()
+                            raise XPostError(
+                                "x_post_pool_item_unavailable",
+                                "候选素材复检状态已变更，请重试",
+                                409,
+                            )
             else:
                 blocked = conn.execute(
                     "SELECT id,content_id FROM x_post_drama_pool "

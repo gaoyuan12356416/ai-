@@ -12,6 +12,7 @@ X 素材/短剧排程候选选择、内部计划冻结、存储计数、测试�
 | 调度器支持可用子集 | Codex | `scripts/x_post_schedule_runner.py` | 完成 |
 | 短剧选择支持账号缺口 | Codex | `features/x_posts/drama_selector.py` | 完成 |
 | 存储层原子冻结部分计划 | Codex | `features/x_posts/service.py` | 完成 |
+| 修复跨页扫描与历史异常复检 | Codex | runner、store、专项测试 | 完成 |
 | 单元/集成/副本回归 | Codex | `scripts/test_x_post_*.py` | 进行中 |
 | GitHub-first 生产部署 | Codex | CPU X 发布服务 | 待执行 |
 
@@ -31,3 +32,4 @@ python -m unittest scripts.test_x_post_drama_selector scripts.test_x_post_schedu
 ## 完成记录
 
 - 2026-08-20：核心实现完成，专项回归 138/138、完整 X 回归 715/715（2 条条件跳过）通过。
+- 2026-08-20：复查补修跨页候选与历史异常恢复，修复专项 106/106、完整 X 回归 718/718（2 条条件跳过）通过；待生产副本和部署验收。
