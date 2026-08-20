@@ -3075,6 +3075,902 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed_preflight")
         return failed
 
+    def _failed_schedule_run_with_queue(self, *, with_log=False):
+        failed = self._failed_schedule_run(
+            "x_post_schedule_preflight_interrupted",
+            error_message=(
+                "该时间点执行进程在建队前被维护中止；已核实零队列、"
+                "零发布尝试、零未知结果。为避免阻塞后续时间点，已审计终止。"
+            ),
+        )
+        pool = self.store.add_pool_materials(
+            ["9901"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "9901", "error_code": ""},
+            ],
+        )["items"][0]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='claimed',"
+                "error_code='',error_message='',started_at='',finished_at='' "
+                "WHERE id=?",
+                (failed["id"],),
+            )
+            conn.commit()
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [self.material_candidate(pool, 2)],
+        )
+        log = (
+            self.store.reserve_log(plan["queues"][0]["id"])
+            if with_log
+            else None
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='failed_preflight',"
+                "queued_count=0,published_count=0,failed_count=0,"
+                "unknown_count=0,error_code=?,error_message=?,"
+                "started_at='',finished_at='' WHERE id=?",
+                (
+                    "x_post_schedule_preflight_interrupted",
+                    "interrupted before queue creation",
+                    failed["id"],
+                ),
+            )
+            conn.commit()
+        return failed, plan["queues"][0], log
+
+    def test_interrupted_preflight_initial_recovery_is_audited_and_once(self):
+        failed = self._failed_schedule_run(
+            "x_post_schedule_preflight_interrupted",
+            error_message=(
+                "该时间点执行进程在建队前被维护中止；已核实零队列、"
+                "零发布尝试、零未知结果。为避免阻塞后续时间点，已审计终止。"
+            ),
+        )
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_preflight_interrupted",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["validated_count"], 1)
+        self.assertEqual(validated["updated_count"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_schedule_recovery_audit "
+                    "WHERE schedule_run_id=?",
+                    (failed["id"],),
+                ).fetchone()[0],
+                0,
+            )
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "failed_preflight",
+        )
+
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_schedule_preflight_interrupted",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "claimed",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT previous_status,previous_error_code,"
+                "validated_queue_count,validated_log_count "
+                "FROM x_post_schedule_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (failed["id"],),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                "failed_preflight",
+                "x_post_schedule_preflight_interrupted",
+                0,
+                0,
+            ),
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_preflight_interrupted",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_interrupted_preflight_initial_recovery_rejects_queue_evidence(self):
+        failed, _queue, _log = self._failed_schedule_run_with_queue()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_preflight_interrupted",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_interrupted_preflight_initial_recovery_rejects_log_evidence(self):
+        failed, _queue, log = self._failed_schedule_run_with_queue(
+            with_log=True
+        )
+        self.assertIsNotNone(log)
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_preflight_interrupted",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_interrupted_preflight_initial_recovery_rejects_unknown_count(self):
+        failed = self._failed_schedule_run(
+            "x_post_schedule_preflight_interrupted"
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET unknown_count=1 WHERE id=?",
+                (failed["id"],),
+            )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_preflight_interrupted",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def _operator_stopped_material_run(self):
+        saved = self.store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2, 3, 4, 5],
+                "publish_times": ["09:00"],
+                "version": 1,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4, 5],
+            now=datetime(
+                2026, 7, 27, 8, 0, tzinfo=service.BEIJING_TZ
+            ),
+        )
+        pools = self.store.add_pool_materials(
+            ["9801", "9802", "9803", "9804"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": material_id, "error_code": ""}
+                for material_id in ("9801", "9802", "9803", "9804")
+            ],
+        )["items"]
+        candidates = [
+            self.material_candidate(pool, account_id)
+            for pool, account_id in zip(reversed(pools), (2, 3, 4, 5))
+        ]
+        candidates[1].update(
+            {
+                "preflight_duration": 180.0,
+                "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+                "relay_account_id": 9,
+                "relay_account_username": "premium9",
+            }
+        )
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            saved["version"],
+            candidates,
+            premium_account_ids=[],
+            premium_relay_accounts=[
+                {
+                    "id": 9,
+                    "username": "premium9",
+                    "drama_language": "en",
+                }
+            ],
+        )
+        target_queues = plan["queues"][:2]
+        for queue in target_queues:
+            log = self.store.reserve_log(queue["id"])
+            self.store.mark_failed_if_reserved(
+                log["id"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                "operator stopped the schedule worker before X",
+            )
+
+        real_failure_queue = plan["queues"][2]
+        real_log = self.store.reserve_log(real_failure_queue["id"])
+        self.store.prepare_log(
+            real_log["id"],
+            "https://www.dramawavew2a.com/ads/101/2116/view?real=1",
+            "https://gy.g2flow.com/s2l/real.html",
+            "real material failure",
+        )
+        self.store.mark_publishing(real_log["id"])
+        self.store.mark_failed(
+            real_log["id"],
+            "x_upstream_error",
+            "X rejected this material after the attempt started",
+        )
+
+        published_queue = plan["queues"][3]
+        published_log = self.store.reserve_log(published_queue["id"])
+        self.store.prepare_log(
+            published_log["id"],
+            "https://www.dramawavew2a.com/ads/101/2116/view?published=1",
+            "https://gy.g2flow.com/s2l/published.html",
+            "published material",
+        )
+        self.store.mark_publishing(published_log["id"])
+        self.store.mark_media_uploaded(published_log["id"], "media-published")
+        self.store.mark_published(
+            published_log["id"],
+            "media-published",
+            "post-published",
+            "https://x.com/material/status/post-published",
+        )
+        run = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(run["status"], "completed_with_errors")
+        self.assertEqual(run["published_count"], 1)
+        self.assertEqual(run["failed_count"], 3)
+        self.assertEqual(run["unknown_count"], 0)
+        return {
+            "run": run,
+            "target_queue_ids": [queue["id"] for queue in target_queues],
+            "direct_queue_id": target_queues[0]["id"],
+            "relay_queue_id": target_queues[1]["id"],
+            "real_failure_queue_id": real_failure_queue["id"],
+            "published_queue_id": published_queue["id"],
+        }
+
+    def _queue_log_snapshot(self, queue_ids):
+        placeholders = ",".join("?" for _item in queue_ids)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            return conn.execute(
+                "SELECT q.id,q.status,q.updated_at,l.* "
+                "FROM x_post_queue q JOIN x_post_publish_log l "
+                "ON l.queue_id=q.id WHERE q.id IN (%s) ORDER BY q.id"
+                % placeholders,
+                tuple(queue_ids),
+            ).fetchall()
+
+    def _queue_material_key(self, queue_id):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            return str(
+                conn.execute(
+                    "SELECT material_key FROM x_post_queue WHERE id=?",
+                    (queue_id,),
+                ).fetchone()[0]
+            )
+
+    def test_material_operator_stop_recovery_is_exact_audited_and_once(self):
+        fixture = self._operator_stopped_material_run()
+        run_id = fixture["run"]["id"]
+        target_ids = fixture["target_queue_ids"]
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+
+        with self.assertRaises(service.XPostError) as incomplete_scope:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                run_id,
+                target_ids[:1],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            incomplete_scope.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+        with self.assertRaises(service.XPostError) as arbitrary_code:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                run_id,
+                target_ids,
+                "x_post_schedule_operator_stopped_before_x_other",
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            arbitrary_code.exception.code,
+            "x_post_material_operator_stop_recovery_not_allowed",
+        )
+
+        untouched_ids = [
+            fixture["real_failure_queue_id"],
+            fixture["published_queue_id"],
+        ]
+        untouched_before = self._queue_log_snapshot(untouched_ids)
+        target_before = self._queue_log_snapshot(target_ids)
+        run_before = self.store.get_schedule_run(run_id)
+        validated = self.store.recover_operator_stopped_material_schedule_queues(
+            run_id,
+            target_ids,
+            service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+            reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+            actor="codex_operator",
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["validated_count"], 2)
+        self.assertEqual(validated["validated_relay_count"], 1)
+        self.assertEqual(validated["updated_count"], 0)
+        self.assertEqual(self._queue_log_snapshot(target_ids), target_before)
+        self.assertEqual(self._queue_log_snapshot(untouched_ids), untouched_before)
+        self.assertEqual(self.store.get_schedule_run(run_id), run_before)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM "
+                    "x_post_schedule_material_operator_stop_recovery_audit"
+                ).fetchone()[0],
+                0,
+            )
+
+        recovered = self.store.recover_operator_stopped_material_schedule_queues(
+            run_id,
+            target_ids,
+            service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+            reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 2)
+        self.assertEqual(recovered["updated_queue_count"], 2)
+        self.assertEqual(recovered["updated_log_count"], 2)
+        self.assertEqual(recovered["updated_relay_count"], 1)
+        restored_run = self.store.get_schedule_run(run_id)
+        self.assertEqual(restored_run["status"], "running")
+        self.assertEqual(restored_run["failed_count"], 1)
+        self.assertEqual(restored_run["published_count"], 1)
+        self.assertEqual(restored_run["unknown_count"], 0)
+        self.assertEqual(self._queue_log_snapshot(untouched_ids), untouched_before)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            targets = conn.execute(
+                "SELECT q.id,q.status,l.status,l.attempt_count,l.error_code,"
+                "l.unknown_outcome,l.long_url,l.short_url,l.post_text,"
+                "l.x_media_id,l.x_post_id,l.x_post_url,l.started_at,"
+                "l.published_at,COALESCE(r.status,''),"
+                "COALESCE(r.source_attempt_count,0),"
+                "COALESCE(r.repost_attempt_count,0),"
+                "COALESCE(r.error_code,''),COALESCE(r.unknown_outcome,0) "
+                "FROM x_post_queue q JOIN x_post_publish_log l "
+                "ON l.queue_id=q.id LEFT JOIN x_post_repost_ledger r "
+                "ON r.queue_id=q.id WHERE q.id IN (?,?) ORDER BY q.id",
+                tuple(target_ids),
+            ).fetchall()
+            audit = conn.execute(
+                "SELECT recovery_reason,actor,previous_status,"
+                "expected_error_code,target_queue_ids_json,target_state_json,"
+                "target_count,validated_queue_count,validated_log_count,"
+                "validated_relay_count,previous_published_count,"
+                "previous_failed_count,previous_unknown_count "
+                "FROM x_post_schedule_material_operator_stop_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+        self.assertTrue(
+            all(
+                row[1:14]
+                == (
+                    "queued",
+                    "reserved",
+                    0,
+                    "",
+                    0,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                )
+                for row in targets
+            )
+        )
+        self.assertEqual(targets[0][14:], ("", 0, 0, "", 0))
+        self.assertEqual(targets[1][14:], ("reserved", 0, 0, "", 0))
+        self.assertEqual(audit[0], service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON)
+        self.assertEqual(audit[1:4], (
+            "codex_operator",
+            "completed_with_errors",
+            service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+        ))
+        self.assertEqual(json.loads(audit[4]), target_ids)
+        self.assertEqual(
+            [item["queue_id"] for item in json.loads(audit[5])],
+            target_ids,
+        )
+        self.assertEqual(audit[6:], (2, 2, 2, 1, 1, 3, 0))
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                run_id,
+                target_ids,
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+
+    def test_material_operator_stop_recovery_rejects_any_target_drift(self):
+        fixture = self._operator_stopped_material_run()
+        run_id = fixture["run"]["id"]
+        target_ids = fixture["target_queue_ids"]
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+
+        def assert_rejected():
+            before = self._queue_log_snapshot(target_ids)
+            with self.assertRaises(service.XPostError) as rejected:
+                self.store.recover_operator_stopped_material_schedule_queues(
+                    run_id,
+                    target_ids,
+                    service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                    reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                    actor="codex_operator",
+                    now=recovery_now,
+                )
+            self.assertEqual(
+                rejected.exception.code,
+                "x_post_material_operator_stop_recovery_conflict",
+            )
+            self.assertEqual(self._queue_log_snapshot(target_ids), before)
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM "
+                        "x_post_schedule_material_operator_stop_recovery_audit"
+                    ).fetchone()[0],
+                    0,
+                )
+
+        direct_id = fixture["direct_queue_id"]
+        relay_id = fixture["relay_queue_id"]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_queue SET status='queued' WHERE id=?",
+                (direct_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_queue SET status='failed' WHERE id=?",
+                (direct_id,),
+            )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='reserved' WHERE queue_id=?",
+                (direct_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='failed',"
+                "unknown_outcome=1 WHERE queue_id=?",
+                (direct_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET unknown_outcome=0,"
+                "x_media_id='unexpected-media' WHERE queue_id=?",
+                (direct_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET x_media_id='' WHERE queue_id=?",
+                (direct_id,),
+            )
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status='reserved' "
+                "WHERE queue_id=?",
+                (relay_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status='failed',"
+                "source_attempt_count=1 WHERE queue_id=?",
+                (relay_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET source_attempt_count=0,"
+                "source_post_id='unexpected-post' WHERE queue_id=?",
+                (relay_id,),
+            )
+            conn.commit()
+        assert_rejected()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET source_post_id='',"
+                "error_code='x_upstream_error' WHERE queue_id=?",
+                (relay_id,),
+            )
+            conn.commit()
+        assert_rejected()
+
+    def test_material_operator_stop_recovery_rejects_direct_relay_ledger(self):
+        fixture = self._operator_stopped_material_run()
+        direct_id = fixture["direct_queue_id"]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            direct = conn.execute(
+                "SELECT run_date,account_id FROM x_post_queue WHERE id=?",
+                (direct_id,),
+            ).fetchone()
+            conn.execute("DROP TRIGGER trg_x_post_repost_binding_insert")
+            conn.execute(
+                "INSERT INTO x_post_repost_ledger("
+                "queue_id,run_date,target_account_id,relay_account_id,status,"
+                "error_code,error_message,created_at,updated_at"
+                ") VALUES(?,?,?,9,'failed',?,?,?,?)",
+                (
+                    direct_id,
+                    direct[0],
+                    direct[1],
+                    service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                    "invalid direct relay evidence",
+                    "2026-07-27T01:00:00Z",
+                    "2026-07-27T01:00:00Z",
+                ),
+            )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                fixture["run"]["id"],
+                fixture["target_queue_ids"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+
+    def test_material_operator_stop_recovery_rejects_account_unresolved(self):
+        fixture = self._operator_stopped_material_run()
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+
+        def start_other_publish(account_id, material_id):
+            candidate = base_candidate(
+                account_id,
+                "OtherAccount%s" % account_id,
+                material_id,
+                "OtherContent%s" % material_id,
+            )
+            candidate["idempotency_key"] = (
+                "xpost:test:operator-recovery-unresolved:%s" % account_id
+            )
+            queue = self.store.enqueue(candidate)
+            log = self.store.reserve_log(queue["id"])
+            self.store.prepare_log(
+                log["id"],
+                "https://www.dramawavew2a.com/ads/101/2116/view?other=1",
+                "https://gy.g2flow.com/s2l/other.html",
+                "other in-flight material",
+            )
+            return queue, self.store.mark_publishing(log["id"])
+
+        _target_queue, target_log = start_other_publish(2, "9701")
+        with self.assertRaises(service.XPostError) as target_rejected:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                fixture["run"]["id"],
+                fixture["target_queue_ids"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            target_rejected.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+        self.store.mark_failed(
+            target_log["id"],
+            "x_upstream_error",
+            "known terminal failure for the separate queue",
+        )
+
+        _relay_queue, _relay_log = start_other_publish(9, "9702")
+        with self.assertRaises(service.XPostError) as relay_rejected:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                fixture["run"]["id"],
+                fixture["target_queue_ids"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            relay_rejected.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+
+    def test_material_operator_stop_recovery_rejects_material_reuse(self):
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        fixture = self._operator_stopped_material_run()
+        material_key = self._queue_material_key(fixture["direct_queue_id"])
+        self.store.create_manual_run(
+            [material_key],
+            [10],
+            "operator-recovery-active-reservation",
+            actor={"user_id": "admin-1", "name": "Admin"},
+        )
+        with self.assertRaises(service.XPostError) as reserved:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                fixture["run"]["id"],
+                fixture["target_queue_ids"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            reserved.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+
+    def test_material_operator_stop_recovery_rejects_consumed_reuse(self):
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        fixture = self._operator_stopped_material_run()
+        material_key = self._queue_material_key(fixture["direct_queue_id"])
+        manual = self.store.create_manual_run(
+            [material_key],
+            [10],
+            "operator-recovery-consumed-reservation",
+            actor={"user_id": "admin-1", "name": "Admin"},
+        )
+        manual_candidate = base_candidate(
+            10,
+            "ManualAccount10",
+            material_key,
+            "ManualReuseContent",
+        )
+        manual_candidate["source_date"] = manual["source_date"]
+        self.store.create_manual_plan(manual["id"], [manual_candidate])
+        with self.assertRaises(service.XPostError) as reused:
+            self.store.recover_operator_stopped_material_schedule_queues(
+                fixture["run"]["id"],
+                fixture["target_queue_ids"],
+                service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+                reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+                actor="codex_operator",
+                validate_only=True,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            reused.exception.code,
+            "x_post_material_operator_stop_recovery_conflict",
+        )
+
+    def test_recovered_queue_rechecks_account_fence_before_publishing(self):
+        fixture = self._operator_stopped_material_run()
+        self.store.recover_operator_stopped_material_schedule_queues(
+            fixture["run"]["id"],
+            fixture["target_queue_ids"],
+            service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+            reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+            actor="codex_operator",
+            now=datetime(
+                2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+            ),
+        )
+
+        def start_other_publish(account_id, material_id):
+            candidate = base_candidate(
+                account_id,
+                "ConcurrentAccount%s" % account_id,
+                material_id,
+                "ConcurrentContent%s" % material_id,
+            )
+            candidate["idempotency_key"] = (
+                "xpost:test:operator-recovery-publish-fence:%s" % account_id
+            )
+            queue = self.store.enqueue(candidate)
+            log = self.store.reserve_log(queue["id"])
+            self.store.prepare_log(
+                log["id"],
+                "https://www.dramawavew2a.com/ads/101/2116/view?concurrent=1",
+                "https://gy.g2flow.com/s2l/concurrent.html",
+                "concurrent in-flight material",
+            )
+            return self.store.mark_publishing(log["id"])
+
+        target_log = start_other_publish(2, "9601")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            direct_log_id = int(
+                conn.execute(
+                    "SELECT id FROM x_post_publish_log WHERE queue_id=?",
+                    (fixture["direct_queue_id"],),
+                ).fetchone()[0]
+            )
+        self.store.prepare_log(
+            direct_log_id,
+            "https://www.dramawavew2a.com/ads/101/2116/view?recovered=1",
+            "https://gy.g2flow.com/s2l/recovered.html",
+            "recovered direct material",
+        )
+        with self.assertRaises(service.XPostError) as target_blocked:
+            self.store.mark_publishing(direct_log_id)
+        self.assertEqual(
+            target_blocked.exception.code,
+            "x_post_unknown_outcome",
+        )
+        self.store.mark_failed(
+            target_log["id"],
+            "x_upstream_error",
+            "known terminal failure for the separate target account queue",
+        )
+
+        relay_log = start_other_publish(9, "9602")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            recovered_relay_log_id = int(
+                conn.execute(
+                    "SELECT id FROM x_post_publish_log WHERE queue_id=?",
+                    (fixture["relay_queue_id"],),
+                ).fetchone()[0]
+            )
+        self.store.prepare_log(
+            recovered_relay_log_id,
+            "https://www.dramawavew2a.com/ads/101/2116/view?relay=1",
+            "https://gy.g2flow.com/s2l/recovered-relay.html",
+            "recovered relay material",
+        )
+        with self.assertRaises(service.XPostError) as relay_blocked:
+            self.store.mark_publishing(recovered_relay_log_id)
+        self.assertEqual(
+            relay_blocked.exception.code,
+            "x_post_unknown_outcome",
+        )
+        self.assertEqual(self.store.get_log(relay_log["id"])["status"], "media_uploading")
+
+    def test_recovered_relay_rechecks_fence_before_reposting(self):
+        fixture = self._operator_stopped_material_run()
+        self.store.recover_operator_stopped_material_schedule_queues(
+            fixture["run"]["id"],
+            fixture["target_queue_ids"],
+            service.MATERIAL_OPERATOR_STOP_ERROR_CODE,
+            reason=service.MATERIAL_OPERATOR_STOP_RECOVERY_REASON,
+            actor="codex_operator",
+            now=datetime(
+                2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+            ),
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            relay_log_id = int(
+                conn.execute(
+                    "SELECT id FROM x_post_publish_log WHERE queue_id=?",
+                    (fixture["relay_queue_id"],),
+                ).fetchone()[0]
+            )
+        self.store.prepare_log(
+            relay_log_id,
+            "https://www.dramawavew2a.com/ads/101/2116/view?source=1",
+            "https://gy.g2flow.com/s2l/relay-source.html",
+            "recovered relay source material",
+        )
+        self.store.mark_publishing(relay_log_id)
+        self.store.mark_media_uploaded(relay_log_id, "relay-media")
+        self.store.mark_relay_source_published(
+            relay_log_id,
+            "relay-media",
+            "1900000000000000991",
+            "https://x.com/relay/status/1900000000000000991",
+        )
+
+        other = base_candidate(
+            2,
+            "ConcurrentTarget2",
+            "9501",
+            "ConcurrentTargetContent9501",
+        )
+        other["idempotency_key"] = (
+            "xpost:test:operator-recovery-repost-fence:2"
+        )
+        other_queue = self.store.enqueue(other)
+        other_log = self.store.reserve_log(other_queue["id"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_queue SET status='publishing' WHERE id=?",
+                (other_queue["id"],),
+            )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='media_uploading',"
+                "attempt_count=1,started_at='2026-07-27T01:05:00Z' "
+                "WHERE id=?",
+                (other_log["id"],),
+            )
+            conn.commit()
+
+        with self.assertRaises(service.XPostError) as blocked:
+            self.store.mark_reposting(fixture["relay_queue_id"])
+        self.assertEqual(blocked.exception.code, "x_post_unknown_outcome")
+        relay = self.store.get_repost_ledger(fixture["relay_queue_id"])
+        self.assertEqual(relay["status"], "source_published")
+        self.assertEqual(relay["repost_attempt_count"], 0)
+        self.assertEqual(
+            self.store.get_log(relay_log_id)["status"],
+            "source_published",
+        )
+
     def test_failed_preflight_recovery_is_same_day_zero_write_and_audited(self):
         failed = self._failed_schedule_run()
         recovery_now = datetime(
@@ -4104,6 +5000,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertIn("x_post_schedule_config", tables)
             self.assertIn("x_post_schedule_run", tables)
             self.assertIn("x_post_schedule_recovery_audit", tables)
+            self.assertIn(
+                "x_post_schedule_material_operator_stop_recovery_audit",
+                tables,
+            )
             self.assertIn("x_post_schedule_corrective_retry_audit", tables)
             self.assertIn(
                 "x_post_schedule_verified_repair_retry_audit",

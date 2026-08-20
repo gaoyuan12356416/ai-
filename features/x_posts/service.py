@@ -135,8 +135,15 @@ FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
         "x_token_missing",
         "x_token_invalid",
         "x_upstream_error",
+        "x_post_schedule_preflight_interrupted",
         *FAILED_PREFLIGHT_PROVEN_CONFIG_ERROR_MESSAGES,
     }
+)
+MATERIAL_OPERATOR_STOP_ERROR_CODE = (
+    "x_post_schedule_operator_stopped_before_x"
+)
+MATERIAL_OPERATOR_STOP_RECOVERY_REASON = (
+    "operator_same_day_material_operator_stop_recovery_v1"
 )
 DRAMA_POOL_RETRYABLE_VALIDATION_CODES = frozenset(
     {"x_long_video_requires_premium"}
@@ -1530,6 +1537,37 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_material_operator_stop_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_material_operator_stop_recovery_v1'),
+                    actor TEXT NOT NULL,
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='completed_with_errors'),
+                    expected_error_code TEXT NOT NULL
+                        CHECK(expected_error_code='x_post_schedule_operator_stopped_before_x'),
+                    target_queue_ids_json TEXT NOT NULL,
+                    target_state_json TEXT NOT NULL,
+                    target_count INTEGER NOT NULL CHECK(target_count>0),
+                    validated_queue_count INTEGER NOT NULL
+                        CHECK(validated_queue_count=target_count),
+                    validated_log_count INTEGER NOT NULL
+                        CHECK(validated_log_count=target_count),
+                    validated_relay_count INTEGER NOT NULL
+                        CHECK(validated_relay_count BETWEEN 0 AND target_count),
+                    previous_queued_count INTEGER NOT NULL,
+                    previous_published_count INTEGER NOT NULL,
+                    previous_failed_count INTEGER NOT NULL,
+                    previous_unknown_count INTEGER NOT NULL
+                        CHECK(previous_unknown_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_corrective_retry_audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     schedule_run_id INTEGER NOT NULL UNIQUE,
@@ -2378,6 +2416,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_recovery_created "
                 "ON x_post_schedule_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_material_operator_stop_recovery_created "
+                "ON x_post_schedule_material_operator_stop_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_corrective_created "
@@ -12424,6 +12466,75 @@ class XPostStore:
             )
         return ledger
 
+    @staticmethod
+    def _assert_account_publish_fence(conn, queue):
+        """Fail closed if another edge for this publish scope is unresolved."""
+        publishing_account_ids = {
+            int(queue["account_id"]),
+        }
+        if int(queue["relay_account_id"] or 0) > 0:
+            publishing_account_ids.add(int(queue["relay_account_id"]))
+        if queue["schedule_run_id"] is not None:
+            schedule_run = conn.execute(
+                "SELECT account_ids_json FROM x_post_schedule_run WHERE id=?",
+                (int(queue["schedule_run_id"]),),
+            ).fetchone()
+            if not schedule_run:
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "发布队列关联的定时批次不存在",
+                    500,
+                )
+            publishing_account_ids.update(
+                _schedule_account_ids(
+                    _json_array(
+                        schedule_run["account_ids_json"],
+                        "account_ids",
+                    )
+                )
+            )
+            publishing_account_ids.update(
+                int(item["relay_account_id"])
+                for item in conn.execute(
+                    "SELECT DISTINCT relay_account_id "
+                    "FROM x_post_queue WHERE schedule_run_id=? "
+                    "AND relay_account_id IS NOT NULL "
+                    "AND relay_account_id>0",
+                    (int(queue["schedule_run_id"]),),
+                ).fetchall()
+            )
+        ordered_account_ids = tuple(sorted(publishing_account_ids))
+        account_placeholders = ",".join(
+            "?" for _item in ordered_account_ids
+        )
+        unresolved = conn.execute(
+            "SELECT 1 FROM x_post_queue q "
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+            "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+            "WHERE q.id<>? AND (q.account_id IN (%s) "
+            "OR COALESCE(q.relay_account_id,0) IN (%s) "
+            "OR COALESCE(r.relay_account_id,0) IN (%s)) "
+            "AND (q.status='publishing' "
+            "OR COALESCE(l.unknown_outcome,0)=1 "
+            "OR l.status IN ('media_uploading','post_creating','repost_creating') "
+            "OR COALESCE(r.unknown_outcome,0)=1 "
+            "OR r.status IN ('source_publishing','reposting','needs_review')) "
+            "LIMIT 1"
+            % (
+                account_placeholders,
+                account_placeholders,
+                account_placeholders,
+            ),
+            (int(queue["id"]),) + ordered_account_ids * 3,
+        ).fetchone()
+        if unresolved is not None:
+            raise XPostError(
+                "x_post_unknown_outcome",
+                "所选账号存在待核对发布结果，已暂停后续发布",
+                409,
+                True,
+            )
+
     def reassign_premium_relay(self, queue_id, eligible_accounts):
         queue_id = _positive_int(queue_id, "queue_id")
         if not isinstance(eligible_accounts, list):
@@ -12639,6 +12750,7 @@ class XPostStore:
                     "Relay source is not ready for Repost",
                     409,
                 )
+            self._assert_account_publish_fence(conn, queue)
             conn.execute(
                 "UPDATE x_post_repost_ledger SET status='reposting',"
                 "repost_attempt_count=repost_attempt_count+1,updated_at=? "
@@ -13553,6 +13665,7 @@ class XPostStore:
             if not row["long_url"] or not row["short_url"] or not row["post_text"]:
                 conn.rollback()
                 raise XPostError("x_post_log_not_prepared", "发布日志尚未准备完成", 409)
+            self._assert_account_publish_fence(conn, queue)
             conn.execute(
                 "UPDATE x_post_publish_log SET status='media_uploading',attempt_count=attempt_count+1,"
                 "started_at=?,error_code='',error_message='',unknown_outcome=0,updated_at=? WHERE id=?",
@@ -13824,6 +13937,498 @@ class XPostStore:
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
+
+    def recover_operator_stopped_material_schedule_queues(
+        self,
+        run_id,
+        queue_ids,
+        expected_error_code,
+        *,
+        reason,
+        actor,
+        validate_only=False,
+        now=None,
+    ):
+        """Requeue one audited same-day material subset stopped before X.
+
+        This recovery is deliberately separate from drama retry logic.  It
+        accepts only the explicit operator-stop code and only rows whose queue,
+        log, and optional relay ledger prove that no X operation started.
+        """
+        run_id = _positive_int(run_id, "run_id")
+        if not isinstance(queue_ids, (list, tuple)):
+            raise XPostError(
+                "invalid_request",
+                "queue_ids must be an array",
+                400,
+            )
+        if not isinstance(validate_only, bool):
+            raise XPostError(
+                "invalid_request",
+                "validate_only must be a boolean",
+                400,
+            )
+        try:
+            normalized_queue_ids = tuple(
+                sorted(_positive_int(value, "queue_id") for value in queue_ids)
+            )
+            expected_error_code = _clean_token(
+                expected_error_code,
+                "expected error code",
+                64,
+            )
+            reason = _clean_token(reason, "recovery reason", 128)
+            actor = _clean_token(actor, "recovery actor", 128)
+        except (TypeError, ValueError):
+            raise XPostError(
+                "invalid_request",
+                "Material operator-stop recovery arguments are invalid",
+                400,
+            ) from None
+        if (
+            not normalized_queue_ids
+            or len(normalized_queue_ids) > MAX_SCHEDULE_ACCOUNTS
+            or len(set(normalized_queue_ids)) != len(normalized_queue_ids)
+        ):
+            raise XPostError(
+                "invalid_request",
+                "queue_ids must contain unique schedule queue ids",
+                400,
+            )
+        if (
+            expected_error_code != MATERIAL_OPERATOR_STOP_ERROR_CODE
+            or reason != MATERIAL_OPERATOR_STOP_RECOVERY_REASON
+        ):
+            raise XPostError(
+                "x_post_material_operator_stop_recovery_not_allowed",
+                "This failure is not eligible for material operator-stop recovery",
+                409,
+            )
+
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        current_date = current.date().isoformat()
+        timestamp = utc_now()
+        placeholders = ",".join("?" for _item in normalized_queue_ids)
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_run_not_found",
+                    "X schedule run was not found",
+                    404,
+                )
+
+            aggregate = conn.execute(
+                "SELECT COUNT(q.id) AS queue_count,COUNT(l.id) AS log_count,"
+                "SUM(CASE WHEN l.status='published' THEN 1 ELSE 0 END) "
+                "AS published_count,"
+                "SUM(CASE WHEN l.status='failed' "
+                "AND COALESCE(l.unknown_outcome,0)=0 THEN 1 ELSE 0 END) "
+                "AS failed_count,"
+                "SUM(CASE WHEN COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('post_creating','repost_creating') "
+                "THEN 1 ELSE 0 END) AS unknown_count,"
+                "SUM(CASE WHEN COALESCE(l.attempt_count,0)>0 "
+                "OR q.status='publishing' THEN 1 ELSE 0 END) "
+                "AS started_count "
+                "FROM x_post_queue q LEFT JOIN x_post_publish_log l "
+                "ON l.queue_id=q.id WHERE q.schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+            unresolved = conn.execute(
+                "SELECT 1 FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.schedule_run_id=? AND ("
+                "q.status='publishing' "
+                "OR COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('media_uploading','post_creating','repost_creating') "
+                "OR COALESCE(r.unknown_outcome,0)=1 "
+                "OR r.status IN ('source_publishing','reposting','needs_review')) "
+                "LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            prior_audit = conn.execute(
+                "SELECT id FROM "
+                "x_post_schedule_material_operator_stop_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+            exact_error_rows = conn.execute(
+                "SELECT q.id FROM x_post_queue q "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.schedule_run_id=? "
+                "AND (l.error_code=? OR COALESCE(r.error_code,'')=?) "
+                "ORDER BY q.id",
+                (
+                    run_id,
+                    expected_error_code,
+                    expected_error_code,
+                ),
+            ).fetchall()
+            target_rows = conn.execute(
+                "SELECT q.id AS queue_id,q.schedule_run_id,q.run_date,"
+                "q.source_type,q.status AS queue_status,q.account_id,"
+                "q.material_key,"
+                "q.delivery_mode,q.relay_account_id,"
+                "l.id AS log_id,l.account_id AS log_account_id,"
+                "l.status AS log_status,l.attempt_count,l.long_url,"
+                "l.short_url,l.post_text,l.x_media_id,l.x_post_id,"
+                "l.x_post_url,l.error_code AS log_error_code,"
+                "l.unknown_outcome AS log_unknown_outcome,l.started_at,"
+                "l.published_at,r.id AS relay_ledger_id,"
+                "r.target_account_id,r.relay_account_id AS ledger_relay_account_id,"
+                "r.status AS relay_status,r.source_attempt_count,"
+                "r.repost_attempt_count,r.source_post_id,r.source_post_url,"
+                "r.repost_id,r.error_code AS relay_error_code,"
+                "r.unknown_outcome AS relay_unknown_outcome,"
+                "r.source_published_at,r.reposted_at "
+                "FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.id IN (%s) ORDER BY q.id" % placeholders,
+                normalized_queue_ids,
+            ).fetchall()
+
+            expected_slot_key = (
+                "xpost:schedule:v1:material:%s:%s"
+                % (
+                    str(run["run_date"]),
+                    str(run["publish_time"]).replace(":", ""),
+                )
+            )
+            queue_count = int(aggregate["queue_count"] or 0)
+            log_count = int(aggregate["log_count"] or 0)
+            published_count = int(aggregate["published_count"] or 0)
+            failed_count = int(aggregate["failed_count"] or 0)
+            unknown_count = int(aggregate["unknown_count"] or 0)
+            started_count = int(aggregate["started_count"] or 0)
+            try:
+                frozen_account_ids = _schedule_account_ids(
+                    _json_array(run["account_ids_json"], "account_ids")
+                )
+            except XPostError:
+                frozen_account_ids = []
+            recovery_account_ids = set(frozen_account_ids)
+            recovery_account_ids.update(
+                int(row["relay_account_id"] or 0)
+                for row in target_rows
+                if int(row["relay_account_id"] or 0) > 0
+            )
+            account_unresolved = None
+            if recovery_account_ids:
+                ordered_recovery_account_ids = tuple(
+                    sorted(recovery_account_ids)
+                )
+                account_placeholders = ",".join(
+                    "?" for _item in ordered_recovery_account_ids
+                )
+                account_unresolved = conn.execute(
+                    "SELECT 1 FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                    "WHERE (q.account_id IN (%s) "
+                    "OR COALESCE(q.relay_account_id,0) IN (%s) "
+                    "OR COALESCE(r.relay_account_id,0) IN (%s)) "
+                    "AND (q.status='publishing' "
+                    "OR COALESCE(l.unknown_outcome,0)=1 "
+                    "OR l.status IN ('media_uploading','post_creating','repost_creating') "
+                    "OR COALESCE(r.unknown_outcome,0)=1 "
+                    "OR r.status IN ('source_publishing','reposting','needs_review')) "
+                    "LIMIT 1"
+                    % (
+                        account_placeholders,
+                        account_placeholders,
+                        account_placeholders,
+                    ),
+                    ordered_recovery_account_ids * 3,
+                ).fetchone()
+            target_material_keys = tuple(
+                str(row["material_key"] or "") for row in target_rows
+            )
+            material_reuse_conflict = None
+            active_reservation_conflict = None
+            if target_material_keys and all(target_material_keys):
+                material_placeholders = ",".join(
+                    "?" for _item in target_material_keys
+                )
+                material_reuse_conflict = conn.execute(
+                    "SELECT 1 FROM x_post_queue "
+                    "WHERE material_key IN (%s) AND id NOT IN (%s) LIMIT 1"
+                    % (material_placeholders, placeholders),
+                    target_material_keys + normalized_queue_ids,
+                ).fetchone()
+                active_reservation_conflict = conn.execute(
+                    "SELECT 1 FROM x_post_manual_material_reservation "
+                    "WHERE material_key IN (%s) AND state='active' LIMIT 1"
+                    % material_placeholders,
+                    target_material_keys,
+                ).fetchone()
+            conflict = bool(
+                str(run["source_type"]) != "material"
+                or str(run["run_date"]) != current_date
+                or str(run["timezone"]) != SCHEDULE_TIMEZONE
+                or str(run["slot_key"]) != expected_slot_key
+                or str(run["status"]) != "completed_with_errors"
+                or int(run["expected_count"] or 0) != queue_count
+                or int(run["queued_count"] or 0) != queue_count
+                or int(run["published_count"] or 0) != published_count
+                or int(run["failed_count"] or 0) != failed_count
+                or int(run["unknown_count"] or 0) != 0
+                or queue_count != log_count
+                or published_count + failed_count != queue_count
+                or unknown_count != 0
+                or started_count == 0
+                or unresolved is not None
+                or account_unresolved is not None
+                or material_reuse_conflict is not None
+                or active_reservation_conflict is not None
+                or not all(target_material_keys)
+                or len(set(target_material_keys)) != len(target_material_keys)
+                or prior_audit is not None
+                or not frozen_account_ids
+                or tuple(int(row["id"]) for row in exact_error_rows)
+                != normalized_queue_ids
+                or len(target_rows) != len(normalized_queue_ids)
+            )
+
+            target_state = []
+            relay_ids = []
+            for row in target_rows:
+                delivery_mode = str(row["delivery_mode"] or "")
+                relay_ledger_id = (
+                    int(row["relay_ledger_id"])
+                    if row["relay_ledger_id"] is not None
+                    else None
+                )
+                row_conflict = bool(
+                    int(row["schedule_run_id"] or 0) != run_id
+                    or str(row["run_date"]) != str(run["run_date"])
+                    or str(row["source_type"]) != "material"
+                    or int(row["account_id"] or 0)
+                    not in frozen_account_ids
+                    or str(row["queue_status"]) != "failed"
+                    or row["log_id"] is None
+                    or int(row["log_account_id"] or 0)
+                    != int(row["account_id"] or 0)
+                    or str(row["log_status"] or "") != "failed"
+                    or int(row["attempt_count"] or 0) != 0
+                    or int(row["log_unknown_outcome"] or 0) != 0
+                    or str(row["log_error_code"] or "")
+                    != expected_error_code
+                    or any(
+                        str(row[field] or "")
+                        for field in (
+                            "long_url",
+                            "short_url",
+                            "post_text",
+                            "x_media_id",
+                            "x_post_id",
+                            "x_post_url",
+                            "started_at",
+                            "published_at",
+                        )
+                    )
+                    or delivery_mode not in DELIVERY_MODES
+                )
+                if delivery_mode == DIRECT_DELIVERY_MODE:
+                    row_conflict = bool(
+                        row_conflict
+                        or relay_ledger_id is not None
+                        or int(row["relay_account_id"] or 0) != 0
+                    )
+                elif delivery_mode == PREMIUM_RELAY_REPOST_MODE:
+                    row_conflict = bool(
+                        row_conflict
+                        or relay_ledger_id is None
+                        or int(row["target_account_id"] or 0)
+                        != int(row["account_id"] or 0)
+                        or int(row["ledger_relay_account_id"] or 0)
+                        != int(row["relay_account_id"] or 0)
+                        or int(row["relay_account_id"] or 0) <= 0
+                        or int(row["relay_account_id"] or 0)
+                        == int(row["account_id"] or 0)
+                        or str(row["relay_status"] or "") != "failed"
+                        or int(row["source_attempt_count"] or 0) != 0
+                        or int(row["repost_attempt_count"] or 0) != 0
+                        or int(row["relay_unknown_outcome"] or 0) != 0
+                        or str(row["relay_error_code"] or "")
+                        != expected_error_code
+                        or any(
+                            str(row[field] or "")
+                            for field in (
+                                "source_post_id",
+                                "source_post_url",
+                                "repost_id",
+                                "source_published_at",
+                                "reposted_at",
+                            )
+                        )
+                    )
+                    if relay_ledger_id is not None:
+                        relay_ids.append(relay_ledger_id)
+                if row_conflict:
+                    conflict = True
+                target_state.append(
+                    {
+                        "queue_id": int(row["queue_id"]),
+                        "log_id": int(row["log_id"] or 0),
+                        "relay_ledger_id": relay_ledger_id,
+                        "delivery_mode": delivery_mode,
+                        "log_status": str(row["log_status"] or ""),
+                        "log_error_code": str(row["log_error_code"] or ""),
+                        "relay_status": str(row["relay_status"] or ""),
+                        "relay_error_code": str(row["relay_error_code"] or ""),
+                    }
+                )
+
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_material_operator_stop_recovery_conflict",
+                    "Run or target queue evidence is not an exact zero-X operator stop",
+                    409,
+                )
+
+            result = {
+                "run_id": run_id,
+                "queue_ids": list(normalized_queue_ids),
+                "expected_error_code": expected_error_code,
+                "reason": reason,
+                "actor": actor,
+                "validated_queue_count": len(target_rows),
+                "validated_log_count": len(target_rows),
+                "validated_relay_count": len(relay_ids),
+                "validate_only": validate_only,
+                "validated_count": len(target_rows),
+                "updated_count": 0,
+                "next_status": "running",
+            }
+            if validate_only:
+                conn.rollback()
+                return result
+
+            target_state_json = json.dumps(
+                target_state,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            audit_cursor = conn.execute(
+                "INSERT INTO "
+                "x_post_schedule_material_operator_stop_recovery_audit("
+                "schedule_run_id,recovery_reason,actor,previous_status,"
+                "expected_error_code,target_queue_ids_json,target_state_json,"
+                "target_count,validated_queue_count,validated_log_count,"
+                "validated_relay_count,previous_queued_count,"
+                "previous_published_count,previous_failed_count,"
+                "previous_unknown_count,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    reason,
+                    actor,
+                    str(run["status"]),
+                    expected_error_code,
+                    json.dumps(list(normalized_queue_ids), separators=(",", ":")),
+                    target_state_json,
+                    len(target_rows),
+                    len(target_rows),
+                    len(target_rows),
+                    len(relay_ids),
+                    int(run["queued_count"] or 0),
+                    int(run["published_count"] or 0),
+                    int(run["failed_count"] or 0),
+                    int(run["unknown_count"] or 0),
+                    timestamp,
+                ),
+            )
+            log_cursor = conn.execute(
+                "UPDATE x_post_publish_log SET status='reserved',"
+                "long_url='',short_url='',post_text='',x_media_id='',"
+                "x_post_id='',x_post_url='',error_code='',error_message='',"
+                "unknown_outcome=0,started_at='',published_at='',updated_at=? "
+                "WHERE queue_id IN (%s) AND status='failed' "
+                "AND attempt_count=0 AND unknown_outcome=0 AND error_code=? "
+                "AND long_url='' AND short_url='' AND post_text='' "
+                "AND x_media_id='' AND x_post_id='' AND x_post_url='' "
+                "AND started_at='' AND published_at=''" % placeholders,
+                (timestamp,) + normalized_queue_ids + (expected_error_code,),
+            )
+            relay_cursor_count = 0
+            if relay_ids:
+                relay_placeholders = ",".join("?" for _item in relay_ids)
+                relay_cursor = conn.execute(
+                    "UPDATE x_post_repost_ledger SET status='reserved',"
+                    "source_post_id='',source_post_url='',repost_id='',"
+                    "error_code='',error_message='',unknown_outcome=0,"
+                    "source_published_at='',reposted_at='',updated_at=? "
+                    "WHERE id IN (%s) AND status='failed' "
+                    "AND source_attempt_count=0 AND repost_attempt_count=0 "
+                    "AND unknown_outcome=0 AND error_code=? "
+                    "AND source_post_id='' AND source_post_url='' "
+                    "AND repost_id='' AND source_published_at='' "
+                    "AND reposted_at=''" % relay_placeholders,
+                    (timestamp,) + tuple(relay_ids) + (expected_error_code,),
+                )
+                relay_cursor_count = int(relay_cursor.rowcount or 0)
+            queue_cursor = conn.execute(
+                "UPDATE x_post_queue SET status='queued',updated_at=? "
+                "WHERE id IN (%s) AND schedule_run_id=? "
+                "AND source_type='material' AND status='failed'" % placeholders,
+                (timestamp,) + normalized_queue_ids + (run_id,),
+            )
+            if (
+                int(log_cursor.rowcount or 0) != len(target_rows)
+                or relay_cursor_count != len(relay_ids)
+                or int(queue_cursor.rowcount or 0) != len(target_rows)
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_material_operator_stop_recovery_conflict",
+                    "Material operator-stop target state changed during recovery",
+                    409,
+                )
+
+            self._sync_run(conn, normalized_queue_ids[0], timestamp)
+            updated_run = conn.execute(
+                "SELECT status,queued_count,published_count,failed_count,"
+                "unknown_count FROM x_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if (
+                not updated_run
+                or str(updated_run["status"]) != "running"
+                or int(updated_run["queued_count"] or 0) != queue_count
+                or int(updated_run["published_count"] or 0) != published_count
+                or int(updated_run["failed_count"] or 0)
+                != failed_count - len(target_rows)
+                or int(updated_run["unknown_count"] or 0) != 0
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_material_operator_stop_recovery_conflict",
+                    "Recovered material schedule did not return to running",
+                    409,
+                )
+            conn.commit()
+            result["audit_id"] = int(audit_cursor.lastrowid)
+            result["updated_count"] = len(target_rows)
+            result["updated_queue_count"] = len(target_rows)
+            result["updated_log_count"] = len(target_rows)
+            result["updated_relay_count"] = len(relay_ids)
+            return result
 
     def recover_pre_x_schedule_failure(
         self,
