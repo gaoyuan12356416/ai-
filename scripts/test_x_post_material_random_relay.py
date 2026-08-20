@@ -19,7 +19,6 @@ if str(ROOT) not in sys.path:
 from features.x_posts import service
 from features.x_accounts import oauth_service
 from scripts import x_post_schedule_runner as runner
-from scripts.x_post_daily_runner import CandidatePreflightError
 
 
 def compliance():
@@ -51,7 +50,15 @@ def pool_candidate(material_id, duration, language="en"):
         "pool_created_at": "2026-08-17T00:00:%02dZ" % int(material_id),
         "material_id": str(material_id),
         "material_language": language,
-        "duration_for_test": float(duration),
+        "media_kind": "video",
+        "source_duration": float(duration),
+        "content_id": "CONTENT-%s" % material_id,
+        "material_url": "https://media.example.test/%s.mp4" % material_id,
+        "material_name": "Episode %s" % material_id,
+        "drama_name": "Drama",
+        "tag": "Drama",
+        "description": "A complete episode description.",
+        **compliance(),
     }
 
 
@@ -63,37 +70,6 @@ class FakeRelaySidecar:
     def premium_relay_accounts(self, run_date, drama_language="en"):
         self.calls.append((run_date, drama_language))
         return [dict(item) for item in self.relays]
-
-
-def fake_preflight(
-    _config,
-    candidate,
-    selected_account,
-    rank,
-    _timestamp,
-    _destination,
-    _downloader,
-    _prober,
-    **_kwargs,
-):
-    duration = float(candidate["duration_for_test"])
-    if duration > 140.0 and not selected_account.get("long_video_eligible"):
-        raise CandidatePreflightError(
-            "long video requires Premium",
-            code="x_long_video_requires_premium",
-        )
-    return {
-        **candidate,
-        "account_id": int(selected_account["id"]),
-        "account_username": str(selected_account["username"]),
-        "page_name": str(selected_account["display_name"]),
-        "page_id": str(selected_account["x_user_id"]),
-        "preflight_duration": duration,
-        "candidate_rank": rank,
-        "delivery_mode": "direct",
-        "relay_account_id": 0,
-        "relay_account_username": "",
-    }
 
 
 class MaterialAssignmentTests(unittest.TestCase):
@@ -114,23 +90,22 @@ class MaterialAssignmentTests(unittest.TestCase):
         options = {
             "source_date": "2026-08-16",
             "timestamp": 1786900000,
-            "downloader": object(),
-            "prober": object(),
-            "repair_client": None,
+            "downloader": mock.Mock(side_effect=AssertionError("download called")),
+            "prober": mock.Mock(side_effect=AssertionError("probe called")),
+            "repair_client": mock.Mock(
+                side_effect=AssertionError("repair called")
+            ),
             "assignment_identity": self.identity,
         }
         if shuffler is not None:
             options["stable_shuffler"] = shuffler
-        with mock.patch.object(
-            runner, "_preflight_candidate", side_effect=fake_preflight
-        ):
-            return runner._preflight_material_candidates(
-                self.config,
-                FakeRelaySidecar(relays),
-                candidates,
-                accounts,
-                **options,
-            )
+        return runner._preflight_material_candidates(
+            self.config,
+            FakeRelaySidecar(relays),
+            candidates,
+            accounts,
+            **options,
+        )
 
     def test_stable_seed_and_injected_shuffle_have_no_probability_assertion(self):
         parts = ("target", "material", "2026-08-17", "09:17", 7, "en")
@@ -153,6 +128,9 @@ class MaterialAssignmentTests(unittest.TestCase):
         )
         self.assertFalse(failures)
         self.assertEqual(direct[0]["delivery_mode"], "direct")
+        self.assertEqual(direct[0]["media_validation_mode"], "deferred")
+        self.assertEqual(direct[0]["preflight_sha256"], "")
+        self.assertEqual(direct[0]["preflight_size"], 0)
 
         def choose_last(items, _seed):
             return list(items)[::-1]

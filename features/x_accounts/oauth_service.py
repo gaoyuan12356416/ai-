@@ -2627,7 +2627,10 @@ def publish_queue_request(
                 duration = float(queue.get("preflight_duration", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 duration = 0.0
-            if relay_delivery or duration > 140.0:
+            deferred_media_validation = bool(
+                queue.get("media_validation_mode") == "deferred"
+            )
+            if relay_delivery or duration > 140.0 or deferred_media_validation:
                 verified_source = verify_account(
                     source_account_id,
                     actor,
@@ -2644,7 +2647,7 @@ def publish_queue_request(
                         "X account drama language no longer matches the frozen queue",
                         409,
                     )
-                if (
+                if (relay_delivery or duration > 140.0) and (
                     not verified_source.get("long_video_publish_eligible")
                     or verified_source.get("protected") is not False
                 ):
@@ -3807,6 +3810,15 @@ def _safe_schedule_queue(queue):
             "X定时发布队列状态无效",
             503,
         )
+    error_code = str(queue.get("error_code", "") or "").strip()
+    if len(error_code) > 64 or (
+        error_code and not re.fullmatch(r"[A-Za-z0-9_.:-]+", error_code)
+    ):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布队列错误码无效",
+            503,
+        )
     delivery_mode = str(
         queue.get("delivery_mode", "direct") or "direct"
     )
@@ -3841,6 +3853,7 @@ def _safe_schedule_queue(queue):
         "account_id": account_id,
         "candidate_rank": candidate_rank,
         "status": status,
+        "error_code": error_code,
         "unknown_outcome": bool(queue.get("unknown_outcome", False)),
         "delivery_mode": delivery_mode,
         "relay_account_id": relay_account_id,
@@ -4172,7 +4185,9 @@ def create_post_schedule_plan_request(payload):
                 }
             )
         trusted.append(item)
-    preflight_post_storage_request(len(trusted))
+    # Schedule queues download and probe one media file at a time. Reserve
+    # capacity for that serialized working set, not the whole frozen batch.
+    preflight_post_storage_request(1)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         result = XPostStore(POST_DB_PATH).create_schedule_plan(

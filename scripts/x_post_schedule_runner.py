@@ -65,6 +65,7 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     SidecarError,
     _connect_from_config,
     _parse_hosts,
+    _plan_candidate,
     _preflight_candidate,
     _record_pool_checks_best_effort,
     _safe_account,
@@ -692,6 +693,7 @@ class ScheduleSidecarClient(SidecarClient):
             rank = raw.get("candidate_rank")
             status = raw.get("status")
             unknown = raw.get("unknown_outcome", False)
+            error_code = raw.get("error_code", "")
             delivery_mode = str(
                 raw.get("delivery_mode", "direct") or "direct"
             )
@@ -712,6 +714,10 @@ class ScheduleSidecarClient(SidecarClient):
                 or rank <= previous_rank
                 or status not in _QUEUE_STATUSES
                 or not isinstance(unknown, bool)
+                or not isinstance(error_code, str)
+                or len(error_code) > 64
+                or bool(error_code)
+                and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", error_code)
                 or delivery_mode
                 not in {"direct", "premium_relay_repost"}
                 or not isinstance(relay_account_id, int)
@@ -750,6 +756,7 @@ class ScheduleSidecarClient(SidecarClient):
                 "candidate_rank": rank,
                 "status": status,
                 "unknown_outcome": unknown,
+                "error_code": error_code,
             }
             if delivery_mode == "premium_relay_repost":
                 normalized.update(
@@ -1141,12 +1148,11 @@ def _preflight_material_candidates(
     accepted_by_account=None,
     repair_state=None,
 ):
-    """FIFO-scan one page while preserving optional cross-page run state."""
+    """FIFO-plan one metadata page without downloading candidate media."""
+    del config, downloader, prober, repair_client, repair_state
     target_count = len(accounts)
     if accepted_by_account is None:
         accepted_by_account = {}
-    if repair_state is None:
-        repair_state = {"attempted": 0}
     failures = []
     accounts_by_language = {}
     for account in accounts:
@@ -1165,166 +1171,131 @@ def _preflight_material_candidates(
         for language, language_accounts in accounts_by_language.items()
     }
     relay_cache = {}
-    work_root = Path(config.work_dir)
-    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
-        raise ScheduleRunError(
-            "schedule media work directory is unavailable",
-            "x_post_storage_unavailable",
-        )
-    with tempfile.TemporaryDirectory(
-        prefix="x-post-schedule-material-", dir=str(work_root)
-    ) as temporary:
-        root = Path(temporary)
-        for candidate in candidates:
-            if len(accepted_by_account) == target_count:
-                break
-            try:
-                language = canonical_drama_language(
-                    candidate.get("material_language")
-                    or candidate.get("language")
+    for candidate in candidates:
+        if len(accepted_by_account) == target_count:
+            break
+        try:
+            language = canonical_drama_language(
+                candidate.get("material_language") or candidate.get("language")
+            )
+        except (AttributeError, ValueError) as exc:
+            failures.append(
+                {
+                    "pool_item_id": (
+                        candidate.get("pool_item_id")
+                        if isinstance(candidate, dict)
+                        else None
+                    ),
+                    "material_id": str(
+                        candidate.get("material_id", "")
+                        if isinstance(candidate, dict)
+                        else ""
+                    ),
+                    "error_code": "x_account_drama_language_invalid",
+                    "error_message": redact_text(str(exc), 240),
+                }
+            )
+            continue
+        remaining_targets = [
+            account
+            for account in target_order.get(language, [])
+            if int(account["id"]) not in accepted_by_account
+        ]
+        if not remaining_targets:
+            failures.append(
+                {
+                    "pool_item_id": candidate.get("pool_item_id"),
+                    "material_id": str(candidate.get("material_id", "") or ""),
+                    "error_code": "material_language_not_scheduled",
+                    "error_message": "当前发布账号不包含该素材语言",
+                }
+            )
+            continue
+        target = remaining_targets[0]
+        material_id = str(candidate.get("material_id", "") or "")
+        rank = len(accepted_by_account) + 1
+        try:
+            duration = float(candidate.get("source_duration") or 0)
+            if candidate.get("media_kind") == "video" and duration <= 0:
+                raise CandidatePreflightError(
+                    "source video duration metadata is missing",
+                    code="material_duration_missing",
                 )
-            except (AttributeError, ValueError) as exc:
-                failures.append(
+            route_account = target
+            relay = None
+            if duration > 140 and not target.get("long_video_eligible"):
+                if language not in relay_cache:
+                    relay_cache[language] = sidecar.premium_relay_accounts(
+                        str(assignment_identity.get("run_date") or ""), language
+                    )
+                relay_options = [
+                    option
+                    for option in relay_cache[language]
+                    if int(option["id"]) != int(target["id"])
+                    and bool(option.get("long_video_eligible"))
+                    and same_drama_language(
+                        option.get("drama_language"), language
+                    )
+                ]
+                relay_options = stable_shuffler(
+                    relay_options,
+                    _material_assignment_seed_parts(
+                        assignment_identity,
+                        accounts,
+                        language,
+                        "relay:%s:%s" % (int(target["id"]), material_id),
+                    ),
+                )
+                if not relay_options:
+                    raise CandidatePreflightError(
+                        "no currently eligible same-language public Premium relay account is available",
+                        "x_long_video_requires_premium",
+                    ) from None
+                relay = relay_options[0]
+                route_account = relay
+            item = _plan_candidate(route_account, candidate, rank, timestamp)
+            item.update(
+                {
+                    "media_validation_mode": "deferred",
+                    "preflight_sha256": "",
+                    "preflight_size": 0,
+                    "preflight_duration": duration,
+                    "preflight_width": 0,
+                    "preflight_height": 0,
+                    "delivery_mode": "direct",
+                    "relay_account_id": 0,
+                    "relay_account_username": "",
+                }
+            )
+            if relay is not None:
+                item.update(
                     {
-                        "pool_item_id": (
-                            candidate.get("pool_item_id")
-                            if isinstance(candidate, dict)
-                            else None
+                        "account_id": int(target["id"]),
+                        "account_username": str(target["username"]),
+                        "page_name": str(
+                            target.get("display_name", "") or target["username"]
                         ),
-                        "material_id": str(
-                            candidate.get("material_id", "")
-                            if isinstance(candidate, dict)
-                            else ""
-                        ),
-                        "error_code": "x_account_drama_language_invalid",
-                        "error_message": redact_text(str(exc), 240),
+                        "page_id": str(target["x_user_id"]),
+                        "delivery_mode": "premium_relay_repost",
+                        "relay_account_id": int(relay["id"]),
+                        "relay_account_username": str(relay["username"]),
                     }
                 )
-                continue
-            remaining_targets = [
-                account
-                for account in target_order.get(language, [])
-                if int(account["id"]) not in accepted_by_account
-            ]
-            if not remaining_targets:
-                failures.append(
-                    {
-                        "pool_item_id": candidate.get("pool_item_id"),
-                        "material_id": str(
-                            candidate.get("material_id", "") or ""
-                        ),
-                        "error_code": "material_language_not_scheduled",
-                        "error_message": "当前发布账号不包含该素材语言",
-                    }
-                )
-                continue
-            target = remaining_targets[0]
-            material_id = str(candidate.get("material_id", "") or "")
-            destination = root / ("%s.mp4" % material_id)
-            rank = len(accepted_by_account) + 1
-            try:
-                try:
-                    item = _preflight_candidate(
-                        config,
-                        candidate,
-                        target,
-                        rank,
-                        timestamp,
-                        destination,
-                        downloader,
-                        prober,
-                        repair_client=repair_client,
-                        repair_state=repair_state,
-                    )
-                except (
-                    XPostError,
-                    CandidatePreflightError,
-                    http.client.HTTPException,
-                    OSError,
-                    ValueError,
-                ) as direct_error:
-                    if not (
-                        str(getattr(direct_error, "code", "") or "")
-                        == "x_long_video_requires_premium"
-                        and not target.get("long_video_eligible")
-                    ):
-                        raise
-                    if language not in relay_cache:
-                        relay_cache[language] = sidecar.premium_relay_accounts(
-                            str(assignment_identity.get("run_date") or ""),
-                            language,
-                        )
-                    relay_options = [
-                        relay
-                        for relay in relay_cache[language]
-                        if int(relay["id"]) != int(target["id"])
-                        and same_drama_language(
-                            relay.get("drama_language"), language
-                        )
-                    ]
-                    relay_options = stable_shuffler(
-                        relay_options,
-                        _material_assignment_seed_parts(
-                            assignment_identity,
-                            accounts,
-                            language,
-                            "relay:%s:%s"
-                            % (int(target["id"]), material_id),
-                        ),
-                    )
-                    if not relay_options:
-                        raise CandidatePreflightError(
-                            "no currently eligible same-language public Premium relay account is available",
-                            "x_long_video_requires_premium",
-                        ) from None
-                    relay = relay_options[0]
-                    item = _preflight_candidate(
-                        config,
-                        candidate,
-                        relay,
-                        rank,
-                        timestamp,
-                        destination,
-                        downloader,
-                        prober,
-                        repair_client=repair_client,
-                        repair_state=repair_state,
-                    )
-                    item.update(
-                        {
-                            "account_id": int(target["id"]),
-                            "account_username": str(target["username"]),
-                            "page_name": str(
-                                target.get("display_name", "")
-                                or target["username"]
-                            ),
-                            "page_id": str(target["x_user_id"]),
-                            "delivery_mode": "premium_relay_repost",
-                            "relay_account_id": int(relay["id"]),
-                            "relay_account_username": str(relay["username"]),
-                        }
-                    )
-            except (
-                XPostError,
-                CandidatePreflightError,
-                http.client.HTTPException,
-                OSError,
-                ValueError,
-            ) as exc:
-                failures.append(
-                    {
-                        "pool_item_id": candidate.get("pool_item_id"),
-                        "material_id": material_id,
-                        "error_code": str(
-                            getattr(exc, "code", "media_preflight_failed")
-                        )[:64],
-                        "error_message": redact_text(str(exc), 240),
-                    }
-                )
-                continue
-            item["source_type"] = "material"
-            item["source_date"] = source_date
-            accepted_by_account[int(target["id"])] = item
+        except (XPostError, CandidatePreflightError, TypeError, ValueError) as exc:
+            failures.append(
+                {
+                    "pool_item_id": candidate.get("pool_item_id"),
+                    "material_id": material_id,
+                    "error_code": str(
+                        getattr(exc, "code", "metadata_planning_failed")
+                    )[:64],
+                    "error_message": redact_text(str(exc), 240),
+                }
+            )
+            continue
+        item["source_type"] = "material"
+        item["source_date"] = source_date
+        accepted_by_account[int(target["id"])] = item
     accepted = []
     for account in accounts:
         item = accepted_by_account.get(int(account["id"]))
@@ -1367,7 +1338,7 @@ def _material_candidates(
     planned = []
     connection = _open_source_connection(config, connection_factory)
     try:
-        # candidate_pool_limit bounds one hydration/media-preflight page.  The
+        # candidate_pool_limit bounds one metadata-hydration page. The
         # fixed pool snapshot may continue through scan_limit until the frozen
         # account scope is filled or every row has been inspected.
         for start in range(0, len(pool_items), config.candidate_pool_limit):
@@ -1388,7 +1359,7 @@ def _material_candidates(
                 config,
                 selector_rejections,
             )
-            planned, preflight_rejections = _preflight_material_candidates(
+            planned, planning_rejections = _preflight_material_candidates(
                 config,
                 sidecar,
                 candidates,
@@ -1406,7 +1377,7 @@ def _material_candidates(
             _record_pool_checks_best_effort(
                 sidecar,
                 config,
-                preflight_rejections,
+                planning_rejections,
             )
     finally:
         close = getattr(connection, "close", None)
@@ -1414,7 +1385,7 @@ def _material_candidates(
             close()
     if not planned:
         raise ScheduleRunError(
-            "no FIFO material candidate passed media preflight",
+            "no FIFO material candidate passed metadata planning",
             "x_post_schedule_material_preflight_shortage",
         )
     return planned
@@ -1432,17 +1403,9 @@ def _drama_candidates(
     repair_client,
     timestamp,
 ):
+    del downloader, prober, repair_client
     account_ids = [int(account["id"]) for account in accounts]
     connection = _open_source_connection(config, connection_factory)
-    work_root = Path(config.work_dir)
-    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
-        raise ScheduleRunError(
-            "schedule media work directory is unavailable",
-            "x_post_storage_unavailable",
-        )
 
     def reject_unassigned(pool_item_id, content_id, code, message):
         result = sidecar.record_drama_pool_checks(
@@ -1467,102 +1430,50 @@ def _drama_candidates(
             )
 
     try:
-        repair_state = {"attempted": 0}
         rejected_ids = set()
-        preflight_cache = {}
         refresh_accounts = False
         relay_accounts = {}
-
-        def preflight_one(candidate, account, rank, temporary):
-            cache_key = (
-                int(account["id"]),
-                int(candidate["drama_pool_item_id"]),
-                str(candidate["episode_key"]),
-                str(candidate["material_id"]),
-                str(candidate["material_url"]),
-                str(candidate["drama_pool_created_at"]),
-                str(candidate["description"]),
-                str(candidate["name_tag"]),
-                str(candidate["tag"]),
+        while len(rejected_ids) < config.scan_limit:
+            if refresh_accounts:
+                accounts = _verify_accounts(sidecar, account_ids)
+                refresh_accounts = False
+            pool_items = sidecar.available_drama_pool(
+                config.drama_pool_path,
+                config.scan_limit,
+                account_ids,
             )
-            cached = preflight_cache.get(cache_key)
-            if cached is not None:
-                return dict(cached)
-            build_drama_episode_post_text(
-                DEFAULT_SHORT_BASE_URL + "/1.html",
-                candidate["sub_num"],
-                candidate["name_tag"],
-                candidate["description"],
-            )
-            helper_candidate = dict(candidate)
-            helper_candidate["pool_item_id"] = candidate[
-                "drama_pool_item_id"
-            ]
-            helper_candidate["pool_created_at"] = candidate[
-                "drama_pool_created_at"
-            ]
-            helper_candidate["source_date"] = source_date
-            destination = Path(temporary) / (
-                "%s-%s.mp4"
-                % (
-                    candidate["drama_pool_item_id"],
-                    candidate["sub_num"],
+            if not pool_items:
+                raise ScheduleRunError(
+                    "short-drama pool has no free episode for this schedule",
+                    "x_post_schedule_drama_shortage",
                 )
-            )
-            item = _preflight_candidate(
-                config,
-                helper_candidate,
-                account,
-                rank,
-                timestamp,
-                destination,
-                downloader,
-                prober,
-                repair_client=repair_client,
-                repair_state=repair_state,
-            )
-            preflight_cache[cache_key] = dict(item)
-            return item
-
-        with tempfile.TemporaryDirectory(
-            prefix="x-post-schedule-drama-", dir=str(work_root)
-        ) as temporary:
-            while len(rejected_ids) < config.scan_limit:
-                if refresh_accounts:
-                    accounts = _verify_accounts(sidecar, account_ids)
-                    refresh_accounts = False
-                pool_items = sidecar.available_drama_pool(
-                    config.drama_pool_path,
-                    config.scan_limit,
-                    account_ids,
-                )
-                if not pool_items:
-                    raise ScheduleRunError(
-                        "short-drama pool has no free episode for this schedule",
-                        "x_post_schedule_drama_shortage",
-                    )
-                pool_by_id = {
-                    int(item["id"]): item
-                    for item in pool_items
-                    if isinstance(item, dict) and item.get("id") is not None
-                }
+            candidates = []
+            refill_required = False
+            for pool_item in pool_items:
                 try:
-                    candidates = select_drama_pool_episodes(
-                        connection,
-                        pool_items,
-                        account_ids=account_ids,
-                        schema=config.mysql_database,
-                        app_id=config.drama_app_id,
+                    candidates.extend(
+                        select_drama_pool_episodes(
+                            connection,
+                            [pool_item],
+                            account_ids=account_ids,
+                            schema=config.mysql_database,
+                            app_id=config.drama_app_id,
+                        )
                     )
                 except DramaPoolRejection as exc:
-                    pool = pool_by_id.get(int(exc.pool_item_id or 0), {})
-                    if int(pool.get("assigned_account_id") or 0) > 0:
+                    if (
+                        int(exc.pool_item_id or 0) != int(pool_item.get("id") or 0)
+                        or str(exc.content_id or "")
+                        != str(pool_item.get("content_id") or "")
+                    ):
                         raise ScheduleRunError(
-                            str(exc),
-                            exc.code,
-                            drama_pool_item_id=exc.pool_item_id,
-                            content_id=exc.content_id,
+                            "short-drama selector rejection identity changed",
+                            "x_post_drama_pool_check_conflict",
                         ) from None
+                    if int(pool_item.get("assigned_account_id") or 0) > 0:
+                        # A bound drama keeps its affinity/progress for later
+                        # repair, but must not suppress healthy sibling dramas.
+                        continue
                     reject_unassigned(
                         exc.pool_item_id,
                         exc.content_id,
@@ -1571,192 +1482,177 @@ def _drama_candidates(
                     )
                     rejected_ids.add(int(exc.pool_item_id))
                     refresh_accounts = True
-                    continue
-                if not candidates:
+                    refill_required = True
+                    break
+            if refill_required:
+                continue
+            candidate_account_ids = [
+                int(candidate.get("candidate_account_id") or 0)
+                for candidate in candidates
+            ]
+            if candidate_account_ids and not _is_ordered_account_subset(
+                candidate_account_ids, account_ids
+            ):
+                raise ScheduleRunError(
+                    "short-drama candidate order changed during planning",
+                    "x_post_schedule_account_mismatch",
+                )
+            if not candidates:
+                raise ScheduleRunError(
+                    "short-drama pool has no eligible free episode for this schedule",
+                    "x_post_schedule_drama_shortage",
+                )
+
+            account_by_id = {int(account["id"]): account for account in accounts}
+            planned_by_index = {}
+
+            def normalize_item(item, candidate):
+                normalized = dict(item)
+                normalized.update(
+                    {
+                        # Drama affinity is stored on the dedicated pool row.
+                        "pool_item_id": None,
+                        "pool_created_at": "",
+                        "drama_pool_item_id": candidate["drama_pool_item_id"],
+                        "drama_pool_created_at": candidate[
+                            "drama_pool_created_at"
+                        ],
+                        "source_type": "drama",
+                        "source_date": source_date,
+                        "media_validation_mode": "deferred",
+                        "preflight_sha256": "",
+                        "preflight_size": 0,
+                        "preflight_width": 0,
+                        "preflight_height": 0,
+                        "delivery_mode": item.get("delivery_mode") or "direct",
+                        "relay_account_id": int(item.get("relay_account_id") or 0),
+                        "relay_account_username": str(
+                            item.get("relay_account_username") or ""
+                        ),
+                    }
+                )
+                return normalized
+
+            def normalize_relay_item(
+                item, candidate, target_account, relay_account
+            ):
+                normalized = normalize_item(item, candidate)
+                normalized.update(
+                    {
+                        "delivery_mode": "premium_relay_repost",
+                        "relay_account_id": int(relay_account["id"]),
+                        "relay_account_username": str(relay_account["username"]),
+                        "account_id": int(target_account["id"]),
+                        "account_username": str(target_account["username"]),
+                        "page_name": str(
+                            target_account.get("display_name", "")
+                            or target_account["username"]
+                        ),
+                        "page_id": str(target_account["x_user_id"]),
+                    }
+                )
+                return normalized
+
+            for index, candidate in enumerate(candidates):
+                rank = index + 1
+                account = account_by_id.get(
+                    int(candidate.get("candidate_account_id") or 0)
+                )
+                if account is None:
                     raise ScheduleRunError(
-                        "short-drama pool has no eligible free episode for this schedule",
-                        "x_post_schedule_drama_shortage",
+                        "short-drama account assignment changed during planning",
+                        "x_post_schedule_account_mismatch",
+                        drama_pool_item_id=candidate.get("drama_pool_item_id"),
+                        content_id=candidate.get("content_id", ""),
                     )
-
-                planned_by_index = {}
-                rejected = False
-                account_by_id = {
-                    int(account["id"]): account for account in accounts
-                }
-                processing_indexes = range(len(candidates))
-
-                def normalize_item(item, candidate):
-                    normalized = dict(item)
-                    # pool_item_id is used only by the GPU repair worker.
-                    # The durable affinity is stored on the drama pool row.
-                    normalized["pool_item_id"] = None
-                    normalized["pool_created_at"] = ""
-                    normalized["drama_pool_item_id"] = candidate[
-                        "drama_pool_item_id"
-                    ]
-                    normalized["drama_pool_created_at"] = candidate[
-                        "drama_pool_created_at"
-                    ]
-                    normalized["source_type"] = "drama"
-                    normalized["source_date"] = source_date
-                    return normalized
-
-                def normalize_relay_item(
-                    item, candidate, target_account, relay_account
-                ):
-                    normalized = normalize_item(item, candidate)
-                    normalized.update(
+                try:
+                    build_drama_episode_post_text(
+                        DEFAULT_SHORT_BASE_URL + "/1.html",
+                        candidate["sub_num"],
+                        candidate["name_tag"],
+                        candidate["description"],
+                    )
+                    helper_candidate = dict(candidate)
+                    helper_candidate.update(
                         {
-                            "delivery_mode": "premium_relay_repost",
-                            "relay_account_id": int(relay_account["id"]),
-                            "relay_account_username": str(
-                                relay_account["username"]
-                            ),
-                            "account_id": int(target_account["id"]),
-                            "account_username": str(
-                                target_account["username"]
-                            ),
-                            "page_name": str(
-                                target_account.get("display_name", "")
-                                or target_account["username"]
-                            ),
-                            "page_id": str(target_account["x_user_id"]),
+                            "pool_item_id": candidate["drama_pool_item_id"],
+                            "pool_created_at": candidate[
+                                "drama_pool_created_at"
+                            ],
+                            "source_date": source_date,
                         }
                     )
-                    return normalized
+                    drama_language = canonical_drama_language(
+                        candidate.get("material_language")
+                        or candidate.get("language")
+                    )
+                    if account.get("long_video_eligible"):
+                        item = _plan_candidate(
+                            account, helper_candidate, rank, timestamp
+                        )
+                        item["preflight_duration"] = 0.0
+                        planned_by_index[index] = normalize_item(item, candidate)
+                        continue
 
-                for index in processing_indexes:
-                    rank = index + 1
-                    candidate = candidates[index]
-                    candidate_account_id = int(
-                        candidate.get("candidate_account_id") or 0
-                    )
-                    account = account_by_id.get(candidate_account_id)
-                    if account is None:
-                        raise ScheduleRunError(
-                            "short-drama account assignment changed during preflight",
-                            "x_post_schedule_account_mismatch",
-                            drama_pool_item_id=candidate.get(
-                                "drama_pool_item_id"
-                            ),
-                            content_id=candidate.get("content_id", ""),
-                        )
-                    try:
-                        item = preflight_one(
-                            candidate,
-                            account,
-                            rank,
-                            temporary,
-                        )
-                    except (
-                        CandidatePreflightError,
-                        XPostError,
-                        http.client.HTTPException,
-                        OSError,
-                        TypeError,
-                        ValueError,
-                    ) as exc:
-                        code = str(
-                            getattr(
-                                exc,
-                                "code",
-                                "x_post_drama_preflight_failed",
-                            )
-                        )
-                        message = "episode %s media preflight failed: %s" % (
-                            candidate["episode_key"],
-                            exc,
-                        )
-                        if (
-                            code == "x_long_video_requires_premium"
-                            and not account.get("long_video_eligible")
-                        ):
-                            drama_language = canonical_drama_language(
-                                candidate.get("material_language")
-                                or candidate.get("language")
-                            )
-                            if drama_language not in relay_accounts:
-                                relay_run_date = datetime.fromtimestamp(
-                                    timestamp, BEIJING_TZ
-                                ).date().isoformat()
-                                try:
-                                    relay_accounts[drama_language] = sidecar.premium_relay_accounts(
-                                        relay_run_date,
-                                        drama_language,
-                                    )
-                                except TypeError:
-                                    # Backward-compatible injected sidecar
-                                    # adapters used by offline operators/tests.
-                                    relay_accounts[drama_language] = sidecar.premium_relay_accounts(
-                                        relay_run_date
-                                    )
-                            relay_account = next(
-                                (
-                                    relay
-                                    for relay in relay_accounts[drama_language]
-                                    if int(relay["id"])
-                                    != int(account["id"])
-                                ),
-                                None,
-                            )
-                            if relay_account is None:
-                                continue
-                            try:
-                                relay_item = preflight_one(
-                                    candidate,
-                                    relay_account,
-                                    rank,
-                                    temporary,
+                    if drama_language not in relay_accounts:
+                        relay_run_date = datetime.fromtimestamp(
+                            timestamp, BEIJING_TZ
+                        ).date().isoformat()
+                        try:
+                            relay_accounts[drama_language] = (
+                                sidecar.premium_relay_accounts(
+                                    relay_run_date, drama_language
                                 )
-                            except (
-                                CandidatePreflightError,
-                                XPostError,
-                                http.client.HTTPException,
-                                OSError,
-                                TypeError,
-                                ValueError,
-                            ) as route_exc:
-                                continue
-                            planned_by_index[index] = normalize_relay_item(
-                                relay_item,
-                                candidate,
-                                account,
-                                relay_account,
                             )
-                            continue
-                        if code not in _DRAMA_DETERMINISTIC_REJECTION_CODES:
-                            continue
-                        if int(candidate.get("assigned_account_id") or 0) > 0:
-                            continue
-                        reject_unassigned(
-                            candidate["drama_pool_item_id"],
-                            candidate["content_id"],
-                            code,
-                            message,
-                        )
-                        rejected_ids.add(
-                            int(candidate["drama_pool_item_id"])
-                        )
-                        refresh_accounts = True
-                        rejected = True
-                        break
-                    planned_by_index[index] = normalize_item(item, candidate)
-                if rejected:
-                    continue
-                if not planned_by_index:
-                    raise ScheduleRunError(
-                        "no short-drama candidate passed media preflight",
-                        "x_post_schedule_drama_shortage",
+                        except TypeError:
+                            relay_accounts[drama_language] = (
+                                sidecar.premium_relay_accounts(relay_run_date)
+                            )
+                    relay_account = next(
+                        (
+                            relay
+                            for relay in relay_accounts[drama_language]
+                            if int(relay["id"]) != int(account["id"])
+                            and bool(relay.get("long_video_eligible"))
+                            and (
+                                not relay.get("drama_language")
+                                or same_drama_language(
+                                    relay.get("drama_language"), drama_language
+                                )
+                            )
+                        ),
+                        None,
                     )
-                return [
-                    planned_by_index[index]
-                    for index in range(len(candidates))
-                    if index in planned_by_index
-                ]
-            raise ScheduleRunError(
-                "drama preflight rejection limit was reached",
-                "x_post_schedule_drama_shortage",
-            )
+                    if relay_account is None:
+                        continue
+                    relay_item = _plan_candidate(
+                        relay_account, helper_candidate, rank, timestamp
+                    )
+                    # Source duration is unavailable. 141 is only a relay hint;
+                    # deferred publish probes the episode once before upload.
+                    relay_item["preflight_duration"] = 141.0
+                    planned_by_index[index] = normalize_relay_item(
+                        relay_item, candidate, account, relay_account
+                    )
+                except (XPostError, TypeError, ValueError):
+                    # Candidate-local metadata/copy defects must not block other
+                    # already-available episodes in this frozen schedule.
+                    continue
+
+            if not planned_by_index:
+                raise ScheduleRunError(
+                    "no short-drama candidate passed metadata planning",
+                    "x_post_schedule_drama_shortage",
+                )
+            return [
+                planned_by_index[index]
+                for index in range(len(candidates))
+                if index in planned_by_index
+            ]
+        raise ScheduleRunError(
+            "drama metadata rejection limit was reached",
+            "x_post_schedule_drama_shortage",
+        )
     finally:
         close = getattr(connection, "close", None)
         if callable(close):
@@ -1806,9 +1702,11 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
             results.append(entry)
             continue
         if queue["status"] == "failed":
-            entry["error_code"] = "x_post_retry_requires_review"
+            entry["error_code"] = (
+                queue.get("error_code") or "x_post_retry_requires_review"
+            )
             results.append(entry)
-            if identity["source_type"] == "drama":
+            if queue.get("error_code") == "x_post_rate_limited":
                 stopped = True
                 break
             continue
@@ -1831,11 +1729,7 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
                     "unknown_outcome": exc.unknown_outcome,
                 }
             )
-            if (
-                identity["source_type"] == "drama"
-                or exc.status == 429
-                or exc.unknown_outcome
-            ):
+            if exc.status == 429 or exc.unknown_outcome:
                 stopped = True
         results.append(entry)
         if stopped:
@@ -1889,9 +1783,6 @@ def execute_schedule_tick(
         config.internal_token,
         timeout=config.internal_timeout,
     )
-    if repair_client is None:
-        repair_client = _repair_client(config)
-
     due_options = {
         "current": current,
         "grace_seconds": config.grace_seconds,
@@ -1922,10 +1813,9 @@ def execute_schedule_tick(
         }
 
     batches = []
-    retrying_downloader = _retrying_media_downloader(downloader)
     for identity in accepted_due:
-        # Frozen state always wins.  This query precedes token verification,
-        # MySQL reads, downloads and GPU repair.
+        # Frozen state always wins.  This query precedes token verification and
+        # source metadata reads. Scheduled planning never downloads media.
         existing = sidecar.query_schedule_plan(
             config.plan_query_path, identity
         )
@@ -1954,7 +1844,7 @@ def execute_schedule_tick(
                 material_loader_options = {
                     "source_date": source_date,
                     "connection_factory": connection_factory,
-                    "downloader": retrying_downloader,
+                    "downloader": downloader,
                     "prober": prober,
                     "repair_client": repair_client,
                     "timestamp": timestamp,
@@ -1974,7 +1864,7 @@ def execute_schedule_tick(
                     accounts,
                     source_date=source_date,
                     connection_factory=connection_factory,
-                    downloader=retrying_downloader,
+                    downloader=downloader,
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,
@@ -1989,9 +1879,8 @@ def execute_schedule_tick(
                     "candidate account order does not match frozen schedule",
                     "x_post_schedule_account_mismatch",
                 )
-            # Media download/repair may outlive a two-hour X access token.
-            # Refresh the frozen scope again immediately before the atomic
-            # plan transaction; each later publish also verifies its account.
+            # Refresh the frozen scope immediately before the atomic plan
+            # transaction; each later publish also verifies its account.
             _verify_accounts(sidecar, candidate_account_ids)
             sidecar.preflight_storage(config.storage_preflight_path)
         except Exception as exc:

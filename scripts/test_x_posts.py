@@ -119,6 +119,7 @@ class XPostsTests(unittest.TestCase):
             columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             self.assertIn("account_username", columns)
             self.assertIn("preflight_duration", columns)
+            self.assertIn("media_validation_mode", columns)
             self.assertNotIn("source_queue_id", columns)
 
     def test_daily_plan_accepts_nine_candidates_with_dynamic_expected_count(self):
@@ -1247,6 +1248,105 @@ class XPostsTests(unittest.TestCase):
                 "af_channel"
             ],
             "long",
+        )
+
+    def test_deferred_publish_uses_final_probe_duration_for_attribution(self):
+        store = service.XPostStore(self.db_path)
+        config = store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2],
+                "publish_times": ["10:00"],
+                "version": 1,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2],
+        )
+        pool = store.add_pool_materials(
+            ["88010"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "88010", "error_code": ""}],
+        )["items"][0]
+        item = candidate()
+        item.update(
+            {
+                "material_id": "88010",
+                "content_id": "32010",
+                "pool_item_id": pool["id"],
+                "pool_created_at": pool["created_at"],
+                "account_drama_language": "en",
+                "media_validation_mode": "deferred",
+                "preflight_sha256": "",
+                "preflight_size": 0,
+                # Routing metadata is intentionally stale. Deferred mode must
+                # attribute from the single final probe, not this value.
+                "preflight_duration": 141.0,
+                "facebook_violation_count": 0,
+                "tiktok_violation_count": 0,
+                "twitter_violation_count": 0,
+                "resource_audit_count": 0,
+                "dangerous_tag_count": 0,
+            }
+        )
+        plan = store.create_schedule_plan(
+            "material",
+            "2026-07-22",
+            "10:00",
+            config["version"],
+            [item],
+            premium_account_ids=[2],
+        )
+        queue = plan["queues"][0]
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                ),
+                response(200, {"data": {"id": "deferred-media"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "deferred-media"}}),
+                response(201, {"data": {"id": "1900031", "text": "ok"}}),
+            ]
+        )
+        with mock.patch.object(
+            service, "probe_media", return_value={"duration": 45.25}
+        ):
+            result = service.publish_canary(
+                db_path=self.db_path,
+                queue_id=queue["id"],
+                account={
+                    "id": 2,
+                    "username": "ShortsDramhx",
+                    "subscription_type": "premium",
+                },
+                access_token="secret-token",
+                public_root=self.root / "deferred-public" / "s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
+                allowed_media_hosts=["media.example.com"],
+                http_client=client,
+                sleeper=lambda _seconds: None,
+                timeout=5,
+            )
+        self.assertEqual(result["status"], "published")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            long_url = conn.execute(
+                "SELECT long_url FROM x_post_publish_log WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()[0]
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(long_url).query))
+        self.assertEqual(query["af_channel"], "short")
+        initialize = next(
+            request
+            for request in client.requests
+            if request["url"].endswith("/2/media/upload/initialize")
+        )
+        self.assertEqual(
+            json.loads(initialize["body"].decode("utf-8"))["media_category"],
+            "tweet_video",
         )
 
     def test_publish_fails_if_final_probe_crosses_140_second_channel_boundary(self):

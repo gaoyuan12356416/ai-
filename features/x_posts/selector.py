@@ -490,6 +490,7 @@ class DramawaveCandidateSelector:
                 "material_product_mismatch",
                 "素材 %s 不属于Dramawave" % material_id,
             )
+        source_duration = 0.0
         if material_type == 1:
             if not allow_images:
                 raise PoolCandidateRejection(
@@ -677,6 +678,7 @@ class DramawaveCandidateSelector:
             "material_key": key,
             "material_id": candidate_id,
             "media_kind": media_kind,
+            "source_duration": source_duration,
             "content_id": content_id,
             "material_url": material_url,
             "material_name": material_name,

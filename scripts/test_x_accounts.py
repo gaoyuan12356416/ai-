@@ -74,6 +74,26 @@ class XAccountsTestCase(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_safe_schedule_queue_exposes_only_bounded_error_code(self):
+        queue = {
+            "id": 7,
+            "account_id": 101,
+            "candidate_rank": 1,
+            "status": "failed",
+            "error_code": "x_post_rate_limited",
+            "unknown_outcome": False,
+            "delivery_mode": "direct",
+            "relay_account_id": 0,
+            "repost_status": "",
+        }
+        safe = service._safe_schedule_queue(queue)
+        self.assertEqual(safe["error_code"], "x_post_rate_limited")
+        self.assertNotIn("error_message", safe)
+        with self.assertRaises(service.ServiceError):
+            service._safe_schedule_queue(
+                {**queue, "error_code": "unsafe\nsecret"}
+            )
+
     def test_daily_account_scope_accepts_one_and_fifty_but_rejects_invalid_scope(self):
         self.assertEqual(service._daily_account_scope((7,)), (7,))
         fifty = tuple(range(1, 51))
@@ -2653,6 +2673,56 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertNotIn("access_token", result)
         self.assertEqual(captured["publish"]["queue_id"], queue["id"])
         self.assertEqual(captured["publish"]["access_token"], "access-secret")
+
+    def test_deferred_queue_uses_full_source_account_verification(self):
+        account = self.complete("3011", "deferred_owner", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "deferred_owner",
+                "page_name": "Deferred Owner",
+                "page_id": "3011",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore
+
+        store = XPostStore(service.POST_DB_PATH)
+        queue = store.enqueue(payload)
+        with contextlib.closing(sqlite3.connect(service.POST_DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_post_queue SET media_validation_mode='deferred',"
+                "preflight_sha256='',preflight_size=0 WHERE id=?",
+                (queue["id"],),
+            )
+            conn.commit()
+
+        @contextlib.contextmanager
+        def credentials(_account_id, _actor, _scope):
+            yield account, "access-secret"
+
+        verify = mock.Mock(return_value=account)
+        with mock.patch.object(service, "verify_account", verify), mock.patch.object(
+            service, "publish_credentials", credentials
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(
+                XPostError,
+                XPostStore,
+                lambda **_kwargs: {
+                    "status": "published",
+                    "log_id": 9,
+                    "short_url": "https://ai.yingliangads.com/s2l/9.html",
+                    "post_id": "9009",
+                    "preview_url": "https://x.com/deferred_owner/status/9009",
+                },
+            ),
+        ):
+            result = service.publish_queue_request(queue["id"])
+        self.assertEqual(result["post_id"], "9009")
+        self.assertEqual(verify.call_count, 1)
+        self.assertNotIn("only_refresh_required", verify.call_args.kwargs)
 
     def test_daily_publish_scope_rejects_non_daily_queue_before_log_reservation(self):
         account = self.complete("3000", "not_a_daily_queue", actor=self.owner)

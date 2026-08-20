@@ -269,6 +269,7 @@ QUEUE_LEDGER_FIELDS = (
     "media_repair_job_key",
     "media_repair_profile",
     "media_repair_source_sha256",
+    "media_validation_mode",
     "preflight_sha256",
     "preflight_size",
     "preflight_duration",
@@ -277,6 +278,12 @@ QUEUE_LEDGER_FIELDS = (
     "twitter_violation_count",
     "resource_audit_count",
     "dangerous_tag_count",
+)
+
+MEDIA_VALIDATION_PREFLIGHT = "preflight"
+MEDIA_VALIDATION_DEFERRED = "deferred"
+MEDIA_VALIDATION_MODES = frozenset(
+    {MEDIA_VALIDATION_PREFLIGHT, MEDIA_VALIDATION_DEFERRED}
 )
 
 DIRECT_DELIVERY_MODE = "direct"
@@ -315,6 +322,23 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
         "material_not_found_or_ineligible",
         "material_not_video",
         "material_inactive",
+        # Media-only failures are safe to revisit. The current source metadata
+        # and final publish-time download/probe decide whether the item is now
+        # usable; identity, mapping, source-tag and unknown-result errors are
+        # deliberately excluded from this list.
+        "media_download_failed",
+        "invalid_media_codec",
+        "invalid_media_dimensions",
+        "invalid_media_duration",
+        "invalid_media_frame_rate",
+        "invalid_media_response",
+        "invalid_media_scan",
+        "invalid_media_type",
+        "source_not_repairable",
+        "repaired_media_invalid",
+        "x_post_media_repair_invalid_response",
+        "x_post_media_repair_unreachable",
+        "cos_upload_failed",
     }
 )
 _REVALIDATABLE_MATERIAL_VALIDATION_SQL = "(" + ",".join(
@@ -1345,6 +1369,8 @@ def ensure_storage(db_path):
                 media_repair_job_key TEXT NOT NULL DEFAULT '',
                 media_repair_profile TEXT NOT NULL DEFAULT '',
                 media_repair_source_sha256 TEXT NOT NULL DEFAULT '',
+                media_validation_mode TEXT NOT NULL DEFAULT 'preflight'
+                    CHECK(media_validation_mode IN ('preflight','deferred')),
                 preflight_sha256 TEXT NOT NULL DEFAULT '',
                 preflight_size INTEGER NOT NULL DEFAULT 0,
                 preflight_duration REAL NOT NULL DEFAULT 0,
@@ -1946,6 +1972,10 @@ def ensure_storage(db_path):
                 "media_repair_job_key": "TEXT NOT NULL DEFAULT ''",
                 "media_repair_profile": "TEXT NOT NULL DEFAULT ''",
                 "media_repair_source_sha256": "TEXT NOT NULL DEFAULT ''",
+                "media_validation_mode": (
+                    "TEXT NOT NULL DEFAULT 'preflight' "
+                    "CHECK(media_validation_mode IN ('preflight','deferred'))"
+                ),
                 "preflight_sha256": "TEXT NOT NULL DEFAULT ''",
                 "preflight_size": "INTEGER NOT NULL DEFAULT 0",
                 "preflight_duration": "REAL NOT NULL DEFAULT 0",
@@ -4823,6 +4853,7 @@ class XPostStore:
         candidate_rank=None,
         require_compliance=False,
         allow_material_relay=False,
+        allow_deferred_media=False,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
@@ -5143,6 +5174,25 @@ class XPostStore:
         rank_value = candidate_rank if candidate_rank is not None else payload.get("candidate_rank")
         result["candidate_rank"] = _nonnegative_int(rank_value, "candidate_rank", 0)
         result["spend"] = _nonnegative_float(payload.get("spend"), "spend", 0)
+        media_validation_mode = str(
+            payload.get("media_validation_mode", MEDIA_VALIDATION_PREFLIGHT)
+            or ""
+        ).strip().lower()
+        if media_validation_mode not in MEDIA_VALIDATION_MODES:
+            raise XPostError(
+                "invalid_request", "media_validation_mode is invalid", 400
+            )
+        if media_validation_mode == MEDIA_VALIDATION_DEFERRED and (
+            not allow_deferred_media
+            or not require_compliance
+            or source_type not in {"material", "drama"}
+        ):
+            raise XPostError(
+                "invalid_request",
+                "deferred media validation is restricted to compliant schedule plans",
+                400,
+            )
+        result["media_validation_mode"] = media_validation_mode
         preflight_sha256 = str(payload.get("preflight_sha256", "") or "").strip().lower()
         result["preflight_size"] = _nonnegative_int(
             payload.get("preflight_size"), "preflight_size", 0
@@ -5173,7 +5223,16 @@ class XPostStore:
             )
         if preflight_sha256 and not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
             raise XPostError("invalid_request", "preflight_sha256无效", 400)
-        if require_compliance and (not preflight_sha256 or result["preflight_size"] <= 0):
+        if media_validation_mode == MEDIA_VALIDATION_DEFERRED:
+            if preflight_sha256 or result["preflight_size"] != 0:
+                raise XPostError(
+                    "invalid_request",
+                    "deferred media validation cannot contain a preflight fingerprint",
+                    400,
+                )
+        elif require_compliance and (
+            not preflight_sha256 or result["preflight_size"] <= 0
+        ):
             raise XPostError("invalid_request", "每日计划缺少完整媒体预检指纹", 400)
         result["preflight_sha256"] = preflight_sha256
         result.update(_compliance_counts(payload, require_all=require_compliance))
@@ -5240,6 +5299,7 @@ class XPostStore:
                     "media_repair_job_key",
                     "media_repair_profile",
                     "media_repair_source_sha256",
+                    "media_validation_mode",
                     "preflight_sha256",
                     "preflight_size",
                 ):
@@ -6168,10 +6228,9 @@ class XPostStore:
                 ),
                 409,
             )
-        owned_rows = conn.execute(
+        bound_rows = conn.execute(
             "SELECT * FROM x_post_drama_pool "
             "WHERE status IN ('pending','active') "
-            "AND last_error_code='' "
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id IN (%s) "
@@ -6179,14 +6238,21 @@ class XPostStore:
             tuple(account_ids),
         ).fetchall()
         owned_by_account = {}
-        for row in owned_rows:
+        occupied_account_ids = set()
+        for row in bound_rows:
             owner_id = int(row["assigned_account_id"])
-            if owner_id in owned_by_account:
+            if owner_id in occupied_account_ids:
                 raise XPostError(
                     "x_post_storage_conflict",
                     "同一X账号绑定了多部未完成短剧",
                     500,
                 )
+            occupied_account_ids.add(owner_id)
+            # A known failure stays local to this bound drama. It occupies its
+            # account (so no second drama can be bound there) but is not offered
+            # as a candidate until an explicit revalidation clears last_error.
+            if str(row["last_error_code"] or ""):
+                continue
             if not same_drama_language(
                 row["language"],
                 normalized_account_languages[owner_id],
@@ -6200,7 +6266,7 @@ class XPostStore:
         free_account_ids = [
             account_id
             for account_id in account_ids
-            if account_id not in owned_by_account
+            if account_id not in occupied_account_ids
         ]
         unassigned_limit = max(0, limit)
         unassigned_rows = conn.execute(
@@ -8525,6 +8591,7 @@ class XPostStore:
             "relay_account_id",
             "repost_status",
             "status",
+            "error_code",
             "unknown_outcome",
             "created_at",
             "updated_at",
@@ -8543,7 +8610,7 @@ class XPostStore:
                     "q.source_date,q.account_id,q.candidate_rank,"
                     "q.episode_number,q.delivery_mode,"
                     "q.relay_account_id,COALESCE(r.status,'') AS repost_status,"
-                    "q.status,"
+                    "q.status,COALESCE(l.error_code,'') AS error_code,"
                     "CASE WHEN l.status IN ('post_creating','repost_creating') "
                     "OR COALESCE(l.unknown_outcome,0)=1 "
                     "OR COALESCE(r.unknown_outcome,0)=1 "
@@ -10598,6 +10665,7 @@ class XPostStore:
                 candidate_rank=index,
                 require_compliance=True,
                 allow_material_relay=(source_type == "material"),
+                allow_deferred_media=True,
             )
             if values["account_id"] in seen_accounts:
                 raise XPostError(
@@ -12697,8 +12765,13 @@ class XPostStore:
                 "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
                 (timestamp, queue_id),
             )
-            self._mark_drama_needs_review(
-                conn, queue_id, timestamp, code, message
+            self._mark_drama_failure(
+                conn,
+                queue_id,
+                timestamp,
+                code,
+                message,
+                unknown_outcome=unknown_outcome,
             )
             self._sync_run(conn, queue_id, timestamp)
             conn.commit()
@@ -13172,12 +13245,6 @@ class XPostStore:
             status = "needs_review"
         elif int(counts["rate_limited_count"] or 0):
             status = "stopped"
-        elif (
-            table_name == "x_post_schedule_run"
-            and str(run["source_type"]) == "drama"
-            and failed_count > 0
-        ):
-            status = "stopped"
         elif terminal_count >= expected_count and published_count == expected_count:
             status = "completed"
         elif terminal_count >= expected_count:
@@ -13279,12 +13346,14 @@ class XPostStore:
             )
 
     @staticmethod
-    def _mark_drama_needs_review(
+    def _mark_drama_failure(
         conn,
         queue_id,
         timestamp,
         error_code,
         error_message,
+        *,
+        unknown_outcome,
     ):
         queue = conn.execute(
             "SELECT source_type,drama_pool_item_id FROM x_post_queue WHERE id=?",
@@ -13296,11 +13365,13 @@ class XPostStore:
             or queue["drama_pool_item_id"] is None
         ):
             return
+        status = "needs_review" if unknown_outcome else "active"
         conn.execute(
-            "UPDATE x_post_drama_pool SET status='needs_review',"
+            "UPDATE x_post_drama_pool SET status=?,"
             "last_checked_at=?,last_error_code=?,last_error_message=?,"
             "updated_at=? WHERE id=? AND status<>'completed'",
             (
+                status,
                 timestamp,
                 str(error_code or "x_post_failed")[:64],
                 redact_text(error_message, 500),
@@ -13628,12 +13699,13 @@ class XPostStore:
                         relay["id"],
                     ),
                 )
-            self._mark_drama_needs_review(
+            self._mark_drama_failure(
                 conn,
                 row["queue_id"],
                 timestamp,
                 "x_post_outcome_unknown",
                 message,
+                unknown_outcome=True,
             )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
@@ -13687,12 +13759,13 @@ class XPostStore:
                         relay["id"],
                     ),
                 )
-            self._mark_drama_needs_review(
+            self._mark_drama_failure(
                 conn,
                 row["queue_id"],
                 timestamp,
                 code,
                 message,
+                unknown_outcome=unknown_outcome,
             )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
@@ -13740,12 +13813,13 @@ class XPostStore:
                     "updated_at=? WHERE id=?",
                     (code, message, timestamp, relay["id"]),
                 )
-            self._mark_drama_needs_review(
+            self._mark_drama_failure(
                 conn,
                 row["queue_id"],
                 timestamp,
                 code,
                 message,
+                unknown_outcome=False,
             )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
@@ -14831,7 +14905,12 @@ def publish_canary(
     confirmed_media_id = ""
     try:
         expected_duration = float(queue.get("preflight_duration", 0) or 0)
-        prepare_link_after_probe = not bool(log["long_url"]) and expected_duration <= 0
+        deferred_media_validation = bool(
+            queue.get("media_validation_mode") == MEDIA_VALIDATION_DEFERRED
+        )
+        prepare_link_after_probe = not bool(log["long_url"]) and (
+            deferred_media_validation or expected_duration <= 0
+        )
         if log["long_url"]:
             long_url = log["long_url"]
             short_url = log["short_url"]
@@ -14904,7 +14983,7 @@ def publish_canary(
         )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
         expected_size = int(queue.get("preflight_size", 0) or 0)
-        if (
+        if not deferred_media_validation and (
             queue.get("run_id")
             or queue.get("catchup_run_id")
             or queue.get("schedule_run_id")
@@ -14951,7 +15030,7 @@ def publish_canary(
                 max_duration_seconds=duration_limit,
             )
             published_duration = float(media_probe["duration"])
-            if expected_duration > 0 and abs(
+            if not deferred_media_validation and expected_duration > 0 and abs(
                 expected_duration - published_duration
             ) > 0.05:
                 raise XPostError(
@@ -14959,7 +15038,7 @@ def publish_canary(
                     "素材时长与建计划前的预检记录不一致",
                     409,
                 )
-            if expected_duration > 0 and (
+            if not deferred_media_validation and expected_duration > 0 and (
                 expected_duration > STANDARD_MAX_DURATION_SECONDS
             ) != (
                 published_duration > STANDARD_MAX_DURATION_SECONDS

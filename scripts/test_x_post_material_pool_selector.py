@@ -175,6 +175,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
 
         self.assertEqual(rejections, [])
         self.assertEqual([item["material_id"] for item in selected], ["5286820"])
+        self.assertEqual(selected[0]["source_duration"], 763.0)
         material_sql, material_params = next(
             (sql, params)
             for sql, params in connection.calls
@@ -203,6 +204,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
             [(item["material_id"], item["media_kind"]) for item in selected],
             [("40", "image"), ("50", "video")],
         )
+        self.assertEqual(selected[0]["source_duration"], 0.0)
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
@@ -335,6 +337,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
 
         self.assertEqual(rejections, [])
         self.assertEqual([item["material_id"] for item in selected], ["5286820"])
+        self.assertEqual(selected[0]["source_duration"], 763.938)
         material_sql, material_params = next(
             (sql, params)
             for sql, params in connection.calls

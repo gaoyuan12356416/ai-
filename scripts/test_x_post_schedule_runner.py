@@ -23,6 +23,7 @@ from features.x_posts.service import (  # noqa: E402
     XPostError,
     _material_fifo_selection_matches,
 )
+from features.x_posts.drama_selector import DramaPoolRejection  # noqa: E402
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
@@ -112,13 +113,21 @@ def due_item(
     }
 
 
-def queue(queue_id, account_id, rank, status="queued", unknown=False):
+def queue(
+    queue_id,
+    account_id,
+    rank,
+    status="queued",
+    unknown=False,
+    error_code="",
+):
     return {
         "id": queue_id,
         "account_id": account_id,
         "candidate_rank": rank,
         "status": status,
         "unknown_outcome": unknown,
+        "error_code": error_code,
     }
 
 
@@ -263,48 +272,50 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "pool_item_id": 2,
                 "material_id": "ja-newest",
                 "material_language": "ja",
+                "media_kind": "video",
+                "source_duration": 30,
             },
             {
                 "pool_item_id": 1,
                 "material_id": "en-next",
                 "material_language": "en",
+                "media_kind": "video",
+                "source_duration": 30,
+                "content_id": "EN1",
+                "material_url": "https://media.example.test/en.mp4",
+                "material_name": "Episode",
+                "drama_name": "Drama",
+                "tag": "Drama",
+                "description": "A complete episode description.",
             },
         ]
         accounts = [
             {
                 "id": 11,
                 "username": "english11",
+                "x_user_id": "x11",
+                "display_name": "English 11",
                 "drama_language": "en",
+                "long_video_eligible": False,
             }
         ]
-        def preflight(_config, candidate, account, *_args, **_kwargs):
-            return {
-                "pool_item_id": candidate["pool_item_id"],
-                "account_id": account["id"],
-                "preflight_duration": 100.0,
-            }
-
-        with mock.patch(
-            "scripts.x_post_schedule_runner._preflight_candidate",
-            side_effect=preflight,
-        ):
-            planned, failures = _preflight_material_candidates(
-                self.config,
-                mock.Mock(),
-                candidates,
-                accounts,
-                source_date="2026-07-27",
-                timestamp=1,
-                downloader=object(),
-                prober=object(),
-                repair_client=None,
-                assignment_identity={
-                    "source_type": "material",
-                    "run_date": "2026-07-27",
-                    "publish_time": "10:00",
-                    "version": 3,
-                },
-            )
+        planned, failures = _preflight_material_candidates(
+            self.config,
+            mock.Mock(),
+            candidates,
+            accounts,
+            source_date="2026-07-27",
+            timestamp=1,
+            downloader=lambda *_args, **_kwargs: self.fail("download called"),
+            prober=lambda *_args, **_kwargs: self.fail("probe called"),
+            repair_client=mock.Mock(side_effect=AssertionError("repair called")),
+            assignment_identity={
+                "source_type": "material",
+                "run_date": "2026-07-27",
+                "publish_time": "10:00",
+                "version": 3,
+            },
+        )
         self.assertEqual([item["pool_item_id"] for item in planned], [1])
         self.assertEqual(
             failures,
@@ -317,6 +328,9 @@ class ScheduleRunnerTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(planned[0]["media_validation_mode"], "deferred")
+        self.assertEqual(planned[0]["preflight_sha256"], "")
+        self.assertEqual(planned[0]["preflight_size"], 0)
 
     def test_material_scan_continues_after_first_hydration_batch(self):
         pool_items = [
@@ -372,38 +386,25 @@ class ScheduleRunnerTests(unittest.TestCase):
                     "material_language": (
                         "en" if int(item["id"]) >= 50 else "ja"
                     ),
+                    "media_kind": "video",
+                    "source_duration": (
+                        200 if int(item["id"]) == 50 else 30
+                    ),
+                    "content_id": "CONTENT-%s" % item["id"],
+                    "material_url": "https://media.example.test/%s.mp4"
+                    % item["id"],
+                    "material_name": "Episode %s" % item["id"],
+                    "drama_name": "Drama",
+                    "tag": "Drama",
+                    "description": "A complete episode description.",
                 }
                 for item in items
             ], []
-
-        def preflight(_config, candidate, account, *_args, **kwargs):
-            preflighted.append(
-                (
-                    str(candidate["material_id"]),
-                    int(account["id"]),
-                    id(kwargs["repair_state"]),
-                )
-            )
-            if str(candidate["material_id"]) == "9050":
-                raise CandidatePreflightError(
-                    "no same-language Premium relay is available",
-                    code="x_long_video_requires_premium",
-                )
-            return {
-                "pool_item_id": int(candidate["pool_item_id"]),
-                "pool_created_at": str(candidate["pool_created_at"]),
-                "material_id": str(candidate["material_id"]),
-                "account_id": int(account["id"]),
-                "preflight_duration": 100.0,
-            }
 
         sidecar = Sidecar()
         with mock.patch(
             "scripts.x_post_schedule_runner.select_pool_candidates",
             side_effect=hydrate,
-        ), mock.patch(
-            "scripts.x_post_schedule_runner._preflight_candidate",
-            side_effect=preflight,
         ):
             result = self.execute(
                 sidecar,
@@ -432,14 +433,11 @@ class ScheduleRunnerTests(unittest.TestCase):
             ],
             [(51, "9051")],
         )
+        self.assertEqual(preflighted, [])
         self.assertEqual(
-            [
-                (material_id, account_id)
-                for material_id, account_id, _ in preflighted
-            ],
-            [("9050", 11), ("9051", 11)],
+            create_call[2]["candidates"][0]["media_validation_mode"],
+            "deferred",
         )
-        self.assertEqual(len({state_id for _, _, state_id in preflighted}), 1)
 
     def test_fifo_replay_accepts_current_language_skip(self):
         self.assertTrue(
@@ -807,8 +805,20 @@ class ScheduleRunnerTests(unittest.TestCase):
 
         sidecar = DramaSidecar()
         accounts = [
-            {"id": 10, "username": "owner"},
-            {"id": 9, "username": "new"},
+            {
+                "id": 10,
+                "username": "owner",
+                "x_user_id": "x10",
+                "display_name": "Owner",
+                "long_video_eligible": True,
+            },
+            {
+                "id": 9,
+                "username": "new",
+                "x_user_id": "x9",
+                "display_name": "New",
+                "long_video_eligible": True,
+            },
         ]
         with mock.patch(
             "scripts.x_post_schedule_runner.select_drama_pool_episodes",
@@ -829,17 +839,17 @@ class ScheduleRunnerTests(unittest.TestCase):
                 timestamp=1,
             )
 
-        self.assertEqual(sidecar.available_calls, 2)
-        self.assertEqual(sidecar.verify_calls, [10, 9])
-        self.assertEqual(
-            [(item["pool_item_id"], item["content_id"]) for item in sidecar.checks],
-            [(53, "BAD")],
-        )
+        self.assertEqual(sidecar.available_calls, 1)
+        self.assertEqual(sidecar.verify_calls, [])
+        self.assertEqual(sidecar.checks, [])
         self.assertEqual(
             [(item["account_id"], item["content_id"]) for item in planned],
-            [(10, "OWNER"), (9, "NEXT")],
+            [(10, "OWNER"), (9, "BAD")],
         )
-        self.assertEqual(preflight_calls, ["OWNER", "BAD", "NEXT"])
+        self.assertEqual(preflight_calls, [])
+        self.assertTrue(
+            all(item["media_validation_mode"] == "deferred" for item in planned)
+        )
 
         transient_sidecar = DramaSidecar()
 
@@ -881,10 +891,144 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
         self.assertEqual(
             [(item["account_id"], item["content_id"]) for item in transient_planned],
-            [(10, "OWNER")],
+            [(10, "OWNER"), (9, "BAD")],
         )
         self.assertEqual(transient_sidecar.checks, [])
         self.assertEqual(transient_sidecar.available_calls, 1)
+
+    def test_bad_bound_drama_does_not_block_healthy_sibling_queues(self):
+        pool_items = [
+            {
+                "id": 61,
+                "content_id": "BAD-BOUND",
+                "created_at": "2026-07-27T00:00:00Z",
+                "next_sub_number": 4,
+                "assigned_account_id": 10,
+                "candidate_account_id": 10,
+            },
+            {
+                "id": 62,
+                "content_id": "GOOD-BOUND",
+                "created_at": "2026-07-27T00:01:00Z",
+                "next_sub_number": 2,
+                "assigned_account_id": 11,
+                "candidate_account_id": 11,
+            },
+            {
+                "id": 63,
+                "content_id": "GOOD-FREE",
+                "created_at": "2026-07-27T00:02:00Z",
+                "next_sub_number": 1,
+                "assigned_account_id": 0,
+                "candidate_account_id": 12,
+            },
+        ]
+        frozen_pool = [dict(item) for item in pool_items]
+
+        class Connection:
+            def close(self):
+                return None
+
+        class DramaSidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__(
+                    [due_item(source_type="drama", accounts=[10, 11, 12])]
+                )
+                self.checks = []
+
+            def verify_account(self, account_id):
+                item = super().verify_account(account_id)
+                item.update(
+                    {
+                        "drama_language": "en",
+                        "subscription_type": "premium",
+                        "premium_subscriber": True,
+                        "long_video_eligible": True,
+                    }
+                )
+                return item
+
+            def available_drama_pool(self, _path, _limit, _account_ids):
+                return [dict(item) for item in pool_items]
+
+            def record_drama_pool_checks(self, _path, checks):
+                self.checks.extend(dict(item) for item in checks)
+                return {"updated_count": len(checks)}
+
+        def selected(_connection, items, **_kwargs):
+            item = items[0]
+            if item["id"] == 61:
+                raise DramaPoolRejection(
+                    "drama_mapping_missing",
+                    "bound drama metadata is incomplete",
+                    61,
+                    "BAD-BOUND",
+                )
+            return [
+                {
+                    "drama_pool_item_id": item["id"],
+                    "drama_pool_created_at": item["created_at"],
+                    "episode_number": item["next_sub_number"],
+                    "sub_num": item["next_sub_number"],
+                    "episode_key": "%s:%s"
+                    % (item["content_id"], item["next_sub_number"]),
+                    "material_key": "",
+                    "material_id": str(item["id"]),
+                    "content_id": item["content_id"],
+                    "material_url": "https://media.example.test/%s.mp4"
+                    % item["id"],
+                    "material_name": "Episode",
+                    "material_language": "en",
+                    "drama_name": "Drama",
+                    "tag": "Drama",
+                    "name_tag": "#Drama",
+                    "description": "A complete episode description.",
+                    "free_episode_count": 20,
+                    "assigned_account_id": item["assigned_account_id"],
+                    "candidate_account_id": item["candidate_account_id"],
+                    "spend": 0,
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                }
+            ]
+
+        sidecar = DramaSidecar()
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_drama_pool_episodes",
+            side_effect=selected,
+        ):
+            result = self.execute(
+                sidecar,
+                drama_candidate_loader=_drama_candidates,
+                connection_factory=lambda _config: Connection(),
+                downloader=mock.Mock(
+                    side_effect=AssertionError("download called")
+                ),
+                prober=mock.Mock(side_effect=AssertionError("probe called")),
+                repair_client=mock.Mock(
+                    side_effect=AssertionError("repair called")
+                ),
+            )
+
+        self.assertIn("create", [call[0] for call in sidecar.calls], result)
+        create_payload = next(
+            call[2] for call in sidecar.calls if call[0] == "create"
+        )
+        self.assertEqual(create_payload["account_ids"], [11, 12])
+        self.assertEqual(
+            [item["content_id"] for item in create_payload["candidates"]],
+            ["GOOD-BOUND", "GOOD-FREE"],
+        )
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [101, 102],
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(sidecar.checks, [])
+        self.assertEqual(pool_items, frozen_pool)
 
     def test_unassigned_long_drama_routes_to_confirmed_premium_account(self):
         class Connection:
@@ -1028,9 +1172,11 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(planned[0]["delivery_mode"], "premium_relay_repost")
         self.assertEqual(planned[0]["relay_account_id"], 9)
+        self.assertEqual(planned[0]["preflight_duration"], 141.0)
+        self.assertEqual(planned[0]["media_validation_mode"], "deferred")
         self.assertEqual(
             preflight_calls,
-            [("LONG", 10), ("LONG", 9), ("SHORT", 9)],
+            [],
         )
         self.assertEqual(sidecar.checks, [])
 
@@ -1101,7 +1247,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 return [
                     {
                         "id": 9,
-                        "username": "owned-premium",
+                        "username": "ownedpremium",
                         "x_user_id": "x9",
                         "display_name": "Owned Premium",
                         "long_video_eligible": True,
@@ -1176,7 +1322,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             },
             {
                 "id": 9,
-                "username": "owned-premium",
+                "username": "ownedpremium",
                 "x_user_id": "x9",
                 "display_name": "Owned Premium",
                 "long_video_eligible": True,
@@ -1211,7 +1357,7 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(planned[0]["relay_account_id"], 9)
         self.assertEqual(
             preflight_calls,
-            [("LONG", 10), ("LONG", 9), ("OWNER", 9)],
+            [],
         )
 
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):
@@ -1531,16 +1677,16 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["batches"][0]["planned_count"], 2)
 
-    def test_drama_known_failure_stops_later_episode_queue(self):
+    def test_drama_known_failure_continues_later_episode_queue(self):
         sidecar = FakeSidecar([due_item(source_type="drama")])
         sidecar.publish_errors[101] = SidecarError(
             "x_upstream_error", "known X rejection", 400, False
         )
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["status"], "completed_with_errors")
         self.assertEqual(
             [call[1] for call in sidecar.calls if call[0] == "publish"],
-            [101],
+            [101, 102],
         )
 
     def test_stopped_drama_batch_does_not_skip_independent_due_batch(self):
@@ -1554,11 +1700,11 @@ class ScheduleRunnerTests(unittest.TestCase):
             "x_upstream_error", "known X rejection", 400, False
         )
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["status"], "completed_with_errors")
         self.assertEqual(result["processed_count"], 2)
         self.assertEqual(
             [call[1] for call in sidecar.calls if call[0] == "publish"],
-            [101, 103],
+            [101, 102, 103],
         )
         self.assertEqual(result["batches"][1]["status"], "published")
 
@@ -1635,6 +1781,20 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result["batches"][0]["published_count"], 1)
 
+    def test_rate_limit_still_stops_later_queue(self):
+        sidecar = FakeSidecar([due_item(source_type="drama")])
+        sidecar.publish_errors[101] = SidecarError(
+            "x_post_rate_limited", "X rate limit", 429, False
+        )
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [101],
+        )
+
     def test_unknown_frozen_queue_stops_without_another_publish_call(self):
         identity = due_item(source_type="drama", accounts=[11, 12])
         sidecar = FakeSidecar([identity])
@@ -1654,6 +1814,49 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertTrue(
             result["batches"][0]["results"][0]["unknown_outcome"]
         )
+
+    def test_known_failed_frozen_drama_queue_does_not_block_later_queue(self):
+        identity = due_item(source_type="drama", accounts=[11, 12])
+        sidecar = FakeSidecar([identity])
+        sidecar.existing[("drama", "2026-07-27", "10:00", 3)] = {
+            "found": True,
+            "run": frozen_run("drama", 2),
+            "queues": [
+                queue(201, 11, 1, status="failed", unknown=False),
+                queue(202, 12, 2),
+            ],
+        }
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [202],
+        )
+
+    def test_frozen_rate_limited_queue_still_stops_later_queue(self):
+        identity = due_item(source_type="drama", accounts=[11, 12])
+        sidecar = FakeSidecar([identity])
+        sidecar.existing[("drama", "2026-07-27", "10:00", 3)] = {
+            "found": True,
+            "run": frozen_run("drama", 2),
+            "queues": [
+                queue(
+                    201,
+                    11,
+                    1,
+                    status="failed",
+                    error_code="x_post_rate_limited",
+                ),
+                queue(202, 12, 2),
+            ],
+        }
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
 
     def test_before_start_date_is_a_noop(self):
         config = make_config(self.temporary.name)
