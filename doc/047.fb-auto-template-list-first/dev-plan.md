@@ -12,7 +12,7 @@
 | 拆分列表与表单页 | Codex | `static/fb-auto-publish-*` | 完成 |
 | 更新前端契约测试 | Codex | `scripts/test_fb_auto_app_contract.py` | 完成 |
 | 本地回归与浏览器 QA | QA | 测试命令 / Playwright | 完成 |
-| GitHub 与生产静态发布 | Codex | 分支 / CPU 静态目录 | 待执行 |
+| GitHub 与生产静态发布 | Codex | 分支 / CPU 静态目录 | 完成 |
 
 ## 编译 / 构建命令
 
@@ -34,3 +34,4 @@ git diff --check
 
 - 2026-08-20：三个新增脚本 `node --check` 通过；FB 全量 80/80、X/TT 主契约 66/66 通过。
 - 2026-08-20：Playwright mock 登录态完成列表、创建、编辑、保存、筛选、分页、确认、权限和 390×844 回归，控制台 0 error/0 warning。
+- 2026-08-20：提交 `bda9e7f347d8cd81743f26b65ee4f3e128504e4e` 已推送并从 GitHub 精确导出；六个静态文件发布到应用与 Nginx 目录，公网哈希一致，无服务重启或 Nginx reload。

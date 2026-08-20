@@ -2,7 +2,7 @@
 
 ## 结论
 
-代码评审与本地完整回归通过；待生产只读验收后关闭发布项。
+代码评审、本地完整回归和生产只读验收均通过，发布项关闭。
 
 ## 评审范围
 
@@ -25,3 +25,5 @@
 - `python -m unittest scripts.test_fb_auto_app_contract`：5/5 通过。
 - FB 全量回归 80/80、X/TT 主契约 66/66 通过。
 - Playwright 11 个本地 mock 场景通过，控制台 0 error/0 warning。
+- 生产公网六个静态资源 HTTP 200，GitHub release、两个生产目录与公网响应 SHA-256 一致；入口/表单 DOM 契约通过。
+- 生产 health、sidecar PID/重启次数、六张运行表计数和 SQLite `quick_check` 与发布前一致，未触发写接口或 Graph Post。
