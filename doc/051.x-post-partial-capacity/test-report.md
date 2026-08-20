@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-复查补丁的专项、完整 X 回归和独立 QA 均通过；生产副本及部署后自然 timer 验证待新版本发布后补录。此前 `10bb243` 的部分容量主路径通过，但不覆盖本次发现的两处边界缺陷。
+复查补丁的专项、完整 X 回归、独立 QA、精确服务器 release、生产副本和部署后自然分钟 timer 均通过。此前 `10bb243` 的部分容量主路径通过，但不覆盖本次发现的两处边界缺陷；最终保证版本为 `63ec8f3`。
 
 ## 测试范围
 
@@ -16,8 +16,9 @@ Drama selector、schedule runner、material relay、multi-schedule store，以�
 | 本次修复专项 | 106 | 106 | 0 | 0 |
 | 完整 X 回归 | 718 | 718 | 0 | 0（2 条条件跳过） |
 | 独立 QA 边界场景 | 5 | 5 | 0 | 0 |
-| 新版本生产 DB 副本 | 待部署 | 0 | 0 | 1 |
-| 新版本服务器专项/自然 timer | 待部署 | 0 | 0 | 1 |
+| 新版本生产 DB 副本 | 2 个正反场景 | 2 | 0 | 0 |
+| 新版本服务器四模块 | 141 | 141 | 0 | 0 |
+| 部署后自然分钟 timer | 11:44-11:48 多轮 | 通过 | 0 | 0 |
 
 ## 缺陷情况
 
@@ -32,7 +33,11 @@ Drama selector、schedule runner、material relay、multi-schedule store，以�
 - 独立 QA：前 100 条语言不匹配、第 101 条正常；前 100 条无 relay、第 101 条正常；三种历史可复检错误成功/未成功；跨页确定性，全部通过。
 - `py_compile`、`git diff --check` 通过。
 - 全部新增测试使用 Fake Sidecar、Mock 媒体预检和临时 SQLite，未调用真实 X 发布接口。
-- `10bb243` 的既有生产副本已证明 17/16 短剧和 19/1 素材的基础部分容量；本次新缺陷需要在新 release 上重新演练。
+- `10bb243` 的既有生产副本证明了 17/16 短剧和 19/1 素材的基础部分容量；本次新缺陷已在新 release 上重新演练。
+- 精确服务器 release 四模块 `Ran 141 tests ... OK`。首次直接运行的 Linux 临时目录夹具被生产固定路径保护拒绝；随后仅在测试进程中映射固定工作目录，生产代码和路径保护未修改。
+- 服务器边界复现使用 100 条无 relay 候选和第 101 条正常候选，实际按 `[100,1]` 两页扫描并选择第 101 条，跨页共享同一 repair state。
+- 生产副本正例：历史 `material_not_video` 当前正常，原子清错并创建 1 队列；反例：未经复检的较新 `material_inactive` 返回 `x_post_pool_fifo_conflict`、0 队列并保留旧错误。两份副本均 `quick_check=ok`、外键 0。
+- 部署后 11:44-11:48 schedule 连续 `no_due`、claim 为 0，manual 恢复为 `no_pending`，X Auto scheduler/runner 正常完成；三个服务和六个 timer active。
 
 ## 遗留风险
 
@@ -40,4 +45,4 @@ Drama selector、schedule runner、material relay、multi-schedule store，以�
 
 ## 发布建议
 
-本地与独立 QA 已通过，可以进入 GitHub-first 生产发布；发布后必须重新执行生产副本、健康、账本和自然 timer 验收。
+已发布。保持自然 timer 运行，并在 15:11 素材、16:04 短剧等真实时间点按账本和 X 回执继续验收。

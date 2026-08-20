@@ -58,6 +58,11 @@
 ## 2026-08-20 复查补丁
 
 - `10bb243` 已证明基础部分容量，但复查发现候选前 100 条截断和历史可复检错误 FIFO 冲突，不能作为最终保证版本。
-- 新补丁无 DDL、无新增配置；将重新执行 GitHub-first 提交、在线备份、不可变 release 切换和服务器专项。
-- 部署后必须用生产 SQLite 副本复现“第 101 条正常”和“历史异常恢复”两条路径，并观察下一自然素材/短剧时间点。
-- 新 commit、release、备份和验收证据待发布后补录。
+- 新补丁无 DDL、无新增配置；已按 GitHub-first 完成在线备份、不可变 release 切换和服务器专项。
+- GitHub commit：`63ec8f36aa1132d7196dd7933369c6e1c7ec05a1`。
+- 当前 release：`/mnt/data-disk/x-post-automation/releases/63ec8f36aa1132d7196dd7933369c6e1c7ec05a1`。
+- 备份：`/mnt/data-disk/x-post-automation/backups/20260820T114035+0800-material-scan-63ec8f36aa1132d7196dd7933369c6e1c7ec05a1`；回滚 release：`10bb243bd3c12bdeac10a4a922829c8c96088f21`。
+- 生产副本：`/mnt/data-disk/x-post-automation/rechecks/20260820T114749-material-scan-63ec8f36aa1132d7196dd7933369c6e1c7ec05a1`。历史异常恢复正例建 1 队列并清错；未复检反例 FIFO conflict、0 队列且保留错误。
+- 精确 release 服务器四模块 141/141；100 条不可发、第 101 条正常的服务器边界复现通过。
+- 主 API 与 Sidecar `service.py` SHA-256 一致；主/X Auto SQLite `quick_check=ok`、外键 0、unknown 0；三个服务、六个 timer active。
+- 部署后自然分钟 timer 连续成功且当前 `no_due`；未创建测试 Post。下一真实素材 slot 为 15:11，短剧 slot 为 16:04。
