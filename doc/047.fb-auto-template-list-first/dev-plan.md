@@ -13,7 +13,7 @@
 | 更新前端契约测试 | Codex | `scripts/test_fb_auto_app_contract.py` | 完成 |
 | 本地回归与浏览器 QA | QA | 测试命令 / Playwright | 完成 |
 | GitHub 与生产静态发布 | Codex | 分支 / CPU 静态目录 | 完成 |
-| 修复旧合并页浏览器缓存 | Codex | navigation / FB 静态页 / Nginx | 开发完成，待发布 |
+| 修复旧合并页浏览器缓存 | Codex | navigation / FB 静态页 / Nginx | 完成 |
 
 ## 编译 / 构建命令
 
@@ -38,3 +38,4 @@ git diff --check
 - 2026-08-20：Playwright mock 登录态完成列表、创建、编辑、保存、筛选、分页、确认、权限和 390×844 回归，控制台 0 error/0 warning。
 - 2026-08-20：提交 `bda9e7f347d8cd81743f26b65ee4f3e128504e4e` 已推送并从 GitHub 精确导出；六个静态文件发布到应用与 Nginx 目录，公网哈希一致，无服务重启或 Nginx reload。
 - 2026-08-20：运营截图确认浏览器恢复旧合并页；版本化导航/创建/返回链路并新增精确 Nginx `no-store`，本地 FB 81/81、跨功能 66/66、浏览器列表→创建回归通过。
+- 2026-08-20：缓存修复提交 `490e3b78cd418e0114e2abba7b097653f18e47b0` 已从 GitHub 精确 release 发布；保留 Nginx 运行时导航差异，仅定点替换 FB 入口。`nginx -t` 后 reload，公网响应头、页面契约、服务状态和数据不变量验收通过。

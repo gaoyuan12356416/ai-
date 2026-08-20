@@ -83,3 +83,33 @@
 6. 复核 `live_enabled=false`、sidecar PID/重启次数、六张运行表计数及 SQLite `quick_check` 与发布前一致。
 
 回滚：恢复备份的静态/导航文件；若 Nginx 配置发布前不存在，则将该单文件移入备份目录，若存在则恢复原文件；执行 `nginx -t` 后 reload。不得回滚 SQLite。
+
+## 旧合并页缓存修复生产记录（2026-08-20）
+
+- 分支：`codex/fb-auto-template-list-first-20260820`。
+- GitHub 精确提交：`490e3b78cd418e0114e2abba7b097653f18e47b0`。
+- 不可变副本：`/opt/fb-auto-post-ui/releases/490e3b78cd418e0114e2abba7b097653f18e47b0`。
+- 发布前备份：`/mnt/data-disk/fb-auto-post-deploy/backups/20260820T094706Z-stale-shell-cache-pre-490e3b7`。
+- 发布前 `/etc/nginx/default.d/fb-auto-publish.conf` 不存在，已在备份清单记录 absent。
+- 两个生产 `navigation.json` 的内容范围不同；未覆盖 Nginx 运行时定制导航，仅原子替换其中唯一的 FB 模板 href 为 `/fb-auto-publish-templates.html?v=20260820-list-only-v2`，其余条目保持不变。
+- `quick-nav.js`、列表 HTML/JS、表单 HTML/JS 原子安装到应用和 Nginx 两个静态目录；安装精确 Nginx location 后 `nginx -t` 通过并 reload。未重启主 API 或 `fb-auto-post-service.service`。
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `quick-nav.js` | `efff12a34a8384dbc0cf3c7aa8b09ecead05519d86926aa18c57e9b7d63e3e91` |
+| `fb-auto-publish-templates.html` | `2b1c03b0e2b0e2bfe2e8d37061b28d93943056350036c9086119938008204135` |
+| `fb-auto-publish-templates.js` | `8144b70cf82d7294c9d11fa30df52e5c5ee05098d31705b012ffab0a09fefc21` |
+| `fb-auto-publish-template.html` | `96ec9c9650d56f0aeb6ba80897dc69619999a8ff19add00da1c59faaef3c5868` |
+| `fb-auto-publish-template.js` | `463853ce27f222e7d511f9fd71c0b27a174141f758cb36bfa0edd258ee752b0b` |
+| `nginx-fb-auto-publish.conf` | `433a36b1293008ed561af2c269a6a793873a0a9e9cf3965bf29df03bfb638f04` |
+
+生产验收结果：
+
+- 无参数及版本化的列表、表单、记录 HTML 均为 HTTP 200，响应包含 `Cache-Control: no-cache, no-store, must-revalidate, max-age=0`、`Pragma: no-cache`、`Expires: 0`。
+- 公网导航与 QuickNav 均指向版本化列表；列表无 `templateForm` 且创建按钮进入独立表单，编辑、返回和保存成功跳转契约均通过；匿名模板 API 为 401。
+- `fb-auto-publish.css`、公共脚本、两张模板页、两张业务脚本、QuickNav 和记录页公网请求均为 HTTP 200；变更文件公网 SHA 与 release/两个生产静态目录一致。
+- 发布后 `live_enabled=false`；FB sidecar `MainPID=3083645`、Nginx `MainPID=2164`，二者 `NRestarts=0` 且 `active/running`。
+- `fb_auto_template`、`fb_auto_run`、`fb_auto_task`、`fb_auto_due_slot`、`fb_auto_publish_attempt`、`fb_auto_publish_ledger` 均为 0，SQLite `quick_check=ok`。
+- 未创建/修改/启停模板，未调用 run-now，未产生 Graph Post。
+
+本次缓存修复回滚源为：`/mnt/data-disk/fb-auto-post-deploy/backups/20260820T094706Z-stale-shell-cache-pre-490e3b7`。恢复备份静态/导航文件，并因发布前 Nginx 配置不存在而移走该精确配置文件；`nginx -t` 通过后 reload。不得回滚 SQLite。

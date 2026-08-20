@@ -2,7 +2,7 @@
 
 ## 状态
 
-代码已修复，本地回归通过，待生产发布验收。
+已修复并通过生产发布验收，缺陷关闭。
 
 ## 现象
 
@@ -31,4 +31,6 @@
 - `python -m unittest discover -s scripts -p "test_fb_auto_*.py"`：81/81 通过。
 - X/TT 主契约回归：66/66 通过。
 - 本地 Playwright：版本化导航显示纯模板列表，无 `templateForm`；点击“创建模板”进入独立创建页；控制台 0 error/0 warning。
-- 待完成生产 `nginx -t`、公网 `no-store` 响应头和账本不变量验收后关闭。
+- 修复提交：`490e3b78cd418e0114e2abba7b097653f18e47b0`；生产 release 与提交一致。
+- 生产 `nginx -t` 通过并完成 reload；无参数及版本化的列表、表单、记录 HTML 均返回 `no-store`，列表页无 `templateForm`，创建、编辑、保存返回链路全部指向版本化独立页面。
+- 发布后 `live_enabled=false`；FB sidecar `MainPID=3083645`、`NRestarts=0`，六张运行表均为 0，SQLite `quick_check=ok`；未执行任何生产模板或 Graph 写操作。
