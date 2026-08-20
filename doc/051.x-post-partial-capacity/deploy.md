@@ -42,3 +42,15 @@
 - 若临近自然排程点，不执行切换，先让当前版本完成该时间点。
 - 回滚代码不会撤销已经正常发布的部分队列。
 - 部署记录、commit、备份和自然验收结果完成后补录本文件。
+
+## 2026-08-20 生产记录
+
+- GitHub 代码提交：`10bb243bd3c12bdeac10a4a922829c8c96088f21`。
+- 当前不可变 release：`/mnt/data-disk/x-post-automation/releases/10bb243bd3c12bdeac10a4a922829c8c96088f21`。
+- 回滚 release：`/mnt/data-disk/x-post-automation/releases/9bbd5cad336be2d9c21002778969ceab0b16db0f`。
+- 备份目录：`/mnt/data-disk/x-post-automation/backups/20260820T105330+0800-partial-capacity-10bb243bd3c12bdeac10a4a922829c8c96088f21`。
+- 精确 Git blob 校验通过；主 API 与 Sidecar 的 `service.py`、`drama_selector.py` 内容一致。
+- `x-auto-post-metric.timer` 已恢复为 enabled/active，指标代次 1185 已 ready。
+- 部署后 OAuth Sidecar、X Auto Sidecar、Drama Material API active；六个 X timer active；8810/18833 健康检查通过，8787 正常监听。
+- 在线两套 SQLite 均 `quick_check=ok`、外键异常 0、unknown 0。回滚只切代码并恢复模块，不回滚 SQLite/Token/账本。
+- 首次 18833 探针早于监听就绪，得到一次 connection refused；服务随后正常监听并通过重试健康检查，日志无启动异常，未触发回滚。
