@@ -263,6 +263,12 @@ def candidate_loader(
 class ScheduleRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
+        fixed_work_dir = mock.patch(
+            "scripts.x_post_schedule_runner.DEFAULT_WORK_DIR",
+            str(Path(self.temporary.name).resolve()),
+        )
+        fixed_work_dir.start()
+        self.addCleanup(fixed_work_dir.stop)
         self.config = make_config(self.temporary.name)
         self.now = datetime(2026, 7, 27, 10, 0, 30, tzinfo=BEIJING)
 

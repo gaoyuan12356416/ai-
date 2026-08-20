@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -383,6 +384,14 @@ def run_new_catchup(sidecar, *, config=None, loaded_candidates=None):
 
 
 class CatchupOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        fixed_work_dir = mock.patch(
+            "scripts.x_post_daily_runner.FIXED_DAILY_WORK_DIR",
+            Path(tempfile.gettempdir()).resolve(),
+        )
+        fixed_work_dir.start()
+        self.addCleanup(fixed_work_dir.stop)
+
     def test_new_child_uses_exact_difference_fifo_and_sequential_publish(self):
         sidecar = FakeSidecar()
         result, connection, preflight_events = run_new_catchup(sidecar)
