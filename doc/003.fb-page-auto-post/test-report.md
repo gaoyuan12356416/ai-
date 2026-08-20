@@ -4,7 +4,7 @@
 
 通过。已完成本地161项回归、CPU/GPU closed-gate生产部署、30日指标回填和prepare-only GPU→COS canary；未调用 Meta，真实发布仍保持关闭。
 
-2026-08-20 `{{desc}}/{{url}}` 扩展本地 QA 通过：92项FB专项 + 93项GPU/TT短链/X-TT合并基线，共185项全部通过。生产只读预检确认 MySQL `@@read_only=1`，描述聚合使用 `content_id` 索引；真实 schema 的同身份描述可确定性收敛为1值。closed-gate部署尚待执行，本段不代表线上完成。
+2026-08-20 `{{desc}}/{{url}}` 扩展通过：92项FB专项 + 93项GPU/TT短链/X-TT合并基线，共185项本地测试全部通过；生产release再跑92项FB测试通过。生产只读预检确认 MySQL `@@read_only=1`，描述聚合使用 `content_id` 索引；真实 schema 的同身份描述可确定性收敛为1值。closed-gate部署和线上验收已完成。
 
 ## 测试范围
 
@@ -48,3 +48,5 @@ BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG
 closed-gate 部署已完成，不建议开启真实发布。开 live 前仅剩持续磁盘告警/当时水位复核、同槽连续吞吐评审，并须单独审批真实 Graph 发帖 canary；不得把本轮验收当作真实发帖授权。
 
 `{{desc}}/{{url}}` 扩展仍按同一边界：只允许 closed-gate部署、404/header/页面/SQLite验收；不创建生产模板、任务、短链 wrapper 或真实帖子。
+
+2026-08-20 线上证据：release `1b9fe57...`、备份 `20260820T183309+0800-pre-1b9fe57a`；sidecar/Nginx `NRestarts=0`，七个timers active，六张业务表和wrapper均为0，X/TT/TT-auto既有短链样本200，FB短链缺失/非法/POST分别404/404/403，页面列表/创建分离及两宏可见。

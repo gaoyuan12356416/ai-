@@ -14,7 +14,7 @@
 | Sidecar/API代理 | Codex | `service.py`、`client.py`、`app.py` | 完成 |
 | UI/导航/权限 | Codex | 两张 HTML、导航、权限 | 完成 |
 | 部署/测试/文档 | Codex | deploy、scripts、doc | 完成 |
-| desc/url 宏与短链 | Codex | validation、repositories、core、links、publisher、UI/Nginx | 本地实现与QA完成；closed-gate部署待执行（2026-08-20） |
+| desc/url 宏与短链 | Codex | validation、repositories、core、links、publisher、UI/Nginx | 完成（2026-08-20） |
 
 ## 编译 / 构建命令
 
@@ -37,3 +37,5 @@ node --check static\quick-nav.js
 2026-08-18 部署阶段：GitHub-first commit/push、CPU/GPU备份及closed-gate生产部署完成；生产只读MySQL、30日指标cache与prepare-only GPU/COS/NVENC canary通过。未调用Meta，live gate保持0。
 
 2026-08-20 扩展阶段：先锁定 `{{desc}}`、`{{url}}`、`AIpost`、`/ads/0/2049/view` 契约，再实现加法列、批量描述读取、不可变 wrapper 与独立 Nginx 路由；测试、代码评审和 closed-gate 部署完成前不得改为“完成”。
+
+2026-08-20 部署完成：GitHub commit `1b9fe57a90c9e64ab8ce05140fc6d0ed1d576c52` 已切到 `/opt/fb-auto-post/current`；仅重启 sidecar、reload Nginx并更新两份创建页，主 API 未重启。live gate与六张业务表保持0，未创建wrapper或Graph Post。

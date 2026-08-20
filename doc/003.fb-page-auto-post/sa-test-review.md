@@ -16,7 +16,7 @@
 | STR-06 | prepare-only边界 | 复用完整TT worker会暴露发布面 | 独立fb_gpu入口，只开放health/prepare | 已关闭 |
 | STR-07 | desc来源 | 容易误用`ads_drama_info`或跨语言描述 | 真实schema只读确认；Fake SQL锁定resource/app/content/language/type | 已通过 |
 | STR-08 | 短链/Graph顺序 | 单测只验证文案会漏掉外部写顺序 | 注入writer失败并断言Page凭证与Graph均未调用 | 已通过 |
-| STR-09 | 线上验收 | 创建模板会扩大生产状态 | gate=0、六表计数不变、404/方法/headers验收 | 部署后执行；禁止以模板验收 |
+| STR-09 | 线上验收 | 创建模板会扩大生产状态 | gate=0、六表计数不变、404/方法/headers验收 | 已通过；零模板/任务/wrapper/Graph写 |
 
 ## QA 修订确认
 

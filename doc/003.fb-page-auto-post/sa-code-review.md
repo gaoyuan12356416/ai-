@@ -51,4 +51,4 @@ FB package、runner、main API、navigation/UI、units/env、docs/tests。
 
 最终编译、单元/契约回归及静态/敏感扫描见 `test-report.md`。
 
-2026-08-20 本地评审未发现未关闭 P0/P1/P2；生产部署证据待 closed-gate 发布后补录。
+2026-08-20 本地评审未发现未关闭 P0/P1/P2；closed-gate生产发布后 sidecar/Nginx `NRestarts=0`、服务日志错误0、六张业务表和wrapper均为0，线上验收通过。

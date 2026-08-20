@@ -14,6 +14,15 @@
 - prepare-only GPU canary：3秒源素材，首次17.218秒，H.264 High 720×1280 成片3.33MB；公开HTTPS HEAD=200、`video/mp4`、size/SHA/profile元数据匹配；同job复用0.002秒。没有调用Graph。
 - canary发现并关闭 BUG-005（MySQL/Python content排序）与 BUG-006（COS Metadata header前缀）。失败canary产生的无引用COS孤立对象和失败job目录已按精确身份清理并验证404；成功job仅保留manifest。
 
+## 宏扩展生产部署结果（2026-08-20）
+
+- GitHub/production release：`1b9fe57a90c9e64ab8ce05140fc6d0ed1d576c52`，current 为 `/opt/fb-auto-post/releases/<sha>`。
+- 变更前备份：`/mnt/data-disk/fb-auto-post-deploy/backups/20260820T183309+0800-pre-1b9fe57a`，含两个SQLite online backup、env、gy.g2flow配置、两份静态页和SHA256清单；旧release为`02dc36c...`。
+- 仅 `fb-auto-post-service.service` 从 PID `3083645` 换到 `587639`；Nginx仅reload，master PID仍`2164`。两者`NRestarts=0`，七个FB timers均active，部署后sidecar错误日志计数0。
+- health为`live_enabled=false`；六张业务表均0、`quick_check=ok`、task已有`short_url/long_url`；公开目录wrapper=0。
+- `/s2l/fb/1.html`不存在时404且带no-store/referrer/nosniff，非法路径404，POST 403；既有X、TT、TT-auto样本仍200。创建页200并显示`{{desc}}/{{url}}/AIpost`；列表页仍仅列表+创建入口，表单只在创建页。
+- 生产release再跑92项FB测试全通过；未创建模板、due/run/task、短链文件或Meta帖子，主 API未重启。
+
 ## 配置项
 
 真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。

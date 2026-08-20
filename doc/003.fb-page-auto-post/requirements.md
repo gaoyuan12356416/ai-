@@ -108,4 +108,4 @@
 ## 变更记录
 
 - 2026-08-17：完成实现候选与本地测试，无生产变更。
-- 2026-08-20：确认并进入 `{{desc}}`/`{{url}}` 扩展开发；生产验收保持 `FB_AUTO_POST_LIVE_ENABLED=0`，不得创建模板、运行或真实 Graph Post。
+- 2026-08-20：`{{desc}}`/`{{url}}` 扩展已按 GitHub-first 完成 closed-gate生产部署；`FB_AUTO_POST_LIVE_ENABLED=0`，验收未创建模板、运行、wrapper 或真实 Graph Post。
