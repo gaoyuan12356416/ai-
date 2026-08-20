@@ -18,6 +18,8 @@
 
 真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。
 
+2026-08-20 宏扩展新增 `FB_AUTO_POST_SHORT_LINK_ROOT=/mnt/data-disk/fb-auto-post-public/s2l/fb`。该公开目录与 0700 的 SQLite 私有目录分离；父目录和 wrapper 分别为 0755/0644。`gy.g2flow.com` TLS server 引入 `deploy/nginx-fb-auto-short-domain-location.conf`，精确服务 `/s2l/fb/{正整数}.html`。
+
 ## 数据库变更
 
 无 MySQL DDL/DML。Sidecar 在 `/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3` 保存运行状态，在独立 `/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3` 保存指标代次；路径相同或指向同一文件时启动失败。两库只做加法建表/索引；旧队列只读。Page Token 不进入 SQLite。
@@ -36,6 +38,8 @@
 8. 增量部署主 API `app.py`、`features/fb_auto_posts/`、两张 HTML、quick-nav 和 navigation 合并；不得覆盖独立推进的 X/TT 包或线上 navigation 其他项。
 9. 重启仅 `fb-auto-post-service.service` 和 `drama-material-api.service`；静态发布后验证 no-store。
 
+宏扩展不改 `app.py`、navigation 或主 API 进程：部署时备份 current symlink、两个 SQLite online backup、`/etc/fb-auto-post.env` 元数据、Nginx live配置和两份创建页；从已推送 SHA 创建 immutable release，补充 env、创建独立公开根，`nginx -t` 后 reload，切换 sidecar并只重启 `fb-auto-post-service.service`，最后原子安装两份静态 HTML。保持 `FB_AUTO_POST_LIVE_ENABLED=0`。
+
 部署前只读门禁：对 Page/group/token、旧队列冲突、素材候选 SQL 做 `EXPLAIN` 和小范围 SELECT；确认 `g.user_id`、`ads_setting` 黑名单、目标 app/product 映射和响应大小。指标 SQL 的修正版生产只读 EXPLAIN 与30日实际刷新均已通过；不得打印 Token。
 
 ## 验证步骤
@@ -49,12 +53,16 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 
 接受标准：health `live_enabled=false`；页面 Cookie/权限正确；35 组/计数与同刻只读查询一致；自然 timer 返回 gate closed/no work；SQLite `quick_check=ok`；旧队列和 Meta 帖子计数不变；日志/DOM/API 无 Token。
 
+宏扩展附加接受标准：`fb_auto_task` 存在 `short_url/long_url` 加法列；六张业务表计数仍为0；不存在的合法短链返回404且带 no-store/security headers，非法路径返回404，POST被拒绝；TT/X既有 `/s2l` 路由不变；创建页可见 `{{desc}}/{{url}}/AIpost`。不得为验收创建 wrapper、模板、run 或 Graph Post。
+
 ## 回滚方案
 
 1. 停止全部 FB timer 与 sidecar；恢复主 API/静态/navigation/unit 备份或 checkout 上一 SHA。
 2. 重启仅主 API，验证 X/TT 契约和页面。
 3. 保留当前 FB SQLite（尤其 submitted/published/unknown/attempt）；代码回滚不得恢复旧 SQLite 覆盖新事实。
 4. 若尚未发生任何任务且经确认可废弃，另行归档数据目录，不直接删除。
+
+含 `{{url}}` 的任务存在时不得单独回滚 publisher 而保留待发布任务；必须先关闭 gate/全部FB timers并审计 planned/ready/running/submitted/unknown。历史 wrapper、Nginx `/s2l/fb/` route 与当前 SQLite 必须保留，避免已发布短链失效。
 
 ## 注意事项
 

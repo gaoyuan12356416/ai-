@@ -18,8 +18,8 @@ class FakeMySQL:
             return [{"group_id": "6", "owner_user_id": "248", "group_type": 0, "group_name": "DW Post", "app_id": "1479", "product": "Dramawave", "total_pages": 3, "publishable_pages": 2}]
         if "ads_facebook_page_group_ins" in sql:
             return [
-                {"group_id": "6", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "eligible_token_count": 2},
-                {"group_id": "18", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "eligible_token_count": 2},
+                {"group_id": "6", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "page_name": "FreeReels", "eligible_token_count": 2},
+                {"group_id": "18", "owner_user_id": "248", "page_id": "10001", "timezone": "UTC", "language": "english", "page_name": "FreeReels", "eligible_token_count": 2},
             ]
         if "page_access_token" in sql:
             return [
@@ -40,7 +40,9 @@ class RepositoryTests(unittest.TestCase):
     def test_overlapping_membership_becomes_one_page_with_lineage(self):
         mysql = FakeMySQL(); pages = PagePoolRepository(mysql).list_pages(["6", "18"], is_admin=True, owner_user_id="")
         self.assertEqual(len(pages), 1); self.assertEqual(pages[0].group_ids, ("6", "18"))
+        self.assertEqual(pages[0].page_name, "FreeReels")
         self.assertIn("g.type IN (0,1)", mysql.calls[0][0])
+        self.assertIn("MAX(TRIM(pn.page_name))", mysql.calls[0][0])
 
     def test_credentials_dedupe_by_token_in_memory(self):
         credentials = PagePoolRepository(FakeMySQL()).eligible_credentials("10001")
@@ -113,6 +115,29 @@ class RepositoryTests(unittest.TestCase):
         config=normalize_template_payload(payload()); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         with self.assertRaises(RepositoryError) as caught: repository.candidate_snapshot(config)
         self.assertEqual(caught.exception.code,"fb_auto_catalog_scan_timeout")
+
+    def test_description_macro_uses_batched_same_language_resource_and_freezes_tag(self):
+        class Store:
+            def load_metric_window(self,**_kwargs):
+                return MetricWindow((1,),("2026-08-16",),{"d1":MetricTotals(Decimal("1"),Decimal("1"))},{("d1","1"):MetricTotals(Decimal("1"),Decimal("1"))})
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def __init__(self, ambiguous=False): self.calls=[]; self.ambiguous=ambiguous
+            def select(self,sql,params):
+                self.calls.append((sql,tuple(params)))
+                if "ads_drama_resource" in sql:
+                    return [{"content_id":"d1","drama_description":"  A  short\n drama  description  ","description_count":2 if self.ambiguous else 1}]
+                if "JOIN (SELECT d0.content_id" in sql:
+                    return [{"content_id":"d1","drama_name":"Drama","resource_type_v2":"1","series_code":"s1"}]
+                return [{"material_id":"1","content_id":"d1","media_url":"https://cdn.example/1.mp4","material_name":"Material","material_tag":"hook","language":"en","video_duration":30}]
+        raw=payload(); raw["message_template"]="{{desc}}"; config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MySQL(); candidates=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidates(config)
+        self.assertEqual((candidates[0].drama_description,candidates[0].material_tag),("A short drama description","hook"))
+        resource_call=next(item for item in mysql.calls if "ads_drama_resource" in item[0])
+        self.assertIn("r.app_id=%s AND r.type=2 AND LOWER(TRIM(r.language))=%s",resource_call[0])
+        self.assertIn("COUNT(DISTINCT BINARY TRIM(r.`desc`))",resource_call[0]); self.assertIn("GROUP BY r.content_id",resource_call[0])
+        self.assertEqual(resource_call[1][:2],("1479","en")); self.assertEqual(len(resource_call[1]),3)
+        self.assertEqual(MaterialRepository(MySQL(True),Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidates(config),[])
 
 
 if __name__ == "__main__": unittest.main()

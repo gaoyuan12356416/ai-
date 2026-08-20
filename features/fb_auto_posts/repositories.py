@@ -43,6 +43,7 @@ class PageTarget:
     timezone: str
     language: str
     eligible_token_count: int
+    page_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,8 @@ class MaterialCandidate:
     drama_spend: Decimal
     drama_roas: Decimal | None
     resource_type_v2: str
+    drama_description: str = ""
+    material_tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,18 @@ def _https(value: Any) -> str:
     except ValueError:
         valid = False
     return text if valid else ""
+
+
+def _description(value: Any) -> str:
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return ""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if any(ord(char) < 32 for char in text):
+        return ""
+    return text[:4096].rstrip()
 
 
 class ReadOnlyMySQL:
@@ -210,6 +225,9 @@ class PagePoolRepository:
             SELECT CAST(g.id AS CHAR) AS group_id,CAST(g.user_id AS CHAR) AS owner_user_id,
                    CAST(i.page_id AS CHAR) AS page_id,COALESCE(i.timezone,'') AS timezone,
                    LOWER(TRIM(COALESCE(i.language,''))) AS language,
+                   COALESCE((SELECT MAX(TRIM(pn.page_name)) FROM `{self.mysql.schema}`.ads_facebook_page_post pn
+                              WHERE pn.page_id=i.page_id AND pn.status=0
+                                AND TRIM(pn.page_access_token)<>'' AND TRIM(COALESCE(pn.page_name,''))<>''),'') AS page_name,
                    (SELECT COUNT(*) FROM `{self.mysql.schema}`.ads_facebook_page_post p
                      WHERE p.page_id=i.page_id AND p.status=0 AND TRIM(p.page_access_token)<>'') AS eligible_token_count
               FROM `{self.mysql.schema}`.ads_facebook_page_group g
@@ -225,10 +243,10 @@ class PagePoolRepository:
             if not page_id:
                 continue
             group_id = str(row.get("group_id") or "")
-            item = grouped.setdefault(page_id, {"group_ids": [], "owner_user_id": str(row.get("owner_user_id") or ""), "timezone": str(row.get("timezone") or "")[:64], "language": str(row.get("language") or "")[:32], "tokens": int(row.get("eligible_token_count") or 0)})
+            item = grouped.setdefault(page_id, {"group_ids": [], "owner_user_id": str(row.get("owner_user_id") or ""), "timezone": str(row.get("timezone") or "")[:64], "language": str(row.get("language") or "")[:32], "tokens": int(row.get("eligible_token_count") or 0), "page_name": str(row.get("page_name") or page_id).strip()[:255]})
             if group_id not in item["group_ids"]:
                 item["group_ids"].append(group_id)
-        return [PageTarget(sorted(item["group_ids"], key=int)[0], tuple(sorted(item["group_ids"], key=int)), page_id, item["owner_user_id"], item["timezone"], item["language"], item["tokens"]) for page_id, item in sorted(grouped.items())]
+        return [PageTarget(sorted(item["group_ids"], key=int)[0], tuple(sorted(item["group_ids"], key=int)), page_id, item["owner_user_id"], item["timezone"], item["language"], item["tokens"], item["page_name"]) for page_id, item in sorted(grouped.items())]
 
     def legacy_conflicts(self, group_ids: Sequence[str]) -> List[Dict[str, str]]:
         ids = list(dict.fromkeys(str(item) for item in group_ids))
@@ -304,7 +322,8 @@ class MaterialRepository:
         type_sql = "" if not allowed_types else " AND CAST(d.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
-                   COALESCE(s.name,'') material_name,LOWER(TRIM(s.language)) language,s.video_duration
+                   COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
+                   LOWER(TRIM(s.language)) language,s.video_duration
               FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
              WHERE s.data_source=%s AND s.product=%s AND s.type=2 AND s.is_delete=0
                AND LOWER(TRIM(s.language))=%s AND s.video_duration>0
@@ -323,6 +342,7 @@ class MaterialRepository:
         """
         product, app_id = str(config["product"]), str(config["app_id"])
         allowed_type_set = set(allowed_types)
+        uses_description = "{{desc}}" in str(config.get("message_template") or "")
         candidates: List[MaterialCandidate] = []
         drama_key = "drama_spend" if drama_rule["sort_by"] == "spend" else "drama_roas"
         material_key = "material_spend" if material_rule["sort_by"] == "spend" else "material_roas"
@@ -352,6 +372,7 @@ class MaterialRepository:
                 raise RepositoryError("fb_auto_catalog_scan_too_large", "素材目录超过安全分页上限，已停止选择", 409)
             content_ids = tuple(dict.fromkeys(str(row.get("content_id") or "").strip() for row in rows if str(row.get("content_id") or "").strip()))
             metadata: Dict[str, Mapping[str, Any]] = {}
+            descriptions: Dict[str, str] = {}
             if content_ids:
                 ids_sql = ",".join("%s" for _ in content_ids)
                 metadata_type_sql = "" if not allowed_types else " AND CAST(d0.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
@@ -369,6 +390,23 @@ class MaterialRepository:
                 """
                 metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
                 metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
+                if uses_description:
+                    description_sql = f"""
+                        SELECT r.content_id,MAX(TRIM(r.`desc`)) drama_description,
+                               COUNT(DISTINCT BINARY TRIM(r.`desc`)) description_count
+                          FROM `{self.mysql.schema}`.ads_drama_resource r FORCE INDEX(content_id)
+                         WHERE r.app_id=%s AND r.type=2 AND LOWER(TRIM(r.language))=%s
+                           AND r.content_id IN ({ids_sql})
+                           AND TRIM(COALESCE(r.`desc`,''))<>''
+                         GROUP BY r.content_id
+                         ORDER BY r.content_id
+                    """
+                    description_rows = self.mysql.select(description_sql, (app_id, language, *content_ids))
+                    for item in description_rows:
+                        content_id = str(item.get("content_id") or "").strip()
+                        description = _description(item.get("drama_description"))
+                        if content_id and description and int(item.get("description_count") or 0) == 1:
+                            descriptions[content_id] = description
             for row in rows:
                 raw_id = str(row.get("material_id") or "")
                 if not raw_id.isdigit() or int(raw_id) <= cursor_id:
@@ -384,10 +422,12 @@ class MaterialRepository:
                 detail = metadata.get(str(row.get("content_id") or "").strip(), row)
                 resource_type = str(detail.get("resource_type_v2") or "")
                 if not url or (allowed_type_set and resource_type not in allowed_type_set): continue
+                description = descriptions.get(str(row.get("content_id") or "").strip(), "")
+                if uses_description and not description: continue
                 if not Decimal(str(material_rule["duration_min_seconds"])) <= duration <= Decimal(str(material_rule["duration_max_seconds"])): continue
                 if not self._in_range(m_spend, material_rule["spend_min"], material_rule["spend_max"]) or not self._in_range(m_roas, material_rule["roas_min"], material_rule["roas_max"]): continue
                 if not self._in_range(d_spend, drama_rule["spend_min"], drama_rule["spend_max"]) or not self._in_range(d_roas, drama_rule["roas_min"], drama_rule["roas_max"]): continue
-                candidates.append(MaterialCandidate(raw_id, str(row.get("content_id") or ""), url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type))
+                candidates.append(MaterialCandidate(raw_id, str(row.get("content_id") or ""), url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
             candidates.sort(key=cmp_to_key(compare))
             del candidates[5000:]
             if len(rows) < page_size: break

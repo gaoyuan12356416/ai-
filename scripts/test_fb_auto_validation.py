@@ -30,9 +30,16 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, 409)
 
     def test_unknown_or_incomplete_macro_is_rejected(self):
-        for text in ("{{url}}", "{{drama_name}"):
+        for text in ("{{unknown}}", "{{drama_name}"):
             value = payload(); value["message_template"] = text
             with self.assertRaises(ValidationError): normalize_template_payload(value)
+
+    def test_description_and_single_short_url_macros_are_supported(self):
+        value = payload(); value["message_template"] = "{{desc}}\n{{url}}"
+        self.assertEqual(normalize_template_payload(value)["message_template"], "{{desc}}\n{{url}}")
+        value["message_template"] = "{{url}} {{url}}"
+        with self.assertRaises(ValidationError) as caught: normalize_template_payload(value)
+        self.assertEqual(caught.exception.code, "fb_auto_message_template_invalid")
 
     def test_random_window_must_support_hour_spacing(self):
         value = payload(); value["schedule"] = {"mode": "random", "daily_count": 3, "start": "08:00", "end": "09:00"}

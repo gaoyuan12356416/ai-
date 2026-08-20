@@ -1,12 +1,13 @@
 import unittest
 
 from features.fb_auto_posts.publisher import AutoPostExecutor, GraphResult, RequestsGraphTransport
+from features.fb_auto_posts.links import FBPostLinkError, build_short_url, build_w2a_url
 from features.fb_auto_posts.repositories import PageCredential
 
 
 class Store:
-    def __init__(self): self.attempts=[]; self.completed=[]; self.reconciled=[]
-    def claim_next(self, *_args): return {"id": 1, "page_id": "10001", "source_media_url": "https://cdn.example/source.mp4", "prepared_media_url": "https://cdn.example/prepared.mp4", "media_url": "https://cdn.example/prepared.mp4", "message_text": "hello"}
+    def __init__(self): self.attempts=[]; self.completed=[]; self.reconciled=[]; self.task={"id": 1, "page_id": "10001", "source_media_url": "https://cdn.example/source.mp4", "prepared_media_url": "https://cdn.example/prepared.mp4", "media_url": "https://cdn.example/prepared.mp4", "message_text": "hello"}
+    def claim_next(self, *_args): return dict(self.task)
     def record_attempt(self, *args, **kwargs): self.attempts.append((args,kwargs))
     def complete_task(self, task_id, outcome): self.completed.append(outcome); return outcome
     def complete_submitted_with_attempt(self, task_id, sequence, **kwargs):
@@ -76,6 +77,32 @@ class PublisherTests(unittest.TestCase):
     def test_live_gate_calls_nothing(self):
         store=Store(); graph=Graph([]); result=AutoPostExecutor(store,Pages(),graph,live_enabled=False).execute_next("w")
         self.assertEqual(result["status"],"live_gate_closed"); self.assertEqual(graph.calls,0)
+
+    @staticmethod
+    def _long_url():
+        return build_w2a_url({"username":"10001","timestamp":1787191200,"material_language":"en","drama_name":"Drama","tag":"hook","task_id":1,"page_name":"Page","page_id":"10001","material_name":"Material","material_id":"501","content_id":"d1"})
+
+    def test_short_wrapper_is_materialized_before_token_and_graph(self):
+        events=[]; store=Store(); short=build_short_url(1); store.task.update({"short_url":short,"long_url":self._long_url(),"message_text":"watch "+short})
+        class OrderedPages(Pages):
+            def eligible_credentials(self,page): events.append("tokens"); return super().eligible_credentials(page)
+        class OrderedGraph(Graph):
+            def publish_video(self,*args): events.append("graph"); return super().publish_video(*args)
+        def writer(root,task_id,long_url): events.append("wrapper"); self.assertEqual((root,task_id),("/safe/fb",1)); self.assertEqual(long_url,self._long_url())
+        graph=OrderedGraph([GraphResult("success",post_id="vid_9")])
+        result=AutoPostExecutor(store,OrderedPages(),graph,live_enabled=True,short_link_root="/safe/fb",short_link_writer=writer,min_request_interval_seconds=0).execute_next("w")
+        self.assertEqual(result["status"],"submitted"); self.assertEqual(events,["wrapper","tokens","graph"])
+
+    def test_short_wrapper_failure_blocks_token_and_graph(self):
+        store=Store(); short=build_short_url(1); store.task.update({"short_url":short,"long_url":self._long_url(),"message_text":"watch "+short})
+        class CountingPages(Pages):
+            def __init__(self): self.calls=0
+            def eligible_credentials(self,page): self.calls+=1; return super().eligible_credentials(page)
+        def failed_writer(*_args): raise FBPostLinkError("fb_auto_short_link_write_failed","磁盘不可用",500)
+        pages=CountingPages(); graph=Graph([GraphResult("success",post_id="must-not-run")])
+        result=AutoPostExecutor(store,pages,graph,live_enabled=True,short_link_root="/safe/fb",short_link_writer=failed_writer).execute_next("w")
+        self.assertEqual(result["status"],"failed"); self.assertEqual(result["error_code"],"fb_auto_short_link_write_failed")
+        self.assertEqual(pages.calls,0); self.assertEqual(graph.calls,0)
 
 
 if __name__ == "__main__": unittest.main()

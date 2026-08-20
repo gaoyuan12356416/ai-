@@ -14,7 +14,7 @@ TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 LANGUAGE_RE = re.compile(r"[a-z0-9]{2,8}(?:-[a-z0-9]{1,8}){0,3}")
 LANGUAGE_ALIASES = {"english":"en","spanish":"es","portuguese":"pt","indonesian":"id","french":"fr","german":"de","japanese":"ja","korean":"ko","thai":"th","vietnamese":"vi","arabic":"ar","russian":"ru","filipino":"tl"}
 MACRO_RE = re.compile(r"\{\{([a-z_][a-z0-9_]*)\}\}")
-ALLOWED_MACROS = {"drama_name", "material_name", "content_id"}
+ALLOWED_MACROS = {"drama_name", "material_name", "content_id", "desc", "url"}
 
 
 class ValidationError(ValueError):
@@ -150,6 +150,8 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     remainder = MACRO_RE.sub("", message)
     if "{{" in remainder or "}}" in remainder or set(macros) - ALLOWED_MACROS:
         raise ValidationError("fb_auto_message_template_invalid", "发布文案包含未知或不完整宏")
+    if macros.count("url") > 1:
+        raise ValidationError("fb_auto_message_template_invalid", "发布文案中的短链宏最多只能使用一次")
     if not isinstance(groups, list) or not 1 <= len(groups) <= 100:
         raise ValidationError("invalid_request", "至少选择一个且最多100个Page池")
     group_ids = []

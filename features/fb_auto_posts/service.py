@@ -269,7 +269,17 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     pages, materials = PagePoolRepository(mysql), MaterialRepository(mysql, metric_store)
     graph = RequestsGraphTransport(api_version=str(env.get("FB_GRAPH_API_VERSION", "v22.0")), timeout_seconds=int(env.get("FB_AUTO_GRAPH_TIMEOUT", "120")))
     live = str(env.get("FB_AUTO_POST_LIVE_ENABLED", "0")) == "1"
-    executor = AutoPostExecutor(store, pages, graph, live_enabled=live, min_request_interval_seconds=float(env.get("FB_AUTO_GRAPH_MIN_INTERVAL_SECONDS", "0.5")))
+    short_link_root = Path(str(env.get("FB_AUTO_POST_SHORT_LINK_ROOT", "/mnt/data-disk/fb-auto-post-public/s2l/fb"))).expanduser()
+    if not short_link_root.is_absolute():
+        raise ValueError("FB_AUTO_POST_SHORT_LINK_ROOT must be absolute")
+    executor = AutoPostExecutor(
+        store,
+        pages,
+        graph,
+        live_enabled=live,
+        min_request_interval_seconds=float(env.get("FB_AUTO_GRAPH_MIN_INTERVAL_SECONDS", "0.5")),
+        short_link_root=str(short_link_root),
+    )
     gpu = GPUPrepareClient(str(env.get("FB_AUTO_GPU_PREPARE_INTERNAL_TOKEN", "")), port=int(env.get("FB_AUTO_GPU_PREPARE_PORT", "18836")), timeout=int(env.get("FB_AUTO_GPU_PREPARE_TIMEOUT", "9000")))
     preparer = PrepareExecutor(store, gpu, live_enabled=live)
     limits = {

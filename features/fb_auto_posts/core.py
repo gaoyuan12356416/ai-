@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from .links import FBPostLinkError, build_short_url, build_w2a_url
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
 
@@ -144,6 +145,7 @@ class FBAutoPostStore:
           id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,template_id INTEGER NOT NULL,template_version INTEGER NOT NULL,
           page_id TEXT NOT NULL,group_id TEXT NOT NULL,status TEXT NOT NULL,skip_reason TEXT NOT NULL DEFAULT '',
           material_id TEXT NOT NULL DEFAULT '',content_id TEXT NOT NULL DEFAULT '',media_url TEXT NOT NULL DEFAULT '',message_text TEXT NOT NULL DEFAULT '',
+          short_url TEXT NOT NULL DEFAULT '',long_url TEXT NOT NULL DEFAULT '',
           lease_owner TEXT NOT NULL DEFAULT '',lease_expires_at_utc TEXT NOT NULL DEFAULT '',attempt_count INTEGER NOT NULL DEFAULT 0,
           graph_post_id TEXT NOT NULL DEFAULT '',error_code TEXT NOT NULL DEFAULT '',error_message TEXT NOT NULL DEFAULT '',unknown_outcome INTEGER NOT NULL DEFAULT 0,
           created_at_utc TEXT NOT NULL,started_at_utc TEXT NOT NULL DEFAULT '',completed_at_utc TEXT NOT NULL DEFAULT '',UNIQUE(run_id,page_id)
@@ -190,6 +192,8 @@ class FBAutoPostStore:
                 "prepared_profile": "TEXT NOT NULL DEFAULT ''",
                 "next_prepare_at_utc": "TEXT NOT NULL DEFAULT ''",
                 "next_reconcile_at_utc": "TEXT NOT NULL DEFAULT ''",
+                "short_url": "TEXT NOT NULL DEFAULT ''",
+                "long_url": "TEXT NOT NULL DEFAULT ''",
             })
             self._ensure_columns(conn, "fb_auto_due_slot", {"available_at_utc": "TEXT NOT NULL DEFAULT ''", "trigger_type": "TEXT NOT NULL DEFAULT 'auto'"})
             conn.execute("DROP INDEX IF EXISTS uq_fb_auto_active_page")
@@ -322,12 +326,43 @@ class FBAutoPostStore:
         return {str(row[0]) for row in conn.execute(sql, params)}
 
     @staticmethod
-    def _message(config: Mapping[str, Any], material: Any) -> str:
-        text = str(config["message_template"])
-        replacements = {"{{drama_name}}": material.drama_name, "{{material_name}}": material.material_name, "{{content_id}}": material.content_id}
-        for key, value in replacements.items():
-            text = text.replace(key, str(value or ""))
+    def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
+        replacements = {
+            "drama_name": material.drama_name,
+            "material_name": material.material_name,
+            "content_id": material.content_id,
+            "desc": getattr(material, "drama_description", ""),
+            "url": short_url,
+        }
+        text = re.sub(
+            r"\{\{(drama_name|material_name|content_id|desc|url)\}\}",
+            lambda match: str(replacements[match.group(1)] or ""),
+            str(config["message_template"]),
+        )
+        if short_url and len(text) > 5000:
+            raise StoreError("fb_auto_message_length_invalid", "宏展开后的发布文案超过5000字符，未创建任务", 409)
         return text[:5000]
+
+    @staticmethod
+    def _link_values(page: Any, material: Any, task_id: int, timestamp: int) -> tuple[str, str]:
+        try:
+            short_url = build_short_url(task_id)
+            long_url = build_w2a_url({
+                "username": page.page_id,
+                "timestamp": timestamp,
+                "material_language": material.language,
+                "drama_name": material.drama_name or material.content_id,
+                "tag": getattr(material, "material_tag", "") or "FBauto",
+                "task_id": task_id,
+                "page_name": getattr(page, "page_name", "") or page.page_id,
+                "page_id": page.page_id,
+                "material_name": material.material_name or material.material_id,
+                "material_id": material.material_id,
+                "content_id": material.content_id,
+            })
+            return short_url, long_url
+        except FBPostLinkError as exc:
+            raise StoreError(exc.code, str(exc), exc.status) from None
 
     def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
@@ -448,7 +483,9 @@ class FBAutoPostStore:
                     or (max_jobs_per_slot is not None and global_slot_jobs > int(max_jobs_per_slot))
                     or (max_daily_jobs is not None and publishable * daily_count > int(max_daily_jobs))):
                 raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，全局最坏同槽GPU任务 {global_slot_jobs}/{max_jobs_per_slot or '-'}，本模板每日任务 {publishable * daily_count}/{max_daily_jobs or '-'}", 409)
-        now = utc_iso(self.now_fn())
+        now_dt = self.now_fn()
+        now = utc_iso(now_dt)
+        link_timestamp = int(now_dt.timestamp())
         missing = total - publishable
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -491,11 +528,16 @@ class FBAutoPostStore:
                 gpu_job_id = "fb-page-" + __import__("hashlib").sha256(f"{template_id}:{template['current_version']}:{slot_key}:{page.page_id}".encode()).hexdigest()[:48]
                 values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now if status == "skipped" else "", publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
                 try:
-                    conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+                    task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
                 except sqlite3.IntegrityError:
                     status, reason = "skipped", "fb_auto_page_task_conflict"
                     values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now, publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
-                    conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+                    task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
+                    task_id = int(task_cursor.lastrowid)
+                    short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
+                    message_text = self._message(config, material, short_url)
+                    conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
                 if status == "planned": queued += 1
                 else: skipped += 1
             run_status = "completed" if queued == 0 else "queued"
@@ -689,7 +731,7 @@ class FBAutoPostStore:
             run = conn.execute(f"SELECT r.*,t.name FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE r.id=?{clause}", (run_id,) + params).fetchone()
             if run is None:
                 raise StoreError("fb_auto_run_not_found", "运行记录不存在", 404)
-            tasks = conn.execute("SELECT id,page_id,group_id,status,skip_reason,material_id,content_id,video_template,gpu_job_id,planned_publish_at_utc,prepared_profile,prepared_sha256,prepared_size_bytes,prepared_duration_seconds,graph_post_id,error_code,error_message,unknown_outcome,created_at_utc,completed_at_utc FROM fb_auto_task WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+            tasks = conn.execute("SELECT id,page_id,group_id,status,skip_reason,material_id,content_id,short_url,long_url,video_template,gpu_job_id,planned_publish_at_utc,prepared_profile,prepared_sha256,prepared_size_bytes,prepared_duration_seconds,graph_post_id,error_code,error_message,unknown_outcome,created_at_utc,completed_at_utc FROM fb_auto_task WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
             pages = conn.execute("SELECT page_id,group_id,group_ids_json,timezone,language,eligible_token_count,snapshot_status,skip_reason FROM fb_auto_run_page WHERE run_id=? ORDER BY page_id", (run_id,)).fetchall()
             attempts = conn.execute("SELECT a.task_id,a.sequence,a.credential_id,a.fb_user_id,a.result_kind,a.error_code,a.trace_id,a.created_at_utc FROM fb_auto_publish_attempt a JOIN fb_auto_task t ON t.id=a.task_id WHERE t.run_id=? ORDER BY a.task_id,a.sequence", (run_id,)).fetchall()
         result = {key: run[key] for key in run.keys() if key != "config_json"}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Any, Dict, Mapping, Protocol
 import requests
 
 from .core import FBAutoPostStore
+from .links import FBPostLinkError, build_short_url, validate_short_url, validate_w2a_url, write_short_redirect
 from .repositories import PageCredential, PagePoolRepository
 
 
@@ -115,9 +117,10 @@ class RequestsGraphTransport:
 
 
 class AutoPostExecutor:
-    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, graph: GraphTransport, *, live_enabled: bool = False, rng: random.Random | None = None, min_request_interval_seconds: float = 0.5):
+    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, graph: GraphTransport, *, live_enabled: bool = False, rng: random.Random | None = None, min_request_interval_seconds: float = 0.5, short_link_root: str = "", short_link_writer=write_short_redirect):
         self.store, self.pages, self.graph = store, pages, graph
         self.live_enabled, self.rng = live_enabled is True, rng or random.SystemRandom()
+        self.short_link_root, self.short_link_writer = str(short_link_root or ""), short_link_writer
         self.min_request_interval_seconds = max(0.0, min(float(min_request_interval_seconds), 10.0))
         self._rate_lock, self._last_request_at = threading.Lock(), 0.0
 
@@ -136,6 +139,21 @@ class AutoPostExecutor:
             return {"ok": True, "status": "no_pending", "claimed": False}
         if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or task.get("prepared_media_url") == task.get("source_media_url"):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "任务缺少独立GPU成片，已禁止发布", "definite_attempts": 0})
+        short_url, long_url = str(task.get("short_url") or ""), str(task.get("long_url") or "")
+        if bool(short_url) != bool(long_url):
+            return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_short_link_snapshot_invalid", "error_message": "任务短链快照不完整，已禁止发布", "definite_attempts": 0})
+        if short_url:
+            try:
+                normalized_short = validate_short_url(short_url)
+                expected_short = build_short_url(task["id"])
+                validate_w2a_url(long_url)
+                if not secrets.compare_digest(normalized_short, expected_short) or str(task.get("message_text") or "").count(normalized_short) != 1:
+                    raise FBPostLinkError("fb_auto_short_link_snapshot_invalid", "任务短链快照与发布文案不一致", 409)
+                self.short_link_writer(self.short_link_root, int(task["id"]), long_url)
+            except FBPostLinkError as exc:
+                return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": exc.code, "error_message": str(exc), "definite_attempts": 0})
+            except Exception:
+                return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_short_link_write_failed", "error_message": "FB短链写入失败，已禁止发布", "definite_attempts": 0})
         credentials = self.pages.eligible_credentials(task["page_id"])
         self.rng.shuffle(credentials)
         if not credentials:

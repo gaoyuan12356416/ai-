@@ -71,6 +71,14 @@
 | TC-56 | 失败目录清理 | 新鲜/旧失败/成功manifest/链接 | cleanup | 只删安全根下过期失败job | P1 | 通过 |
 | TC-57 | future素材原子预留 | cooldown=0、两个并发future planner、同Page两候选 | 同时创建 | 两个run分别预留501/502 | P0 | 通过 |
 | TC-58 | 8 Token时间预算 | 前7个每次121秒明确失败、第8个成功 | execute/reconcile | 968秒内落账，租约未过期且无重复claim | P0 | 通过 |
+| TC-59 | desc宏 | 模板含`{{desc}}`且同语言描述唯一 | 冻结任务 | 批量读取并在message中冻结规范化描述 | P0 | 通过 |
+| TC-60 | desc歧义/缺失 | 同content/language空值或多种描述 | 候选选择 | 该素材不可选，不串用其他语言 | P0 | 通过 |
+| TC-61 | url宏校验 | `{{url}}`一次/两次 | 保存 | 一次通过，两次400 | P0 | 通过 |
+| TC-62 | W2A拼接 | 固定Page/素材/task | 构造长链 | base=`/ads/0/2049/view`、字段顺序与TT一致、`af_channel=AIpost` | P0 | 通过 |
+| TC-63 | 链接冻结 | 创建含url任务后修改源元数据 | 读取任务 | short/long/message不变，短链为`/s2l/fb/{task_id}.html` | P0 | 通过 |
+| TC-64 | wrapper原子性 | 首写/同内容重写/不同目标/软链接根 | 写短链 | 成功/幂等/409/拒绝 | P0 | 通过 |
+| TC-65 | Graph前置门禁 | wrapper写入失败 | execute | 任务安全失败，Graph与Token查询均为0 | P0 | 通过 |
+| TC-66 | UI/Nginx契约 | 创建页与短链location | 静态检查 | 展示两宏；只准精确GET、no-store、安全头 | P1 | 通过 |
 
 ## 回归范围
 

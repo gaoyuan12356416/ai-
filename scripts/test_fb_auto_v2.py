@@ -244,6 +244,12 @@ class MetricAndScheduleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"independent"):
                 build_runtime(env)
 
+    def test_short_link_root_must_be_absolute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env={"FB_AUTO_POST_INTERNAL_TOKEN":"x"*32,"FB_AUTO_GPU_PREPARE_INTERNAL_TOKEN":"y"*32,"FB_AUTO_POST_DB_PATH":str(Path(tmp)/"post.sqlite3"),"FB_AUTO_METRIC_DB_PATH":str(Path(tmp)/"metric.sqlite3"),"FB_AUTO_POST_SHORT_LINK_ROOT":"relative/fb"}
+            with self.assertRaisesRegex(ValueError,"SHORT_LINK_ROOT"):
+                build_runtime(env)
+
     def test_metric_streaming_write_does_not_lock_operational_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             operational=FBAutoPostStore(Path(tmp)/"operational.sqlite3",now_fn=self.clock)

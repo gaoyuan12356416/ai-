@@ -42,7 +42,13 @@ FB package、runner、main API、navigation/UI、units/env、docs/tests。
 | CR-28 | P1 | GPU work root | 失败job可长期堆积至磁盘满 | 严格根目录/名字、保留期和有界清理，不跟随链接 | 已修复 |
 | CR-29 | P0 | core.create_run | ahead future时隙可并发选中同Page同素材 | active预留纳入冷却；事务内重查、改选并插task | 已修复 |
 | CR-30 | P0 | runner/unit | 8 Token最坏960秒超过600秒HTTP及短对账租约 | execute/reconcile 1200租约、1300 HTTP、`TimeoutStartSec=1500`，每轮4任务 | 已修复 |
+| CR-31 | P0 | core/message | 顺序replace会递归展开描述中的宏文本 | 对原模板单次正则替换，动态值不再二次解析 | 已修复并回归 |
+| CR-32 | P0 | publisher/link | 短链失败后若先读Token/Graph会扩大外部影响 | 校验并原子物化wrapper后才读取Page授权、调用Graph | 已修复并回归 |
+| CR-33 | P1 | repositories/desc | 同一content约百条resource记录会放大网络返回 | MySQL按content聚合并用binary distinct检测歧义，每catalog页一次批量读 | 已修复；生产只读EXPLAIN使用content_id索引 |
+| CR-34 | P1 | filesystem/Nginx | SQLite私有目录0700不能作为Nginx公开根 | 独立`fb-auto-post-public`根与精确`^~ /s2l/fb/` location | 已修复 |
 
 ## 编译 / 验证结果
 
 最终编译、单元/契约回归及静态/敏感扫描见 `test-report.md`。
+
+2026-08-20 本地评审未发现未关闭 P0/P1/P2；生产部署证据待 closed-gate 发布后补录。

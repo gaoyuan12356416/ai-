@@ -1,6 +1,7 @@
 import random
 import tempfile
 import unittest
+import urllib.parse
 from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -41,6 +42,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(materials.calls, 1); self.assertEqual(result["summary"]["total_pages"], 2); self.assertEqual(result["summary"]["missing_token_pages"], 1); self.assertEqual(result["summary"]["overlap_pages"], 1)
         detail = self.store.get_run(result["run_id"], self.actor)["run"]
         self.assertEqual({task["skip_reason"] for task in detail["tasks"]}, {"", "fb_page_missing_eligible_token"})
+
+    def test_description_and_short_link_are_frozen_with_task_identity(self):
+        raw=payload(); raw["name"]="Macros"; raw["message_template"]="{{drama_name}}\n{{desc}}\n{{url}}"
+        template=self.store.create_template(raw,self.actor,{"app_id":"1479","product":"Dramawave"})
+        class OnePage(Pages):
+            def list_pages(self,*_args,**_kwargs): return [PageTarget("6",("6",),"10001","248","UTC","en",1,"Free Reels")]
+        material=MaterialCandidate("501","AcWE9aQz8q","https://cdn.example/a.mp4","Opening","My Drama","en",Decimal("30"),Decimal("5"),Decimal("50"),Decimal("10"),Decimal("60"),"1","A short drama description","hook")
+        class RichMaterials(Materials):
+            def candidate_snapshot(self,_config): return CandidateSnapshot((material,),(11,),("2026-08-16",))
+        result=self.store.create_run(template["id"],"manual:macros","manual",self.actor,OnePage(),RichMaterials())
+        with self.store.connect() as conn:
+            task=dict(conn.execute("SELECT id,message_text,short_url,long_url FROM fb_auto_task WHERE run_id=?",(result["run_id"],)).fetchone())
+        self.assertEqual(task["short_url"],f"https://gy.g2flow.com/s2l/fb/{task['id']}.html")
+        self.assertEqual(task["message_text"],f"My Drama\nA short drama description\n{task['short_url']}")
+        parsed=urllib.parse.urlsplit(task["long_url"]); values=dict(urllib.parse.parse_qsl(parsed.query))
+        self.assertEqual(parsed.path,"/ads/0/2049/view"); self.assertEqual(values["af_channel"],"AIpost")
+        self.assertEqual(values["af_adset"],"Free Reels"); self.assertEqual(values["af_ad_id"],"501")
+        self.assertEqual(values["af_c_id"],str(task["id"])); self.assertTrue(values["c"].endswith("*hook*"+str(task["id"])))
+        detail=self.store.get_run(result["run_id"],self.actor)["run"]["tasks"][0]
+        self.assertEqual((detail["short_url"],detail["long_url"]),(task["short_url"],task["long_url"]))
+
+    def test_macro_values_are_not_recursively_expanded(self):
+        material=MaterialCandidate("501","d1","https://cdn.example/a.mp4","M {{desc}}","D","en",Decimal("30"),Decimal("1"),Decimal("1"),Decimal("1"),Decimal("1"),"1","Description {{url}}","hook")
+        rendered=self.store._message({"message_template":"{{material_name}} | {{desc}} | {{url}}"},material,"https://gy.g2flow.com/s2l/fb/7.html")
+        self.assertEqual(rendered,"M {{desc}} | Description {{url}} | https://gy.g2flow.com/s2l/fb/7.html")
 
     def test_previous_backlog_blocks_next_slot(self):
         self.store.set_template_status(self.template["id"], True, self.actor, self.template["version"])

@@ -24,6 +24,8 @@
 - 有效组为 `g.is_delete=0 AND g.type IN (0,1)`，仅包含 `type=0` Post 和 `type=1` AD；未知未来类型不误标为 AD。
 - `ads_custom_source.type=2` 视频；素材源由服务端受控产品映射冻结。首发仅 `app_id=1479 / product=Dramawave / data_source=6 / metric_product=Dramawave / platform=0`，未知映射禁止启用，绝不回退 2。
 - `POST /{page_id}/videos` 提交和 `GET /{object_id}?fields=id,status` 对账。
+- 发布文案支持 `{{desc}}` 和 `{{url}}`：`{{desc}}` 来自同 app/content/language 的 `ads_drama_resource.desc`；`{{url}}` 为任务 ID 对应的不可变 `https://gy.g2flow.com/s2l/fb/{task_id}.html`，不得展开为素材 URL 或 W2A 长链。
+- `{{url}}` 的 W2A 目标固定为 `https://www.dramawavew2a.com/ads/0/2049/view`，归因字段和 campaign 拼接规则沿用 TT，`af_channel` 固定为大小写精确的 `AIpost`。
 - Graph 返回 ID 只进入 `submitted`；仅 ready/published 后进入 `published`。
 - 固定/随机北京时间；随机计划按版本+日期持久化，以可行解计数 DP 抽样，不取整点，相邻至少 60 分钟；完整日窗口 24 次必须可生成。
 - Graph execute/reconcile 每轮固定最多 4 个并发任务，每任务最多 8 个 Token；单 Graph 请求 120 秒、任务租约 1,200 秒、runner HTTP 1,300 秒、unit 1,500 秒。prepare 按 GPU 实际串行合同每轮只领取 1 个任务。
@@ -32,7 +34,7 @@
 
 - 图片、文字、Reels、多附件；首版只支持视频 URL。
 - 跨产品素材：首版所选组必须属于同一 `app_id/product`，素材产品由服务端派生。旧系统允许目标 Page 与素材产品不同，这是 V1 限制。
-- URL 宏/短链；只允许 `{{drama_name}}`、`{{material_name}}`、`{{content_id}}`。
+- 除本文固定 W2A 短链外的任意 URL 类型或自定义跳转目标；只允许模板宏 `{{drama_name}}`、`{{material_name}}`、`{{content_id}}`、`{{desc}}`、`{{url}}`，其中 `{{url}}` 最多一次。
 - 旧队列写入/迁移/停用；Token 修改；生产发布或上线。
 
 ## 用户故事 / 业务规则
@@ -53,6 +55,9 @@
 12. Scheduler 进程内 single-flight；每分钟只在 SQLite 中把未来 `FB_AUTO_PREPARE_AHEAD_SECONDS=14400` 窗口内的时隙幂等写入 `due_slot`，持久 watermark、有界 catch-up，并记录过旧 missed。Page/素材冻结由独立 plan worker 执行，GPU 由 prepare worker 提前制作，Graph runner 仅领取达到 `planned_publish_at_utc` 的 ready 任务。
 13. 素材目录以 `ads_custom_source s FORCE INDEX(PRIMARY)` 做完整有界 keyset 扫描，短剧资格用 `EXISTS ... FORCE INDEX(ac)` 去重；元数据再按 content 确定性取唯一行。不得在本地指标筛选/排序前任意截断 5,000 行；整体扫描有 600 秒/100 页 fail-closed 边界。
 14. 对账更新 ledger 时保留发布阶段累计的 `definite_attempts`，不可归零。
+15. `{{desc}}` 仅在模板使用时按素材页的 content ID 批量读取，不得逐 Page/逐素材 N+1 查询；空或同一身份多值的描述不得被选作该模板候选。描述压缩连续空白并最多冻结 4,096 字符。
+16. `{{url}}` 在 task 自增 ID 取得后，于同一个 `BEGIN IMMEDIATE` 事务内冻结 short URL、W2A long URL 和最终 `message_text`；页面名缺失时使用 Page ID，素材 tag 缺失时使用 `FBauto`。后续模板、Page 名、素材名或 tag 变化不得改写历史任务。
+17. Graph POST 前必须先将冻结 long URL 原子写到独立公开根 `/mnt/data-disk/fb-auto-post-public/s2l/fb`，形成不可变短链 wrapper；写入失败、目标冲突、路径越界或软链接目录均在 Graph 前失败，不调用任何 Page Token。Nginx 只允许 GET 精确的 `/s2l/fb/[1-9][0-9]{0,18}.html`，无目录索引并返回 no-store/security headers；公开目录与 SQLite 私有目录物理分离。
 
 ## 交互与流程
 
@@ -62,11 +67,11 @@
 
 ### 影响模块
 
-`features/fb_auto_posts/`、`scripts/fb_auto_post_*`、`app.py`、`.env.example`、导航、两张 HTML、`deploy/fb-auto-post-*`。
+`features/fb_auto_posts/`、`scripts/fb_auto_post_*`、`app.py`、`.env.example`、导航、两张 HTML、`deploy/fb-auto-post-*`、`deploy/nginx-fb-auto-short-domain-location.conf`。
 
 ### 数据结构
 
-运行库 SQLite 表：`fb_auto_template`、`fb_auto_template_version`、`fb_auto_schedule_plan`、`fb_auto_due_slot`、`fb_auto_run`、`fb_auto_run_page`、`fb_auto_task`、`fb_auto_publish_attempt`、`fb_auto_publish_ledger`。指标缓存使用独立 `FB_AUTO_METRIC_DB_PATH`；启动时与 `FB_AUTO_POST_DB_PATH` 同路径（含已存在文件的 samefile/symlink）立即失败，避免长指标写事务阻塞 scheduler/claim。迁移只建表/索引或补列。
+运行库 SQLite 表：`fb_auto_template`、`fb_auto_template_version`、`fb_auto_schedule_plan`、`fb_auto_due_slot`、`fb_auto_run`、`fb_auto_run_page`、`fb_auto_task`、`fb_auto_publish_attempt`、`fb_auto_publish_ledger`。`fb_auto_task.short_url/long_url` 与 `message_text` 一起冻结。指标缓存使用独立 `FB_AUTO_METRIC_DB_PATH`；启动时与 `FB_AUTO_POST_DB_PATH` 同路径（含已存在文件的 samefile/symlink）立即失败，避免长指标写事务阻塞 scheduler/claim。迁移只建表/索引或补列。
 
 ### API / 接口
 
@@ -103,3 +108,4 @@
 ## 变更记录
 
 - 2026-08-17：完成实现候选与本地测试，无生产变更。
+- 2026-08-20：确认并进入 `{{desc}}`/`{{url}}` 扩展开发；生产验收保持 `FB_AUTO_POST_LIVE_ENABLED=0`，不得创建模板、运行或真实 Graph Post。

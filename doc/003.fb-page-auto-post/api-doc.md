@@ -20,6 +20,8 @@
 
 模板字段：`name/group_ids/language/message_template/video_template/metric_window_days/drama_launch_window_days/cooldown_days/drama_rule/material_rule/schedule`。`video_template` 必须为 `random_overlay`。`language` 保存数据库规范小写 code，常见名称会归一（`english→en`），支持 `zh-tw`。服务端按组派生并冻结 `app_id/product/material_data_source/metric_product/metric_platform`，不信任浏览器产品或来源文本。
 
+`message_template` 允许 `{{drama_name}}`、`{{material_name}}`、`{{content_id}}`、`{{desc}}`、`{{url}}`。`{{desc}}` 来自同 app/content/language 的短剧资源描述；`{{url}}` 可选且最多一次，展开为 `https://gy.g2flow.com/s2l/fb/{task_id}.html`。对应 W2A long URL 固定使用 `https://www.dramawavew2a.com/ads/0/2049/view` 与 `af_channel=AIpost`；short/long/message 在任务创建事务中冻结。
+
 `run-now` 请求为 `{"expected_version":N,"operation_id":"客户端生成的16-100字符幂等ID"}`，只写入 manual due-slot 并返回 `202`、`due_slot_id/status/operation_id/idempotent`；同模板版本+operation_id 重试不重复创建。Page/素材查询、GPU 和 Graph 均不在主 API 请求内执行。
 
 内部路由：`tick` 只持久化未来 due slots；`plan-next` 冻结 Page、指标代次和源素材；`prepare-next` 仅调用独立 GPU 制作；`execute-next` 仅领取到时 ready 任务；`reconcile-next` 只读查询已返回 ID 的 Graph 对象。
@@ -46,6 +48,10 @@
 | `fb_auto_catalog_scan_timeout/too_large` | 完整素材目录超过整体时间或分页安全边界 |
 | `fb_auto_product_mapping_unsupported` | 目标 Page 池不在受控产品映射 |
 | `fb_auto_prepared_media_required` | 缺独立 GPU 成片，禁止 Graph |
+| `fb_auto_message_length_invalid` | 宏展开后文案超过5000字符，未创建任务 |
+| `fb_auto_link_metadata_invalid` | 构造TT兼容归因所需的Page/素材字段无效 |
+| `fb_auto_short_link_snapshot_invalid` | task短链、长链或文案快照不一致，禁止Graph |
+| `fb_auto_short_link_root_invalid/write_failed/conflict` | 公共短链目录无效、写入失败或ID目标冲突，禁止Graph |
 | `fb_graph_*_outcome_unknown` | 结果未知，禁止重发 |
 | `fb_graph_reconcile_all_credentials_rejected` | 全部健康授权均明确无法对账，终态人工确认 |
 
@@ -53,4 +59,4 @@
 
 ## 兼容性说明
 
-接口、权限和 SQLite 均为加法式；不改旧队列、X/TT 路由和 MySQL 数据。Graph 默认与现有服务器脚本对齐为可配置 `v22.0`。
+接口、权限和 SQLite 均为加法式；`fb_auto_task` 只新增 `short_url/long_url`。不改旧队列、X/TT 路由和 MySQL 数据。Graph 默认与现有服务器脚本对齐为可配置 `v22.0`。

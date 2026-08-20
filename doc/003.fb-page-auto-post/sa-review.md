@@ -6,6 +6,8 @@
 
 2026-08-18 V2 复审：原候选的窗口 MySQL 双扫和到点重活已删除。指标改为 FB 独立 READY 日缓存；调度改为 future due-slot + plan + prepare + 到时 Graph；产品范围明确冻结为 Dramawave。GPU worker 制品和 Graph 已有对象状态只读核验仍是开 live gate 前的外部集成门禁，不影响 gate=0 候选验收。
 
+2026-08-20 宏扩展复审：有条件通过。`{{desc}}` 必须从 `ads_drama_resource.desc` 按 app/content/language 批量、确定性读取；`{{url}}` 必须冻结为独立 FB 命名空间短链，W2A base 固定 `/ads/0/2049/view`、`af_channel=AIpost`，并在任何 Graph POST 前完成不可变 wrapper 写入。生产只做 closed-gate 部署和只读/404 验证，不以真实模板或发帖验收。
+
 ## 问题清单
 
 | 编号 | 严重级别 | 位置 | 问题 | 建议 | 状态 |
@@ -18,6 +20,9 @@
 | SA-06 | P1 | 重复Page | 组独占不足 | Page联集+唯一索引 | 已关闭 |
 | SA-07 | P1 | 产品 | 历史支持跨产品 | V1同产品限制并明示 | 已关闭 |
 | SA-08 | P1 | 吞吐 | 单任务执行积压 | Graph每轮4并发/4任务；GPU每轮串行1任务；容量/积压闭锁 | 已关闭 |
+| SA-09 | P0 | URL冻结 | 若运行时临时拼长链，重试可能漂移 | task ID 后同事务冻结 short/long/message | 已关闭 |
+| SA-10 | P0 | Graph边界 | wrapper失败后仍可能发帖 | 发布前物化，失败即停止且Graph调用数为0 | 已关闭 |
+| SA-11 | P1 | 描述查询 | 逐Page查询导致N+1或语言错配 | 仅宏启用时按每页content集合聚合读取并过滤歧义 | 已关闭；生产只读EXPLAIN通过 |
 
 ## 决策记录
 

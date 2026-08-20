@@ -4,6 +4,8 @@
 
 通过。已完成本地161项回归、CPU/GPU closed-gate生产部署、30日指标回填和prepare-only GPU→COS canary；未调用 Meta，真实发布仍保持关闭。
 
+2026-08-20 `{{desc}}/{{url}}` 扩展本地 QA 通过：92项FB专项 + 93项GPU/TT短链/X-TT合并基线，共185项全部通过。生产只读预检确认 MySQL `@@read_only=1`，描述聚合使用 `content_id` 索引；真实 schema 的同身份描述可确定性收敛为1值。closed-gate部署尚待执行，本段不代表线上完成。
+
 ## 测试范围
 
 FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU prepare-only/容量/部署契约，以及上一轮 X accounts、TT auto、X auto 主 API 合并基线。
@@ -44,3 +46,5 @@ BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG
 ## 发布建议
 
 closed-gate 部署已完成，不建议开启真实发布。开 live 前仅剩持续磁盘告警/当时水位复核、同槽连续吞吐评审，并须单独审批真实 Graph 发帖 canary；不得把本轮验收当作真实发帖授权。
+
+`{{desc}}/{{url}}` 扩展仍按同一边界：只允许 closed-gate部署、404/header/页面/SQLite验收；不创建生产模板、任务、短链 wrapper 或真实帖子。

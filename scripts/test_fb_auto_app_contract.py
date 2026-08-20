@@ -80,6 +80,15 @@ class ContractTests(unittest.TestCase):
         self.assertIn("202 if parsed.path.endswith(\"run-now\")",service)
         self.assertIn('30 if path.endswith("/run-now")',client)
 
+    def test_description_url_helper_and_fb_short_link_nginx_contract(self):
+        form=(ROOT/"static"/"fb-auto-publish-template.html").read_text(encoding="utf-8")
+        nginx=(ROOT/"deploy"/"nginx-fb-auto-short-domain-location.conf").read_text(encoding="utf-8")
+        self.assertIn("{{desc}}",form); self.assertIn("{{url}}",form); self.assertIn("AIpost",form)
+        self.assertIn("location ^~ /s2l/fb/",nginx); self.assertIn('^/s2l/fb/[1-9][0-9]{0,18}[.]html$',nginx)
+        self.assertIn("root /mnt/data-disk/fb-auto-post-public;",nginx)
+        self.assertIn("limit_except GET",nginx); self.assertIn('Cache-Control "no-store" always',nginx)
+        self.assertIn("navigate-to https://www.dramawavew2a.com",nginx)
+
     def test_javascript_parses(self):
         for name in (
             "fb-auto-publish-common.js",
