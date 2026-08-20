@@ -744,21 +744,20 @@ class ScheduleRunnerTests(unittest.TestCase):
             "scripts.x_post_schedule_runner._preflight_candidate",
             side_effect=transient_preflight,
         ):
-            with self.assertRaises(ScheduleRunError) as transient:
-                _drama_candidates(
-                    self.config,
-                    transient_sidecar,
-                    accounts,
-                    source_date="2026-07-28",
-                    connection_factory=lambda _config: Connection(),
-                    downloader=object(),
-                    prober=object(),
-                    repair_client=None,
-                    timestamp=1,
-                )
+            transient_planned = _drama_candidates(
+                self.config,
+                transient_sidecar,
+                accounts,
+                source_date="2026-07-28",
+                connection_factory=lambda _config: Connection(),
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+                timestamp=1,
+            )
         self.assertEqual(
-            transient.exception.code,
-            "x_post_drama_preflight_failed",
+            [(item["account_id"], item["content_id"]) for item in transient_planned],
+            [(10, "OWNER")],
         )
         self.assertEqual(transient_sidecar.checks, [])
         self.assertEqual(transient_sidecar.available_calls, 1)
@@ -1112,6 +1111,36 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "/internal/posts/schedule-plan/query", identity
             )
 
+    def test_plan_query_accepts_ordered_partial_frozen_scope(self):
+        identity = due_item(accounts=[11, 12, 13])
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "found": True,
+                        "run": {
+                            **frozen_run("material", 3),
+                            "expected_count": 2,
+                        },
+                        "queues": [
+                            queue(1, 11, 1),
+                            queue(2, 13, 2),
+                        ],
+                    }
+                }
+            ]
+        )
+
+        plan = client.query_schedule_plan(
+            "/internal/posts/schedule-plan/query", identity
+        )
+
+        self.assertEqual(plan["run"]["expected_count"], 2)
+        self.assertEqual(
+            [item["account_id"] for item in plan["queues"]],
+            [11, 13],
+        )
+
     def test_plan_create_uses_wrapped_http_response(self):
         identity = due_item(accounts=[11])
         payload = {
@@ -1339,6 +1368,44 @@ class ScheduleRunnerTests(unittest.TestCase):
             [11, 12],
         )
         self.assertEqual(result["batches"][0]["published_count"], 2)
+
+    def test_available_subset_is_frozen_and_published_without_waiting(self):
+        sidecar = FakeSidecar(
+            [due_item(accounts=[11, 12, 13])]
+        )
+
+        def partial_loader(
+            _config,
+            _sidecar,
+            accounts,
+            *,
+            source_date,
+            **_kwargs,
+        ):
+            return [
+                {
+                    "account_id": account["id"],
+                    "source_date": source_date,
+                    "material_id": str(9000 + account["id"]),
+                }
+                for account in (accounts[0], accounts[2])
+            ]
+
+        result = self.execute(
+            sidecar,
+            material_candidate_loader=partial_loader,
+        )
+
+        create_payload = next(
+            call[2] for call in sidecar.calls if call[0] == "create"
+        )
+        self.assertEqual(create_payload["account_ids"], [11, 13])
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [101, 102],
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["batches"][0]["planned_count"], 2)
 
     def test_drama_known_failure_stops_later_episode_queue(self):
         sidecar = FakeSidecar([due_item(source_type="drama")])

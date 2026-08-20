@@ -1123,7 +1123,6 @@ def _material_fifo_selection_matches(
         return False
     if not premium_ids.issubset(account_id_set):
         return False
-    remaining_premium_ids = set(premium_ids)
     selected_pool_ids = set()
     cutoff = str(validation_cutoff or "")
     for pool in pool_rows:
@@ -1160,7 +1159,6 @@ def _material_fifo_selection_matches(
             ):
                 return False
             selected_pool_ids.add(pool_id)
-            remaining_premium_ids.discard(account_id)
             continue
 
         error_code = str(pool["last_error_code"] or "")
@@ -1170,16 +1168,6 @@ def _material_fifo_selection_matches(
             and (not cutoff or (checked_at and checked_at >= cutoff))
         )
         if not checked_in_this_preflight:
-            return False
-        if (
-            error_code == "x_long_video_requires_premium"
-            and remaining_premium_ids
-        ):
-            return False
-        if error_code == "x_long_video_requires_premium":
-            # Stable random pairing may not bypass a newer eligible long row
-            # with an older short row. The runner must fail the whole batch
-            # when that long row has no same-language relay capacity.
             return False
     return selected_pool_ids == set(actual_by_pool)
 
@@ -3499,6 +3487,22 @@ def _schedule_account_ids(values, *, allow_empty=False):
     return normalized
 
 
+def _is_ordered_account_subset(values, configured):
+    """Return whether values is a non-empty ordered subset of configured."""
+    if (
+        not values
+        or len(values) > len(configured)
+        or len(set(values)) != len(values)
+    ):
+        return False
+    positions = {account_id: index for index, account_id in enumerate(configured)}
+    try:
+        ranks = [positions[account_id] for account_id in values]
+    except KeyError:
+        return False
+    return ranks == sorted(ranks)
+
+
 def _manual_material_ids(values):
     if (
         not isinstance(values, list)
@@ -4704,10 +4708,11 @@ class XPostStore:
             account_ids = _schedule_account_ids(
                 _json_array(row["account_ids_json"], "account_ids")
             )
-            if len(account_ids) != int(row["expected_count"]):
+            expected_count = int(row["expected_count"])
+            if not 1 <= expected_count <= len(account_ids):
                 raise XPostError(
                     "x_post_storage_conflict",
-                    "X定时发布冻结批次账号数量不一致",
+                    "X定时发布冻结批次计划数量超出账号范围",
                     500,
                 )
             items.append(
@@ -4783,10 +4788,11 @@ class XPostStore:
             account_ids = _schedule_account_ids(
                 _json_array(row["account_ids_json"], "account_ids")
             )
-            if len(account_ids) != int(row["expected_count"]):
+            expected_count = int(row["expected_count"])
+            if not 1 <= expected_count <= len(account_ids):
                 raise XPostError(
                     "x_post_storage_conflict",
-                    "X previous-day frozen run account count is inconsistent",
+                    "X previous-day frozen run plan count is outside its account scope",
                     500,
                 )
             items.append(
@@ -6237,7 +6243,7 @@ class XPostStore:
             if row is None:
                 row = selected_by_account.get(account_id)
             if row is None:
-                break
+                continue
             item = _row_dict(row)
             item["candidate_account_id"] = account_id
             assignments.append(item)
@@ -8962,18 +8968,19 @@ class XPostStore:
                 and int(row["publish_approved"] or 0) == 1
                 and bool(str(row["token_store_key"] or "").strip())
             }
+            expected_count = int(run["expected_count"] or 0)
 
             conflict = bool(
                 str(run["run_date"]) != expected_run_date
                 or str(run["status"]) != "stopped"
                 or str(run["error_code"]) != "x_post_schedule_stale_claim"
-                or int(run["expected_count"] or 0) != len(account_ids)
+                or not 1 <= expected_count <= len(account_ids)
                 or int(run["queued_count"] or 0) != queue_count
                 or int(run["published_count"] or 0) != published_queue_count
                 or int(run["failed_count"] or 0) != 0
                 or int(run["unknown_count"] or 0) != 0
                 or set(queue_counts).difference({"queued", "published"})
-                or queue_count not in {0, len(account_ids)}
+                or queue_count not in {0, expected_count}
                 or queued_queue_count + published_queue_count != queue_count
                 or log_count != published_queue_count
                 or unresolved is not None
@@ -10570,10 +10577,10 @@ class XPostStore:
                     "自动发布设置已变更，本时间点不再创建新队列",
                     409,
                 )
-        if len(candidates) != len(account_ids):
+        if not candidates or len(candidates) > len(account_ids):
             raise XPostError(
                 "x_post_schedule_candidate_shortage",
-                "定时发布计划候选数量与账号数量不一致",
+                "定时发布计划至少需要一个候选且不能超过配置账号数量",
                 409,
             )
         prepared = []
@@ -10592,12 +10599,6 @@ class XPostStore:
                 require_compliance=True,
                 allow_material_relay=(source_type == "material"),
             )
-            if values["account_id"] != account_ids[index - 1]:
-                raise XPostError(
-                    "x_post_schedule_account_mismatch",
-                    "候选账号顺序与自动发布设置不一致",
-                    409,
-                )
             if values["account_id"] in seen_accounts:
                 raise XPostError(
                     "invalid_request",
@@ -10640,6 +10641,16 @@ class XPostStore:
             publication_keys.add(publication_key)
             prepared.append(values)
 
+        prepared_account_ids = [
+            int(values["account_id"]) for values in prepared
+        ]
+        if not _is_ordered_account_subset(prepared_account_ids, account_ids):
+            raise XPostError(
+                "x_post_schedule_account_mismatch",
+                "候选账号必须保持自动发布设置中的相对顺序",
+                409,
+            )
+
         timestamp = utc_now()
         slot_key = "xpost:schedule:v1:%s:%s:%s" % (
             source_type,
@@ -10664,7 +10675,6 @@ class XPostStore:
                 if (
                     int(existing["config_version"]) != config_version
                     or existing_account_ids != account_ids
-                    or int(existing["expected_count"]) != len(account_ids)
                 ):
                     conn.rollback()
                     raise XPostError(
@@ -10678,6 +10688,13 @@ class XPostStore:
                     (existing["id"],),
                 ).fetchall()
                 if existing_queues:
+                    if int(existing["expected_count"]) != len(prepared):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_schedule_run_exists",
+                            "该时间点已存在不同数量的发布计划",
+                            409,
+                        )
                     expected = [
                         (
                             values["account_id"],
@@ -10728,6 +10745,13 @@ class XPostStore:
                     ]
                     item["created"] = False
                     return item
+                if int(existing["expected_count"]) != len(account_ids):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "待建队列批次的冻结账号数量不一致",
+                        500,
+                    )
                 if existing["status"] == "failed_preflight":
                     conn.rollback()
                     raise XPostError(
@@ -10898,29 +10922,31 @@ class XPostStore:
                     1000,
                     premium_account_ids=premium_account_ids,
                 )
-                if len(assignments) != len(prepared):
-                    conn.rollback()
-                    raise XPostError(
-                        "x_post_schedule_drama_shortage",
-                        "短剧池中没有足够的未绑定短剧供全部账号发布",
-                        409,
-                    )
                 expected_by_pool = {
                     int(item["id"]): item for item in assignments
+                }
+                expected_by_account = {
+                    int(item["candidate_account_id"]): item
+                    for item in assignments
+                }
+                free_assignment_account_ids = {
+                    account_id
+                    for account_id, item in expected_by_account.items()
+                    if int(item["assigned_account_id"] or 0) == 0
                 }
                 actual_pool_ids = [
                     int(values["drama_pool_item_id"])
                     for values in prepared
                 ]
                 assignment_conflict = bool(
-                    len(actual_pool_ids) != len(expected_by_pool)
-                    or len(set(actual_pool_ids)) != len(actual_pool_ids)
-                    or set(actual_pool_ids) != set(expected_by_pool)
+                    len(set(actual_pool_ids)) != len(actual_pool_ids)
                 )
                 for values in prepared:
                     pool_id = int(values["drama_pool_item_id"])
+                    account_id = int(values["account_id"])
                     expected = expected_by_pool.get(pool_id)
-                    if not expected:
+                    account_assignment = expected_by_account.get(account_id)
+                    if not expected or not account_assignment:
                         assignment_conflict = True
                         continue
                     owner_id = int(expected["assigned_account_id"] or 0)
@@ -10929,7 +10955,16 @@ class XPostStore:
                         != int(expected["next_sub_number"])
                         or (
                             owner_id > 0
-                            and int(values["account_id"]) != owner_id
+                            and account_id != owner_id
+                        )
+                        or (
+                            owner_id == 0
+                            and account_id not in free_assignment_account_ids
+                        )
+                        or (
+                            int(account_assignment["assigned_account_id"] or 0)
+                            > 0
+                            and int(account_assignment["id"]) != pool_id
                         )
                     ):
                         assignment_conflict = True
@@ -10937,7 +10972,7 @@ class XPostStore:
                     conn.rollback()
                     raise XPostError(
                         "x_post_drama_assignment_conflict",
-                        "短剧候选与账号固定归属或新剧入池顺序不一致",
+                        "短剧候选与当前账号固定归属或入池顺序不一致",
                         409,
                     )
                 pool_by_id = expected_by_pool
@@ -11056,6 +11091,16 @@ class XPostStore:
                     values["relay_account_username"] = relay_username
                     relay_counts[relay_account_id] += 1
 
+            partial_capacity = len(prepared) < len(account_ids)
+            partial_capacity_message = (
+                "配置账号%d个，本次已为%d个有正常可用%s的账号建队列，"
+                "其余账号在本时间点跳过"
+                % (
+                    len(account_ids),
+                    len(prepared),
+                    "素材" if source_type == "material" else "短剧",
+                )
+            )
             if schedule_run_id is None:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
@@ -11096,6 +11141,16 @@ class XPostStore:
                         len(prepared),
                         len(prepared),
                         timestamp,
+                        timestamp,
+                        schedule_run_id,
+                    ),
+                )
+            if partial_capacity:
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET error_code='',"
+                    "error_message=?,updated_at=? WHERE id=?",
+                    (
+                        partial_capacity_message,
                         timestamp,
                         schedule_run_id,
                     ),

@@ -837,6 +837,51 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_previous_day_recovery_conflict",
         )
 
+    def test_previous_day_partial_plan_can_be_recovered_without_scope_loss(self):
+        self.save_schedule("material", [2, 3], ["10:00"])
+        self._add_recovery_account(2)
+        self._add_recovery_account(3)
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 26, 10, 0, 10, tzinfo=service.BEIJING_TZ),
+            grace_seconds=90,
+        )
+        pool = self.store.add_pool_materials(
+            ["261"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "261", "error_code": ""}
+            ],
+        )["items"][0]
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-26",
+            "10:00",
+            2,
+            [self.material_candidate(pool, 2)],
+        )
+        run_id = plan["id"]
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, 10, tzinfo=service.BEIJING_TZ),
+            grace_seconds=90,
+        )
+        now = datetime(2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ)
+
+        recovered = self.store.recover_previous_day_stale_claim_schedule_run(
+            run_id,
+            actor="codex_operator",
+            deployed_commit="c" * 40,
+            now=now,
+        )
+        recovered_due = self.store.previous_day_recovered_schedule_slots(
+            "2026-07-26",
+            "c" * 40,
+            now=now,
+        )
+
+        self.assertEqual(recovered["expected_count"], 1)
+        self.assertEqual(recovered["next_status"], "running")
+        self.assertEqual(recovered_due["items"][0]["account_ids"], [2, 3])
+
     def test_previous_day_slot_remains_due_during_midnight_grace(self):
         self.save_schedule("material", [2], ["23:59"])
         claimed = self.store.due_schedule_slots(
@@ -1377,7 +1422,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             {oldest_pool["id"], newest_pool["id"]},
         )
 
-    def test_material_schedule_cannot_bypass_long_fifo_after_premium_target_used(self):
+    def test_material_schedule_skips_current_long_row_after_premium_target_used(self):
         self.save_schedule("material", [2, 3, 4], ["09:00"])
         added = self.store.add_pool_materials(
             ["231", "232", "233", "234", "235"],
@@ -1402,24 +1447,18 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         standard_two = self.material_candidate(second_oldest, 4)
         standard_two["preflight_duration"] = 100.0
 
-        with self.assertRaises(service.XPostError) as rejected:
-            self.store.create_schedule_plan(
-                "material",
-                "2026-07-27",
-                "09:00",
-                2,
-                [premium, standard_one, standard_two],
-                premium_account_ids=[2],
-            )
-        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
-        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
-            self.assertEqual(
-                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
-                0,
-            )
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [premium, standard_one, standard_two],
+            premium_account_ids=[2],
+        )
+        self.assertEqual(len(plan["queues"]), 3)
         self.assertNotEqual(oldest["id"], second_oldest["id"])
 
-    def test_material_schedule_cannot_skip_long_fifo_while_premium_remains(self):
+    def test_material_schedule_skips_currently_unpublishable_long_fifo_row(self):
         self.save_schedule("material", [2], ["09:00"])
         oldest, newest = self.store.add_pool_materials(
             ["241", "242"],
@@ -1436,20 +1475,53 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         candidate = self.material_candidate(oldest, 2)
         candidate["preflight_duration"] = 200.0
 
-        with self.assertRaises(service.XPostError) as rejected:
-            self.store.create_schedule_plan(
-                "material",
-                "2026-07-27",
-                "09:00",
-                2,
-                [candidate],
-                premium_account_ids=[2],
-            )
-        self.assertEqual(
-            rejected.exception.code,
-            "x_post_pool_fifo_conflict",
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [candidate],
+            premium_account_ids=[2],
         )
+        self.assertEqual(plan["queues"][0]["pool_item_id"], oldest["id"])
         self.assertNotEqual(oldest["id"], newest["id"])
+
+    def test_material_available_subset_creates_partial_audited_run(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["251"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "251", "error_code": ""}],
+        )["items"][0]
+
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.material_candidate(pool, 2)],
+        )
+        frozen = self.store.query_schedule_plan(
+            "material", "2026-07-27", "09:00"
+        )
+        due = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                9,
+                0,
+                30,
+                tzinfo=service.BEIJING_TZ,
+            )
+        )
+
+        self.assertEqual(len(plan["queues"]), 1)
+        self.assertEqual(frozen["run"]["account_ids"], [2, 3])
+        self.assertEqual(frozen["run"]["expected_count"], 1)
+        self.assertEqual(frozen["run"]["error_code"], "")
+        self.assertIn("本次已为1个", frozen["run"]["error_message"])
+        self.assertEqual(due["items"][0]["account_ids"], [2, 3])
 
     def test_material_fifo_replay_rejects_stale_skip_evidence(self):
         self.assertFalse(
@@ -1800,7 +1872,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [(2, "D1"), (3, "D3")],
         )
 
-    def test_drama_shortage_creates_no_partial_queue(self):
+    def test_duplicate_drama_pool_row_cannot_fill_two_accounts(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
         pool = self.add_drama(content_id="ONLY", free_episode_count=2)
         with self.assertRaises(service.XPostError) as rejected:
@@ -1816,7 +1888,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
         self.assertEqual(
             rejected.exception.code,
-            "x_post_schedule_drama_shortage",
+            "x_post_drama_assignment_conflict",
         )
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             self.assertEqual(
@@ -1825,6 +1897,63 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 ).fetchone()[0],
                 0,
             )
+
+    def test_drama_available_subset_creates_and_completes_partial_run(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        pool = self.add_drama(content_id="ONLY", free_episode_count=2)
+
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        frozen = self.store.query_schedule_plan(
+            "drama", "2026-07-27", "09:00"
+        )
+
+        self.assertEqual(len(plan["queues"]), 1)
+        self.assertEqual(frozen["run"]["account_ids"], [2, 3])
+        self.assertEqual(frozen["run"]["expected_count"], 1)
+        self.assertEqual(frozen["run"]["error_code"], "")
+        self.assertIn("本次已为1个", frozen["run"]["error_message"])
+
+        self.publish_queue(plan["queues"][0], 1)
+        completed = self.store.query_schedule_plan(
+            "drama", "2026-07-27", "09:00"
+        )
+        self.assertEqual(completed["run"]["status"], "completed")
+        self.assertEqual(completed["run"]["published_count"], 1)
+        self.assertEqual(completed["run"]["error_code"], "")
+        self.assertIn("本次已为1个", completed["run"]["error_message"])
+
+    def test_drama_assignment_does_not_hide_later_bound_account_after_gap(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        long_pool = self.add_drama(content_id="LONG", free_episode_count=2)
+        short_pool = self.add_drama(content_id="SHORT", free_episode_count=1)
+        first = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(short_pool, 2, 1),
+                self.drama_candidate(long_pool, 3, 1),
+            ],
+        )
+        for item in first["queues"]:
+            self.publish_queue(item, 1, "first-%s" % item["account_id"])
+
+        available = self.store.available_drama_pool_items(
+            limit=1000,
+            account_ids=[2, 3],
+        )
+
+        self.assertEqual(
+            [(item["candidate_account_id"], item["content_id"]) for item in available],
+            [(3, "LONG")],
+        )
 
     def test_drama_assignment_rejects_cross_account_continuation(self):
         self.save_schedule("drama", [2, 3], ["09:00", "10:00"])

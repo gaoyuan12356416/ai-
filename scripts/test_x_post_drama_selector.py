@@ -353,6 +353,22 @@ class DramaSelectorTests(unittest.TestCase):
                 account_ids=[2],
             )
 
+    def test_pool_accepts_noncontiguous_ordered_account_subset(self):
+        selected = select_drama_pool_episodes(
+            FakeConnection([episode_row(1, unlocked=1)]),
+            [
+                pool_row(
+                    10,
+                    "DRAMA-A",
+                    "2026-07-27T01:00:00Z",
+                    4,
+                )
+            ],
+            account_ids=[2, 3, 4],
+        )
+
+        self.assertEqual(selected[0]["candidate_account_id"], 4)
+
     def test_replay_generation_has_a_distinct_episode_identity(self):
         selected = select_drama_pool_episodes(
             FakeConnection([episode_row(1, unlocked=1)]),

@@ -473,6 +473,11 @@ class DramawaveDramaSelector:
                 raise DramaSelectionError("account_ids is invalid")
             seen_accounts.add(account_id)
             normalized_accounts.append(account_id)
+        account_positions = {
+            account_id: index
+            for index, account_id in enumerate(normalized_accounts)
+        }
+        previous_account_position = -1
         if len(pool_items) > len(normalized_accounts):
             raise DramaSelectionError(
                 "drama pool response exceeds the configured account scope"
@@ -480,7 +485,7 @@ class DramawaveDramaSelector:
         normalized_pool = []
         seen_ids = set()
         seen_content_ids = set()
-        for index, raw in enumerate(pool_items):
+        for raw in pool_items:
             if not isinstance(raw, dict):
                 raise DramaSelectionError("drama pool item must be an object")
             pool_item_id = _positive_int(raw.get("id"), "drama pool item id")
@@ -513,13 +518,18 @@ class DramawaveDramaSelector:
                 raw.get("candidate_account_id"),
                 "candidate_account_id",
             )
+            candidate_account_position = account_positions.get(
+                candidate_account_id
+            )
             if (
-                candidate_account_id != normalized_accounts[index]
+                candidate_account_position is None
+                or candidate_account_position <= previous_account_position
                 or assigned_account_id not in (0, candidate_account_id)
             ):
                 raise DramaSelectionError(
                     "drama pool account assignment is invalid"
                 )
+            previous_account_position = candidate_account_position
             assigned_at = _text(
                 raw.get("assigned_at"),
                 "assigned_at",

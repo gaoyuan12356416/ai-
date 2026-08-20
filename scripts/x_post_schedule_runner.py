@@ -120,6 +120,22 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
 MATERIAL_ASSIGNMENT_VERSION = "material-random-relay-v1"
 
 
+def _is_ordered_account_subset(values, configured):
+    """Return whether values is a non-empty ordered subset of configured."""
+    if (
+        not values
+        or len(values) > len(configured)
+        or len(set(values)) != len(values)
+    ):
+        return False
+    positions = {account_id: index for index, account_id in enumerate(configured)}
+    try:
+        ranks = [positions[account_id] for account_id in values]
+    except KeyError:
+        return False
+    return ranks == sorted(ranks)
+
+
 class ScheduleRunError(RuntimeError):
     def __init__(
         self,
@@ -624,7 +640,11 @@ class ScheduleSidecarClient(SidecarClient):
             or run.get("publish_time") != identity["publish_time"]
             or run.get("config_version") != identity["version"]
             or run.get("account_ids") != identity["account_ids"]
-            or run.get("expected_count") != len(identity["account_ids"])
+            or not isinstance(run.get("expected_count"), int)
+            or isinstance(run.get("expected_count"), bool)
+            or not 1
+            <= run.get("expected_count")
+            <= len(identity["account_ids"])
         ):
             raise SidecarError(
                 "x_post_schedule_plan_invalid_response",
@@ -633,9 +653,13 @@ class ScheduleSidecarClient(SidecarClient):
         queues = self._normalize_queues(
             item["queues"], identity["account_ids"]
         )
-        if queues and [queue["account_id"] for queue in queues] != identity[
-            "account_ids"
-        ]:
+        queue_account_ids = [queue["account_id"] for queue in queues]
+        if queues and (
+            len(queues) != run["expected_count"]
+            or not _is_ordered_account_subset(
+                queue_account_ids, identity["account_ids"]
+            )
+        ):
             raise SidecarError(
                 "x_post_schedule_plan_invalid_response",
                 "Frozen queue account order is inconsistent",
@@ -1245,9 +1269,9 @@ def _preflight_material_candidates(
                         ),
                     )
                     if not relay_options:
-                        raise ScheduleRunError(
+                        raise CandidatePreflightError(
                             "no currently eligible same-language public Premium relay account is available",
-                            "x_post_premium_relay_unavailable",
+                            "x_long_video_requires_premium",
                         ) from None
                     relay = relay_options[0]
                     item = _preflight_candidate(
@@ -1324,9 +1348,9 @@ def _material_candidates(
     pool_items = sidecar.available_pool_items(
         config.material_pool_path, config.scan_limit
     )
-    if len(pool_items) < len(accounts):
+    if not pool_items:
         raise ScheduleRunError(
-            "manual material pool has fewer items than this schedule requires",
+            "manual material pool has no available item",
             "x_post_schedule_material_shortage",
         )
     connection = _open_source_connection(config, connection_factory)
@@ -1370,9 +1394,9 @@ def _material_candidates(
         config,
         preflight_rejections,
     )
-    if len(planned) != len(accounts):
+    if not planned:
         raise ScheduleRunError(
-            "not enough FIFO material candidates passed media preflight",
+            "no FIFO material candidate passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
     return planned
@@ -1494,10 +1518,9 @@ def _drama_candidates(
                     config.scan_limit,
                     account_ids,
                 )
-                if len(pool_items) < len(accounts):
+                if not pool_items:
                     raise ScheduleRunError(
-                        "short-drama pool has fewer free episodes than this "
-                        "schedule requires",
+                        "short-drama pool has no free episode for this schedule",
                         "x_post_schedule_drama_shortage",
                     )
                 pool_by_id = {
@@ -1531,16 +1554,18 @@ def _drama_candidates(
                     rejected_ids.add(int(exc.pool_item_id))
                     refresh_accounts = True
                     continue
-                if len(candidates) != len(accounts):
+                if not candidates:
                     raise ScheduleRunError(
-                        "short-drama pool has fewer free episodes than this "
-                        "schedule requires",
+                        "short-drama pool has no eligible free episode for this schedule",
                         "x_post_schedule_drama_shortage",
                     )
 
                 planned_by_index = {}
                 rejected = False
-                processing_indexes = range(len(accounts))
+                account_by_id = {
+                    int(account["id"]): account for account in accounts
+                }
+                processing_indexes = range(len(candidates))
 
                 def normalize_item(item, candidate):
                     normalized = dict(item)
@@ -1585,10 +1610,11 @@ def _drama_candidates(
                 for index in processing_indexes:
                     rank = index + 1
                     candidate = candidates[index]
-                    account = accounts[index]
-                    if int(candidate.get("candidate_account_id") or 0) != int(
-                        account["id"]
-                    ):
+                    candidate_account_id = int(
+                        candidate.get("candidate_account_id") or 0
+                    )
+                    account = account_by_id.get(candidate_account_id)
+                    if account is None:
                         raise ScheduleRunError(
                             "short-drama account assignment changed during preflight",
                             "x_post_schedule_account_mismatch",
@@ -1656,14 +1682,7 @@ def _drama_candidates(
                                 None,
                             )
                             if relay_account is None:
-                                raise ScheduleRunError(
-                                    "no currently eligible public Premium relay account is available",
-                                    "x_post_premium_relay_unavailable",
-                                    drama_pool_item_id=candidate[
-                                        "drama_pool_item_id"
-                                    ],
-                                    content_id=candidate["content_id"],
-                                ) from None
+                                continue
                             try:
                                 relay_item = preflight_one(
                                     candidate,
@@ -1679,17 +1698,7 @@ def _drama_candidates(
                                 TypeError,
                                 ValueError,
                             ) as route_exc:
-                                raise ScheduleRunError(
-                                    "Premium relay drama preflight failed: %s"
-                                    % route_exc,
-                                    str(
-                                        getattr(
-                                            route_exc,
-                                            "code",
-                                            "x_post_drama_preflight_failed",
-                                        )
-                                    ),
-                                ) from None
+                                continue
                             planned_by_index[index] = normalize_relay_item(
                                 relay_item,
                                 candidate,
@@ -1698,19 +1707,9 @@ def _drama_candidates(
                             )
                             continue
                         if code not in _DRAMA_DETERMINISTIC_REJECTION_CODES:
-                            raise ScheduleRunError(
-                                message,
-                                code,
-                            ) from None
+                            continue
                         if int(candidate.get("assigned_account_id") or 0) > 0:
-                            raise ScheduleRunError(
-                                message,
-                                code,
-                                drama_pool_item_id=candidate[
-                                    "drama_pool_item_id"
-                                ],
-                                content_id=candidate["content_id"],
-                            ) from None
+                            continue
                         reject_unassigned(
                             candidate["drama_pool_item_id"],
                             candidate["content_id"],
@@ -1726,14 +1725,15 @@ def _drama_candidates(
                     planned_by_index[index] = normalize_item(item, candidate)
                 if rejected:
                     continue
-                if len(planned_by_index) != len(accounts):
+                if not planned_by_index:
                     raise ScheduleRunError(
-                        "short-drama Premium routing did not fill every account",
+                        "no short-drama candidate passed media preflight",
                         "x_post_schedule_drama_shortage",
                     )
                 return [
                     planned_by_index[index]
-                    for index in range(len(accounts))
+                    for index in range(len(candidates))
+                    if index in planned_by_index
                 ]
             raise ScheduleRunError(
                 "drama preflight rejection limit was reached",
@@ -1751,7 +1751,7 @@ def _plan_payload(identity, candidates):
         "run_date": identity["run_date"],
         "publish_time": identity["publish_time"],
         "version": identity["version"],
-        "account_ids": list(identity["account_ids"]),
+        "account_ids": [int(item["account_id"]) for item in candidates],
         "source_date": candidates[0]["source_date"],
         "candidates": candidates,
     }
@@ -1961,9 +1961,12 @@ def execute_schedule_tick(
                     repair_client=repair_client,
                     timestamp=timestamp,
                 )
-            if [int(item["account_id"]) for item in candidates] != identity[
-                "account_ids"
-            ]:
+            candidate_account_ids = [
+                int(item["account_id"]) for item in candidates
+            ]
+            if not _is_ordered_account_subset(
+                candidate_account_ids, identity["account_ids"]
+            ):
                 raise ScheduleRunError(
                     "candidate account order does not match frozen schedule",
                     "x_post_schedule_account_mismatch",
@@ -1971,7 +1974,7 @@ def execute_schedule_tick(
             # Media download/repair may outlive a two-hour X access token.
             # Refresh the frozen scope again immediately before the atomic
             # plan transaction; each later publish also verifies its account.
-            accounts = _verify_accounts(sidecar, identity["account_ids"])
+            _verify_accounts(sidecar, candidate_account_ids)
             sidecar.preflight_storage(config.storage_preflight_path)
         except Exception as exc:
             audit = _record_schedule_failure_best_effort(
@@ -1989,7 +1992,7 @@ def execute_schedule_tick(
             config.plan_path,
             _plan_payload(identity, candidates),
         )
-        if [queue["account_id"] for queue in queues] != identity["account_ids"]:
+        if [queue["account_id"] for queue in queues] != candidate_account_ids:
             raise ScheduleRunError(
                 "created queue order does not match frozen schedule",
                 "x_post_schedule_plan_mismatch",

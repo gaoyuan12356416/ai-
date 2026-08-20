@@ -168,23 +168,19 @@ class MaterialAssignmentTests(unittest.TestCase):
         self.assertEqual(relayed[0]["delivery_mode"], "premium_relay_repost")
         self.assertEqual(relayed[0]["relay_account_id"], 11)
 
-    def test_no_relay_fails_whole_fifo_batch_without_scanning_short(self):
+    def test_no_relay_skips_long_row_and_publishes_available_short_row(self):
         publisher = mock.Mock()
-        with self.assertRaises(runner.ScheduleRunError) as rejected:
-            self.preflight(
-                [pool_candidate(1, 180.0), pool_candidate(2, 90.0)],
-                [account(1)],
-            )
+        accepted, failures = self.preflight(
+            [pool_candidate(1, 180.0), pool_candidate(2, 90.0)],
+            [account(1)],
+        )
         self.assertEqual(
-            rejected.exception.code, "x_post_premium_relay_unavailable"
+            [item["material_id"] for item in accepted], ["2"]
         )
-        failure = runner._preflight_failure_result(
-            self.identity,
-            rejected.exception,
-            {"status": "failed_preflight"},
+        self.assertEqual(
+            [item["error_code"] for item in failures],
+            ["x_long_video_requires_premium"],
         )
-        self.assertEqual(failure["status"], "failed_preflight")
-        self.assertEqual(failure["planned_count"], 0)
         publisher.assert_not_called()
 
     def test_single_premium_target_keeps_newest_fifo_long_material(self):
