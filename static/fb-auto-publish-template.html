@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <title>创建 FB Page 自动发布模板 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/fb-auto-publish.css?v=20260820list1" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1 id="pageTitle">创建 FB Page 自动发布模板</h1>
+          <p>选择同一目标产品的 Page 池，并配置选材、视频制作和北京时间发布规则。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/fb-auto-publish-templates.html">返回模板列表</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能创建或编辑 FB Page 自动发布模板。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 FB Page 自动发布权限</strong>
+        <span>请联系管理员在用户管理中开启 fb_page_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="notice">
+          <div class="notice-mark">i</div>
+          <div>
+            <strong>保存只更新模板配置，不会立即发布。</strong>
+            新模板默认停用；已启用模板必须先在列表页停用，再修改配置。
+          </div>
+        </section>
+
+        <section class="stats" aria-label="Page 池统计">
+          <article class="stat"><span>Page 池</span><strong id="groupCount">—</strong></article>
+          <article class="stat"><span>Page 总数</span><strong id="pageCount">—</strong></article>
+          <article class="stat"><span>可发布 Page</span><strong id="publishableCount">—</strong></article>
+          <article class="stat"><span>缺授权 Page</span><strong id="missingCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>模板配置</h2>
+              <p>同一模板只能选择同一目标产品的 Page 池；素材产品由目标产品派生。</p>
+            </div>
+            <div class="actions">
+              <span id="templateStatusBadge" class="badge warning">新模板</span>
+              <button id="resetForm" class="button" type="button">重置</button>
+            </div>
+          </div>
+
+          <form id="templateForm" class="form-grid">
+            <div class="field">
+              <label class="required" for="name">模板名称</label>
+              <input id="name" required maxlength="120" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label class="required" for="language">语言</label>
+              <select id="language" required>
+                <option value="en" selected>英语 (en)</option>
+                <option value="es">西班牙语 (es)</option>
+                <option value="pt">葡萄牙语 (pt)</option>
+                <option value="id">印尼语 (id)</option>
+                <option value="ja">日语 (ja)</option>
+                <option value="th">泰语 (th)</option>
+                <option value="zh-tw">繁体中文 (zh-tw)</option>
+                <option value="fr">法语 (fr)</option>
+                <option value="de">德语 (de)</option>
+                <option value="ko">韩语 (ko)</option>
+                <option value="vi">越南语 (vi)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dataSource">素材来源</label>
+              <input id="dataSource" type="number" value="6" readonly />
+              <span class="helper">Dramawave Page 池固定映射到 data_source 6。</span>
+            </div>
+            <div class="field">
+              <label class="required" for="videoTemplate">视频制作模板</label>
+              <select id="videoTemplate" required>
+                <option value="random_overlay">随机排重模板</option>
+              </select>
+              <span class="helper">每个 Page 独立制作成片，失败不会回退源素材。</span>
+            </div>
+            <div class="field">
+              <label for="cooldown">Page 素材冷却天数</label>
+              <input id="cooldown" type="number" min="0" max="3650" value="30" />
+            </div>
+            <div class="field">
+              <label for="metricDays">指标窗口（完整天）</label>
+              <input id="metricDays" type="number" min="1" max="30" value="7" />
+            </div>
+            <div class="field wide">
+              <label class="required">Page 池（Post 与 AD 均可）</label>
+              <div id="poolList" class="pool-list">加载中…</div>
+            </div>
+            <div class="field wide">
+              <label class="required" for="message">发布文案</label>
+              <textarea id="message" required placeholder="可用宏：{{drama_name}} {{material_name}} {{content_id}}"></textarea>
+            </div>
+            <div class="field">
+              <label for="launchDays">短剧上线窗口（0 不限）</label>
+              <input id="launchDays" type="number" min="0" max="3650" value="0" />
+            </div>
+            <div class="field">
+              <label>短剧消耗范围</label>
+              <div class="range-grid"><input id="dSpendMin" type="number" min="0" step="0.01" placeholder="下限" /><input id="dSpendMax" type="number" min="0" step="0.01" placeholder="上限" /></div>
+            </div>
+            <div class="field">
+              <label>短剧 D0 ROAS% 范围</label>
+              <div class="range-grid"><input id="dRoasMin" type="number" min="0" step="0.01" placeholder="下限" /><input id="dRoasMax" type="number" min="0" step="0.01" placeholder="上限" /></div>
+            </div>
+            <div class="field">
+              <label>素材消耗范围</label>
+              <div class="range-grid"><input id="mSpendMin" type="number" min="0" step="0.01" placeholder="下限" /><input id="mSpendMax" type="number" min="0" step="0.01" placeholder="上限" /></div>
+            </div>
+            <div class="field">
+              <label>素材 D0 ROAS% 范围</label>
+              <div class="range-grid"><input id="mRoasMin" type="number" min="0" step="0.01" placeholder="下限" /><input id="mRoasMax" type="number" min="0" step="0.01" placeholder="上限" /></div>
+            </div>
+            <div class="field">
+              <label>视频时长（秒）</label>
+              <div class="range-grid"><input id="durationMin" type="number" min="0" value="1" /><input id="durationMax" type="number" min="1" value="600" /></div>
+            </div>
+            <div class="field">
+              <label>素材排序</label>
+              <div class="range-grid">
+                <select id="sortBy"><option value="roas">ROAS</option><option value="spend">消耗</option></select>
+                <select id="sortDirection"><option value="desc">降序</option><option value="asc">升序</option></select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="scheduleMode">发布时间模式</label>
+              <select id="scheduleMode"><option value="fixed">固定时间</option><option value="random">每日随机</option></select>
+            </div>
+            <div class="field" id="fixedField">
+              <label for="fixedTimes">固定时间（逗号分隔）</label>
+              <input id="fixedTimes" value="10:30" />
+            </div>
+            <div class="field hidden" id="randomField">
+              <label>随机次数 / 窗口</label>
+              <div class="random-grid">
+                <input id="randomCount" type="number" value="1" min="1" max="24" aria-label="每日随机次数" />
+                <input id="randomStart" type="time" value="08:00" aria-label="随机开始时间" />
+                <input id="randomEnd" type="time" value="23:00" aria-label="随机结束时间" />
+              </div>
+            </div>
+            <div class="field wide form-actions">
+              <div id="capacityEstimate" class="helper">请选择 Page 池后查看每日预计 GPU 任务和 Graph 发布量。</div>
+              <div class="actions">
+                <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
+                <a class="button link-button" href="/fb-auto-publish-templates.html">取消并返回</a>
+                <span id="formMessage" class="status-line" role="status" aria-live="polite"></span>
+              </div>
+            </div>
+          </form>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script src="/fb-auto-publish-common.js?v=20260820list1"></script>
+  <script src="/fb-auto-publish-template.js?v=20260820list1"></script>
+</body>
+</html>
