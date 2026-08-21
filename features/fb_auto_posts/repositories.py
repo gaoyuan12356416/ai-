@@ -294,9 +294,12 @@ class PagePoolRepository:
 class MaterialRepository:
     """Select video candidates using the current X-auto source semantics."""
 
-    def __init__(self, mysql: ReadOnlyMySQL, metric_store: Any | None = None, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC), rng: random.Random | None = None, monotonic_fn: Callable[[], float] = time.monotonic, catalog_deadline_seconds: int = 600, catalog_max_pages: int = 100):
+    def __init__(self, mysql: ReadOnlyMySQL, metric_store: Any | None = None, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC), rng: random.Random | None = None, monotonic_fn: Callable[[], float] = time.monotonic, catalog_deadline_seconds: int = 600, catalog_max_pages: int = 100, metric_prefilter_min_content_ids: int = 100, metric_prefilter_batch_size: int = 200, candidate_limit: int = 5000):
         self.mysql, self.metric_store, self.now_fn, self.rng = mysql, metric_store, now_fn, rng or random.SystemRandom()
         self.monotonic_fn, self.catalog_deadline_seconds, self.catalog_max_pages = monotonic_fn, max(60, int(catalog_deadline_seconds)), max(1, int(catalog_max_pages))
+        self.metric_prefilter_min_content_ids = max(1, int(metric_prefilter_min_content_ids))
+        self.metric_prefilter_batch_size = max(1, min(int(metric_prefilter_batch_size), 500))
+        self.candidate_limit = max(1, min(int(candidate_limit), 5000))
 
     @staticmethod
     def _in_range(value: Decimal | None, low: Any, high: Any) -> bool:
@@ -320,7 +323,7 @@ class MaterialRepository:
         drama_rule, material_rule = config["drama_rule"], config["material_rule"]
         allowed_types = [str(item) for item in drama_rule.get("resource_type_v2") or []]
         type_sql = "" if not allowed_types else " AND CAST(d.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
-        sql = f"""
+        keyset_sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
                    LOWER(TRIM(s.language)) language,s.video_duration
@@ -344,6 +347,7 @@ class MaterialRepository:
         allowed_type_set = set(allowed_types)
         uses_description = "{{desc}}" in str(config.get("message_template") or "")
         candidates: List[MaterialCandidate] = []
+        seen_material_ids: set[str] = set()
         drama_key = "drama_spend" if drama_rule["sort_by"] == "spend" else "drama_roas"
         material_key = "material_spend" if material_rule["sort_by"] == "spend" else "material_roas"
 
@@ -358,18 +362,11 @@ class MaterialRepository:
                     return -ordered if direction == "desc" else ordered
             return (int(left.material_id) > int(right.material_id)) - (int(left.material_id) < int(right.material_id))
 
-        page_size, cursor_id, page_count = 1000, 0, 0
         deadline = self.monotonic_fn() + self.catalog_deadline_seconds
-        while True:
-            if self.monotonic_fn() >= deadline:
-                raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
-            end_epoch = int(self.now_fn().timestamp())
-            params: tuple[Any, ...] = (int(config["material_data_source"]), product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"], cursor_id, page_size)
-            rows = self.mysql.select(sql, params)
-            if not rows: break
-            page_count += 1
-            if page_count > self.catalog_max_pages:
-                raise RepositoryError("fb_auto_catalog_scan_too_large", "素材目录超过安全分页上限，已停止选择", 409)
+
+        def add_rows(rows: Sequence[Mapping[str, Any]], *, expected_content_ids: set[str] | None = None) -> None:
+            if expected_content_ids is not None:
+                rows = [row for row in rows if str(row.get("content_id") or "").strip() in expected_content_ids]
             content_ids = tuple(dict.fromkeys(str(row.get("content_id") or "").strip() for row in rows if str(row.get("content_id") or "").strip()))
             metadata: Dict[str, Mapping[str, Any]] = {}
             descriptions: Dict[str, str] = {}
@@ -388,6 +385,7 @@ class MaterialRepository:
                              GROUP BY d0.content_id) pick ON pick.id=d.id
                      ORDER BY d.content_id
                 """
+                end_epoch = int(self.now_fn().timestamp())
                 metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
                 metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
                 if uses_description:
@@ -409,27 +407,100 @@ class MaterialRepository:
                             descriptions[content_id] = description
             for row in rows:
                 raw_id = str(row.get("material_id") or "")
-                if not raw_id.isdigit() or int(raw_id) <= cursor_id:
+                if not re.fullmatch(r"[1-9][0-9]*", raw_id):
                     raise RepositoryError("fb_auto_catalog_page_invalid", "素材目录分页顺序无效")
-                cursor_id = int(raw_id)
+                if raw_id in seen_material_ids:
+                    continue
+                content_id = str(row.get("content_id") or "").strip()
                 url, duration = _https(row.get("media_url")), _decimal(row.get("video_duration"))
-                material_totals = metric_window.by_material.get((str(row.get("content_id") or "").strip(), raw_id))
-                drama_totals = metric_window.by_drama.get(str(row.get("content_id") or "").strip())
+                material_totals = metric_window.by_material.get((content_id, raw_id))
+                drama_totals = metric_window.by_drama.get(content_id)
                 m_spend = material_totals.spend if material_totals else Decimal("0")
                 m_roas = material_totals.roas if material_totals else None
                 d_spend = drama_totals.spend if drama_totals else Decimal("0")
                 d_roas = drama_totals.roas if drama_totals else None
-                detail = metadata.get(str(row.get("content_id") or "").strip(), row)
+                detail = metadata.get(content_id, row)
                 resource_type = str(detail.get("resource_type_v2") or "")
-                if not url or (allowed_type_set and resource_type not in allowed_type_set): continue
-                description = descriptions.get(str(row.get("content_id") or "").strip(), "")
-                if uses_description and not description: continue
-                if not Decimal(str(material_rule["duration_min_seconds"])) <= duration <= Decimal(str(material_rule["duration_max_seconds"])): continue
-                if not self._in_range(m_spend, material_rule["spend_min"], material_rule["spend_max"]) or not self._in_range(m_roas, material_rule["roas_min"], material_rule["roas_max"]): continue
-                if not self._in_range(d_spend, drama_rule["spend_min"], drama_rule["spend_max"]) or not self._in_range(d_roas, drama_rule["roas_min"], drama_rule["roas_max"]): continue
-                candidates.append(MaterialCandidate(raw_id, str(row.get("content_id") or ""), url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
+                if not url or (allowed_type_set and resource_type not in allowed_type_set):
+                    continue
+                description = descriptions.get(content_id, "")
+                if uses_description and not description:
+                    continue
+                if not Decimal(str(material_rule["duration_min_seconds"])) <= duration <= Decimal(str(material_rule["duration_max_seconds"])):
+                    continue
+                if not self._in_range(m_spend, material_rule["spend_min"], material_rule["spend_max"]) or not self._in_range(m_roas, material_rule["roas_min"], material_rule["roas_max"]):
+                    continue
+                if not self._in_range(d_spend, drama_rule["spend_min"], drama_rule["spend_max"]) or not self._in_range(d_roas, drama_rule["roas_min"], drama_rule["roas_max"]):
+                    continue
+                seen_material_ids.add(raw_id)
+                candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
             candidates.sort(key=cmp_to_key(compare))
-            del candidates[5000:]
+            del candidates[self.candidate_limit:]
+
+        # The primary ordering is always drama-level.  For descending spend,
+        # every positive-spend drama sorts before every zero-history drama; for
+        # ROAS, every defined value sorts before an undefined value in either
+        # direction.  If the indexed metric-drama scan alone produces the full
+        # retained candidate limit, it is therefore an exact top-N proof and a
+        # six-million-row PRIMARY keyset scan is unnecessary.  Otherwise the
+        # original complete scan remains the fail-closed fallback.
+        priority_content_ids: List[str] = []
+        if drama_rule["sort_by"] == "spend" and drama_rule["sort_direction"] == "desc":
+            priority_content_ids = [str(content_id) for content_id, totals in metric_window.by_drama.items() if totals.spend > 0]
+        elif drama_rule["sort_by"] == "roas":
+            priority_content_ids = [str(content_id) for content_id, totals in metric_window.by_drama.items() if totals.roas is not None]
+        priority_content_ids.sort(key=lambda value: value.encode("utf-8"))
+        if len(priority_content_ids) >= self.metric_prefilter_min_content_ids:
+            for start_at in range(0, len(priority_content_ids), self.metric_prefilter_batch_size):
+                if self.monotonic_fn() >= deadline:
+                    raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
+                batch = priority_content_ids[start_at:start_at + self.metric_prefilter_batch_size]
+                ids_sql = ",".join("%s" for _ in batch)
+                priority_sql = f"""
+                    SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
+                           COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
+                           LOWER(TRIM(s.language)) language,s.video_duration
+                      FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(idx_source_type_source_id)
+                     WHERE s.data_source=%s AND s.data_source_id IN ({ids_sql})
+                       AND s.product=%s AND s.type=2 AND s.is_delete=0
+                       AND LOWER(TRIM(s.language))=%s AND s.video_duration>0
+                       AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info d FORCE INDEX(ac)
+                                    WHERE d.content_id=s.data_source_id AND d.app_id=%s
+                                      AND d.release_status=1 AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql})
+                       AND NOT EXISTS (SELECT 1 FROM `{self.mysql.blacklist_schema}`.ads_facebook_post_blacklist b
+                                       WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id)
+                       AND NOT EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info db FORCE INDEX(ac)
+                                       JOIN `{self.mysql.blacklist_schema}`.ads_facebook_post_blacklist b
+                                         ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
+                                       WHERE db.content_id=s.data_source_id AND db.app_id=%s)
+                       AND s.video_duration>=%s AND s.video_duration<=%s
+                     ORDER BY s.id
+                """
+                end_epoch = int(self.now_fn().timestamp())
+                params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
+                add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
+            if len(candidates) >= self.candidate_limit:
+                return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
+            candidates.clear()
+            seen_material_ids.clear()
+
+        page_size, cursor_id, page_count = 1000, 0, 0
+        while True:
+            if self.monotonic_fn() >= deadline:
+                raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
+            end_epoch = int(self.now_fn().timestamp())
+            params: tuple[Any, ...] = (int(config["material_data_source"]), product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"], cursor_id, page_size)
+            rows = self.mysql.select(keyset_sql, params)
+            if not rows: break
+            page_count += 1
+            if page_count > self.catalog_max_pages:
+                raise RepositoryError("fb_auto_catalog_scan_too_large", "素材目录超过安全分页上限，已停止选择", 409)
+            for row in rows:
+                raw_id = str(row.get("material_id") or "")
+                if not re.fullmatch(r"[1-9][0-9]*", raw_id) or int(raw_id) <= cursor_id:
+                    raise RepositoryError("fb_auto_catalog_page_invalid", "素材目录分页顺序无效")
+                cursor_id = int(raw_id)
+            add_rows(rows)
             if len(rows) < page_size: break
             if self.monotonic_fn() >= deadline:
                 raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)

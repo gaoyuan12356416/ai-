@@ -104,6 +104,83 @@ class RepositoryTests(unittest.TestCase):
         mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidate_snapshot(config)
         self.assertEqual(result.candidates[0].material_id,"6001"); self.assertEqual(mysql.source_calls,6); self.assertEqual(mysql.calls,12); self.assertLessEqual(len(result.candidates),5000)
 
+    def test_metric_drama_prefilter_proves_exact_top_limit_without_primary_scan(self):
+        class Store:
+            def load_metric_window(self,**_kwargs):
+                return MetricWindow(
+                    (1,), ("2026-08-16",),
+                    {"d1":MetricTotals(Decimal("10"),Decimal("1")),"d2":MetricTotals(Decimal("20"),Decimal("2"))},
+                    {("d1","1"):MetricTotals(Decimal("1"),Decimal("1")),("d1","2"):MetricTotals(Decimal("2"),Decimal("1")),("d2","3"):MetricTotals(Decimal("3"),Decimal("1")),("d2","4"):MetricTotals(Decimal("4"),Decimal("1"))},
+                )
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def __init__(self): self.calls=[]
+            def select(self,sql,params):
+                self.calls.append((sql,tuple(params)))
+                if "JOIN (SELECT d0.content_id" in sql:
+                    return [{"content_id":item,"drama_name":item,"resource_type_v2":"1","series_code":item} for item in params[3:]]
+                if "FORCE INDEX(idx_source_type_source_id)" in sql:
+                    return [
+                        {"material_id":"1","content_id":"d1","media_url":"https://cdn.example/1.mp4","material_name":"m1","language":"en","video_duration":30},
+                        {"material_id":"2","content_id":"d1","media_url":"https://cdn.example/2.mp4","material_name":"m2","language":"en","video_duration":30},
+                        {"material_id":"3","content_id":"d2","media_url":"https://cdn.example/3.mp4","material_name":"m3","language":"en","video_duration":30},
+                        {"material_id":"4","content_id":"d2","media_url":"https://cdn.example/4.mp4","material_name":"m4","language":"en","video_duration":30},
+                    ]
+                if "FORCE INDEX(PRIMARY)" in sql: raise AssertionError("full catalog scan must be skipped after an exact top-N proof")
+                return []
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"desc"})
+        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,metric_prefilter_batch_size=2,candidate_limit=3).candidate_snapshot(config)
+        self.assertEqual([item.material_id for item in result.candidates],["4","3","2"])
+        self.assertTrue(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
+        self.assertFalse(any("FORCE INDEX(PRIMARY)" in sql for sql,_ in mysql.calls))
+
+    def test_metric_drama_prefilter_falls_back_when_it_cannot_fill_limit(self):
+        class Store:
+            def load_metric_window(self,**_kwargs):
+                return MetricWindow((1,),("2026-08-16",),{"d1":MetricTotals(Decimal("10"),Decimal("1")),"d2":MetricTotals(Decimal("20"),Decimal("2"))},{})
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def __init__(self): self.calls=[]
+            def select(self,sql,params):
+                self.calls.append((sql,tuple(params)))
+                if "JOIN (SELECT d0.content_id" in sql:
+                    return [{"content_id":item,"drama_name":item,"resource_type_v2":"1","series_code":item} for item in params[3:]]
+                if "FORCE INDEX(idx_source_type_source_id)" in sql:
+                    return [{"material_id":"9","content_id":"d2","media_url":"https://cdn.example/9.mp4","material_name":"m9","language":"en","video_duration":30}]
+                if "FORCE INDEX(PRIMARY)" in sql:
+                    if int(params[-2]) > 0: return []
+                    return [
+                        {"material_id":"1","content_id":"zero","media_url":"https://cdn.example/1.mp4","material_name":"m1","language":"en","video_duration":30},
+                        {"material_id":"2","content_id":"d1","media_url":"https://cdn.example/2.mp4","material_name":"m2","language":"en","video_duration":30},
+                        {"material_id":"9","content_id":"d2","media_url":"https://cdn.example/9.mp4","material_name":"m9","language":"en","video_duration":30},
+                    ]
+                return []
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"})
+        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,metric_prefilter_batch_size=2,candidate_limit=3).candidate_snapshot(config)
+        self.assertEqual([item.material_id for item in result.candidates],["9","2","1"])
+        self.assertTrue(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
+        self.assertTrue(any("FORCE INDEX(PRIMARY)" in sql for sql,_ in mysql.calls))
+
+    def test_ascending_spend_keeps_complete_primary_scan(self):
+        class Store:
+            def load_metric_window(self,**_kwargs):
+                return MetricWindow((1,),("2026-08-16",),{"d1":MetricTotals(Decimal("10"),Decimal("1")),"d2":MetricTotals(Decimal("20"),Decimal("2"))},{})
+        class MySQL:
+            schema="kunlunads_dev"; blacklist_schema="ads_setting"
+            def __init__(self): self.calls=[]
+            def select(self,sql,params):
+                self.calls.append((sql,tuple(params)))
+                if "JOIN (SELECT d0.content_id" in sql: return [{"content_id":"zero","drama_name":"zero","resource_type_v2":"1","series_code":"zero"}]
+                if "FORCE INDEX(PRIMARY)" in sql: return [{"material_id":"1","content_id":"zero","media_url":"https://cdn.example/1.mp4","material_name":"m1","language":"en","video_duration":30}]
+                return []
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"asc"})
+        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        mysql=MySQL(); MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,candidate_limit=1).candidate_snapshot(config)
+        self.assertFalse(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
+        self.assertTrue(any("FORCE INDEX(PRIMARY)" in sql for sql,_ in mysql.calls))
+
     def test_catalog_scan_has_bounded_overall_deadline(self):
         class Store:
             def load_metric_window(self,**_kwargs): return MetricWindow((1,),('2026-08-16',),{}, {})

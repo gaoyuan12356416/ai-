@@ -53,7 +53,7 @@
 10. live gate 关闭时 tick 只清理过期 running，不读取 due 模板或创建 queued run。
 11. enabled 模板禁止直接编辑；必须先停用、修改、再通过完整冲突检查启用。
 12. Scheduler 进程内 single-flight；每分钟只在 SQLite 中把未来 `FB_AUTO_PREPARE_AHEAD_SECONDS=14400` 窗口内的时隙幂等写入 `due_slot`，持久 watermark、有界 catch-up，并记录过旧 missed。Page/素材冻结由独立 plan worker 执行，GPU 由 prepare worker 提前制作，Graph runner 仅领取达到 `planned_publish_at_utc` 的 ready 任务。
-13. 素材目录以 `ads_custom_source s FORCE INDEX(PRIMARY)` 做完整有界 keyset 扫描，短剧资格用 `EXISTS ... FORCE INDEX(ac)` 去重；元数据再按 content 确定性取唯一行。不得在本地指标筛选/排序前任意截断 5,000 行；整体扫描有 600 秒/100 页 fail-closed 边界。
+13. 素材目录默认以 `ads_custom_source s FORCE INDEX(PRIMARY)` 做完整有界 keyset 扫描，短剧资格用 `EXISTS ... FORCE INDEX(ac)` 去重；元数据再按 content 确定性取唯一行。允许在短剧主排序可证明“有指标集合严格领先无指标集合”时，先用 `(data_source,data_source_id)` 索引完整扫描全部指标短剧；只有该集合经过相同产品/语言/上下架/黑名单/时长/描述/指标范围过滤后已填满最终 Top 5,000，才可把它作为等价 Top-N 证明并跳过主键全扫。证明不足、短剧消耗升序或任何不确定情况必须回退原完整扫描；不得任意截断 5,000 行。所有路径共享 600 秒整体 fail-closed 边界，完整 keyset 扫描另有100页边界。
 14. 对账更新 ledger 时保留发布阶段累计的 `definite_attempts`，不可归零。
 15. `{{desc}}` 仅在模板使用时按素材页的 content ID 批量读取，不得逐 Page/逐素材 N+1 查询；空或同一身份多值的描述不得被选作该模板候选。描述压缩连续空白并最多冻结 4,096 字符。
 16. `{{url}}` 在 task 自增 ID 取得后，于同一个 `BEGIN IMMEDIATE` 事务内冻结 short URL、W2A long URL 和最终 `message_text`；页面名缺失时使用 Page ID，素材 tag 缺失时使用 `FBauto`。后续模板、Page 名、素材名或 tag 变化不得改写历史任务。
