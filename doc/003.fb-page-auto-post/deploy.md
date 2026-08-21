@@ -44,6 +44,17 @@
 - 最终run=`completed`、task/ledger=`published`、unknown=0；只有1个run、1个task、1个ledger、2条授权attempt。短链`https://gy.g2flow.com/s2l/fb/1.html`返回200和`no-store`，目标为指定`https://www.dramawavew2a.com/ads/0/2049/view`并含`af_channel=AIpost`。
 - 持久化`/etc/fb-auto-post.env`仍为`FB_AUTO_POST_LIVE_ENABLED=0`，health仍`live_enabled=false`。真实发布与回查只在边界清晰的一次性进程中临时打开；七个自然timer虽然active，但不会继续创建或发布其他任务。模板1本身保持enabled，未来自动执行仍被总开关阻断。
 
+## 北京自然日提前预制与live切换结果（2026-08-21）
+
+- 当前生产release为`af1c3b1`；切换前备份目录为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T164759+0800-pre-af1c3b1`。
+- 第一阶段持久化配置为`FB_AUTO_PREBUILD_ENABLED=1`、`FB_AUTO_POST_LIVE_ENABLED=0`，先允许scheduler/plan/prepare提前冻结与预制，Graph live执行保持关闭。
+- 明日北京自然日已生成完整5个计划时隙；计划快照覆盖Page池13个Page，其中8个具备可发布Token、5个缺Token。缺Token Page不进入实际发布任务，当前可发布口径仍为5时隙×8 Page。
+- release验证通过FB专项128/128与X/TT合并基线66/66；本次先进入prebuild-only观察，不以代码回归或计划生成代替真实GPU ready和Graph发布验收。
+- 首条自动预制为task 4/run 2：2026-08-21 17:04:41 CST开始，17:14:03 CST进入ready；成片58,144,303 bytes，SHA=`cf2b71128cefd8c62d209fa23015195e73e532aa9487e9bbe02d96033075da46`，profile=`tt-post-random-overlay-h264-720x1280-v3`。公开对象HEAD为200，size/SHA/profile元数据一致。
+- 2026-08-21 17:14:48 CST开启`FB_AUTO_POST_LIVE_ENABLED=1`。切换前running=0、preparing=0、ready=1，operational/metric两库备份目录为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T171448+0800-pre-live-af1c3b1`。
+- 切换后health显示`prebuild_enabled=true`、`live_enabled=true`，服务`NRestarts=0`；连续4次execute均返回no_pending，reconcile返回no_submitted，attempt仍为2、ledger仍为1、early running=0，证明未来时隙未被提前发布。第二条自动任务task 6于17:14:51 CST开始、17:16:46 CST进入ready，成片20,205,203 bytes；第三条自动任务已进入preparing，且attempt/ledger仍无增量，预制流水线继续工作。
+- `[待观察]` 首个自然到点批次的task/attempt/ledger/Graph最终对账结果，以及届时是否保持live或执行回滚。该批次尚未到点，当前不得伪造或提前标记为published。
+
 ## 配置项
 
 真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREBUILD_ENABLED`、`FB_AUTO_PREBUILD_DAYS_AHEAD=1`、`FB_AUTO_MAX_LATE_SECONDS=600`、兼容回退项 `FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。
@@ -86,6 +97,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 接受标准：health `live_enabled=false`；页面 Cookie/权限正确；35 组/计数与同刻只读查询一致；自然 timer 返回 gate closed/no work；SQLite `quick_check=ok`；旧队列和 Meta 帖子计数不变；日志/DOM/API 无 Token。
 
 日预制 live 验收标准：health `live_enabled=true`；模板1当前版本enabled；Page池62实数仍在容量内；明日 `schedule_plan` 正好5个时隙且至少间隔60分钟；每个prepared due-slot对应8个当前可发布Page任务（成员漂移时按当刻实数解释）；至少一个真实GPU任务完成为ready且成片SHA/size/profile有效；所有明日任务在计划时间前Graph attempt增量为0；operational/metric两库`quick_check=ok`，服务和七个timer无异常重启。若预制不能在首时隙前完成，关闭live gate并报告，不以到点临时筛选/制作兜底。
+
+当前live阶段验收事实：release=`af1c3b1`、明日5个时隙、Page计划13/可发布8/缺Token 5、首条自动任务task 4/run 2已ready，17:14:48 CST后`prebuild=1/live=1`，health与`NRestarts=0`正常，且4次execute no_pending、reconcile no_submitted、attempt/ledger无提前增量。FB 128/128与X/TT 66/66回归通过；首个自然到点批次最终对账仍按上节待观察项验收，不能以timer active、ready或live开启替代。
 
 宏扩展附加接受标准：`fb_auto_task` 存在 `short_url/long_url` 加法列；六张业务表计数仍为0；不存在的合法短链返回404且带 no-store/security headers，非法路径返回404，POST被拒绝；TT/X既有 `/s2l` 路由不变；创建页可见 `{{desc}}/{{url}}/AIpost`。不得为验收创建 wrapper、模板、run 或 Graph Post。
 

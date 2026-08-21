@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-通过。已完成本地161项回归、CPU/GPU生产部署、30日指标回填和GPU→COS canary。2026-08-21经用户单独授权，仅对一个冻结的随机可发布Page执行了一条真实帖子canary并确认`published`；持久化自动发布总开关仍关闭，其余Page未创建任务或调用Meta。
+通过。最新回归为FB专项128项与X/TT合并基线66项，另已完成CPU/GPU生产部署、30日指标回填和GPU→COS canary。2026-08-21经用户单独授权，仅对一个冻结的随机可发布Page执行了一条真实帖子canary并确认`published`；随后release `af1c3b1`完成日预制部署，首条自动任务已ready，并于2026-08-21 17:14:48 CST开启持久化live。首个自然到点批次尚未发生，其最终Graph对账仍待自然观察。
 
 2026-08-20 `{{desc}}/{{url}}` 扩展通过：92项FB专项 + 93项GPU/TT短链/X-TT合并基线，共185项本地测试全部通过；生产release再跑92项FB测试通过。生产只读预检确认 MySQL `@@read_only=1`，描述聚合使用 `content_id` 索引；真实 schema 的同身份描述可确定性收敛为1值。closed-gate部署和线上验收已完成。
 
@@ -10,7 +10,11 @@
 
 2026-08-21 单Page真实canary通过：首次复用冻结随机意图时，完整素材PRIMARY扫描达到600秒截止并以`fb_auto_catalog_scan_timeout`停止，未创建run/task且GPU/Meta调用均为0。release `9f1f5b268766e1c25fbe3081bd0505978510b78e`新增按指标剧集走`(data_source,data_source_id)`索引的精确候选预筛；只有过滤后的优先集合填满5000条候选时才跳过全表扫描，否则回退原完整keyset扫描。生产只读真实配置基准从超时降至142.266秒并返回5000条候选。本地95项FB专项与66项X/TT合并基线全部通过，生产release再跑95项FB测试通过。
 
-2026-08-21 北京自然日提前预制改造本地与独立复审通过：新增prebuild/live双门禁、当天冷启动只建明日、跨午夜持续模板补今天剩余、次日5时隙一次冻结、`prepared_at_utc`、10分钟自动迟到截止、enabled/current-version门禁、manual停用永久取消、running不可逆Meta提交边界、due租约ABA防护和legacy ready fail-closed迁移。FB专项128/128、X/TT合并基线66/66、py_compile与diff-check均通过；部署前生产仍为原release、live=false、0 due、0 running/ready，只有既存单Pagecanary事实。
+2026-08-21 北京自然日提前预制改造本地与独立复审通过：新增prebuild/live双门禁、当天冷启动只建明日、跨午夜持续模板补今天剩余、次日5时隙一次冻结、`prepared_at_utc`、10分钟自动迟到截止、enabled/current-version门禁、manual停用永久取消、running不可逆Meta提交边界、due租约ABA防护和legacy ready fail-closed迁移。FB专项128/128、X/TT合并基线66/66、py_compile与diff-check均通过；部署前审计时生产仍为原release、live=false、0 due、0 running/ready，只有既存单Pagecanary事实。
+
+2026-08-21 prebuild-only生产灰度先完成代码、计划与首条GPU预制验证：当前release=`af1c3b1`，代码切换前备份目录为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T164759+0800-pre-af1c3b1`。明日计划正好5个时隙，Page计划快照为13个Page/8个可发布/5个缺Token；FB专项128/128、X/TT合并基线66/66通过。首条自动任务task 4/run 2于17:04:41 CST开始、17:14:03 CST ready，成片58,144,303 bytes、SHA=`cf2b71128cefd8c62d209fa23015195e73e532aa9487e9bbe02d96033075da46`、profile=`tt-post-random-overlay-h264-720x1280-v3`，公开HEAD 200且元数据一致。
+
+2026-08-21 17:14:48 CST在running=0/preparing=0/ready=1的切换门禁下开启live，切换前两库备份为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T171448+0800-pre-live-af1c3b1`。切换后health的prebuild/live均为true，服务`NRestarts=0`；4次execute均为no_pending、reconcile为no_submitted、attempt仍2、ledger仍1、early running=0，未来任务没有提前发布。第二条自动任务task 6于17:14:51 CST开始、17:16:46 CST ready，成片20,205,203 bytes；第三条自动任务已进入preparing，attempt/ledger仍无增量。首个自然到点批次最终对账保留为未来观察项。
 
 同一冻结Page `967347116442420`（`कहानी के दृश्य`）随后仅创建run 1/task 1；素材`6281282`、content `XtTulNgWI1`经GPU生成475.766667秒、285,917,510 bytes的独立H.264成片。Graph首次授权被明确拒绝为190，第二个同Page可用授权返回对象`1051031017645759`；首次自然回查确认`video_status=ready`、`publish_status=published`，永久链接`https://www.facebook.com/reel/1051031017645759/`匿名HEAD为200。最终run=`completed`、task/ledger=`published`、unknown=0，且总量保持1 run、1 task、1 ledger、2 attempt。
 
@@ -43,6 +47,10 @@ BUG-001 SQLite连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-
 - GPU/COS：首次17.218秒、二次0.002秒复用；公开HEAD 200、`video/mp4`、3,306,811 bytes，SHA/profile元数据一致；成功job仅manifest，GPU数据盘101G可用。
 - 单Page真实canary：生产成片HEAD 200、`video/mp4`、285,917,510 bytes，COS SHA/profile与SQLite/GPU manifest一致；短链`https://gy.g2flow.com/s2l/fb/1.html`返回200及`no-store`，wrapper目标为指定`/ads/0/2049/view`且包含`af_channel=AIpost`；Graph永久链接返回200。
 - 生产状态：operational/metric SQLite `quick_check=ok`；sidecar PID `1062207`、`NRestarts=0`、部署后warning日志0；七个timer均active但持久化health仍`live_enabled=false`，因此不会继续创建或发布其他任务。
+- 日预制与live：release `af1c3b1`；代码备份`20260821T164759+0800-pre-af1c3b1`；明日5个时隙；计划13个Page中8个可发布、5个缺Token；FB 128/128与X/TT 66/66回归通过。
+- 首条自动GPU ready：task 4/run 2，17:04:41→17:14:03 CST，58,144,303 bytes，SHA=`cf2b71128cefd8c62d209fa23015195e73e532aa9487e9bbe02d96033075da46`，profile=`tt-post-random-overlay-h264-720x1280-v3`，公开HEAD 200且元数据一致。
+- live切换：17:14:48 CST，切换前running=0/preparing=0/ready=1；两库备份`20260821T171448+0800-pre-live-af1c3b1`；health的prebuild/live均为true，`NRestarts=0`。开启后4次execute no_pending、reconcile no_submitted、attempt仍2、ledger仍1、early running=0。task 6于17:14:51→17:16:46 CST完成第二条自动ready，20,205,203 bytes；第三条自动任务已preparing，attempt/ledger仍无增量。
+- `[待观察]` 首个自然到点批次的task/attempt/ledger/Graph最终对账或回滚结果；尚未发生，不能提前填写。
 
 ## 遗留风险
 
@@ -55,10 +63,12 @@ BUG-001 SQLite连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-
 
 ## 发布建议
 
-单Page真实canary已完成，但不建议据此开启全局真实发布。开 live 前仍需持续磁盘告警/当时水位复核、同槽连续吞吐评审和明确的批量范围审批；不得把本次单帖授权扩大为Page池或定时自动发布授权。
+单Page真实canary、首条自动GPU ready及live切换均已完成，当前health显示prebuild/live均为true；明日5个自然时隙的计划已存在，且开启后未提前发布。是否能按计划完成每天5次真实发布，仍需以首个自然到点批次的ledger/Graph最终对账作为生产闭环证据，不得把计划存在、ready或timer active当作发布成功。
 
 2026-08-20 `{{desc}}/{{url}}` 扩展部署本身保持closed-gate，未创建生产模板、任务、wrapper或帖子；2026-08-21另经单帖授权的canary才创建唯一wrapper与唯一真实帖子。
 
 2026-08-20 线上证据：release `1b9fe57...`、备份 `20260820T183309+0800-pre-1b9fe57a`；sidecar/Nginx `NRestarts=0`，七个timers active，六张业务表和wrapper均为0，X/TT/TT-auto既有短链样本200，FB短链缺失/非法/POST分别404/404/403，页面列表/创建分离及两宏可见。
 
-2026-08-21 最新线上证据：release `9f1f5b268766e1c25fbe3081bd0505978510b78e`；部署前备份`20260821T112904+0800-pre-9f1f5b2`，对账前submitted事实备份`20260821T115928+0800-pre-task1-reconcile`。最终对象`1051031017645759`为`published`，persistent gate仍为0。
+2026-08-21 单Pagecanary线上证据：release `9f1f5b268766e1c25fbe3081bd0505978510b78e`；部署前备份`20260821T112904+0800-pre-9f1f5b2`，对账前submitted事实备份`20260821T115928+0800-pre-task1-reconcile`。最终对象`1051031017645759`为`published`，当时persistent gate为0。
+
+2026-08-21 当前线上证据：release `af1c3b1`；代码切换前备份`20260821T164759+0800-pre-af1c3b1`；明日5槽，Page计划13/可发布8/缺Token 5。task 4/run 2已ready；17:14:48 CST在备份`20260821T171448+0800-pre-live-af1c3b1`后开启persistent live，health为`prebuild=1/live=1`，`NRestarts=0`，无提前execute/reconcile事实。`[待观察]` 首个自然到点批次最终对账。
