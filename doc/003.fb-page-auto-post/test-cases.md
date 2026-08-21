@@ -79,6 +79,21 @@
 | TC-64 | wrapper原子性 | 首写/同内容重写/不同目标/软链接根 | 写短链 | 成功/幂等/409/拒绝 | P0 | 通过 |
 | TC-65 | Graph前置门禁 | wrapper写入失败 | execute | 任务安全失败，Graph与Token查询均为0 | P0 | 通过 |
 | TC-66 | UI/Nginx契约 | 创建页与短链location | 静态检查 | 展示两宏；只准精确GET、no-store、安全头 | P1 | 通过 |
+| TC-67 | 北京自然日预制 | 跨午夜持续enabled，days ahead=1 | tick | 直接写今天剩余+明天完整时隙，UTC换算正确，不逐分钟扫描 | P0 | 本地通过 |
+| TC-68 | 次日随机计划 | random=5，days ahead=1 | 重复tick | 明日一次冻结5个间隔安全时隙，重复tick新增0 | P0 | 本地通过 |
+| TC-69 | 冷启动自然日边界 | 同日首次启用/重启用/新版本启用 | 下一次tick | 当天新增0，明日完整5个slot；既有同版本auto work不删除 | P0 | 本地通过 |
+| TC-70 | 停用暂停门禁 | 已有planned/ready，同版本停用 | prepare/execute claim | 均不领取、不调用GPU/Graph；重新启用可继续 | P0 | 本地通过 |
+| TC-71 | 版本漂移门禁 | 旧版本planned/ready/preparing后编辑 | update/complete/execute | planned/ready安全skipped；制作中返回也skipped；Graph调用0 | P0 | 本地通过 |
+| TC-72 | 到时门禁保持 | 明日任务已ready | 发布时刻前/后claim | 时刻前不可领取，到时后才领取 | P0 | 本地通过 |
+| TC-73 | 当天中途切换 | 当日已有过去随机时隙 | tick | 不追发过去时隙；仅计划未来，完整5批次从次日开始 | P0 | 本地通过 |
+| TC-74 | 双门禁预建 | prebuild=1、live=0 | scheduler/plan/prepare/execute | 可形成ready并记录prepared_at；Graph claim/attempt=0 | P0 | 本地通过，生产待验收 |
+| TC-75 | 自动迟到截止 | auto due/planned/ready超过10分钟，manual同条件 | plan/prepare/execute | auto落missed/skipped且Graph=0；manual仍可按明确操作执行 | P0 | 本地通过 |
+| TC-76 | running提交边界 | claim前停用、claim后停用/编辑 | 并发操作 | 前者Graph=0；后者409且版本/任务不漂移，终态后可操作 | P0 | 本地通过 |
+| TC-77 | manual停用取消 | disabled run-now；pending/preparing/planned/ready后停用再启用 | API/worker | 不建新due或永久skipped/failed，重新启用不复活 | P0 | 本地通过 |
+| TC-78 | planner租约接管 | A租约过期，B同owner新expires接管，A晚回调 | create/complete/defer | A全部superseded/no-op，不覆盖B租约或建孤儿run | P0 | 本地通过 |
+| TC-79 | legacy ready迁移 | 旧schema manual/auto ready且prepared_at缺失 | 启动/claim | 原子skipped并刷新run，Graph=0且不占backlog | P0 | 本地通过 |
+| TC-80 | 冷启动精确边界 | 23:59:59、00:00:00、白天、重复enable、停用重启用 | tick | 跨午夜才补当天；零点及之后只建明日；no-op不刷新启用时间 | P0 | 本地通过 |
+| TC-81 | auto计划中暂停 | auto due已claim，素材扫描中停用再启用 | plan/claim | 原worker不建单，due退pending；重启用在迟到时限内可再claim | P0 | 本地通过 |
 
 ## 回归范围
 

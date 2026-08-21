@@ -80,6 +80,13 @@ class ContractTests(unittest.TestCase):
         self.assertIn("202 if parsed.path.endswith(\"run-now\")",service)
         self.assertIn('30 if path.endswith("/run-now")',client)
 
+    def test_disabled_template_cannot_run_now_from_list(self):
+        page=(ROOT/"static"/"fb-auto-publish-templates.js").read_text(encoding="utf-8")
+        html=(ROOT/"static"/"fb-auto-publish-templates.html").read_text(encoding="utf-8")
+        self.assertIn('state.busyIds.has(id) || !enabled ? " disabled" : ""',page)
+        self.assertIn("模板已停用，请先启用后再手动执行",page)
+        self.assertIn('/fb-auto-publish-templates.js?v=20260821-prebuild-v1',html)
+
     def test_description_url_helper_and_fb_short_link_nginx_contract(self):
         form=(ROOT/"static"/"fb-auto-publish-template.html").read_text(encoding="utf-8")
         nginx=(ROOT/"deploy"/"nginx-fb-auto-short-domain-location.conf").read_text(encoding="utf-8")

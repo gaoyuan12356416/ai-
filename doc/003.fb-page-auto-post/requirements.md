@@ -50,9 +50,12 @@
 8. Graph 发布非 2xx 且无 ID 才是明确失败；断连/超时/非法或 2xx 缺 ID 是终态 unknown；任何返回 ID 都禁止重发。对账遇当前 Token 的明确凭证/权限失败时随机不放回尝试其余健康 Token；处理失败进入 `failed_without_retry`；全部 Token 明确无法对账进入保留 Graph ID 的终态 `unknown/attention`；网络或无法判定仍为 `submitted`，只允许稍后 GET 对账。
 8A. 最坏 8 Token 路径按 `8×120秒+开销` 预算；execute/reconcile 在 1,200 秒租约内完成，第8个 Token 约968秒返回成功 ID 时仍须原子落账，不能被 stale cleanup 或并发对账抢占。
 9. 尝试审计仅保存序号、Token 行 ID、`fb_user_id`、安全错误码/trace ID；不保存 Token 或哈希。
-10. live gate 关闭时 tick 只清理过期 running，不读取 due 模板或创建 queued run。
+10. Graph live gate 与预制门禁分离：`FB_AUTO_PREBUILD_ENABLED=1` 时允许 scheduler、plan 和 GPU prepare 生成明日 ready 任务；`FB_AUTO_POST_LIVE_ENABLED=0` 时 Graph execute/reconcile 仍严格闭锁。未显式配置预制门禁时仅为兼容旧部署而跟随 live gate。两者都为0时 tick 不读取 due 模板或创建 queued run。
 11. enabled 模板禁止直接编辑；必须先停用、修改、再通过完整冲突检查启用。
-12. Scheduler 进程内 single-flight；每分钟只在 SQLite 中把未来 `FB_AUTO_PREPARE_AHEAD_SECONDS=14400` 窗口内的时隙幂等写入 `due_slot`，持久 watermark、有界 catch-up，并记录过旧 missed。Page/素材冻结由独立 plan worker 执行，GPU 由 prepare worker 提前制作，Graph runner 仅领取达到 `planned_publish_at_utc` 的 ready 任务。
+12. Scheduler 进程内 single-flight；生产默认 `FB_AUTO_PREBUILD_DAYS_AHEAD=1`。跨过北京时间00:00仍持续 enabled 的模板，每分钟直接枚举“今天剩余时隙 + 明天完整自然日时隙”；当天首次启用、停用后重启用或新版本重启用的模板不新增当天时隙，只生成明天完整自然日，避免冷启动把GPU预算耗在不完整当天。该规则不删除已存在的同版本自动 due/task。所有时隙幂等写入 `due_slot`，复杂度只与模板数、日期数和时隙数相关，不按未来2,880分钟逐分钟扫描。随机计划在日期首次进入预制范围时按 `template/version/local_date` 一次冻结。`FB_AUTO_PREBUILD_DAYS_AHEAD=0` 时才兼容原 `FB_AUTO_PREPARE_AHEAD_SECONDS` 滚动窗口。Page/素材冻结由独立 plan worker 执行，GPU 由 prepare worker提前制作，Graph runner 仍只领取达到 `planned_publish_at_utc` 的 ready 任务。
+12A. prepare 与 Graph claim 必须同时校验模板仍为 enabled 且 task 版本等于 current version。自动任务同版本停用只暂停并保留已有预制，重启用后仅在原自动迟到时限内继续；手动任务仅允许 enabled 模板创建，停用会永久取消尚未跨Graph边界的manual due/task，重启用不得复活。模板编辑产生新版本时，旧版本 planned/ready 任务立即安全跳过，制作中的旧版本即使GPU返回成片也只能落为skipped。`ready→running` 是不可逆的Meta提交边界：存在running任务时停用/编辑必须在与claim相同的SQLite写事务中返回中文409；submitted/unknown继续对账，不得伪装成已取消。
+12B. 每个成片进入ready时必须记录 `prepared_at_utc`。升级前无该证据的legacy ready以及运行期媒体快照不完整的ready必须原子落为skipped并刷新run，既不能调用Graph，也不能永久占用manual backlog。
+12C. 自动 due/task 使用 `FB_AUTO_MAX_LATE_SECONDS=600` 的最大迟到宽限：超过计划时间10分钟仍未完成计划/预制或未被发布领取时，分别落为missed/skipped，禁止稍后突然补发；manual run-now不套用自动时隙的过期规则，但仍受enabled、版本、取消和发布边界约束。plan worker领取due后以due ID、lease owner与lease expires组成租约令牌；旧worker的晚建单、complete或defer不得覆盖已被新worker接管的租约。
 13. 素材目录默认以 `ads_custom_source s FORCE INDEX(PRIMARY)` 做完整有界 keyset 扫描，短剧资格用 `EXISTS ... FORCE INDEX(ac)` 去重；元数据再按 content 确定性取唯一行。允许在短剧主排序可证明“有指标集合严格领先无指标集合”时，先用 `(data_source,data_source_id)` 索引完整扫描全部指标短剧；只有该集合经过相同产品/语言/上下架/黑名单/时长/描述/指标范围过滤后已填满最终 Top 5,000，才可把它作为等价 Top-N 证明并跳过主键全扫。证明不足、短剧消耗升序或任何不确定情况必须回退原完整扫描；不得任意截断 5,000 行。所有路径共享 600 秒整体 fail-closed 边界，完整 keyset 扫描另有100页边界。
 14. 对账更新 ledger 时保留发布阶段累计的 `definite_attempts`，不可归零。
 15. `{{desc}}` 仅在模板使用时按素材页的 content ID 批量读取，不得逐 Page/逐素材 N+1 查询；空或同一身份多值的描述不得被选作该模板候选。描述压缩连续空白并最多冻结 4,096 字符。
@@ -101,11 +104,12 @@
 - `video_template` 在新建和更新时严格必填，仅接受 `random_overlay`；缺失或其他枚举返回 `409 fb_auto_video_template_required`，没有 FB 历史兼容回退。
 - 每个 Page 任务使用 `template/version/slot/page_id` 派生的稳定 GPU job ID；重试复用，同一 run 的不同 Page 不共用成片。GPU 必须返回匹配 job/content/profile、不同于源 URL 的 HTTPS 成片、SHA-256、正 size/duration；任一校验失败不得调用 Graph。
 - 独立媒体 profile 复用生产验证身份 `tt-post-random-overlay-h264-720x1280-v3`；仓库内 `features/fb_gpu/prepare_worker.py` 是不导入 TT credentials/API 的 prepare-only 提取，固定 `h264_nvenc`、独立 work root/secret、CPU `18836`/GPU `8836` 隧道，HTTP 只开放 health 与 prepare。成片按 SHA 内容寻址上传 COS，只有明确 404 才创建，HEAD 同时核对 size+sha metadata，上传使用 public-read/video/mp4/sha/profile metadata 并再次 HEAD，Graph 只获得验证域名的逐段 URL 编码 HTTPS 地址。
-- GPU processor 当前以进程内锁串行执行，实际并发为 1；CPU prepare worker 的并发不能被当成 GPU 并发。`max_jobs_per_slot=20` 只是在4小时 ahead 下的保守上界，未完成真实 NVENC 单任务与P95基准前不得上调。
-- 启用时计算 `publishable_pages × daily_frequency`，同时作为每日 GPU jobs 和 Graph posts 估算，并按所有启用模板保守汇总最坏同槽峰值。创建运行在素材冻结后重新读取 Page/Token、旧队列、跨模板 Page 重叠和全局容量，最终事务再校验 enabled/version fingerprint。默认上限为 500 Page、20 job/单时隙、500 job/post/日、10 个启用模板，提前制作窗口 14,400 秒；无真实基准时有效启用上限由更保守的 20 job/slot 决定。超限返回中文实数/上限，不创建任务。
-- `FB_AUTO_POST_LIVE_ENABLED=0` 时 scheduler 不写 slot/watermark，run-now 不创建 run，prepare/Graph 均不调用；指标只读刷新保持独立。
+- GPU processor 当前以进程内锁串行执行，实际并发为 1；CPU prepare worker 的并发不能被当成 GPU 并发。生产单 Page canary 的 475.77 秒成片从任务创建到 GPU manifest 约 20 分钟，按 8 个可发布 Page × 5 个日时隙估算为 40 个串行预制任务、约 13.3 小时基线，因此 4 小时滚动窗口不足。次日完整日预制窗口用于提供 24–48 小时余量；未完成连续任务 P95 前不得上调 `max_jobs_per_slot=20`。
+- 启用时计算 `publishable_pages × daily_frequency`，同时作为每日 GPU jobs 和 Graph posts 估算，并按所有启用模板保守汇总最坏同槽峰值。创建运行在素材冻结后重新读取 Page/Token、旧队列、跨模板 Page 重叠和全局容量，最终事务再校验 enabled/version fingerprint。默认上限为 500 Page、20 job/单时隙、500 job/post/日、10 个启用模板，生产提前制作为未来 1 个完整北京自然日；无真实基准时有效启用上限由更保守的 20 job/slot 决定。超限返回中文实数/上限，不创建任务。
+- `FB_AUTO_PREBUILD_ENABLED=0` 时 scheduler/plan/prepare不创建或制作；`FB_AUTO_POST_LIVE_ENABLED=0` 时 run-now与Graph闭锁。生产切换允许先设 prebuild=1、live=0 完成真实GPU预制验收，再单独打开Graph；指标只读刷新保持独立。自动时隙超过迟到宽限后只能形成可审计的missed/skipped，不允许无限晚发。关闭live或回滚前必须先停runner并等待running=0；杀死正在提交的进程只能形成unknown，不能当作取消。
 
 ## 变更记录
 
 - 2026-08-17：完成实现候选与本地测试，无生产变更。
 - 2026-08-20：`{{desc}}`/`{{url}}` 扩展已按 GitHub-first 完成 closed-gate生产部署；`FB_AUTO_POST_LIVE_ENABLED=0`，验收未创建模板、运行、wrapper 或真实 Graph Post。
+- 2026-08-21：确认模板“测试”v2的“随机5次”表示 5 个日批次；Page池62实时为13个Page、8个可发布Page，即容量口径为40个GPU任务/40条Graph帖子/日。新增按北京自然日提前冻结和预制、旧版本发布门禁；当天中途上线不追发过去时隙，完整5批次保证从下一个完整北京自然日开始。

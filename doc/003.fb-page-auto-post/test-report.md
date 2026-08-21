@@ -10,6 +10,8 @@
 
 2026-08-21 单Page真实canary通过：首次复用冻结随机意图时，完整素材PRIMARY扫描达到600秒截止并以`fb_auto_catalog_scan_timeout`停止，未创建run/task且GPU/Meta调用均为0。release `9f1f5b268766e1c25fbe3081bd0505978510b78e`新增按指标剧集走`(data_source,data_source_id)`索引的精确候选预筛；只有过滤后的优先集合填满5000条候选时才跳过全表扫描，否则回退原完整keyset扫描。生产只读真实配置基准从超时降至142.266秒并返回5000条候选。本地95项FB专项与66项X/TT合并基线全部通过，生产release再跑95项FB测试通过。
 
+2026-08-21 北京自然日提前预制改造本地与独立复审通过：新增prebuild/live双门禁、当天冷启动只建明日、跨午夜持续模板补今天剩余、次日5时隙一次冻结、`prepared_at_utc`、10分钟自动迟到截止、enabled/current-version门禁、manual停用永久取消、running不可逆Meta提交边界、due租约ABA防护和legacy ready fail-closed迁移。FB专项128/128、X/TT合并基线66/66、py_compile与diff-check均通过；部署前生产仍为原release、live=false、0 due、0 running/ready，只有既存单Pagecanary事实。
+
 同一冻结Page `967347116442420`（`कहानी के दृश्य`）随后仅创建run 1/task 1；素材`6281282`、content `XtTulNgWI1`经GPU生成475.766667秒、285,917,510 bytes的独立H.264成片。Graph首次授权被明确拒绝为190，第二个同Page可用授权返回对象`1051031017645759`；首次自然回查确认`video_status=ready`、`publish_status=published`，永久链接`https://www.facebook.com/reel/1051031017645759/`匿名HEAD为200。最终run=`completed`、task/ledger=`published`、unknown=0，且总量保持1 run、1 task、1 ledger、2 attempt。
 
 ## 测试范围
@@ -20,17 +22,17 @@ FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU 
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| FB V2 专项单元/契约 | 95 | 95 | 0 | 0 |
+| FB V2 专项单元/契约 | 128 | 128 | 0 | 0 |
 | X/TT 合并基线 | 66 | 66 | 0 | 0 |
-| 当前累计证据 | 161 | 161 | 0 | 0 |
+| 当前累计证据 | 194 | 194 | 0 | 0 |
 
 ## 缺陷情况
 
-BUG-001 SQLite 连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU 系统 Python 版本不兼容、BUG-004 oneshot 忽略 `RuntimeMaxSec`、BUG-005 MySQL/Python跨content排序语义不一致、BUG-006 COS SDK自定义元数据键缺少协议前缀、BUG-007 625万行素材PRIMARY全表扫描超时均已修复并回归。无未关闭本地缺陷。
+BUG-001 SQLite连接泄漏、BUG-002 metric SQL `ONLY_FULL_GROUP_BY` 1055、BUG-003 GPU系统Python版本不兼容、BUG-004 oneshot忽略`RuntimeMaxSec`、BUG-005 MySQL/Python跨content排序语义不一致、BUG-006 COS SDK自定义元数据键缺少协议前缀、BUG-007 625万行素材PRIMARY全表扫描超时、BUG-008 running期间升版竞态、BUG-009 disabled manual延迟恢复、BUG-010 planner租约ABA、BUG-011 legacy ready永久backlog均已修复并回归。无未关闭本地缺陷。
 
 ## 验证证据
 
-- `python -m unittest discover -s scripts -p "test_fb_auto_*.py"`：80/80 PASS；`scripts.test_fb_gpu_prepare_worker`：15/15 PASS。
+- `python -m unittest discover -s scripts -p "test_fb_auto_*.py"`：128/128 PASS；其中GPU prepare-only契约包含在当前FB专项范围。
 - `scripts.test_x_accounts_app_contract scripts.test_tt_auto_publish_app_contract scripts.test_x_auto_publish_app_contract scripts.test_tt_posts_app_contract`：66/66 PASS。
 - `python -m py_compile ... app.py`：PASS。
 - `node --check static/quick-nav.js`、navigation JSON 解析：PASS。

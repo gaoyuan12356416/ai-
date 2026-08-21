@@ -46,7 +46,7 @@
 
 ## 配置项
 
-真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。
+真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREBUILD_ENABLED`、`FB_AUTO_PREBUILD_DAYS_AHEAD=1`、`FB_AUTO_MAX_LATE_SECONDS=600`、兼容回退项 `FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。
 
 2026-08-20 宏扩展新增 `FB_AUTO_POST_SHORT_LINK_ROOT=/mnt/data-disk/fb-auto-post-public/s2l/fb`。该公开目录与 0700 的 SQLite 私有目录分离；父目录和 wrapper 分别为 0755/0644。`gy.g2flow.com` TLS server 引入 `deploy/nginx-fb-auto-short-domain-location.conf`，精确服务 `/s2l/fb/{正整数}.html`。
 
@@ -62,13 +62,15 @@
 4. 从 GitHub checkout 精确 SHA 到 `/opt/fb-auto-post/releases/<sha>`，原子切换 `/opt/fb-auto-post/current`。
 5. 创建 `fb-auto-post` 系统用户、0700 数据目录、0600 env；sidecar unit 创建 0700 的 `/run/fb-auto-post`，指标锁固定为 `/run/fb-auto-post/metric.lock`；GPU 固定使用现有 `/root/miniconda3/envs/drama-voice/bin/python`，并确认该环境可导入 `qcloud_cos`（COS SDK 配置固定 timeout、KeepAlive=false、retry=0）；安装 unit，`systemctl daemon-reload`。
 6. 保持 live gate=0，启动 sidecar；可启动 metric 只读 timer。scheduler/plan/prepare/runner/reconcile 会返回 gate closed，不手动创建运行。
-7. Scheduler 必须在 60 秒内只完成 SQLite future due-slot 规划；耗时的 Page/素材冻结由 plan unit 完成，GPU 制作由 prepare unit 完成。验证 future frontier 为当前时间后 14,400 秒。
+7. Scheduler 必须在60秒内只完成SQLite future due-slot规划；耗时的Page/素材冻结由plan unit完成，GPU制作由prepare unit完成。生产 `FB_AUTO_PREBUILD_DAYS_AHEAD=1` 时分两种验收：跨过北京午夜持续enabled的模板应有今天剩余+明天完整时隙；当天首次启用/重启用/新版本应当天新增0、明天完整时隙。两者的 `planned_through_utc` 都为明日23:59（北京时间）的UTC值；不得逐分钟扫描2,880个点。只有该项为0时才验证兼容的14,400秒滚动frontier。
    - Graph execute/reconcile unit 每轮最多4任务并发，任务 lease=1200、loopback HTTP=1300、`TimeoutStartSec=1500`，覆盖8个Token最坏路径；oneshot 不使用该生产 systemd 会忽略的 `RuntimeMaxSec`。
    - GPU processor与prepare unit均按串行1任务运行，不以CPU线程数宣称GPU并行能力。
 8. 增量部署主 API `app.py`、`features/fb_auto_posts/`、两张 HTML、quick-nav 和 navigation 合并；不得覆盖独立推进的 X/TT 包或线上 navigation 其他项。
 9. 重启仅 `fb-auto-post-service.service` 和 `drama-material-api.service`；静态发布后验证 no-store。
 
 宏扩展不改 `app.py`、navigation 或主 API 进程：部署时备份 current symlink、两个 SQLite online backup、`/etc/fb-auto-post.env` 元数据、Nginx live配置和两份创建页；从已推送 SHA 创建 immutable release，补充 env、创建独立公开根，`nginx -t` 后 reload，切换 sidecar并只重启 `fb-auto-post-service.service`，最后原子安装两份静态 HTML。保持 `FB_AUTO_POST_LIVE_ENABLED=0`。
+
+日预制切换先保持 `FB_AUTO_POST_LIVE_ENABLED=0` 完成代码部署和单元/复制库验收，再设置 `FB_AUTO_PREBUILD_ENABLED=1`、`FB_AUTO_PREBUILD_DAYS_AHEAD=1`。先只放开scheduler/plan/GPU prepare；当前模板若为当天启用，应核对今天新增0、次日正好5个slot、每slot Page快照数量、素材互斥、容量与 `prepared_at_utc`。此阶段Graph runner必须持续返回live gate closed且attempt增量为0。真实预制验收通过且各批次按实际GPU基准可在deadline前ready后才把live gate设为1。当天过去时隙不补发，完整5批次只从下一完整北京自然日承诺。
 
 部署前只读门禁：对 Page/group/token、旧队列冲突、素材候选 SQL 做 `EXPLAIN` 和小范围 SELECT；确认 `g.user_id`、`ads_setting` 黑名单、目标 app/product 映射和响应大小。指标 SQL 的修正版生产只读 EXPLAIN 与30日实际刷新均已通过；不得打印 Token。
 
@@ -83,6 +85,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 
 接受标准：health `live_enabled=false`；页面 Cookie/权限正确；35 组/计数与同刻只读查询一致；自然 timer 返回 gate closed/no work；SQLite `quick_check=ok`；旧队列和 Meta 帖子计数不变；日志/DOM/API 无 Token。
 
+日预制 live 验收标准：health `live_enabled=true`；模板1当前版本enabled；Page池62实数仍在容量内；明日 `schedule_plan` 正好5个时隙且至少间隔60分钟；每个prepared due-slot对应8个当前可发布Page任务（成员漂移时按当刻实数解释）；至少一个真实GPU任务完成为ready且成片SHA/size/profile有效；所有明日任务在计划时间前Graph attempt增量为0；operational/metric两库`quick_check=ok`，服务和七个timer无异常重启。若预制不能在首时隙前完成，关闭live gate并报告，不以到点临时筛选/制作兜底。
+
 宏扩展附加接受标准：`fb_auto_task` 存在 `short_url/long_url` 加法列；六张业务表计数仍为0；不存在的合法短链返回404且带 no-store/security headers，非法路径返回404，POST被拒绝；TT/X既有 `/s2l` 路由不变；创建页可见 `{{desc}}/{{url}}/AIpost`。不得为验收创建 wrapper、模板、run 或 Graph Post。
 
 ## 回滚方案
@@ -91,6 +95,10 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 2. 重启仅主 API，验证 X/TT 契约和页面。
 3. 保留当前 FB SQLite（尤其 submitted/published/unknown/attempt）；代码回滚不得恢复旧 SQLite 覆盖新事实。
 4. 若尚未发生任何任务且经确认可废弃，另行归档数据目录，不直接删除。
+
+日预制回滚时先把持久化 live gate 改回0并重启sidecar，再停止scheduler/plan/prepare/runner/reconcile timers；保留已生成的due/run/task/GPU成片与短链事实做审计。旧release不理解新调度配置时可切回上一SHA，但绝不回灌部署前SQLite覆盖切换后的任务、attempt、ledger或wrapper。
+
+切换live或回滚前必须先停止runner timer，并确认 `fb_auto_task.status='running'` 为0；若已有running，等待其进入submitted/unknown/failed/published后再重启sidecar。不得用杀进程宣称取消已开始的Meta提交。
 
 含 `{{url}}` 的任务存在时不得单独回滚 publisher 而保留待发布任务；必须先关闭 gate/全部FB timers并审计 planned/ready/running/submitted/unknown。历史 wrapper、Nginx `/s2l/fb/` route 与当前 SQLite 必须保留，避免已发布短链失效。
 

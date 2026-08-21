@@ -27,11 +27,16 @@ class ServiceError(RuntimeError):
 
 
 class Runtime:
-    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, materials: MaterialRepository, executor: AutoPostExecutor, preparer: PrepareExecutor, internal_token: str, *, metric_store: FBAutoPostStore | None = None, max_daily_jobs: int = 500, max_publishable_pages: int = 500, max_jobs_per_slot: int = 20, max_enabled_templates: int = 10, prepare_ahead_seconds: int = 14400):
+    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, materials: MaterialRepository, executor: AutoPostExecutor, preparer: PrepareExecutor, internal_token: str, *, metric_store: FBAutoPostStore | None = None, max_daily_jobs: int = 500, max_publishable_pages: int = 500, max_jobs_per_slot: int = 20, max_enabled_templates: int = 10, prepare_ahead_seconds: int = 14400, prebuild_days_ahead: int = 1, max_late_seconds: int = 600, prebuild_enabled: bool | None = None):
         self.store, self.pages, self.materials, self.executor, self.preparer, self.internal_token = store, pages, materials, executor, preparer, internal_token
         self.max_daily_jobs, self.max_publishable_pages = int(max_daily_jobs), int(max_publishable_pages)
         self.max_jobs_per_slot = int(max_jobs_per_slot)
         self.max_enabled_templates, self.prepare_ahead_seconds = int(max_enabled_templates), int(prepare_ahead_seconds)
+        self.prebuild_days_ahead, self.max_late_seconds = int(prebuild_days_ahead), int(max_late_seconds)
+        self.prebuild_enabled = bool(executor.live_enabled) if prebuild_enabled is None else prebuild_enabled is True
+        self.store.max_late_seconds = self.max_late_seconds
+        if hasattr(self.preparer, "live_enabled"):
+            self.preparer.live_enabled = self.prebuild_enabled
         self.metric_store = metric_store or store
         self._tick_lock = threading.Lock()
 
@@ -95,7 +100,7 @@ class Runtime:
         with self.store.connect() as conn:
             enabled_count = int(conn.execute("SELECT COUNT(*) FROM fb_auto_template WHERE status='enabled' AND id<>?", (int(template["id"]),)).fetchone()[0])
         global_slot_jobs = publishable + other_slot_jobs
-        summary = {"total_pages": len(pages), "publishable_pages": publishable, "missing_token_pages": len(pages) - publishable, "daily_frequency": daily_count, "estimated_jobs_per_slot": publishable, "estimated_global_jobs_per_slot": global_slot_jobs, "estimated_daily_gpu_jobs": daily_jobs, "estimated_daily_graph_posts": daily_jobs, "capacity_limits": {"publishable_pages": self.max_publishable_pages, "jobs_per_slot": self.max_jobs_per_slot, "daily_jobs": self.max_daily_jobs, "enabled_templates": self.max_enabled_templates, "prepare_ahead_seconds": self.prepare_ahead_seconds}}
+        summary = {"total_pages": len(pages), "publishable_pages": publishable, "missing_token_pages": len(pages) - publishable, "daily_frequency": daily_count, "estimated_jobs_per_slot": publishable, "estimated_global_jobs_per_slot": global_slot_jobs, "estimated_daily_gpu_jobs": daily_jobs, "estimated_daily_graph_posts": daily_jobs, "capacity_limits": {"publishable_pages": self.max_publishable_pages, "jobs_per_slot": self.max_jobs_per_slot, "daily_jobs": self.max_daily_jobs, "enabled_templates": self.max_enabled_templates, "prepare_ahead_seconds": self.prepare_ahead_seconds, "prebuild_days_ahead": self.prebuild_days_ahead, "max_late_seconds": self.max_late_seconds}}
         summary["_enabled_fingerprint"] = enabled_fingerprint
         if not pages: raise ServiceError("fb_auto_page_pool_empty", "所选Page池没有有效Page", 409)
         if not publishable: raise ServiceError("fb_auto_page_pool_unpublishable", "所选Page池没有任何可发布Page", 409)
@@ -113,18 +118,20 @@ class Runtime:
             return {"ok": True, "status": "already_running", "stale_marked_unknown": 0, "runs": []}
         try:
             stale = self.store.mark_stale_running_unknown()
-            if not self.executor.live_enabled:
-                return {"ok": True, "status": "live_gate_closed", "stale_marked_unknown": stale, "enqueued": 0}
-            result = self.store.enqueue_due_slots(live_enabled=True, prepare_ahead_seconds=self.prepare_ahead_seconds)
+            if not self.prebuild_enabled:
+                status = "live_gate_closed" if not self.executor.live_enabled else "prebuild_gate_closed"
+                return {"ok": True, "status": status, "stale_marked_unknown": stale, "enqueued": 0, "skipped_today_templates": 0}
+            result = self.store.enqueue_due_slots(live_enabled=True, prepare_ahead_seconds=self.prepare_ahead_seconds, prebuild_days_ahead=self.prebuild_days_ahead)
             result["stale_marked_unknown"] = stale
             return result
         finally:
             self._tick_lock.release()
 
     def plan_next(self, worker_id: str, lease_seconds: int = 1800) -> Dict[str, Any]:
-        if not self.executor.live_enabled:
-            return {"ok": True, "status": "live_gate_closed", "claimed": False}
-        due = self.store.claim_due_slot(worker_id, lease_seconds)
+        if not self.prebuild_enabled:
+            status = "live_gate_closed" if not self.executor.live_enabled else "prebuild_gate_closed"
+            return {"ok": True, "status": status, "claimed": False}
+        due = self.store.claim_due_slot(worker_id, lease_seconds, max_late_seconds=self.max_late_seconds)
         if due is None:
             return {"ok": True, "status": "no_due_slot", "claimed": False}
         actor = ActorScope("scheduler", "自动调度", bool(due["scope_is_admin"]), str(due["owner_user_id"]))
@@ -139,18 +146,26 @@ class Runtime:
                 self.materials,
                 planned_publish_at_utc=str(due["planned_publish_at_utc"]),
                 expected_template_version=int(due["template_version"]),
+                expected_due_id=int(due["id"]),
+                expected_due_lease_owner=str(due["lease_owner"]),
+                expected_due_lease_expires_at_utc=str(due["lease_expires_at_utc"]),
                 max_publishable_pages=self.max_publishable_pages,
                 max_jobs_per_slot=self.max_jobs_per_slot,
                 max_daily_jobs=self.max_daily_jobs,
             )
-            self.store.complete_due_slot(int(due["id"]), run_id=int(result["run_id"]))
+            self.store.complete_due_slot(int(due["id"]), run_id=int(result["run_id"]), expected_lease_owner=str(due["lease_owner"]), expected_lease_expires_at_utc=str(due["lease_expires_at_utc"]))
             return result
         except (StoreError, RepositoryError) as exc:
             if exc.code == "fb_auto_due_slot_template_changed":
-                self.store.complete_due_slot(int(due["id"]), error_code=exc.code)
+                self.store.complete_due_slot(int(due["id"]), error_code=exc.code, expected_lease_owner=str(due["lease_owner"]), expected_lease_expires_at_utc=str(due["lease_expires_at_utc"]))
                 return {"ok": False, "status": "failed", "due_slot_id": int(due["id"]), "error": exc.code}
-            self.store.defer_due_slot(int(due["id"]), exc.code)
+            self.store.defer_due_slot(int(due["id"]), exc.code, expected_lease_owner=str(due["lease_owner"]), expected_lease_expires_at_utc=str(due["lease_expires_at_utc"]))
             return {"ok": False, "status": "deferred", "due_slot_id": int(due["id"]), "error": exc.code}
+
+    def prepare_next(self, worker_id: str, lease_seconds: int = 10200) -> Dict[str, Any]:
+        if not self.prebuild_enabled:
+            return {"ok": True, "status": "prebuild_gate_closed", "claimed": False}
+        return self.preparer.prepare_next(worker_id, lease_seconds)
 
 
 def as_public(value: Any) -> Dict[str, Any]:
@@ -186,13 +201,13 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self) -> None:
         parsed, method = urlsplit(self.path), self.command
         if method == "GET" and parsed.path == "/health":
-            self.send_json(200, {"ok": True, "service": "fb-auto-post", "live_enabled": self.runtime.executor.live_enabled}); return
+            self.send_json(200, {"ok": True, "service": "fb-auto-post", "prebuild_enabled": self.runtime.prebuild_enabled, "live_enabled": self.runtime.executor.live_enabled}); return
         if parsed.path.startswith("/internal/"):
             if not self.internal(): raise ServiceError("forbidden", "内部请求未授权", 403)
             payload = self.read_json()
             if method == "POST" and parsed.path == "/internal/fb-auto-post/tick": result = self.runtime.tick()
             elif method == "POST" and parsed.path == "/internal/fb-auto-post/plan-next": result = self.runtime.plan_next(str(payload.get("worker_id") or "fb-auto-plan")[:120], int(payload.get("lease_seconds") or 1800))
-            elif method == "POST" and parsed.path == "/internal/fb-auto-post/prepare-next": result = self.runtime.preparer.prepare_next(str(payload.get("worker_id") or "fb-auto-prepare")[:120], int(payload.get("lease_seconds") or 10200))
+            elif method == "POST" and parsed.path == "/internal/fb-auto-post/prepare-next": result = self.runtime.prepare_next(str(payload.get("worker_id") or "fb-auto-prepare")[:120], int(payload.get("lease_seconds") or 10200))
             elif method == "POST" and parsed.path == "/internal/fb-auto-post/execute-next": result = self.runtime.executor.execute_next(str(payload.get("worker_id") or "fb-auto-runner")[:120], int(payload.get("lease_seconds") or 1200))
             elif method == "POST" and parsed.path == "/internal/fb-auto-post/reconcile-next": result = self.runtime.executor.reconcile_next(str(payload.get("worker_id") or "fb-auto-reconcile")[:120], int(payload.get("lease_seconds") or 1200))
             else: raise ServiceError("not_found", "接口不存在", 404)
@@ -234,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 if set(payload) != {"expected_version","operation_id"}: raise ServiceError("invalid_request", "手动执行请求字段无效", 400)
                 if not self.runtime.executor.live_enabled: raise ServiceError("fb_auto_live_gate_closed", "FB自动发布总开关关闭，未创建运行或调用GPU/Meta", 409)
+                if not self.runtime.prebuild_enabled: raise ServiceError("fb_auto_prebuild_gate_closed", "FB自动发布预制开关关闭，未创建运行或调用GPU", 409)
                 result = self.runtime.store.enqueue_manual_due_slot(template_id, actor, expected_template_version=int(payload["expected_version"]), operation_id=str(payload["operation_id"]))
         self.send_json(202 if parsed.path.endswith("run-now") else 200, result)
 
@@ -269,6 +285,10 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     pages, materials = PagePoolRepository(mysql), MaterialRepository(mysql, metric_store)
     graph = RequestsGraphTransport(api_version=str(env.get("FB_GRAPH_API_VERSION", "v22.0")), timeout_seconds=int(env.get("FB_AUTO_GRAPH_TIMEOUT", "120")))
     live = str(env.get("FB_AUTO_POST_LIVE_ENABLED", "0")) == "1"
+    prebuild_raw = env.get("FB_AUTO_PREBUILD_ENABLED")
+    if prebuild_raw is not None and str(prebuild_raw) not in {"0", "1"}:
+        raise ValueError("FB_AUTO_PREBUILD_ENABLED must be 0 or 1")
+    prebuild_enabled = live if prebuild_raw is None else str(prebuild_raw) == "1"
     short_link_root = Path(str(env.get("FB_AUTO_POST_SHORT_LINK_ROOT", "/mnt/data-disk/fb-auto-post-public/s2l/fb"))).expanduser()
     if not short_link_root.is_absolute():
         raise ValueError("FB_AUTO_POST_SHORT_LINK_ROOT must be absolute")
@@ -281,17 +301,19 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         short_link_root=str(short_link_root),
     )
     gpu = GPUPrepareClient(str(env.get("FB_AUTO_GPU_PREPARE_INTERNAL_TOKEN", "")), port=int(env.get("FB_AUTO_GPU_PREPARE_PORT", "18836")), timeout=int(env.get("FB_AUTO_GPU_PREPARE_TIMEOUT", "9000")))
-    preparer = PrepareExecutor(store, gpu, live_enabled=live)
+    preparer = PrepareExecutor(store, gpu, live_enabled=prebuild_enabled)
     limits = {
         "max_daily_jobs": int(env.get("FB_AUTO_MAX_DAILY_JOBS", "500")),
         "max_publishable_pages": int(env.get("FB_AUTO_MAX_PUBLISHABLE_PAGES", "500")),
         "max_jobs_per_slot": int(env.get("FB_AUTO_MAX_JOBS_PER_SLOT", "20")),
         "max_enabled_templates": int(env.get("FB_AUTO_MAX_ENABLED_TEMPLATES", "10")),
         "prepare_ahead_seconds": int(env.get("FB_AUTO_PREPARE_AHEAD_SECONDS", "14400")),
+        "prebuild_days_ahead": int(env.get("FB_AUTO_PREBUILD_DAYS_AHEAD", "1")),
+        "max_late_seconds": int(env.get("FB_AUTO_MAX_LATE_SECONDS", "600")),
     }
-    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 1000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400:
+    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 1000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
         raise ValueError("FB auto capacity configuration invalid")
-    return Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, **limits)
+    return Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, prebuild_enabled=prebuild_enabled, **limits)
 
 
 def main() -> None:

@@ -8,6 +8,10 @@
 
 2026-08-20 宏扩展复审：有条件通过。`{{desc}}` 必须从 `ads_drama_resource.desc` 按 app/content/language 批量、确定性读取；`{{url}}` 必须冻结为独立 FB 命名空间短链，W2A base 固定 `/ads/0/2049/view`、`af_channel=AIpost`，并在任何 Graph POST 前完成不可变 wrapper 写入。生产只做 closed-gate 部署和只读/404 验证，不以真实模板或发帖验收。
 
+2026-08-21 日预制复审：原4小时滚动窗口不足以覆盖当前40个/日、单任务约20分钟的串行GPU基线。跨过北京午夜持续启用的模板直接枚举今天剩余和明天完整时隙；当天首次启用/重启用/新版本仅生成明日完整时隙，且不删除既有同版本自动任务。次日随机计划、Page、素材与成片提前冻结，发布领取继续受计划时间约束。模板停用/版本漂移必须在prepare和Graph两层fail closed。
+
+切换安全性要求预制与Graph分门禁：先 `prebuild=1/live=0` 生成真实 ready 成片并验证 `prepared_at_utc`、SHA/profile与计划时间，再打开Graph；不能为了测试预制而同时放开真实发布。
+
 ## 问题清单
 
 | 编号 | 严重级别 | 位置 | 问题 | 建议 | 状态 |
@@ -23,6 +27,14 @@
 | SA-09 | P0 | URL冻结 | 若运行时临时拼长链，重试可能漂移 | task ID 后同事务冻结 short/long/message | 已关闭 |
 | SA-10 | P0 | Graph边界 | wrapper失败后仍可能发帖 | 发布前物化，失败即停止且Graph调用数为0 | 已关闭 |
 | SA-11 | P1 | 描述查询 | 逐Page查询导致N+1或语言错配 | 仅宏启用时按每页content集合聚合读取并过滤歧义 | 已关闭；生产只读EXPLAIN通过 |
+| SA-12 | P0 | 预制吞吐 | 4小时窗口无法覆盖40个串行长视频任务 | 直接冻结今天剩余+次日完整时隙，提供24–48小时预制余量 | 已关闭 |
+| SA-13 | P0 | 版本门禁 | 已ready旧版本任务可能在编辑后继续发布 | prepare/execute claim校验enabled+current version，旧版本安全跳过 | 已关闭 |
+| SA-14 | P0 | 切换门禁 | 单一live开关无法在不放Graph时验收真实预制 | 增加独立prebuild gate，health同时展示两者 | 已关闭 |
+| SA-15 | P0 | 迟到策略 | GPU失败或停用后重启可能无限晚发 | 自动due/task超过10分钟宽限落missed/skipped，manual不受影响 | 已关闭 |
+| SA-16 | P0 | Graph状态竞态 | ready领取后停用/升版可能让旧running继续提交 | claim为不可逆边界；running存在时同事务拒绝停用/编辑 | 已关闭 |
+| SA-17 | P0 | manual恢复 | 停用模板可排manual并在日后重启用后意外发布 | disabled拒绝run-now；停用永久取消未提交manual；列表按钮置灰 | 已关闭 |
+| SA-18 | P1 | planner租约ABA | 旧plan worker晚回调可能覆盖新worker租约 | due ID + owner + expires组成令牌，所有建单/完成/延后均核对 | 已关闭 |
+| SA-19 | P1 | legacy ready | prepared_at为空的旧ready不可领却会占backlog | 迁移与运行期均fail closed终结并刷新run | 已关闭 |
 
 ## 决策记录
 

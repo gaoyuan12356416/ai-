@@ -54,6 +54,8 @@
       const enabled = isEnabled(item);
       const poolIds = Array.isArray(config.group_ids) ? config.group_ids.map(ui.escapeHtml).join(", ") : "";
       const busy = state.busyIds.has(id) ? " disabled" : "";
+      const runDisabled = state.busyIds.has(id) || !enabled ? " disabled" : "";
+      const runTitle = enabled ? "" : ' title="请先启用模板"';
       return [
         "<tr>",
         "<td><strong>", ui.escapeHtml(item.name || config.name || ("模板 " + id)), "</strong><br><small>v", version, " · ",
@@ -64,7 +66,7 @@
         '<td><div class="table-actions">',
         '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
-        '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', busy, ">手动执行</button>",
+        '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
         "</div></td>",
         "</tr>",
       ].join("");
@@ -110,11 +112,15 @@
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
     const enabled = isEnabled(item);
+    if (action === "run" && !enabled) {
+      ui.showToast("模板已停用，请先启用后再手动执行。", true);
+      return;
+    }
     const accepted = action === "run"
       ? await ui.confirmAction("确认手动执行", "将创建可追踪的手动计划，由后台异步冻结 Page 和素材。确认继续？")
       : await ui.confirmAction(enabled ? "确认停用模板" : "确认启用模板", enabled
-        ? "停用后不再生成新时隙，已进入异步流程的任务不会取消。"
-        : "启用后系统会按模板时间自动创建 Page 发布任务。");
+        ? "停用后不再生成新时隙；未提交 Meta 的手动执行会取消，自动预制任务保留并暂停。正在提交 Meta 时需等待本次结果后再停用。"
+        : "启用后系统会按模板时间创建 Page 发布任务；当天新启用从下一个完整北京时间自然日开始生成新时隙。已预制的同版本自动任务会继续。");
     if (!accepted) return;
     state.busyIds.add(id);
     renderTemplates();

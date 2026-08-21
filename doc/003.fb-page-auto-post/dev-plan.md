@@ -15,6 +15,7 @@
 | UI/导航/权限 | Codex | 两张 HTML、导航、权限 | 完成 |
 | 部署/测试/文档 | Codex | deploy、scripts、doc | 完成 |
 | desc/url 宏与短链 | Codex | validation、repositories、core、links、publisher、UI/Nginx | 完成（2026-08-20） |
+| 北京自然日提前预制与版本门禁 | Codex | core、service、env、systemd运行配置、测试/文档 | 进行中（2026-08-21） |
 
 ## 编译 / 构建命令
 
@@ -39,3 +40,5 @@ node --check static\quick-nav.js
 2026-08-20 扩展阶段：先锁定 `{{desc}}`、`{{url}}`、`AIpost`、`/ads/0/2049/view` 契约，再实现加法列、批量描述读取、不可变 wrapper 与独立 Nginx 路由；测试、代码评审和 closed-gate 部署完成前不得改为“完成”。
 
 2026-08-20 部署完成：GitHub commit `1b9fe57a90c9e64ab8ce05140fc6d0ed1d576c52` 已切到 `/opt/fb-auto-post/current`；仅重启 sidecar、reload Nginx并更新两份创建页，主 API 未重启。live gate与六张业务表保持0，未创建wrapper或Graph Post。
+
+2026-08-21 日预制阶段：生产只读审计确认模板1 v2 enabled，但持久化总开关仍为0，当前不会自动发布；Page池62为13/8，总量语义为5批次×8 Page=40条/日。实现并验证 `FB_AUTO_PREBUILD_DAYS_AHEAD=1` 后再按备份、精确SHA、生产预建和ready门禁顺序切换。
