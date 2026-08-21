@@ -32,6 +32,18 @@
 - 仅重启 `fb-auto-post-service.service`，新PID `1039754`、`NRestarts=0`；七个FB timers均active。health仍为 `live_enabled=false`，模板1仍为disabled，run/task/due/attempt/ledger和wrapper均为0，未调用Meta。
 - “启用”查询缺陷已修复；“手动执行”仍按既有安全合同返回 `fb_auto_live_gate_closed`。开启 `FB_AUTO_POST_LIVE_ENABLED=1` 属于真实Graph发布授权，不包含在本次故障修复中。
 
+## 单Page真实canary与素材扫描优化（2026-08-21）
+
+- 用户明确授权从模板1的Page池随机选择一个可发布Page发送一条测试帖。随机意图冻结为Page `967347116442420`（`कहानी के दृश्य`）；失败后不重抽Page，整个canary严格限制为1 run、1 task、1 Graph对象。
+- 第一次尝试在完整素材PRIMARY keyset扫描达到600秒截止后以`fb_auto_catalog_scan_timeout`停止；审计文件为`/mnt/data-disk/fb-auto-post-publisher/one-shot-audits/fb-one-page-canary-20260821T030437Z-b106dd39c646.json`，run/task/GPU/Meta均为0。
+- GitHub/production release为`9f1f5b268766e1c25fbe3081bd0505978510b78e`。按主排序剧集的正spend或已定义ROAS指标集合走`idx_source_type_source_id`精确预筛，仍应用产品、语言、上映、黑名单、时长、描述及指标边界；只有精确过滤集合填满5000条候选时才跳过全表扫描，否则回退原完整扫描，避免优化改变选择语义。spend升序不走该捷径。
+- 本地95项FB专项、66项X/TT合并基线和生产release 95项FB专项全部通过。生产只读真实模板基准为5000条候选/142.266秒、PRIMARY catalog调用0；修复前相同流程在600秒超时。
+- 切换前online backup为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T112904+0800-pre-9f1f5b2`，旧release为`9df5f8c...`。原子切换后仅重启`fb-auto-post-service.service`，PID `1062207`、`NRestarts=0`、warning日志0。
+- 重试审计文件为`/mnt/data-disk/fb-auto-post-publisher/one-shot-audits/fb-one-page-canary-retry-20260821T033040Z-70d39da53667.json`。run 1/task 1冻结素材`6281282`、content `XtTulNgWI1`；GPU成片profile=`tt-post-random-overlay-h264-720x1280-v3`，时长475.766667秒、大小285,917,510 bytes、SHA=`a416ee8628ca0f2eb8391795a87dd16d831ccff1e72e4283eed638015a116773`，COS HEAD 200且元数据一致。
+- Graph第一个授权明确返回190，按同Page授权轮换合同使用第二个授权成功提交；对象`1051031017645759`在首次到期回查时确认`video_status=ready`和`publish_status=published`。永久链接为`https://www.facebook.com/reel/1051031017645759/`并实测HTTP 200。对账前submitted事实备份为`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T115928+0800-pre-task1-reconcile`，`quick_check=ok`。
+- 最终run=`completed`、task/ledger=`published`、unknown=0；只有1个run、1个task、1个ledger、2条授权attempt。短链`https://gy.g2flow.com/s2l/fb/1.html`返回200和`no-store`，目标为指定`https://www.dramawavew2a.com/ads/0/2049/view`并含`af_channel=AIpost`。
+- 持久化`/etc/fb-auto-post.env`仍为`FB_AUTO_POST_LIVE_ENABLED=0`，health仍`live_enabled=false`。真实发布与回查只在边界清晰的一次性进程中临时打开；七个自然timer虽然active，但不会继续创建或发布其他任务。模板1本身保持enabled，未来自动执行仍被总开关阻断。
+
 ## 配置项
 
 真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。
@@ -87,6 +99,6 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://ai.yingliangads.com/fb-auto-pu
 - GitHub-first，备份先于切换；上述 production SHA 已完成 commit/push/deploy。
 - `active/running` 不等于业务完成；必须核对 health、timer、ledger、旧队列、Graph 处理状态。
 - 开 live gate、创建生产模板或真实 Page 帖子均需单独明确授权。
-- Graph v22.0 已对既有视频对象完成只读 status 验证；真实发帖 canary 仍须单独审批，禁止用本部署验收创建帖子。
+- Graph v22.0 已完成一次用户明确授权的单Page真实发帖canary；该授权已消费完毕，禁止据此继续创建帖子、扩大Page范围或打开持久化总开关。
 - GPU 使用独立 `fb-page-random-overlay-gpu.service` 与 `fb-page-random-overlay-tunnel.service`，端口 `8836→18836`、work root `/data/fb-page-random-overlay`、真实 H.264 profile `tt-post-random-overlay-h264-720x1280-v3`。unit 指向本仓库 `scripts/fb_random_overlay_gpu_worker.py`。COS真实配置只放root只读env，key为 `.../fb-page-random-overlay-h264-v3/{sha前2位}/{sha}.mp4`。失败 job 仅在 `work_root/jobs` 下按严格 job 名清理，默认保留48小时、启动和每小时有界清理，不跟随符号链接且成功 manifest 永不删。实际资产/COS/NVENC单任务canary已通过；无并发吞吐基准前不得上调默认20。
 - GPU `/data` 当前可用101G，高于 `2GB × 20 = 40GB` 的外部门禁快照；仍需配置持续磁盘告警，并在开启live前复核当时水位。
