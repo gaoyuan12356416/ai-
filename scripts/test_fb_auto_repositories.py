@@ -57,6 +57,8 @@ class RepositoryTests(unittest.TestCase):
         mysql=MySQL(); conflicts=PagePoolRepository(mysql).legacy_conflicts(["6"])
         self.assertEqual(conflicts[0]["group_id"],"18"); self.assertEqual(conflicts[0]["overlap_page_id"],"10001")
         self.assertIn("si.page_id=li.page_id",mysql.calls[0][0]); self.assertIn("q.execute_switch=1",mysql.calls[0][0])
+        self.assertIn("ORDER BY queue_id,overlap_page_id", mysql.calls[0][0])
+        self.assertNotIn("ORDER BY q.id,li.page_id", mysql.calls[0][0])
 
     def test_material_query_pushes_filters_and_uses_drama_then_material_sort_before_limit(self):
         class MaterialMySQL:

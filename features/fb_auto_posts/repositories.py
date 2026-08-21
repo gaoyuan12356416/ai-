@@ -267,7 +267,7 @@ class PagePoolRepository:
               JOIN `{self.mysql.schema}`.ads_facebook_page_group sg
                 ON sg.id=si.group_id AND sg.is_delete=0 AND sg.type IN (0,1)
              WHERE q.execute_switch=1 AND CAST(si.group_id AS CHAR) IN ({placeholders})
-             ORDER BY q.id,li.page_id
+             ORDER BY queue_id,overlap_page_id
         """
         return [{"queue_id": str(row.get("queue_id") or ""), "queue_name": str(row.get("queue_name") or "")[:200], "group_id": str(row.get("group_id") or ""), "selected_group_id": str(row.get("selected_group_id") or ""), "overlap_page_id": str(row.get("overlap_page_id") or ""), "status": "enabled"} for row in self.mysql.select(sql, ids)]
 
