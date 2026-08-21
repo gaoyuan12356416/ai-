@@ -23,6 +23,15 @@
 - `/s2l/fb/1.html`不存在时404且带no-store/referrer/nosniff，非法路径404，POST 403；既有X、TT、TT-auto样本仍200。创建页200并显示`{{desc}}/{{url}}/AIpost`；列表页仍仅列表+创建入口，表单只在创建页。
 - 生产release再跑92项FB测试全通过；未创建模板、due/run/task、短链文件或Meta帖子，主 API未重启。
 
+## 模板启用查询兼容性修复（2026-08-21）
+
+- 模板1点击“启用”时，主 API审计记录 `fb_auto_source_query_failed`；生产只读复现确认旧队列冲突查询被 MySQL 5.7 以错误3065拒绝：`SELECT DISTINCT` 后按未投影的 `q.id/li.page_id` 排序。
+- GitHub/production release：`9df5f8cac60ef9c7c6087601a62f760f846f62b1`。查询改为按已投影别名 `queue_id,overlap_page_id` 排序，并新增回归断言。
+- 变更前备份：`/mnt/data-disk/fb-auto-post-deploy/backups/20260821T104837+0800-pre-9df5f8c`，包含上一release指针、受影响源码、env/unit和两个通过 `quick_check` 的SQLite online backup；SHA256清单全部通过。
+- 本地及新release均通过92项FB专项测试；生产 `@@read_only=1` 的真实查询确认Page池62为13个Page、8个可发布Page、旧队列冲突0。模板当前1天指标窗口的 `2026-08-20` active generation为READY，容量门禁未超。
+- 仅重启 `fb-auto-post-service.service`，新PID `1039754`、`NRestarts=0`；七个FB timers均active。health仍为 `live_enabled=false`，模板1仍为disabled，run/task/due/attempt/ledger和wrapper均为0，未调用Meta。
+- “启用”查询缺陷已修复；“手动执行”仍按既有安全合同返回 `fb_auto_live_gate_closed`。开启 `FB_AUTO_POST_LIVE_ENABLED=1` 属于真实Graph发布授权，不包含在本次故障修复中。
+
 ## 配置项
 
 真实值仅放 `/etc/fb-auto-post.env`（root 可读），不得提交。关键项：只读 MySQL、CPU internal token、独立 GPU prepare-only token、互不相同的 `FB_AUTO_POST_DB_PATH`/`FB_AUTO_METRIC_DB_PATH`、容量上限、`FB_AUTO_PREPARE_AHEAD_SECONDS=14400`、Graph v22.0。首次部署强制 `FB_AUTO_POST_LIVE_ENABLED=0`。

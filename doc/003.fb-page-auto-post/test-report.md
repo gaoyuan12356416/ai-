@@ -6,6 +6,8 @@
 
 2026-08-20 `{{desc}}/{{url}}` 扩展通过：92项FB专项 + 93项GPU/TT短链/X-TT合并基线，共185项本地测试全部通过；生产release再跑92项FB测试通过。生产只读预检确认 MySQL `@@read_only=1`，描述聚合使用 `content_id` 索引；真实 schema 的同身份描述可确定性收敛为1值。closed-gate部署和线上验收已完成。
 
+2026-08-21 模板启用查询兼容性修复通过：本地与生产新release各92项FB专项测试通过；生产只读端口复现并关闭 MySQL 5.7 错误3065，修复后的旧队列冲突查询返回0条冲突。Page池62为13/8个总Page/可发布Page，指标active pointer READY，模板、运行和Graph状态均未被验证过程修改。真实发布总开关仍关闭。
+
 ## 测试范围
 
 FB validation/repository/store/publisher/app contract、V2 metric/due queue/GPU prepare-only/容量/部署契约，以及上一轮 X accounts、TT auto、X auto 主 API 合并基线。
