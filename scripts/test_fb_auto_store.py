@@ -249,7 +249,15 @@ class StoreTests(unittest.TestCase):
         with self.store.connect() as conn:
             task_id = int(conn.execute("SELECT id FROM fb_auto_task WHERE run_id=? AND status='planned'", (created["run_id"],)).fetchone()[0])
             conn.execute("UPDATE fb_auto_task SET status='ready',media_url='https://cdn.example/prepared.mp4',prepared_media_url='https://cdn.example/prepared.mp4' WHERE id=?", (task_id,))
-            conn.execute("ALTER TABLE fb_auto_task DROP COLUMN prepared_at_utc")
+            current_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='fb_auto_task'").fetchone()[0]
+            legacy_sql = current_sql.replace("CREATE TABLE fb_auto_task", "CREATE TABLE fb_auto_task_legacy", 1).replace(" prepared_at_utc TEXT NOT NULL DEFAULT '',", "")
+            self.assertNotIn("prepared_at_utc", legacy_sql)
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(fb_auto_task)") if row[1] != "prepared_at_utc"]
+            projection = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
+            conn.execute(legacy_sql)
+            conn.execute(f"INSERT INTO fb_auto_task_legacy({projection}) SELECT {projection} FROM fb_auto_task")
+            conn.execute("DROP TABLE fb_auto_task")
+            conn.execute("ALTER TABLE fb_auto_task_legacy RENAME TO fb_auto_task")
         upgraded = FBAutoPostStore(self.store.path, now_fn=lambda: self.now)
         with upgraded.connect() as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(fb_auto_task)")}
