@@ -12,8 +12,8 @@
 | 增加查询及动态重读合同测试 | Codex | `scripts/test_fb_auto_repositories.py`、`scripts/test_fb_auto_publisher.py` | 已完成 |
 | 更新主需求/API 文档 | Codex | `doc/003.fb-page-auto-post/` | 已完成 |
 | 本地回归 | Codex | FB 专项与 X/TT 合并基线 | 已完成 |
-| 生产回归 | Codex | CPU release | 待执行 |
-| GitHub-first 部署 | Codex | CPU `43.166.187.96` | 待执行 |
+| 生产回归 | Codex | CPU release | 已完成 |
+| GitHub-first 部署 | Codex | CPU `43.166.187.96` | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -34,3 +34,5 @@ python -m unittest discover -s scripts -p "test_fb_auto*.py"
 - 2026-08-24：完成生产只读基线，Page 组 62 当前 8 可发，新口径 12 可发。
 - 2026-08-24：生产字段 `status` 为 NOT NULL、默认 0；21,210 行中 NULL=0。
 - 2026-08-24：本地 24 项定向、129 项 FB、66 项 X/TT 基线全部通过。
+- 2026-08-24：精确 release `d2a6e91f` 已部署；服务器 129+66 回归、
+  health、只读 Page 池、SQLite 不变量及七个 timers 全部验收通过。
