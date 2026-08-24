@@ -83,10 +83,11 @@ class FakeNotFound(Exception):
 
 
 class FakeCosClient:
-    def __init__(self):
+    def __init__(self, upload_failures=0):
         self.objects = {}
         self.upload_calls = []
         self.head_calls = []
+        self.upload_failures = int(upload_failures)
 
     def head_object(self, *, Bucket, Key):
         self.head_calls.append((Bucket, Key))
@@ -101,6 +102,9 @@ class FakeCosClient:
 
     def upload_file(self, **kwargs):
         self.upload_calls.append(dict(kwargs))
+        if self.upload_failures > 0:
+            self.upload_failures -= 1
+            raise RuntimeError("transient upload failure")
         body = Path(kwargs["LocalFilePath"]).read_bytes()
         self.objects[kwargs["Key"]] = {
             "body": body,
@@ -623,6 +627,39 @@ class MediaRepairTests(unittest.TestCase):
             self.assertNotIn("X_POST_MEDIA_REPAIR_TOKEN", kwargs["env"])
             self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
             self.assertTrue(kwargs["close_fds"])
+
+    def test_cos_upload_retries_without_retranscoding_the_output(self):
+        source = b"source-video"
+        request = make_request(source)
+        config = make_config(self.root)
+        cos = FakeCosClient(upload_failures=1)
+        runner = FakeRunner()
+
+        def downloader(_url, destination, _hosts, **_kwargs):
+            Path(destination).write_bytes(source)
+            return {
+                "path": Path(destination),
+                "size": len(source),
+                "sha256": hashlib.sha256(source).hexdigest(),
+                "media_type": "video/mp4",
+            }
+
+        processor = media_repair.MediaRepairProcessor(
+            config,
+            runner=runner,
+            cos_client=cos,
+            downloader=downloader,
+        )
+        with mock.patch.object(media_repair.time, "sleep") as sleep:
+            result = processor.repair(request)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(len(cos.upload_calls), 2)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(
+            len([command for command in runner.commands if "ffmpeg" in command[0]]),
+            1,
+        )
 
     def test_drama_resource_id_uses_a_canonical_path_safe_cos_segment(self):
         config = make_config(self.root)

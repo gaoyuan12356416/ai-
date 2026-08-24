@@ -104,6 +104,8 @@ DEFAULT_TRANSCODE_TIMEOUT = 1800
 DEFAULT_PROBE_TIMEOUT = 120
 DEFAULT_DOWNLOAD_TIMEOUT = 120
 DEFAULT_COS_MAX_THREADS = 4
+COS_UPLOAD_ATTEMPTS = 3
+COS_UPLOAD_RETRY_DELAYS_SECONDS = (1, 2)
 
 _FALLBACK_LOCKS = {}
 _FALLBACK_LOCKS_GUARD = threading.Lock()
@@ -1139,25 +1141,46 @@ class CosObjectStore:
                 "existing content-addressed COS object failed integrity verification",
                 409,
             )
-        try:
-            self.client.upload_file(
-                Bucket=self.config.cos_bucket,
-                Key=key,
-                LocalFilePath=str(local_path),
-                PartSize=8,
-                MAXThread=self.config.cos_max_threads,
-                EnableMD5=True,
-                ACL="public-read",
-                ContentType="video/mp4",
-                Metadata={
-                    "x-cos-meta-sha256": sha256_value,
-                    "x-cos-meta-profile": self.config.profile,
-                },
-            )
-        except Exception as exc:
+        last_exception = None
+        for attempt in range(1, COS_UPLOAD_ATTEMPTS + 1):
+            try:
+                self.client.upload_file(
+                    Bucket=self.config.cos_bucket,
+                    Key=key,
+                    LocalFilePath=str(local_path),
+                    PartSize=8,
+                    MAXThread=self.config.cos_max_threads,
+                    EnableMD5=True,
+                    ACL="public-read",
+                    ContentType="video/mp4",
+                    Metadata={
+                        "x-cos-meta-sha256": sha256_value,
+                        "x-cos-meta-profile": self.config.profile,
+                    },
+                )
+                last_exception = None
+                break
+            except Exception as exc:
+                last_exception = exc
+                try:
+                    existing = self.head(key)
+                except MediaRepairError:
+                    existing = None
+                if existing is not None:
+                    if self.validate_head(existing, size, sha256_value):
+                        return True
+                    raise MediaRepairError(
+                        "cos_object_conflict",
+                        "failed upload left a conflicting content-addressed COS object",
+                        409,
+                    ) from None
+                if attempt < COS_UPLOAD_ATTEMPTS:
+                    time.sleep(COS_UPLOAD_RETRY_DELAYS_SECONDS[attempt - 1])
+        if last_exception is not None:
             raise MediaRepairError(
                 "cos_upload_failed",
-                "COS upload failed: %s" % exc.__class__.__name__,
+                "COS upload failed after %s attempts: %s"
+                % (COS_UPLOAD_ATTEMPTS, last_exception.__class__.__name__),
                 502,
             ) from None
         verified = self.head(key)
