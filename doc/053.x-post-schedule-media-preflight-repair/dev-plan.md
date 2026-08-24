@@ -12,7 +12,7 @@
 | 预检与 repair 接入 | Codex | `scripts/x_post_schedule_runner.py` | 已完成 |
 | codec/dimensions/深扫回归 | Codex | `scripts/test_x_post_schedule_runner.py` | 已完成 |
 | 全量 X 回归与代码评审 | Codex | `scripts/test_x*.py` | 已完成 |
-| GitHub-first 部署 | Codex | CPU immutable release | 待执行 |
+| GitHub-first 部署 | Codex | CPU immutable release | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -32,4 +32,5 @@ git diff --check
 ## 完成记录
 
 - 2026-08-24：从生产精确 commit `2f9d31d8...` 建立独立 worktree。
+- 2026-08-24：提交 `61f2f420...` 已通过 GitHub-first 流程切换为 immutable release；生产自然 timer 验收通过。
 - 2026-08-24：focused 55/55、X 全量 752（通过 750、条件跳过 2）通过。

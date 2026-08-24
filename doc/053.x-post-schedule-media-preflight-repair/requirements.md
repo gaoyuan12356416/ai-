@@ -2,7 +2,7 @@
 
 ## 背景
 
-2026-08-24 素材池排期 run 318 冻结 19 条 deferred 队列后，10 条发布成功，7 条因 `invalid_media_codec`、2 条因 `invalid_media_dimensions` 在 X 上传前失败。九条队列的 repair trigger/job/profile/source hash 均为空，publish attempt 均为 0，证明排期链路没有进入已有 GPU 重制能力。
+2026-08-24 素材池排期 run 318 冻结 19 条 deferred 队列后，10 条发布成功，7 条因 `invalid_media_codec`、2 条因 `invalid_media_dimensions` 在 X 上传前失败。部署等待期间自然到点的 run 320 同样完成为 7 成功、12 失败，进一步确认旧排期链路没有进入已有 GPU 重制能力；两批均已终态且不在本次自动恢复范围。
 
 ## 目标
 
@@ -21,7 +21,7 @@
 
 ### 不包含
 
-- 不重放或改写 run 318 及九条历史失败队列。
+- 不重放或改写 run 318、run 320 及其历史失败队列。
 - 不改变 drama schedule 的 deferred/Relay 行为。
 - 不改变手动发布、X Auto、daily、catch-up 或最终 X publish 门禁。
 - 不以真实 X Post 作为部署测试。
@@ -70,7 +70,7 @@
 ## 风险与待确认
 
 - 预检与 repair 可能延迟 queue 创建，但不会产生未知 X 写入。
-- 本次不恢复历史九条；如需补发，必须另行做 operator-manual 受控恢复。
+- 本次不恢复 run 318/320 的历史失败；如需补发，必须另行做 operator-manual 受控恢复。
 
 ## 变更记录
 

@@ -38,4 +38,15 @@
 
 ## 注意事项
 
-历史 run 318 和九条 failed queue 不自动重试。
+历史 run 318/320 及其 failed queue 不自动重试。
+
+## 生产执行记录
+
+- 运行代码提交：`61f2f420cca1a63d1c2aa83e9a70cc960790a64a`。
+- 当前 release：`/mnt/data-disk/x-post-automation/releases/61f2f420cca1a63d1c2aa83e9a70cc960790a64a`。
+- 部署前备份：`/mnt/data-disk/x-post-automation/backups/20260824T155659+0800-schedule-media-preflight-repair-pre-61f2f42`，目录权限 `0700`，代码和 SQLite checksum 通过。
+- 回滚 release：`/mnt/data-disk/x-post-automation/releases/2f9d31d8ce782f59d38b3a64b3c3b35cd38f8089`。
+- schedule/claim timer：均为 `enabled/active`；自然执行分别返回 `no_due` 与 `claimed_or_pending_count=0`。
+- 台账：queue/log `606/606`，published `548`，failed `58`，unknown `0`，active run `0`；`quick_check=ok`，foreign key error `0`。
+- GPU repair health：`status=ok`，profile `x-h264-nvenc-720-duration-policy-v5`。
+- 未手工启动发布 oneshot，未创建部署测试 Post。
