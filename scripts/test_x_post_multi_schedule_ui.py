@@ -36,6 +36,14 @@ def inline_javascript(source):
 
 
 class XPostMultiScheduleUiTest(unittest.TestCase):
+    def test_logs_show_current_schedule_runs_with_legacy_daily_context(self):
+        self.assertIn("自动运行批次", LOGS)
+        self.assertIn("当前定时批次及历史日批次", LOGS)
+        self.assertIn('item.batch_kind === "schedule" ? "定时批次" : "日批次"', LOGS)
+        self.assertIn('item.source_type === "drama" ? "短剧池" : "素材池"', LOGS)
+        self.assertIn("item.publish_time", LOGS)
+        self.assertNotIn("暂无每日运行批次", LOGS)
+
     def test_pool_pages_describe_newest_upload_first(self):
         self.assertIn("可用素材按上传时间倒序、最新上传优先", MATERIAL)
         self.assertIn("按上传时间倒序领取尚未发布过的新剧", DRAMA)

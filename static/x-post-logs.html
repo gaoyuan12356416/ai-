@@ -90,7 +90,7 @@
         </section>
 
         <section class="panel">
-          <div class="section-head"><h2>每日运行批次</h2><p>展示最近 10 次定时任务；发布前失败也会在这里留下原因。</p></div>
+          <div class="section-head"><h2>自动运行批次</h2><p>展示最近 10 次当前定时批次及历史日批次；发布前失败也会在这里留下原因。</p></div>
           <div class="table-wrap">
             <table class="run-table">
               <thead><tr><th>运行日期</th><th>批次参考日</th><th>状态</th><th>队列</th><th>已发布</th><th>失败/待确认</th><th>开始/完成</th><th>错误</th></tr></thead>
@@ -219,12 +219,16 @@
         if (!items.length) {
           const row = document.createElement("tr");
           const cell = document.createElement("td");
-          cell.colSpan = 8; cell.className = "empty"; text(cell, "暂无每日运行批次。");
+          cell.colSpan = 8; cell.className = "empty"; text(cell, "暂无自动运行批次。");
           row.appendChild(cell); body.appendChild(row); return;
         }
         items.forEach(item => {
           const row = document.createElement("tr");
-          appendCell(row, item.run_date || "—", `批次 ${item.id || "—"}`);
+          const kind = item.batch_kind === "schedule" ? "定时批次" : "日批次";
+          const scheduleMeta = item.batch_kind === "schedule"
+            ? `${item.source_type === "drama" ? "短剧池" : "素材池"} · ${item.publish_time || "—"}`
+            : "";
+          appendCell(row, item.run_date || "—", `${kind} ${item.id || "—"}${scheduleMeta ? ` · ${scheduleMeta}` : ""}`);
           appendCell(row, item.source_date || "—");
           const statusCell = document.createElement("td");
           const badge = document.createElement("span");

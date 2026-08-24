@@ -3389,6 +3389,153 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 ).fetchone()[0]
             )
 
+    def test_failed_media_recovery_rebuilds_exact_frozen_queues_once(self):
+        saved = self.save_schedule("material", [2, 3, 4], ["09:00"])
+        pools = self.store.add_pool_materials(
+            ["9901", "9902", "9903"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": material_id, "error_code": ""}
+                for material_id in ("9901", "9902", "9903")
+            ],
+        )["items"]
+        candidates = [
+            self.material_candidate(pool, account_id)
+            for pool, account_id in zip(reversed(pools), (2, 3, 4))
+        ]
+        for item in candidates:
+            item.update(
+                {
+                    "media_validation_mode": "deferred",
+                    "preflight_sha256": "",
+                    "preflight_size": 0,
+                }
+            )
+        candidates[1].update(
+            {
+                "preflight_duration": 180.0,
+                "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+                "relay_account_id": 9,
+                "relay_account_username": "premium9",
+            }
+        )
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            saved["version"],
+            candidates,
+            premium_account_ids=[],
+            premium_relay_accounts=[
+                {"id": 9, "username": "premium9", "drama_language": "en"}
+            ],
+        )
+        failed = plan["queues"][:2]
+        error_codes = ("invalid_media_dimensions", "invalid_media_codec")
+        for queue, code in zip(failed, error_codes):
+            log = self.store.reserve_log(queue["id"])
+            self.store.mark_failed_if_reserved(log["id"], code, "pre-X media failure")
+
+        published = plan["queues"][2]
+        published_log = self.store.reserve_log(published["id"])
+        self.store.prepare_log(
+            published_log["id"],
+            "https://www.dramawavew2a.com/ads/101/2116/view?published=1",
+            "https://gy.g2flow.com/s2l/published.html",
+            "published material",
+        )
+        self.store.mark_publishing(published_log["id"])
+        self.store.mark_media_uploaded(published_log["id"], "media-published")
+        self.store.mark_published(
+            published_log["id"],
+            "media-published",
+            "post-published",
+            "https://x.com/material/status/post-published",
+        )
+        self.assertEqual(
+            self.store.get_schedule_run(plan["id"])["status"],
+            "completed_with_errors",
+        )
+        prepared = []
+        for index, (queue, code) in enumerate(zip(failed, error_codes), 1):
+            prepared.append(
+                {
+                    "queue_id": queue["id"],
+                    "material_url": "https://media.example.test/repaired-%s.mp4"
+                    % queue["id"],
+                    "media_repair_trigger_code": code,
+                    "media_repair_job_key": ("%064x" % (100 + index))[-64:],
+                    "media_repair_profile": "x-h264-test-profile-v1",
+                    "media_repair_source_sha256": ("%064x" % (200 + index))[-64:],
+                    "preflight_sha256": ("%064x" % (300 + index))[-64:],
+                    "preflight_size": 2048 + index,
+                    "preflight_duration": 120.0 if index == 1 else 180.0,
+                }
+            )
+        now = datetime(2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ)
+        validated = self.store.recover_failed_material_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.FAILED_MEDIA_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            validate_only=True,
+            now=now,
+        )
+        self.assertEqual(validated["validated_queue_count"], 2)
+        self.assertEqual(validated["validated_relay_count"], 1)
+        self.assertEqual(validated["updated_count"], 0)
+
+        recovered = self.store.recover_failed_material_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.FAILED_MEDIA_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            now=now,
+        )
+        self.assertEqual(recovered["updated_count"], 2)
+        restored = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(restored["status"], "running")
+        self.assertEqual(restored["published_count"], 1)
+        self.assertEqual(restored["failed_count"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT q.status,q.media_validation_mode,q.original_material_url,"
+                "q.material_url,q.preflight_sha256,l.status,l.attempt_count,"
+                "l.error_code,COALESCE(r.status,'') "
+                "FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.id IN (?,?) ORDER BY q.id",
+                tuple(queue["id"] for queue in failed),
+            ).fetchall()
+            audit_count = conn.execute(
+                "SELECT COUNT(*) FROM x_post_schedule_failed_media_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (plan["id"],),
+            ).fetchone()[0]
+        self.assertEqual(audit_count, 2)
+        self.assertTrue(all(row[0] == "queued" for row in rows))
+        self.assertTrue(all(row[1] == "preflight" for row in rows))
+        self.assertTrue(all(row[2] and row[3] and row[2] != row[3] for row in rows))
+        self.assertTrue(all(len(row[4]) == 64 for row in rows))
+        self.assertTrue(all(row[5:8] == ("reserved", 0, "") for row in rows))
+        self.assertEqual(rows[0][8], "")
+        self.assertEqual(rows[1][8], "reserved")
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_material_schedule_queues(
+                plan["id"],
+                prepared,
+                reason=service.FAILED_MEDIA_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="a" * 40,
+                now=now,
+            )
+        self.assertEqual(
+            repeated.exception.code, "x_post_failed_media_recovery_conflict"
+        )
+
     def test_material_operator_stop_recovery_is_exact_audited_and_once(self):
         fixture = self._operator_stopped_material_run()
         run_id = fixture["run"]["id"]

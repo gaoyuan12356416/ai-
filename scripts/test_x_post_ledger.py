@@ -596,6 +596,49 @@ class XPostLedgerTests(unittest.TestCase):
         with self.assertRaises(service.XPostError):
             store.query_material_keys([])
 
+    def test_query_runs_merges_current_schedule_and_legacy_daily_ledgers(self):
+        store = service.XPostStore(self.db_path)
+        store.create_daily_plan(
+            "2026-07-23", "2026-07-22", plan_candidates()
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO x_post_schedule_run("
+                "slot_key,source_type,run_date,publish_time,timezone,config_version,"
+                "account_ids_json,status,expected_count,queued_count,published_count,"
+                "failed_count,unknown_count,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "material:2026-08-24:11:00",
+                    "material",
+                    "2026-08-24",
+                    "11:00",
+                    service.SCHEDULE_TIMEZONE,
+                    1,
+                    "[2,3,4]",
+                    "completed_with_errors",
+                    3,
+                    3,
+                    2,
+                    1,
+                    0,
+                    "2026-08-24T03:00:00Z",
+                    "2026-08-24T03:01:00Z",
+                ),
+            )
+            conn.commit()
+
+        result = store.query_runs({"page": 1, "page_size": 20})
+        self.assertEqual(result["pagination"]["total"], 2)
+        latest, legacy = result["items"]
+        self.assertEqual(latest["batch_kind"], "schedule")
+        self.assertEqual(latest["run_date"], "2026-08-24")
+        self.assertEqual(latest["source_date"], "2026-08-23")
+        self.assertEqual(latest["source_type"], "material")
+        self.assertEqual(latest["publish_time"], "11:00")
+        self.assertEqual(legacy["batch_kind"], "daily")
+        self.assertEqual(legacy["run_date"], "2026-07-23")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
