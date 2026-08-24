@@ -1148,11 +1148,12 @@ def _preflight_material_candidates(
     accepted_by_account=None,
     repair_state=None,
 ):
-    """FIFO-plan one metadata page without downloading candidate media."""
-    del config, downloader, prober, repair_client, repair_state
+    """FIFO-preflight one page while preserving optional cross-page state."""
     target_count = len(accounts)
     if accepted_by_account is None:
         accepted_by_account = {}
+    if repair_state is None:
+        repair_state = {"attempted": 0}
     failures = []
     accounts_by_language = {}
     for account in accounts:
@@ -1171,131 +1172,190 @@ def _preflight_material_candidates(
         for language, language_accounts in accounts_by_language.items()
     }
     relay_cache = {}
-    for candidate in candidates:
-        if len(accepted_by_account) == target_count:
-            break
-        try:
-            language = canonical_drama_language(
-                candidate.get("material_language") or candidate.get("language")
+    work_root = Path(config.work_dir)
+    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
+        raise ScheduleRunError(
+            "schedule media work directory is unavailable",
+            "x_post_storage_unavailable",
+        )
+
+    def relay_for(language, target, material_id):
+        if language not in relay_cache:
+            relay_cache[language] = sidecar.premium_relay_accounts(
+                str(assignment_identity.get("run_date") or ""), language
             )
-        except (AttributeError, ValueError) as exc:
-            failures.append(
-                {
-                    "pool_item_id": (
-                        candidate.get("pool_item_id")
-                        if isinstance(candidate, dict)
-                        else None
-                    ),
-                    "material_id": str(
-                        candidate.get("material_id", "")
-                        if isinstance(candidate, dict)
-                        else ""
-                    ),
-                    "error_code": "x_account_drama_language_invalid",
-                    "error_message": redact_text(str(exc), 240),
-                }
-            )
-            continue
-        remaining_targets = [
-            account
-            for account in target_order.get(language, [])
-            if int(account["id"]) not in accepted_by_account
+        relay_options = [
+            option
+            for option in relay_cache[language]
+            if int(option["id"]) != int(target["id"])
+            and bool(option.get("long_video_eligible"))
+            and same_drama_language(option.get("drama_language"), language)
         ]
-        if not remaining_targets:
-            failures.append(
-                {
-                    "pool_item_id": candidate.get("pool_item_id"),
-                    "material_id": str(candidate.get("material_id", "") or ""),
-                    "error_code": "material_language_not_scheduled",
-                    "error_message": "当前发布账号不包含该素材语言",
-                }
-            )
-            continue
-        target = remaining_targets[0]
-        material_id = str(candidate.get("material_id", "") or "")
-        rank = len(accepted_by_account) + 1
-        try:
-            duration = float(candidate.get("source_duration") or 0)
-            if candidate.get("media_kind") == "video" and duration <= 0:
-                raise CandidatePreflightError(
-                    "source video duration metadata is missing",
-                    code="material_duration_missing",
+        relay_options = stable_shuffler(
+            relay_options,
+            _material_assignment_seed_parts(
+                assignment_identity,
+                accounts,
+                language,
+                "relay:%s:%s" % (int(target["id"]), material_id),
+            ),
+        )
+        if not relay_options:
+            raise CandidatePreflightError(
+                "no currently eligible same-language public Premium relay account is available",
+                "x_long_video_requires_premium",
+            ) from None
+        return relay_options[0]
+
+    with tempfile.TemporaryDirectory(
+        prefix="x-post-schedule-material-", dir=str(work_root)
+    ) as temporary:
+        root = Path(temporary)
+        for candidate in candidates:
+            if len(accepted_by_account) == target_count:
+                break
+            try:
+                language = canonical_drama_language(
+                    candidate.get("material_language")
+                    or candidate.get("language")
                 )
-            route_account = target
-            relay = None
-            if duration > 140 and not target.get("long_video_eligible"):
-                if language not in relay_cache:
-                    relay_cache[language] = sidecar.premium_relay_accounts(
-                        str(assignment_identity.get("run_date") or ""), language
-                    )
-                relay_options = [
-                    option
-                    for option in relay_cache[language]
-                    if int(option["id"]) != int(target["id"])
-                    and bool(option.get("long_video_eligible"))
-                    and same_drama_language(
-                        option.get("drama_language"), language
-                    )
-                ]
-                relay_options = stable_shuffler(
-                    relay_options,
-                    _material_assignment_seed_parts(
-                        assignment_identity,
-                        accounts,
-                        language,
-                        "relay:%s:%s" % (int(target["id"]), material_id),
-                    ),
-                )
-                if not relay_options:
-                    raise CandidatePreflightError(
-                        "no currently eligible same-language public Premium relay account is available",
-                        "x_long_video_requires_premium",
-                    ) from None
-                relay = relay_options[0]
-                route_account = relay
-            item = _plan_candidate(route_account, candidate, rank, timestamp)
-            item.update(
-                {
-                    "media_validation_mode": "deferred",
-                    "preflight_sha256": "",
-                    "preflight_size": 0,
-                    "preflight_duration": duration,
-                    "preflight_width": 0,
-                    "preflight_height": 0,
-                    "delivery_mode": "direct",
-                    "relay_account_id": 0,
-                    "relay_account_username": "",
-                }
-            )
-            if relay is not None:
-                item.update(
+            except (AttributeError, ValueError) as exc:
+                failures.append(
                     {
-                        "account_id": int(target["id"]),
-                        "account_username": str(target["username"]),
-                        "page_name": str(
-                            target.get("display_name", "") or target["username"]
+                        "pool_item_id": (
+                            candidate.get("pool_item_id")
+                            if isinstance(candidate, dict)
+                            else None
                         ),
-                        "page_id": str(target["x_user_id"]),
-                        "delivery_mode": "premium_relay_repost",
-                        "relay_account_id": int(relay["id"]),
-                        "relay_account_username": str(relay["username"]),
+                        "material_id": str(
+                            candidate.get("material_id", "")
+                            if isinstance(candidate, dict)
+                            else ""
+                        ),
+                        "error_code": "x_account_drama_language_invalid",
+                        "error_message": redact_text(str(exc), 240),
                     }
                 )
-        except (XPostError, CandidatePreflightError, TypeError, ValueError) as exc:
-            failures.append(
-                {
-                    "pool_item_id": candidate.get("pool_item_id"),
-                    "material_id": material_id,
-                    "error_code": str(
-                        getattr(exc, "code", "metadata_planning_failed")
-                    )[:64],
-                    "error_message": redact_text(str(exc), 240),
-                }
-            )
-            continue
-        item["source_type"] = "material"
-        item["source_date"] = source_date
-        accepted_by_account[int(target["id"])] = item
+                continue
+            remaining_targets = [
+                account
+                for account in target_order.get(language, [])
+                if int(account["id"]) not in accepted_by_account
+            ]
+            if not remaining_targets:
+                failures.append(
+                    {
+                        "pool_item_id": candidate.get("pool_item_id"),
+                        "material_id": str(
+                            candidate.get("material_id", "") or ""
+                        ),
+                        "error_code": "material_language_not_scheduled",
+                        "error_message": "当前发布账号不包含该素材语言",
+                    }
+                )
+                continue
+            target = remaining_targets[0]
+            material_id = str(candidate.get("material_id", "") or "")
+            destination = root / ("%s.bin" % material_id)
+            rank = len(accepted_by_account) + 1
+            relay = None
+            try:
+                duration = float(candidate.get("source_duration") or 0)
+                if candidate.get("media_kind") == "video" and duration <= 0:
+                    raise CandidatePreflightError(
+                        "source video duration metadata is missing",
+                        code="material_duration_missing",
+                    )
+                route_account = target
+                if duration > 140 and not target.get("long_video_eligible"):
+                    relay = relay_for(language, target, material_id)
+                    route_account = relay
+                try:
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        route_account,
+                        rank,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
+                except (
+                    XPostError,
+                    CandidatePreflightError,
+                    http.client.HTTPException,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ) as direct_error:
+                    if not (
+                        relay is None
+                        and str(getattr(direct_error, "code", "") or "")
+                        == "x_long_video_requires_premium"
+                        and not target.get("long_video_eligible")
+                    ):
+                        raise
+                    relay = relay_for(language, target, material_id)
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        relay,
+                        rank,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
+                item.update(
+                    {
+                        "media_validation_mode": "preflight",
+                        "delivery_mode": "direct",
+                        "relay_account_id": 0,
+                        "relay_account_username": "",
+                    }
+                )
+                if relay is not None:
+                    item.update(
+                        {
+                            "account_id": int(target["id"]),
+                            "account_username": str(target["username"]),
+                            "page_name": str(
+                                target.get("display_name", "")
+                                or target["username"]
+                            ),
+                            "page_id": str(target["x_user_id"]),
+                            "delivery_mode": "premium_relay_repost",
+                            "relay_account_id": int(relay["id"]),
+                            "relay_account_username": str(relay["username"]),
+                        }
+                    )
+            except (
+                XPostError,
+                CandidatePreflightError,
+                http.client.HTTPException,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                failures.append(
+                    {
+                        "pool_item_id": candidate.get("pool_item_id"),
+                        "material_id": material_id,
+                        "error_code": str(
+                            getattr(exc, "code", "media_preflight_failed")
+                        )[:64],
+                        "error_message": redact_text(str(exc), 240),
+                    }
+                )
+                continue
+            item["source_type"] = "material"
+            item["source_date"] = source_date
+            accepted_by_account[int(target["id"])] = item
     accepted = []
     for account in accounts:
         item = accepted_by_account.get(int(account["id"]))
@@ -1385,7 +1445,7 @@ def _material_candidates(
             close()
     if not planned:
         raise ScheduleRunError(
-            "no FIFO material candidate passed metadata planning",
+            "no FIFO material candidate passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
     return planned
@@ -1783,6 +1843,8 @@ def execute_schedule_tick(
         config.internal_token,
         timeout=config.internal_timeout,
     )
+    if repair_client is None:
+        repair_client = _repair_client(config)
     due_options = {
         "current": current,
         "grace_seconds": config.grace_seconds,
@@ -1813,9 +1875,10 @@ def execute_schedule_tick(
         }
 
     batches = []
+    retrying_downloader = _retrying_media_downloader(downloader)
     for identity in accepted_due:
-        # Frozen state always wins.  This query precedes token verification and
-        # source metadata reads. Scheduled planning never downloads media.
+        # Frozen state always wins. This query precedes token verification,
+        # source reads, media downloads, and GPU repair.
         existing = sidecar.query_schedule_plan(
             config.plan_query_path, identity
         )
@@ -1844,7 +1907,7 @@ def execute_schedule_tick(
                 material_loader_options = {
                     "source_date": source_date,
                     "connection_factory": connection_factory,
-                    "downloader": downloader,
+                    "downloader": retrying_downloader,
                     "prober": prober,
                     "repair_client": repair_client,
                     "timestamp": timestamp,
@@ -1879,8 +1942,9 @@ def execute_schedule_tick(
                     "candidate account order does not match frozen schedule",
                     "x_post_schedule_account_mismatch",
                 )
-            # Refresh the frozen scope immediately before the atomic plan
-            # transaction; each later publish also verifies its account.
+            # Material preflight/repair may outlive an access token. Refresh
+            # the frozen subset immediately before the atomic plan transaction;
+            # each later publish also verifies its account.
             _verify_accounts(sidecar, candidate_account_ids)
             sidecar.preflight_storage(config.storage_preflight_path)
         except Exception as exc:

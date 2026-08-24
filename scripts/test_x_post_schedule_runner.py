@@ -305,23 +305,44 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "long_video_eligible": False,
             }
         ]
-        planned, failures = _preflight_material_candidates(
-            self.config,
-            mock.Mock(),
-            candidates,
-            accounts,
-            source_date="2026-07-27",
-            timestamp=1,
-            downloader=lambda *_args, **_kwargs: self.fail("download called"),
-            prober=lambda *_args, **_kwargs: self.fail("probe called"),
-            repair_client=mock.Mock(side_effect=AssertionError("repair called")),
-            assignment_identity={
-                "source_type": "material",
-                "run_date": "2026-07-27",
-                "publish_time": "10:00",
-                "version": 3,
-            },
-        )
+        preflighted = []
+
+        def preflight(_config, candidate, account, *_args, **_kwargs):
+            preflighted.append((candidate["material_id"], account["id"]))
+            return {
+                **candidate,
+                "account_id": account["id"],
+                "account_username": account["username"],
+                "page_name": account["display_name"],
+                "page_id": account["x_user_id"],
+                "preflight_sha256": "a" * 64,
+                "preflight_size": 5,
+                "preflight_duration": 30.0,
+                "preflight_width": 720,
+                "preflight_height": 1280,
+            }
+
+        with mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            planned, failures = _preflight_material_candidates(
+                self.config,
+                mock.Mock(),
+                candidates,
+                accounts,
+                source_date="2026-07-27",
+                timestamp=1,
+                downloader=object(),
+                prober=object(),
+                repair_client=object(),
+                assignment_identity={
+                    "source_type": "material",
+                    "run_date": "2026-07-27",
+                    "publish_time": "10:00",
+                    "version": 3,
+                },
+            )
         self.assertEqual([item["pool_item_id"] for item in planned], [1])
         self.assertEqual(
             failures,
@@ -334,9 +355,117 @@ class ScheduleRunnerTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(planned[0]["media_validation_mode"], "deferred")
-        self.assertEqual(planned[0]["preflight_sha256"], "")
-        self.assertEqual(planned[0]["preflight_size"], 0)
+        self.assertEqual(preflighted, [("en-next", 11)])
+        self.assertEqual(planned[0]["media_validation_mode"], "preflight")
+        self.assertEqual(planned[0]["preflight_sha256"], "a" * 64)
+        self.assertEqual(planned[0]["preflight_size"], 5)
+
+    def test_material_preflight_repairs_codec_and_dimensions_before_freeze(self):
+        candidate = {
+            "pool_item_id": 7,
+            "pool_created_at": "2026-07-27T00:00:00Z",
+            "material_id": "9007",
+            "material_language": "en",
+            "media_kind": "video",
+            "source_duration": 30,
+            "content_id": "CONTENT-9007",
+            "material_url": "https://media.example.test/9007.mp4",
+            "material_name": "Episode 9007",
+            "drama_name": "Drama",
+            "tag": "Drama",
+            "description": "A complete episode description.",
+        }
+        account = {
+            "id": 11,
+            "username": "english11",
+            "x_user_id": "x11",
+            "display_name": "English 11",
+            "drama_language": "en",
+            "long_video_eligible": False,
+        }
+        valid_probe = {
+            "codec": "h264",
+            "pixel_format": "yuv420p",
+            "audio_codec": "aac",
+            "duration": 30.0,
+            "width": 720,
+            "height": 1280,
+            "frame_rate": 30.0,
+            "size": 8,
+        }
+
+        for trigger_code in (
+            "invalid_media_codec",
+            "invalid_media_dimensions",
+        ):
+            with self.subTest(trigger_code=trigger_code):
+                repair_payloads = []
+
+                class Repair:
+                    def repair(self, payload):
+                        repair_payloads.append(dict(payload))
+                        return {
+                            "output_url": "https://media.example.test/repaired.mp4",
+                            "output_sha256": "b" * 64,
+                            "output_size": 8,
+                            "probe": dict(valid_probe),
+                        }
+
+                def downloader(url, destination, _hosts, max_bytes, timeout):
+                    del max_bytes, timeout
+                    if url.endswith("repaired.mp4"):
+                        Path(destination).write_bytes(b"repaired")
+                        return {
+                            "size": 8,
+                            "sha256": "b" * 64,
+                            "media_type": "video/mp4",
+                            "media_kind": "video",
+                        }
+                    Path(destination).write_bytes(b"source")
+                    return {
+                        "size": 6,
+                        "sha256": "a" * 64,
+                        "media_type": "video/mp4",
+                        "media_kind": "video",
+                    }
+
+                def prober(path, **_kwargs):
+                    if Path(path).read_bytes() == b"source":
+                        raise XPostError(trigger_code, "repairable media", 422)
+                    return dict(valid_probe)
+
+                planned, failures = _preflight_material_candidates(
+                    self.config,
+                    mock.Mock(),
+                    [dict(candidate)],
+                    [dict(account)],
+                    source_date="2026-07-27",
+                    timestamp=1,
+                    downloader=downloader,
+                    prober=prober,
+                    repair_client=Repair(),
+                    assignment_identity={
+                        "source_type": "material",
+                        "run_date": "2026-07-27",
+                        "publish_time": "10:00",
+                        "version": 3,
+                    },
+                )
+
+                self.assertEqual(failures, [])
+                self.assertEqual(len(planned), 1)
+                item = planned[0]
+                self.assertEqual(item["media_validation_mode"], "preflight")
+                self.assertEqual(item["original_material_url"], candidate["material_url"])
+                self.assertEqual(item["material_url"], "https://media.example.test/repaired.mp4")
+                self.assertEqual(item["media_repair_trigger_code"], trigger_code)
+                self.assertEqual(len(item["media_repair_job_key"]), 64)
+                self.assertEqual(item["media_repair_source_sha256"], "a" * 64)
+                self.assertEqual(item["preflight_sha256"], "b" * 64)
+                self.assertEqual(item["preflight_size"], 8)
+                self.assertEqual(item["preflight_width"], 720)
+                self.assertEqual(item["preflight_height"], 1280)
+                self.assertEqual(repair_payloads[0]["trigger_code"], trigger_code)
 
     def test_material_scan_continues_after_first_hydration_batch(self):
         pool_items = [
@@ -393,9 +522,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                         "en" if int(item["id"]) >= 50 else "ja"
                     ),
                     "media_kind": "video",
-                    "source_duration": (
-                        200 if int(item["id"]) == 50 else 30
-                    ),
+                    "source_duration": 30,
                     "content_id": "CONTENT-%s" % item["id"],
                     "material_url": "https://media.example.test/%s.mp4"
                     % item["id"],
@@ -408,9 +535,39 @@ class ScheduleRunnerTests(unittest.TestCase):
             ], []
 
         sidecar = Sidecar()
+
+        def preflight(_config, candidate, account, *_args, **kwargs):
+            preflighted.append(
+                (
+                    str(candidate["material_id"]),
+                    int(account["id"]),
+                    id(kwargs["repair_state"]),
+                )
+            )
+            if str(candidate["material_id"]) == "9050":
+                raise CandidatePreflightError(
+                    "source codec cannot be repaired",
+                    code="invalid_media_codec",
+                )
+            return {
+                **candidate,
+                "account_id": int(account["id"]),
+                "account_username": str(account["username"]),
+                "page_name": str(account["display_name"]),
+                "page_id": str(account["x_user_id"]),
+                "preflight_sha256": "c" * 64,
+                "preflight_size": 7,
+                "preflight_duration": 30.0,
+                "preflight_width": 720,
+                "preflight_height": 1280,
+            }
+
         with mock.patch(
             "scripts.x_post_schedule_runner.select_pool_candidates",
             side_effect=hydrate,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
         ):
             result = self.execute(
                 sidecar,
@@ -439,10 +596,14 @@ class ScheduleRunnerTests(unittest.TestCase):
             ],
             [(51, "9051")],
         )
-        self.assertEqual(preflighted, [])
+        self.assertEqual(
+            [(material_id, account_id) for material_id, account_id, _ in preflighted],
+            [("9050", 11), ("9051", 11)],
+        )
+        self.assertEqual(len({state_id for _, _, state_id in preflighted}), 1)
         self.assertEqual(
             create_call[2]["candidates"][0]["media_validation_mode"],
-            "deferred",
+            "preflight",
         )
 
     def test_fifo_replay_accepts_current_language_skip(self):

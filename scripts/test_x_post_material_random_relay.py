@@ -87,25 +87,40 @@ class MaterialAssignmentTests(unittest.TestCase):
         self.temp.cleanup()
 
     def preflight(self, candidates, accounts, relays=(), shuffler=None):
+        def media_preflight(_config, candidate, account_item, *_args, **_kwargs):
+            return {
+                **candidate,
+                "account_id": int(account_item["id"]),
+                "account_username": str(account_item["username"]),
+                "page_name": str(account_item["display_name"]),
+                "page_id": str(account_item["x_user_id"]),
+                "preflight_sha256": "a" * 64,
+                "preflight_size": 5,
+                "preflight_duration": float(candidate["source_duration"]),
+                "preflight_width": 720,
+                "preflight_height": 1280,
+            }
+
         options = {
             "source_date": "2026-08-16",
             "timestamp": 1786900000,
-            "downloader": mock.Mock(side_effect=AssertionError("download called")),
-            "prober": mock.Mock(side_effect=AssertionError("probe called")),
-            "repair_client": mock.Mock(
-                side_effect=AssertionError("repair called")
-            ),
+            "downloader": object(),
+            "prober": object(),
+            "repair_client": object(),
             "assignment_identity": self.identity,
         }
         if shuffler is not None:
             options["stable_shuffler"] = shuffler
-        return runner._preflight_material_candidates(
-            self.config,
-            FakeRelaySidecar(relays),
-            candidates,
-            accounts,
-            **options,
-        )
+        with mock.patch.object(
+            runner, "_preflight_candidate", side_effect=media_preflight
+        ):
+            return runner._preflight_material_candidates(
+                self.config,
+                FakeRelaySidecar(relays),
+                candidates,
+                accounts,
+                **options,
+            )
 
     def test_stable_seed_and_injected_shuffle_have_no_probability_assertion(self):
         parts = ("target", "material", "2026-08-17", "09:17", 7, "en")
@@ -128,9 +143,9 @@ class MaterialAssignmentTests(unittest.TestCase):
         )
         self.assertFalse(failures)
         self.assertEqual(direct[0]["delivery_mode"], "direct")
-        self.assertEqual(direct[0]["media_validation_mode"], "deferred")
-        self.assertEqual(direct[0]["preflight_sha256"], "")
-        self.assertEqual(direct[0]["preflight_size"], 0)
+        self.assertEqual(direct[0]["media_validation_mode"], "preflight")
+        self.assertEqual(direct[0]["preflight_sha256"], "a" * 64)
+        self.assertEqual(direct[0]["preflight_size"], 5)
 
         def choose_last(items, _seed):
             return list(items)[::-1]
