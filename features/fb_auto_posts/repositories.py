@@ -200,7 +200,7 @@ class PagePoolRepository:
                    COUNT(DISTINCT i.page_id) AS total_pages,
                    COUNT(DISTINCT CASE WHEN EXISTS (
                        SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_page_post p
-                        WHERE p.page_id=i.page_id AND p.status=0
+                        WHERE p.page_id=i.page_id AND p.status<>1
                           AND TRIM(p.page_access_token)<>''
                    ) THEN i.page_id END) AS publishable_pages
               FROM `{self.mysql.schema}`.ads_facebook_page_group g
@@ -226,10 +226,10 @@ class PagePoolRepository:
                    CAST(i.page_id AS CHAR) AS page_id,COALESCE(i.timezone,'') AS timezone,
                    LOWER(TRIM(COALESCE(i.language,''))) AS language,
                    COALESCE((SELECT MAX(TRIM(pn.page_name)) FROM `{self.mysql.schema}`.ads_facebook_page_post pn
-                              WHERE pn.page_id=i.page_id AND pn.status=0
+                              WHERE pn.page_id=i.page_id AND pn.status<>1
                                 AND TRIM(pn.page_access_token)<>'' AND TRIM(COALESCE(pn.page_name,''))<>''),'') AS page_name,
                    (SELECT COUNT(*) FROM `{self.mysql.schema}`.ads_facebook_page_post p
-                     WHERE p.page_id=i.page_id AND p.status=0 AND TRIM(p.page_access_token)<>'') AS eligible_token_count
+                     WHERE p.page_id=i.page_id AND p.status<>1 AND TRIM(p.page_access_token)<>'') AS eligible_token_count
               FROM `{self.mysql.schema}`.ads_facebook_page_group g
               JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
              WHERE g.is_delete=0 AND g.type IN (0,1) AND i.deleted_at=0 AND TRIM(i.page_id)<>''
@@ -272,12 +272,14 @@ class PagePoolRepository:
         return [{"queue_id": str(row.get("queue_id") or ""), "queue_name": str(row.get("queue_name") or "")[:200], "group_id": str(row.get("group_id") or ""), "selected_group_id": str(row.get("selected_group_id") or ""), "overlap_page_id": str(row.get("overlap_page_id") or ""), "status": "enabled"} for row in self.mysql.select(sql, ids)]
 
     def eligible_credentials(self, page_id: str) -> List[PageCredential]:
+        # Page authorization status is mutable.  Keep this as a live query on
+        # every execute/reconcile call instead of caching the planning snapshot.
         if not re.fullmatch(r"[1-9][0-9]{3,40}", str(page_id or "")):
             raise RepositoryError("fb_auto_page_id_invalid", "Page ID无效", 400)
         sql = f"""
             SELECT CAST(id AS CHAR) AS credential_id,CAST(page_id AS CHAR) AS page_id,CAST(fb_user_id AS CHAR) AS fb_user_id,page_access_token
               FROM `{self.mysql.schema}`.ads_facebook_page_post
-             WHERE page_id=%s AND status=0 AND TRIM(page_access_token)<>''
+             WHERE page_id=%s AND status<>1 AND TRIM(page_access_token)<>''
              ORDER BY fb_user_id
         """
         rows = self.mysql.select(sql, (str(page_id),))

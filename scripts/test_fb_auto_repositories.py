@@ -36,6 +36,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual((groups[0].name, groups[0].app_id, groups[0].publishable_pages), ("DW Post", "1479", 2))
         self.assertIn("g.user_id", mysql.calls[0][0]); self.assertNotIn("g.owner_user_id", mysql.calls[0][0])
         self.assertIn("g.type IN (0,1)", mysql.calls[0][0])
+        self.assertIn("p.status<>1", mysql.calls[0][0]); self.assertNotIn("p.status=0", mysql.calls[0][0])
 
     def test_overlapping_membership_becomes_one_page_with_lineage(self):
         mysql = FakeMySQL(); pages = PagePoolRepository(mysql).list_pages(["6", "18"], is_admin=True, owner_user_id="")
@@ -43,11 +44,14 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(pages[0].page_name, "FreeReels")
         self.assertIn("g.type IN (0,1)", mysql.calls[0][0])
         self.assertIn("MAX(TRIM(pn.page_name))", mysql.calls[0][0])
+        self.assertIn("pn.status<>1", mysql.calls[0][0]); self.assertIn("p.status<>1", mysql.calls[0][0])
+        self.assertNotIn("pn.status=0", mysql.calls[0][0]); self.assertNotIn("p.status=0", mysql.calls[0][0])
 
     def test_credentials_dedupe_by_token_in_memory(self):
-        credentials = PagePoolRepository(FakeMySQL()).eligible_credentials("10001")
+        mysql = FakeMySQL(); credentials = PagePoolRepository(mysql).eligible_credentials("10001")
         self.assertEqual([item.credential_id for item in credentials], ["1", "3"])
         self.assertNotIn("secret", repr(credentials))
+        self.assertIn("status<>1", mysql.calls[0][0]); self.assertNotIn("status=0", mysql.calls[0][0])
 
     def test_legacy_conflict_detects_same_page_across_different_groups(self):
         class MySQL(FakeMySQL):

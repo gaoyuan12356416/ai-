@@ -41,6 +41,18 @@ class PublisherTests(unittest.TestCase):
         store=Store(); graph=Graph([GraphResult("definite_failure",error_code="fb_graph_190"),GraphResult("success",post_id="vid_9")]); result=AutoPostExecutor(store,Pages(),graph,live_enabled=True).execute_next("w")
         self.assertEqual(result["status"],"submitted"); self.assertEqual(graph.calls,2); self.assertEqual(len(store.attempts),2)
 
+    def test_each_execution_refreshes_dynamic_page_credentials(self):
+        class DynamicPages(Pages):
+            def __init__(self): self.calls=0
+            def eligible_credentials(self, page):
+                self.calls+=1
+                return [] if self.calls==1 else super().eligible_credentials(page)
+        store=Store(); pages=DynamicPages(); graph=Graph([GraphResult("success",post_id="vid_9")])
+        executor=AutoPostExecutor(store,pages,graph,live_enabled=True,min_request_interval_seconds=0)
+        self.assertEqual(executor.execute_next("w1")["error_code"],"fb_page_missing_eligible_token")
+        self.assertEqual(executor.execute_next("w2")["status"],"submitted")
+        self.assertEqual(pages.calls,2); self.assertEqual(graph.calls,1)
+
     def test_unknown_never_fails_over(self):
         store=Store(); graph=Graph([GraphResult("unknown",error_code="fb_graph_network_outcome_unknown")]); result=AutoPostExecutor(store,Pages(),graph,live_enabled=True).execute_next("w")
         self.assertEqual(result["status"],"unknown"); self.assertEqual(graph.calls,1)

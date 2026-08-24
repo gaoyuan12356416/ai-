@@ -26,7 +26,7 @@
 
 内部路由：`tick` 只持久化未来 due slots；`plan-next` 冻结 Page、指标代次和源素材；`prepare-next` 仅调用独立 GPU 制作；`execute-next` 仅领取到时 ready 任务；`reconcile-next` 只读查询已返回 ID 的 Graph 对象。
 
-组 DTO 含 `group_id/name/group_type/group_label/app_id/product/total_pages/publishable_pages/missing_token_pages`。运行汇总含 total/publishable/missing/overlap/queued/skipped。
+组 DTO 含 `group_id/name/group_type/group_label/app_id/product/total_pages/publishable_pages/missing_token_pages`。可发布 Token 的当前口径是 `status<>1` 且 Token 非空；计划统计与每次 execute/reconcile 都实时读取，不缓存授权状态。运行汇总含 total/publishable/missing/overlap/queued/skipped。
 
 ## 错误码
 
@@ -39,7 +39,7 @@
 | `fb_auto_previous_run_backlog` | 前一时隙未完成 |
 | `fb_auto_enabled_template_edit_denied` | 已启用模板须先停用再编辑 |
 | `fb_auto_page_pool_empty/unpublishable` | 空组/零可发布Page |
-| `fb_page_missing_eligible_token` | 执行时无Token |
+| `fb_page_missing_eligible_token` | 执行时没有非被封且非空的Token |
 | `fb_auto_no_eligible_video` | 无合格视频 |
 | `fb_auto_video_template_required` | 视频制作模板缺失或枚举不支持 |
 | `fb_auto_metric_window_not_ready` | 指标窗口缺完整 READY 日 |

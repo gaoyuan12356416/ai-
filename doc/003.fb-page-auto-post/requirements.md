@@ -4,7 +4,7 @@
 
 运营需要在 AI 后台维护 Facebook Page 自动视频发布模板：选择 Page 池、配置与 X 自动发布一致的短剧/素材指标筛选、发布文案和固定/随机频率，系统在每个时隙为当时可发布的每个 Page 冻结一条任务。
 
-只读盘点：35 个有效组（26 Post、9 AD），4,243 条成员关系、4,002 个唯一 Page；1,157 个 Page 有 `status=0` 且非空 Token，2,845 个缺少可用 Token。每个 Page 可能有 1–8 个 Token。旧表 `ads_facebook_post_publish_queue` 仍可能按 `execute_switch=1` 运行。
+初始只读盘点：35 个有效组（26 Post、9 AD），4,243 条成员关系、4,002 个唯一 Page；旧口径有 1,157 个 Page 具备 `status=0` 且非空 Token。2026-08-24 起资格口径改为仅排除 `status=1（被封）`，所有非 1 状态仍须 Token 非空；Page 状态动态变化，计划统计与每次 execute/reconcile 都必须重新读取实时授权，禁止缓存计划快照。每个 Page 可能有 1–8 个 Token。旧表 `ads_facebook_post_publish_queue` 仍可能按 `execute_switch=1` 运行。
 
 ## 目标
 
@@ -46,7 +46,7 @@
 5. 一个运行只执行一次有界候选查询；不得按 Page 重扫指标表。
 5A. 同 Page 的 `planned/preparing/ready/running/submitted/unknown` 素材始终视为预留；`published/failed_without_retry` 在冷却窗口内占用。最终冷却重查、候选改选和 task 插入必须处于同一 `BEGIN IMMEDIATE`，并发 future planner 不得预留同一素材；首选被占用时改选冻结候选中的下一条。
 6. 同模板上一个已到发布时间的任务仍 `planned/preparing/ready/running` 时返回中文积压原因；尚未到期的未来时隙可提前冻结和制作。
-7. 无 Token 保存 `fb_page_missing_eligible_token`；无视频保存 `fb_auto_no_eligible_video`；冲突保存 `fb_auto_page_task_conflict`。
+7. 没有“非被封且 Token 非空”的授权时保存 `fb_page_missing_eligible_token`；无视频保存 `fb_auto_no_eligible_video`；冲突保存 `fb_auto_page_task_conflict`。Page/Token 状态是动态数据，执行每个任务和对账前都重新查询，不能沿用运行冻结时的 Token 列表。
 8. Graph 发布非 2xx 且无 ID 才是明确失败；断连/超时/非法或 2xx 缺 ID 是终态 unknown；任何返回 ID 都禁止重发。对账遇当前 Token 的明确凭证/权限失败时随机不放回尝试其余健康 Token；处理失败进入 `failed_without_retry`；全部 Token 明确无法对账进入保留 Graph ID 的终态 `unknown/attention`；网络或无法判定仍为 `submitted`，只允许稍后 GET 对账。
 8A. 最坏 8 Token 路径按 `8×120秒+开销` 预算；execute/reconcile 在 1,200 秒租约内完成，第8个 Token 约968秒返回成功 ID 时仍须原子落账，不能被 stale cleanup 或并发对账抢占。
 9. 尝试审计仅保存序号、Token 行 ID、`fb_user_id`、安全错误码/trace ID；不保存 Token 或哈希。
