@@ -751,6 +751,10 @@ class XAccountsAppContractTest(unittest.TestCase):
                 "material_id": "5221348",
             },
         )
+        self.assertEqual(
+            parse_pool("availability=deferred"),
+            {"page": 1, "page_size": 20, "availability": "deferred"},
+        )
         with self.assertRaises(ValueError):
             parse_pool("access_token=secret")
         with self.assertRaises(ValueError):
@@ -773,6 +777,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('navigation_item="xPostMaterialPool"', post_route)
         self.assertIn("validation_checks=validation_checks", post_route)
         self.assertIn("append_audit_log(", post_route)
+        self.assertIn('"deferred_count": int(', post_route)
         self.assertIn("no_store=True", post_route)
 
         delete_route = source_between(
