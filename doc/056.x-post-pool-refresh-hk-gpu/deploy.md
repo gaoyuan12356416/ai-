@@ -23,7 +23,7 @@ CPU 发布 selector/schedule 修复；香港 GPU 新增 X media repair worker �
 4. 完成本机 health、鉴权拒绝、NVENC 样例和 COS 配置启动校验。
 5. 停旧 GPU tunnel，启香港 tunnel；验证 CPU 18820 的 sshd 对端与 health。失败立即恢复旧 tunnel。
 6. CPU 发布 GitHub commit，重启 sidecar，执行聚焦 health/测试。
-7. 对 8 个修复/COS 素材运行显式 backfill；刷新四类历史状态；删除冻结 3 条。
+7. 对 8 个修复/COS 素材运行带 `--force-repair` 的显式 backfill；刷新四类历史状态；删除冻结 3 条。
 8. 核对错误分布、deferred、队列/日志、timer、systemd、SQLite integrity。
 
 ## 验证步骤
@@ -31,7 +31,7 @@ CPU 发布 selector/schedule 修复；香港 GPU 新增 X media repair worker �
 - `systemctl is-active x-post-media-repair.service x-post-media-repair-tunnel.service`
 - `curl http://127.0.0.1:8820/health`（香港）与 `curl http://127.0.0.1:18820/health`（CPU）
 - `nvidia-smi`、NVENC 样例 `ffmpeg` + `ffprobe`
-- `python scripts/x_post_media_repair_backfill.py --material-id ... --report-path ...`
+- `python scripts/x_post_media_repair_backfill.py --force-repair --material-id ... --report-path ...`
 - SQLite 精确数量、指纹、`PRAGMA integrity_check`、队列/日志前后差异为 0。
 
 ## 回滚方案

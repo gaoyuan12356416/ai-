@@ -202,7 +202,7 @@ class MediaRepairTests(unittest.TestCase):
                 media_repair.WorkerConfig.from_env()
         self.assertEqual(caught.exception.code, "invalid_configuration")
 
-    def test_request_contract_is_exact_and_only_three_triggers_are_repairable(self):
+    def test_request_contract_is_exact_and_only_supported_triggers_are_repairable(self):
         request = media_repair.validate_request(make_request())
         self.assertEqual(request["profile"], media_repair.REPAIR_PROFILE)
         self.assertEqual(request["duration_policy"], "standard")
@@ -217,6 +217,7 @@ class MediaRepairTests(unittest.TestCase):
             "invalid_media_codec",
             "invalid_media_dimensions",
             "invalid_media_duration",
+            "operator_forced_repair",
         ):
             request = media_repair.validate_request(make_request(trigger_code=trigger))
             self.assertEqual(request["trigger_code"], trigger)

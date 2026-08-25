@@ -268,6 +268,105 @@ class BackfillTests(unittest.TestCase):
         self.assertNotIn("https://", serialized)
         self.assertNotIn("repair-secret", serialized)
 
+    def test_long_video_uses_premium_duration_policy_without_false_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.config(temporary)
+            sidecar = FakeSidecar((10,))
+            probe_limits = []
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                Path(destination).write_bytes(b"long-video")
+                return {
+                    "size": 10,
+                    "sha256": "a" * 64,
+                    "media_type": "video/mp4",
+                }
+
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+                probe_limits.append(max_duration_seconds)
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 180.0,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            class NoRepair:
+                def repair(self, _payload):
+                    raise AssertionError("valid long media must not be repaired")
+
+            result = execute_backfill(
+                config,
+                ["10"],
+                sidecar=sidecar,
+                repair_client=NoRepair(),
+                connection_factory=lambda _config: FakeConnection(),
+                pool_candidate_loader=hydrated_loader,
+                downloader=downloader,
+                prober=prober,
+                lock_factory=acquired_lock,
+                now=NOW,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["results"][0]["status"], "validated_ready")
+        self.assertEqual(result["repair_attempted_count"], 0)
+        self.assertEqual(probe_limits, [14400.0])
+
+    def test_force_repair_regenerates_valid_source_with_explicit_audit_code(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.config(temporary)
+            sidecar = FakeSidecar((10,))
+
+            class Repair:
+                def __init__(self):
+                    self.calls = []
+
+                def repair(self, payload):
+                    self.calls.append(dict(payload))
+                    return repair_response(payload["job_key"])
+
+            def valid_prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 30.0,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            repair = Repair()
+            result = execute_backfill(
+                config,
+                ["10"],
+                sidecar=sidecar,
+                repair_client=repair,
+                connection_factory=lambda _config: FakeConnection(),
+                pool_candidate_loader=hydrated_loader,
+                downloader=media_downloader,
+                prober=valid_prober,
+                lock_factory=acquired_lock,
+                now=NOW,
+                force_repair=True,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["force_repair"])
+        self.assertEqual(result["repair_attempted_count"], 1)
+        self.assertEqual(result["results"][0]["status"], "repaired_ready")
+        self.assertEqual(len(repair.calls), 1)
+        self.assertEqual(
+            repair.calls[0]["trigger_code"], "operator_forced_repair"
+        )
+        self.assertEqual(repair.calls[0]["duration_policy"], "premium")
+
     def test_failed_repair_records_safe_error_and_continues_fifo(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = self.config(temporary)

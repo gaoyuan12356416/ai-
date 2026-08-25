@@ -95,6 +95,12 @@ _BACKFILL_ACCOUNT = {
     "username": "x_media_repair",
     "x_user_id": "1",
     "display_name": "X Media Repair",
+    # Backfill validates media capability, not a target account assignment.
+    # Use the platform's confirmed Premium duration ceiling so long media is
+    # not incorrectly frozen before the scheduler can choose a relay account.
+    "subscription_type": "premium",
+    "premium_subscriber": True,
+    "long_video_eligible": True,
 }
 
 
@@ -363,6 +369,7 @@ def _execute_locked_backfill(
     downloader,
     prober,
     now,
+    force_repair,
 ):
     sidecar.preflight_storage(config.storage_preflight_path)
     available = sidecar.available_pool_items(
@@ -483,10 +490,16 @@ def _execute_locked_backfill(
                 # so keep the one-attempt guard per material without making
                 # later requested IDs depend on an earlier material's result.
                 item_repair_state = {"attempted": 0}
+                backfill_account = dict(_BACKFILL_ACCOUNT)
+                backfill_account["drama_language"] = (
+                    candidate.get("material_language")
+                    or candidate.get("language")
+                    or "en"
+                )
                 item = _preflight_candidate(
                     config,
                     candidate,
-                    _BACKFILL_ACCOUNT,
+                    backfill_account,
                     1,
                     max(1, int(shanghai_now(now).timestamp())),
                     root / ("%s.mp4" % candidate["material_id"]),
@@ -494,6 +507,7 @@ def _execute_locked_backfill(
                     prober,
                     repair_client=repair_client,
                     repair_state=item_repair_state,
+                    force_repair=force_repair,
                 )
             except (
                 XPostError,
@@ -564,6 +578,7 @@ def _execute_locked_backfill(
         "failed_count": failed_count,
         "repair_attempted_count": repair_attempted_count,
         "pool_checks_updated_count": updated,
+        "force_repair": bool(force_repair),
         "results": results,
     }
 
@@ -580,6 +595,7 @@ def execute_backfill(
     prober=probe_media,
     lock_factory=process_lock,
     now=None,
+    force_repair=False,
 ):
     material_ids = normalize_material_ids(material_ids)
     config.validate()
@@ -610,6 +626,7 @@ def execute_backfill(
                 "failed_count": 0,
                 "repair_attempted_count": 0,
                 "pool_checks_updated_count": 0,
+                "force_repair": bool(force_repair),
                 "results": [],
             }
         return _execute_locked_backfill(
@@ -622,6 +639,7 @@ def execute_backfill(
             downloader=downloader,
             prober=prober,
             now=now,
+            force_repair=bool(force_repair),
         )
 
 
@@ -642,6 +660,14 @@ def _argument_parser():
         "--report-path",
         help="Optional absolute path for an atomic JSON report.",
     )
+    parser.add_argument(
+        "--force-repair",
+        action="store_true",
+        help=(
+            "Regenerate every explicitly selected video on the GPU even "
+            "when its source currently passes media probing."
+        ),
+    )
     return parser
 
 
@@ -660,6 +686,7 @@ def main(argv=None):
                 config,
                 args.material_id,
                 now=datetime.now().astimezone(),
+                force_repair=args.force_repair,
             )
     except (
         BackfillError,
@@ -678,6 +705,7 @@ def main(argv=None):
             "failed_count": len(args.material_id or ()),
             "repair_attempted_count": 0,
             "pool_checks_updated_count": 0,
+            "force_repair": bool(args.force_repair),
             "results": [],
         }
     except Exception as exc:
@@ -691,6 +719,7 @@ def main(argv=None):
             "failed_count": len(args.material_id or ()),
             "repair_attempted_count": 0,
             "pool_checks_updated_count": 0,
+            "force_repair": bool(args.force_repair),
             "results": [],
         }
     report_write_failed = False

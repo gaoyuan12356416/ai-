@@ -45,6 +45,8 @@ X 素材池保留了若干旧规则或旧拓扑产生的错误状态：长视频
 
 - `features/x_posts/selector.py`：移除新旧选择路径的标签 gate。
 - `scripts/x_post_schedule_runner.py`：修正语言容量语义，保留 Premium relay 路由。
+- `scripts/x_post_media_repair_backfill.py`：使用 Premium 时长策略，并为显式 ID 增加可审计的强制重制模式。
+- `scripts/x_post_daily_runner.py` / `features/x_posts/media_repair.py`：复用既有预检、NVENC、COS HEAD 闭环，新增仅由显式回填触发的 `operator_forced_repair` 原因。
 - `deploy/x-post-media-repair-hk*.service`：香港 GPU worker 与隧道基线。
 - `deploy/x-post-media-repair.requirements.txt`：冻结 Python 依赖。
 
@@ -54,7 +56,7 @@ X 素材池保留了若干旧规则或旧拓扑产生的错误状态：长视频
 
 ### API / 接口
 
-现有内部接口不变：素材池 available/check、Premium relay accounts、GPU `/health` 与 `/internal/x-post-media-repair`。
+现有内部路由不变：素材池 available/check、Premium relay accounts、GPU `/health` 与 `/internal/x-post-media-repair`。GPU 请求的 `trigger_code` allowlist 增加 `operator_forced_repair`；日常自动调度不会产生该值。
 
 ### 异常与边界
 
@@ -62,6 +64,7 @@ X 素材池保留了若干旧规则或旧拓扑产生的错误状态：长视频
 - 香港 GPU worker、COS HEAD 或 CPU 18820 健康检查失败即恢复旧 GPU 隧道。
 - `drama_not_yet_deliverable` 始终排除在清理与状态清空之外。
 - 回填失败只更新对应素材为当前错误，不触发发布。
+- `--force-repair` 只接受工具本身已要求的显式、去重素材 ID；使用独立确定性 job key，既不复用旧自动修复任务，也不会因命令重试重复转码已完成的新任务。
 
 ## 验收标准
 

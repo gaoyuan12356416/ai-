@@ -12,6 +12,7 @@ X selector、随机排期语言分配、香港 GPU systemd/依赖基线、回归
 | 修复语言容量误报 | Codex | `scripts/x_post_schedule_runner.py` | 完成 |
 | 增补回归 | Codex | `scripts/test_x_post_*.py` | 完成 |
 | 香港 GPU 部署基线 | Codex | `deploy/x-post-media-repair-hk*` | 完成 |
+| 修复显式回填长视频误判并增加强制重制 | Codex | daily/backfill/worker contract | 完成 |
 | 生产迁移与状态处理 | Codex | CPU/旧 GPU/香港 GPU | 待部署 |
 
 ## 编译 / 构建命令
@@ -29,4 +30,4 @@ python -m unittest scripts.test_x_post_daily scripts.test_x_post_material_pool_s
 
 ## 完成记录
 
-- 2026-08-25：完成代码变更与 164 项聚焦测试。
+- 2026-08-25：完成首轮代码变更与 165 项聚焦测试；生产首跑发现回填虚拟账号未声明 Premium，补充强制重制闭环后重新回归。

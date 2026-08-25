@@ -66,6 +66,7 @@ REPAIRABLE_MEDIA_CODES = frozenset(
         "invalid_media_codec",
         "invalid_media_dimensions",
         "invalid_media_duration",
+        "operator_forced_repair",
     }
 )
 DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v5"
@@ -1435,7 +1436,14 @@ def _duration_limit(account):
     )
 
 
-def _repair_job_key(item, source_sha256, profile, duration_policy):
+def _repair_job_key(
+    item,
+    source_sha256,
+    profile,
+    duration_policy,
+    *,
+    operator_forced=False,
+):
     material_id = _normalize_repair_material_id(item["material_id"])
     repair_item_id = item.get("pool_item_id")
     if repair_item_id in (None, ""):
@@ -1451,7 +1459,11 @@ def _repair_job_key(item, source_sha256, profile, duration_policy):
         )
     identity = "\0".join(
         (
-            "x-post-media-repair-v3",
+            (
+                "x-post-media-repair-operator-force-v1"
+                if operator_forced
+                else "x-post-media-repair-v3"
+            ),
             material_id,
             str(int(repair_item_id)),
             str(source_sha256),
@@ -1528,6 +1540,7 @@ def _preflight_candidate(
     repair_client=None,
     repair_state=None,
     image_prober=probe_image,
+    force_repair=False,
 ):
     """Validate one FIFO candidate and perform at most one repair attempt."""
     try:
@@ -1572,6 +1585,11 @@ def _preflight_candidate(
                 422,
             )
         if actual_media_kind == "image":
+            if force_repair:
+                raise CandidatePreflightError(
+                    "operator-forced media repair supports video only",
+                    code="source_not_repairable",
+                )
             probe = image_prober(
                 destination,
                 media.get("media_type"),
@@ -1579,6 +1597,8 @@ def _preflight_candidate(
                 timeout=config.media_timeout,
             )
         else:
+            trigger_code = "operator_forced_repair" if force_repair else ""
+            probe_error = None
             try:
                 probe = prober(
                     destination,
@@ -1588,14 +1608,22 @@ def _preflight_candidate(
                 )
             except XPostError as exc:
                 trigger_code = str(getattr(exc, "code", "") or "")
+                if trigger_code not in REPAIRABLE_MEDIA_CODES:
+                    raise
+                probe_error = exc
+            if trigger_code:
                 state = repair_state if isinstance(repair_state, dict) else {}
                 repairs_attempted = int(state.get("attempted", 0) or 0)
                 if (
-                    trigger_code not in REPAIRABLE_MEDIA_CODES
-                    or repair_client is None
+                    repair_client is None
                     or repairs_attempted >= config.max_repairs_per_run
                 ):
-                    raise
+                    if probe_error is not None:
+                        raise probe_error
+                    raise CandidatePreflightError(
+                        "operator-forced media repair is unavailable",
+                        code="media_repair_disabled",
+                    )
                 source_sha256, source_size = _media_fingerprint(media)
                 state["attempted"] = repairs_attempted + 1
                 original_url = str(item["material_url"])
@@ -1605,6 +1633,7 @@ def _preflight_candidate(
                     source_sha256,
                     config.repair_profile,
                     duration_policy,
+                    operator_forced=bool(force_repair),
                 )
                 repaired = repair_client.repair(
                     {

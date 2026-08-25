@@ -47,6 +47,9 @@ REPAIRABLE_TRIGGER_CODES = frozenset(
         "invalid_media_codec",
         "invalid_media_dimensions",
         "invalid_media_duration",
+        # Accepted only when an operator invokes the explicit-ID backfill
+        # with --force-repair. Automatic publishing never emits this code.
+        "operator_forced_repair",
     }
 )
 MIN_DURATION_SECONDS = 0.5
