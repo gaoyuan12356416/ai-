@@ -102,7 +102,7 @@
 
 ### 转化明细 `conversion`
 
-维度增加 `conversion_country/campaign_id/adset_id/ad_id/campaign_name/adset_name/ad_name`；指标为手工成本、测转安装、D1 留存、游戏时长权重、D0/D1 收入和行数。`conversion_country` 是转化国家。
+维度增加 `conversion_country/campaign_id/adset_id/ad_id/campaign_name/adset_name/ad_name`；指标为手工成本、测转安装、D1 留存、总播放时长、D0/D1 收入和行数。平均游戏时长由总播放时长除安装数派生；`conversion_country` 是转化国家。
 
 ## 错误契约
 

@@ -11,8 +11,8 @@
 | 冻结口径与评审 | Codex | `requirements.md`、`sa-review.md` | 已完成 |
 | 生成器与缓存 | Codex | `ops/ai-game-performance/ai_game_performance_dashboard.py` | 已完成 |
 | 前端/缓存契约 | Codex | `report.html`、Nginx 配置 | 已完成 |
-| 单元与契约测试 | Codex | `ops/ai-game-performance/test_*.py` | 本地 17/17 通过 |
-| 部署/回滚 | Codex | `deploy/*`、`deploy.md` | 待生产阴影/部署 |
+| 单元与契约测试 | Codex | `ops/ai-game-performance/test_*.py` | 本地/服务器 18/18 通过 |
+| 部署/回滚 | Codex | `deploy/*`、`deploy.md` | 已完成 |
 | 生产验收 | 用户 | 任务看板 CTB-000101 | 待验收 |
 
 ## 编译 / 构建命令
@@ -35,3 +35,5 @@ git diff --check
 
 - 2026-08-25：完成生产数据只读摸底、映射覆盖验证、隔离分支和需求/SA 评审。
 - 2026-08-25：完成实现、本地代码评审、17 项单元/部署契约和前端语法验证；修复 BUG-001/BUG-002 本地部分。
+- 2026-08-25：全量阴影发现并修复 BUG-003 日期格式、BUG-004 总播放时长语义；服务器与真实数据回归通过。
+- 2026-08-25：生产登录态回归完成并加固 BUG-005 CSV Blob 生命周期；运行提交 `479398b` 已部署，自然 timer 成功，等待用户验收。

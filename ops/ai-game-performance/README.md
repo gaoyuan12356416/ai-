@@ -16,6 +16,7 @@ GitHub-maintained source for the standalone, Feishu-protected report at:
 - Only a one-game mapping is assigned. Ambiguous and unmapped delivery rows remain separate.
 - Unity has no unified delivery rows in the current source and uses `manual cost` only as an explicitly labelled overview fallback.
 - Delivery `country` and conversion `country` remain separate dimensions.
+- Live `play_duration_seconds` is total play time. Average play time is `SUM(total seconds) / SUM(installs)`; the legacy average column is converted to total seconds on read.
 - Browser requests never query MySQL.
 
 ## Cache and publish contract
