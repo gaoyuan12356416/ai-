@@ -42,6 +42,9 @@ def main():
         "mapping_status",
         "Unity兜底",
         "URL.createObjectURL",
+        'new Blob(["\\ufeff"+lines.join("\\r\\n")]',
+        "document.body.appendChild(link)",
+        "window.setTimeout(()=>{URL.revokeObjectURL(link.href);link.remove()},1000)",
         "replaceChildren",
     ):
         require(contract in HTML, "missing frontend contract: %s" % contract)
