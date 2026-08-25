@@ -31,13 +31,14 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：PASS；
-- `python -m unittest discover ...`：18/18 PASS；
+- `python -m unittest discover ...`：19/19 PASS；
 - `python validate_frontend_contract.py`：PASS（含 `node --check`）；
 - `git diff --check`：PASS。
 - 验收缺陷修复后：19/19 PASS；新增 Node 行为测试验证六渠道、Google 不双计、Unity 兜底和来源行数守恒；前端契约与 `node --check` PASS。
-- 服务器不可变 release：18/18 PASS；
+- 服务器不可变 release `98045976290b92ce3d69d030ae45eab45f386760`：19/19 PASS；
 - 全量阴影：433,060 条转化、13,983 条渠道事实，`quick_check=ok`，峰值 RSS 303 MB；
-- 最终生产：435,309 条转化、13,990 条渠道事实，MySQL/SQLite 2026-08-24 精确对账；
+- 最终生产：440,857 条转化、13,996 条渠道事实，MySQL/SQLite 2026-08-24 逐字段完全一致；
+- 17:12 自然 timer 成功发布 `20260825T171308367560+0800`；生产“渠道明细｜渠道”为 838 条渠道事实 + 48,088 条转化事实，聚合 6 行；
 - `nginx -t`、匿名 302、登录态 200、自然 timer、TT 回归、390×844：PASS。
 
 剩余验收：用户打开最终报表并手点 CSV 下载。
