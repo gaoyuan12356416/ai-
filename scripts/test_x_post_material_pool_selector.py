@@ -438,7 +438,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
             ["drama_deploy_time_missing", "drama_deploy_time_invalid"],
         )
 
-    def test_violation_history_is_ignored_while_safety_rejections_still_apply(self):
+    def test_violation_history_and_tags_are_ignored_while_identity_rejections_apply(self):
         connection = PoolConnection(range(1, 7))
         connection.materials["2"]["source_tag_name"] = "sexual_content"
         connection.material_tags["3"] = ["blood_gore"]
@@ -455,10 +455,13 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 for material_id in range(1, 7)
             ],
             "2026-07-22",
-            limit=2,
+            limit=4,
         )
 
-        self.assertEqual([item["material_id"] for item in selected], ["1", "6"])
+        self.assertEqual(
+            [item["material_id"] for item in selected],
+            ["1", "2", "3", "6"],
+        )
         self.assertTrue(
             all(
                 item["facebook_violation_count"] == 0
@@ -471,8 +474,6 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
-                "material_source_tag_unsafe",
-                "material_tag_unsafe",
                 "drama_mapping_ambiguous",
                 "material_url_not_https",
             ],
@@ -488,6 +489,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertTrue(
             all("violations" not in sql and "resource_audit" not in sql for sql in statements)
         )
+        self.assertTrue(all("resource_tags" not in sql for sql in statements))
 
     def test_sexual_or_violent_drama_labels_are_allowed(self):
         connection = PoolConnection([8])

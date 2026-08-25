@@ -568,35 +568,9 @@ class DramawaveCandidateSelector:
             "resource_audit_count": 0,
         }
 
-        source_tag = row.get("source_tag_name")
-        if source_tag not in (None, ""):
-            try:
-                source_tag_is_unsafe = contains_dangerous_tag(source_tag)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_source_tag_invalid",
-                    "material source tag cannot be checked safely: %s" % exc,
-                ) from None
-            if source_tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_source_tag_unsafe",
-                    "material source tag is unsafe",
-                )
-
-        material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            try:
-                tag_is_unsafe = contains_dangerous_tag(tag_value)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_tag_invalid",
-                    "material tag cannot be checked safely: %s" % exc,
-                ) from None
-            if tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_tag_unsafe",
-                    "material tag is unsafe",
-                )
+        # Source and resource tags are descriptive metadata, not X publishing
+        # eligibility gates. Historical tag classifications remain visible in
+        # the source system, but they do not remove an otherwise valid item.
 
         drama_rows = self._pool_drama_rows(content_id, material_language)
         if not drama_rows:
@@ -731,13 +705,8 @@ class DramawaveCandidateSelector:
             "resource_audit_count": 0,
         }
 
-        source_tag = row.get("source_tag_name")
-        if source_tag not in (None, "") and contains_dangerous_tag(source_tag):
-            raise CandidateSelectionError("material source tag is unsafe")
-        material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            if contains_dangerous_tag(tag_value):
-                raise CandidateSelectionError("material tag is unsafe")
+        # Keep legacy selection aligned with the material-pool path: tags are
+        # retained as source metadata but do not gate X publishing.
 
         drama_rows = self._drama_rows(content_id, series_code, material_language)
         if not drama_rows:

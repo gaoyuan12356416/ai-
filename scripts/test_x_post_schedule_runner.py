@@ -360,6 +360,86 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(planned[0]["preflight_sha256"], "a" * 64)
         self.assertEqual(planned[0]["preflight_size"], 5)
 
+    def test_filled_language_capacity_does_not_mark_material_unscheduled(self):
+        candidates = [
+            {
+                "pool_item_id": pool_item_id,
+                "material_id": "ja-%s" % pool_item_id,
+                "material_language": "ja",
+                "media_kind": "video",
+                "source_duration": 30,
+            }
+            for pool_item_id in (3, 2)
+        ] + [
+            {
+                "pool_item_id": 1,
+                "material_id": "en-1",
+                "material_language": "en",
+                "media_kind": "video",
+                "source_duration": 30,
+            }
+        ]
+        accounts = [
+            {
+                "id": 11,
+                "username": "japanese11",
+                "x_user_id": "x11",
+                "display_name": "Japanese 11",
+                "drama_language": "ja",
+                "long_video_eligible": False,
+            },
+            {
+                "id": 12,
+                "username": "english12",
+                "x_user_id": "x12",
+                "display_name": "English 12",
+                "drama_language": "en",
+                "long_video_eligible": False,
+            },
+        ]
+
+        def preflight(_config, candidate, account, *_args, **_kwargs):
+            return {
+                **candidate,
+                "account_id": account["id"],
+                "account_username": account["username"],
+                "page_name": account["display_name"],
+                "page_id": account["x_user_id"],
+                "preflight_sha256": "a" * 64,
+                "preflight_size": 5,
+                "preflight_duration": 30.0,
+                "preflight_width": 720,
+                "preflight_height": 1280,
+            }
+
+        with mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            planned, failures = _preflight_material_candidates(
+                self.config,
+                mock.Mock(),
+                candidates,
+                accounts,
+                source_date="2026-08-25",
+                timestamp=1,
+                downloader=object(),
+                prober=object(),
+                repair_client=object(),
+                assignment_identity={
+                    "source_type": "material",
+                    "run_date": "2026-08-25",
+                    "publish_time": "18:00",
+                    "version": 22,
+                },
+            )
+
+        self.assertEqual(
+            [(item["pool_item_id"], item["account_id"]) for item in planned],
+            [(3, 11), (1, 12)],
+        )
+        self.assertEqual(failures, [])
+
     def test_material_preflight_repairs_codec_and_dimensions_before_freeze(self):
         candidate = {
             "pool_item_id": 7,

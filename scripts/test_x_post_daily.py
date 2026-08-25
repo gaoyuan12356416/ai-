@@ -100,6 +100,8 @@ class FakeCursor:
             ]
         elif "ads_drama_resource" in sql:
             material_id = str(params[0]).lstrip("C")
+            if material_id in self.connection.query_error_material_ids:
+                raise RuntimeError("simulated read-only connection loss")
             self.rows = self.connection.drama_rows.get(
                 material_id, [drama_row(material_id)]
             )
@@ -173,7 +175,7 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(CandidateSelectionError):
             contains_dangerous_tag(b"\xff")
 
-    def test_selector_excludes_common_derived_violence_tag(self):
+    def test_selector_does_not_gate_common_derived_violence_tag(self):
         unsafe = base_row(21, 200)
         unsafe["source_tag_name"] = "weapons"
         connection = FakeConnection([unsafe, base_row(22, 100)])
@@ -183,9 +185,12 @@ class SelectorTests(unittest.TestCase):
             limit=1,
             scan_limit=10,
         )
-        self.assertEqual([item["material_id"] for item in selected], ["22"])
+        self.assertEqual([item["material_id"] for item in selected], ["21"])
+        self.assertTrue(
+            all("resource_tags" not in sql for sql, _params in connection.calls)
+        )
 
-    def test_selector_ignores_violation_history_but_excludes_unsafe_and_ambiguous_rows(self):
+    def test_selector_ignores_violation_history_and_tags_but_excludes_ambiguous_rows(self):
         connection = FakeConnection(
             [
                 base_row(1, 600),
@@ -206,11 +211,11 @@ class SelectorTests(unittest.TestCase):
             connection,
             "2026-07-22",
             excluded_material_keys={"1"},
-            limit=2,
+            limit=3,
             scan_limit=100,
         )
-        self.assertEqual([item["material_id"] for item in selected], ["2", "5"])
-        self.assertEqual([item["spend"] for item in selected], [500.0, 200.0])
+        self.assertEqual([item["material_id"] for item in selected], ["2", "3", "5"])
+        self.assertEqual([item["spend"] for item in selected], [500.0, 400.0, 200.0])
         self.assertTrue(
             all(
                 item["facebook_violation_count"] == 0
@@ -226,6 +231,7 @@ class SelectorTests(unittest.TestCase):
         self.assertTrue(
             all("violations" not in sql and "resource_audit" not in sql for sql in statements)
         )
+        self.assertTrue(all("resource_tags" not in sql for sql in statements))
         base_sql, base_params = connection.calls[0]
         self.assertNotIn("2026-07-22", base_sql)
         self.assertIn("2026-07-22", base_params)

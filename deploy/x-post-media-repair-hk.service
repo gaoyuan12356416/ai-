@@ -1,0 +1,41 @@
+[Unit]
+Description=X Post GPU media repair worker (Hong Kong GPU)
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/var/lib/x-post-media-repair
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/x-post-media-repair/current
+EnvironmentFile=/etc/x-post-media-repair.cos.env
+EnvironmentFile=/etc/x-post-media-repair.env
+EnvironmentFile=/etc/x-post-media-repair.token
+ExecStart=/opt/x-post-media-repair/venv/bin/python /opt/x-post-media-repair/current/scripts/x_post_media_repair_worker.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=x-post-media-repair
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/x-post-media-repair/current
+ReadWritePaths=/var/lib/x-post-media-repair
+UMask=0077
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

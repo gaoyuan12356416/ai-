@@ -1,0 +1,31 @@
+[Unit]
+Description=Reverse tunnel for X Post media repair from Hong Kong GPU
+After=network-online.target x-post-media-repair.service
+Wants=network-online.target
+Requires=x-post-media-repair.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/ssh -i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts -R 127.0.0.1:18820:127.0.0.1:8820 root@43.166.187.96
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/x-post-media-repair-tunnel
+
+[Install]
+WantedBy=multi-user.target

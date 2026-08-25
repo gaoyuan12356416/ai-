@@ -1237,22 +1237,27 @@ def _preflight_material_candidates(
                     }
                 )
                 continue
+            language_targets = target_order.get(language, [])
             remaining_targets = [
                 account
-                for account in target_order.get(language, [])
+                for account in language_targets
                 if int(account["id"]) not in accepted_by_account
             ]
             if not remaining_targets:
-                failures.append(
-                    {
-                        "pool_item_id": candidate.get("pool_item_id"),
-                        "material_id": str(
-                            candidate.get("material_id", "") or ""
-                        ),
-                        "error_code": "material_language_not_scheduled",
-                        "error_message": "当前发布账号不包含该素材语言",
-                    }
-                )
+                if not language_targets:
+                    failures.append(
+                        {
+                            "pool_item_id": candidate.get("pool_item_id"),
+                            "material_id": str(
+                                candidate.get("material_id", "") or ""
+                            ),
+                            "error_code": "material_language_not_scheduled",
+                            "error_message": "当前发布账号不包含该素材语言",
+                        }
+                    )
+                # The language is configured, but all targets of that language
+                # already have a candidate in this batch. This is normal batch
+                # capacity, so leave the item clean for a later schedule point.
                 continue
             target = remaining_targets[0]
             material_id = str(candidate.get("material_id", "") or "")
