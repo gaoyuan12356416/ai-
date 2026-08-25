@@ -105,11 +105,11 @@
 - Google/Meta/TikTok 的手工成本仅对账，不进入有效花费；organic/restricted 有转化但有效花费为 0；
 - 共享维度为日期、游戏、渠道和广告层级；`source_country` 是渠道国家/分组，转化事实使用“仅转化侧”占位，`conversion_country` 仍保留独立语义。
 
-表格/CSV 指标包括 `effective_spend/source_spend/manual_cost/source_installs/manual_installs/d1_retained/source_impressions/source_clicks/source_ctr/source_cpi/source_row_count/manual_row_count`。页面状态分别显示当前渠道事实行数与转化事实行数，避免把聚合结果行数误认为源数据行数。
+表格/CSV 指标包括 `effective_spend/source_spend/manual_cost/source_installs/manual_installs/d1_retained/source_impressions/source_clicks/source_ctr/source_cpi`。`source_row_count/manual_row_count` 仅保留在版本化数据与客户端内部聚合中用于完整性校验，不进入指标卡、质量提示、表格、状态文案或 CSV。
 
 ### 转化明细 `conversion`
 
-维度增加 `conversion_country/campaign_id/adset_id/ad_id/campaign_name/adset_name/ad_name`；指标为手工成本、测转安装、D1 留存、总播放时长、D0/D1 收入和行数。平均游戏时长由总播放时长除安装数派生；`conversion_country` 是转化国家。
+维度增加 `conversion_country/campaign_id/adset_id/ad_id/campaign_name/adset_name/ad_name`；展示指标为手工成本、测转安装、D1 留存、平均游戏时长和 D0/D1 收入。平均游戏时长由总播放时长除安装数派生；`conversion_country` 是转化国家。
 
 ## 错误契约
 

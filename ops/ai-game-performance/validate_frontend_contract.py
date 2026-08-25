@@ -43,7 +43,7 @@ def main():
         "Unity兜底",
         'requestedView==="delivery"?["delivery","conversion"]',
         'out.source_country="仅转化侧"',
-        "渠道事实 ${INT.format(sourceRows)} 行 + 转化事实",
+        "已合并渠道与转化数据",
         'delivery:["effective_spend","source_spend","manual_cost"',
         "URL.createObjectURL",
         'new Blob(["\\ufeff"+lines.join("\\r\\n")]',
@@ -52,6 +52,13 @@ def main():
         "replaceChildren",
     ):
         require(contract in HTML, "missing frontend contract: %s" % contract)
+    require('"渠道行"' not in HTML, "channel-row label must not be user-visible")
+    require('"转化行"' not in HTML, "conversion-row label must not be user-visible")
+    metrics = re.search(r"const VIEW_METRICS=(.*?);\s*const BASE_NUMERIC", HTML, flags=re.DOTALL)
+    require(metrics, "missing view metrics declaration")
+    require("source_row_count" not in metrics.group(1), "channel-row metric must not reach table or CSV")
+    require("manual_row_count" not in metrics.group(1), "conversion-row metric must not reach table or CSV")
+    require("source_row_count" in HTML and "manual_row_count" in HTML, "internal row-count invariants must remain")
     require("innerHTML" not in HTML, "data must not be rendered with innerHTML")
     require("<script src=" not in HTML and "<link rel=\"stylesheet\"" not in HTML, "report shell must not load third-party assets")
     scripts = re.findall(r"<script>(.*?)</script>", HTML, flags=re.DOTALL | re.IGNORECASE)
