@@ -42259,6 +42259,7 @@ def x_post_pool_query_params(raw_query):
     if availability:
         if availability not in {
             "available",
+            "deferred",
             "validation_failed",
             "occupied",
             "failed",
@@ -99462,6 +99463,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         ),
                         "validation_failed_count": int(
                             result.get("validation_failed_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "deferred_count": int(
+                            result.get("deferred_count", 0)
                             if isinstance(result, dict)
                             else 0
                         ),

@@ -50,6 +50,7 @@ STANDARD_MAX_DURATION_SECONDS = 140.0
 # canary also confirmed a raw 763.938-second upload and Post readback.  Keep the
 # entitlement token-scoped and the API byte/codec gates unchanged.
 PREMIUM_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
+MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 STANDARD_MEDIA_CATEGORY = "tweet_video"
 PREMIUM_MEDIA_CATEGORY = "amplify_video"
 IMAGE_MEDIA_CATEGORY = "tweet_image"
@@ -327,11 +328,26 @@ NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
 _NONBLOCKING_MATERIAL_VALIDATION_SQL = "(" + ",".join(
     "'%s'" % code for code in sorted(NONBLOCKING_MATERIAL_VALIDATION_CODES)
 ) + ")"
+# These outcomes temporarily block publication without making the material a
+# validation failure. They remain unbound and are reconsidered by every later
+# natural material-pool preflight until the authoritative source gate opens.
+DEFERRED_MATERIAL_VALIDATION_CODES = frozenset(
+    {
+        "drama_not_yet_deliverable",
+    }
+)
+_DEFERRED_MATERIAL_VALIDATION_SQL = "(" + ",".join(
+    "'%s'" % code for code in sorted(DEFERRED_MATERIAL_VALIDATION_CODES)
+) + ")"
 # Historical selectors collapsed missing, image, and inactive-video outcomes
 # into these codes. They stay unavailable until revalidated, but candidate
 # scans may revisit them so the current selector can clear or refine the code.
 REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
     {
+        # A future drama delivery boundary is not a permanent failure. The
+        # selector must reread deploy_time and may clear it only while the
+        # successfully prepared queue is frozen.
+        "drama_not_yet_deliverable",
         "material_not_found_or_ineligible",
         "material_not_video",
         "material_inactive",
@@ -359,6 +375,7 @@ _REVALIDATABLE_MATERIAL_VALIDATION_SQL = "(" + ",".join(
 ) + ")"
 MATERIAL_FIFO_SKIP_CODES = frozenset(
     {
+        "drama_not_yet_deliverable",
         "material_source_tag_unsafe",
         "material_tag_unsafe",
         "material_language_not_scheduled",
@@ -1135,8 +1152,18 @@ def _compliance_counts(payload, require_all=False):
     return result
 
 
+def _material_validation_availability(error_code):
+    error_code = str(error_code or "")
+    if not error_code or error_code in NONBLOCKING_MATERIAL_VALIDATION_CODES:
+        return "available"
+    if error_code in DEFERRED_MATERIAL_VALIDATION_CODES:
+        return "deferred"
+    return "validation_failed"
+
+
 def _material_validation_is_blocking(error_code):
-    return bool(error_code) and error_code not in NONBLOCKING_MATERIAL_VALIDATION_CODES
+    """Compatibility helper: true only for durable validation failures."""
+    return _material_validation_availability(error_code) == "validation_failed"
 
 
 def _material_fifo_selection_matches(
@@ -1195,6 +1222,22 @@ def _material_fifo_selection_matches(
                 )
             ):
                 return False
+            if str(pool["last_error_code"] or "") in (
+                DEFERRED_MATERIAL_VALIDATION_CODES
+            ):
+                # A historical defer may be cleared only by a candidate that
+                # carries the deploy_time returned by the current read-only
+                # source selection, and only after that boundary has passed.
+                try:
+                    deploy_time = int(values.get("drama_deploy_time"))
+                except (TypeError, ValueError, OverflowError):
+                    return False
+                if (
+                    deploy_time < 0
+                    or deploy_time > MAX_SUPPORTED_EPOCH_SECONDS
+                    or deploy_time > int(time.time())
+                ):
+                    return False
             selected_pool_ids.add(pool_id)
             continue
 
@@ -1204,6 +1247,14 @@ def _material_fifo_selection_matches(
             error_code in MATERIAL_FIFO_SKIP_CODES
             and (not cutoff or (checked_at and checked_at >= cutoff))
         )
+        if error_code in DEFERRED_MATERIAL_VALIDATION_CODES:
+            # Unlike historical nonblocking evidence, a delivery-time skip is
+            # safe only after this claimed run has reread the source boundary.
+            # This prevents an old future-time result from authorizing a FIFO
+            # jump without a current selector pass.
+            checked_in_this_preflight = bool(
+                cutoff and checked_at and checked_at >= cutoff
+            )
         if not checked_in_this_preflight:
             return False
     return selected_pool_ids == set(actual_by_pool)
@@ -5740,16 +5791,23 @@ class XPostStore:
             "available_count": sum(
                 1
                 for material_id in created_material_ids
-                if not _material_validation_is_blocking(
+                if _material_validation_availability(
                     checks_by_material[material_id][0]
-                )
+                ) == "available"
+            ),
+            "deferred_count": sum(
+                1
+                for material_id in created_material_ids
+                if _material_validation_availability(
+                    checks_by_material[material_id][0]
+                ) == "deferred"
             ),
             "validation_failed_count": sum(
                 1
                 for material_id in created_material_ids
-                if _material_validation_is_blocking(
+                if _material_validation_availability(
                     checks_by_material[material_id][0]
-                )
+                ) == "validation_failed"
             ),
         }
 
@@ -5848,10 +5906,14 @@ class XPostStore:
             "THEN 'failed' "
             "WHEN q.id IS NOT NULL THEN 'occupied' "
             "WHEN r.id IS NOT NULL THEN 'occupied' "
+            "WHEN p.last_error_code IN %s THEN 'deferred' "
             "WHEN p.last_error_code<>'' AND p.last_error_code NOT IN %s "
             "THEN 'validation_failed' "
             "ELSE 'available' END"
-            % _NONBLOCKING_MATERIAL_VALIDATION_SQL
+            % (
+                _DEFERRED_MATERIAL_VALIDATION_SQL,
+                _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+            )
         )
         clauses = []
         values = []
@@ -5865,6 +5927,7 @@ class XPostStore:
         if availability:
             if availability not in {
                 "available",
+                "deferred",
                 "validation_failed",
                 "occupied",
                 "failed",
@@ -5924,10 +5987,17 @@ class XPostStore:
                 "AND r.id IS NULL "
                 "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "THEN 1 ELSE 0 END) AS available,"
+                "SUM(CASE WHEN p.status='unpublished' AND q.id IS NULL "
+                "AND r.id IS NULL "
+                "AND p.last_error_code IN %s "
+                "THEN 1 ELSE 0 END) AS deferred,"
                 "SUM(CASE WHEN p.status='unpublished' "
                 "AND (q.id IS NOT NULL OR r.id IS NOT NULL) "
                 "THEN 1 ELSE 0 END) AS occupied"
-                % _NONBLOCKING_MATERIAL_VALIDATION_SQL
+                % (
+                    _NONBLOCKING_MATERIAL_VALIDATION_SQL,
+                    _DEFERRED_MATERIAL_VALIDATION_SQL,
+                )
                 + join_sql
             ).fetchone()
         items = []
@@ -5943,7 +6013,14 @@ class XPostStore:
             "items": items,
             "summary": {
                 key: int(summary[key] or 0)
-                for key in ("total", "unpublished", "published", "available", "occupied")
+                for key in (
+                    "total",
+                    "unpublished",
+                    "published",
+                    "available",
+                    "deferred",
+                    "occupied",
+                )
             },
             "pagination": {
                 "page": page,
@@ -10758,6 +10835,34 @@ class XPostStore:
                 allow_material_relay=(source_type == "material"),
                 allow_deferred_media=True,
             )
+            raw_deploy_time = payload.get("drama_deploy_time")
+            if raw_deploy_time not in (None, ""):
+                if isinstance(raw_deploy_time, bool):
+                    raise XPostError(
+                        "invalid_request",
+                        "drama_deploy_time无效",
+                        400,
+                    )
+                try:
+                    drama_deploy_time = int(raw_deploy_time)
+                except (TypeError, ValueError, OverflowError):
+                    raise XPostError(
+                        "invalid_request",
+                        "drama_deploy_time无效",
+                        400,
+                    ) from None
+                if (
+                    drama_deploy_time < 0
+                    or drama_deploy_time > MAX_SUPPORTED_EPOCH_SECONDS
+                ):
+                    raise XPostError(
+                        "invalid_request",
+                        "drama_deploy_time无效",
+                        400,
+                    )
+                # This source-only preflight proof is deliberately not added
+                # to the queue schema. It is consumed by the atomic FIFO gate.
+                values["drama_deploy_time"] = drama_deploy_time
             if values["account_id"] in seen_accounts:
                 raise XPostError(
                     "invalid_request",

@@ -73,7 +73,7 @@
     .hidden { display: none !important; }
     .gate { padding: 48px 24px; text-align: center; color: var(--muted); }
     .gate strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 18px; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .stat { min-height: 104px; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
     .stat span { color: var(--muted); font-size: 13px; }
     .stat strong { display: block; margin-top: 11px; font-size: 26px; }
@@ -354,11 +354,13 @@
     }
     .badge.published, .badge.available { color: #08734f; background: #e8f8f1; }
     .badge.unpublished, .badge.queued, .badge.reserved, .badge.occupied { color: #2457b8; background: #eef4ff; }
+    .badge.deferred { color: #925d00; background: #fff4d9; }
     .badge.validation_failed, .badge.failed { color: #ad2f3b; background: #ffedef; }
     .badge.unknown, .badge.needs_review { color: #925d00; background: #fff4d9; }
     .badge.other { color: #56657b; background: #edf1f6; }
     .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .error { max-width: 320px; color: #a62f3a; line-height: 1.45; word-break: break-word; }
+    .deferred-info { max-width: 320px; color: #7a5600; line-height: 1.45; word-break: break-word; }
     .links { display: flex; flex-direction: column; gap: 6px; min-width: 116px; }
     .links a { color: var(--blue); font-weight: 700; text-decoration: none; }
     .links a:hover { text-decoration: underline; }
@@ -421,6 +423,7 @@
           <article class="stat"><span>池内素材</span><strong id="totalCount">—</strong></article>
           <article class="stat"><span>未发布</span><strong id="unpublishedCount">—</strong></article>
           <article class="stat"><span>可供发布</span><strong id="availableCount">—</strong></article>
+          <article class="stat"><span>待可投放</span><strong id="deferredCount">—</strong></article>
           <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
         </section>
 
@@ -508,7 +511,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>素材池明细</h2>
-            <p>主状态仅区分已发布/未发布；“不可用”表示素材ID不存在或未通过 X 发布标准。发布失败或结果待确认的队列不会自动重发。</p>
+            <p>主状态仅区分已发布/未发布；“待可投放”表示关联短剧尚未到开放时间，系统会在到点后的下一次自然排期自动复检，不会提前建队列或发布；“不可用”才表示素材ID不存在或未通过 X 发布标准。发布失败或结果待确认的队列不会自动重发。</p>
           </div>
           <form id="filters" class="filters">
             <input id="materialIdFilter" inputmode="numeric" placeholder="素材 ID" aria-label="素材 ID" />
@@ -520,6 +523,7 @@
             <select id="availabilityFilter" aria-label="可用状态">
               <option value="">全部可用状态</option>
               <option value="available">可供发布</option>
+              <option value="deferred">待可投放</option>
               <option value="validation_failed">不可用</option>
               <option value="occupied">已被队列占用</option>
               <option value="failed">发布失败（不重发）</option>
@@ -542,7 +546,7 @@
                   <th>X 账号</th>
                   <th>素材预览</th>
                   <th>Post 预览</th>
-                  <th>校验/发布错误</th>
+                  <th>排期/校验/发布信息</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -668,6 +672,7 @@
         "failed_preflight",
       ]);
       const MANUAL_ERROR_LABELS = Object.freeze({
+        drama_not_yet_deliverable: "短剧尚未到可投放时间，请选择开放时间之后的定时发布",
         material_not_found: "素材不存在",
         material_source_ambiguous: "素材源数据重复",
         material_product_mismatch: "素材不属于Dramawave",
@@ -1668,10 +1673,13 @@
           rejected: "validation_failed",
           error: "validation_failed",
           unknown: "needs_review",
+          waiting: "deferred",
+          scheduled_for_delivery: "deferred",
         };
         const value = aliases[explicit] || explicit;
         const labels = {
           available: "可供发布",
+          deferred: "待可投放",
           occupied: "已被队列占用",
           published: "已发布",
           validation_failed: "不可用",
@@ -1784,8 +1792,19 @@
             item.last_error_code || item.publish_error_code || item.error_code || "";
           const errorMessage =
             item.last_error_message || item.publish_error_message || item.error_message || "";
-          const errorCell = appendCell(row, errorCode || "—", errorMessage);
-          if (errorCode || errorMessage) errorCell.className = "error";
+          const isDeferred = available.value === "deferred";
+          const errorCell = appendCell(
+            row,
+            isDeferred ? "等待短剧可投放时间" : (errorCode || "—"),
+            isDeferred
+              ? `${errorMessage || "当前尚未到可投放时间"}；系统将在到点后的下一次自然排期自动复检。`
+              : errorMessage
+          );
+          if (isDeferred) {
+            errorCell.className = "deferred-info";
+          } else if (errorCode || errorMessage) {
+            errorCell.className = "error";
+          }
 
           const actionCell = document.createElement("td");
           const canDelete = status.value === "unpublished" && !item.queue_id;
@@ -1835,9 +1854,10 @@
           countFor({}),
           countFor({ status: "unpublished" }),
           countFor({ availability: "available" }),
+          countFor({ availability: "deferred" }),
           countFor({ status: "published" }),
         ]);
-        const targets = ["totalCount", "unpublishedCount", "availableCount", "publishedCount"];
+        const targets = ["totalCount", "unpublishedCount", "availableCount", "deferredCount", "publishedCount"];
         results.forEach((result, index) => {
           setText(byId(targets[index]), result.status === "fulfilled" ? result.value : "—");
         });
@@ -1890,6 +1910,7 @@
             body: JSON.stringify({ material_ids: materialIds }),
           });
           const addedCount = Number(result.added_count ?? result.created_count ?? materialIds.length);
+          const deferredCount = Number(result.deferred_count ?? 0);
           const unavailableCount = Number(result.validation_failed_count ?? 0);
           const skippedCount = Number(result.skipped_count ?? 0);
           const duplicateInputCount = Number(result.duplicate_input_count ?? 0);
@@ -1902,7 +1923,11 @@
           ];
           if (unavailableCount) {
             messages.push(`新增素材中 ${unavailableCount} 个未通过 X 发布校验，已标记不可用`);
-          } else if (addedCount) {
+          }
+          if (deferredCount) {
+            messages.push(`新增素材中 ${deferredCount} 个尚未到短剧可投放时间，已进入待可投放排期`);
+          }
+          if (!unavailableCount && !deferredCount && addedCount) {
             messages.push("新增素材均已通过入池校验");
           }
           if (skippedCount) {

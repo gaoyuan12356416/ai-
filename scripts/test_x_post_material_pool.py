@@ -145,6 +145,44 @@ class XPostMaterialPoolTests(unittest.TestCase):
             0,
         )
 
+    def test_future_drama_delivery_is_deferred_and_reenters_preflight(self):
+        result = self.store.add_pool_materials(
+            ["96"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "96",
+                    "error_code": "drama_not_yet_deliverable",
+                    "error_message": (
+                        "短剧可投放时间为2026-08-26 00:00:00（北京时间），"
+                        "当前尚未到达"
+                    ),
+                }
+            ],
+        )
+
+        self.assertEqual(result["available_count"], 0)
+        self.assertEqual(result["deferred_count"], 1)
+        self.assertEqual(result["validation_failed_count"], 0)
+        queried = self.store.query_pool({"material_id": "96"})
+        self.assertEqual(queried["items"][0]["status"], "unpublished")
+        self.assertEqual(queried["items"][0]["availability"], "deferred")
+        self.assertEqual(queried["summary"]["available"], 0)
+        self.assertEqual(queried["summary"]["deferred"], 1)
+        self.assertEqual(
+            self.store.query_pool({"availability": "deferred"})[
+                "pagination"
+            ]["total"],
+            1,
+        )
+        self.assertEqual(
+            [
+                item["material_id"]
+                for item in self.store.available_pool_items(10)
+            ],
+            ["96"],
+        )
+
     def test_add_fifo_validation_and_delete_available_item(self):
         items = self.add("00101", "102", "103", "104")
         self.assertEqual([item["material_id"] for item in items], ["101", "102", "103", "104"])
@@ -344,6 +382,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.assertEqual(result["already_in_pool_count"], 1)
         self.assertEqual(result["already_used_count"], 0)
         self.assertEqual(result["available_count"], 1)
+        self.assertEqual(result["deferred_count"], 0)
         self.assertEqual(result["validation_failed_count"], 1)
 
     def test_bulk_add_accepts_exactly_one_hundred_unique_materials(self):

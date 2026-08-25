@@ -1477,6 +1477,126 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(revalidated["last_error_code"], "")
         self.assertEqual(revalidated["last_error_message"], "")
 
+    def test_material_schedule_atomically_clears_due_delivery_defer(self):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["214"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {
+                    "material_id": "214",
+                    "error_code": "drama_not_yet_deliverable",
+                    "error_message": "historical delivery boundary was future",
+                }
+            ],
+        )["items"][0]
+
+        candidate = self.material_candidate(pool, 2)
+        candidate["drama_deploy_time"] = 1
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [candidate],
+        )
+
+        self.assertTrue(plan["created"])
+        self.assertEqual(plan["queues"][0]["pool_item_id"], pool["id"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            revalidated = conn.execute(
+                "SELECT last_error_code,last_error_message "
+                "FROM x_post_material_pool WHERE id=?",
+                (pool["id"],),
+            ).fetchone()
+        self.assertEqual(revalidated, ("", ""))
+
+    def test_material_schedule_cannot_clear_delivery_defer_before_boundary(self):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["215"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {
+                    "material_id": "215",
+                    "error_code": "drama_not_yet_deliverable",
+                    "error_message": "delivery boundary is still future",
+                }
+            ],
+        )["items"][0]
+        candidate = self.material_candidate(pool, 2)
+        candidate["drama_deploy_time"] = service.MAX_SUPPORTED_EPOCH_SECONDS
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [candidate],
+            )
+
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+        self.assertEqual(
+            self.store.query_pool({"material_id": "215"})["items"][0][
+                "availability"
+            ],
+            "deferred",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
+                0,
+            )
+
+    def test_material_fifo_delivery_defer_requires_current_claim_evidence(self):
+        pool_rows = [
+            {
+                "id": 2,
+                "last_error_code": "drama_not_yet_deliverable",
+                "last_checked_at": "2026-07-27T01:00:01Z",
+            },
+            {
+                "id": 1,
+                "last_error_code": "",
+                "last_checked_at": "",
+            },
+        ]
+        prepared = [
+            {
+                "pool_item_id": 1,
+                "account_id": 2,
+                "preflight_duration": 100.0,
+            }
+        ]
+
+        self.assertTrue(
+            service._material_fifo_selection_matches(
+                pool_rows,
+                prepared,
+                [2],
+                [],
+                validation_cutoff="2026-07-27T01:00:00Z",
+            )
+        )
+        self.assertFalse(
+            service._material_fifo_selection_matches(
+                pool_rows,
+                prepared,
+                [2],
+                [],
+                validation_cutoff="2026-07-27T01:00:02Z",
+            )
+        )
+        self.assertFalse(
+            service._material_fifo_selection_matches(
+                pool_rows,
+                prepared,
+                [2],
+                [],
+            )
+        )
+
     def test_media_only_historical_errors_are_rechecked_but_unsafe_is_not(self):
         self.save_schedule("material", [2], ["09:00", "10:00", "11:00"])
         for index, (publish_time, error_code) in enumerate(
