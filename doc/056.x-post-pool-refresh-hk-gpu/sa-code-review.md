@@ -19,6 +19,7 @@
 | CR-001 | 中 | selector tests | 删除 tag 查询后旧“查询失败”测试不再触发 | 将故障注入移到仍存在的 drama 映射查询 | 已修复 |
 | CR-002 | 中 | HK runtime | 系统 Python 3.6 不支持当前代码，且缺 COS SDK | 使用 Python 3.9 venv 与冻结依赖 | 已修复 |
 | CR-003 | 低 | 部署 | 香港无 `/data` 独立挂载 | release 放 `/opt`、工作数据放 `/var/lib` 并由 systemd 限权 | 已修复 |
+| CR-004 | 中 | HK Python 依赖 | 旧 Conda 的 `requests==2.33.1` 不存在于 PyPI，无法重建最小 venv | 固定为 PyPI 可安装且与 SDK 兼容的 `requests==2.32.5` | 已修复 |
 
 ## 编译 / 验证结果
 
