@@ -24,7 +24,7 @@
 | TC-007 | API 参数 | availability=deferred | 主 API 与 Sidecar 查询 | 均接受且只返回等待行 | P1 | 通过 |
 | TC-008 | 其他错误不放宽 | material_not_found 等确定性失败 | 查询/调度 | 仍为 validation_failed，不进入非法发布 | P0 | 通过 |
 | TC-009 | 发布历史不重用 | future-time 行已有队列/未知结果 | 候选查询 | 永不返回自动候选 | P0 | 通过 |
-| TC-010 | 生产无发帖验收 | 上线前冻结 queue/log/Post/unknown 计数 | 部署、健康检查、自然 timer 观察 | 无部署触发的真实 X 写；历史行得到新复检证据或等待下个自然槽 | P0 | 待执行 |
+| TC-010 | 生产无发帖验收 | 上线前冻结 queue/log/Post/unknown 计数 | 部署、健康检查、自然 timer 观察 | 无部署触发的真实 X 写；历史行得到新复检证据或等待下个自然槽 | P0 | 通过 |
 | TC-011 | 到点证明不可伪造 | 旧行仍为 deferred，候选携带未来 deploy_time | 尝试原子建队列 | FIFO conflict、零队列、仍为 deferred | P0 | 通过 |
 | TC-012 | 错误目录完整性 | 扫描 8 个发布链路模块的稳定 literal error code | 对照错误目录 | 除集中说明的字段级总码外全部逐码出现 | P1 | 通过 |
 
