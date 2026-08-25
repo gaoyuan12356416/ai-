@@ -30,17 +30,18 @@
 ## 实际部署记录
 
 - 分支：`codex/ai-game-performance-report-20260825`；
-- 当前生产运行提交：`98045976290b92ce3d69d030ae45eab45f386760`；
-- 当前 release：`/opt/ai-game-performance/releases/98045976290b92ce3d69d030ae45eab45f386760`；
-- 初始运行提交/上一 release：`479398bed4a2656a431d571ec3b58d0efd452a88`；
+- 当前生产运行提交：`c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
+- 当前 release：`/opt/ai-game-performance/releases/c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
+- 上一运行提交/release：`98045976290b92ce3d69d030ae45eab45f386760`；
 - current：`/opt/ai-game-performance/current`；
 - SQLite：`/mnt/data-disk/ai-game-performance/cache/ai-game-performance.sqlite3`；
 - 公开目录：`/usr/share/nginx/html/reports/ai-game-performance`；
 - URL：`https://ai.yingliangads.com/reports/ai-game-performance/`；
-- 最终数据版本：`20260825T171308367560+0800`；
+- 最终数据版本：`20260825T182509993602+0800`；
 - 首次部署前备份：`/mnt/data-disk/ai-game-performance/backups/20260825T160520+0800-pre-2655aaf`；
 - 最终版本回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T162341+0800-pre-479398b`；
 - BUG-006 发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T170107+0800-pre-9804597`；
+- v6 展示精简发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T181629+0800-pre-c2ea2ac`；
 - 数据盘：UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`，BUG-006 发布前可用 84 GiB；
 - Nginx 仅 reload；未重启 `drama-material-api` 或 TT/X/Meta 发布服务。
 
@@ -61,16 +62,17 @@ curl -sS -I https://ai.yingliangads.com/reports/ai-game-performance/
 
 - 本地与服务器：19/19 PASS，前端契约与 `node --check` PASS；
 - 全量阴影：2026-08-10 至 2026-08-25，SQLite `quick_check=ok`，峰值 RSS 310,036 KiB；
-- 最终生产：440,857 条转化、13,996 条投放事实、1,960 条总览组合；
+- 最终生产：443,363 条转化、14,002 条投放事实、1,961 条总览组合；
 - 2026-08-24 MySQL/SQLite 成本、安装、D1、总播放时长、收入、渠道花费/安装/曝光/点击逐项一致；
 - 匿名页面/JSON 302 到正确飞书登录 next，登录态 HTML/清单/日文件为 200；
 - BUG-006 后自然 timer 17:12:10 触发、17:13:19 成功，公开版本 `20260825T171308367560+0800`；
 - `nginx -t`、Nginx、AI 主 API 和现有 TT 报表回归通过；
 - Chrome 桌面与 390×844 手机布局、三视图、筛选、分页通过。
+- v6 生产三视图、状态、质量提示、表格和导出字段契约均不再暴露“渠道行/转化行”；仅渠道维度仍聚合 6 行。
 
 ## 回滚方案
 
-最终版本回滚到上一生产提交 `2655aaf` 时使用备份 `20260825T162341+0800-pre-479398b`，全程保留 SQLite 和新版本数据目录：
+v6 回滚到上一生产提交 `98045976290b92ce3d69d030ae45eab45f386760` 时使用备份 `20260825T181629+0800-pre-c2ea2ac`，全程保留 SQLite 和新版本数据目录：
 
 1. `systemctl stop ai-game-performance-refresh.timer`；
 2. 从备份的 `current-before` 创建临时 symlink，再用 `mv -Tf` 原子恢复 `/opt/ai-game-performance/current`；
@@ -86,7 +88,7 @@ curl -sS -I https://ai.yingliangads.com/reports/ai-game-performance/
 - 部署前必须确认 `/mnt/data-disk` 是 UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8` 的真实挂载且空间充足；
 - 刷新与 TT/归因报表共用 `/tmp/tt_minis_multi_dim_dashboard.lock`；
 - 不把完整 SQL、数据库口令或子进程参数写入日志；
-- 本文件将在真实部署后补充精确备份路径、提交、服务状态与回滚命令。
+- 本文件已记录本次真实发布的精确备份路径、提交、服务状态与回滚边界。
 
 ## BUG-006 验收缺陷增量发布
 
@@ -100,3 +102,19 @@ curl -sS -I https://ai.yingliangads.com/reports/ai-game-performance/
 - 17:12:10 自然刷新覆盖 8 月 23 至 25 日，17:13:19 成功提交 `20260825T171308367560+0800`；8 月 24 日源库/SQLite 逐字段一致（838 条渠道事实、48,088 条转化事实），登录态页面按渠道聚合为 6 行。
 
 精确回滚：确认刷新 service 为 inactive 后，将 `current` 原子切回上一 release，并从上述备份恢复 `public-before/index.html` 与 `public-before/latest.json`（`latest.json` 最后切换）；无需恢复 SQLite。随后复核文件哈希、匿名 302、登录态页面、timer 和 TT/主 API。若新 release 已产生后续完整快照，只回滚代码/清单提交点，保留 SQLite 与版本目录用于诊断。
+
+## v6 展示精简增量发布
+
+- GitHub/运行提交：`c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
+- release：`/opt/ai-game-performance/releases/c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
+- 上一 release：`/opt/ai-game-performance/releases/98045976290b92ce3d69d030ae45eab45f386760`；
+- 发布前备份：`/mnt/data-disk/ai-game-performance/backups/20260825T181629+0800-pre-c2ea2ac`，`current-before`、旧 `index.html`、旧 `latest.json` 校验通过；
+- 首次锁等待因现有 TT 60 日刷新而在切换前安全超时；该进程持续消耗 CPU 并自然完成，未终止、未并发扫描；
+- 锁释放后仅从既有 SQLite 执行 `--publish`，18:25:09 提交公开版本 `20260825T182509993602+0800`，再原子切换 current；
+- 公开 `index.html` SHA-256 为 `36a83abdf0f9bc352f2826eff650096741f75ba4171d28a3de9b68acbf3801e6`，与 release `report.html` 一致；
+- SQLite `quick_check=ok`、`integrity_check=ok`，所有清单日文件存在；内部事实计数仍为渠道 14,002、转化 443,363；
+- 本地/服务器 19/19、前端不可见性契约、`nginx -t`、匿名页面/清单 302、TT 报表 302、Nginx/API/timer 状态通过；
+- 登录态 Chrome 验证三视图均不含两个字段，仅渠道维度仍为 6 行；390×844 无页面横向溢出；
+- 未查询 MySQL、未修改 Nginx/unit/env、未 reload Nginx，未重启 AI 主 API、TT/X/Meta 服务。
+
+精确回滚：确认刷新 service 为 inactive 后，将 `current` 原子切回 `98045976290b92ce3d69d030ae45eab45f386760`，从本节备份恢复 `public-before/index.html` 和 `public-before/latest.json`（清单最后切换）；保留 SQLite、新 release 和新数据版本用于审计，再复核哈希、匿名鉴权、登录态页面、timer、TT 报表和主 API。
