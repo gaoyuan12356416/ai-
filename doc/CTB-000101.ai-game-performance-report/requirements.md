@@ -52,7 +52,7 @@ AI 游戏的产品测转化明细已经进入只读表 `ads_ai.ads_manual_daily_
    - organic/restricted：产品转化保留，渠道花费为 0。
 5. 一个渠道键只映射到一个游戏时才归属；映射到多个游戏显示“多游戏待归属”，没有映射显示“未归属”，不得按比例猜测。
 6. 手工表 `game_id` 为空时，可从三个名称字段中的严格 `projectid[数字]` 提取；仍为空时显示“未标记游戏”。`1000000000000000000` 显示为“通用素材”。
-7. `play_duration_seconds` 按安装数加权计算平均游戏时长；兼容历史字段名 `avg_play_duration_seconds`，但若两个字段都不存在则刷新失败并保留旧快照。
+7. 现网 `play_duration_seconds` 字段注释为“总播放时长”，平均游戏时长按 `SUM(play_duration_seconds) / SUM(install)` 计算；若仅存在历史 `avg_play_duration_seconds`，读取时先乘该行安装数归一为总时长。两个字段都不存在则刷新失败并保留旧快照。
 8. D1 留存率为 `SUM(day1_retention_count) / SUM(install)`；D0 ROAS 为 `SUM(day0_revenue) / SUM(有效花费)`；每个 D1 留存成本为 `SUM(有效花费) / SUM(day1_retention_count)`。
 9. Google/TikTok/Meta 的有效花费来自统一渠道源；Unity 的有效花费来自明确标注的手工兜底。手工表 `cost` 对受支持渠道只用于对账，不替代渠道源。
 10. `ads_custom_source_insight.country` 显示为“渠道国家/分组”；手工表 `country` 显示为“转化国家”，两者不得混称或强行 Join。

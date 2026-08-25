@@ -99,7 +99,7 @@ OVERVIEW_COLUMNS = [
     "manual_cost",
     "manual_installs",
     "d1_retained",
-    "play_weighted_seconds",
+    "play_total_seconds",
     "play_weight_installs",
     "day0_revenue",
     "day1_revenue",
@@ -146,7 +146,7 @@ CONVERSION_COLUMNS = [
     "manual_installs",
     "d1_retained",
     "play_duration_seconds",
-    "play_weighted_seconds",
+    "play_total_seconds",
     "play_weight_installs",
     "day0_revenue",
     "day1_revenue",
@@ -163,7 +163,7 @@ NUMERIC_COLUMNS = {
     "manual_installs",
     "d1_retained",
     "play_duration_seconds",
-    "play_weighted_seconds",
+    "play_total_seconds",
     "play_weight_installs",
     "day0_revenue",
     "day1_revenue",
@@ -410,6 +410,11 @@ def fetch_manual_day(day: str, duration_column: str):
     day = validate_date(day)
     if duration_column not in ("play_duration_seconds", "avg_play_duration_seconds"):
         raise ValueError("unsupported duration column")
+    duration_expression = (
+        "play_duration_seconds"
+        if duration_column == "play_duration_seconds"
+        else "(avg_play_duration_seconds * install)"
+    )
     sql = """
     SELECT
       id,
@@ -427,14 +432,14 @@ def fetch_manual_day(day: str, duration_column: str):
       cost,
       install,
       day1_retention_count,
-      {duration_column},
+      {duration_expression} AS play_duration_seconds,
       day0_revenue,
       day1_revenue,
       DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')
     FROM ads_ai.ads_manual_daily_performance FORCE INDEX(uk_manual_daily_ad_grain)
     WHERE stat_date = {day}
     ORDER BY id
-    """.format(duration_column=duration_column, day=sql_quote(day))
+    """.format(duration_expression=duration_expression, day=sql_quote(day))
     return [normalize_manual_row(dict(zip(MANUAL_SOURCE_COLUMNS, item))) for item in run_mysql(sql, timeout=240)]
 
 
@@ -784,7 +789,7 @@ def overview_rows_for_day(connection, day: str):
       SUM(manual_cost) AS manual_cost,
       SUM(manual_installs) AS manual_installs,
       SUM(d1_retained) AS d1_retained,
-      SUM(play_duration_seconds * manual_installs) AS play_weighted_seconds,
+      SUM(play_duration_seconds) AS play_total_seconds,
       SUM(CASE WHEN manual_installs > 0 THEN manual_installs ELSE 0 END) AS play_weight_installs,
       SUM(day0_revenue) AS day0_revenue,
       SUM(day1_revenue) AS day1_revenue,
@@ -809,7 +814,7 @@ def overview_rows_for_day(connection, day: str):
             "manual_cost": number(row["manual_cost"]),
             "manual_installs": integer(row["manual_installs"]),
             "d1_retained": integer(row["d1_retained"]),
-            "play_weighted_seconds": number(row["play_weighted_seconds"]),
+            "play_total_seconds": number(row["play_total_seconds"]),
             "play_weight_installs": integer(row["play_weight_installs"]),
             "day0_revenue": number(row["day0_revenue"]),
             "day1_revenue": number(row["day1_revenue"]),
@@ -848,7 +853,7 @@ def overview_rows_for_day(connection, day: str):
                 "manual_cost": 0.0,
                 "manual_installs": 0,
                 "d1_retained": 0,
-                "play_weighted_seconds": 0.0,
+                "play_total_seconds": 0.0,
                 "play_weight_installs": 0,
                 "day0_revenue": 0.0,
                 "day1_revenue": 0.0,
@@ -876,7 +881,7 @@ def overview_rows_for_day(connection, day: str):
         target["source_cpi"] = ratio(target["source_spend"], target["source_installs"])
         target["d1_retention_rate"] = ratio(target["d1_retained"], target["manual_installs"])
         target["avg_play_duration_seconds"] = ratio(
-            target["play_weighted_seconds"], target["play_weight_installs"]
+            target["play_total_seconds"], target["play_weight_installs"]
         )
         target["d0_roas"] = ratio(target["day0_revenue"], target["effective_spend"])
         target["cost_per_d1_retained"] = ratio(target["effective_spend"], target["d1_retained"])
@@ -926,9 +931,7 @@ def conversion_rows_for_day(connection, day: str):
         item["manual_installs"] = integer(item["manual_installs"])
         item["d1_retained"] = integer(item["d1_retained"])
         item["play_duration_seconds"] = number(item["play_duration_seconds"])
-        item["play_weighted_seconds"] = number(
-            dec(item["play_duration_seconds"]) * dec(item["manual_installs"])
-        )
+        item["play_total_seconds"] = item["play_duration_seconds"]
         item["play_weight_installs"] = item["manual_installs"] if item["manual_installs"] > 0 else 0
         item["day0_revenue"] = number(item["day0_revenue"])
         item["day1_revenue"] = number(item["day1_revenue"])
@@ -1009,7 +1012,7 @@ def aggregate_overview(rows):
         "manual_cost": Decimal("0"),
         "manual_installs": 0,
         "d1_retained": 0,
-        "play_weighted_seconds": Decimal("0"),
+        "play_total_seconds": Decimal("0"),
         "play_weight_installs": 0,
         "day0_revenue": Decimal("0"),
         "day1_revenue": Decimal("0"),
@@ -1017,7 +1020,7 @@ def aggregate_overview(rows):
         "manual_row_count": 0,
     }
     for row in rows:
-        for key in ("effective_spend", "source_spend", "manual_cost", "play_weighted_seconds", "day0_revenue", "day1_revenue"):
+        for key in ("effective_spend", "source_spend", "manual_cost", "play_total_seconds", "day0_revenue", "day1_revenue"):
             total[key] += dec(row.get(key))
         for key in (
             "source_installs",
@@ -1036,7 +1039,7 @@ def aggregate_overview(rows):
             "source_ctr": ratio(total["source_clicks"], total["source_impressions"]),
             "source_cpi": ratio(total["source_spend"], total["source_installs"]),
             "d1_retention_rate": ratio(total["d1_retained"], total["manual_installs"]),
-            "avg_play_duration_seconds": ratio(total["play_weighted_seconds"], total["play_weight_installs"]),
+            "avg_play_duration_seconds": ratio(total["play_total_seconds"], total["play_weight_installs"]),
             "d0_roas": ratio(total["day0_revenue"], total["effective_spend"]),
             "cost_per_d1_retained": ratio(total["effective_spend"], total["d1_retained"]),
         }

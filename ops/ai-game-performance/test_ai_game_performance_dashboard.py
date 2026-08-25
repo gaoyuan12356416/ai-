@@ -135,7 +135,14 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("%%Y", sql)
         self.assertIn("DATE_FORMAT(stat_date, '%Y-%m-%d')", sql)
         self.assertIn("DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')", sql)
+        self.assertIn("play_duration_seconds AS play_duration_seconds", sql)
         self.assertEqual(rows[0]["dt"], "2026-08-24")
+        with mock.patch.object(dashboard, "run_mysql", return_value=[raw_row]) as legacy_query:
+            dashboard.fetch_manual_day("2026-08-24", "avg_play_duration_seconds")
+        self.assertIn(
+            "(avg_play_duration_seconds * install) AS play_duration_seconds",
+            legacy_query.call_args.args[0],
+        )
 
     def test_read_only_gate_fails_closed(self):
         with mock.patch.object(dashboard, "run_mysql", return_value=[["1"]]):
@@ -162,15 +169,15 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertEqual((game_id, status), (dashboard.UNMAPPED_GAME_ID, "unmapped"))
 
-    def test_overview_keeps_delivery_spend_single_and_weights_play_duration(self):
+    def test_overview_keeps_delivery_spend_single_and_uses_total_play_duration(self):
         manual = [
-            manual_row(1, manual_installs="2", d1_retained="1", play_duration_seconds="10"),
+            manual_row(1, manual_installs="2", d1_retained="1", play_duration_seconds="20"),
             manual_row(
                 2,
                 conversion_country="ID",
                 manual_installs="3",
                 d1_retained="2",
-                play_duration_seconds="20",
+                play_duration_seconds="60",
             ),
             manual_row(
                 3,
@@ -182,7 +189,7 @@ class DashboardTests(unittest.TestCase):
                 manual_cost="25",
                 manual_installs="4",
                 d1_retained="1",
-                play_duration_seconds="30",
+                play_duration_seconds="120",
             ),
         ]
         dashboard.replace_manual_day(self.connection, "2026-08-24", manual)
@@ -197,6 +204,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(google["effective_spend"], 100)
         self.assertEqual(google["manual_installs"], 5)
         self.assertEqual(google["d1_retained"], 3)
+        self.assertEqual(google["play_total_seconds"], 80)
         self.assertEqual(google["avg_play_duration_seconds"], 16)
         self.assertEqual(google["d1_retention_rate"], 0.6)
         self.assertEqual(unity["effective_spend"], 25)

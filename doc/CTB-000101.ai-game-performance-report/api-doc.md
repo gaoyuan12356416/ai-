@@ -92,7 +92,7 @@
 
 共享维度：日期、游戏 ID/名称、渠道、映射状态、花费来源。
 
-基础可加指标：`effective_spend/source_spend/source_installs/source_impressions/source_clicks/manual_cost/manual_installs/d1_retained/play_weighted_seconds/play_weight_installs/day0_revenue/day1_revenue/source_row_count/manual_row_count`。
+基础可加指标：`effective_spend/source_spend/source_installs/source_impressions/source_clicks/manual_cost/manual_installs/d1_retained/play_total_seconds/play_weight_installs/day0_revenue/day1_revenue/source_row_count/manual_row_count`。
 
 比率必须在筛选/分组后重算：`source_ctr/source_cpi/d1_retention_rate/avg_play_duration_seconds/d0_roas/cost_per_d1_retained`。
 
