@@ -1140,7 +1140,7 @@ def publish_from_cache(cache_db: Path = DEFAULT_CACHE_DB, output_dir: Path = DEF
             },
             "views": {
                 "overview": {"label": "游戏总览", "description": "渠道事实与产品测转化在日期+游戏+渠道共享维度汇总"},
-                "delivery": {"label": "渠道明细", "description": "统一渠道事实；country 表示渠道国家/分组"},
+                "delivery": {"label": "渠道明细", "description": "渠道事实与转化事实由客户端并列聚合；两类国家保持分离"},
                 "conversion": {"label": "转化明细", "description": "手工产品测转化事实；country 表示转化国家"},
             },
             "data_files": data_files,

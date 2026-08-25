@@ -15,6 +15,7 @@ GitHub-maintained source for the standalone, Feishu-protected report at:
 - Google maps by `campaign_id + adset_id`; Meta/TikTok map by `ad_id`.
 - Only a one-game mapping is assigned. Ambiguous and unmapped delivery rows remain separate.
 - Unity has no unified delivery rows in the current source and uses `manual cost` only as an explicitly labelled overview fallback.
+- The channel view loads the versioned delivery and conversion day files together, appends them as parallel facts, and aggregates only after the operator selects dimensions. It never raw-joins the two fact tables; Google/Meta/TikTok effective spend still comes only from delivery, Unity from manual fallback, and organic/restricted remain zero-spend conversion channels.
 - Delivery `country` and conversion `country` remain separate dimensions.
 - Live `play_duration_seconds` is total play time. Average play time is `SUM(total seconds) / SUM(installs)`; the legacy average column is converted to total seconds on read.
 - Browser requests never query MySQL.
@@ -26,6 +27,7 @@ GitHub-maintained source for the standalone, Feishu-protected report at:
 - `latest.json` and `index.html` are `private, no-store`; versioned daily files are `private, max-age=900` and use same-origin Cache Storage for 15 minutes.
 - A failed refresh or publish does not replace `latest.json`.
 - Retention is 60 days. Normal runs refresh Beijing today and the previous two days so D1 retention backfills are captured, while the first run uses `--full-refresh`.
+- Production timer runs every 30 minutes at `*:12` and `*:42`, with up to 30 seconds randomized delay; a normal refresh republishes after the three-day incremental read completes.
 
 ## Local validation
 

@@ -98,7 +98,14 @@
 
 ### 渠道明细 `delivery`
 
-维度增加 `source_country/campaign_id/adset_id/ad_id`；指标为渠道花费、安装、曝光、点击和行数。`source_country` 是渠道国家/分组。
+客户端同时读取同一天的 `delivery` 与 `conversion` 文件，并把两类记录转换成指标互斥的并列事实后再按所选维度聚合，禁止逐行 Join：
+
+- `delivery` 行只贡献渠道花费、渠道安装、曝光、点击和 `source_row_count`；有效花费来自该行渠道花费；
+- `conversion` 行只贡献手工成本、测转安装、D1、时长、收入和 `manual_row_count`；仅 Unity 行贡献手工兜底有效花费；
+- Google/Meta/TikTok 的手工成本仅对账，不进入有效花费；organic/restricted 有转化但有效花费为 0；
+- 共享维度为日期、游戏、渠道和广告层级；`source_country` 是渠道国家/分组，转化事实使用“仅转化侧”占位，`conversion_country` 仍保留独立语义。
+
+表格/CSV 指标包括 `effective_spend/source_spend/manual_cost/source_installs/manual_installs/d1_retained/source_impressions/source_clicks/source_ctr/source_cpi/source_row_count/manual_row_count`。页面状态分别显示当前渠道事实行数与转化事实行数，避免把聚合结果行数误认为源数据行数。
 
 ### 转化明细 `conversion`
 
