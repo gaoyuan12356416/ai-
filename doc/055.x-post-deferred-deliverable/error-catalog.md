@@ -5,7 +5,7 @@
 本目录覆盖素材池入池、自然排期、手动发布、媒体预检/修复、账号与 Token、队列台账、
 X 上传/Post/Repost 的可见错误。它从生产基线
 `3b9cda698e8f4ad1a025a8f9e2e1dd6296c95769` 及本需求变更代码提取。自动覆盖测试当前
-从 8 个发布链路模块扫描到 236 个稳定 literal error code，本目录逐码覆盖，缺失为 0。
+从 8 个发布链路模块扫描到 232 个稳定 literal error code，本目录逐码覆盖，缺失为 0。
 
 - `等待`：不是发布失败，不建队列；条件到达后由自然排期复检。
 - `本轮跳过`：本次没有发布，后续自然排期可重新选材。
@@ -46,9 +46,9 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `material_duration_exceeds_limit` | 源时长超过当前路径上限（最高 4 小时） | `阻断` |
 | `material_url_not_https` | 素材源地址不是 HTTPS | `阻断` |
 | `material_source_tag_invalid` / `material_tag_invalid` | 标签无法安全解析 | `阻断`；修正编码/内容 |
-| `material_source_tag_unsafe` / `material_tag_unsafe` | 标签命中禁发词 | 当前素材池保留历史提示，本轮 selector 跳过；修正标签后自然复检 |
-| `material_language_not_scheduled` | 当前排期账号没有该素材语言 | `本轮跳过`；保留素材，等同语言账号排期 |
-| `material_has_violation` | 历史违规记录提示 | 当前合同不以历史违规表作为 X 投放门禁；保留审计提示 |
+| `material_source_tag_unsafe` / `material_tag_unsafe` | 历史版本曾因标签过滤素材 | 当前 X selector 不再读取或按 source/resource tag 过滤；旧状态经当前源数据复检后清空 |
+| `material_language_not_scheduled` | 当前配置确实不存在该素材语言账号 | `本轮跳过`；保留素材，等同语言账号排期；已有该语言但本批容量满时不写此码 |
+| `material_has_violation` | 历史版本曾按违规记录过滤 | 当前 X 合同不查询或按历史违规表过滤；旧状态经当前源数据复检后清空 |
 | `violation_check_invalid` | 历史违规结果无法核验 | 兼容旧记录；查旧校验链 |
 | `drama_mapping_missing` | 素材没有对应短剧信息 | `阻断` |
 | `drama_mapping_invalid` | 短剧映射字段缺失或身份/语言不一致 | `阻断` |
@@ -90,7 +90,7 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `invalid_media_duration` | 小于 0.5 秒、普通账号超过 140 秒或会员路径超过 4 小时 | 选会员账号/压缩/换素材 |
 | `invalid_media_frame_rate` | 帧率无效或超过 60 fps | `阻断但可复检` |
 | `invalid_image` / `invalid_image_dimensions` | 图片格式、签名或尺寸无效 | `阻断` |
-| `x_long_video_requires_premium` | 视频超过 140 秒且目标账号没有 Token 实测会员资格 | 本轮跳过该账号/素材组合；保留素材供会员或 relay 路由 |
+| `x_long_video_requires_premium` | 长视频当前没有可用的同语言 Token 实测会员直发/relay 路径 | 本轮跳过并保留素材；有可用 relay 时由会员账号发原 Post、目标账号 Repost，不应写此码 |
 | `media_preflight_changed` | 发布时下载到的文件与冻结 SHA/大小/时长不一致 | `阻断`；防止源文件静默替换 |
 | `media_preflight_failed` | 旧/兜底媒体预检错误 | 本轮不建队列或不发布，查看具体消息 |
 
@@ -102,7 +102,7 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `source_not_repairable` / `trigger_not_repairable` | 源文件或触发原因不支持自动修复 | `阻断`；人工换源/转码 |
 | `source_too_large` | GPU 下载源超修复服务上限 | `阻断` |
 | `profile_mismatch` | 请求的转码 profile 与服务不一致 | `阻断`；同步配置 |
-| `repaired_media_invalid` | 修复产物仍不满足 X 合同 | `阻断但可复检` |
+| `repaired_media_invalid` | 修复产物仍不满足 X 合同 | `阻断但可复检`；显式强制重制使用香港 GPU，COS HEAD 与 CPU 二次探测通过后清错 |
 | `repaired_media_too_large` / `repaired_media_empty` / `repaired_media_missing` | 修复产物过大、为空或不存在 | `阻断` |
 | `repaired_media_duration_invalid` / `repaired_media_duration_too_long` / `repaired_media_duration_mismatch` | 修复后时长不合法、超账号上限或与预期不一致 | `阻断` |
 | `x_post_media_repair_invalid_request` | CPU 发往 GPU 的修复请求不合法 | 工程配置/契约错误 |
@@ -112,7 +112,7 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_media_repair_probe_mismatch` | CPU 与 GPU 的媒体探针结果不一致 | `阻断` |
 | `source_integrity_mismatch` | GPU 实际源文件与请求指纹不一致 | `阻断` |
 | `manifest_invalid` / `job_key_conflict` | 修复审计清单无效或同 job key 指向不同任务 | `阻断` |
-| `cos_sdk_unavailable` / `cos_upload_failed` / `cos_head_failed` | COS SDK、上传或 HEAD 校验失败 | 临时故障可复检，先确认对象未被部分写入 |
+| `cos_sdk_unavailable` / `cos_upload_failed` / `cos_head_failed` | COS SDK、上传或 HEAD 校验失败 | 临时故障可复检；香港 GPU worker 上传带有限次重试，最终仍须 COS HEAD 和 CPU 指纹复检 |
 | `cos_verification_failed` / `cos_object_conflict` | COS 对象大小/SHA 不一致或同 key 内容冲突 | `阻断`；禁止覆盖后假定成功 |
 | `storage_error` / `invalid_configuration` | GPU 本地存储或配置错误 | `阻断`；修配置/磁盘 |
 
@@ -292,6 +292,18 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 5 条 `drama_not_yet_deliverable` 均仍为 `status=unpublished`，最后校验时间停留在
 2026-08-21，而权威开放时间为 2026-08-22 00:00（北京时间）。这证明原故障是候选查询
 把临时错误永久排除，未发生重新校验；不是已建 queue 或 X 上游发布失败。
+
+## 部署后生产验收快照（2026-08-25 18:22，北京时间）
+
+- 六个指定历史/修复错误码数量均为 0：`x_long_video_requires_premium`、
+  `material_language_not_scheduled`、`material_source_tag_unsafe`、
+  `repaired_media_invalid`、`material_has_violation`、`cos_upload_failed`。
+- 8 条媒体素材均在香港 GPU 强制重制并通过 COS HEAD 与 CPU 二次复检。
+- 其余 3 条确定无效、未发布、无队列/活动占用的素材已精确删除。
+- 唯一剩余非空错误为 5 条 `drama_not_yet_deliverable`；它们继续显示“待可投放”，
+  由后续自然素材排期按当前权威时间重新校验，不作为永久不可用状态。
+- 素材池/队列/日志/未知结果为 `841/627/627/0`，SQLite integrity 为 `ok`，
+  foreign-key violations 为 0；本次验收没有创建真实 Post/Repost。
 
 ## 代码来源
 

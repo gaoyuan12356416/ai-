@@ -20,10 +20,13 @@
 | CR-002 | 中 | HK runtime | 系统 Python 3.6 不支持当前代码，且缺 COS SDK | 使用 Python 3.9 venv 与冻结依赖 | 已修复 |
 | CR-003 | 低 | 部署 | 香港无 `/data` 独立挂载 | release 放 `/opt`、工作数据放 `/var/lib` 并由 systemd 限权 | 已修复 |
 | CR-004 | 中 | HK Python 依赖 | 旧 Conda 的 `requests==2.33.1` 不存在于 PyPI，无法重建最小 venv | 固定为 PyPI 可安装且与 SDK 兼容的 `requests==2.32.5` | 已修复 |
-| CR-005 | 高 | 显式媒体 backfill | 固定虚拟账号未声明 Premium，长视频在 GPU 调用前被误判；合规源视频也无法按用户要求重制 | backfill 使用 Premium 时长能力；新增显式 `--force-repair`、独立任务键和专用审计原因 | 已修复，待生产重跑 |
+| CR-005 | 高 | 显式媒体 backfill | 固定虚拟账号未声明 Premium，长视频在 GPU 调用前被误判；合规源视频也无法按用户要求重制 | backfill 使用 Premium 时长能力；新增显式 `--force-repair`、独立任务键和专用审计原因 | 已修复；生产 8/8 重跑通过 |
+| CR-006 | 中 | timer 恢复 | manual 15 秒相位若与 schedule `:10` 重合，会造成自然 `skipped_locked` | 将 manual 恢复到 `:13/:28/:43/:58` 相位并观察下一分钟自然 tick | 已修复；claim=0、schedule=no_due、manual=no_pending |
 
 ## 编译 / 验证结果
 
 - `git diff --check`：通过（仅 Windows 行尾提示）。
 - `python -m compileall -q features scripts`：通过。
-- `python -m unittest discover -s scripts -p "test_x_post*.py"`：503 通过、1 跳过、0 失败。
+- 聚焦回归：167/167 通过。
+- `python -m unittest discover -s scripts -p "test_x_post*.py"`：506 执行、505 通过、1 条环境条件跳过、0 失败。
+- 精确 Git release：CPU 32/32、香港 GPU 20/20 通过。
