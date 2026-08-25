@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the AI game performance report every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:12,42:00
+RandomizedDelaySec=30
+Persistent=true
+Unit=ai-game-performance-refresh.service
+
+[Install]
+WantedBy=timers.target
