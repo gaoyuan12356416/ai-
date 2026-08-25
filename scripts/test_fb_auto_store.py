@@ -62,6 +62,98 @@ class StoreTests(unittest.TestCase):
         detail = self.store.get_run(result["run_id"], self.actor)["run"]
         self.assertEqual({task["skip_reason"] for task in detail["tasks"]}, {"", "fb_page_missing_eligible_token"})
 
+    def test_targeted_manual_run_only_creates_explicit_pages(self):
+        self.enable()
+        class ExtraPage(Pages):
+            def list_pages(self, *_args, **_kwargs):
+                return super().list_pages() + [PageTarget("6", ("6",), "10003", "248", "UTC", "english", 1)]
+        result = self.store.create_run(
+            self.template["id"],
+            "manual-backfill:v1:s20:operator-test-0001",
+            "manual",
+            self.actor,
+            ExtraPage(),
+            Materials(),
+            required_template_version=1,
+            target_page_ids=["10002", "10001"],
+        )
+        detail = self.store.get_run(result["run_id"], self.actor)["run"]
+        self.assertEqual([task["page_id"] for task in detail["tasks"]], ["10001", "10002"])
+        self.assertEqual(result["summary"]["total_pages"], 2)
+        self.assertEqual(result["summary"]["queued_tasks"], 1)
+        self.assertEqual(result["summary"]["skipped_tasks"], 1)
+
+    def test_targeted_manual_run_fails_closed_when_page_scope_drifts(self):
+        self.enable()
+        class DriftingPages(Pages):
+            def __init__(self): self.calls = 0
+            def list_pages(self, *_args, **_kwargs):
+                self.calls += 1
+                rows = super().list_pages()
+                return rows if self.calls == 1 else rows[:1]
+        with self.assertRaises(StoreError) as caught:
+            self.store.create_run(
+                self.template["id"],
+                "manual-backfill:v1:s20:operator-test-0002",
+                "manual",
+                self.actor,
+                DriftingPages(),
+                Materials(),
+                required_template_version=1,
+                target_page_ids=["10001", "10002"],
+            )
+        self.assertEqual(caught.exception.code, "fb_auto_target_page_scope_changed")
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fb_auto_run").fetchone()[0], 0)
+
+    def test_targeted_manual_run_requires_manual_trigger_and_version_guard(self):
+        self.enable()
+        cases = [
+            {"trigger_type": "manual", "required_template_version": None, "expected_template_version": None},
+            {"trigger_type": "auto", "required_template_version": 1, "expected_template_version": None},
+            {"trigger_type": "manual", "required_template_version": 1, "expected_template_version": 1},
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(case=case), self.assertRaises(StoreError) as caught:
+                self.store.create_run(
+                    self.template["id"],
+                    f"manual-backfill:v1:s20:invalid-{index:04d}",
+                    case["trigger_type"],
+                    self.actor,
+                    Pages(),
+                    Materials(),
+                    required_template_version=case["required_template_version"],
+                    expected_template_version=case["expected_template_version"],
+                    target_page_ids=["10001"],
+                )
+            self.assertEqual(caught.exception.code, "invalid_request")
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fb_auto_run").fetchone()[0], 0)
+
+    def test_targeted_manual_run_rechecks_enabled_template_after_catalog_snapshot(self):
+        self.enable()
+        store = self.store
+        actor = self.actor
+        class DisablingMaterials(Materials):
+            def candidate_snapshot(self, config):
+                snapshot = super().candidate_snapshot(config)
+                store.set_template_status(1, False, actor, 1)
+                return snapshot
+        with self.assertRaises(StoreError) as caught:
+            self.store.create_run(
+                self.template["id"],
+                "manual-backfill:v1:s20:disable-race-0001",
+                "manual",
+                self.actor,
+                Pages(),
+                DisablingMaterials(),
+                required_template_version=1,
+                target_page_ids=["10001"],
+            )
+        self.assertEqual(caught.exception.code, "fb_auto_due_slot_template_changed")
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fb_auto_run").fetchone()[0], 0)
+
     def test_description_and_short_link_are_frozen_with_task_identity(self):
         raw=payload(); raw["name"]="Macros"; raw["message_template"]="{{drama_name}}\n{{desc}}\n{{url}}"
         template=self.store.create_template(raw,self.actor,{"app_id":"1479","product":"Dramawave"})

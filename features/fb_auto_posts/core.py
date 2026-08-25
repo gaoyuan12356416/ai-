@@ -457,14 +457,59 @@ class FBAutoPostStore:
             raise StoreError("fb_auto_due_slot_lease_superseded", "计划租约已过期或被其他worker接管，本次结果不再落账", 409)
         return due
 
-    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None) -> Dict[str, Any]:
+    @staticmethod
+    def _target_page_ids(value: Sequence[str] | None) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+            raise StoreError("invalid_request", "定向回补Page范围无效", 400)
+        result = tuple(sorted(str(item or "").strip() for item in value))
+        if (
+            len(result) != len(set(result))
+            or not all(re.fullmatch(r"[1-9][0-9]{3,40}", item) for item in result)
+        ):
+            raise StoreError("invalid_request", "定向回补Page范围无效", 400)
+        return result
+
+    @staticmethod
+    def _only_target_pages(page_rows: Sequence[Any], target_page_ids: Sequence[str]) -> List[Any]:
+        if not target_page_ids:
+            return list(page_rows)
+        wanted = set(target_page_ids)
+        selected = [page for page in page_rows if str(page.page_id) in wanted]
+        by_id = {str(page.page_id): page for page in selected}
+        missing = sorted(wanted.difference(by_id))
+        if missing or len(selected) != len(by_id):
+            error = StoreError("fb_auto_target_page_scope_changed", "定向回补Page范围已变化或存在重复，未创建运行", 409)
+            error.conflicts = (
+                [{"page_id": page_id, "status": "missing"} for page_id in missing[:20]]
+                or [{"status": "duplicate"}]
+            )
+            raise error
+        return [by_id[page_id] for page_id in target_page_ids]
+
+    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, required_template_version: int | None = None, target_page_ids: Sequence[str] | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
             raise StoreError("invalid_request", "运行触发参数无效", 400)
+        target_ids = self._target_page_ids(target_page_ids)
+        try:
+            required_version = None if required_template_version is None else int(required_template_version)
+        except (TypeError, ValueError, OverflowError):
+            raise StoreError("invalid_request", "定向回补模板版本无效", 400) from None
+        if required_version is not None and required_version <= 0:
+            raise StoreError("invalid_request", "定向回补模板版本无效", 400)
+        if target_ids and (
+            trigger_type != "manual"
+            or required_version is None
+            or expected_template_version is not None
+        ):
+            raise StoreError("invalid_request", "定向回补必须使用手动触发和独立模板版本锁", 400)
+        version_guard = expected_template_version if expected_template_version is not None else required_version
         with self.connect() as conn:
             template = self._template_row(conn, template_id, actor)
-            if expected_template_version is not None and int(template["current_version"]) != int(expected_template_version):
+            if version_guard is not None and int(template["current_version"]) != int(version_guard):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板版本已变化，原计划时隙不再执行", 409)
-            if expected_template_version is not None and template["status"] != "enabled":
+            if version_guard is not None and template["status"] != "enabled":
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
             if expected_template_version is not None:
@@ -500,7 +545,10 @@ class FBAutoPostStore:
             error = StoreError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409)
             error.conflicts = exclusive
             raise error
-        page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+        page_rows = self._only_target_pages(
+            pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner),
+            target_ids,
+        )
         page_ids = {page.page_id for page in page_rows}
         drift_conflicts: List[Dict[str, Any]] = []
         enabled_others = self.enabled_template_sources(template_id)
@@ -561,7 +609,10 @@ class FBAutoPostStore:
             error = StoreError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409)
             error.conflicts = exclusive
             raise error
-        page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+        page_rows = self._only_target_pages(
+            pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner),
+            target_ids,
+        )
         page_ids, global_slot_jobs = {page.page_id for page in page_rows}, sum(page.eligible_token_count > 0 for page in page_rows)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         drift_conflicts = []
@@ -594,9 +645,9 @@ class FBAutoPostStore:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
             current = conn.execute("SELECT status,current_version FROM fb_auto_template WHERE id=?", (template_id,)).fetchone()
-            if current is None or (expected_template_version is not None and int(current["current_version"]) != int(expected_template_version)):
+            if current is None or (version_guard is not None and int(current["current_version"]) != int(version_guard)):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板已停用或版本已变化，原计划时隙不再执行", 409)
-            if current["status"] != "enabled" and (expected_template_version is not None or trigger_type == "auto"):
+            if current["status"] != "enabled" and (version_guard is not None or trigger_type == "auto"):
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
             if expected_template_version is not None:
@@ -606,7 +657,7 @@ class FBAutoPostStore:
                     expected_due_lease_owner=expected_due_lease_owner,
                     expected_due_lease_expires_at_utc=expected_due_lease_expires_at_utc,
                 )
-            if trigger_type == "auto" or expected_template_version is not None:
+            if trigger_type == "auto" or version_guard is not None:
                 current_enabled = {(int(row[0]), int(row[1])) for row in conn.execute("SELECT id,current_version FROM fb_auto_template WHERE status='enabled'")}
                 if current_enabled != enabled_fingerprint:
                     raise StoreError("fb_auto_capacity_snapshot_changed", "启用模板集合在计划期间变化，请重试容量复核", 409)
