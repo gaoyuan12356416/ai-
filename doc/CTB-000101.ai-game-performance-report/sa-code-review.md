@@ -22,11 +22,12 @@
 | CR-006 | 低 | 版本清理 | 清理函数可能删除 `data/` 下非版本目录 | 仅删除匹配严格版本格式且超过 24 小时的目录 | 已修复 |
 | CR-007 | 中 | Nginx/auth | 新 location 复用 TT 鉴权子请求，需验证命名 location 与登录 next | 服务器 `nginx -t`、匿名/登录态回归 | 待生产验证 |
 | CR-008 | 中 | 性能/容量 | 单日转化文件最高约 5 万源行，需验证全量刷新内存、磁盘和浏览器 | 数据盘阴影全量、文件大小/耗时/390px 浏览器回归 | 待生产验证 |
+| CR-009 | 高 | 手工转化 SQL 日期格式 | `.format()` SQL 模板错误保留 `%%`，MySQL 返回字面量 `%Y-%m-%d` | 改为 MySQL 单 `%` 格式符，并增加 SQL 级回归 | 已修复，BUG-003 |
 
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：PASS；
-- `python -m unittest discover ...`：17/17 PASS；
+- `python -m unittest discover ...`：18/18 PASS；
 - `python validate_frontend_contract.py`：PASS（含 `node --check`）；
 - `git diff --check`：PASS。
 

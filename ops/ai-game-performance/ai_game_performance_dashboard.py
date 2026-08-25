@@ -413,7 +413,7 @@ def fetch_manual_day(day: str, duration_column: str):
     sql = """
     SELECT
       id,
-      DATE_FORMAT(stat_date, '%%Y-%%m-%%d'),
+      DATE_FORMAT(stat_date, '%Y-%m-%d'),
       country,
       game_name,
       game_id,
@@ -430,7 +430,7 @@ def fetch_manual_day(day: str, duration_column: str):
       {duration_column},
       day0_revenue,
       day1_revenue,
-      DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s')
+      DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')
     FROM ads_ai.ads_manual_daily_performance FORCE INDEX(uk_manual_daily_ad_grain)
     WHERE stat_date = {day}
     ORDER BY id

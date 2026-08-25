@@ -107,6 +107,36 @@ class DashboardTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "duration column"):
                 dashboard.detect_manual_duration_column()
 
+    def test_manual_query_uses_mysql_date_format_tokens(self):
+        raw_row = [
+            "1",
+            "2026-08-24",
+            "US",
+            "Dino Bros",
+            "2070453956790943744",
+            "googleadwords_int",
+            "24084098776",
+            "202074209947",
+            "",
+            "campaign",
+            "adset",
+            "ad",
+            "0",
+            "1",
+            "0",
+            "10",
+            "0",
+            "0",
+            "2026-08-25 00:00:00",
+        ]
+        with mock.patch.object(dashboard, "run_mysql", return_value=[raw_row]) as query:
+            rows = dashboard.fetch_manual_day("2026-08-24", "play_duration_seconds")
+        sql = query.call_args.args[0]
+        self.assertNotIn("%%Y", sql)
+        self.assertIn("DATE_FORMAT(stat_date, '%Y-%m-%d')", sql)
+        self.assertIn("DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')", sql)
+        self.assertEqual(rows[0]["dt"], "2026-08-24")
+
     def test_read_only_gate_fails_closed(self):
         with mock.patch.object(dashboard, "run_mysql", return_value=[["1"]]):
             dashboard.assert_read_only()
