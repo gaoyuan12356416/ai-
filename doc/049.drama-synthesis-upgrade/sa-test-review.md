@@ -2,19 +2,19 @@
 
 ## 结论
 
-**待独立 SA/QA 评审。** 实现自测不替代 QA gate。
+**PASS（代码 QA），production release HOLD。** 独立 QA 已完成浏览器、定向安全/状态机、迁移并发和一次最终 broad regression；未调用真实 YouTube API。
 
 ## 必查覆盖
 
 | 编号 | 场景 | 状态 |
 | --- | --- | --- |
-| SA-T01 | 404 expired session 与未知关闭 | 待补充/评审 |
-| SA-T02 | worker crash 和过期 lease 重领 | 待补充/评审 |
-| SA-T03 | 浏览器现有视觉/侧栏/表单/卡片/表格回归 | 待浏览器评审 |
-| SA-T04 | HK 真机 FFmpeg profile 和资产清单（不部署） | 待受控环境评审 |
-| SA-T05 | API 不泄漏 credentials/session URI | 待安全评审 |
+| SA-T01 | 404 expired session 与未知关闭 | PASS |
+| SA-T02 | worker crash、过期 lease 重领与 stale fencing | PASS（5/5；并发 400/400） |
+| SA-T03 | 浏览器现有视觉/侧栏/表单/卡片/表格回归 | PASS（8/8） |
+| SA-T04 | HK 真机 FFmpeg profile 和资产清单（不部署） | 代码/合同 PASS；部署 gate 待执行 |
+| SA-T05 | API 不泄漏 credentials/session URI | PASS |
 | SA-T06 | 不触发真实 YouTube post/comment | 必须保持 |
 
 ## QA 修订确认
 
-待独立 QA 填写用例编号、证据与结论。
+独立证据：targeted bugs 8/8、identity 7/7、stale writes 5/5、migration concurrency 400/400。最终 broad regression：1,894 collected / 1,885 PASS / 3 SKIP / 5 FAIL / 1 collection ERROR；6 个 non-pass 均在 base 复现且相关文件在 base..head 未变化，判定 baseline/unrelated。候选无 P0/P1。

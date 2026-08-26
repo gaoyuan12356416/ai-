@@ -2,7 +2,7 @@
 
 ## 授权边界
 
-本文是可演练方案，不是部署授权。当前禁止 push、生产文件写入、服务重启、数据库写入、真实 YouTube 发布/评论。必须先独立 QA，通过后由 CEO 明确授权。
+根授权允许在本文全部 release blocker 和部署 gate 满足后，按 GitHub-first 流程部署生产代码。当前外部 blocker 尚未关闭，因此本候选仍为 HOLD，不得 push/deploy、写生产文件、重启服务或写生产数据库。真实 YouTube 发布/评论不随代码部署获得授权；任何真实视频/评论都必须另行取得精确授权，部署和 smoke 均不得触发。
 
 ## GitHub-first 发布物
 
@@ -20,7 +20,7 @@ GPU_VIDEO_WORKER_URL=http://127.0.0.1:18788
 GPU_VIDEO_WORKER_TOKEN=<server-only shared secret>
 DRAMA_SHORT_LINK_ROOT=<blank until audited CloudFront/S3 publish mount exists>
 DRAMA_YOUTUBE_WORK_ROOT=/mnt/data-disk/drama-youtube-publish
-DRAMA_YOUTUBE_SOURCE_HOSTS=<exact COS HTTPS hostname(s), no wildcard>
+DRAMA_YOUTUBE_SOURCE_HOSTS=advertising-1306474899.cos.ap-hongkong.myqcloud.com,ai.yingliangads.com
 ```
 
 HK：
@@ -56,7 +56,7 @@ DRAMA_API_PORT=8788
 5. 启动独立隧道前确认 `/etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel` 与 `known_hosts` 权限；remote 18788 必须空闲。保留现有 18787。
 6. CPU 先以 curl 通过 18788 读取 catalog，再提交非生产 canary；验证 recipe/output identities。
 7. 只有上述通过后才切 CPU `GPU_VIDEO_WORKER_URL` 并重启相关服务。
-8. YouTube worker 先保持 disabled；确认 1479 eligible list、source hostname allowlist、临时存储权限后才能启用。不得用真实发布做 health check。
+8. YouTube worker 先保持 disabled；确认 1479 eligible list、临时存储权限，并核对 source allowlist 保持精确两项 `advertising-1306474899.cos.ap-hongkong.myqcloud.com,ai.yingliangads.com` 后才能启用。该 allowlist 来自 CPU SQLite 当前 20 个 done jobs 的只读证据，不得添加通配符。不得用真实发布做 health check。
 9. 启动 worker 前执行应用自带 `ensure_storage()`；它通过 `PRAGMA table_info` 检查并在旧 SQLite 表缺列时仅执行 `ALTER TABLE drama_youtube_publish_task ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`。先备份 SQLite，并只读核验旧行 generation=0；不需要独立 MySQL DDL。
 10. disabled worker 下用 fake client 演练 token 频道 mismatch 和两 worker generation reclaim；确认没有真实 Google mutation，再进入后续授权 gate。
 11. 公网已存在 `/s2l/1.html`。CDN owner 必须先核对既有 ID 命名空间和不可变对象；短链 publisher 未落实时 `DRAMA_SHORT_LINK_ROOT` 留空，对用户显示明确失败。
@@ -80,4 +80,9 @@ DRAMA_API_PORT=8788
 
 ## 发布阻断条件
 
-- 独立 QA/SA 未通过；CPU/HK baseline 漂移；资产 hash 不一致；18788 冲突；source allowlist 未确定；短链 publisher 所有权不明却试图启用；任何秘密扫描命中。
+- 当前外部 release blocker（须关闭）：
+  - `page.dramabuzzs.com` 的 writer/owner 与受审计写入路径未落实，且既有数字 ID 命名空间尚未由 owner 冻结/核对。
+- source allowlist 已关闭：CPU SQLite 只读检查当前 20 个 done jobs，仅发现 `advertising-1306474899.cos.ap-hongkong.myqcloud.com` 和 `ai.yingliangads.com`；生产配置只能使用这两个 hostname，不得通配。
+- 条件部署 gate：CPU/HK baseline 无漂移；资产 hash 全量一致；18788 无冲突；备份与回滚点就绪；候选 commit 与已审核 commit 一致；秘密扫描无命中。
+- 独立 QA 已对 `25b8af9` 给出代码 PASS，未发现候选 P0/P1。该结论不关闭上述短链外部 blocker，也不等于 production release PASS。
+- blocker 和 gate 全部满足后，GitHub-first production deployment 已获根授权；真实 YouTube publish/comment 仍保持单独禁止，除非另有精确授权。

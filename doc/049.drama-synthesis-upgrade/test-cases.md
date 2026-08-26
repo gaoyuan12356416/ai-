@@ -6,7 +6,7 @@
 
 ## 用例列表
 
-| 编号 | 场景 | 预期结果 | 优先级 | 实现自测 |
+| 编号 | 场景 | 预期结果 | 优先级 | 结果 |
 | --- | --- | --- | --- | --- |
 | DS-001 | 四个输出 checkbox 初始态 | 全部未勾选 | P0 | PASS |
 | DS-002 | 零输出请求 | UI 与 backend 均拒绝 | P0 | PASS |
@@ -28,9 +28,9 @@
 | DS-018 | worker crash lease recovery | 到期任务可被重领并继续状态机 | P0 | PASS |
 | DS-018A | 评论调用中 worker crash | 标记 unknown，禁止自动重复评论 | P0 | PASS |
 | DS-019 | HK v1 清单 | 20/20、520297533 bytes、SHA 完全一致 | P0 | 待部署前只读演练 |
-| DS-020 | 线上旧三产物/侧栏/表格回归 | 合同保持不变 | P0 | 待独立 QA 浏览器回归 |
+| DS-020 | 线上旧三产物/侧栏/表格回归 | 合同保持不变 | P0 | 独立浏览器 8/8 PASS |
 | DS-021 | 不含新移除字段 | 新 payload 无 cover template/naming rule | P1 | PASS |
-| DS-022 | credential/secret 泄漏扫描 | API/diff/log 无秘密值 | P0 | 待最终 gate |
+| DS-022 | credential/secret 泄漏扫描 | API/diff/log 无秘密值 | P0 | PASS |
 | DS-023 | YouTube live schema contract | SQL 使用 `ch.channel_status`，禁止 `ch.status` | P0 | PASS |
 | DS-024 | raw legacy job 的随机模板 YouTube 来源 | 从已完成冻结 recipe/output 解析 URL | P0 | PASS |
 | DS-025 | SQL 标识对抗输入 | quote/backslash/越界 ID 在查询前失败关闭 | P0 | PASS |

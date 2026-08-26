@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-在不改变线上「短剧素材合成」视觉体系、侧栏、表单、卡片和任务表的前提下，扩展随机模板视频、不可变短链与异步 YouTube 发布。CPU 服继续编排；视频渲染迁移到香港 GPU `43.154.250.89`。本需求不授权部署、推送或真实 YouTube 发布/评论。
+在不改变线上「短剧素材合成」视觉体系、侧栏、表单、卡片和任务表的前提下，扩展随机模板视频、不可变短链与异步 YouTube 发布。CPU 服继续编排；视频渲染迁移到香港 GPU `43.154.250.89`。根授权允许在全部发布 gate 满足后按 GitHub-first 流程部署生产代码；真实 YouTube 发布/评论始终不在该授权内，必须另行获得精确授权。
 
 ## 范围
 
@@ -21,7 +21,7 @@
 - 不改 W2A 归因、深链、Pixel、CTA 或现有 `/tt` 合同。
 - 不开放自定义短链目标，不实现通用 URL 跳转器。
 - 不把 OAuth 凭证、刷新令牌、断点续传 URI 返回浏览器或写日志。
-- 不迁移历史媒体、不切换生产隧道、不发布代码、不创建真实视频/评论。
+- 不迁移历史媒体；当前实现/QA 阶段不切换生产隧道、不部署代码、不创建真实视频/评论。后续部署只能在全部 gate 满足后按 `deploy.md` 执行。
 
 ## 业务规则
 
@@ -53,16 +53,17 @@
 - 新 payload 不含 `cover_template`、`naming_rule`；历史数据仍可读取。
 - 短链目标、HTML、编码、幂等性、不可变性和无开放跳转均通过离线测试。
 - YouTube eligibility、token 频道身份核验、lease generation fencing、视频/评论分态、断点重试、未知关闭、幂等、二次确认均通过 fake-client 测试；测试不访问真实 Google API。
-- 语法、定向测试、diff check 和秘密扫描通过；独立 QA 后才允许部署。
+- 语法、定向测试、diff check、秘密扫描和独立 QA 均通过；当前短链外部 release blocker 关闭后才允许按 GitHub-first 部署。
 
 ## 风险与待决依赖
 
-- P1：CloudFront/S3 短链发布所有者和审计发布路径尚未确认；保持失败关闭。
-- P1：公网已存在 `/s2l/1.html`，启用 publisher 前必须由 CDN owner 冻结/核对既有 ID 命名空间；本实现遇到对象内容冲突会拒绝覆盖。
-- P1：HK 尚未安装 drama renderer/素材目录；必须按 deploy.md 验证清单后 canary。
-- P1：生产源视频 HTTPS hostname allowlist 需部署前从实际 COS URL 确认，不得使用通配符。
-- 当前实现候选只进入独立 QA，不部署、不推送。
+- P1 外部阻断：CloudFront/S3 短链 writer/owner 和受审计发布路径尚未落实；保持失败关闭。
+- P1 外部阻断：公网已存在 `/s2l/1.html`，必须由 owner 冻结并核对数字 ID 命名空间后才能启用 publisher；本实现遇到对象内容冲突会拒绝覆盖。
+- 生产 source allowlist 已由 CPU SQLite 只读核验当前 20 个 done jobs：近期 COS 输出仅使用 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`，历史本机托管输出仅使用 `ai.yingliangads.com`；配置必须精确包含这两个 hostname，禁止通配符。该项已关闭。
+- HK renderer、素材复制、隧道与 canary 是已定义的部署 gate，不是代码 QA 缺陷；必须按 `deploy.md` 完成后再切流。
+- 独立 QA 对提交 `25b8af9` 的代码结论为 PASS，未发现候选 P0/P1；整体 release 仍为 HOLD，直至上述短链外部阻断关闭并完成部署 gate。
 
 ## 变更记录
 
 - 2026-08-26：冻结需求合同、只读生产基线和实现候选范围。
+- 2026-08-26：独立 QA 代码结论 PASS；明确 GitHub-first 条件部署授权、真实 YouTube 单独授权边界及短链外部 release blocker。
