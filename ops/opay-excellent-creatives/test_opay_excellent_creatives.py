@@ -312,9 +312,18 @@ class ConfigurationAndMediaTests(unittest.TestCase):
                 report.load_product_config()
 
     def test_read_only_port_guard(self):
-        with mock.patch.object(report, "run_mysql", return_value=[["1", "63350"]]):
+        with mock.patch.object(
+            report, "mysql_command_env", return_value=(["mysql", "-P63350"], {}, ())
+        ), mock.patch.object(report, "run_mysql", return_value=[["1"]]):
             report.assert_read_only()
-        with mock.patch.object(report, "run_mysql", return_value=[["0", "63353"]]):
+        with mock.patch.object(
+            report, "mysql_command_env", return_value=(["mysql", "--port=63353"], {}, ())
+        ), mock.patch.object(report, "run_mysql", return_value=[["1"]]):
+            with self.assertRaises(RuntimeError):
+                report.assert_read_only()
+        with mock.patch.object(
+            report, "mysql_command_env", return_value=(["mysql", "-P", "63350"], {}, ())
+        ), mock.patch.object(report, "run_mysql", return_value=[["0"]]):
             with self.assertRaises(RuntimeError):
                 report.assert_read_only()
 

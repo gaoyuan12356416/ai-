@@ -304,9 +304,26 @@ def run_mysql(sql: str, timeout: int = 180):
     return list(csv.reader(process.stdout.splitlines(), delimiter="\t", quoting=csv.QUOTE_NONE))
 
 
+def mysql_cli_port(command) -> int:
+    command = [str(item) for item in command]
+    for index, item in enumerate(command):
+        if item == "-P" and index + 1 < len(command):
+            return integer(command[index + 1])
+        if item.startswith("-P") and len(item) > 2:
+            return integer(item[2:])
+        if item == "--port" and index + 1 < len(command):
+            return integer(command[index + 1])
+        if item.startswith("--port="):
+            return integer(item.split("=", 1)[1])
+    return 0
+
+
 def assert_read_only() -> None:
-    rows = run_mysql("SELECT @@read_only, @@port", timeout=30)
-    if not rows or text(rows[0][0]) != "1" or integer(rows[0][1]) != 63350:
+    command, _environment, _secrets = mysql_command_env()
+    if mysql_cli_port(command) != 63350:
+        raise RuntimeError("refusing refresh: expected read-only MySQL entry port 63350")
+    rows = run_mysql("SELECT @@read_only", timeout=30)
+    if not rows or text(rows[0][0]) != "1":
         raise RuntimeError("refusing refresh: expected read-only MySQL port 63350")
 
 
