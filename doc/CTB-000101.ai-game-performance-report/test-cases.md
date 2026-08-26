@@ -41,9 +41,25 @@
 | TC-024 | 渠道视图不双计 | Google/TikTok 同时有两类事实 | 按渠道汇总有效花费、渠道花费、手工成本 | 渠道花费只计 delivery，手工成本仅对账，Unity 才进入手工兜底；源行数分别计数 | P0 | 生产通过 |
 | TC-025 | 隐藏底层行计数 | 三视图均有数据 | 检查指标卡、质量提示、表格并核对 CSV 字段契约 | 不出现“渠道行/转化行”；内部 source/manual row count 守恒测试仍通过；其他指标不变 | P0 | 生产通过（CSV 下载文件仍由用户手点验收） |
 
+### v7 Unity 增量用例（2026-08-26）
+
+| 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| TC-026 | Unity 查询边界 | Fake MySQL/现网只读 Schema | 捕获单日 SQL | 使用 `idx_date`；精确 product/date/category 0；不 union category 1 | P0 | 本地通过 |
+| TC-027 | Unity 指标映射 | starts/views/clicks/installs 同时存在 | 标准化源行 | starts 为曝光、clicks 为点击、installs 为安装；views 不进入曝光；非法 varchar 数值失败关闭 | P0 | 本地通过 |
+| TC-028 | 来源 ID 隔离 | 两张源表均有相同正 ID | 同日写入 SQLite | Unity 使用负 ID，两行并存且无覆盖 | P0 | 本地通过 |
+| TC-029 | 同日游戏维度丰富 | 相同广告键跨日对应不同项目 | 丰富手工 Unity 行 | 只使用同日候选；同日多项目显式 ambiguous，无匹配保持未标记 | P0 | 失败优先发现后已修复，本地通过 |
+| TC-030 | 禁止指标 Join | Unity delivery 与 manual 粒度不同 | 执行丰富与日替换 | 只修改 game ID/name；两侧成本/安装/留存/曝光/点击不互抄 | P0 | 本地通过 |
+| TC-031 | Unity 总览守恒 | 同游戏同日两类事实 | 聚合 overview | 渠道指标各计一次；有效花费只取 manual fallback；source spend 不增加 | P0 | 本地通过 |
+| TC-032 | 旧缓存增量迁移 | 无 `source_game_id` 的 v6 SQLite | 连续执行两次 schema ensure | 原行/金额保留；新列默认空；迁移幂等 | P0 | 本地通过 |
+| TC-033 | 前端并列聚合/CPI | Unity delivery + conversion | 按渠道聚合 | Unity 渠道指标不双计；CPI 保持 `source_spend/source_installs` 且 Unity 为 0，手工兜底不进入 CPI | P0 | 本地 Node 通过 |
+| TC-034 | 生产只读对账 | 阴影缓存与真实 category 0 | 比较行数/installs/starts/clicks，并核对 category 1 排除 | MySQL、SQLite、JSON 精确一致；公开版本尚未切换 | P0 | 待执行 |
+
 ## 回归范围
 
 - 现有 TT 小程序报表 URL、清单和一个日文件；
 - `nginx -t`；
 - AI 主 API 健康和飞书鉴权子请求；
 - 不重启 TT、X、FB 自动发布服务。
+
+v7 未完成 TC-026 至 TC-034 前，不覆盖上述 v6 生产结论，也不建议发布。

@@ -42,6 +42,8 @@ MYSQL_ERROR_MAX_CHARS = 400
 PLATFORM_CHANNEL = {0: "Facebook Ads", 1: "googleadwords_int", 3: "tiktokglobal_int"}
 SOURCE_CHANNELS = frozenset(PLATFORM_CHANNEL.values())
 UNITY_CHANNEL = "unityads_int"
+UNITY_PLATFORM_SENTINEL = -1
+UNITY_CATEGORY = 0
 GENERIC_GAME_ID = "1000000000000000000"
 UNMAPPED_GAME_ID = "__UNMAPPED__"
 AMBIGUOUS_GAME_ID = "__AMBIGUOUS__"
@@ -81,6 +83,19 @@ DELIVERY_SOURCE_COLUMNS = [
     "source_installs",
     "source_impressions",
     "source_clicks",
+    "updated_at",
+]
+
+UNITY_DELIVERY_SOURCE_COLUMNS = [
+    "source_id",
+    "dt",
+    "source_country",
+    "campaign_id",
+    "ad_id",
+    "creative_pack_name",
+    "source_impressions",
+    "source_clicks",
+    "source_installs",
     "updated_at",
 ]
 
@@ -219,6 +234,21 @@ def text(value) -> str:
 def normalize_id(value) -> str:
     raw = text(value)
     return str(int(raw)) if raw.isdigit() else ""
+
+
+def normalize_unity_id(value) -> str:
+    raw = text(value)
+    return raw if re.fullmatch(r"[A-Za-z0-9]{1,64}", raw) else ""
+
+
+def unity_count(value, field: str, source_id: int) -> int:
+    raw = text(value)
+    if not re.fullmatch(r"\d+(?:\.0+)?", raw):
+        raise RuntimeError("invalid Unity %s for source_id=%s" % (field, source_id))
+    parsed = dec(raw)
+    if parsed < 0 or parsed != parsed.to_integral_value():
+        raise RuntimeError("invalid Unity %s for source_id=%s" % (field, source_id))
+    return int(parsed)
 
 
 def sql_quote(value) -> str:
@@ -383,16 +413,18 @@ def normalize_manual_row(row: dict) -> dict:
     game_name = display_game_name(game_id, row.get("game_name"))
     installs = integer(row.get("manual_installs"))
     duration = number(row.get("play_duration_seconds"))
+    channel = text(row.get("channel")) or "未填"
+    normalize_dimension_id = normalize_unity_id if channel == UNITY_CHANNEL else normalize_id
     return {
         "source_id": integer(row.get("source_id")),
         "dt": validate_date(row.get("dt")),
         "conversion_country": text(row.get("conversion_country")) or "未填",
         "game_name": game_name,
         "game_id": game_id,
-        "channel": text(row.get("channel")) or "未填",
-        "campaign_id": normalize_id(row.get("campaign_id")),
-        "adset_id": normalize_id(row.get("adset_id")),
-        "ad_id": normalize_id(row.get("ad_id")),
+        "channel": channel,
+        "campaign_id": normalize_dimension_id(row.get("campaign_id")),
+        "adset_id": normalize_dimension_id(row.get("adset_id")),
+        "ad_id": normalize_dimension_id(row.get("ad_id")),
         "campaign_name": text(row.get("campaign_name")),
         "adset_name": text(row.get("adset_name")),
         "ad_name": text(row.get("ad_name")),
@@ -483,6 +515,63 @@ def fetch_delivery_day(day: str):
                 "source_installs": integer(source.get("source_installs")),
                 "source_impressions": integer(source.get("source_impressions")),
                 "source_clicks": integer(source.get("source_clicks")),
+                "source_game_id": "",
+                "updated_at": text(source.get("updated_at")),
+            }
+        )
+    return rows
+
+
+def fetch_unity_delivery_day(day: str):
+    day = validate_date(day)
+    sql = """
+    SELECT
+      id,
+      DATE_FORMAT(date, '%Y-%m-%d'),
+      country,
+      campaign_id,
+      creative_pack_id,
+      creative_pack_name,
+      starts,
+      clicks,
+      installs,
+      DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')
+    FROM kunlunads_dev.ads_unity_insights FORCE INDEX(idx_date)
+    WHERE date = {day}
+      AND product = {product}
+      AND category = {category}
+    ORDER BY campaign_id, creative_pack_id, country, platform
+    """.format(day=sql_quote(day), product=sql_quote(PRODUCT), category=UNITY_CATEGORY)
+    rows = []
+    for item in run_mysql(sql, timeout=180):
+        source = dict(zip(UNITY_DELIVERY_SOURCE_COLUMNS, item))
+        raw_source_id = integer(source.get("source_id"))
+        if raw_source_id <= 0:
+            raise RuntimeError("invalid Unity source id")
+        campaign_id = normalize_unity_id(source.get("campaign_id"))
+        ad_id = normalize_unity_id(source.get("ad_id"))
+        if not campaign_id or not ad_id:
+            raise RuntimeError("invalid Unity dimension id for source_id=%s" % raw_source_id)
+        rows.append(
+            {
+                # Source-table ids are independently allocated. Negative ids
+                # namespace Unity rows away from positive custom-source ids.
+                "source_id": -raw_source_id,
+                "dt": validate_date(source.get("dt")),
+                "platform": UNITY_PLATFORM_SENTINEL,
+                "channel": UNITY_CHANNEL,
+                "source_country": text(source.get("source_country")) or "未填",
+                "campaign_id": campaign_id,
+                "adset_id": "",
+                "ad_id": ad_id,
+                "source_spend": 0.0,
+                "source_installs": unity_count(source.get("source_installs"), "installs", raw_source_id),
+                # Unity defines starts as impressions; views are completed views.
+                "source_impressions": unity_count(
+                    source.get("source_impressions"), "starts", raw_source_id
+                ),
+                "source_clicks": unity_count(source.get("source_clicks"), "clicks", raw_source_id),
+                "source_game_id": extract_project_id(source.get("creative_pack_name")),
                 "updated_at": text(source.get("updated_at")),
             }
         )
@@ -537,6 +626,7 @@ def ensure_cache_schema(connection) -> None:
           campaign_id TEXT NOT NULL,
           adset_id TEXT NOT NULL,
           ad_id TEXT NOT NULL,
+          source_game_id TEXT NOT NULL DEFAULT '',
           game_id TEXT NOT NULL,
           game_name TEXT NOT NULL,
           mapping_status TEXT NOT NULL,
@@ -569,6 +659,13 @@ def ensure_cache_schema(connection) -> None:
         );
         """
     )
+    delivery_columns = {
+        text(row[1]) for row in connection.execute("PRAGMA table_info(delivery_fact)")
+    }
+    if "source_game_id" not in delivery_columns:
+        connection.execute(
+            "ALTER TABLE delivery_fact ADD COLUMN source_game_id TEXT NOT NULL DEFAULT ''"
+        )
     connection.commit()
 
 
@@ -609,7 +706,9 @@ def replace_manual_day(connection, day: str, rows) -> None:
         )
 
 
-def mapping_key(channel: str, campaign_id: str, adset_id: str, ad_id: str):
+def mapping_key(
+    channel: str, campaign_id: str, adset_id: str, ad_id: str, dt: str = ""
+):
     if channel == "googleadwords_int":
         if campaign_id and adset_id:
             return channel, campaign_id, adset_id
@@ -618,7 +717,52 @@ def mapping_key(channel: str, campaign_id: str, adset_id: str, ad_id: str):
         if ad_id:
             return channel, ad_id
         return None
+    if channel == UNITY_CHANNEL:
+        if dt and campaign_id and ad_id:
+            return channel, dt, campaign_id, ad_id
+        return None
     return None
+
+
+def enrich_manual_unity_games(manual_rows, unity_rows) -> dict:
+    candidates = collections.defaultdict(set)
+    for row in unity_rows:
+        dimension_key = mapping_key(
+            row.get("channel", ""),
+            row.get("campaign_id", ""),
+            row.get("adset_id", ""),
+            row.get("ad_id", ""),
+            row.get("dt", ""),
+        )
+        key = dimension_key
+        game_id = text(row.get("source_game_id"))
+        if key and game_id:
+            candidates[key].add(game_id)
+    mapped = 0
+    ambiguous = 0
+    for row in manual_rows:
+        if row.get("channel") != UNITY_CHANNEL or row.get("game_id") != UNMARKED_GAME_ID:
+            continue
+        dimension_key = mapping_key(
+            row.get("channel", ""),
+            row.get("campaign_id", ""),
+            row.get("adset_id", ""),
+            row.get("ad_id", ""),
+            row.get("dt", ""),
+        )
+        key = dimension_key
+        games = candidates.get(key, set()) if key else set()
+        valid_games = {game_id for game_id in games if game_id != AMBIGUOUS_GAME_ID}
+        if AMBIGUOUS_GAME_ID in games or len(valid_games) > 1:
+            row["game_id"] = AMBIGUOUS_GAME_ID
+            row["game_name"] = display_game_name(AMBIGUOUS_GAME_ID)
+            ambiguous += 1
+        elif len(valid_games) == 1:
+            game_id = next(iter(valid_games))
+            row["game_id"] = game_id
+            row["game_name"] = display_game_name(game_id)
+            mapped += 1
+    return {"mapped": mapped, "ambiguous": ambiguous}
 
 
 def build_game_mapping(connection):
@@ -638,15 +782,38 @@ def build_game_mapping(connection):
             current_name = game_names.get(game_id, "")
             if not current_name or (current_name == "游戏 " + game_id and candidate_name != current_name):
                 game_names[game_id] = candidate_name
-            key = mapping_key(row["channel"], row["campaign_id"], row["adset_id"], row["ad_id"])
+            key = mapping_key(
+                row["channel"],
+                row["campaign_id"],
+                row["adset_id"],
+                row["ad_id"],
+                row["dt"],
+            )
             if key:
                 key_games[key].add(game_id)
     return key_games, game_names
 
 
 def assign_delivery_game(row: dict, key_games, game_names):
-    key = mapping_key(row["channel"], row["campaign_id"], row["adset_id"], row["ad_id"])
+    key = mapping_key(
+        row["channel"],
+        row["campaign_id"],
+        row["adset_id"],
+        row["ad_id"],
+        row.get("dt", ""),
+    )
     games = key_games.get(key, set()) if key else set()
+    source_game_id = text(row.get("source_game_id"))
+    if source_game_id == AMBIGUOUS_GAME_ID or (
+        source_game_id and games and games != {source_game_id}
+    ):
+        return AMBIGUOUS_GAME_ID, display_game_name(AMBIGUOUS_GAME_ID), "ambiguous"
+    if normalize_id(source_game_id):
+        return (
+            source_game_id,
+            game_names.get(source_game_id, display_game_name(source_game_id)),
+            "mapped",
+        )
     if len(games) == 1:
         game_id = next(iter(games))
         return game_id, game_names.get(game_id, display_game_name(game_id)), "mapped"
@@ -666,6 +833,7 @@ def replace_delivery_day(connection, day: str, rows, key_games, game_names) -> N
         "campaign_id",
         "adset_id",
         "ad_id",
+        "source_game_id",
         "game_id",
         "game_name",
         "mapping_status",
@@ -679,6 +847,7 @@ def replace_delivery_day(connection, day: str, rows, key_games, game_names) -> N
     for row in rows:
         game_id, game_name, status = assign_delivery_game(row, key_games, game_names)
         item = dict(row)
+        item.setdefault("source_game_id", "")
         item.update({"game_id": game_id, "game_name": game_name, "mapping_status": status})
         normalized.append(item)
     now = bj_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -693,12 +862,17 @@ def replace_delivery_day(connection, day: str, rows, key_games, game_names) -> N
             "INSERT OR REPLACE INTO refresh_log(fact_type,dt,row_count,refreshed_at) VALUES ('delivery',?,?,?)",
             (day, len(normalized), now),
         )
+        connection.execute(
+            "INSERT OR REPLACE INTO refresh_log(fact_type,dt,row_count,refreshed_at) VALUES ('unity_delivery',?,?,?)",
+            (day, sum(row["channel"] == UNITY_CHANNEL for row in normalized), now),
+        )
 
 
 def remap_delivery_cache(connection, key_games, game_names) -> int:
     updates = []
     for row in connection.execute(
-        "SELECT source_id,channel,campaign_id,adset_id,ad_id FROM delivery_fact ORDER BY source_id"
+        "SELECT source_id,dt,channel,campaign_id,adset_id,ad_id,source_game_id "
+        "FROM delivery_fact ORDER BY source_id"
     ):
         game_id, game_name, status = assign_delivery_game(dict(row), key_games, game_names)
         updates.append((game_id, game_name, status, row["source_id"]))
@@ -725,19 +899,61 @@ def refresh_cache(start_date: str, end_date: str, cache_db: Path = DEFAULT_CACHE
     duration_column = detect_manual_duration_column()
     connection = cache_conn(cache_db)
     timings = []
+    unity_mapping = {"mapped": 0, "ambiguous": 0}
+    unity_source_rows = 0
     try:
         ensure_cache_schema(connection)
         for day in each_date(start_date, end_date):
-            started = time.monotonic()
-            rows = fetch_manual_day(day, duration_column)
-            replace_manual_day(connection, day, rows)
-            timings.append({"fact": "manual", "date": day, "rows": len(rows), "seconds": round(time.monotonic() - started, 3)})
+            manual_started = time.monotonic()
+            manual_rows = fetch_manual_day(day, duration_column)
+            manual_query_seconds = time.monotonic() - manual_started
+
+            unity_started = time.monotonic()
+            unity_rows = fetch_unity_delivery_day(day)
+            unity_seconds = time.monotonic() - unity_started
+            mapping_result = enrich_manual_unity_games(manual_rows, unity_rows)
+            for key in unity_mapping:
+                unity_mapping[key] += mapping_result[key]
+
+            replace_started = time.monotonic()
+            replace_manual_day(connection, day, manual_rows)
+            timings.append(
+                {
+                    "fact": "manual",
+                    "date": day,
+                    "rows": len(manual_rows),
+                    "unity_games_mapped": mapping_result["mapped"],
+                    "unity_games_ambiguous": mapping_result["ambiguous"],
+                    "seconds": round(manual_query_seconds + time.monotonic() - replace_started, 3),
+                }
+            )
+            timings.append(
+                {
+                    "fact": "unity_delivery",
+                    "date": day,
+                    "rows": len(unity_rows),
+                    "seconds": round(unity_seconds, 3),
+                }
+            )
+            unity_source_rows += len(unity_rows)
+
+            delivery_started = time.monotonic()
+            custom_rows = fetch_delivery_day(day)
+            combined_rows = custom_rows + unity_rows
+            # The final local remap below runs after every refreshed manual day
+            # is present, so cross-day mapping remains deterministic.
+            replace_delivery_day(connection, day, combined_rows, {}, {})
+            timings.append(
+                {
+                    "fact": "delivery",
+                    "date": day,
+                    "rows": len(combined_rows),
+                    "custom_rows": len(custom_rows),
+                    "unity_rows": len(unity_rows),
+                    "seconds": round(time.monotonic() - delivery_started, 3),
+                }
+            )
         key_games, game_names = build_game_mapping(connection)
-        for day in each_date(start_date, end_date):
-            started = time.monotonic()
-            rows = fetch_delivery_day(day)
-            replace_delivery_day(connection, day, rows, key_games, game_names)
-            timings.append({"fact": "delivery", "date": day, "rows": len(rows), "seconds": round(time.monotonic() - started, 3)})
         remapped = remap_delivery_cache(connection, key_games, game_names)
         pruned = prune_cache(connection, retention_days)
         check = connection.execute("PRAGMA quick_check").fetchone()[0]
@@ -748,6 +964,8 @@ def refresh_cache(start_date: str, end_date: str, cache_db: Path = DEFAULT_CACHE
             "end_date": end_date,
             "duration_column": duration_column,
             "mapping_keys": len(key_games),
+            "unity_mapping": unity_mapping,
+            "unity_source_rows": unity_source_rows,
             "remapped_delivery_rows": remapped,
             "timings": timings,
             "pruned": pruned,
@@ -964,6 +1182,12 @@ def quality_for_range(connection, start_date: str, end_date: str):
         "FROM manual_conversion_fact WHERE dt BETWEEN ? AND ?",
         (start_date, end_date),
     ).fetchone()
+    unity_row = connection.execute(
+        "SELECT COUNT(*) rows_count,COALESCE(SUM(source_installs),0) installs,"
+        "COALESCE(SUM(source_impressions),0) impressions,COALESCE(SUM(source_clicks),0) clicks "
+        "FROM delivery_fact WHERE dt BETWEEN ? AND ? AND channel=?",
+        (start_date, end_date, UNITY_CHANNEL),
+    ).fetchone()
     return {
         "source_rows": source_rows,
         "source_spend": source_spend,
@@ -978,6 +1202,10 @@ def quality_for_range(connection, start_date: str, end_date: str):
         "manual_rows": integer(manual_row["rows_count"]),
         "manual_installs": integer(manual_row["installs"]),
         "manual_cost": number(manual_row["cost"]),
+        "unity_rows": integer(unity_row["rows_count"]),
+        "unity_installs": integer(unity_row["installs"]),
+        "unity_impressions": integer(unity_row["impressions"]),
+        "unity_clicks": integer(unity_row["clicks"]),
     }
 
 
@@ -1135,12 +1363,12 @@ def publish_from_cache(cache_db: Path = DEFAULT_CACHE_DB, output_dir: Path = DEF
                 "public_url": PUBLIC_URL,
                 "timezone": "Asia/Shanghai",
                 "currency_note": "源表没有币种字段；金额按上传与渠道源保持同一币种展示为 $。",
-                "source_note": "渠道事实：ads_custom_source_insight product=Neonarcade；产品测转化：ads_manual_daily_performance；Unity 花费使用手工表兜底。",
+                "source_note": "渠道事实：Google/Meta/TikTok 来自 ads_custom_source_insight；Unity 渠道安装、曝光(starts)、点击来自 ads_unity_insights product=Neonarcade category=0；产品测转化来自 ads_manual_daily_performance；Unity 有效花费仍使用手工表 cost 兜底。",
                 "today_partial": end_date == generated.date().isoformat(),
             },
             "views": {
                 "overview": {"label": "游戏总览", "description": "渠道事实与产品测转化在日期+游戏+渠道共享维度汇总"},
-                "delivery": {"label": "渠道明细", "description": "渠道事实与转化事实由客户端并列聚合；两类国家保持分离"},
+                "delivery": {"label": "渠道明细", "description": "渠道事实与转化事实由客户端并列聚合；Unity 曝光使用 starts；两类国家保持分离"},
                 "conversion": {"label": "转化明细", "description": "手工产品测转化事实；country 表示转化国家"},
             },
             "data_files": data_files,
@@ -1199,6 +1427,9 @@ def check_cache(cache_db: Path = DEFAULT_CACHE_DB):
             "end_date": bounds[1],
             "manual_rows": connection.execute("SELECT COUNT(*) FROM manual_conversion_fact").fetchone()[0],
             "delivery_rows": connection.execute("SELECT COUNT(*) FROM delivery_fact").fetchone()[0],
+            "unity_delivery_rows": connection.execute(
+                "SELECT COUNT(*) FROM delivery_fact WHERE channel=?", (UNITY_CHANNEL,)
+            ).fetchone()[0],
         }
     finally:
         connection.close()

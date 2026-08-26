@@ -107,3 +107,25 @@ CTB-000101 已完成实现、真实只读数据阴影、生产部署、BUG-006 �
 - 清单仍记录 `avg_play_duration_seconds=1260.936077`；三视图各 17 个日文件完整，SQLite `quick_check=ok`、`integrity_check=ok`。
 - 匿名页面/清单、正确 TT 报表入口均返回预期飞书登录 302；Nginx、`drama-material-api`、timer 正常。
 - CSV 实际下载文件仍保留为用户手点验收项；页面和导出代码契约已通过。
+
+## Unity 补数阶段测试记录（2026-08-26，非发布报告）
+
+用户发现 BUG-007：Unity 渠道安装/曝光/点击缺失。本节只覆盖 Unity 补数开发阶段；上文分钟单位与既有生产证据仍保留，但不能证明 Unity 补数已经上线。
+
+### 已执行
+
+- 新增 8 组后端测试，覆盖 `idx_date/product/date/category=0`、starts 曝光映射、varchar 数值失败关闭、负 ID 共存、同日/跨日维度隔离、overview 守恒和旧缓存 additive migration。
+- 扩展 Node 渠道并列聚合，加入 Unity delivery + conversion，验证渠道指标/手工指标各计一次、有效花费仍为手工兜底、CPI 保持 source spend 除渠道安装且 Unity 为 0，以及 `source_country` 分桶不伪 Join。
+- 开发中首次运行后端测试共 21 项：20 通过、1 失败。失败项为跨日相同广告键的游戏映射被误判 ambiguous，符合失败优先预期，已交回实现修复；这不是发布 PASS。
+- 同轮前端 Node 2/2 通过；仍需在最终实现落定后重跑完整 discovery 与静态契约。
+
+### 本地修复后门禁
+
+1. 同日映射键已修复；Python discovery 27/27、前端 Node 2/2、`py_compile`、前端静态契约与 `git diff --check` 全部通过。
+2. 独立 SA 代码评审已确认后端与前端 CPI 公式一致、Unity raw spend 未进入有效花费，并关闭两项阴影发布 P1。
+3. 待服务器只读阴影对账 category 0 的行数、installs、starts、clicks，证明 category 1 未并入。
+4. 待生产前备份、不可变 release、原子发布、登录态浏览器与自然 timer 验证。
+
+### 当前结论
+
+本地实现与独立评审已通过，具备进入生产只读阴影的条件；当前生产仍未包含本次变更。不得把本地绿灯或既有版本生产证据描述为 Unity 补数已上线。

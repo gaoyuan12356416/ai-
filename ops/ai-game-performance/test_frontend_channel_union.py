@@ -54,10 +54,10 @@ console.log("duration_minutes=PASS");
         app = scripts[0].replace("bind();loadManifest().catch(showError);", "")
         scenario = r"""
 selectedDims=["channel"];
-const source=(channel,spend,installs)=>channelFact({
+const source=(channel,spend,installs,impressions=1000,clicks=100)=>channelFact({
   dt:"2026-08-24",channel,mapping_status:"mapped",source_country:"AIG-WW",
-  source_spend:spend,source_installs:installs,source_impressions:1000,
-  source_clicks:100,source_row_count:1
+  source_spend:spend,source_installs:installs,source_impressions:impressions,
+  source_clicks:clicks,source_row_count:1
 },"delivery");
 const manual=(channel,cost,installs,d1)=>channelFact({
   dt:"2026-08-24",channel,conversion_country:"US",manual_cost:cost,
@@ -67,6 +67,7 @@ const manual=(channel,cost,installs,d1)=>channelFact({
 const facts=[
   source("googleadwords_int",100,25),
   source("tiktokglobal_int",20,5),
+  source("unityads_int",0,7,700,70),
   manual("googleadwords_int",40,6,2),
   manual("tiktokglobal_int",19,4,1),
   manual("unityads_int",25,4,1),
@@ -82,9 +83,27 @@ assert(byChannel.googleadwords_int.source_spend===100,"google source spend chang
 assert(byChannel.googleadwords_int.manual_cost===40,"google manual cost missing");
 assert(byChannel.googleadwords_int.effective_spend===100,"google effective spend double counted");
 assert(byChannel.unityads_int.effective_spend===25,"unity fallback missing");
+assert(byChannel.unityads_int.source_spend===0,"unity source spend must stay excluded");
+assert(byChannel.unityads_int.source_installs===7,"unity source installs missing or doubled");
+assert(byChannel.unityads_int.source_impressions===700,"unity starts/impressions missing or doubled");
+assert(byChannel.unityads_int.source_clicks===70,"unity source clicks missing or doubled");
+assert(byChannel.unityads_int.source_ctr===0.1,"unity CTR must be clicks / starts");
+assert(byChannel.unityads_int.source_cpi===0,"unity source CPI must remain source spend / source installs");
+assert(byChannel.unityads_int.manual_cost===25,"unity manual cost missing or doubled");
+assert(byChannel.unityads_int.manual_installs===4,"unity manual installs missing or doubled");
+assert(byChannel.unityads_int.source_row_count===1,"unity delivery row count must stay separate");
+assert(byChannel.unityads_int.manual_row_count===1,"unity conversion row count must stay separate");
 assert(byChannel.organic.effective_spend===0,"organic must not gain spend");
-assert(grouped.reduce((sum,row)=>sum+row.source_row_count,0)===2,"source row count mismatch");
+assert(grouped.reduce((sum,row)=>sum+row.source_row_count,0)===3,"source row count mismatch");
 assert(grouped.reduce((sum,row)=>sum+row.manual_row_count,0)===6,"manual row count mismatch");
+const unityBuckets=aggregate(facts.filter(row=>row.channel==="unityads_int"),["channel","source_country"],"delivery");
+assert(unityBuckets.length===2,"source country must keep Unity parallel facts in separate buckets");
+const unityDelivery=unityBuckets.find(row=>row.source_country==="AIG-WW");
+const unityConversion=unityBuckets.find(row=>row.source_country==="仅转化侧");
+assert(unityDelivery.source_installs===7&&unityDelivery.effective_spend===0,"Unity delivery bucket must contain source metrics only");
+assert(unityDelivery.manual_cost===0&&unityDelivery.manual_installs===0,"Unity delivery bucket gained conversion metrics");
+assert(unityConversion.effective_spend===25&&unityConversion.manual_installs===4,"Unity conversion bucket lost manual fallback metrics");
+assert(unityConversion.source_installs===0&&unityConversion.source_impressions===0,"Unity conversion bucket gained source metrics");
 console.log("channel_union=PASS");
 """
         with tempfile.NamedTemporaryFile(

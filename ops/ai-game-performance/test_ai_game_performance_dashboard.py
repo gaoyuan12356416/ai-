@@ -55,10 +55,37 @@ def delivery_row(source_id, **overrides):
         "source_installs": 25,
         "source_impressions": 1000,
         "source_clicks": 100,
+        "source_game_id": "",
         "updated_at": "2026-08-25 00:00:00",
     }
     raw.update(overrides)
     return raw
+
+
+def unity_mysql_row(source_id=42, **overrides):
+    raw = {
+        "source_id": str(source_id),
+        "dt": "2026-08-24",
+        "source_country": "US",
+        "campaign_id": "987654321",
+        "ad_id": "123456789",
+        "creative_pack_name": "Neonarcade_en_projectid[2082282824310779904]",
+        "source_impressions": "1000",
+        "source_clicks": "50",
+        "source_installs": "7",
+        "updated_at": "2026-08-25 00:00:00",
+    }
+    raw.update(overrides)
+    return [raw[column] for column in dashboard.UNITY_DELIVERY_SOURCE_COLUMNS]
+
+
+def unity_delivery_row(source_id=42, **overrides):
+    with mock.patch.object(
+        dashboard,
+        "run_mysql",
+        return_value=[unity_mysql_row(source_id, **overrides)],
+    ):
+        return dashboard.fetch_unity_delivery_day(overrides.get("dt", "2026-08-24"))[0]
 
 
 class DashboardTests(unittest.TestCase):
@@ -257,6 +284,269 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("product = 'Neonarcade'", sql)
         self.assertIn("dt = '2026-08-24'", sql)
         self.assertIn("platform IN (0,1,3)", sql)
+
+    def test_unity_query_uses_exact_product_date_category_index_and_starts(self):
+        raw = unity_mysql_row(
+            42,
+            source_impressions="2034406.0",
+            source_clicks="1017135",
+            source_installs="11847",
+        )
+        with mock.patch.object(dashboard, "run_mysql", return_value=[raw]) as query:
+            rows = dashboard.fetch_unity_delivery_day("2026-08-24")
+        sql = query.call_args.args[0]
+        self.assertIn("FROM kunlunads_dev.ads_unity_insights FORCE INDEX(idx_date)", sql)
+        self.assertIn("date = '2026-08-24'", sql)
+        self.assertIn("product = 'Neonarcade'", sql)
+        self.assertIn("category = 0", sql)
+        self.assertNotIn("category IN", sql.upper())
+        self.assertRegex(sql, r"(?s)creative_pack_name,\s+starts,\s+clicks,\s+installs")
+        self.assertNotRegex(sql, r"(?im)^\s*views\s*,?\s*$")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["source_id"], -42)
+        self.assertEqual(row["channel"], dashboard.UNITY_CHANNEL)
+        self.assertEqual(row["ad_id"], "123456789")
+        self.assertEqual(row["source_spend"], 0)
+        self.assertEqual(row["source_installs"], 11847)
+        self.assertEqual(row["source_impressions"], 2034406)
+        self.assertEqual(row["source_clicks"], 1017135)
+        self.assertEqual(row["source_game_id"], "2082282824310779904")
+
+    def test_unity_varchar_metrics_accept_integer_decimal_and_fail_closed_otherwise(self):
+        self.assertEqual(dashboard.unity_count("7.0", "installs", 42), 7)
+        self.assertEqual(dashboard.unity_count(" 8 ", "clicks", 42), 8)
+        for bad in ("", "-1", "1.5", "not-a-number"):
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(RuntimeError, "invalid Unity impressions"):
+                    dashboard.unity_count(bad, "impressions", 42)
+
+    def test_unity_source_id_namespace_can_coexist_with_custom_source_id(self):
+        unity = unity_delivery_row(10)
+        manual = [
+            manual_row(1),
+            manual_row(
+                2,
+                game_id="",
+                game_name="",
+                channel=dashboard.UNITY_CHANNEL,
+                campaign_id=unity["campaign_id"],
+                adset_id="",
+                ad_id=unity["ad_id"],
+                ad_name="",
+            ),
+        ]
+        dashboard.enrich_manual_unity_games(manual, [unity])
+        dashboard.replace_manual_day(self.connection, "2026-08-24", manual)
+        keys, names = dashboard.build_game_mapping(self.connection)
+        dashboard.replace_delivery_day(
+            self.connection,
+            "2026-08-24",
+            [delivery_row(10), unity],
+            keys,
+            names,
+        )
+        source_ids = [
+            row[0]
+            for row in self.connection.execute(
+                "SELECT source_id FROM delivery_fact WHERE dt=? ORDER BY source_id",
+                ("2026-08-24",),
+            )
+        ]
+        self.assertEqual(source_ids, [-10, 10])
+
+    def test_unity_delivery_mapping_key_is_scoped_to_date(self):
+        common = {
+            "channel": dashboard.UNITY_CHANNEL,
+            "campaign_id": "987654321",
+            "adset_id": "",
+            "ad_id": "123456789",
+        }
+        day_23 = manual_row(
+            101,
+            dt="2026-08-23",
+            game_id="2070453956790943744",
+            game_name="Dino Bros",
+            **common,
+        )
+        day_24 = manual_row(
+            102,
+            dt="2026-08-24",
+            game_id="2082282824310779904",
+            game_name="Bring Them Home",
+            **common,
+        )
+        dashboard.replace_manual_day(self.connection, "2026-08-23", [day_23])
+        dashboard.replace_manual_day(self.connection, "2026-08-24", [day_24])
+        keys, names = dashboard.build_game_mapping(self.connection)
+        delivery_23 = dict(
+            unity_delivery_row(51, dt="2026-08-23"),
+            source_game_id="",
+        )
+        delivery_24 = dict(unity_delivery_row(52), source_game_id="")
+        assigned_23 = dashboard.assign_delivery_game(delivery_23, keys, names)
+        assigned_24 = dashboard.assign_delivery_game(delivery_24, keys, names)
+        self.assertEqual(assigned_23[0:3:2], ("2070453956790943744", "mapped"))
+        self.assertEqual(assigned_24[0:3:2], ("2082282824310779904", "mapped"))
+        self.assertNotEqual(
+            dashboard.mapping_key(**common, dt="2026-08-23"),
+            dashboard.mapping_key(**common, dt="2026-08-24"),
+        )
+
+    def test_unity_enrichment_is_same_day_dimension_only_and_keeps_unmatched_explicit(self):
+        unity = unity_delivery_row(21)
+        other_day = dict(
+            unity,
+            source_id=-22,
+            dt="2026-08-23",
+            source_game_id="2070453956790943744",
+        )
+        source = manual_row(
+            3,
+            game_id="",
+            game_name="",
+            channel=dashboard.UNITY_CHANNEL,
+            campaign_id=unity["campaign_id"],
+            adset_id="",
+            ad_id=unity["ad_id"],
+            ad_name="",
+            manual_cost="25",
+            manual_installs="4",
+            d1_retained="1",
+        )
+        metric_snapshot = {
+            key: source[key]
+            for key in (
+                "manual_cost",
+                "manual_installs",
+                "d1_retained",
+                "play_duration_seconds",
+                "day0_revenue",
+                "day1_revenue",
+            )
+        }
+        enriched_rows = [source]
+        stats = dashboard.enrich_manual_unity_games(enriched_rows, [unity, other_day])
+        enriched = enriched_rows[0]
+        self.assertEqual(stats, {"mapped": 1, "ambiguous": 0})
+        self.assertEqual(enriched["game_id"], "2082282824310779904")
+        self.assertEqual(enriched["game_name"], "游戏 2082282824310779904")
+        self.assertEqual(
+            {key: enriched[key] for key in metric_snapshot},
+            metric_snapshot,
+        )
+        self.assertFalse(
+            {"source_spend", "source_installs", "source_impressions", "source_clicks"}
+            & set(enriched)
+        )
+
+        conflict = dict(unity, source_id=-23, source_game_id="2070453956790943744")
+        ambiguous_rows = [dict(source, game_id=dashboard.UNMARKED_GAME_ID, game_name="未标记游戏")]
+        stats = dashboard.enrich_manual_unity_games(ambiguous_rows, [unity, conflict])
+        ambiguous = ambiguous_rows[0]
+        self.assertEqual(stats, {"mapped": 0, "ambiguous": 1})
+        self.assertEqual(ambiguous["game_id"], dashboard.AMBIGUOUS_GAME_ID)
+        self.assertEqual(ambiguous["game_name"], "多游戏待归属")
+
+        unmatched_source = dict(
+            source,
+            ad_id="no-such-pack",
+            game_id=dashboard.UNMARKED_GAME_ID,
+            game_name="未标记游戏",
+        )
+        unmatched_rows = [unmatched_source]
+        stats = dashboard.enrich_manual_unity_games(unmatched_rows, [unity])
+        unmatched = unmatched_rows[0]
+        self.assertEqual(stats, {"mapped": 0, "ambiguous": 0})
+        self.assertEqual(unmatched["game_id"], dashboard.UNMARKED_GAME_ID)
+        self.assertEqual(unmatched["game_name"], "未标记游戏")
+
+    def test_unity_overview_conserves_parallel_facts_and_manual_spend_fallback(self):
+        unity = unity_delivery_row(31)
+        manual = manual_row(
+            4,
+            game_id="",
+            game_name="",
+            channel=dashboard.UNITY_CHANNEL,
+            campaign_id=unity["campaign_id"],
+            adset_id="",
+            ad_id=unity["ad_id"],
+            ad_name="",
+            manual_cost="25",
+            manual_installs="4",
+            d1_retained="1",
+        )
+        enriched = [manual]
+        self.assertEqual(
+            dashboard.enrich_manual_unity_games(enriched, [unity]),
+            {"mapped": 1, "ambiguous": 0},
+        )
+        dashboard.replace_manual_day(self.connection, "2026-08-24", enriched)
+        keys, names = dashboard.build_game_mapping(self.connection)
+        dashboard.replace_delivery_day(
+            self.connection, "2026-08-24", [unity], keys, names
+        )
+        rows = dashboard.overview_rows_for_day(self.connection, "2026-08-24")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["game_id"], "2082282824310779904")
+        self.assertEqual(row["channel"], dashboard.UNITY_CHANNEL)
+        self.assertEqual(row["effective_spend"], 25)
+        self.assertEqual(row["spend_source"], "manual_fallback")
+        self.assertEqual(row["source_spend"], 0)
+        self.assertEqual(row["source_installs"], 7)
+        self.assertEqual(row["source_impressions"], 1000)
+        self.assertEqual(row["source_clicks"], 50)
+        self.assertEqual(row["source_ctr"], 0.05)
+        self.assertEqual(row["source_cpi"], 0)
+        self.assertEqual(row["manual_cost"], 25)
+        self.assertEqual(row["manual_installs"], 4)
+        self.assertEqual(row["source_row_count"], 1)
+        self.assertEqual(row["manual_row_count"], 1)
+
+    def test_old_cache_adds_source_game_id_without_rebuild_or_data_loss(self):
+        legacy_db = self.root / "legacy-cache.sqlite3"
+        connection = dashboard.cache_conn(legacy_db)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE delivery_fact (
+                  source_id INTEGER PRIMARY KEY,
+                  dt TEXT NOT NULL,
+                  platform INTEGER NOT NULL,
+                  channel TEXT NOT NULL,
+                  source_country TEXT NOT NULL,
+                  campaign_id TEXT NOT NULL,
+                  adset_id TEXT NOT NULL,
+                  ad_id TEXT NOT NULL,
+                  game_id TEXT NOT NULL,
+                  game_name TEXT NOT NULL,
+                  mapping_status TEXT NOT NULL,
+                  source_spend REAL NOT NULL,
+                  source_installs INTEGER NOT NULL,
+                  source_impressions INTEGER NOT NULL,
+                  source_clicks INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO delivery_fact VALUES (
+                  77,'2026-08-24',1,'googleadwords_int','US','campaign','adset','ad',
+                  '__UNMAPPED__','未归属','unmapped',12.5,3,100,10,'2026-08-25 00:00:00'
+                );
+                """
+            )
+            dashboard.ensure_cache_schema(connection)
+            dashboard.ensure_cache_schema(connection)
+            columns = {
+                row["name"]: row
+                for row in connection.execute("PRAGMA table_info(delivery_fact)")
+            }
+            self.assertIn("source_game_id", columns)
+            row = connection.execute(
+                "SELECT source_id,source_spend,source_game_id FROM delivery_fact WHERE source_id=77"
+            ).fetchone()
+            self.assertEqual((row["source_id"], row["source_spend"], row["source_game_id"]), (77, 12.5, ""))
+        finally:
+            connection.close()
 
     def seed_publish_cache(self):
         dashboard.replace_manual_day(self.connection, "2026-08-24", [manual_row(1)])

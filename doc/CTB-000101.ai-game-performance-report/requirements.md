@@ -143,3 +143,26 @@ AI 游戏的产品测转化明细已经进入只读表 `ads_ai.ads_manual_daily_
 - 2026-08-25 v4：按现网字段注释修正总播放时长语义，补充实时映射漂移、生产验证与用户 CSV 手点验收边界。
 - 2026-08-25 v5：根据验收反馈修复“渠道明细按渠道仅显示渠道源”的覆盖缺口，冻结双事实并列聚合、六渠道基线和来源行数提示。
 - 2026-08-25 v6：按用户验收调整移除“渠道行/转化行”的全部前端出口，底层完整性计数保持不变。
+
+## v7 Unity 渠道事实补全（2026-08-26，开发中）
+
+### 问题与范围
+
+当前生产报表的 Unity 仅有 `ads_manual_daily_performance` 转化事实和手工成本兜底，缺少渠道安装、曝光、点击。v7 只补充 Unity 渠道事实，不改变飞书鉴权、静态发布、其他渠道查询、转化指标或 Unity 有效花费口径。
+
+### 冻结口径
+
+- 新增只读源 `kunlunads_dev.ads_unity_insights`，严格限定 `product='Neonarcade'`、目标日期、`category=0`，并使用 `FORCE INDEX(idx_date)`；不得并入 `category=1`，后者与 category 0 重复安装/花费且粒度不同。
+- `starts -> source_impressions`、`clicks -> source_clicks`、`installs -> source_installs`；Unity 官方口径中 starts 即 impressions，`views` 是完整播放，本次不进入曝光列。
+- Unity 原始 `spend` 不进入 `source_spend/effective_spend`；有效花费继续只取手工转化表 `manual_cost` 兜底。渠道 CPI 保持既有 `source_spend / source_installs`，因此 Unity 本次为 0，不偷用手工兜底成本。
+- 两类事实仅并列聚合，禁止原始指标行 Join。Unity 源只可通过同日 `campaign_id + creative_pack_id/ad_id` 丰富游戏维度；`creative_pack_name` 仅接受严格 `projectid[数字]`，多 ID 为“多游戏待归属”，无 ID/无匹配保持显式未标记/未归属。
+- Unity `id` 转为负数作为 `delivery_fact.source_id`，避免与 `ads_custom_source_insight.id` 主键碰撞；SQLite 以可重复、保数据的 `ALTER TABLE` 增加 `source_game_id TEXT NOT NULL DEFAULT ''`，支持旧缓存重映射。
+
+### v7 验收标准
+
+1. 单元测试锁定查询索引/过滤、category 防双计、starts 曝光映射、负 ID 命名空间、同日映射、歧义/未匹配、旧缓存迁移和总览守恒。
+2. 渠道前端同时出现 Unity 渠道安装/曝光/点击；Unity 有效花费仍只计一次手工兜底，渠道 CPI 保持 source spend 口径并显示 0。
+3. 真实只读阴影对账必须分别核对 Unity category 0 的行数、installs/starts/clicks，且证明 category 1 未进入；普通浏览器请求仍为零 MySQL。
+4. 通过评审、完整本地回归、备份、阴影刷新和用户授权的生产发布前，v7 状态保持“开发/验证中”，不得写成已部署。
+
+- 2026-08-26 v7：登记 BUG-007 与上述 Unity 渠道事实目标；当前未部署。

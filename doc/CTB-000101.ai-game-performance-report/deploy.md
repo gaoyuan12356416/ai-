@@ -132,3 +132,16 @@ v6 回滚到上一生产提交 `98045976290b92ce3d69d030ae45eab45f386760` 时使
 - 未查询 MySQL、未修改或 reload Nginx，未重启 AI 主 API、TT/X/Meta 服务。
 
 精确回滚：确认 `ai-game-performance-refresh.service` 为 inactive，持有 `/tmp/tt_minis_multi_dim_dashboard.lock` 后，将 `/opt/ai-game-performance/current` 原子切回 `c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；从上述备份恢复 `public-before/index.html`，最后恢复 `public-before/latest.json` 作为提交点。保留 SQLite、新 release 和新数据版本，随后复核公开文件哈希、匿名 302、登录态秒单位、timer、TT 报表和主 API；无需 reload 或重启服务。
+
+## v7 Unity 补数发布计划（2026-08-26，未部署）
+
+当前生产运行提交为 `a63293b323f3a24afb5835d89d58e02d63b4139e`。以下仅为待执行计划：
+
+1. 合并前完成独立代码评审；本地 Python/Node/前端契约/编译/格式全部绿灯。
+2. 发布前记录 v6 `current/latest.json/index.html` 哈希、timer/锁/Nginx/API 状态，并备份 SQLite 与公开提交点；不得在共享刷新锁被占用时强杀或并发扫库。
+3. 从 GitHub 精确提交创建不可变 release；阴影命令必须同时指定独立 `--cache-db` 与 `--output-dir`，先验证 additive `source_game_id` 迁移可重复且绝不触碰在线 SQLite。
+4. 只读阴影刷新逐日读取 manual、custom delivery、Unity category 0；对账 Unity 行数、installs、starts、clicks，并单独证明 category 1 未并入。
+5. 阴影 `quick_check/integrity_check`、所有日文件和对账通过后，备份在线 SQLite，切换精确代码提交，并在共享锁内对在线缓存重复全量刷新；成功发布版本文件和 `latest.json` 后再完成公开验收。阴影缓存只作证据、不直接冒充在线提交点；不重启 AI 主 API 或 TT/X/Meta 服务。
+6. 验证按渠道与 `source_country` 分组：Unity 安装/曝光/点击出现，手工成本/测转安装不丢失，有效花费不双计，CPI 保持 `source_spend/source_installs=0`。
+
+回滚边界：停止/确认 refresh inactive 后，原子切回本节发布前记录的 v6 release，恢复发布前的 SQLite 在线备份，并最后恢复备份的 `index.html/latest.json`。失败 release 和迁移后 SQLite 另存审计，不能让旧代码继续读取残留 Unity delivery/游戏映射；若不恢复 SQLite，只能由旧代码全量重建完整保留窗口。当前尚无 v7 备份路径、提交、release 或公开版本，任何此类字段只能在真实执行后补写。
