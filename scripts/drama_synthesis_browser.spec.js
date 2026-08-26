@@ -1,10 +1,23 @@
-const { test, expect } = require("@playwright/test");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+function loadPlaywrightTest() {
+  try {
+    return require("@playwright/test");
+  } catch (originalError) {
+    const cliFile = require.main && require.main.filename;
+    if (!cliFile) throw originalError;
+    const resolved = require.resolve("@playwright/test", { paths: [path.dirname(cliFile)] });
+    return require(resolved);
+  }
+}
+
+const { test, expect } = loadPlaywrightTest();
+
 const VIDEO_JOB = "a".repeat(32);
 const COVER_JOB = "b".repeat(32);
+const XSS_JOB = "c".repeat(32);
 let server;
 let baseUrl;
 
@@ -44,6 +57,21 @@ async function openFakePage(page) {
       await route.fulfill({ json: { job_id: COVER_JOB, app_id: "1479", status: "done", drama_name: "Cover job", output_video_url: "", output_video_no_bgm_url: "", output_random_template_url: "", cover_16x9_url: "https://media.example.test/cover.jpg", short_links: [], youtube_publish_tasks: [] } });
       return;
     }
+    if (pathname === `/api/drama-material/jobs/${XSS_JOB}`) {
+      await route.fulfill({ json: {
+        job_id: XSS_JOB, app_id: "1479", status: "done", drama_name: "Audit job",
+        output_video_url: "https://media.example.test/video.mp4", output_video_no_bgm_url: "",
+        output_random_template_url: "", cover_16x9_url: "", short_links: [], youtube_publish_tasks: [],
+        random_template_recipe: {
+          version: '\"><img src=x onerror="window.__recipeXss=1">',
+          profile: "profile'quoted",
+          source: "<script>window.__recipeXss=2</script>",
+          asset_set_sha256: "sha&<tag>",
+          assets: { border: { name: '\" onmouseover="window.__recipeXss=3' }, corners: { name: "corner<script>bad</script>" } }
+        }
+      } });
+      return;
+    }
     if (pathname === "/api/drama-material/youtube/channels") {
       channelRequests += 1;
       expect(requestUrl.searchParams.get("app_id")).toBe("1479");
@@ -78,4 +106,17 @@ test("cover-only task disables short and YouTube actions without channel request
   await expect(page.locator("#jobDetailActions button", { hasText: "发布到 YouTube" })).toBeDisabled();
   await page.evaluate(jobId => window.openYoutubePublish(jobId), COVER_JOB);
   expect(channelRequests()).toBe(0);
+});
+
+test("recipe audit renders hostile values as visible text without DOM injection", async ({ page }) => {
+  await page.addInitScript(() => { window.__recipeXss = 0; });
+  await openFakePage(page);
+  await page.evaluate(jobId => window.viewJob(jobId), XSS_JOB);
+  const audit = page.locator('[data-recipe-audit="true"]');
+  await expect(audit).toBeVisible();
+  await expect(audit).toContainText('<img src=x onerror="window.__recipeXss=1">');
+  await expect(audit).toContainText("<script>window.__recipeXss=2</script>");
+  await expect(audit).toContainText('\" onmouseover="window.__recipeXss=3');
+  await expect(audit.locator("img,script")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__recipeXss)).toBe(0);
 });

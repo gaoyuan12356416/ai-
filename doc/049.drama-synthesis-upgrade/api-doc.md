@@ -18,3 +18,5 @@
 标题 required/<=100 chars；描述 required/模板和渲染值 UTF-8 <=5000 bytes；评论可选。`{{url}}` 仅 description replace-all，先确保同 material 短链。冻结 app/job/material URL/channel/title/template/rendered/comment/operator/privacy public。同 operation+同 payload 幂等，不同 payload 409。
 
 主状态 queued/validating/downloading/uploading/submitted/processing/published/failed/unknown。processing/unknown 同 job+material+channel 新请求 409；prior published 未二次确认 409。依赖 503，输入 400，权限 401/403，不可变/并发冲突 409。
+
+统一同步 RPC 不接受通用 JSON：video 精确为 `{publish_id:<positive integer>,video_id:<6..32 URL-safe string>}`；comment 精确再含 `comment_id:<1..255 URL-safe string>`；publish_log 与 video 同字段。video/comment external ID 分别等于对应 ID；publish_log external ID 是无前导零的十进制 `publish_id` 字符串。任何 extra/missing/错类型/identity mismatch 均 409 并由 outbox 安全记 failed。

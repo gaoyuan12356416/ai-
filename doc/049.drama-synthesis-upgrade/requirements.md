@@ -14,6 +14,7 @@
 - auto 从 FB v3 的 border 3、corners 3、opacity_video 5、tint 7 中稳定选择，共 315 种；light 不参与。manual 必须提供四层有效 asset ID。
 - 冻结 source、asset manifest SHA、四层 asset identity、recipe/version、安全 rotation/scale/tint opacity 参数；重试复用同一 recipe。
 - 结果字段固定为 `output_random_template_url` 与 `random_template_recipe`。
+- recipe 审计 UI 仅以 DOM `textContent`/文本节点展示 version/profile/source/asset-set/layers；所有服务端值均视为不可信，禁止拼入 `innerHTML`。
 - 新请求中的 `cover_template`、`naming_rule` 以及同名旧顶层字段只接受后忽略，归一为安全 `default`；历史值和展示保留。
 - 上线前先备份 SQLite，dry-run 后以单事务、幂等方式把历史 `outputs_json` 补齐四个明确布尔；随机模板缺失为 false，不用新默认值重解释历史任务。
 
@@ -36,7 +37,7 @@
 - `comment_status` 与 `sync_status` 独立。评论只在 confirmed published 后执行；评论失败只重试评论。同步使用 outbox，失败不改变视频已发布事实。
 - interrupted/5xx 查询 resumable session；无法证明未提交时 unknown 并禁止替代发布。processing/unknown 不重传。prior success 需二次确认。
 - 评论非空须 `youtube.force-ssl`；关闭评论、儿童内容或权限不足只影响评论子状态。凭据仅服务端，日志禁止 secret/session URI。
-- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；禁止 DELETE、DDL、任意 SQL。worker 必须从受控 RPC factory 构造 writer：仅 HTTPS 或 loopback HTTP、禁止 redirect、固定 payload allowlist/timeout，凭据只从 server-only 0600 文件读取。缺配置/认证/表/响应均 fail closed，不能标记 sync 成功。
+- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；禁止 DELETE、DDL、任意 SQL。实体 payload 必须是 exact keys/types：video=`publish_id:int>0,video_id:str`，comment 再要求 `comment_id:str`，publish_log 与 video 同字段；禁止 extra/missing/错类型，external ID 必须分别等于 `video_id`、`comment_id`、十进制 `str(publish_id)`。worker 必须从受控 RPC factory 构造 writer：仅 HTTPS 或 loopback HTTP、禁止 redirect、固定 timeout，凭据只从 server-only 0600 文件读取。缺配置/认证/表/响应均 fail closed；claimed outbox 的坏 JSON、非 object、合同错误也必须按原 lease fencing 标记 failed，不得记录原 payload。
 
 ## 香港 GPU 与验收
 

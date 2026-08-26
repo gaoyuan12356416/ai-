@@ -12,7 +12,7 @@
 
 ## 外部统一 MySQL
 
-目标表精确为 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前只读证据确认三表尚不存在，因此候选不含 DDL。统一 writer 只接收受控 `select/insert/update`、精确表白名单、受限 payload 和 external ID；单进程并发 1，先 select 再 insert/update，结果必须声明 idempotent success。worker 的 executor 由受控 RPC env factory 构造，RPC 端负责表 schema/外部 ID 唯一约束；credential 只在 0600 文件。缺 executor、缺表、schema 不匹配或非白名单操作均 fail closed，outbox 保持失败待重试，禁止宣称同步成功。
+目标表精确为 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前只读证据确认三表尚不存在，因此候选不含 DDL。统一 writer 只接收受控 `select/insert/update`、精确表白名单和实体级 exact payload；`publish_id` 在 payload 中是正整数，在 publish_log external ID 中是规范十进制字符串，video/comment external ID 分别冻结为对应字符串 ID，三类 identity mismatch 均拒绝。单进程并发 1，先 select 再 insert/update，结果必须声明 idempotent success。worker 的 executor 由受控 RPC env factory 构造，RPC 端负责表 schema/外部 ID 唯一约束；credential 只在 0600 文件。缺 executor、缺表、schema 不匹配或非白名单操作均 fail closed，claimed outbox 即使 payload JSON/合同无效也由 owner+generation fenced 写为 failed，禁止宣称同步成功或记录原 payload。
 
 ## 文件所有权
 

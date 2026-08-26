@@ -141,6 +141,23 @@ class FakeRPCSession:
     def close(self): pass
 
 
+class FakeSyncStore:
+    def __init__(self, payload_json, *, entity_kind="video", external_id="video_fake"):
+        self.item = {
+            "id": 91, "lease_generation": 4, "entity_kind": entity_kind,
+            "external_id": external_id, "payload_json": payload_json,
+        }
+        self.finish_calls = []
+
+    def claim_youtube_sync(self, _worker_id, _expiry):
+        item, self.item = self.item, None
+        return item
+
+    def finish_youtube_sync(self, outbox_id, **kwargs):
+        self.finish_calls.append((outbox_id, kwargs))
+        return {"id": outbox_id, "status": "synced" if kwargs["success"] else "failed"}
+
+
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -376,9 +393,12 @@ class UpgradeTests(unittest.TestCase):
         claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
         self.store.video_published(row["id"], "video_456", worker_id="worker", lease_generation=claim["lease_generation"])
         conn = sqlite3.connect(self.store.db_path)
-        kinds = [item[0] for item in conn.execute("SELECT entity_kind FROM drama_youtube_sync_outbox ORDER BY entity_kind")]
+        rows = list(conn.execute("SELECT entity_kind,external_id,payload_json FROM drama_youtube_sync_outbox ORDER BY entity_kind"))
         conn.close()
-        self.assertEqual(kinds, ["publish_log", "video"])
+        self.assertEqual([item[0] for item in rows], ["publish_log", "video"])
+        self.assertEqual(rows[0][1], str(row["id"]))
+        self.assertEqual(rows[1][1], "video_456")
+        self.assertEqual(json.loads(rows[0][2]), {"publish_id": row["id"], "video_id": "video_456"})
 
     def test_late_comment_outbox_reopens_independent_sync_status(self):
         row = self.enqueue(operation="operation:late-comment", comment="hello")
@@ -404,13 +424,30 @@ class UpgradeTests(unittest.TestCase):
 
     def test_unified_writer_is_whitelisted_idempotent_and_fail_closed(self):
         with self.assertRaises(DramaSynthesisError):
-            UnifiedYouTubeWriter(None).sync("video", "video_1", {"video_id": "video_1"})
+            UnifiedYouTubeWriter(None).sync("video", "video_1", {"publish_id": 1, "video_id": "video_1"})
         calls = []
         writer = UnifiedYouTubeWriter(lambda action, table, external_id, payload: calls.append((action, table, external_id, payload)) or ({"found": False} if action == "select" else {"idempotent_success": True}))
-        writer.sync("video", "video_1", {"video_id": "video_1", "secret": "drop"})
+        writer.sync("video", "video_1", {"publish_id": 1, "video_id": "video_1"})
         self.assertEqual([call[0] for call in calls], ["select", "insert"])
         self.assertEqual(calls[1][1:3], ("ads_youtube_videos", "video_1"))
-        self.assertNotIn("secret", calls[1][3])
+        rejected = (
+            ("video", "video_1", {"publish_id": 1, "video_id": "video_1", "secret": "reject"}),
+            ("video", "video_1", {"video_id": "video_1"}),
+            ("video", "video_1", {"publish_id": "1", "video_id": "video_1"}),
+            ("video", "video_other", {"publish_id": 1, "video_id": "video_1"}),
+            ("comment", "comment_other", {"publish_id": 1, "video_id": "video_1", "comment_id": "comment_1"}),
+            ("publish_log", "2", {"publish_id": 1, "video_id": "video_1"}),
+        )
+        for entity_kind, external_id, payload in rejected:
+            with self.assertRaises(DramaSynthesisError):
+                writer.sync(entity_kind, external_id, payload)
+        self.assertEqual(len(calls), 2)
+        writer.sync("comment", "comment_1", {"publish_id": 1, "video_id": "video_1", "comment_id": "comment_1"})
+        writer.sync("publish_log", "1", {"publish_id": 1, "video_id": "video_1"})
+        self.assertEqual(
+            [(calls[index][1], calls[index][2]) for index in (3, 5)],
+            [("ads_youtube_comments", "comment_1"), ("ads_youtube_publish_log", "1")],
+        )
         with self.assertRaises(DramaSynthesisError):
             validate_controlled_operation("delete", "ads_youtube_videos")
 
@@ -425,19 +462,39 @@ class UpgradeTests(unittest.TestCase):
         }
         session = FakeRPCSession([FakeResponse(payload={"found": False}), FakeResponse(payload={"idempotent_success": True})])
         writer = build_unified_youtube_writer_from_env(env, session_factory=lambda: session)
-        writer.sync("video", "video_rpc", {"video_id": "video_rpc"})
+        writer.sync("video", "video_rpc", {"publish_id": 1, "video_id": "video_rpc"})
         self.assertEqual([call[1]["json"]["action"] for call in session.posts], ["select", "insert"])
         self.assertTrue(all(call[1]["allow_redirects"] is False for call in session.posts))
         self.assertTrue(all(call[1]["headers"]["Authorization"].startswith("Bearer ") for call in session.posts))
         with self.assertRaises(DramaSynthesisError):
-            build_unified_youtube_writer_from_env({}).sync("video", "video_missing", {"video_id": "video_missing"})
+            build_unified_youtube_writer_from_env({}).sync("video", "video_missing", {"publish_id": 1, "video_id": "video_missing"})
         for response, expected in ((FakeResponse(status=401), "youtube_sync_auth_failed"), (FakeResponse(status=302), "youtube_sync_redirect_denied"), (FakeResponse(payload={}), "youtube_sync_response_invalid")):
             failed = build_unified_youtube_writer_from_env(env, session_factory=lambda response=response: FakeRPCSession([response]))
             with self.assertRaises(DramaSynthesisError) as raised:
-                failed.sync("video", "video_failed", {"video_id": "video_failed"})
+                failed.sync("video", "video_failed", {"publish_id": 1, "video_id": "video_failed"})
             self.assertEqual(raised.exception.code, expected)
         with self.assertRaises(DramaSynthesisError):
             ControlledRPCExecutor("https://ledger.example.test/v1", str(credential))("delete", "ads_youtube_videos", "video", {})
+
+    def test_sync_outbox_invalid_payload_is_fenced_failed_without_raw_data(self):
+        writer_calls = []
+        writer = UnifiedYouTubeWriter(lambda *args: writer_calls.append(args) or {"found": False})
+        cases = (
+            ('{"secret":', "youtube_sync_payload_invalid"),
+            ('["not-an-object"]', "youtube_sync_payload_invalid"),
+            (json.dumps({"publish_id": 1, "video_id": "video_fake", "secret": "must-reject"}), "youtube_sync_contract_invalid"),
+        )
+        for payload_json, expected_code in cases:
+            store = FakeSyncStore(payload_json)
+            result = run_sync_outbox_once(store, writer, "sync-worker")
+            self.assertEqual((result["status"], result["code"]), ("failed", expected_code))
+            self.assertEqual(len(store.finish_calls), 1)
+            outbox_id, finish = store.finish_calls[0]
+            self.assertEqual(outbox_id, 91)
+            self.assertEqual((finish["worker_id"], finish["lease_generation"], finish["success"]), ("sync-worker", 4, False))
+            self.assertEqual(finish["code"], expected_code)
+            self.assertNotIn("secret", finish["message"].lower())
+        self.assertEqual(writer_calls, [])
 
     def test_channel_repository_uses_channel_status_and_decimal_ids(self):
         seen = []
@@ -551,8 +608,14 @@ class UpgradeTests(unittest.TestCase):
             self.assertIn("chooseMaterial(job, false)", text)
             self.assertIn("无可用视频产物", text)
             self.assertIn("随机模板配方审计", text)
+            self.assertIn('card.dataset.recipeAudit = "true"', text)
+            self.assertIn("line.textContent =", text)
+            self.assertNotIn('join("<br />")', text)
             self.assertNotIn("const [job, channels] = await Promise.all", text)
             self.assertNotIn("random_template_video_url", text)
+        browser_spec = (ROOT / "scripts/drama_synthesis_browser.spec.js").read_text(encoding="utf-8")
+        self.assertIn('require.resolve("@playwright/test"', browser_spec)
+        self.assertIn("recipe audit renders hostile values", browser_spec)
 
     def test_app_exposes_exact_six_routes_and_macro_precondition(self):
         text = (ROOT / "app.py").read_text(encoding="utf-8")

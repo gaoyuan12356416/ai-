@@ -19110,14 +19110,6 @@ function buildJobRow(job) {
 
       ];
       const frozenRecipe = job.random_template_recipe && typeof job.random_template_recipe === "object" ? job.random_template_recipe : null;
-      if (frozenRecipe) {
-        const assets = frozenRecipe.assets && typeof frozenRecipe.assets === "object" ? frozenRecipe.assets : {};
-        const layers = ["border", "corners", "opacity_video", "tint"].map(key => {
-          const asset = assets[key];
-          return `${key}=${asset && typeof asset === "object" ? (asset.name || "--") : "--"}`;
-        }).join("<br />");
-        detailResultCards.push(`<div class="card"><strong>随机模板配方审计</strong><div style="margin-top:8px;line-height:1.8;">资产版本：${navText(frozenRecipe.version || "--")} / ${navText(frozenRecipe.profile || "--")}<br />源视频：${navText(frozenRecipe.source || "--")}<br />资产集合：${navText(frozenRecipe.asset_set_sha256 || "--")}<br />${layers}</div></div>`);
-      }
       (job.short_links || []).forEach(link => {
         const shortValue = link.short_url ? `<a href="${navText(link.short_url)}" target="_blank">${navText(link.short_url)}</a>` : navText(link.error_message || "短链尚未发布");
         detailResultCards.push(`<div class="card"><strong>短链 · ${navText(link.material_kind || "视频")}</strong><div style="margin-top:8px;">状态：${navText(link.publish_state || "--")} · ${shortValue}</div></div>`);
@@ -19128,6 +19120,33 @@ function buildJobRow(job) {
         detailResultCards.push(`<div class="card"><strong>YouTube：${navText(task.title || task.channel_id || "发布任务")}</strong><div style="margin-top:8px;line-height:1.8;">视频状态：${navText(task.video_state || "--")}<br />评论状态：${navText(task.comment_status || "--")}<br />同步状态：${navText(task.sync_status || "--")}<br />任务状态：${navText(task.status || "--")}${task.error_message ? `<br />原因：${navText(task.error_message)}` : ""}</div>${retryComment}</div>`);
       });
       els.jobDetailResults.innerHTML = detailResultCards.join("");
+      if (frozenRecipe) {
+        const auditText = value => ["string", "number", "boolean"].includes(typeof value) ? String(value) : "--";
+        const card = document.createElement("div");
+        card.className = "card";
+        card.dataset.recipeAudit = "true";
+        const title = document.createElement("strong");
+        title.textContent = "随机模板配方审计";
+        card.appendChild(title);
+        const body = document.createElement("div");
+        body.style.marginTop = "8px";
+        body.style.lineHeight = "1.8";
+        const addLine = (label, value) => {
+          const line = document.createElement("div");
+          line.textContent = `${label}：${auditText(value)}`;
+          body.appendChild(line);
+        };
+        addLine("资产版本", `${auditText(frozenRecipe.version)} / ${auditText(frozenRecipe.profile)}`);
+        addLine("源视频", frozenRecipe.source);
+        addLine("资产集合", frozenRecipe.asset_set_sha256);
+        const assets = frozenRecipe.assets && typeof frozenRecipe.assets === "object" ? frozenRecipe.assets : {};
+        ["border", "corners", "opacity_video", "tint"].forEach(key => {
+          const asset = assets[key];
+          addLine(key, asset && typeof asset === "object" ? asset.name : "--");
+        });
+        card.appendChild(body);
+        els.jobDetailResults.appendChild(card);
+      }
       const hasVideoMaterial = selectableMaterials(job, false).length > 0;
       els.jobDetailActions.innerHTML = job.status === "done" ? `
         <button class="btn btn-secondary" type="button" onclick="copyMaterialUrl('${job.job_id}')">复制素材 URL</button>

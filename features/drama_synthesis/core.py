@@ -862,10 +862,10 @@ class DramaSynthesisStore:
                     (int(task_id), "video", "published", video_id, now),
                 )
                 payload = _canonical_json({"publish_id": int(task_id), "video_id": video_id})
-                for entity_kind in ("video", "publish_log"):
+                for entity_kind, external_id in (("video", video_id), ("publish_log", str(task_id))):
                     conn.execute(
                         "INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",
-                        (int(task_id), entity_kind, video_id, payload, "pending", now, now),
+                        (int(task_id), entity_kind, external_id, payload, "pending", now, now),
                     )
                 conn.commit()
                 return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())

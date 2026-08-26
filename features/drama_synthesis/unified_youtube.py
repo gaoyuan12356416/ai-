@@ -22,7 +22,58 @@ TABLE_BY_KIND = {
 }
 ALLOWED_ACTIONS = frozenset({"select", "insert", "update"})
 EXTERNAL_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,255}")
-PAYLOAD_KEYS = frozenset({"publish_id", "video_id", "comment_id"})
+VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
+ENTITY_PAYLOAD_KEYS = {
+    "video": frozenset({"publish_id", "video_id"}),
+    "comment": frozenset({"publish_id", "video_id", "comment_id"}),
+    "publish_log": frozenset({"publish_id", "video_id"}),
+}
+TABLE_TO_KIND = {table: kind for kind, table in TABLE_BY_KIND.items()}
+
+
+def _valid_publish_id(value: Any) -> bool:
+    return type(value) is int and 1 <= value <= 9_223_372_036_854_775_807
+
+
+def _expected_external_id(entity_kind: str, payload: Mapping[str, Any]) -> str:
+    if not _valid_publish_id(payload.get("publish_id")):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+    video_id = payload.get("video_id")
+    if type(video_id) is not str or not VIDEO_ID_RE.fullmatch(video_id):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+    if entity_kind == "video":
+        return video_id
+    if entity_kind == "publish_log":
+        return str(payload["publish_id"])
+    comment_id = payload.get("comment_id")
+    if type(comment_id) is not str or not EXTERNAL_ID_RE.fullmatch(comment_id):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+    return comment_id
+
+
+def validate_entity_payload(entity_kind: str, external_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    required = ENTITY_PAYLOAD_KEYS.get(entity_kind)
+    if (
+        required is None or type(external_id) is not str
+        or not isinstance(payload, Mapping) or set(payload.keys()) != required
+    ):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+    expected = _expected_external_id(entity_kind, payload)
+    if external_id != expected:
+        raise DramaSynthesisError("youtube_sync_identity_mismatch", "YouTube统一记录身份不匹配", 409)
+    return dict(payload)
+
+
+def validate_external_id(entity_kind: str, external_id: str) -> None:
+    if type(external_id) is not str:
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+    if entity_kind == "video" and VIDEO_ID_RE.fullmatch(external_id):
+        return
+    if entity_kind == "comment" and EXTERNAL_ID_RE.fullmatch(external_id):
+        return
+    if entity_kind == "publish_log" and re.fullmatch(r"[1-9][0-9]{0,18}", external_id):
+        return
+    raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
 
 
 class ControlledRPCExecutor:
@@ -56,10 +107,17 @@ class ControlledRPCExecutor:
 
     def __call__(self, action: str, table: str, external_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         validate_controlled_operation(action, table)
-        if not EXTERNAL_ID_RE.fullmatch(str(external_id or "")) or not isinstance(payload, Mapping):
+        entity_kind = TABLE_TO_KIND[table]
+        validate_external_id(entity_kind, external_id)
+        if not isinstance(payload, Mapping):
             raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
-        safe_payload = {str(key): value for key, value in payload.items() if str(key) in PAYLOAD_KEYS}
-        if len(safe_payload) != len(payload) or (action == "select" and safe_payload) or (action != "select" and not safe_payload):
+        if action == "select":
+            if payload:
+                raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+            safe_payload = {}
+        else:
+            safe_payload = validate_entity_payload(entity_kind, external_id, payload)
+        if action != "select" and not safe_payload:
             raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
         session = self.session_factory()
         session.trust_env = False
@@ -116,19 +174,17 @@ class UnifiedYouTubeWriter:
 
     def sync(self, entity_kind: str, external_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         table = TABLE_BY_KIND.get(str(entity_kind))
-        if table is None or not EXTERNAL_ID_RE.fullmatch(str(external_id or "")) or not isinstance(payload, Mapping):
+        if table is None:
             raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+        safe_payload = validate_entity_payload(str(entity_kind), external_id, payload)
         if self.executor is None:
             raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步尚未配置", 503)
-        safe_payload = {str(key): value for key, value in payload.items() if str(key) in PAYLOAD_KEYS}
-        if not safe_payload:
-            raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
         with self._gate:
-            existing = self.executor("select", table, str(external_id), {})
+            existing = self.executor("select", table, external_id, {})
             if not isinstance(existing, Mapping) or "found" not in existing:
                 raise DramaSynthesisError("youtube_sync_failed", "YouTube统一记录同步失败", 503)
             action = "update" if bool(existing.get("found")) else "insert"
-            result = self.executor(action, table, str(external_id), safe_payload)
+            result = self.executor(action, table, external_id, safe_payload)
         if not isinstance(result, Mapping) or not bool(result.get("idempotent_success")):
             raise DramaSynthesisError("youtube_sync_failed", "YouTube统一记录同步失败", 503)
         return result
@@ -146,12 +202,22 @@ def run_sync_outbox_once(store, writer: UnifiedYouTubeWriter, worker_id: str):
         return {"status": "no_pending", "claimed": False}
     try:
         payload = json.loads(item["payload_json"])
+        if not isinstance(payload, Mapping):
+            raise DramaSynthesisError("youtube_sync_payload_invalid", "YouTube统一记录待同步数据无效", 409)
         writer.sync(item["entity_kind"], item["external_id"], payload)
         store.finish_youtube_sync(item["id"], worker_id=worker_id, lease_generation=item["lease_generation"], success=True)
         return {"status": "synced", "claimed": True, "outbox_id": item["id"]}
     except DramaSynthesisError as exc:
-        store.finish_youtube_sync(item["id"], worker_id=worker_id, lease_generation=item["lease_generation"], success=False, code=exc.code, message=str(exc))
+        store.finish_youtube_sync(item["id"], worker_id=worker_id, lease_generation=item["lease_generation"], success=False, code=exc.code, message="YouTube统一记录同步失败")
         return {"status": "failed", "claimed": True, "outbox_id": item["id"], "code": exc.code}
+    except (ValueError, TypeError, UnicodeDecodeError):
+        code = "youtube_sync_payload_invalid"
+        store.finish_youtube_sync(item["id"], worker_id=worker_id, lease_generation=item["lease_generation"], success=False, code=code, message="YouTube统一记录待同步数据无效")
+        return {"status": "failed", "claimed": True, "outbox_id": item["id"], "code": code}
+    except Exception:
+        code = "youtube_sync_failed"
+        store.finish_youtube_sync(item["id"], worker_id=worker_id, lease_generation=item["lease_generation"], success=False, code=code, message="YouTube统一记录同步失败")
+        return {"status": "failed", "claimed": True, "outbox_id": item["id"], "code": code}
 
 
-__all__ = ["ALLOWED_ACTIONS", "TABLE_BY_KIND", "ControlledRPCExecutor", "UnifiedYouTubeWriter", "build_unified_youtube_writer_from_env", "run_sync_outbox_once", "validate_controlled_operation"]
+__all__ = ["ALLOWED_ACTIONS", "ENTITY_PAYLOAD_KEYS", "TABLE_BY_KIND", "ControlledRPCExecutor", "UnifiedYouTubeWriter", "build_unified_youtube_writer_from_env", "run_sync_outbox_once", "validate_controlled_operation", "validate_entity_payload"]
