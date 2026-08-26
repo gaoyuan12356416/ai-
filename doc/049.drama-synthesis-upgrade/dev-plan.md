@@ -1,6 +1,6 @@
 # 开发计划
 
-状态：Wave 2-5 实现与实现者 focused/relevant broad 已完成；独立 QA/SA 和外部门禁待执行。
+状态：Wave8 exact SHA `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 实现与独立 QA 已完成，0 P0/P1；production HOLD external-only，尚未部署或外写。
 
 1. 冻结 requirement/SA/API/schema/test/deploy 合同并清除旧域、旧 route、旧 result、video-ID-success 描述。
 2. random template 收口到 `advanced_options`，复用 FB v3，冻结 source/output identity；补历史 outputs_json 迁移。
@@ -15,4 +15,4 @@
 - 独立迁移脚本要求绝对 backup、dry-run、`BEGIN IMMEDIATE`、schema fingerprint、逐行 JSON 校验、幂等二次运行；异常整批 rollback。
 - 开发阶段不向 CPU/HK/统一 MySQL 执行 DDL 或外部写入。
 
-完成定义：实现与附件无冲突；focused/相关 broad 通过或有基线隔离；QA 文档由独立 QA 完成；当前不 commit/push/deploy/外写。
+完成定义已满足代码候选部分：独立 focused 45、broad 77、Playwright 3、compile 11、Python 3.9 AST 11、spec syntax 1、inline JS 4、writer 3+26、outbox 9 全部 PASS。生产完成仍依赖 gy writer/root/namespace owner、统一表 RPC/schema/credential 与 fixed-public 合规门禁；当前不 deploy/push/外写。

@@ -1,21 +1,23 @@
 # 测试报告
 
-状态：旧候选 `f05e10f` 永久 HOLD；本轮修复已完成实现者验证，独立 QA/SA 待执行，不预称 QA PASS 或 production release PASS。
+状态：Wave8 候选 `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 独立 QA PASS，候选 P0/P1 为 0；production HOLD 仅剩外部门禁。本结论不授权部署、短链外写或真实 YouTube 上传/评论。
 
-## 实现者验证
+## 独立 QA 证据
 
-2026-08-26 在独立 feature worktree 执行：
+2026-08-26 对 exact SHA 执行：
 
-- `python scripts/test_drama_synthesis_upgrade.py`：45/45 PASS，0 skip，0 failure；全部外部动作使用 temp/fake，含 100 次并发只读 migration dry-run、GPU loopback fake HTTP、短链原子文件、OAuth/YouTube fake client、runtime channel identity、三实体 strict unified RPC identity/payload 与 malformed outbox fenced failure。
-- 普通仓库命令 `npx --yes --package @playwright/test playwright test scripts/drama_synthesis_browser.spec.js --reporter=line --workers=1`：实际 Chrome + fake API 3/3 PASS，无手工 `NODE_PATH`；覆盖 modal app 顺序、cover-only 零 channel 请求，以及含 img/onerror/script/quotes 的 hostile recipe 0 执行/0 DOM 注入且文本可见。运行产物 `test-results` 已清理，无 screenshot/video/trace 残留。
-- `python -m unittest discover tests -p 'test_*drama*.py' -v`：116 collected，115 PASS，1 Windows 上预期 POSIX permission skip，0 failure。
-- Python 3.14 `py_compile`：app、四项 feature、三个 worker、migration 与 focused test 脚本 PASS；focused suite另用 `ast.parse(..., feature_version=(3,9))`。通过只读 SSH stdin 在 HK `/usr/bin/python3.9`（3.9.6）对 app、四项 feature、三个 worker与 migration 共 9 个运行时文件做无落盘 `compile()`，全部 PASS。
-- Node 24：browser spec `node --check` PASS；两个 HTML 各 3 个 script block 均 parse PASS；两份静态页面 SHA256 mirror 一致。
-- 最终 `git diff --cached --check` 覆盖 14 个 Wave7 staged 文件 PASS；staged high-risk secret、错误 live flag、Playwright artifact/scope 检查均 PASS。仅 Git 的 Windows LF/CRLF 转换提示不计 whitespace error。
-- 未执行真实短链 writer、YouTube 上传/评论、统一 MySQL 写入、CPU/HK 部署。
+- focused 45/45 PASS；broad 77/77 PASS；实际 Chrome Playwright 3/3 PASS。
+- compile 11/11 PASS；Python 3.9 AST 11/11 PASS；browser spec syntax 1/1 PASS；inline JS 4/4 PASS。
+- unified writer：3 个正常实体合同 + 26 个 adversarial 合同用例全部 PASS；outbox malformed/fencing 9/9 PASS。
+- hostile recipe 的 img/onerror/script/quotes 以文本可见，0 执行、0 DOM 注入；两 UI mirror 一致。
+- 未发现 candidate P0/P1。旧候选 `f05e10f`、`2df9aef`、`d27c82c` 均为 HOLD/obsolete，不可替代 Wave8 SHA 作为发布候选。
 
-验证范围证明候选代码合同，不证明 gy namespace owner、外部三表或真实 YouTube minimum functionality 合规。
+## 实现者补充证据
+
+- focused 45/45 PASS；相关 broad 116 collected：115 PASS、1 个 Windows POSIX permission 预期 skip、0 failure；实际 Chrome Playwright 3/3 PASS。
+- 本地 py_compile 10 个文件、HK Python 3.9.6 stdin-only runtime compile 9 个文件、browser spec `node --check`、两 HTML 6 个 script block parse、static mirror、staged diff/secret/scope/artifact 检查均 PASS。
+- 全部外部动作使用 temp/fake；未执行真实短链 writer、YouTube 上传/评论、统一 MySQL 写入、CPU/HK 部署。
 
 ## 发布结论
 
-当前不是 production release PASS。gy `/s2l/youtube` writer/root/owner 与三张统一表 schema/owner 是外部门禁；固定 public 有 YouTube minimum functionality 合规风险。真实 YouTube 上传/评论没有授权。
+代码候选已通过独立 QA，但不是 production release PASS。外部门禁仍为：gy `/s2l/youtube` app-owned writer/root 与数字 namespace owner freeze；外部三张统一表及受控 RPC/schema/credential；固定 public 的 YouTube minimum functionality 合规风险接受或整改。真实 YouTube 上传/评论仍需另行精确授权。

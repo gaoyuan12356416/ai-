@@ -1,6 +1,6 @@
 # SA 需求评审
 
-状态：实现者合同已完成；独立 QA/SA 复审待执行，不自签通过。
+状态：Wave8 exact SHA `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 需求/架构合同经独立 QA PASS，0 P0/P1；production HOLD 仅剩下述外部门禁。
 
 ## 架构决策
 
@@ -16,3 +16,4 @@
 - 三张统一 YouTube 表当前不存在；不得缩减合同。缺表时 outbox 保留并报告失败，由外部 owner 提供 schema 后才可完成同步门禁。
 - 固定 public 存在 YouTube 最低功能要求合规风险；正式启用前须接受或整改。
 - 真实 YouTube 上传/评论需另行精确授权，代码部署授权不包含外部发布。
+- 本轮没有部署、短链外写、统一表写入或真实 YouTube 上传/评论；fixed-public 风险未因代码 QA PASS 而自动接受。
