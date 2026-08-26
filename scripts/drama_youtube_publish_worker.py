@@ -69,7 +69,7 @@ def main() -> int:
     worker_id = "%s:%s" % (socket.gethostname(), os.getpid())
     poll_seconds = env_int("DRAMA_YOUTUBE_POLL_SECONDS", 10, 1, 300)
     sync_enabled = os.environ.get("DRAMA_YOUTUBE_UNIFIED_SYNC_ENABLED", "0") == "1"
-    sync_writer = build_unified_youtube_writer_from_env()
+    sync_writer = build_unified_youtube_writer_from_env() if sync_enabled else None
     while not STOP:
         if os.environ.get("YOUTUBE_LIVE_ENABLED", "0") != "1":
             time.sleep(poll_seconds)
@@ -85,6 +85,8 @@ def main() -> int:
                 time.sleep(poll_seconds)
                 continue
             if sync_enabled:
+                if sync_writer is None:
+                    raise RuntimeError("YouTube unified writer is not configured")
                 sync_result = run_sync_outbox_once(drama_app.DRAMA_SYNTHESIS_STORE, sync_writer, worker_id + ":sync")
                 if sync_result.get("claimed"):
                     logging.info("YouTube unified sync processed: outbox_id=%s status=%s", sync_result.get("outbox_id"), sync_result.get("status"))

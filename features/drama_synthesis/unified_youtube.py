@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import stat
 import threading
 import json
 import os
@@ -23,16 +24,118 @@ TABLE_BY_KIND = {
 ALLOWED_ACTIONS = frozenset({"select", "insert", "update"})
 EXTERNAL_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,255}")
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
+JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
+VIDEO_PAYLOAD_KEYS = frozenset(
+    {
+        "publish_id", "video_id", "app_id", "channel_local_id", "operator_user_id",
+        "job_id", "content_id", "source_kind", "source_url", "title",
+        "description_rendered", "privacy_status", "published_at_utc",
+    }
+)
 ENTITY_PAYLOAD_KEYS = {
-    "video": frozenset({"publish_id", "video_id"}),
-    "comment": frozenset({"publish_id", "video_id", "comment_id"}),
-    "publish_log": frozenset({"publish_id", "video_id"}),
+    "video": VIDEO_PAYLOAD_KEYS,
+    "comment": frozenset(
+        {
+            "publish_id", "video_id", "comment_id", "channel_local_id",
+            "operator_user_id", "comment_text", "published_at_utc",
+        }
+    ),
+    "publish_log": VIDEO_PAYLOAD_KEYS,
 }
 TABLE_TO_KIND = {table: kind for kind, table in TABLE_BY_KIND.items()}
 
 
+def read_secure_owned_file(path_text: str, *, max_bytes: int) -> bytes:
+    """Read one exact-0600 regular file owned by the current process user."""
+
+    path = Path(str(path_text or ""))
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("secure credential path is invalid")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError:
+        raise RuntimeError("secure credential file is unavailable") from None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < 1 or metadata.st_size > int(max_bytes):
+            raise RuntimeError("secure credential file is invalid")
+        if os.name != "nt":
+            if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid():
+                raise RuntimeError("secure credential file owner or mode is unsafe")
+        chunks = []
+        remaining = int(max_bytes) + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        value = b"".join(chunks)
+        if len(value) > int(max_bytes):
+            raise RuntimeError("secure credential file is invalid")
+        return value
+    finally:
+        os.close(descriptor)
+
+
 def _valid_publish_id(value: Any) -> bool:
-    return type(value) is int and 1 <= value <= 9_223_372_036_854_775_807
+    return type(value) is int and 1 <= value <= 2_147_483_647
+
+
+def _valid_int(value: Any, *, low: int, high: int = 2_147_483_647) -> bool:
+    return type(value) is int and low <= value <= high
+
+
+def _valid_utc(value: Any) -> bool:
+    if type(value) is not str or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _validate_video_payload(payload: Mapping[str, Any]) -> None:
+    source_url = payload.get("source_url")
+    parsed = urlsplit(source_url) if type(source_url) is str else None
+    valid_url = bool(
+        parsed and len(source_url) <= 4096 and parsed.scheme == "https" and parsed.hostname
+        and not parsed.username and not parsed.password and not parsed.fragment
+    )
+    title = payload.get("title")
+    description = payload.get("description_rendered")
+    content_id = payload.get("content_id")
+    if not (
+        _valid_int(payload.get("app_id"), low=1)
+        and _valid_int(payload.get("channel_local_id"), low=1)
+        and _valid_int(payload.get("operator_user_id"), low=0)
+        and type(payload.get("job_id")) is str and JOB_ID_RE.fullmatch(payload["job_id"])
+        and type(content_id) is str and 1 <= len(content_id) <= 256
+        and payload.get("source_kind") in {"concat_video", "no_bgm_video", "random_template"}
+        and valid_url
+        and type(title) is str and 1 <= len(title) <= 100
+        and type(description) is str and bool(description) and len(description.encode("utf-8")) <= 5000
+        and payload.get("privacy_status") == "public"
+        and _valid_utc(payload.get("published_at_utc"))
+    ):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+
+
+def _validate_comment_payload(payload: Mapping[str, Any]) -> None:
+    comment = payload.get("comment_text")
+    if not (
+        _valid_int(payload.get("channel_local_id"), low=1)
+        and _valid_int(payload.get("operator_user_id"), low=0)
+        and type(comment) is str and 1 <= len(comment) <= 1000
+        and _valid_utc(payload.get("published_at_utc"))
+    ):
+        raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
 
 
 def _expected_external_id(entity_kind: str, payload: Mapping[str, Any]) -> str:
@@ -61,6 +164,10 @@ def validate_entity_payload(entity_kind: str, external_id: str, payload: Mapping
     expected = _expected_external_id(entity_kind, payload)
     if external_id != expected:
         raise DramaSynthesisError("youtube_sync_identity_mismatch", "YouTube统一记录身份不匹配", 409)
+    if entity_kind in {"video", "publish_log"}:
+        _validate_video_payload(payload)
+    else:
+        _validate_comment_payload(payload)
     return dict(payload)
 
 
@@ -77,28 +184,29 @@ def validate_external_id(entity_kind: str, external_id: str) -> None:
 
 
 class ControlledRPCExecutor:
-    """Send a fixed operation envelope to an owner-provided ledger RPC."""
+    """Send a fixed operation envelope to the dedicated loopback ledger RPC."""
 
     def __init__(self, url: str, credential_file: str, *, timeout: int = 15, session_factory=requests.Session):
         parsed = urlsplit(str(url or "").strip())
-        loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
         if (
             parsed.username or parsed.password or parsed.query or parsed.fragment
-            or parsed.scheme not in {"http", "https"} or not parsed.hostname
-            or (parsed.scheme == "http" and not loopback)
+            or parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+            or port != 18837 or parsed.path != "/v1/youtube-sync"
         ):
             raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步配置无效", 503)
-        path = Path(str(credential_file or ""))
-        if not path.is_absolute() or not path.is_file() or path.is_symlink():
-            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据未配置", 503)
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据权限不安全", 503)
-        raw = path.read_bytes()
+        try:
+            raw = read_secure_owned_file(credential_file, max_bytes=4096)
+        except RuntimeError:
+            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据未配置或权限不安全", 503) from None
         try:
             token = raw.decode("utf-8").strip()
         except UnicodeDecodeError:
             token = ""
-        if not 16 <= len(token) <= 4096 or any(char.isspace() for char in token):
+        if not 32 <= len(token) <= 4096 or any(char.isspace() for char in token):
             raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据无效", 503)
         self.url = parsed.geturl()
         self.token = token
@@ -155,8 +263,10 @@ class ControlledRPCExecutor:
 def build_unified_youtube_writer_from_env(env: Mapping[str, str] = os.environ, *, session_factory=requests.Session):
     url = str(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_URL", "") or "").strip()
     credential_file = str(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_CREDENTIAL_FILE", "") or "").strip()
-    if not url or not credential_file:
+    if not url and not credential_file:
         return UnifiedYouTubeWriter(None)
+    if not url or not credential_file:
+        raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步配置必须成对提供", 503)
     try:
         timeout = int(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_TIMEOUT", "15") or 15)
     except (TypeError, ValueError):
@@ -220,4 +330,4 @@ def run_sync_outbox_once(store, writer: UnifiedYouTubeWriter, worker_id: str):
         return {"status": "failed", "claimed": True, "outbox_id": item["id"], "code": code}
 
 
-__all__ = ["ALLOWED_ACTIONS", "ENTITY_PAYLOAD_KEYS", "TABLE_BY_KIND", "ControlledRPCExecutor", "UnifiedYouTubeWriter", "build_unified_youtube_writer_from_env", "run_sync_outbox_once", "validate_controlled_operation", "validate_entity_payload"]
+__all__ = ["ALLOWED_ACTIONS", "ENTITY_PAYLOAD_KEYS", "TABLE_BY_KIND", "ControlledRPCExecutor", "UnifiedYouTubeWriter", "build_unified_youtube_writer_from_env", "read_secure_owned_file", "run_sync_outbox_once", "validate_controlled_operation", "validate_entity_payload"]

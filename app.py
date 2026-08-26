@@ -1404,8 +1404,11 @@ PUBLIC_BASE_URL = os.environ.get(
 
 DRAMA_SYNTHESIS_STORE = DramaSynthesisStore(JOB_DB_PATH)
 DRAMA_SHORT_LINK_ROOT = os.environ.get("DRAMA_SHORT_LINK_ROOT", "").strip()
+DRAMA_SHORT_LINK_OWNER = os.environ.get("DRAMA_SHORT_LINK_OWNER", "").strip()
+if bool(DRAMA_SHORT_LINK_ROOT) != bool(DRAMA_SHORT_LINK_OWNER):
+    raise RuntimeError("DRAMA_SHORT_LINK_ROOT and DRAMA_SHORT_LINK_OWNER must be configured together")
 DRAMA_SHORT_LINK_PUBLISHER = (
-    ImmutableFilesystemPublisher(DRAMA_SHORT_LINK_ROOT)
+    ImmutableFilesystemPublisher(DRAMA_SHORT_LINK_ROOT, owner_user=DRAMA_SHORT_LINK_OWNER)
     if DRAMA_SHORT_LINK_ROOT
     else None
 )
@@ -14656,6 +14659,7 @@ def enqueue_drama_youtube_publish(job_id, payload):
     row = DRAMA_SYNTHESIS_STORE.enqueue_youtube(
         operation_id=str(payload.get("operation_id") or ""),
         job_id=job_id,
+        content_id=str(job.get("content_id") or ""),
         app_id=str(job.get("app_id") or ""),
         channel_local_id=credential.channel_local_id,
         channel_id=credential.channel_id,

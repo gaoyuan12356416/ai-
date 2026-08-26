@@ -20,4 +20,13 @@
 
 ## 发布结论
 
-代码候选已通过独立 QA，但不是 production release PASS。外部门禁仍为：gy `/s2l/youtube` app-owned writer/root 与数字 namespace owner freeze；外部三张统一表及受控 RPC/schema/credential；固定 public 的 YouTube minimum functionality 合规风险接受或整改。真实 YouTube 上传/评论仍需另行精确授权。
+Wave8 代码候选已通过独立 QA；下述线上实查后的增量仍待独立评审，因此当前不是 production release PASS。gy `/s2l/youtube` app-owned root、Nginx 隔离路由和 X 兼容性门禁已完成；剩余门禁为：统一三表 additive migration、独立最小权限账号与受控 RPC 部署；固定 public 的 YouTube minimum functionality 合规风险接受或整改。真实 YouTube 上传/评论仍需另行精确授权。
+
+## 2026-08-26 线上实查后的增量证据
+
+- X 渠道现行机制已核对：先在 SQLite `x_post_publish_log` 预留自增 ID，以该 ID 生成 `https://gy.g2flow.com/s2l/<id>.html`，冻结 long/short URL 和正文，再原子创建不可覆盖 wrapper，成功后才进入 X 发布；抽样 ID `633` 的数据库 long URL、数字文件名与 HTML canonical 一致，现有短链返回 200。
+- YouTube 不创建新域名、DNS、证书或 server block；只复用现有 `gy.g2flow.com`，增加优先级更高的 `/s2l/youtube/<数字短码>.html` 隔离路径。CPU 已建立 `drama-youtube` owner/root 与 Nginx snippet；`nginx -t` PASS，X `/s2l/633.html` 仍为 200，不存在的 YouTube 数字路径为 404，POST 为 403。未生成真实 YouTube 短链文件。
+- 统一三表确认已存在于 `kunlunads_dev`：`ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前应用账号只读；增量实现提供固定白名单 loopback RPC、独立 0600 DB/RPC 凭据、三表完整 legacy 字段映射、负数 synthetic queue join，以及 external-id nullable 列/唯一索引的可审计迁移脚本。
+- 首次增量独立评审结论为 HOLD：发现 writer 18836 与现有 FB 隧道硬冲突，以及 migrator/runtime 权限、精确 schema/grant、credential owner/0600、ACL 与共享库回滚合同缺口。该结论阻止了提交和部署。
+- 修复候选改用经 CPU `ss`、线上配置和仓库三方核验为空闲的 18837；新增可复现 writer env、一次性 migrator、长期最小权限 writer、全量 schema/grant fingerprint、fresh backup evidence/rehearsal、exact owner/0600、短链 ACL 检查和安全回滚。修复后实现者 Python unittest 91/91 PASS；实际 Chrome Playwright 3/3 PASS；CPU Python 3.9.6 对六个运行文件 compile PASS；线上只读 45 个 legacy 列 fingerprint 与 ACL `--check` PASS；`git diff --check`、changed-file secret scan 0 PASS。独立复审待完成。
+- 上述为实现者证据；在独立复审完成并关闭其发现前，不替代 Wave8 exact-SHA 独立 QA 结论，也不构成 production release PASS。

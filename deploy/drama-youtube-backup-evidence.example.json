@@ -1,0 +1,15 @@
+{
+  "cluster_id": "cynosdbmysql-5kxxsre7",
+  "schema": "kunlunads_dev",
+  "backup_id": "REPLACE_WITH_TENCENT_BACKUP_ID",
+  "backup_status": "SUCCESS",
+  "backup_completed_at_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "verified_at_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "verification_source": "tencent_cynosdb_api",
+  "rehearsal_status": "PASS",
+  "rehearsal_at_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "restore_instance_id": "REPLACE_WITH_ISOLATED_RESTORE_INSTANCE_ID",
+  "migration_contract_sha256": "b5eb53a2f64b040c100f8d1c701bc67d2c23f3bf69651764e3967c0653575c94",
+  "candidate_git_sha": "REPLACE_WITH_40_CHAR_LOWERCASE_GIT_SHA",
+  "rehearsal_result_sha256": "REPLACE_WITH_64_CHAR_LOWERCASE_REHEARSAL_RESULT_SHA256"
+}

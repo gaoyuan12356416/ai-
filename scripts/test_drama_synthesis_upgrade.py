@@ -31,7 +31,7 @@ from features.drama_synthesis.core import (  # noqa: E402
 )
 from features.drama_synthesis.unified_youtube import (  # noqa: E402
     ControlledRPCExecutor, UnifiedYouTubeWriter, build_unified_youtube_writer_from_env,
-    run_sync_outbox_once, validate_controlled_operation,
+    run_sync_outbox_once, validate_controlled_operation, validate_entity_payload,
 )
 from features.drama_synthesis.youtube import (  # noqa: E402
     YouTubeCredential, YouTubeCredentialRepository, YouTubeHTTPClient,
@@ -43,6 +43,36 @@ JOB_ID = "a" * 32
 UPLOAD = "https://www.googleapis.com/auth/youtube.upload"
 READONLY = "https://www.googleapis.com/auth/youtube.readonly"
 CHANNEL = "UC" + "A" * 22
+
+
+def unified_video_payload(*, publish_id=1, video_id="video_1"):
+    return {
+        "publish_id": publish_id,
+        "video_id": video_id,
+        "app_id": 1479,
+        "channel_local_id": 1,
+        "operator_user_id": 803,
+        "job_id": JOB_ID,
+        "content_id": "2284",
+        "source_kind": "concat_video",
+        "source_url": "https://example.test/video.mp4",
+        "title": "Title",
+        "description_rendered": "required",
+        "privacy_status": "public",
+        "published_at_utc": "2026-08-26T00:00:00Z",
+    }
+
+
+def unified_comment_payload(*, publish_id=1, video_id="video_1", comment_id="comment_1"):
+    return {
+        "publish_id": publish_id,
+        "video_id": video_id,
+        "comment_id": comment_id,
+        "channel_local_id": 1,
+        "operator_user_id": 803,
+        "comment_text": "hello",
+        "published_at_utc": "2026-08-26T00:00:00Z",
+    }
 
 
 def catalog():
@@ -170,7 +200,7 @@ class UpgradeTests(unittest.TestCase):
 
     def enqueue(self, operation="operation:test-0001", comment="", description="required", confirmed=False):
         return self.store.enqueue_youtube(
-            operation_id=operation, job_id=JOB_ID, app_id="1479",
+            operation_id=operation, job_id=JOB_ID, content_id="2284", app_id="1479",
             channel_local_id="1", channel_id=CHANNEL, youtube_account_id="2",
             source_kind="concat_video", source_url="https://example.test/video.mp4",
             title="Title", description_template=description, description_rendered=description,
@@ -244,6 +274,19 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaises(DramaSynthesisError):
             self.store.ensure_short_link(JOB_ID, "concat_video", "changed", publisher)
 
+    def test_short_link_stale_temp_name_cannot_block_publish(self):
+        public = self.root / "public"
+        public.mkdir()
+        (public / "1.html.tmp.stale-process").write_bytes(b"stale")
+        row = self.store.ensure_short_link(
+            JOB_ID,
+            "concat_video",
+            "c1",
+            ImmutableFilesystemPublisher(public),
+        )
+        self.assertEqual(row["id"], 1)
+        self.assertTrue((public / "1.html").is_file())
+
     def test_exact_additive_table_names_exist(self):
         conn = sqlite3.connect(self.store.db_path)
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -254,7 +297,16 @@ class UpgradeTests(unittest.TestCase):
         conn.close()
 
     def test_python_runtime_sources_parse_as_39(self):
-        files = [ROOT / "features/drama_synthesis/core.py", ROOT / "features/drama_synthesis/youtube.py", ROOT / "features/drama_synthesis/unified_youtube.py", ROOT / "scripts/drama_synthesis_gpu_worker.py", ROOT / "scripts/migrate_drama_synthesis_outputs.py"]
+        files = [
+            ROOT / "features/drama_synthesis/core.py",
+            ROOT / "features/drama_synthesis/youtube.py",
+            ROOT / "features/drama_synthesis/unified_youtube.py",
+            ROOT / "features/drama_synthesis/unified_youtube_rpc.py",
+            ROOT / "scripts/drama_synthesis_gpu_worker.py",
+            ROOT / "scripts/drama_youtube_unified_writer_rpc.py",
+            ROOT / "scripts/migrate_drama_synthesis_outputs.py",
+            ROOT / "scripts/migrate_drama_youtube_unified_schema.py",
+        ]
         for path in files:
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 9))
 
@@ -398,7 +450,12 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual([item[0] for item in rows], ["publish_log", "video"])
         self.assertEqual(rows[0][1], str(row["id"]))
         self.assertEqual(rows[1][1], "video_456")
-        self.assertEqual(json.loads(rows[0][2]), {"publish_id": row["id"], "video_id": "video_456"})
+        publish_payload = json.loads(rows[0][2])
+        video_payload = json.loads(rows[1][2])
+        self.assertEqual(publish_payload, video_payload)
+        self.assertEqual((publish_payload["publish_id"], publish_payload["video_id"]), (row["id"], "video_456"))
+        validate_entity_payload("publish_log", str(row["id"]), publish_payload)
+        validate_entity_payload("video", "video_456", video_payload)
 
     def test_late_comment_outbox_reopens_independent_sync_status(self):
         row = self.enqueue(operation="operation:late-comment", comment="hello")
@@ -423,27 +480,28 @@ class UpgradeTests(unittest.TestCase):
         self.store.finish_youtube_sync(reclaimed["id"], worker_id="sync-b", lease_generation=reclaimed["lease_generation"], success=True)
 
     def test_unified_writer_is_whitelisted_idempotent_and_fail_closed(self):
+        video = unified_video_payload()
         with self.assertRaises(DramaSynthesisError):
-            UnifiedYouTubeWriter(None).sync("video", "video_1", {"publish_id": 1, "video_id": "video_1"})
+            UnifiedYouTubeWriter(None).sync("video", "video_1", video)
         calls = []
         writer = UnifiedYouTubeWriter(lambda action, table, external_id, payload: calls.append((action, table, external_id, payload)) or ({"found": False} if action == "select" else {"idempotent_success": True}))
-        writer.sync("video", "video_1", {"publish_id": 1, "video_id": "video_1"})
+        writer.sync("video", "video_1", video)
         self.assertEqual([call[0] for call in calls], ["select", "insert"])
         self.assertEqual(calls[1][1:3], ("ads_youtube_videos", "video_1"))
         rejected = (
-            ("video", "video_1", {"publish_id": 1, "video_id": "video_1", "secret": "reject"}),
+            ("video", "video_1", dict(video, secret="reject")),
             ("video", "video_1", {"video_id": "video_1"}),
-            ("video", "video_1", {"publish_id": "1", "video_id": "video_1"}),
-            ("video", "video_other", {"publish_id": 1, "video_id": "video_1"}),
-            ("comment", "comment_other", {"publish_id": 1, "video_id": "video_1", "comment_id": "comment_1"}),
-            ("publish_log", "2", {"publish_id": 1, "video_id": "video_1"}),
+            ("video", "video_1", dict(video, publish_id="1")),
+            ("video", "video_other", video),
+            ("comment", "comment_other", unified_comment_payload()),
+            ("publish_log", "2", video),
         )
         for entity_kind, external_id, payload in rejected:
             with self.assertRaises(DramaSynthesisError):
                 writer.sync(entity_kind, external_id, payload)
         self.assertEqual(len(calls), 2)
-        writer.sync("comment", "comment_1", {"publish_id": 1, "video_id": "video_1", "comment_id": "comment_1"})
-        writer.sync("publish_log", "1", {"publish_id": 1, "video_id": "video_1"})
+        writer.sync("comment", "comment_1", unified_comment_payload())
+        writer.sync("publish_log", "1", video)
         self.assertEqual(
             [(calls[index][1], calls[index][2]) for index in (3, 5)],
             [("ads_youtube_comments", "comment_1"), ("ads_youtube_publish_log", "1")],
@@ -453,28 +511,37 @@ class UpgradeTests(unittest.TestCase):
 
     def test_unified_rpc_factory_config_auth_redirect_and_unknown_fail_closed(self):
         credential = self.root / "unified.token"
-        credential.write_text("fake-server-credential", encoding="utf-8")
+        credential.write_text("fake-server-credential-" + "x" * 32, encoding="utf-8")
         if os.name != "nt": credential.chmod(0o600)
         env = {
-            "DRAMA_YOUTUBE_UNIFIED_RPC_URL": "https://ledger.example.test/v1/youtube-sync",
+            "DRAMA_YOUTUBE_UNIFIED_RPC_URL": "http://127.0.0.1:18837/v1/youtube-sync",
             "DRAMA_YOUTUBE_UNIFIED_RPC_CREDENTIAL_FILE": str(credential),
             "DRAMA_YOUTUBE_UNIFIED_RPC_TIMEOUT": "5",
         }
         session = FakeRPCSession([FakeResponse(payload={"found": False}), FakeResponse(payload={"idempotent_success": True})])
         writer = build_unified_youtube_writer_from_env(env, session_factory=lambda: session)
-        writer.sync("video", "video_rpc", {"publish_id": 1, "video_id": "video_rpc"})
+        writer.sync("video", "video_rpc", unified_video_payload(video_id="video_rpc"))
         self.assertEqual([call[1]["json"]["action"] for call in session.posts], ["select", "insert"])
         self.assertTrue(all(call[1]["allow_redirects"] is False for call in session.posts))
         self.assertTrue(all(call[1]["headers"]["Authorization"].startswith("Bearer ") for call in session.posts))
         with self.assertRaises(DramaSynthesisError):
-            build_unified_youtube_writer_from_env({}).sync("video", "video_missing", {"publish_id": 1, "video_id": "video_missing"})
+            build_unified_youtube_writer_from_env({}).sync("video", "video_missing", unified_video_payload(video_id="video_missing"))
+        with self.assertRaises(DramaSynthesisError) as partial:
+            build_unified_youtube_writer_from_env({"DRAMA_YOUTUBE_UNIFIED_RPC_URL": env["DRAMA_YOUTUBE_UNIFIED_RPC_URL"]})
+        self.assertEqual(partial.exception.code, "youtube_sync_not_configured")
+        credential.write_text("too-short-token", encoding="utf-8")
+        with self.assertRaises(DramaSynthesisError):
+            build_unified_youtube_writer_from_env(env)
+        credential.write_text("fake-server-credential-" + "x" * 32, encoding="utf-8")
         for response, expected in ((FakeResponse(status=401), "youtube_sync_auth_failed"), (FakeResponse(status=302), "youtube_sync_redirect_denied"), (FakeResponse(payload={}), "youtube_sync_response_invalid")):
             failed = build_unified_youtube_writer_from_env(env, session_factory=lambda response=response: FakeRPCSession([response]))
             with self.assertRaises(DramaSynthesisError) as raised:
-                failed.sync("video", "video_failed", {"publish_id": 1, "video_id": "video_failed"})
+                failed.sync("video", "video_failed", unified_video_payload(video_id="video_failed"))
             self.assertEqual(raised.exception.code, expected)
         with self.assertRaises(DramaSynthesisError):
-            ControlledRPCExecutor("https://ledger.example.test/v1", str(credential))("delete", "ads_youtube_videos", "video", {})
+            ControlledRPCExecutor("http://127.0.0.1:18837/v1/youtube-sync", str(credential))("delete", "ads_youtube_videos", "video", {})
+        with self.assertRaises(DramaSynthesisError):
+            ControlledRPCExecutor("http://127.0.0.1:18836/v1/youtube-sync", str(credential))
 
     def test_sync_outbox_invalid_payload_is_fenced_failed_without_raw_data(self):
         writer_calls = []
@@ -482,7 +549,7 @@ class UpgradeTests(unittest.TestCase):
         cases = (
             ('{"secret":', "youtube_sync_payload_invalid"),
             ('["not-an-object"]', "youtube_sync_payload_invalid"),
-            (json.dumps({"publish_id": 1, "video_id": "video_fake", "secret": "must-reject"}), "youtube_sync_contract_invalid"),
+            (json.dumps(dict(unified_video_payload(video_id="video_fake"), secret="must-reject")), "youtube_sync_contract_invalid"),
         )
         for payload_json, expected_code in cases:
             store = FakeSyncStore(payload_json)
@@ -643,6 +710,23 @@ class UpgradeTests(unittest.TestCase):
         self.assertNotIn("refresh_token", gpu)
         publish_worker = (ROOT / "scripts/drama_youtube_publish_worker.py").read_text(encoding="utf-8")
         self.assertIn("build_unified_youtube_writer_from_env()", publish_worker)
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("bool(DRAMA_SHORT_LINK_ROOT) != bool(DRAMA_SHORT_LINK_OWNER)", app_source)
+        writer_service = (ROOT / "deploy/drama-youtube-unified-writer.service").read_text(encoding="utf-8")
+        writer_env = (ROOT / "deploy/drama-youtube-unified-writer.env.example").read_text(encoding="utf-8")
+        short_root = (ROOT / "deploy/configure_drama_youtube_short_link_root.sh").read_text(encoding="utf-8")
+        self.assertIn("DRAMA_YOUTUBE_UNIFIED_RPC_PORT=18837", writer_env)
+        self.assertNotIn("18836", writer_service + writer_env)
+        self.assertIn("drama-youtube:drama-youtube", writer_env)
+        self.assertIn("default:user:nginx:r--", short_root)
+        deploy_doc = (ROOT / "doc/049.drama-synthesis-upgrade/deploy.md").read_text(encoding="utf-8")
+        migration_doc = (ROOT / "doc/049.drama-synthesis-upgrade/migration.md").read_text(encoding="utf-8")
+        for document in (deploy_doc, migration_doc):
+            self.assertIn("runuser -u drama-youtube -- /usr/bin/python3", document)
+            self.assertIn("/opt/drama-youtube-unified-writer/current/scripts/", document)
+        self.assertIn("writer database credential file is invalid", migration_doc)
+        self.assertIn("releases/<candidate_git_sha>", migration_doc)
+        self.assertIn("rehearsal_result_sha256", migration_doc)
 
     def test_gpu_worker_fake_http_contract_is_media_only(self):
         fake_app = SimpleNamespace(

@@ -9,3 +9,4 @@ data/
 .test_screenshot_batch/
 .playwright-cli/
 output/playwright/
+test-results/

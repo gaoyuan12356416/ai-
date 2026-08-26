@@ -12,9 +12,11 @@
 
 ## 外部统一 MySQL
 
-目标表精确为 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前只读证据确认三表尚不存在，因此候选不含 DDL。统一 writer 只接收受控 `select/insert/update`、精确表白名单和实体级 exact payload；`publish_id` 在 payload 中是正整数，在 publish_log external ID 中是规范十进制字符串，video/comment external ID 分别冻结为对应字符串 ID，三类 identity mismatch 均拒绝。单进程并发 1，先 select 再 insert/update，结果必须声明 idempotent success。worker 的 executor 由受控 RPC env factory 构造，RPC 端负责表 schema/外部 ID 唯一约束；credential 只在 0600 文件。缺 executor、缺表、schema 不匹配或非白名单操作均 fail closed，claimed outbox 即使 payload JSON/合同无效也由 owner+generation fenced 写为 failed，禁止宣称同步成功或记录原 payload。
+2026-08-26 只读实查确认三张 legacy 表均位于 `kunlunads_dev`：`ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`，现有规模约 24.3 万、53、5.5 万行。运行前只做 additive migration：分别增加 nullable ASCII/binary `drama_external_video_id`、`drama_external_comment_id`、`drama_external_publish_id` 与唯一索引；历史行保持 NULL，禁止回填或重解释。迁移脚本固定集群 `cynosdbmysql-5kxxsre7`、主库 `101.32.56.53:63353`、schema 与账号名，要求 48 小时内成功备份、API 读回和恢复演练 PASS 的 0600 evidence 文件，支持 dry-run/幂等重跑。一次性 `drama_youtube_migrator@43.166.187.96` 仅在迁移窗口持有三表级 SELECT/INSERT/CREATE/ALTER，完成后二次 dry-run并销毁；长期 `drama_youtube_writer@43.166.187.96` 从未获得 DDL，最终仅留三表级 SELECT/INSERT/UPDATE。
+
+统一 writer 只接收受控 `select/insert/update`、精确表白名单和实体级 exact payload；将发布事实映射到 legacy 必填列，并用三个 external ID 列实现数据库级幂等。`publish_id` 是正的 32-bit 整数，publish_log external ID 是规范十进制字符串；video/comment external ID 分别冻结为对应字符串 ID，三类 identity mismatch 均拒绝。legacy `ads_youtube_videos.queue_id` 与 `ads_youtube_publish_log.created_queue` 都写成 `-publish_id`：负数 namespace 经线上只读审计为未使用，可保持两表关联，又不会伪装成现有正数 `ads_created_queue` ID。单进程并发 1，先 select 再 insert；同 ID 同内容复用，不同内容冲突。`127.0.0.1:18837` RPC health 精确校验三表全部现行列的 type/NULL/default/charset/collation/extra、external 唯一索引和最终最小 grants；额外列、类型漂移或额外权限均关闭同步。客户端 token copy 为 root:root 0600，服务端同值 copy 与 MySQL writer JSON 为 `drama-youtube:drama-youtube` 0600；缺 executor、缺表、schema/grant 不匹配或非白名单操作均 fail closed。
 
 ## 文件所有权
 
-- gy wrapper root：`/mnt/data-disk/drama-youtube-short-links/s2l/youtube`，必须由应用专用 owner 独占写；nginx 只读。
+- gy wrapper root：`/mnt/data-disk/drama-youtube-short-links/s2l/youtube`，复用现有 X 域名/TLS server；三层目录必须为 `drama-youtube:drama-youtube` 0750，Nginx access ACL 为 r-x，最终目录 default ACL 令新文件只读，文件为 0640。`deploy/configure_drama_youtube_short_link_root.sh --check` 是上线门禁；owner 是文件系统写权限，不代表创建新域名或新证书。
 - HK release：`/data/drama-synthesis-gpu/releases/<git_sha>` 不可变，`current` 原子切换；资产 root、work、results 分离。

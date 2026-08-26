@@ -14,6 +14,8 @@ import json
 import os
 import re
 import sqlite3
+import stat
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +61,44 @@ CHANNEL_ID_RE = re.compile(r"UC[A-Za-z0-9_-]{20,30}")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _bounded_decimal(value: Any, *, low: int = 0, high: int = 2_147_483_647) -> int:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        return 0
+    number = int(text)
+    return number if low <= number <= high else 0
+
+
+def _video_sync_payload(row: Mapping[str, Any], video_id: str, published_at_utc: str) -> Dict[str, Any]:
+    return {
+        "publish_id": int(row["id"]),
+        "video_id": str(video_id),
+        "app_id": _bounded_decimal(row.get("app_id"), low=1),
+        "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
+        "operator_user_id": _bounded_decimal(row.get("operator_user_id")),
+        "job_id": str(row.get("job_id") or ""),
+        "content_id": str(row.get("content_id") or ""),
+        "source_kind": str(row.get("source_kind") or ""),
+        "source_url": str(row.get("source_url") or ""),
+        "title": str(row.get("title") or ""),
+        "description_rendered": str(row.get("description_rendered") or ""),
+        "privacy_status": str(row.get("privacy_status") or ""),
+        "published_at_utc": str(published_at_utc),
+    }
+
+
+def _comment_sync_payload(row: Mapping[str, Any], comment_id: str, published_at_utc: str) -> Dict[str, Any]:
+    return {
+        "publish_id": int(row["id"]),
+        "video_id": str(row.get("video_id") or ""),
+        "comment_id": str(comment_id),
+        "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
+        "operator_user_id": _bounded_decimal(row.get("operator_user_id")),
+        "comment_text": str(row.get("comment_text") or ""),
+        "published_at_utc": str(published_at_utc),
+    }
 
 
 class DramaSynthesisError(RuntimeError):
@@ -260,39 +300,98 @@ def render_wrapper_html(job_id: str, content_id: str) -> bytes:
 class ImmutableFilesystemPublisher:
     """Publish only ``<id>.html`` below an explicitly configured origin root."""
 
-    def __init__(self, root: Union[str, os.PathLike]):
+    def __init__(self, root: Union[str, os.PathLike], *, owner_user: str = ""):
         path = Path(root)
         if not path.is_absolute():
             raise ValueError("short-link root must be absolute")
         self.root = path
+        self.owner_user = str(owner_user or "").strip()
+        self.owner_uid: Optional[int] = None
+        self.owner_gid: Optional[int] = None
+        if self.owner_user:
+            if os.name == "nt":
+                raise ValueError("short-link owner is not supported on Windows")
+            import pwd
+
+            try:
+                owner = pwd.getpwnam(self.owner_user)
+            except KeyError:
+                raise ValueError("short-link owner does not exist") from None
+            self.owner_uid = int(owner.pw_uid)
+            self.owner_gid = int(owner.pw_gid)
+            if self.root.is_symlink() or not self.root.is_dir():
+                raise ValueError("short-link owner root is unavailable")
+            self._validate_owner(self.root)
+
+    def _validate_owner(self, path: Path) -> None:
+        if self.owner_uid is None or self.owner_gid is None:
+            return
+        metadata = path.stat()
+        is_root = path == self.root
+        expected_mode = 0o750 if is_root else 0o640
+        expected_type = stat.S_ISDIR(metadata.st_mode) if is_root else stat.S_ISREG(metadata.st_mode)
+        if (
+            not expected_type
+            or metadata.st_uid != self.owner_uid
+            or metadata.st_gid != self.owner_gid
+            or stat.S_IMODE(metadata.st_mode) != expected_mode
+        ):
+            raise DramaSynthesisError("drama_short_link_owner_invalid", "短链目录或文件所有者无效", 503)
 
     def publish(self, link_id: int, body: bytes) -> Dict[str, Any]:
         if not 1 <= int(link_id) <= 9_223_372_036_854_775_807:
             raise DramaSynthesisError("drama_short_link_id_invalid", "短链ID无效", 500)
-        self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if self.root.is_symlink():
+            raise DramaSynthesisError("drama_short_link_path_invalid", "短链路径无效", 500)
+        if self.owner_uid is None:
+            self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        elif not self.root.is_dir():
+            raise DramaSynthesisError("drama_short_link_root_missing", "短链目录尚未配置", 503)
+        self._validate_owner(self.root)
         target = self.root / (str(int(link_id)) + ".html")
         if target.is_symlink():
             raise DramaSynthesisError("drama_short_link_path_invalid", "短链路径无效", 500)
         if target.exists():
+            self._validate_owner(target)
             existing = target.read_bytes()
             if existing != body:
                 raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链ID已存在且目标不一致", 409)
             return {"reused": True, "sha256": hashlib.sha256(body).hexdigest()}
-        temporary = target.with_suffix(".html.tmp.%s.%s" % (os.getpid(), threading.get_ident()))
+        temporary: Optional[Path] = None
         created = False
         try:
-            with temporary.open("xb") as handle:
+            descriptor, temporary_name = tempfile.mkstemp(prefix=target.name + ".tmp.", dir=str(self.root))
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "wb") as handle:
                 handle.write(body)
                 handle.flush()
+                if self.owner_uid is not None and self.owner_gid is not None:
+                    os.fchmod(handle.fileno(), 0o640)
+                    os.fchown(handle.fileno(), self.owner_uid, self.owner_gid)
                 os.fsync(handle.fileno())
             try:
                 os.link(temporary, target)
                 created = True
+                self._validate_owner(target)
             except FileExistsError:
+                self._validate_owner(target)
                 if target.is_symlink() or target.read_bytes() != body:
                     raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链ID已存在且目标不一致", 409)
+            if created and hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(str(self.root), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        try:
+            persisted = target.read_bytes()
+        except OSError:
+            raise DramaSynthesisError("drama_short_link_write_failed", "短链落盘读回失败", 503) from None
+        if persisted != body:
+            raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链落盘读回不一致", 409)
         return {"reused": not created, "sha256": hashlib.sha256(body).hexdigest()}
 
 
@@ -330,7 +429,7 @@ class DramaSynthesisStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_drama_material_short_identity ON drama_material_short_link(job_id,material_kind)",
             """CREATE TABLE IF NOT EXISTS drama_youtube_publish(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE,
-                job_id TEXT NOT NULL, app_id TEXT NOT NULL, channel_local_id TEXT NOT NULL,
+                job_id TEXT NOT NULL, content_id TEXT NOT NULL DEFAULT '', app_id TEXT NOT NULL, channel_local_id TEXT NOT NULL,
                 channel_id TEXT NOT NULL, youtube_account_id TEXT NOT NULL,
                 source_kind TEXT NOT NULL, source_url TEXT NOT NULL,
                 title TEXT NOT NULL, description_template TEXT NOT NULL, description_rendered TEXT NOT NULL, comment_text TEXT NOT NULL,
@@ -375,6 +474,10 @@ class DramaSynthesisStore:
                 if "lease_generation" not in columns:
                     conn.execute(
                         "ALTER TABLE drama_youtube_publish ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "content_id" not in columns:
+                    conn.execute(
+                        "ALTER TABLE drama_youtube_publish ADD COLUMN content_id TEXT NOT NULL DEFAULT ''"
                     )
                 conn.commit()
             finally:
@@ -547,6 +650,7 @@ class DramaSynthesisStore:
         *,
         operation_id: str,
         job_id: str,
+        content_id: str,
         app_id: str,
         channel_local_id: str,
         channel_id: str,
@@ -564,18 +668,23 @@ class DramaSynthesisStore:
     ) -> Dict[str, Any]:
         if not OPERATION_ID_RE.fullmatch(str(operation_id or "")) or not JOB_ID_RE.fullmatch(str(job_id or "")):
             raise DramaSynthesisError("invalid_request", "发布操作ID或任务ID无效")
+        content_id = str(content_id or "").strip()
+        if not content_id or len(content_id) > 256:
+            raise DramaSynthesisError("invalid_request", "内容ID无效")
         if not CHANNEL_ID_RE.fullmatch(str(channel_id or "")):
             raise DramaSynthesisError("youtube_channel_invalid", "YouTube频道无效")
         parsed = urlsplit(str(source_url or ""))
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
             raise DramaSynthesisError("youtube_source_invalid", "待发布视频地址无效")
+        if str(source_kind or "") not in {"concat_video", "no_bgm_video", "random_template"}:
+            raise DramaSynthesisError("youtube_source_invalid", "待发布视频类型无效")
         title = str(title or "").strip()
         description_template = str(description_template or "").strip()
         description_rendered = str(description_rendered or "").strip()
         comment_text = str(comment_text or "").strip()
         if (not 1 <= len(title) <= 100 or not description_template or not description_rendered
                 or len(description_template.encode("utf-8")) > 5000
-                or len(description_rendered.encode("utf-8")) > 5000 or len(comment_text) > 10000):
+                or len(description_rendered.encode("utf-8")) > 5000 or len(comment_text) > 1000):
             raise DramaSynthesisError("youtube_metadata_invalid", "YouTube标题、描述或评论超出限制")
         capabilities = scope_capabilities(scopes)
         if not capabilities["upload_eligible"]:
@@ -591,8 +700,8 @@ class DramaSynthesisStore:
                 conn.execute("BEGIN IMMEDIATE")
                 existing = conn.execute("SELECT * FROM drama_youtube_publish WHERE operation_id=?", (operation_id,)).fetchone()
                 if existing is not None:
-                    immutable = (job_id, channel_id, source_kind, source_url, title, description_template, description_rendered, comment_text)
-                    stored = tuple(existing[key] for key in ("job_id", "channel_id", "source_kind", "source_url", "title", "description_template", "description_rendered", "comment_text"))
+                    immutable = (job_id, content_id, channel_id, source_kind, source_url, title, description_template, description_rendered, comment_text)
+                    stored = tuple(existing[key] for key in ("job_id", "content_id", "channel_id", "source_kind", "source_url", "title", "description_template", "description_rendered", "comment_text"))
                     if immutable != stored:
                         raise DramaSynthesisError("youtube_operation_conflict", "发布操作ID已用于不同请求", 409)
                     conn.commit()
@@ -610,12 +719,12 @@ class DramaSynthesisStore:
                 comment_status = "queued" if comment_text else "skipped"
                 cursor = conn.execute(
                     """INSERT INTO drama_youtube_publish(
-                        operation_id,job_id,app_id,channel_local_id,channel_id,youtube_account_id,
+                        operation_id,job_id,content_id,app_id,channel_local_id,channel_id,youtube_account_id,
                         source_kind,source_url,title,description_template,description_rendered,comment_text,duplicate_confirmed,
                         operator_user_id,operator_name,privacy_status,status,video_state,comment_status,sync_status,created_at_utc,updated_at_utc
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        operation_id, job_id, app_id, channel_local_id, channel_id, youtube_account_id,
+                        operation_id, job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id,
                         source_kind, source_url, title, description_template, description_rendered, comment_text, int(bool(duplicate_confirmed)),
                         str(operator_user_id)[:128], str(operator_name)[:128], "public", "queued", "queued", comment_status, "pending", now, now,
                     ),
@@ -861,7 +970,7 @@ class DramaSynthesisStore:
                     "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
                     (int(task_id), "video", "published", video_id, now),
                 )
-                payload = _canonical_json({"publish_id": int(task_id), "video_id": video_id})
+                payload = _canonical_json(_video_sync_payload(dict(row), video_id, now))
                 for entity_kind, external_id in (("video", video_id), ("publish_log", str(task_id))):
                     conn.execute(
                         "INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",
@@ -907,7 +1016,7 @@ class DramaSynthesisStore:
                 )
                 conn.execute(
                     "INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",
-                    (int(task_id), "comment", str(comment_id), _canonical_json({"publish_id": int(task_id), "video_id": row["video_id"], "comment_id": str(comment_id)}), "pending", now, now),
+                    (int(task_id), "comment", str(comment_id), _canonical_json(_comment_sync_payload(dict(row), str(comment_id), now)), "pending", now, now),
                 )
                 conn.commit()
                 return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())

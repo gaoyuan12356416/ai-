@@ -1,0 +1,30 @@
+[Unit]
+Description=Drama Synthesis Controlled Unified YouTube Writer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drama-youtube
+Group=drama-youtube
+WorkingDirectory=/opt/drama-youtube-unified-writer/current
+EnvironmentFile=/etc/drama-youtube/unified-writer.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/drama-youtube-unified-writer/current/scripts/drama_youtube_unified_writer_rpc.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/drama-youtube/unified-rpc-server.token /etc/drama-youtube/writer-db.json
+
+[Install]
+WantedBy=multi-user.target

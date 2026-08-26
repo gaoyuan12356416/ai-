@@ -19,4 +19,6 @@
 
 主状态 queued/validating/downloading/uploading/submitted/processing/published/failed/unknown。processing/unknown 同 job+material+channel 新请求 409；prior published 未二次确认 409。依赖 503，输入 400，权限 401/403，不可变/并发冲突 409。
 
-统一同步 RPC 不接受通用 JSON：video 精确为 `{publish_id:<positive integer>,video_id:<6..32 URL-safe string>}`；comment 精确再含 `comment_id:<1..255 URL-safe string>`；publish_log 与 video 同字段。video/comment external ID 分别等于对应 ID；publish_log external ID 是无前导零的十进制 `publish_id` 字符串。任何 extra/missing/错类型/identity mismatch 均 409 并由 outbox 安全记 failed。
+统一同步 RPC 不接受通用 JSON。video/publish_log 精确字段为 `publish_id,video_id,app_id,channel_local_id,operator_user_id,job_id,content_id,source_kind,source_url,title,description_rendered,privacy_status,published_at_utc`；comment 精确字段为 `publish_id,video_id,comment_id,channel_local_id,operator_user_id,comment_text,published_at_utc`。video/comment external ID 分别等于对应 ID；publish_log external ID 是无前导零的十进制 `publish_id` 字符串。任何 extra/missing/错类型/identity mismatch 均 409 并由 outbox 安全记 failed。RPC 内部只映射固定 legacy 列，调用方不能传 SQL、列名或数据库凭据。
+
+内部 RPC 固定为 `127.0.0.1:18837`（18836 为既有 FB 隧道）：Bearer `GET /health` 只返回 `ok/schema/grant_fingerprint`；Bearer `POST /v1/youtube-sync` 只接收 exact `action,table,external_id,payload` envelope。同一至少 32 字符 token 使用两份同值文件：root 客户端 copy 为 root:root 0600，服务端 copy 为 `drama-youtube:drama-youtube` 0600；两者都非 symlink。无 token、慢 body、redirect、额外字段、schema/grant/index 漂移全部 fail closed。
