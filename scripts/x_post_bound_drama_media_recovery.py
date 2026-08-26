@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -390,6 +391,20 @@ def main(argv=None):
             _atomic_write_report(report_target, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] in {"validated", "applied"} else 2
+    except sqlite3.Error:
+        result = {
+            "status": "failed",
+            "error_code": "x_post_bound_drama_recovery_store_failed",
+            "error_message": "短剧媒体恢复数据库事务失败，已回滚，禁止自动重试",
+            "x_write_attempted": False,
+        }
+        if report_target is not None:
+            try:
+                _atomic_write_report(report_target, result)
+            except Exception:
+                pass
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 1
     except (
         BackfillError,
         CandidateSelectionError,

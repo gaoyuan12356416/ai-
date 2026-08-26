@@ -28,6 +28,14 @@
 6. 对 Run 274 manifest 先运行 recovery CLI 默认 validate-only；全部 14 条通过后再 `--apply`。
 7. 只读确认 Run 345 仍 0 queue/log/unknown；恢复两个 timer，让新版本按原冻结计划自然建队列并发布，禁止手工制造测试 Post。
 
+## 2026-08-26 生产门禁记录
+
+- 备份：`/var/backups/x-post-automation/20260826T123000CST-before-561da59`，SQLite backup `quick_check=ok`、FK=0。
+- 首版部署提交 `baac99aff6213f6204d4406c4a5616c2cd0373a9`；服务器既有 X 测试 796/796 通过。
+- Run 274 standalone validate-only：14/14，通过，报告 SHA256 `74b020d458183bd6eba205a96b6bbe481796ae3682851f4a7b1eda4a88bd937e`，DB/X 写入均为 0。
+- 首次 apply 在 queue trigger 处失败；SQLite 事务完整回滚，audit=0、修复 URL=0、Run 274/345 原状态不变、DB `quick_check=ok`、FK=0、timers inactive。
+- BUG-005 修复必须经 GitHub exact commit、Linux 800 项、备份副本生产同形态 apply 和生产 standalone validate-only 后，才允许再次对 live DB apply。
+
 ## 验证步骤
 
 - 全部离线 X 测试通过，`git diff --check` 通过。

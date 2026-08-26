@@ -4324,6 +4324,263 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [0, 1],
         )
 
+    def test_bound_drama_recovery_allows_audited_relay_below_140_only_once(self):
+        plan, prepared = self._failed_bound_drama_media_run(
+            relay_first=True
+        )
+        relay_queue = next(
+            queue
+            for queue in plan["queues"]
+            if queue["delivery_mode"] == "premium_relay_repost"
+        )
+        repaired = next(
+            item for item in prepared if item["queue_id"] == relay_queue["id"]
+        )
+        repaired["preflight_duration"] = 120.0
+        recovery_now = datetime(
+            2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+        )
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_queue SET preflight_duration=141 "
+                "WHERE id=?",
+                (relay_queue["id"],),
+            )
+            conn.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_queue SET preflight_duration=120 "
+                    "WHERE id=?",
+                    (relay_queue["id"],),
+                )
+            conn.rollback()
+
+        recovered = self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="9" * 40,
+            now=recovery_now,
+        )
+
+        self.assertEqual(recovered["updated_count"], len(prepared))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            queue = conn.execute(
+                "SELECT delivery_mode,media_validation_mode,preflight_duration,"
+                "status FROM x_post_queue WHERE id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            relay = conn.execute(
+                "SELECT status,source_attempt_count,repost_attempt_count,"
+                "unknown_outcome FROM x_post_repost_ledger WHERE queue_id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            audit = conn.execute(
+                "SELECT final_material_url,preflight_sha256,preflight_size,"
+                "preflight_duration,media_repair_job_key,validated_relay_count "
+                "FROM x_post_schedule_bound_drama_failed_media_recovery_audit "
+                "WHERE queue_id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            self.assertEqual(
+                queue,
+                ("premium_relay_repost", "preflight", 120.0, "queued"),
+            )
+            self.assertEqual(relay, ("reserved", 0, 0, 0))
+            self.assertEqual(
+                audit,
+                (
+                    repaired["material_url"],
+                    repaired["preflight_sha256"],
+                    repaired["preflight_size"],
+                    120.0,
+                    repaired["media_repair_job_key"],
+                    1,
+                ),
+            )
+            frozen_queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            frozen_log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            frozen_audit = conn.execute(
+                "SELECT * FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                "WHERE queue_id=?",
+                (relay_queue["id"],),
+            ).fetchone()
+            other_queue = next(
+                queue
+                for queue in plan["queues"]
+                if queue["id"] != relay_queue["id"]
+            )
+            drifted_episode = relay_queue["episode_number"] + 1
+            drifted_episode_key = service._drama_episode_key(
+                relay_queue["content_id"],
+                drifted_episode,
+                relay_queue["drama_replay_generation"],
+            )
+            tampered_updates = (
+                ("preflight_duration=?", (119.0,)),
+                (
+                    "material_url=?",
+                    ("https://media.example.test/tampered.mp4",),
+                ),
+                ("media_repair_job_key=?", ("f" * 64,)),
+                ("relay_account_id=?", (10,)),
+                (
+                    "drama_pool_item_id=?",
+                    (other_queue["drama_pool_item_id"],),
+                ),
+                ("content_id=?", (other_queue["content_id"],)),
+                (
+                    "episode_number=?,episode_key=?",
+                    (drifted_episode, drifted_episode_key),
+                ),
+                (
+                    "episode_key=?",
+                    (
+                        service._drama_episode_key(
+                            relay_queue["content_id"],
+                            drifted_episode + 1,
+                            relay_queue["drama_replay_generation"],
+                        ),
+                    ),
+                ),
+                (
+                    "drama_replay_generation=?",
+                    (relay_queue["drama_replay_generation"] + 1,),
+                ),
+                (
+                    "drama_pool_created_at=?",
+                    ("1970-01-01T00:00:00Z",),
+                ),
+            )
+            for assignment, values in tampered_updates:
+                with self.subTest(assignment=assignment):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute(
+                            "UPDATE x_post_queue SET %s WHERE id=?"
+                            % assignment,
+                            values + (relay_queue["id"],),
+                        )
+                    conn.rollback()
+                    self.assertEqual(
+                        conn.execute(
+                            "SELECT * FROM x_post_queue WHERE id=?",
+                            (relay_queue["id"],),
+                        ).fetchone(),
+                        frozen_queue,
+                    )
+                    self.assertEqual(
+                        conn.execute(
+                            "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                            (relay_queue["id"],),
+                        ).fetchone(),
+                        frozen_log,
+                    )
+                    self.assertEqual(
+                        conn.execute(
+                            "SELECT * FROM "
+                            "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                            "WHERE queue_id=?",
+                            (relay_queue["id"],),
+                        ).fetchone(),
+                        frozen_audit,
+                    )
+
+    def _bound_drama_media_recovery_state(self, schedule_run_id):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            return {
+                "run": conn.execute(
+                    "SELECT * FROM x_post_schedule_run WHERE id=?",
+                    (schedule_run_id,),
+                ).fetchall(),
+                "queues": conn.execute(
+                    "SELECT * FROM x_post_queue WHERE schedule_run_id=? "
+                    "ORDER BY id",
+                    (schedule_run_id,),
+                ).fetchall(),
+                "logs": conn.execute(
+                    "SELECT l.* FROM x_post_publish_log l "
+                    "JOIN x_post_queue q ON q.id=l.queue_id "
+                    "WHERE q.schedule_run_id=? ORDER BY l.id",
+                    (schedule_run_id,),
+                ).fetchall(),
+                "pools": conn.execute(
+                    "SELECT p.* FROM x_post_drama_pool p "
+                    "JOIN x_post_queue q ON q.drama_pool_item_id=p.id "
+                    "WHERE q.schedule_run_id=? ORDER BY p.id",
+                    (schedule_run_id,),
+                ).fetchall(),
+                "relays": conn.execute(
+                    "SELECT r.* FROM x_post_repost_ledger r "
+                    "JOIN x_post_queue q ON q.id=r.queue_id "
+                    "WHERE q.schedule_run_id=? ORDER BY r.id",
+                    (schedule_run_id,),
+                ).fetchall(),
+                "audits": conn.execute(
+                    "SELECT * FROM "
+                    "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                    "WHERE schedule_run_id=? ORDER BY id",
+                    (schedule_run_id,),
+                ).fetchall(),
+            }
+
+    def _assert_non_placeholder_short_relay_recovery_rolls_back(
+        self,
+        old_duration,
+    ):
+        plan, prepared = self._failed_bound_drama_media_run(
+            relay_first=True
+        )
+        relay_queue = next(
+            queue
+            for queue in plan["queues"]
+            if queue["delivery_mode"] == "premium_relay_repost"
+        )
+        repaired = next(
+            item
+            for item in prepared
+            if item["queue_id"] == relay_queue["id"]
+        )
+        repaired["preflight_duration"] = 120.0
+        if float(old_duration) != 180.0:
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute(
+                    "UPDATE x_post_queue SET preflight_duration=? WHERE id=?",
+                    (float(old_duration), relay_queue["id"]),
+                )
+                conn.commit()
+        before = self._bound_drama_media_recovery_state(plan["id"])
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.recover_failed_drama_schedule_queues(
+                plan["id"],
+                prepared,
+                reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="8" * 40,
+                now=datetime(
+                    2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+                ),
+            )
+
+        after = self._bound_drama_media_recovery_state(plan["id"])
+        self.assertEqual(after, before)
+        self.assertEqual(after["audits"], [])
+
+    def test_bound_drama_short_relay_recovery_rejects_old_duration_180(self):
+        self._assert_non_placeholder_short_relay_recovery_rolls_back(180.0)
+
+    def test_bound_drama_short_relay_recovery_rejects_old_duration_142(self):
+        self._assert_non_placeholder_short_relay_recovery_rolls_back(142.0)
+
     def test_bound_drama_failed_media_recovery_rejects_partial_and_repeat(self):
         plan, prepared = self._failed_bound_drama_media_run()
         recovery_now = datetime(

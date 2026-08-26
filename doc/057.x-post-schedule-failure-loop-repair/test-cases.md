@@ -10,6 +10,7 @@
 - 模拟首次/连续 CandidateQueryError。
 - 23:44 claim、00:00 跨日和 2 小时租约边界。
 - Run 274 的 14 条 queue/pool/content/episode manifest（离线临时 SQLite）。
+- Run 274 relay 的 141 秒 deferred hint 与修复后 129.6/109.533/136.32/117.3/105.877/52.181 秒生产形态。
 
 ## 用例列表
 
@@ -24,7 +25,9 @@
 | TC-007 | 跨午夜租约 | 23:44 活跃 claim | 00:00/2h 后 due poll | 活跃不停止；超时才 stale | P0 | 通过 |
 | TC-008 | 短剧 validate-only | 14 条精确 manifest | 离线验证媒体证据与 ledger | 零 DB/X 写入 | P0 | 通过；生产复核待部署 |
 | TC-009 | 短剧原子 rearm | 全部媒体通过 | 离线 apply | 原队列/绑定不变，audit=14 | P0 | 通过；生产应用待部署 |
-| TC-010 | 全回归 | 代码完成 | 执行 X 全测试 | 0 failure | P0 | 通过，796/796 |
+| TC-010 | relay 修复跨 140 秒边界 | frozen relay=141 秒，修复结果<=140 秒 | 无审计更新、精确 141 审计恢复、旧值 142/180、恢复后媒体/relay/剧集身份逐字段篡改 | 仅精确 141 占位值的审计恢复一次成功；142/180 及所有证据/身份篡改均整事务拒绝 | P0 | 通过 |
+| TC-011 | Store 异常安全输出 | SQLite trigger 拒绝事务 | 执行 recovery CLI apply | 整体回滚、中文稳定错误、`x_write_attempted=false` | P0 | 通过 |
+| TC-012 | 全回归 | 代码完成 | 执行 X 全测试 | 0 business failure | P0 | 原版本 796/796；补丁 193/193，Linux 800 项待发布门禁 |
 
 ## 回归范围
 

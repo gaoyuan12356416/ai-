@@ -277,6 +277,7 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_storage_preflight_invalid_response` | 数据盘预检响应无效 | `阻断` |
 | `x_post_schedule_invalid_response` / `x_post_schedule_plan_invalid_response` / `x_post_schedule_failure_invalid_response` | 排期 claim/plan/failure 审计响应无效 | `阻断/待核查` |
 | `x_post_schedule_heartbeat_invalid_response` | run 租约心跳响应不符合冻结身份合同 | 停止当前 runner；不得在租约未知时继续建计划或发布 |
+| `x_post_bound_drama_recovery_store_failed` | 历史短剧媒体恢复数据库事务失败且已完整回滚 | 阻断；禁止自动重试，先核对恢复 audit、queue/log、剧集绑定及 relay ledger |
 | `x_publish_invalid_response` | 发布接口响应与 queue/log 合同不一致 | 按可能未知结果处理，先查台账/X |
 | `unexpected_error` | runner 未分类异常 | 失败关闭；不得凭此自动重发 |
 

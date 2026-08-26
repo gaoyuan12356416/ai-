@@ -3260,7 +3260,14 @@ def ensure_storage(db_path):
                 CREATE TRIGGER trg_x_post_queue_relay_update
                 BEFORE UPDATE OF delivery_mode,relay_account_id,
                     relay_account_username,source_type,preflight_duration,
-                    account_id,schedule_run_id ON x_post_queue
+                    account_id,schedule_run_id,material_url,
+                    original_material_url,media_validation_mode,
+                    preflight_sha256,preflight_size,
+                    media_repair_trigger_code,media_repair_job_key,
+                    media_repair_profile,media_repair_source_sha256,
+                    drama_pool_item_id,content_id,episode_number,episode_key,
+                    drama_replay_generation,drama_pool_created_at
+                    ON x_post_queue
                 WHEN (
                     NEW.delivery_mode='direct'
                     AND (
@@ -3275,7 +3282,103 @@ def ensure_storage(db_path):
                             NEW.source_type='material'
                             AND NEW.schedule_run_id IS NULL
                         )
-                        OR NEW.preflight_duration<=140
+                        OR (
+                            NEW.preflight_duration<=140
+                            AND NOT (
+                                OLD.delivery_mode='premium_relay_repost'
+                                AND OLD.source_type='drama'
+                                AND NEW.source_type=OLD.source_type
+                                AND NEW.schedule_run_id=
+                                    OLD.schedule_run_id
+                                AND OLD.media_validation_mode='deferred'
+                                AND OLD.preflight_duration=141
+                                AND OLD.status='failed'
+                                AND NEW.status='queued'
+                                AND NEW.media_validation_mode='preflight'
+                                AND NEW.delivery_mode=OLD.delivery_mode
+                                AND NEW.relay_account_id=OLD.relay_account_id
+                                AND NEW.relay_account_username=
+                                    OLD.relay_account_username
+                                AND NEW.account_id=OLD.account_id
+                                AND EXISTS(
+                                    SELECT 1 FROM
+                                    x_post_schedule_bound_drama_failed_media_recovery_audit a
+                                    JOIN x_post_publish_log l
+                                      ON l.queue_id=OLD.id
+                                    JOIN x_post_repost_ledger r
+                                      ON r.queue_id=OLD.id
+                                    JOIN x_post_drama_pool p
+                                      ON p.id=NEW.drama_pool_item_id
+                                    WHERE a.queue_id=OLD.id
+                                      AND a.schedule_run_id=NEW.schedule_run_id
+                                      AND a.drama_pool_item_id=
+                                          NEW.drama_pool_item_id
+                                      AND a.drama_pool_item_id=
+                                          OLD.drama_pool_item_id
+                                      AND a.content_id=NEW.content_id
+                                      AND a.content_id=OLD.content_id
+                                      AND a.episode_number=NEW.episode_number
+                                      AND a.episode_number=OLD.episode_number
+                                      AND a.replay_generation=
+                                          NEW.drama_replay_generation
+                                      AND a.replay_generation=
+                                          OLD.drama_replay_generation
+                                      AND NEW.episode_key=OLD.episode_key
+                                      AND NEW.drama_pool_created_at=
+                                          OLD.drama_pool_created_at
+                                      AND a.account_id=NEW.account_id
+                                      AND a.assigned_source_queue_id=
+                                          p.assigned_source_queue_id
+                                      AND a.validated_relay_count=1
+                                      AND a.previous_queue_status=OLD.status
+                                      AND a.previous_log_status=l.status
+                                      AND a.previous_pool_status=p.status
+                                      AND a.previous_error_code=l.error_code
+                                      AND a.previous_error_code=r.error_code
+                                      AND a.previous_error_code=
+                                          p.last_error_code
+                                      AND a.previous_material_url=
+                                          OLD.material_url
+                                      AND NEW.original_material_url=
+                                          a.previous_material_url
+                                      AND a.final_material_url=NEW.material_url
+                                      AND a.preflight_sha256=
+                                          NEW.preflight_sha256
+                                      AND a.preflight_size=NEW.preflight_size
+                                      AND a.preflight_duration=
+                                          NEW.preflight_duration
+                                      AND a.media_repair_trigger_code=
+                                          NEW.media_repair_trigger_code
+                                      AND a.media_repair_job_key=
+                                          NEW.media_repair_job_key
+                                      AND a.media_repair_profile=
+                                          NEW.media_repair_profile
+                                      AND a.media_repair_source_sha256=
+                                          NEW.media_repair_source_sha256
+                                      AND a.recovery_reason=
+                                          'operator_bound_drama_failed_media_repair_v1'
+                                      AND l.account_id=NEW.account_id
+                                      AND l.status='failed'
+                                      AND l.attempt_count=0
+                                      AND l.unknown_outcome=0
+                                      AND r.target_account_id=NEW.account_id
+                                      AND r.relay_account_id=
+                                          NEW.relay_account_id
+                                      AND r.status='failed'
+                                      AND r.source_attempt_count=0
+                                      AND r.repost_attempt_count=0
+                                      AND r.unknown_outcome=0
+                                      AND p.content_id=NEW.content_id
+                                      AND p.created_at=
+                                          NEW.drama_pool_created_at
+                                      AND p.replay_generation=
+                                          NEW.drama_replay_generation
+                                      AND p.next_sub_number=
+                                          NEW.episode_number
+                                      AND p.assigned_account_id=NEW.account_id
+                                )
+                            )
+                        )
                         OR NEW.relay_account_id<=0
                         OR NEW.relay_account_id=NEW.account_id
                         OR NEW.relay_account_username=''

@@ -2,12 +2,16 @@
 """Offline tests for exact bound-drama media recovery orchestration."""
 
 import contextlib
+import io
+import json
+import sqlite3
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +21,7 @@ if str(ROOT) not in sys.path:
 from scripts.x_post_media_repair_backfill import BackfillError  # noqa: E402
 from scripts.x_post_bound_drama_media_recovery import (  # noqa: E402
     execute_recovery,
+    main,
     normalize_manifest,
 )
 
@@ -193,6 +198,57 @@ class BoundDramaRecoveryTests(unittest.TestCase):
         raw["queues"][1]["queue_id"] = raw["queues"][0]["queue_id"]
         with self.assertRaises(BackfillError):
             normalize_manifest(raw)
+
+    def test_main_redacts_sqlite_failure_and_records_zero_x_report(self):
+        report_path = self.work_dir / "store-failed.json"
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "scripts.x_post_bound_drama_media_recovery.load_manifest",
+                return_value=manifest(),
+            ),
+            mock.patch(
+                "scripts.x_post_bound_drama_media_recovery."
+                "load_drama_environment_files",
+                return_value={},
+            ),
+            mock.patch(
+                "scripts.x_post_bound_drama_media_recovery."
+                "ScheduleConfig.from_env",
+                return_value=self.config,
+            ),
+            mock.patch(
+                "scripts.x_post_bound_drama_media_recovery.execute_recovery",
+                side_effect=sqlite3.IntegrityError(
+                    "x_post_queue relay binding invalid"
+                ),
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "--db-path",
+                    str(self.work_dir / "ledger.sqlite3"),
+                    "--manifest",
+                    str(self.work_dir / "manifest.json"),
+                    "--deployed-commit",
+                    "a" * 40,
+                    "--report-path",
+                    str(report_path),
+                    "--apply",
+                ]
+            )
+
+        result = json.loads(stdout.getvalue())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result, report)
+        self.assertEqual(
+            result["error_code"],
+            "x_post_bound_drama_recovery_store_failed",
+        )
+        self.assertFalse(result["x_write_attempted"])
+        self.assertNotIn("relay binding invalid", result["error_message"])
 
 
 if __name__ == "__main__":
