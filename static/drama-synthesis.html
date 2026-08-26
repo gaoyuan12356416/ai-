@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 
 
 
@@ -9496,6 +9496,7 @@
 
                 <div id="randomTemplateOptions" class="field wide hidden">
                   <label>随机模板配置</label>
+                  <select id="randomTemplateSource"><option value="concat_video">合集视频（含 BGM）</option><option value="no_bgm_video">去 BGM 合集视频</option></select>
                   <select id="randomTemplateMode">
                     <option value="auto">自动随机</option>
                     <option value="manual">手动选择子模板层级</option>
@@ -13098,6 +13099,16 @@
 
   </div>
 
+  <div id="materialPickerModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <h3 class="panel-title">选择任务产物</h3>
+        <button id="materialPickerClose" class="btn btn-secondary" type="button">取消</button>
+      </div>
+      <div id="materialPickerOptions" class="panel-body stack"></div>
+    </div>
+  </div>
+
   <div id="youtubePublishModal" class="modal-backdrop hidden">
     <div class="modal-panel">
       <div class="panel-head">
@@ -13352,6 +13363,7 @@
       randomTemplateCatalog: null,
       youtubePublishJob: null,
       youtubeOperationId: "",
+      materialPickerResolve: null,
 
 
 
@@ -13857,6 +13869,7 @@
 
       randomTemplateOptions: document.getElementById("randomTemplateOptions"),
 
+      randomTemplateSource: document.getElementById("randomTemplateSource"),
       randomTemplateMode: document.getElementById("randomTemplateMode"),
 
       randomTemplateLayers: document.getElementById("randomTemplateLayers"),
@@ -14180,6 +14193,9 @@
       jobDetailLog: document.getElementById("jobDetailLog"),
 
       youtubePublishModal: document.getElementById("youtubePublishModal"),
+      materialPickerModal: document.getElementById("materialPickerModal"),
+      materialPickerClose: document.getElementById("materialPickerClose"),
+      materialPickerOptions: document.getElementById("materialPickerOptions"),
 
       youtubePublishClose: document.getElementById("youtubePublishClose"),
 
@@ -18398,7 +18414,7 @@ function buildJobRow(job) {
 
               ${previewCell(job.output_video_no_bgm_url, "video", "去 BGM")}
 
-              ${previewCell(job.random_template_video_url, "video", "随机模板")}
+              ${previewCell(job.output_random_template_url, "video", "随机模板")}
 
 
 
@@ -19060,7 +19076,7 @@ function buildJobRow(job) {
 
         resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video"),
 
-        resultCard("随机模板视频", job.random_template_video_url, "video"),
+        resultCard("随机模板视频", job.output_random_template_url, "video"),
 
 
 
@@ -19093,14 +19109,14 @@ function buildJobRow(job) {
 
 
       ];
-      if (job.short_link) {
-        const shortValue = job.short_link.short_url
-          ? `<a href="${navText(job.short_link.short_url)}" target="_blank">${navText(job.short_link.short_url)}</a>`
-          : navText(job.short_link.error_message || "短链尚未发布");
-        detailResultCards.push(`<div class="card"><strong>短链</strong><div style="margin-top:8px;">状态：${navText(job.short_link.publish_state || "--")} · ${shortValue}</div></div>`);
-      }
+      (job.short_links || []).forEach(link => {
+        const shortValue = link.short_url ? `<a href="${navText(link.short_url)}" target="_blank">${navText(link.short_url)}</a>` : navText(link.error_message || "短链尚未发布");
+        detailResultCards.push(`<div class="card"><strong>短链 · ${navText(link.material_kind || "视频")}</strong><div style="margin-top:8px;">状态：${navText(link.publish_state || "--")} · ${shortValue}</div></div>`);
+      });
       (job.youtube_publish_tasks || []).forEach(task => {
-        detailResultCards.push(`<div class="card"><strong>YouTube：${navText(task.title || task.channel_id || "发布任务")}</strong><div style="margin-top:8px;line-height:1.8;">视频状态：${navText(task.video_state || "--")}<br />评论状态：${navText(task.comment_state || "--")}<br />任务状态：${navText(task.status || "--")}${task.error_message ? `<br />原因：${navText(task.error_message)}` : ""}</div></div>`);
+        const retryComment = task.video_state === "published" && task.comment_status === "failed" && !task.unknown_outcome
+          ? `<div style="margin-top:8px;"><button class="btn btn-secondary" type="button" onclick="retryYoutubeComment(${Number(task.id)},'${job.job_id}')">仅重试评论</button></div>` : "";
+        detailResultCards.push(`<div class="card"><strong>YouTube：${navText(task.title || task.channel_id || "发布任务")}</strong><div style="margin-top:8px;line-height:1.8;">视频状态：${navText(task.video_state || "--")}<br />评论状态：${navText(task.comment_status || "--")}<br />同步状态：${navText(task.sync_status || "--")}<br />任务状态：${navText(task.status || "--")}${task.error_message ? `<br />原因：${navText(task.error_message)}` : ""}</div>${retryComment}</div>`);
       });
       els.jobDetailResults.innerHTML = detailResultCards.join("");
       els.jobDetailActions.innerHTML = job.status === "done" ? `
@@ -21066,7 +21082,7 @@ function buildJobRow(job) {
 
 
           cover_16x9: els.outCover.checked,
-          random_template_video: els.outRandomTemplate.checked
+          random_template: els.outRandomTemplate.checked
 
 
 
@@ -21099,56 +21115,11 @@ function buildJobRow(job) {
 
 
         advanced_options: {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           overwrite_existing: els.overwriteInput.value === "true",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          output_resolution: els.resolutionInput.value
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        },
-        random_template: els.outRandomTemplate.checked ? {
-          mode: els.randomTemplateMode.value,
+          output_resolution: els.resolutionInput.value,
+          random_template: els.outRandomTemplate.checked ? {
+            mode: els.randomTemplateMode.value,
+            source: els.randomTemplateSource.value,
           layers: els.randomTemplateMode.value === "manual" ? {
             border: els.randomBorder.value,
             opacity_video: els.randomOpacityVideo.value,
@@ -21156,6 +21127,7 @@ function buildJobRow(job) {
             tint: els.randomTint.value
           } : {}
         } : null
+        }
 
 
 
@@ -21315,7 +21287,7 @@ function buildJobRow(job) {
 
 
 
-        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9 && !payload.outputs.random_template_video) {
+        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9 && !payload.outputs.random_template) {
 
 
 
@@ -22395,12 +22367,52 @@ function buildJobRow(job) {
 
 
 
+    function selectableMaterials(job, includeCover) {
+      return [
+        ["concat_video", "合集视频", job.output_video_url],
+        ["no_bgm_video", "去 BGM 视频", job.output_video_no_bgm_url],
+        ["random_template", "随机模板视频", job.output_random_template_url],
+        ...(includeCover ? [["cover_16x9", "16:9 封面", job.cover_16x9_url]] : [])
+      ].filter(item => item[2]);
+    }
+    function closeMaterialPicker(value = null) {
+      els.materialPickerModal.classList.add("hidden");
+      const resolve = state.materialPickerResolve;
+      state.materialPickerResolve = null;
+      if (resolve) resolve(value);
+    }
+    function chooseMaterial(job, includeCover) {
+      const items = selectableMaterials(job, includeCover);
+      if (!items.length) throw new Error("当前任务没有可操作产物");
+      if (items.length === 1) return Promise.resolve(items[0]);
+      els.materialPickerOptions.replaceChildren();
+      items.forEach(item => {
+        const button = document.createElement("button");
+        button.className = "btn btn-secondary";
+        button.type = "button";
+        button.textContent = item[1];
+        button.onclick = () => closeMaterialPicker(item);
+        els.materialPickerOptions.appendChild(button);
+      });
+      els.materialPickerModal.classList.remove("hidden");
+      return new Promise(resolve => { state.materialPickerResolve = resolve; });
+    }
+    async function copyTextSafe(text) {
+      try { await navigator.clipboard.writeText(text); return; } catch (_) {}
+      const area = document.createElement("textarea");
+      area.value = text; area.setAttribute("readonly", ""); area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.appendChild(area); area.select();
+      try { if (!document.execCommand("copy")) throw new Error("copy failed"); }
+      finally { area.remove(); }
+    }
     async function copyMaterialUrl(jobId) {
       try {
         const job = await api(`/api/drama-material/jobs/${jobId}`);
-        const url = job.random_template_video_url || job.output_video_url || job.output_video_no_bgm_url;
+        const material = await chooseMaterial(job, true);
+        if (!material) return;
+        const url = material[2];
         if (!url) throw new Error("当前任务没有可复制的视频产物");
-        await navigator.clipboard.writeText(url);
+        await copyTextSafe(url);
         toast("素材 URL 已复制");
       } catch (error) {
         showError("复制失败", error);
@@ -22409,12 +22421,25 @@ function buildJobRow(job) {
 
     async function createShortLink(jobId) {
       try {
-        const data = await api(`/api/drama-material/jobs/${jobId}/short-link`, { method: "POST", body: "{}" });
-        await navigator.clipboard.writeText(data.short_url);
+        const job = await api(`/api/drama-material/jobs/${jobId}`);
+        const material = await chooseMaterial(job, false);
+        if (!material) return;
+        const data = await api(`/api/drama-material/jobs/${jobId}/short-links`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ material_kind: material[0] }) });
+        await copyTextSafe(data.short_url);
         toast(data.reused ? "已复制已有短链" : "短链已生成并复制");
         await viewJob(jobId);
       } catch (error) {
         showError("短链生成失败", error);
+      }
+    }
+
+    async function retryYoutubeComment(taskId, jobId) {
+      try {
+        await api(`/api/drama-material/youtube-publishes/${taskId}/retry-comment`, { method: "POST" });
+        toast("评论已重新加入队列，不会重复上传视频");
+        await viewJob(jobId);
+      } catch (error) {
+        showError("评论重试失败", error);
       }
     }
 
@@ -22442,7 +22467,7 @@ function buildJobRow(job) {
       try {
         const [job, channels] = await Promise.all([
           api(`/api/drama-material/jobs/${jobId}`),
-          api(`/api/drama-material/jobs/${jobId}/youtube-channels`)
+          api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(job.app_id)}`)
         ]);
         if (!channels.items?.length) throw new Error("当前产品没有可用的 YouTube 上传频道");
         state.youtubePublishJob = job;
@@ -22459,7 +22484,7 @@ function buildJobRow(job) {
         [
           ["concat_video", "合集视频（含 BGM）", job.output_video_url],
           ["no_bgm_video", "去 BGM 合集视频", job.output_video_no_bgm_url],
-          ["random_template_video", "随机模板视频", job.random_template_video_url]
+          ["random_template", "随机模板视频", job.output_random_template_url]
         ].forEach(([value, label, url]) => {
           if (!url) return;
           const option = document.createElement("option");
@@ -22485,24 +22510,29 @@ function buildJobRow(job) {
       els.youtubePublishSubmit.disabled = true;
       els.youtubePublishError.classList.add("hidden");
       try {
+        const title = els.youtubeTitle.value.trim();
+        const description = els.youtubeDescription.value.trim();
+        if (!title || title.length > 100) throw new Error("标题必填且不能超过 100 个字符");
+        if (!description || new TextEncoder().encode(description).length > 5000) throw new Error("描述必填且 UTF-8 不能超过 5000 bytes");
         const payload = {
           operation_id: state.youtubeOperationId,
+          app_id: String(job.app_id || ""),
           channel_local_id: channel.channel_local_id,
           channel_id: channel.channel_id,
           youtube_account_id: channel.youtube_account_id,
-          source_kind: els.youtubeSourceKind.value,
-          title: els.youtubeTitle.value.trim(),
-          description: els.youtubeDescription.value,
-          comment: els.youtubeComment.value,
+          material_kind: els.youtubeSourceKind.value,
+          title,
+          description_template: description,
+          comment_text: els.youtubeComment.value,
           duplicate_confirmed: duplicateConfirmed
         };
-        const data = await api(`/api/drama-material/jobs/${job.job_id}/youtube-publish`, {
+        const data = await api(`/api/drama-material/jobs/${job.job_id}/youtube-publishes`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
         els.youtubePublishModal.classList.add("hidden");
-        toast(`YouTube 异步任务已入队（视频：${data.video_state}，评论：${data.comment_state}）`);
+        toast(`YouTube 异步任务已入队（视频：${data.video_state}，评论：${data.comment_status}）`);
         await viewJob(job.job_id);
       } catch (error) {
         if (error.code === "youtube_duplicate_confirmation_required" && !duplicateConfirmed) {
@@ -22564,7 +22594,7 @@ function buildJobRow(job) {
 
 
 
-        const urls = [job.output_video_url, job.output_video_no_bgm_url, job.random_template_video_url, job.cover_16x9_url].filter(Boolean);
+        const urls = [job.output_video_url, job.output_video_no_bgm_url, job.output_random_template_url, job.cover_16x9_url].filter(Boolean);
 
 
 
@@ -24000,6 +24030,10 @@ function buildJobRow(job) {
       els.outRandomTemplate.addEventListener("change", syncRandomTemplateControls);
       els.randomTemplateMode.addEventListener("change", syncRandomTemplateControls);
       els.youtubeChannel.addEventListener("change", syncYoutubeCommentEligibility);
+      els.materialPickerClose.onclick = () => closeMaterialPicker();
+      els.materialPickerModal.addEventListener("click", event => {
+        if (event.target === els.materialPickerModal) closeMaterialPicker();
+      });
       els.youtubePublishClose.onclick = () => els.youtubePublishModal.classList.add("hidden");
       els.youtubePublishModal.addEventListener("click", event => {
         if (event.target === els.youtubePublishModal) els.youtubePublishModal.classList.add("hidden");

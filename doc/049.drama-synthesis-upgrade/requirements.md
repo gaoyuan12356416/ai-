@@ -1,69 +1,46 @@
-# 049.drama-synthesis-upgrade 需求与技术设计
+# 剧集合成：香港 GPU、随机模板、短链与 YouTube 发布
 
-## 背景与目标
+## 目标与边界
 
-在不改变线上「短剧素材合成」视觉体系、侧栏、表单、卡片和任务表的前提下，扩展随机模板视频、不可变短链与异步 YouTube 发布。CPU 服继续编排；视频渲染迁移到香港 GPU `43.154.250.89`。根授权允许在全部发布 gate 满足后按 GitHub-first 流程部署生产代码；真实 YouTube 发布/评论始终不在该授权内，必须另行获得精确授权。
+- CPU `43.166.187.96` 保留页面、任务队列、SQLite、OAuth、YouTube 发布和统一表同步；全部视频制作迁到香港 GPU `43.154.250.89`。
+- 保持现有视觉、侧栏、表单、卡片和表格。所有输出复选框新建时默认不勾选，服务端拒绝零输出。
+- 不改香港 GPU 现有 `ads_video_producer.service`；不静默双写或自动回退旧 GPU。
+- 本候选不执行部署、短链外写、真实 YouTube 上传/评论。生产代码部署授权也不包含任何真实 YouTube 上传/评论；外部发布必须另行精确授权。
 
-## 范围
+## 随机模板与兼容
 
-包含：
+请求使用 `advanced_options.random_template={mode,source,layers}`。`source` 必填且仅为 `concat_video` 或 `no_bgm_video`；即使源普通输出未被选择，也允许内部生成但不对外返回。
 
-- 四个输出项默认均不勾选；前后端都拒绝零输出。
-- 新增随机模板视频：自动随机或手动选择 `border`、`opacity_video`、`corners`、`tint` 四层。
-- 创建任务时解析并冻结配方版本、素材清单、素材 SHA、参数和配方 SHA；重试只复用冻结配方。
-- 复用已验证的 FB v1 素材目录和 FFmpeg 图，采用独立 profile `drama-random-overlay-h264-720x1280-v1`；不包含 `light`。
-- 新请求不再发送封面模板和命名规则；服务端历史默认值和历史任务兼容保持不变。
-- 完成任务可复制视频 URL、创建幂等短链、创建异步 YouTube 发布任务。
-- YouTube 视频与评论使用独立状态；评论只在视频确认成功后执行。
+- auto 从 FB v3 的 border 3、corners 3、opacity_video 5、tint 7 中稳定选择，共 315 种；light 不参与。manual 必须提供四层有效 asset ID。
+- 冻结 source、asset manifest SHA、四层 asset identity、recipe/version、安全 rotation/scale/tint opacity 参数；重试复用同一 recipe。
+- 结果字段固定为 `output_random_template_url` 与 `random_template_recipe`。
+- 新请求中的 `cover_template`、`naming_rule` 以及同名旧顶层字段只接受后忽略，归一为安全 `default`；历史值和展示保留。
+- 上线前先备份 SQLite，dry-run 后以单事务、幂等方式把历史 `outputs_json` 补齐四个明确布尔；随机模板缺失为 false，不用新默认值重解释历史任务。
 
-不包含：
+## 任务结果操作与短链
 
-- 不改 W2A 归因、深链、Pixel、CTA 或现有 `/tt` 合同。
-- 不开放自定义短链目标，不实现通用 URL 跳转器。
-- 不把 OAuth 凭证、刷新令牌、断点续传 URI 返回浏览器或写日志。
-- 不迁移历史媒体；当前实现/QA 阶段不切换生产隧道、不部署代码、不创建真实视频/评论。后续部署只能在全部 gate 满足后按 `deploy.md` 执行。
+- 单一结果直接操作；多个结果先选素材。复制支持视频和封面；生成短链和 YouTube 只支持视频。
+- 复制优先 Clipboard API，失败时用隐藏 textarea + `execCommand('copy')`。
+- 每个 `(job_id, material_kind)` 只有一条不可变短链；content_id、目标和 wrapper SHA 同步冻结。
+- 短链为 `https://gy.g2flow.com/s2l/youtube/<numeric>.html`；数字 ID 是短链表自增 ID，不等于 job ID。
+- 目标固定为 `https://www.dramawavew2a.com/ads/101/2284/view`，参数顺序固定：`af_dp=<content_id>&c=ai_youtube&af_channel=ai_youtube&af_c_id=<job_id>`，严格 URL 编码。
+- wrapper 无 open redirect；入口查询只能安全透传一个非空、有界 `fbclid`，任何核心参数或其他参数都不能覆盖/透传。文件原子不可覆盖；同内容幂等，不同内容冲突。
 
-## 业务规则
+## YouTube 发布
 
-1. 随机模板目录固定为清单 SHA `028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f`；旧 GPU 已核对 20/20 文件、520,297,533 字节，分类 `border=3,corners=3,light=2,opacity_video=5,tint=7`；本 profile 仅使用四类并排除 `light`。
-2. 自动模式以任务 ID、剧 ID、profile、版本和清单 SHA 确定性选层；手动模式必须选择全部四层。任何目录、素材或 hash 不一致都拒绝渲染。
-3. 随机成片必须是 H.264 High、720×1280；结果回传 output SHA、profile、recipe SHA，CPU 验证配方身份后才完成任务。
-4. 短链格式固定 `https://page.dramabuzzs.com/s2l/<id>.html`；目标固定 `https://www.dramawavew2a.com/ads/101/2284/view?cid=<job_id>&af_channel=ai_youtube`，参数顺序和编码固定。相同任务幂等复用；ID 对应目标不可变。
-5. `page.dramabuzzs.com` 当前为 CloudFront/S3，CPU/HK 均无已确认发布凭证。发布适配器未配置时必须失败关闭，不得声称短链成功。
-6. YouTube 频道只允许当前任务 `app_id` 下 `channel_status=1`、有 refresh token、client config、上传 scope 和身份读取 scope 的映射。仅有 `youtube.upload`、`channel_status=2` 或缺失 scope 元数据均不可用。评论还必须有精确 `youtube.force-ssl`。
-7. 当前只读基线：app 1479 有 59 个映射；27 个可刷新且具备上传 scope，其中 4 个状态为 2；12 个同时具备评论 scope。所有现存 access token 均标记过期，因此只能服务端刷新。
-8. 请求用 `operation_id` 幂等；同任务同频道已有成功视频时必须二次确认；已有未知结果时禁止替代发布。
-9. 断点续传 session URI 必须在首个数据 PUT 前持久化。中断/5xx 后先用空 PUT 和 `Content-Range: bytes */<len>` 查询；308 续传，完成响应复用视频 ID，404 视为未知并失败关闭。
+- API 固定为 catalog、short-links、channels、youtube-publishes create/get/retry-comment 六个，详见 `api-doc.md`。
+- 频道来自当前 app，`channel_status=1`，具有 refresh token、upload scope 与身份读取 scope；每次刷新 token 后、任何 mutation 前用 `channels?part=id&mine=true` 验证唯一实际 channel ID。未知/空/多条/不匹配关闭。
+- 单选视频和频道；标题必填且不超过 100 字符；描述必填且 UTF-8 不超过 5000 bytes；评论可选。`{{url}}` 只在描述模板中 replace-all；出现宏时先确保当前素材短链，失败则不得排队或发起 YouTube 请求。模板与渲染值均冻结。
+- 正式请求 privacy 固定 public；内部测试频道只用于另行授权的 unlisted canary，不出现在正式列表。固定 public 与 YouTube minimum functionality 的隐私选择要求存在合规风险，正式启用前须业务接受或改为三态。
+- 主状态：`queued -> validating -> downloading -> uploading -> submitted -> processing -> published`，另有 `failed`、`unknown`。video ID 仅为 submitted；必须轮询处理完成和 visibility 后才 published。
+- `comment_status` 与 `sync_status` 独立。评论只在 confirmed published 后执行；评论失败只重试评论。同步使用 outbox，失败不改变视频已发布事实。
+- interrupted/5xx 查询 resumable session；无法证明未提交时 unknown 并禁止替代发布。processing/unknown 不重传。prior success 需二次确认。
+- 评论非空须 `youtube.force-ssl`；关闭评论、儿童内容或权限不足只影响评论子状态。凭据仅服务端，日志禁止 secret/session URI。
+- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；禁止 DELETE、DDL、任意 SQL。缺表/缺配置 fail closed，不能标记 sync 成功。
 
-## 技术设计
+## 香港 GPU 与验收
 
-- 现有 `drama_material_job` 保持主状态机；SQLite 增量增加配方、短链、YouTube 任务和事件四张表，由 `ensure_storage()` 可重复创建。
-- CPU：`app.py` 负责校验、冻结、API、审计和向 `127.0.0.1:18788` 提交 HK GPU。
-- HK GPU：独立 8788 HTTP 监听和独立反向隧道；上线时保留旧 18787，完成 canary 后再切 CPU URL。
-- YouTube：单独 systemd 异步 worker，从既有 MySQL 表按需读服务端凭证；SQLite 只存任务状态和发布身份。
-- 每次刷新 access token 后，以及创建 resumable session/发布评论前，必须用 `channels.list(part=id,mine=true)` 核验唯一频道与冻结 `channel_id` 完全一致；空、多频道、不匹配或未授权均失败关闭，网络/5xx 仅可在尚无外部写入时安全重试。
-- YouTube task claim 使用持久化 `lease_generation` fencing；claim 原子递增 generation，所有后续状态写入必须同时匹配 task、owner、generation。下载过程续租，并在每次外部调用前续租，过期 worker 不得覆盖重领 worker。
-- 短链：当前实现不可变文件系统适配器，只有 CloudFront/S3 所有者提供受审计发布挂载后才能配置。
-
-## 验收标准
-
-- UI 四项默认未选；零输出前后端均拒绝。
-- 自动/手动配方可冻结，任务重试不变；目录或回传身份不一致失败。
-- 随机产物在列表/详情展示；原三类产物继续工作。
-- 新 payload 不含 `cover_template`、`naming_rule`；历史数据仍可读取。
-- 短链目标、HTML、编码、幂等性、不可变性和无开放跳转均通过离线测试。
-- YouTube eligibility、token 频道身份核验、lease generation fencing、视频/评论分态、断点重试、未知关闭、幂等、二次确认均通过 fake-client 测试；测试不访问真实 Google API。
-- 语法、定向测试、diff check、秘密扫描和独立 QA 均通过；当前短链外部 release blocker 关闭后才允许按 GitHub-first 部署。
-
-## 风险与待决依赖
-
-- P1 外部阻断：CloudFront/S3 短链 writer/owner 和受审计发布路径尚未落实；保持失败关闭。
-- P1 外部阻断：公网已存在 `/s2l/1.html`，必须由 owner 冻结并核对数字 ID 命名空间后才能启用 publisher；本实现遇到对象内容冲突会拒绝覆盖。
-- 生产 source allowlist 已由 CPU SQLite 只读核验当前 20 个 done jobs：近期 COS 输出仅使用 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`，历史本机托管输出仅使用 `ai.yingliangads.com`；配置必须精确包含这两个 hostname，禁止通配符。该项已关闭。
-- HK renderer、素材复制、隧道与 canary 是已定义的部署 gate，不是代码 QA 缺陷；必须按 `deploy.md` 完成后再切流。
-- 独立 QA 对提交 `25b8af9` 的代码结论为 PASS，未发现候选 P0/P1；整体 release 仍为 HOLD，直至上述短链外部阻断关闭并完成部署 gate。
-
-## 变更记录
-
-- 2026-08-26：冻结需求合同、只读生产基线和实现候选范围。
-- 2026-08-26：独立 QA 代码结论 PASS；明确 GitHub-first 条件部署授权、真实 YouTube 单独授权边界及短链外部 release blocker。
+- release `/data/drama-synthesis-gpu/releases/<git_sha>`，`current` 原子 symlink；unit `drama-synthesis-gpu-worker.service` 仅监听 `127.0.0.1:8787`。
+- 香港反向隧道把 CPU `127.0.0.1:18788` 映射到 HK 8787；legacy 18787 保留。
+- GPU worker 只暴露 health/catalog/render，校验完整 manifest/每文件 SHA，发布 COS 结果；不持有 YouTube 凭据。
+- 验收覆盖历史兼容、315 recipe、冻结、精确短链/fbclid/原子冲突、宏、OAuth identity、resumable/processing、comment、outbox、unknown、防重、lease fencing、迁移并发和 GPU topology；全部外部调用使用 fake/temp。

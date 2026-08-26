@@ -21,6 +21,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app as drama_app  # noqa: E402
+from features.drama_synthesis.unified_youtube import (  # noqa: E402
+    UnifiedYouTubeWriter, run_sync_outbox_once,
+)
 from features.drama_synthesis.youtube import (  # noqa: E402
     YouTubeHTTPClient,
     YouTubePublishEngine,
@@ -65,7 +68,12 @@ def main() -> int:
     engine = build_engine()
     worker_id = "%s:%s" % (socket.gethostname(), os.getpid())
     poll_seconds = env_int("DRAMA_YOUTUBE_POLL_SECONDS", 10, 1, 300)
+    sync_enabled = os.environ.get("DRAMA_YOUTUBE_UNIFIED_SYNC_ENABLED", "0") == "1"
+    sync_writer = UnifiedYouTubeWriter(None)
     while not STOP:
+        if os.environ.get("YOUTUBE_LIVE_ENABLED", "0") != "1":
+            time.sleep(poll_seconds)
+            continue
         try:
             result = engine.run_once(worker_id)
             if result.get("claimed"):
@@ -74,7 +82,14 @@ def main() -> int:
                     result.get("task_id"),
                     result.get("status"),
                 )
+                time.sleep(poll_seconds)
                 continue
+            if sync_enabled:
+                sync_result = run_sync_outbox_once(drama_app.DRAMA_SYNTHESIS_STORE, sync_writer, worker_id + ":sync")
+                if sync_result.get("claimed"):
+                    logging.info("YouTube unified sync processed: outbox_id=%s status=%s", sync_result.get("outbox_id"), sync_result.get("status"))
+                    time.sleep(poll_seconds)
+                    continue
         except Exception:
             logging.exception("YouTube worker loop failed before external task handling")
         time.sleep(poll_seconds)

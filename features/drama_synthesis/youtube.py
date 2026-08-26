@@ -7,11 +7,13 @@ it; the code never creates a replacement video or comment automatically.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,6 +36,7 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 COMMENTS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
+VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
 
 
@@ -362,7 +365,7 @@ class YouTubeHTTPClient:
             video_id = str(payload.get("id") or "")
             if not VIDEO_ID_RE.fullmatch(video_id):
                 raise YouTubeHTTPError("youtube_video_identity_invalid", "YouTube返回的视频ID无效", status=response.status_code, unknown=True)
-            return {"state": "published", "video_id": video_id, "next_byte": int(size)}
+            return {"state": "submitted", "video_id": video_id, "next_byte": int(size)}
         if response.status_code == 308:
             range_value = str(response.headers.get("Range") or "")
             match = re.fullmatch(r"bytes=0-([0-9]+)", range_value)
@@ -451,6 +454,41 @@ class YouTubeHTTPClient:
             raise YouTubeHTTPError("youtube_comment_failed", "YouTube评论发布失败", status=response.status_code)
         return comment_id
 
+    def video_status(self, token: str, video_id: str) -> Dict[str, str]:
+        session = self.session_factory()
+        session.trust_env = False
+        try:
+            response = session.get(
+                VIDEOS_URL + "?" + urlencode((("part", "status"), ("id", video_id))),
+                headers={"Authorization": "Bearer " + token}, timeout=self.timeout,
+                allow_redirects=False,
+            )
+        except requests.RequestException:
+            raise YouTubeHTTPError("youtube_processing_check_failed", "YouTube处理状态查询失败", retryable=True) from None
+        finally:
+            session.close()
+        if response.status_code >= 500:
+            raise YouTubeHTTPError("youtube_processing_check_failed", "YouTube处理状态查询失败", status=response.status_code, retryable=True)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        items = payload.get("items") if isinstance(payload, Mapping) else None
+        if response.status_code != 200 or not isinstance(items, list) or len(items) != 1:
+            raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认", status=response.status_code, unknown=True)
+        status = items[0].get("status") if isinstance(items[0], Mapping) else None
+        if not isinstance(status, Mapping):
+            raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认", unknown=True)
+        upload = str(status.get("uploadStatus") or "")
+        visibility = str(status.get("privacyStatus") or "")
+        if upload == "processed" and visibility == "public":
+            return {"state": "published", "visibility": visibility}
+        if upload in {"uploaded", "processing"}:
+            return {"state": "processing", "visibility": visibility}
+        if upload in {"failed", "rejected", "deleted"}:
+            return {"state": "failed", "visibility": visibility}
+        return {"state": "unknown", "visibility": visibility}
+
 
 class YouTubePublishEngine:
     def __init__(
@@ -461,6 +499,7 @@ class YouTubePublishEngine:
         *,
         work_root: Union[str, os.PathLike],
         allowed_source_hosts: Iterable[str],
+        ffprobe: str = "/usr/bin/ffprobe",
     ):
         root = Path(work_root)
         if not root.is_absolute():
@@ -470,6 +509,7 @@ class YouTubePublishEngine:
         self.client = client
         self.work_root = root
         self.allowed_source_hosts = tuple(dict.fromkeys(str(item).strip().lower() for item in allowed_source_hosts if str(item).strip()))
+        self.ffprobe = str(ffprobe)
         if not self.allowed_source_hosts:
             raise ValueError("YouTube source allowlist is required")
 
@@ -494,11 +534,22 @@ class YouTubePublishEngine:
             token = self.client.refresh_access_token(credential)
             task = self._renew(task, worker_id)
             self.client.verify_channel_identity(token, task["channel_id"])
-            if task["video_state"] != "published":
+            if task["video_state"] in {"submitted", "processing"}:
+                task = self._renew(task, worker_id)
+                state = self.client.video_status(token, task["video_id"])
+                if state["state"] == "published":
+                    task = self.store.video_published(task_id, task["video_id"], worker_id=worker_id, lease_generation=lease_generation)
+                elif state["state"] == "processing":
+                    task = self.store.video_processing(task_id, worker_id=worker_id, lease_generation=lease_generation)
+                    return {"ok": True, "status": "processing", "task_id": task_id, "claimed": True}
+                elif state["state"] == "failed":
+                    raise YouTubeHTTPError("youtube_processing_failed", "YouTube视频处理失败")
+                else:
+                    raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认", unknown=True)
+            elif task["video_state"] != "published":
                 task = self._publish_video(task, token, worker_id)
-                if task["video_state"] != "published":
-                    return {"ok": False, "status": task["status"], "task_id": task_id}
-            if task["comment_state"] == "queued" or task["status"] == "publishing_comment":
+                return {"ok": True, "status": task["status"], "task_id": task_id, "claimed": True}
+            if task["comment_status"] in {"queued", "retry", "publishing"}:
                 task = self._renew(task, worker_id)
                 self.client.verify_channel_identity(token, task["channel_id"])
                 task = self._renew(task, worker_id)
@@ -515,6 +566,7 @@ class YouTubePublishEngine:
                     worker_id=worker_id,
                     lease_generation=lease_generation,
                 )
+            self._cleanup_terminal(task_id)
             return {"ok": True, "status": task["status"], "task_id": task_id, "claimed": True}
         except YouTubeHTTPError as exc:
             phase = "comment" if task.get("video_state") == "published" else "video"
@@ -530,6 +582,8 @@ class YouTubePublishEngine:
             )
             if failed is None:
                 return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
+            if failed["status"] in {"failed", "unknown"}:
+                self._cleanup_terminal(task_id)
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
         except DramaSynthesisError as exc:
             if exc.code == "youtube_stale_claim":
@@ -547,6 +601,8 @@ class YouTubePublishEngine:
             )
             if failed is None:
                 return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
+            if failed["status"] in {"failed", "unknown"}:
+                self._cleanup_terminal(task_id)
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
         except Exception:
             # A programming/runtime failure after an upload or comment attempt
@@ -569,7 +625,12 @@ class YouTubePublishEngine:
             )
             if failed is None:
                 return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
+            if failed["status"] in {"failed", "unknown"}:
+                self._cleanup_terminal(task_id)
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
+
+    def _cleanup_terminal(self, task_id: int) -> None:
+        shutil.rmtree(self.work_root / ("task-%d" % int(task_id)), ignore_errors=True)
 
     @staticmethod
     def _lease_expiry() -> str:
@@ -610,20 +671,36 @@ class YouTubePublishEngine:
         if not source.is_file():
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             task = self._renew(task, worker_id)
+            task = self.store.advance_youtube(task_id, "downloading", worker_id=worker_id, lease_generation=lease_generation)
             self.client.download(
                 task["source_url"],
                 source,
                 allowed_hosts=self.allowed_source_hosts,
                 heartbeat=lambda: self._renew(task, worker_id),
             )
+        digest = hashlib.sha256()
+        with source.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        try:
+            probe = subprocess.run(
+                [self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+            )
+            duration_ms = int(float(json.loads(probe.stdout)["format"]["duration"]) * 1000)
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败") from None
+        if duration_ms <= 0:
+            raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败")
+        task = self.store.advance_youtube(task_id, "uploading", worker_id=worker_id, lease_generation=lease_generation, source_sha256=digest.hexdigest(), source_duration_ms=duration_ms)
         size = source.stat().st_size
         session_uri = str(task.get("resumable_session_uri") or "")
         offset = int(task.get("next_byte") or 0)
         if session_uri:
             task = self._renew(task, worker_id)
             status = self.client.query_upload(session_uri, size)
-            if status["state"] == "published":
-                return self.store.video_published(
+            if status["state"] == "submitted":
+                return self.store.video_submitted(
                     task_id,
                     status["video_id"],
                     worker_id=worker_id,
@@ -650,7 +727,7 @@ class YouTubePublishEngine:
             task = self._renew(task, worker_id)
             self.client.verify_channel_identity(token, task["channel_id"])
             task = self._renew(task, worker_id)
-            session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description"], size=size)
+            session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size)
             self.store.set_upload_session(
                 task_id,
                 session_uri,
@@ -663,9 +740,15 @@ class YouTubePublishEngine:
             task["source_size"] = size
             task["video_attempt_count"] = int(task.get("video_attempt_count") or 0) + 1
         task = self._renew(task, worker_id)
-        result = self.client.upload(session_uri, source, offset)
-        if result["state"] == "published":
-            return self.store.video_published(
+        try:
+            result = self.client.upload(session_uri, source, offset)
+        except YouTubeHTTPError as exc:
+            if not exc.unknown:
+                raise
+            task = self._renew(task, worker_id)
+            result = self.client.query_upload(session_uri, size)
+        if result["state"] == "submitted":
+            return self.store.video_submitted(
                 task_id,
                 result["video_id"],
                 worker_id=worker_id,

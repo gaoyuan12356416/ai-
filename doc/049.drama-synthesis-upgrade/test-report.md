@@ -1,52 +1,20 @@
 # 测试报告
 
-## 结论
+状态：实现者验证完成；独立 QA/SA 待执行。
 
-提交 `25b8af9` 的独立 QA 代码结论为 **PASS**，未发现候选 P0/P1；BUG-001 至 BUG-005 已关闭。整体 production release 仍为 **HOLD**：短链 writer/owner 与既有数字 ID 命名空间冻结尚未落实。生产来源 hostname 已由 CPU SQLite 只读证据精确确认。未调用真实 YouTube API，未创建视频/评论，未部署。
+## 实现者验证
 
-## 执行统计
+2026-08-26 在独立 feature worktree 执行：
 
-| 类型 | 数量 | 通过 | 失败 | 阻塞 |
-| --- | ---: | ---: | ---: | ---: |
-| Offline focused unittest | 29 | 29 | 0 | 0 |
-| Python compile targets | 6 | 6 | 0 | 0 |
-| App import/zero-output integration check | 1 | 1 | 0 | 0 |
-| Inline JavaScript syntax blocks | 4 | 4 | 0 | 0 |
-| 独立浏览器合同 | 8 | 8 | 0 | 0 |
-| 独立 targeted bug 回归 | 8 | 8 | 0 | 0 |
-| 独立 identity 对抗 | 7 | 7 | 0 | 0 |
-| 独立 stale-write fencing | 5 | 5 | 0 | 0 |
-| 独立 migration concurrency iterations | 400 | 400 | 0 | 0 |
-| 最终 broad regression（仅执行一次） | 1,894 collected | 1,885 | 5（baseline/unrelated） | 3 skip + 1 baseline collection error |
+- `python scripts/test_drama_synthesis_upgrade.py`：41/41 PASS，0 skip，0 failure；全部外部动作使用 temp/fake，含 100 次并发只读 migration dry-run、GPU loopback fake HTTP、短链原子文件、OAuth/YouTube fake client、outbox fake executor。
+- `python -m unittest discover tests -p 'test_*drama*.py' -v`：116 collected，115 PASS，1 Windows 上预期 POSIX permission skip，0 failure。
+- Python 3.14 `py_compile`：app、三项 feature、三个 worker/migration/test 脚本 PASS；focused suite 另用 `ast.parse(..., feature_version=(3,9))`。通过只读 SSH stdin 在 HK Python 3.9.6 对 app、三项 feature、YouTube/GPU worker 与 migration 做无落盘 `compile()`，全部 PASS。
+- Node 24：两个 HTML 各 3 个 script block 均 parse PASS。
+- `git diff --check`、changed-file secret pattern scan、旧域/旧路由/旧结果合同 scan 和两份静态页面 SHA mirror 检查均 PASS；仅 Git 提示既有 Windows LF/CRLF 转换，不是 whitespace error。
+- 未执行真实短链 writer、YouTube 上传/评论、统一 MySQL 写入、CPU/HK 部署。
 
-## 覆盖证据
+验证范围证明候选代码合同，不证明 gy namespace owner、外部三表或真实 YouTube minimum functionality 合规。
 
-- 自动/手动 recipe、冻结/冲突、GPU identity。
-- 精确短链目标、wrapper、幂等、无 publisher 失败关闭。
-- YouTube channel eligibility（含 identity-read scope）、刷新后/外部写入前频道身份核验、comment scope、operation idempotency、generation fencing、续租 heartbeat、视频/评论分态、session query retry、unknown fail closed、duplicate confirmation。
-- UI 四项默认未选、零输出 backend guard、新 payload 删除字段。
-- `app.py`、核心模块、worker 和测试脚本 compile；两个静态入口共 4 个内联 JS 块语法通过。
-- 独立 QA：浏览器 8 PASS；targeted bugs 8/8；identity 7/7；stale writes 5/5；migration concurrency 400/400。
-- 最终 broad regression 一次收集 1,894：1,885 PASS、3 SKIP、5 FAIL、1 collection ERROR。6 个非跳过 non-pass 经独立归类为 baseline/unrelated：其中 5 个位于 base..head 未变化的 implementation/test/static surfaces；ad-control route-order assertion 由 base AST 对比独立证明为既有行为。broad regression 只在 candidate 执行一次，未在 base 重跑。
+## 发布结论
 
-命令：
-
-```text
-python scripts/test_drama_synthesis_upgrade.py
-python -m py_compile app.py features/drama_synthesis/core.py features/drama_synthesis/gpu.py features/drama_synthesis/youtube.py scripts/drama_youtube_publish_worker.py scripts/test_drama_synthesis_upgrade.py
-```
-
-## 缺陷
-
-独立评审/QA 共发现 5 个候选缺陷：BUG-001（live schema 列名）、BUG-002（random-template YouTube source legacy-row 路径）、BUG-003（known-safe 评论重试被跳过）、BUG-004（刷新 token 未绑定冻结频道）与 BUG-005（lease 缺少 generation fencing）。五项均已修复并通过独立定向回归，状态关闭。十进制 ID 预校验和 quote/backslash 对抗输入也已验证在 SQL 构造前失败关闭。
-
-## 遗留风险
-
-- 浏览器、404 expired、频道身份核验、generation fencing、lease crash recovery 和 migration concurrency 已通过独立 QA。
-- HK 真机 asset/render/tunnel 是部署 gate，仍须在切流前按部署文档演练。
-- 生产 source allowlist 已通过 CPU SQLite 只读样本确认：`advertising-1306474899.cos.ap-hongkong.myqcloud.com` 与 `ai.yingliangads.com`，禁止通配符。
-- CloudFront/S3 短链 writer/owner 和数字 ID 命名空间冻结仍是唯一已知外部 release blocker；未配置时功能按设计失败关闭。
-
-## 发布建议
-
-代码可进入条件部署准备，但 production release 仍为 HOLD。短链外部 blocker 与全部部署 gate 关闭后，GitHub-first production deployment 已获根授权。真实 YouTube publish/comment 不包含在部署授权内，必须另行获得精确授权。
+当前不是 production release PASS。gy `/s2l/youtube` writer/root/owner 与三张统一表 schema/owner 是外部门禁；固定 public 有 YouTube minimum functionality 合规风险。真实 YouTube 上传/评论没有授权。

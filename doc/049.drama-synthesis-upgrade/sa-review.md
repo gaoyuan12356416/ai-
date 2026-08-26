@@ -1,27 +1,18 @@
-# SA 需求评审意见
+# SA 需求评审
 
-## 结论
+状态：实现者合同已完成；独立 QA/SA 复审待执行，不自签通过。
 
-**PASS（代码/方案），production release HOLD。** 独立评审确认提交 `25b8af9` 无候选 P0/P1；短链外部所有权/命名空间 blocker 仍未关闭，因此本结论不是 production release PASS。
+## 架构决策
 
-## 待核对项
+- CPU 是任务、OAuth、发布、审计和同步账本唯一协调端；HK 是无 YouTube 凭据的媒体执行端。
+- 复用 FB v3 immutable manifest/recipe，业务 recipe 额外冻结 source。
+- gy 使用独立 `/s2l/youtube/` namespace 和 app-owned root，避免与 X/TT/FB writer 冲突。
+- SQLite 保证短链/发布/outbox 幂等；统一表使用严格白名单适配器，缺依赖时 sync fail closed。
+- video ID 不构成成功；processing 与 visibility 读回是 published 门槛。
 
-| 编号 | 严重级别 | 位置 | 核对内容 | 状态 |
-| --- | --- | --- | --- | --- |
-| SA-R01 | P0 | 配方冻结 | 创建、重试、审计、GPU 回传是否同一 identity | PASS |
-| SA-R02 | P0 | YouTube | session 持久化顺序、未知结果、评论门禁、identity/fencing | PASS |
-| SA-R03 | P0 | 短链 | 无开放跳转、不可变目标、publisher 失败关闭 | 代码 PASS；外部 writer/namespace HOLD |
-| SA-R04 | P1 | 拓扑 | HK 8788/CPU 18788 与 legacy 18787 并行回滚 | 方案 PASS；部署 gate 待执行 |
-| SA-R05 | P1 | 兼容 | 原任务 schema/API/UI/W2A 合同不破坏 | PASS（浏览器 8/8） |
+## 风险门禁
 
-## 决策记录
-
-- 短链发布所有权与既有数字 ID 命名空间尚未由 owner 冻结，不补造 AWS 方案，adapter 保持未配置失败。
-- `channel_status=2` 语义无源代码合同，资格查询只接收精确 `channel_status=1`。
-- SQLite 仅作增量 `ensure_storage`，不提供独立 live SQL。
-- 生产 source allowlist 已通过 CPU SQLite 当前 20 个 done jobs 只读确认并冻结为两个精确 hostname；禁止通配符。
-- GitHub-first production deployment 在全部 blocker/gate 关闭后已获根授权；真实 YouTube publish/comment 仍需单独精确授权。
-
-## PM 修订确认
-
-独立代码/方案评审已关闭；production release 由外部 blocker 与部署 gate 控制。
+- 生产尚无 `/s2l/youtube` location/root/owner；候选仅提供配置，部署时必须单独创建并验证。
+- 三张统一 YouTube 表当前不存在；不得缩减合同。缺表时 outbox 保留并报告失败，由外部 owner 提供 schema 后才可完成同步门禁。
+- 固定 public 存在 YouTube 最低功能要求合规风险；正式启用前须接受或整改。
+- 真实 YouTube 上传/评论需另行精确授权，代码部署授权不包含外部发布。

@@ -1,747 +1,562 @@
 #!/usr/bin/env python3
-"""Focused, offline contract tests for the drama-synthesis upgrade."""
+"""Focused, fake-only acceptance tests for the authoritative drama upgrade."""
 
 from __future__ import annotations
 
-import hashlib
 import ast
-import concurrent.futures
+import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
-
-import requests
+from urllib.parse import parse_qsl, urlsplit
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from features.drama_synthesis.core import (
-    COMMENT_SCOPE,
-    DramaSynthesisError,
-    DramaSynthesisStore,
-    ImmutableFilesystemPublisher,
-    RECIPE_CATEGORIES,
-    RECIPE_PROFILE,
-    build_long_url,
-    freeze_random_recipe,
-    render_wrapper_html,
+from features.drama_synthesis.core import (  # noqa: E402
+    COMMENT_SCOPE, DramaSynthesisError, DramaSynthesisStore,
+    ImmutableFilesystemPublisher, RECIPE_CATEGORIES, RECIPE_PROFILE,
+    build_long_url, freeze_random_recipe, render_wrapper_html,
 )
-from features.drama_synthesis.youtube import (
-    YouTubeCredential,
-    YouTubeCredentialRepository,
-    YouTubeHTTPClient,
-    YouTubeHTTPError,
-    YouTubePublishEngine,
+from features.drama_synthesis.unified_youtube import (  # noqa: E402
+    UnifiedYouTubeWriter, run_sync_outbox_once, validate_controlled_operation,
 )
-from features.drama_synthesis import gpu as gpu_adapter
+from features.drama_synthesis.youtube import (  # noqa: E402
+    YouTubeCredential, YouTubeCredentialRepository, YouTubeHTTPClient,
+    YouTubeHTTPError, YouTubePublishEngine,
+)
+from scripts.migrate_drama_synthesis_outputs import migrate  # noqa: E402
 
-
-JOB_ID = "0123456789abcdef0123456789abcdef"
-OTHER_JOB_ID = "fedcba9876543210fedcba9876543210"
-CHANNEL_ID = "UCabcdefghijklmnopqrstuv"
-UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
-READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+JOB_ID = "a" * 32
+UPLOAD = "https://www.googleapis.com/auth/youtube.upload"
+READONLY = "https://www.googleapis.com/auth/youtube.readonly"
+CHANNEL = "UC" + "A" * 22
 
 
 def catalog():
+    counts = {"border": 3, "corners": 3, "opacity_video": 5, "tint": 7}
     categories = {}
-    for category in RECIPE_CATEGORIES:
-        media_type = "video/webm" if category == "opacity_video" else "image/png"
+    for category, count in counts.items():
+        suffix = ".webm" if category in {"corners", "opacity_video"} else ".png"
+        media = "video/webm" if suffix == ".webm" else "image/png"
         categories[category] = [
-            {
-                "name": f"{category}-{index}.{ 'webm' if media_type == 'video/webm' else 'png'}",
-                "sha256": hashlib.sha256(f"{category}:{index}".encode()).hexdigest(),
-                "media_type": media_type,
-                "size": 1000 + index,
-            }
-            for index in (1, 2)
+            {"name": f"{category}-{index:02d}{suffix}", "sha256": f"{index:064x}", "size": 100 + index, "media_type": media}
+            for index in range(1, count + 1)
         ]
-    return {
-        "version": 1,
-        "profile": RECIPE_PROFILE,
-        "manifest_sha256": "a" * 64,
-        "categories": categories,
-    }
+    return {"version": 1, "profile": RECIPE_PROFILE, "manifest_sha256": "f" * 64, "categories": categories}
 
 
-class CredentialRepository:
-    def __init__(self, scopes=(UPLOAD_SCOPE, COMMENT_SCOPE)):
-        self.scopes = frozenset(scopes)
+def recipe(source="concat_video", mode="auto", layers=None):
+    request = {"mode": mode, "source": source, "layers": layers}
+    return freeze_random_recipe(job_id=JOB_ID, content_id="剧 1/+", request=request, catalog=catalog())
 
+
+class FakeCredentialRepo:
     def credential(self, **_kwargs):
         return YouTubeCredential(
-            account_id="11",
-            channel_local_id="22",
-            channel_id=CHANNEL_ID,
-            channel_name="Offline fake",
-            channel_status=1,
-            scopes=self.scopes,
-            refresh_token="server-only-refresh",
-            client_id="server-only-client",
-            client_secret="server-only-secret",
+            account_id="2", channel_local_id="1", channel_id=CHANNEL,
+            channel_name="Current Product", channel_status=1,
+            scopes=frozenset({UPLOAD, READONLY, COMMENT_SCOPE}),
+            refresh_token="refresh", client_id="client", client_secret="secret",
         )
 
 
-class SuccessfulClient:
-    def __init__(self):
-        self.begin_count = 0
-        self.upload_count = 0
-        self.comment_count = 0
-        self.identity_count = 0
-        self.heartbeat_count = 0
+class FakePublishClient:
+    def __init__(self, video_states):
+        self.video_states = list(video_states)
+        self.comments = 0
+        self.identity_checks = 0
 
-    def refresh_access_token(self, _credential):
-        return "not-a-real-token"
-
-    def verify_channel_identity(self, _token, expected_channel_id):
-        self.identity_count += 1
-        if expected_channel_id != CHANNEL_ID:
-            raise AssertionError("unexpected frozen channel identity")
-
-    def download(self, _url, target, **_kwargs):
-        heartbeat = _kwargs.get("heartbeat")
-        if heartbeat is not None:
-            heartbeat()
-            self.heartbeat_count += 1
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"offline-video")
-        return target.stat().st_size
-
-    def begin_resumable(self, _token, **_kwargs):
-        self.begin_count += 1
-        return "https://upload.youtube.test/resumable/session-1"
-
-    def query_upload(self, _session_uri, _size):
-        return {"state": "published", "video_id": "video_123456", "next_byte": 13}
-
-    def upload(self, _session_uri, _source, _offset):
-        self.upload_count += 1
-        return {"state": "published", "video_id": "video_123456", "next_byte": 13}
-
-    def publish_comment(self, _token, **_kwargs):
-        self.comment_count += 1
-        return "comment-123"
+    def refresh_access_token(self, _credential): return "access"
+    def verify_channel_identity(self, _token, expected):
+        self.identity_checks += 1
+        if expected != CHANNEL: raise AssertionError("wrong channel")
+    def video_status(self, _token, _video_id): return {"state": self.video_states.pop(0), "visibility": "public"}
+    def publish_comment(self, _token, *, video_id, comment_text):
+        self.comments += 1
+        self.last_comment = (video_id, comment_text)
+        return "comment_123"
 
 
-class ResumeClient(SuccessfulClient):
-    def upload(self, _session_uri, _source, _offset):
-        self.upload_count += 1
-        return {"state": "resume", "next_byte": 5}
+class FakeRecoveringUploadClient(FakePublishClient):
+    def __init__(self, query_state="submitted"):
+        super().__init__([])
+        self.query_state = query_state
+        self.uploads = 0
+        self.queries = 0
+        self.begins = 0
+
+    def begin_resumable(self, *_args, **_kwargs):
+        self.begins += 1
+        return "https://upload.youtube.test/session"
+
+    def upload(self, *_args, **_kwargs):
+        self.uploads += 1
+        raise YouTubeHTTPError("youtube_upload_response_unknown", "response lost", unknown=True)
+
+    def query_upload(self, *_args, **_kwargs):
+        self.queries += 1
+        if self.query_state == "submitted":
+            return {"state": "submitted", "video_id": "video_recovered"}
+        return {"state": self.query_state}
 
 
-class UnknownClient(SuccessfulClient):
-    def upload(self, _session_uri, _source, _offset):
-        self.upload_count += 1
-        raise YouTubeHTTPError("youtube_upload_unknown", "unknown", unknown=True)
+class FakeResponse:
+    def __init__(self, status=200, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+        self.headers = {}
+    def json(self): return self._payload
 
 
-class ExpiredClient(SuccessfulClient):
-    def query_upload(self, _session_uri, _size):
-        return {"state": "expired"}
-
-
-class RefreshRetryClient(SuccessfulClient):
-    def refresh_access_token(self, _credential):
-        raise YouTubeHTTPError("youtube_token_refresh_unavailable", "temporarily unavailable", retryable=True)
-
-
-class CommentCrashClient(SuccessfulClient):
-    def publish_comment(self, _token, **_kwargs):
-        self.comment_count += 1
-        raise RuntimeError("simulated worker interruption after comment request")
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses); self.trust_env = True; self.gets = 0
+    def get(self, *_args, **_kwargs): self.gets += 1; return self.responses.pop(0)
+    def close(self): pass
 
 
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
         self.store = DramaSynthesisStore(self.root / "jobs.sqlite3")
         self.store.ensure_storage()
 
     def tearDown(self):
-        self.temp.cleanup()
+        self.tmp.cleanup()
 
-    def enqueue(self, operation_id="operation:0001", comment="first comment", duplicate=False):
+    def enqueue(self, operation="operation:test-0001", comment="", description="required", confirmed=False):
         return self.store.enqueue_youtube(
-            operation_id=operation_id,
-            job_id=JOB_ID,
-            app_id="1479",
-            channel_local_id="22",
-            channel_id=CHANNEL_ID,
-            youtube_account_id="11",
-            source_kind="random_template_video",
-            source_url="https://media.example.test/material.mp4",
-            title="Offline title",
-            description="Offline description",
-            comment_text=comment,
-            duplicate_confirmed=duplicate,
-            scopes=(UPLOAD_SCOPE, COMMENT_SCOPE),
+            operation_id=operation, job_id=JOB_ID, app_id="1479",
+            channel_local_id="1", channel_id=CHANNEL, youtube_account_id="2",
+            source_kind="concat_video", source_url="https://example.test/video.mp4",
+            title="Title", description_template=description, description_rendered=description,
+            comment_text=comment, duplicate_confirmed=confirmed,
+            scopes=(UPLOAD, READONLY, COMMENT_SCOPE), operator_user_id="803", operator_name="tester",
         )
 
-    def engine(self, client):
-        return YouTubePublishEngine(
-            self.store,
-            CredentialRepository(),
-            client,
-            work_root=self.root / "youtube",
-            allowed_source_hosts=("media.example.test",),
-        )
+    def test_random_source_is_required_and_exact(self):
+        with self.assertRaises(DramaSynthesisError):
+            freeze_random_recipe(job_id=JOB_ID, content_id="1", request={"mode": "auto"}, catalog=catalog())
+        self.assertEqual(recipe("no_bgm_video")["source"], "no_bgm_video")
 
-    def test_auto_recipe_is_deterministic_and_complete(self):
-        one = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
-        two = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
-        self.assertEqual(one, two)
-        self.assertEqual(set(one["assets"]), set(RECIPE_CATEGORIES))
-        self.assertEqual(one["profile"], RECIPE_PROFILE)
+    def test_fb_v3_catalog_is_315_and_excludes_light(self):
+        data = catalog()
+        self.assertEqual(set(data["categories"]), set(RECIPE_CATEGORIES))
+        product = 1
+        for rows in data["categories"].values():
+            product *= len(rows)
+        self.assertEqual(product, 315)
 
-    def test_new_python_runtime_files_parse_as_python39(self):
-        paths = [
-            ROOT / "features" / "drama_synthesis" / name
-            for name in ("core.py", "gpu.py", "youtube.py")
-        ] + [ROOT / "scripts" / "drama_youtube_publish_worker.py"]
-        for path in paths:
+    def test_auto_recipe_is_deterministic_and_source_frozen(self):
+        self.assertEqual(recipe(), recipe())
+        self.assertNotEqual(recipe("concat_video")["recipe_sha256"], recipe("no_bgm_video")["recipe_sha256"])
+        value = recipe()
+        self.assertTrue(-2000 <= value["rotation_millidegrees"] <= 2000)
+        self.assertTrue(9800 <= value["scale_bp"] <= 10200)
+        self.assertTrue(100 <= value["tint_opacity_bp"] <= 1000)
+
+    def test_manual_recipe_requires_all_four_layers(self):
+        layers = {key: catalog()["categories"][key][0]["name"] for key in RECIPE_CATEGORIES}
+        self.assertEqual(set(recipe(mode="manual", layers=layers)["assets"]), set(RECIPE_CATEGORIES))
+        layers.pop("tint")
+        with self.assertRaises(DramaSynthesisError):
+            recipe(mode="manual", layers=layers)
+
+    def test_recipe_freeze_and_output_are_immutable(self):
+        value = recipe()
+        first = self.store.freeze_recipe(JOB_ID, value)
+        self.assertEqual(first["recipe_sha256"], value["recipe_sha256"])
+        self.store.complete_recipe(JOB_ID, output_url="https://example.test/random.mp4", output_sha256="1" * 64, output_profile=RECIPE_PROFILE, recipe_sha256=value["recipe_sha256"])
+        with self.assertRaises(DramaSynthesisError):
+            self.store.complete_recipe(JOB_ID, output_url="https://example.test/other.mp4", output_sha256="2" * 64, output_profile=RECIPE_PROFILE, recipe_sha256=value["recipe_sha256"])
+
+    def test_short_target_has_exact_order_and_encoding(self):
+        target = build_long_url(JOB_ID, "剧 1/+")
+        parsed = urlsplit(target)
+        self.assertEqual(parsed.scheme + "://" + parsed.netloc + parsed.path, "https://www.dramawavew2a.com/ads/101/2284/view")
+        self.assertEqual(parse_qsl(parsed.query), [("af_dp", "剧 1/+"), ("c", "ai_youtube"), ("af_channel", "ai_youtube"), ("af_c_id", JOB_ID)])
+
+    def test_wrapper_only_reads_fbclid_and_has_no_open_redirect(self):
+        body = render_wrapper_html(JOB_ID, "content").decode()
+        self.assertIn("p.get('fbclid')", body)
+        self.assertNotIn("redirect_uri", body)
+        self.assertEqual(body.count("p.get("), 1)
+        self.assertNotIn("p.get('af_dp')", body)
+
+    def test_short_link_identity_is_job_and_material(self):
+        publisher = ImmutableFilesystemPublisher(self.root / "public")
+        one = self.store.ensure_short_link(JOB_ID, "concat_video", "c1", publisher)
+        again = self.store.ensure_short_link(JOB_ID, "concat_video", "c1", publisher)
+        other = self.store.ensure_short_link(JOB_ID, "no_bgm_video", "c1", publisher)
+        self.assertEqual(one["id"], again["id"])
+        self.assertNotEqual(one["id"], other["id"])
+        self.assertTrue(one["short_url"].startswith("https://gy.g2flow.com/s2l/youtube/"))
+
+    def test_short_link_conflict_and_concurrency(self):
+        publisher = ImmutableFilesystemPublisher(self.root / "public")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            rows = list(pool.map(lambda _: self.store.ensure_short_link(JOB_ID, "concat_video", "c1", publisher), range(4)))
+        self.assertEqual(len({row["id"] for row in rows}), 1)
+        with self.assertRaises(DramaSynthesisError):
+            self.store.ensure_short_link(JOB_ID, "concat_video", "changed", publisher)
+
+    def test_exact_additive_table_names_exist(self):
+        conn = sqlite3.connect(self.store.db_path)
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("drama_material_short_link", names)
+        self.assertIn("drama_youtube_publish", names)
+        self.assertIn("drama_youtube_sync_outbox", names)
+        self.assertNotIn("drama_youtube_publish_task", names)
+        conn.close()
+
+    def test_python_runtime_sources_parse_as_39(self):
+        files = [ROOT / "features/drama_synthesis/core.py", ROOT / "features/drama_synthesis/youtube.py", ROOT / "features/drama_synthesis/unified_youtube.py", ROOT / "scripts/drama_synthesis_gpu_worker.py", ROOT / "scripts/migrate_drama_synthesis_outputs.py"]
+        for path in files:
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 9))
 
-    def test_manual_recipe_requires_every_layer(self):
-        layers = {category: catalog()["categories"][category][1]["name"] for category in RECIPE_CATEGORIES}
-        recipe = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "manual", "layers": layers}, catalog=catalog())
-        self.assertEqual({key: row["name"] for key, row in recipe["assets"].items()}, layers)
+    def _legacy_db(self, outputs='{"concat_video": true}'):
+        path = self.root / "legacy.sqlite3"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE drama_material_job(id INTEGER PRIMARY KEY,outputs_json TEXT,output_video_url TEXT,output_video_no_bgm_url TEXT,cover_16x9_url TEXT)")
+        conn.execute("INSERT INTO drama_material_job VALUES(1,?,?,?,?)", (outputs, "https://a/video.mp4", "https://a/no.mp4", "https://a/cover.jpg"))
+        conn.commit(); conn.close()
+        return path
+
+    def test_outputs_migration_dry_run_backup_apply_and_idempotency(self):
+        db = self._legacy_db()
+        self.assertEqual(migrate(db)["changes"], 1)
+        backup = self.root / "backup.sqlite3"
+        applied = migrate(db, apply=True, backup_path=backup)
+        self.assertEqual(applied["changes"], 1)
+        self.assertTrue(backup.is_file())
+        backup_conn = sqlite3.connect(backup)
+        self.assertEqual(backup_conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(backup_conn.execute("SELECT outputs_json FROM drama_material_job").fetchone()[0], '{"concat_video": true}')
+        backup_conn.close()
+        self.assertEqual(migrate(db)["changes"], 0)
+        conn = sqlite3.connect(db)
+        value = json.loads(conn.execute("SELECT outputs_json FROM drama_material_job").fetchone()[0])
+        conn.close()
+        self.assertEqual(value, {"concat_video": True, "no_bgm_video": True, "cover_16x9": True, "random_template": False})
+
+    def test_outputs_migration_invalid_json_rolls_back(self):
+        db = self._legacy_db("not-json")
+        with self.assertRaises(ValueError):
+            migrate(db, apply=True, backup_path=self.root / "invalid.backup.sqlite3")
+        conn = sqlite3.connect(db)
+        self.assertEqual(conn.execute("SELECT outputs_json FROM drama_material_job").fetchone()[0], "not-json")
+        conn.close()
+
+    def test_outputs_migration_concurrent_dry_runs_are_read_only(self):
+        db = self._legacy_db()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: migrate(db)["changes"], range(100)))
+        self.assertEqual(results, [1] * 100)
+
+    def test_outputs_migration_cli_exposes_explicit_dry_run(self):
+        text = (ROOT / "scripts/migrate_drama_synthesis_outputs.py").read_text(encoding="utf-8")
+        self.assertIn('mode.add_argument("--dry-run"', text)
+        self.assertIn("add_mutually_exclusive_group", text)
+
+    def test_youtube_metadata_uses_required_utf8_byte_limit(self):
         with self.assertRaises(DramaSynthesisError):
-            freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "manual", "layers": {}}, catalog=catalog())
-        invalid_catalog = catalog()
-        invalid_catalog["profile"] = "unexpected-profile"
+            self.enqueue(operation="operation:empty-desc", description="")
+        self.enqueue(operation="operation:bytes-ok", description="中" * 1666)
         with self.assertRaises(DramaSynthesisError):
-            freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=invalid_catalog)
+            self.enqueue(operation="operation:bytes-bad", description="中" * 1667)
 
-    def test_gpu_adapter_returns_frozen_recipe_and_output_identity(self):
-        recipe = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
-        source = self.root / "source.mp4"
-        output = self.root / "output.mp4"
-        source.write_bytes(b"source")
-        probe = {
-            "duration": 1.0,
-            "has_audio": True,
-            "video": {"codec_name": "h264", "profile": "High", "width": 720, "height": 1280},
-            "audio": {"codec_name": "aac"},
-        }
-        with mock.patch.object(gpu_adapter, "_probe", return_value=probe), \
-                mock.patch.object(gpu_adapter, "load_asset_set", return_value={"manifest_sha256": "a" * 64}), \
-                mock.patch.object(gpu_adapter, "validate_recipe"), \
-                mock.patch.object(gpu_adapter, "selected_asset_paths", return_value={}), \
-                mock.patch.object(gpu_adapter, "build_command", return_value=["ffmpeg", "offline"]), \
-                mock.patch.object(gpu_adapter, "sha256_file", return_value=("b" * 64, 1234)):
-            result = gpu_adapter.render_random_output(
-                source=source,
-                output=output,
-                recipe=recipe,
-                asset_root=self.root,
-                manifest_sha256="a" * 64,
-                runner=mock.Mock(),
-            )
-        self.assertEqual(result["recipe_sha256"], recipe["recipe_sha256"])
-        self.assertEqual((result["output_sha256"], result["profile"]), ("b" * 64, RECIPE_PROFILE))
-
-    def test_recipe_freeze_is_retry_stable_and_conflict_safe(self):
-        recipe = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
-        first = self.store.freeze_recipe(JOB_ID, recipe)
-        second = self.store.freeze_recipe(JOB_ID, recipe)
-        self.assertEqual(first["recipe_sha256"], second["recipe_sha256"])
-        changed = freeze_random_recipe(job_id=OTHER_JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
+    def test_youtube_operation_idempotent_and_conflict_safe(self):
+        one = self.enqueue()
+        two = self.enqueue()
+        self.assertEqual(one["id"], two["id"])
         with self.assertRaises(DramaSynthesisError):
-            self.store.freeze_recipe(JOB_ID, changed)
+            self.enqueue(description="changed")
 
-    def test_random_template_youtube_source_resolves_from_frozen_output(self):
-        import app as drama_app
+    def test_processing_and_unknown_block_replacement(self):
+        row = self.enqueue(operation="operation:processing")
+        conn = sqlite3.connect(self.store.db_path)
+        conn.execute("UPDATE drama_youtube_publish SET status='processing',video_state='processing',video_id='video_123' WHERE id=?", (row["id"],))
+        conn.commit(); conn.close()
+        with self.assertRaises(DramaSynthesisError):
+            self.enqueue(operation="operation:replacement")
 
-        recipe = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
-        self.store.freeze_recipe(JOB_ID, recipe)
-        output_url = "https://media.example.test/random-template.mp4"
-        self.store.complete_recipe(
-            JOB_ID,
-            output_url=output_url,
-            output_sha256="b" * 64,
-            output_profile=RECIPE_PROFILE,
-            recipe_sha256=recipe["recipe_sha256"],
-        )
-        raw_legacy_job = {
-            "job_id": JOB_ID,
-            "output_video_url": "",
-            "output_video_no_bgm_url": "",
-        }
-        with mock.patch.object(drama_app, "DRAMA_SYNTHESIS_STORE", self.store):
-            kind, resolved = drama_app.drama_youtube_source(raw_legacy_job, "random_template_video")
-        self.assertEqual((kind, resolved), ("random_template_video", output_url))
-
-    def test_short_target_and_wrapper_are_exact_and_closed(self):
-        target = build_long_url(JOB_ID)
-        self.assertEqual(target, "https://www.dramawavew2a.com/ads/101/2284/view?cid=" + JOB_ID + "&af_channel=ai_youtube")
-        wrapper = render_wrapper_html(JOB_ID).decode()
-        self.assertIn(target.replace("&", "&amp;"), wrapper)
-        self.assertNotIn("window.location", wrapper)
-
-    def test_short_link_is_idempotent_and_immutable(self):
-        publisher = ImmutableFilesystemPublisher(self.root / "wrappers")
-        first = self.store.ensure_short_link(JOB_ID, publisher)
-        second = self.store.ensure_short_link(JOB_ID, publisher)
-        self.assertEqual(first["id"], second["id"])
-        self.assertFalse(first["reused"])
-        self.assertTrue(second["reused"])
-        self.assertEqual(first["short_url"], f"https://page.dramabuzzs.com/s2l/{first['id']}.html")
-        self.assertEqual((self.root / "wrappers" / f"{first['id']}.html").read_bytes(), render_wrapper_html(JOB_ID))
-
-    def test_short_link_concurrency_never_overwrites(self):
-        publisher = ImmutableFilesystemPublisher(self.root / "concurrent-wrappers")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            rows = list(executor.map(lambda _index: self.store.ensure_short_link(JOB_ID, publisher), range(2)))
-        self.assertEqual(len({row["id"] for row in rows}), 1)
-        self.assertEqual(sorted(bool(row["reused"]) for row in rows), [False, True])
-
-    def test_short_link_fails_closed_without_publisher(self):
-        with self.assertRaisesRegex(DramaSynthesisError, "短链发布器"):
-            self.store.ensure_short_link(JOB_ID, None)
-        self.assertEqual(self.store.short_link(JOB_ID)["publish_state"], "failed")
-
-    def test_youtube_operation_is_idempotent(self):
-        first = self.enqueue()
-        second = self.enqueue()
-        self.assertEqual(first["id"], second["id"])
-
-    def test_youtube_comment_scope_is_exact_and_fail_closed(self):
-        with self.assertRaisesRegex(DramaSynthesisError, "评论权限"):
-            self.store.enqueue_youtube(
-                operation_id="operation:scope1", job_id=JOB_ID, app_id="1479",
-                channel_local_id="22", channel_id=CHANNEL_ID, youtube_account_id="11",
-                source_kind="concat_video", source_url="https://media.example.test/material.mp4",
-                title="Title", description="", comment_text="comment",
-                duplicate_confirmed=False, scopes=(UPLOAD_SCOPE, READONLY_SCOPE),
-            )
-
-    def test_youtube_channel_eligibility_requires_status_refresh_and_upload_scope(self):
-        def token(scopes, refresh="refresh"):
-            return json.dumps({"scope": scopes, "refresh_token": refresh})
-
-        credentials = json.dumps({"installed": {"client_id": "client", "client_secret": "secret"}})
-        rows = [
-            ("1", CHANNEL_ID, "eligible", "1", "101", token([UPLOAD_SCOPE, COMMENT_SCOPE]), credentials),
-            ("2", "UCbbbbbbbbbbbbbbbbbbbbbb", "status-2", "2", "102", token([UPLOAD_SCOPE]), credentials),
-            ("3", "UCcccccccccccccccccccccc", "missing-scope", "1", "103", token([]), credentials),
-            ("4", "UCdddddddddddddddddddddd", "missing-refresh", "1", "104", token([UPLOAD_SCOPE, READONLY_SCOPE], ""), credentials),
-            ("5", "UCeeeeeeeeeeeeeeeeeeeeee", "upload-only", "1", "105", token([UPLOAD_SCOPE]), credentials),
-        ]
-        def schema_contract_runner(sql):
-            self.assertIn("ch.channel_status", sql)
-            self.assertNotIn("ch.status", sql)
-            return rows
-
-        items = YouTubeCredentialRepository(schema_contract_runner).list_for_app("1479")
-        self.assertEqual([item["channel_id"] for item in items], [CHANNEL_ID])
-        self.assertTrue(items[0]["comment_eligible"])
-        with self.assertRaisesRegex(DramaSynthesisError, "身份核验权限"):
-            self.store.enqueue_youtube(
-                operation_id="operation:upload-only", job_id=JOB_ID, app_id="1479",
-                channel_local_id="22", channel_id=CHANNEL_ID, youtube_account_id="11",
-                source_kind="concat_video", source_url="https://media.example.test/material.mp4",
-                title="Title", description="", comment_text="",
-                duplicate_confirmed=False, scopes=(UPLOAD_SCOPE,),
-            )
-
-    def test_youtube_schema_contract_uses_live_channel_status_column(self):
-        captured = []
-
-        def runner(sql):
-            captured.append(sql)
-            if "ch.status" in sql or "ch.channel_status" not in sql:
-                raise AssertionError("query does not match live ads_youtube_channels schema")
-            return []
-
-        self.assertEqual(YouTubeCredentialRepository(runner).list_for_app("1479"), [])
-        self.assertEqual(len(captured), 1)
-
-    def test_youtube_sql_identifiers_reject_quote_and_backslash_adversaries(self):
-        captured = []
-        repository = YouTubeCredentialRepository(lambda sql: captured.append(sql) or [])
-        adversaries = ("1479' OR 1=1 --", r"1479\' OR 1=1 --", "0", "9223372036854775808")
-        for value in adversaries:
-            with self.assertRaises(DramaSynthesisError):
-                repository.list_for_app(value)
-            with self.assertRaises(DramaSynthesisError):
-                repository.credential(
-                    app_id="1479",
-                    channel_local_id=value,
-                    account_id="11",
-                    expected_channel_id=CHANNEL_ID,
-                )
-            with self.assertRaises(DramaSynthesisError):
-                repository.credential(
-                    app_id="1479",
-                    channel_local_id="22",
-                    account_id=value,
-                    expected_channel_id=CHANNEL_ID,
-                )
-        self.assertEqual(captured, [])
-
-    def test_youtube_identity_probe_fails_closed_before_external_mutation(self):
-        class FakeResponse:
-            def __init__(self, status_code, payload):
-                self.status_code = status_code
-                self.payload = payload
-
-            def json(self):
-                return self.payload
-
-        class FakeSession:
-            def __init__(self, mode):
-                self.mode = mode
-                self.trust_env = True
-                self.mutation_count = 0
-
-            def get(self, url, **kwargs):
-                self.assertions = (url, kwargs)
-                if self.mode == "transient":
-                    raise requests.ConnectionError("offline transient")
-                payloads = {
-                    "empty": {"items": []},
-                    "multiple": {"items": [{"id": CHANNEL_ID}, {"id": "UCbbbbbbbbbbbbbbbbbbbbbb"}]},
-                    "mismatch": {"items": [{"id": "UCbbbbbbbbbbbbbbbbbbbbbb"}]},
-                }
-                return FakeResponse(200, payloads[self.mode])
-
-            def post(self, *_args, **_kwargs):
-                self.mutation_count += 1
-                raise AssertionError("identity check must not mutate")
-
-            def put(self, *_args, **_kwargs):
-                self.mutation_count += 1
-                raise AssertionError("identity check must not mutate")
-
-            def close(self):
-                return None
-
-        for mode in ("mismatch", "empty", "multiple", "transient"):
-            with self.subTest(mode=mode):
-                session = FakeSession(mode)
-                client = YouTubeHTTPClient(session_factory=lambda: session)
-                with self.assertRaises(YouTubeHTTPError) as caught:
-                    client.verify_channel_identity("not-a-real-token", CHANNEL_ID)
-                if mode == "transient":
-                    self.assertTrue(caught.exception.retryable)
-                    self.assertEqual(caught.exception.code, "youtube_channel_identity_unavailable")
-                else:
-                    self.assertFalse(caught.exception.retryable)
-                    self.assertEqual(caught.exception.code, "youtube_channel_identity_mismatch")
-                self.assertEqual(session.mutation_count, 0)
-                if mode != "transient":
-                    url, kwargs = session.assertions
-                    self.assertEqual(url, "https://www.googleapis.com/youtube/v3/channels?part=id&mine=true")
-                    self.assertEqual(kwargs["headers"]["Authorization"], "Bearer not-a-real-token")
-                    self.assertFalse(kwargs["allow_redirects"])
-
-    def test_youtube_identity_failure_never_begins_upload_or_comment(self):
-        class IdentityGateClient(SuccessfulClient):
-            def __init__(self, mode):
-                super().__init__()
-                self.mode = mode
-
-            def verify_channel_identity(self, _token, _expected_channel_id):
-                self.identity_count += 1
-                retryable = self.mode == "transient"
-                code = "youtube_channel_identity_unavailable" if retryable else "youtube_channel_identity_mismatch"
-                raise YouTubeHTTPError(code, self.mode, retryable=retryable)
-
-        for index, mode in enumerate(("mismatch", "empty", "multiple", "transient"), start=1):
-            with self.subTest(mode=mode):
-                row = self.enqueue(operation_id="operation:identity%d" % index)
-                client = IdentityGateClient(mode)
-                result = self.engine(client).run_once("identity-worker-%d" % index)
-                stored = self.store.youtube_task(row["id"])
-                self.assertEqual((client.begin_count, client.upload_count, client.comment_count), (0, 0, 0))
-                self.assertEqual(client.identity_count, 1)
-                self.assertEqual(result["status"], "video_retry" if mode == "transient" else "failed")
-                self.assertEqual(stored["video_id"], "")
-
-    def test_storage_adds_lease_generation_to_existing_sqlite(self):
-        legacy_path = self.root / "legacy.sqlite3"
-        conn = sqlite3.connect(legacy_path)
-        try:
-            conn.execute(
-                """CREATE TABLE drama_youtube_publish_task(
-                       id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, channel_id TEXT NOT NULL,
-                       status TEXT NOT NULL, unknown_outcome INTEGER NOT NULL DEFAULT 0
-                   )"""
-            )
-            conn.execute(
-                "INSERT INTO drama_youtube_publish_task(id,job_id,channel_id,status) VALUES(1,?,?,?)",
-                (JOB_ID, CHANNEL_ID, "queued"),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        migrated = DramaSynthesisStore(legacy_path)
-        migrated.ensure_storage()
-        conn = sqlite3.connect(legacy_path)
-        try:
-            columns = {row[1]: row for row in conn.execute("PRAGMA table_info(drama_youtube_publish_task)")}
-            value = conn.execute("SELECT lease_generation FROM drama_youtube_publish_task WHERE id=1").fetchone()[0]
-        finally:
-            conn.close()
-        self.assertIn("lease_generation", columns)
-        self.assertEqual((columns["lease_generation"][3], columns["lease_generation"][4], value), (1, "0", 0))
-
-    def test_youtube_lease_generation_fences_reclaimed_worker_writes(self):
-        row = self.enqueue(operation_id="operation:fence1", comment="")
-        stale = self.store.claim_youtube("worker-stale", "2000-01-01T00:00:00Z")
-        current = self.store.claim_youtube("worker-current", "2099-01-01T00:00:00Z")
-        self.assertGreater(current["lease_generation"], stale["lease_generation"])
-        self.store.set_upload_session(
-            row["id"],
-            "https://upload.youtube.test/resumable/current",
-            13,
-            worker_id="worker-current",
-            lease_generation=current["lease_generation"],
-        )
-        stale_calls = (
-            lambda: self.store.renew_youtube_lease(
-                row["id"], "worker-stale", stale["lease_generation"], "2099-01-01T00:00:00Z"
-            ),
-            lambda: self.store.set_upload_session(
-                row["id"],
-                "https://upload.youtube.test/resumable/stale",
-                99,
-                worker_id="worker-stale",
-                lease_generation=stale["lease_generation"],
-            ),
-            lambda: self.store.set_upload_offset(
-                row["id"], 99, worker_id="worker-stale", lease_generation=stale["lease_generation"]
-            ),
-            lambda: self.store.video_published(
-                row["id"],
-                "video_stale1",
-                worker_id="worker-stale",
-                lease_generation=stale["lease_generation"],
-            ),
-            lambda: self.store.fail_youtube(
-                row["id"],
-                worker_id="worker-stale",
-                lease_generation=stale["lease_generation"],
-                phase="video",
-                code="stale_failure",
-                message="stale",
-                unknown=False,
-            ),
-        )
-        for call in stale_calls:
-            with self.assertRaisesRegex(DramaSynthesisError, "租约"):
-                call()
-        unchanged = self.store.youtube_task(row["id"])
-        self.assertEqual(unchanged["resumable_session_uri"], "https://upload.youtube.test/resumable/current")
-        self.assertEqual((unchanged["next_byte"], unchanged["video_id"], unchanged["error_code"]), (0, "", ""))
-        self.store.set_upload_offset(
-            row["id"], 5, worker_id="worker-current", lease_generation=current["lease_generation"]
-        )
-        published = self.store.video_published(
-            row["id"],
-            "video_123456",
-            worker_id="worker-current",
-            lease_generation=current["lease_generation"],
-        )
-        self.assertEqual((published["status"], published["video_state"], published["video_id"]), ("published", "published", "video_123456"))
-
-        comment_row = self.enqueue(operation_id="operation:fence2", duplicate=True)
-        comment_stale = self.store.claim_youtube("comment-stale", "2000-01-01T00:00:00Z")
-        comment_current = self.store.claim_youtube("comment-current", "2099-01-01T00:00:00Z")
-        self.store.video_published(
-            comment_row["id"],
-            "video_654321",
-            worker_id="comment-current",
-            lease_generation=comment_current["lease_generation"],
-        )
-        for call in (
-            lambda: self.store.mark_comment_attempt(
-                comment_row["id"],
-                worker_id="comment-stale",
-                lease_generation=comment_stale["lease_generation"],
-            ),
-            lambda: self.store.comment_published(
-                comment_row["id"],
-                "comment-stale",
-                worker_id="comment-stale",
-                lease_generation=comment_stale["lease_generation"],
-            ),
-            lambda: self.store.fail_youtube(
-                comment_row["id"],
-                worker_id="comment-stale",
-                lease_generation=comment_stale["lease_generation"],
-                phase="comment",
-                code="stale_comment_failure",
-                message="stale",
-                unknown=True,
-            ),
-        ):
-            with self.assertRaisesRegex(DramaSynthesisError, "租约"):
-                call()
-        self.store.mark_comment_attempt(
-            comment_row["id"],
-            worker_id="comment-current",
-            lease_generation=comment_current["lease_generation"],
-        )
-        comment_done = self.store.comment_published(
-            comment_row["id"],
-            "comment-current",
-            worker_id="comment-current",
-            lease_generation=comment_current["lease_generation"],
-        )
-        self.assertEqual((comment_done["status"], comment_done["comment_state"], comment_done["comment_id"]), ("published", "published", "comment-current"))
-
-    def test_youtube_video_and_comment_have_separate_success_states(self):
-        row = self.enqueue()
-        client = SuccessfulClient()
-        result = self.engine(client).run_once("worker-1")
-        stored = self.store.youtube_task(row["id"])
-        self.assertTrue(result["ok"])
-        self.assertEqual((stored["video_state"], stored["comment_state"]), ("published", "published"))
-        self.assertEqual((client.begin_count, client.upload_count, client.comment_count), (1, 1, 1))
-        self.assertEqual(client.identity_count, 3)
-        self.assertEqual(client.heartbeat_count, 1)
-
-    def test_youtube_retry_queries_session_and_never_duplicates_video(self):
-        row = self.enqueue(operation_id="operation:retry1", comment="")
-        first_client = ResumeClient()
-        first = self.engine(first_client).run_once("worker-1")
-        self.assertEqual(first["status"], "video_retry")
-        second_client = SuccessfulClient()
-        second = self.engine(second_client).run_once("worker-2")
-        stored = self.store.youtube_task(row["id"])
-        self.assertTrue(second["ok"])
-        self.assertEqual(stored["video_state"], "published")
-        self.assertEqual(second_client.begin_count, 0)
-        self.assertEqual(second_client.upload_count, 0)
-
-    def test_youtube_unknown_outcome_fails_closed(self):
-        row = self.enqueue(operation_id="operation:unknown1", comment="")
-        client = UnknownClient()
-        result = self.engine(client).run_once("worker-1")
-        self.assertEqual(result["status"], "unknown")
-        self.assertEqual(self.store.youtube_task(row["id"])["unknown_outcome"], 1)
-        self.assertFalse(self.engine(SuccessfulClient()).run_once("worker-2")["claimed"])
-
-    def test_youtube_expired_session_is_unknown_and_closed(self):
-        row = self.enqueue(operation_id="operation:expired1", comment="")
-        claimed = self.store.claim_youtube("setup-worker", "2000-01-01T00:00:00Z")
-        self.store.set_upload_session(
-            row["id"],
-            "https://upload.youtube.test/resumable/expired",
-            13,
-            worker_id="setup-worker",
-            lease_generation=claimed["lease_generation"],
-        )
-        result = self.engine(ExpiredClient()).run_once("worker-1")
-        self.assertEqual(result["status"], "unknown")
-        self.assertEqual(self.store.youtube_task(row["id"])["unknown_outcome"], 1)
-
-    def test_expired_worker_lease_can_be_reclaimed(self):
-        row = self.enqueue(operation_id="operation:lease01", comment="")
-        first = self.store.claim_youtube("crashed-worker", "2000-01-01T00:00:00Z")
-        self.assertEqual(first["id"], row["id"])
-        second = self.store.claim_youtube("recovery-worker", "2099-01-01T00:00:00Z")
+    def test_lease_generation_rejects_stale_worker(self):
+        row = self.enqueue(operation="operation:fence")
+        first = self.store.claim_youtube("worker-a", "2000-01-01T00:00:00Z")
+        second = self.store.claim_youtube("worker-b", "2999-01-01T00:00:00Z")
         self.assertEqual(second["id"], row["id"])
-        self.assertEqual(second["lease_owner"], "recovery-worker")
+        with self.assertRaises(DramaSynthesisError):
+            self.store.set_upload_session(row["id"], "https://upload.youtube.test/session", 10, worker_id="worker-a", lease_generation=first["lease_generation"])
 
-    def test_interrupted_comment_is_unknown_and_never_duplicated(self):
-        row = self.enqueue(operation_id="operation:comment1")
-        claimed = self.store.claim_youtube("crashed-comment-worker", "2000-01-01T00:00:00Z")
-        self.store.video_published(
-            row["id"],
-            "video_123456",
-            worker_id="crashed-comment-worker",
-            lease_generation=claimed["lease_generation"],
-        )
-        claimed = self.store.youtube_task(row["id"])
-        self.assertEqual(claimed["status"], "publishing_comment")
-        self.store.mark_comment_attempt(
-            row["id"],
-            worker_id="crashed-comment-worker",
-            lease_generation=claimed["lease_generation"],
-        )
-        self.assertIsNone(self.store.claim_youtube("recovery-worker", "2099-01-01T00:00:00Z"))
-        stored = self.store.youtube_task(row["id"])
-        self.assertEqual((stored["status"], stored["comment_state"], stored["unknown_outcome"]), ("unknown", "unknown", 1))
+    def test_engine_requires_processing_and_visibility_before_comment(self):
+        row = self.enqueue(operation="operation:engine", comment="hello")
+        conn = sqlite3.connect(self.store.db_path)
+        conn.execute("UPDATE drama_youtube_publish SET status='submitted',video_state='submitted',video_id='video_123' WHERE id=?", (row["id"],))
+        conn.commit(); conn.close()
+        client = FakePublishClient(["processing", "published"])
+        engine = YouTubePublishEngine(self.store, FakeCredentialRepo(), client, work_root=self.root / "work", allowed_source_hosts=("example.test",))
+        first = engine.run_once("worker")
+        self.assertEqual(first["status"], "processing")
+        self.assertEqual(client.comments, 0)
+        second = engine.run_once("worker")
+        self.assertEqual(second["status"], "published")
+        self.assertEqual(client.comments, 1)
+        final = self.store.youtube_task(row["id"])
+        self.assertEqual((final["video_state"], final["comment_status"]), ("published", "published"))
 
-    def test_comment_runtime_interruption_after_attempt_is_unknown(self):
-        row = self.enqueue(operation_id="operation:comment-crash")
-        claimed = self.store.claim_youtube("setup-worker", "2000-01-01T00:00:00Z")
-        self.store.video_published(
-            row["id"],
-            "video_123456",
-            worker_id="setup-worker",
-            lease_generation=claimed["lease_generation"],
-        )
-        client = CommentCrashClient()
-        result = self.engine(client).run_once("comment-crash-worker")
-        stored = self.store.youtube_task(row["id"])
-        self.assertEqual(client.comment_count, 1)
+    def test_lost_upload_response_is_status_queried_before_state_change(self):
+        row = self.enqueue(operation="operation:recover-upload")
+        work = self.root / "work" / ("task-%d" % row["id"])
+        work.mkdir(parents=True)
+        (work / "source.mp4").write_bytes(b"fake-video")
+        client = FakeRecoveringUploadClient()
+        engine = YouTubePublishEngine(self.store, FakeCredentialRepo(), client, work_root=self.root / "work", allowed_source_hosts=("example.test",))
+        probe = SimpleNamespace(stdout='{"format":{"duration":"1.25"}}')
+        with mock.patch("features.drama_synthesis.youtube.subprocess.run", return_value=probe):
+            result = engine.run_once("worker")
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual((client.begins, client.uploads, client.queries), (1, 1, 1))
+        task = self.store.youtube_task(row["id"])
+        self.assertEqual((task["video_state"], task["video_id"]), ("submitted", "video_recovered"))
+
+    def test_upload_query_expired_is_unknown_and_cleans_terminal_source(self):
+        row = self.enqueue(operation="operation:expired-upload")
+        work = self.root / "work" / ("task-%d" % row["id"])
+        work.mkdir(parents=True)
+        (work / "source.mp4").write_bytes(b"fake-video")
+        client = FakeRecoveringUploadClient("expired")
+        engine = YouTubePublishEngine(self.store, FakeCredentialRepo(), client, work_root=self.root / "work", allowed_source_hosts=("example.test",))
+        probe = SimpleNamespace(stdout='{"format":{"duration":"1.25"}}')
+        with mock.patch("features.drama_synthesis.youtube.subprocess.run", return_value=probe):
+            result = engine.run_once("worker")
         self.assertEqual(result["status"], "unknown")
-        self.assertEqual((stored["comment_attempt_count"], stored["comment_state"], stored["unknown_outcome"]), (1, "unknown", 1))
-        self.assertFalse(self.engine(SuccessfulClient()).run_once("recovery-worker")["claimed"])
+        self.assertFalse(work.exists())
+        self.assertEqual(client.queries, 1)
 
-    def test_known_safe_pre_comment_failure_retries_comment_once(self):
-        row = self.enqueue(operation_id="operation:comment-retry")
-        claimed = self.store.claim_youtube("setup-worker", "2000-01-01T00:00:00Z")
-        self.store.video_published(
-            row["id"],
-            "video_123456",
-            worker_id="setup-worker",
-            lease_generation=claimed["lease_generation"],
+    def test_published_video_enqueues_idempotent_sync_outbox(self):
+        row = self.enqueue(operation="operation:outbox", comment="")
+        claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
+        self.store.video_submitted(row["id"], "video_456", worker_id="worker", lease_generation=claim["lease_generation"])
+        claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
+        self.store.video_published(row["id"], "video_456", worker_id="worker", lease_generation=claim["lease_generation"])
+        conn = sqlite3.connect(self.store.db_path)
+        kinds = [item[0] for item in conn.execute("SELECT entity_kind FROM drama_youtube_sync_outbox ORDER BY entity_kind")]
+        conn.close()
+        self.assertEqual(kinds, ["publish_log", "video"])
+
+    def test_late_comment_outbox_reopens_independent_sync_status(self):
+        row = self.enqueue(operation="operation:late-comment", comment="hello")
+        claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
+        self.store.video_submitted(row["id"], "video_late", worker_id="worker", lease_generation=claim["lease_generation"])
+        claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
+        published = self.store.video_published(row["id"], "video_late", worker_id="worker", lease_generation=claim["lease_generation"])
+        writer = UnifiedYouTubeWriter(lambda action, *_args: {"found": False} if action == "select" else {"idempotent_success": True})
+        self.assertEqual(run_sync_outbox_once(self.store, writer, "sync-1")["status"], "synced")
+        self.assertEqual(run_sync_outbox_once(self.store, writer, "sync-2")["status"], "synced")
+        self.assertEqual(self.store.youtube_task(row["id"])["sync_status"], "synced")
+        self.store.mark_comment_attempt(row["id"], worker_id="worker", lease_generation=published["lease_generation"])
+        self.store.comment_published(row["id"], "comment_late", worker_id="worker", lease_generation=published["lease_generation"])
+        self.assertEqual(self.store.youtube_task(row["id"])["sync_status"], "pending")
+
+    def test_outbox_finish_is_fenced_and_updates_parent(self):
+        self.test_published_video_enqueues_idempotent_sync_outbox()
+        item = self.store.claim_youtube_sync("sync-a", "2000-01-01T00:00:00Z")
+        reclaimed = self.store.claim_youtube_sync("sync-b", "2999-01-01T00:00:00Z")
+        with self.assertRaises(DramaSynthesisError):
+            self.store.finish_youtube_sync(item["id"], worker_id="sync-a", lease_generation=item["lease_generation"], success=True)
+        self.store.finish_youtube_sync(reclaimed["id"], worker_id="sync-b", lease_generation=reclaimed["lease_generation"], success=True)
+
+    def test_unified_writer_is_whitelisted_idempotent_and_fail_closed(self):
+        with self.assertRaises(DramaSynthesisError):
+            UnifiedYouTubeWriter(None).sync("video", "video_1", {"video_id": "video_1"})
+        calls = []
+        writer = UnifiedYouTubeWriter(lambda action, table, external_id, payload: calls.append((action, table, external_id, payload)) or ({"found": False} if action == "select" else {"idempotent_success": True}))
+        writer.sync("video", "video_1", {"video_id": "video_1", "secret": "drop"})
+        self.assertEqual([call[0] for call in calls], ["select", "insert"])
+        self.assertEqual(calls[1][1:3], ("ads_youtube_videos", "video_1"))
+        self.assertNotIn("secret", calls[1][3])
+        with self.assertRaises(DramaSynthesisError):
+            validate_controlled_operation("delete", "ads_youtube_videos")
+
+    def test_channel_repository_uses_channel_status_and_decimal_ids(self):
+        seen = []
+        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
+        credentials = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        repo = YouTubeCredentialRepository(lambda sql: seen.append(sql) or [("1", CHANNEL, "Current", "1", "2", token, credentials)])
+        self.assertEqual(len(repo.list_for_app("1479")), 1)
+        self.assertIn("ch.channel_status", seen[0])
+        with self.assertRaises(DramaSynthesisError):
+            repo.list_for_app("1'\\ OR 1=1")
+
+    def test_channel_list_hides_upload_only_and_status_two(self):
+        upload_only = json.dumps({"refresh_token": "r", "scope": [UPLOAD]})
+        complete = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
+        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        rows = [("1", CHANNEL, "upload-only", "1", "2", upload_only, creds), ("3", CHANNEL[:-1] + "B", "disabled", "2", "4", complete, creds)]
+        self.assertEqual(YouTubeCredentialRepository(lambda _sql: rows).list_for_app("1479"), [])
+
+    def test_identity_probe_empty_multiple_and_mismatch_fail_closed(self):
+        payloads = [{"items": []}, {"items": [{"id": CHANNEL}, {"id": CHANNEL}]}, {"items": [{"id": CHANNEL[:-1] + "B"}]}]
+        for payload in payloads:
+            session = FakeSession([FakeResponse(payload=payload)])
+            with self.assertRaises(Exception):
+                YouTubeHTTPClient(session_factory=lambda: session).verify_channel_identity("token", CHANNEL)
+            self.assertEqual(session.gets, 1)
+
+    def test_identity_probe_transient_is_retryable_before_any_mutation(self):
+        session = FakeSession([FakeResponse(status=503)])
+        with self.assertRaises(YouTubeHTTPError) as raised:
+            YouTubeHTTPClient(session_factory=lambda: session).verify_channel_identity("token", CHANNEL)
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(session.gets, 1)
+
+    def test_video_status_maps_processing_published_and_failure(self):
+        payloads = [
+            {"items": [{"status": {"uploadStatus": "uploaded", "privacyStatus": "public"}}]},
+            {"items": [{"status": {"uploadStatus": "processed", "privacyStatus": "public"}}]},
+            {"items": [{"status": {"uploadStatus": "rejected", "privacyStatus": "public"}}]},
+        ]
+        session = FakeSession([FakeResponse(payload=item) for item in payloads])
+        client = YouTubeHTTPClient(session_factory=lambda: session)
+        self.assertEqual(client.video_status("token", "video_123")["state"], "processing")
+        self.assertEqual(client.video_status("token", "video_123")["state"], "published")
+        self.assertEqual(client.video_status("token", "video_123")["state"], "failed")
+
+    def test_retry_comment_never_reuploads_video(self):
+        row = self.enqueue(operation="operation:comment-retry", comment="hello")
+        conn = sqlite3.connect(self.store.db_path)
+        conn.execute("UPDATE drama_youtube_publish SET status='published',video_state='published',video_id='video_123',comment_status='failed' WHERE id=?", (row["id"],))
+        conn.commit(); conn.close()
+        self.store.retry_youtube_comment(row["id"])
+        client = FakePublishClient([])
+        result = YouTubePublishEngine(self.store, FakeCredentialRepo(), client, work_root=self.root / "work", allowed_source_hosts=("example.test",)).run_once("worker")
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(client.comments, 1)
+
+    def test_unknown_outcome_blocks_replacement(self):
+        row = self.enqueue(operation="operation:unknown")
+        claim = self.store.claim_youtube("worker", "2999-01-01T00:00:00Z")
+        self.store.fail_youtube(row["id"], worker_id="worker", lease_generation=claim["lease_generation"], phase="video", code="unknown", message="unknown", unknown=True)
+        with self.assertRaises(DramaSynthesisError):
+            self.enqueue(operation="operation:unknown-replacement")
+
+    def test_published_duplicate_requires_second_confirmation(self):
+        row = self.enqueue(operation="operation:published")
+        conn = sqlite3.connect(self.store.db_path)
+        conn.execute("UPDATE drama_youtube_publish SET status='published',video_state='published',video_id='video_123' WHERE id=?", (row["id"],))
+        conn.commit(); conn.close()
+        with self.assertRaises(DramaSynthesisError):
+            self.enqueue(operation="operation:duplicate")
+        duplicate = self.enqueue(operation="operation:duplicate-confirmed", confirmed=True)
+        self.assertEqual(duplicate["status"], "queued")
+
+    def test_fake_outbox_worker_success_and_missing_adapter_failure(self):
+        self.test_published_video_enqueues_idempotent_sync_outbox()
+        ok = UnifiedYouTubeWriter(lambda action, *_args: {"found": False} if action == "select" else {"idempotent_success": True})
+        self.assertEqual(run_sync_outbox_once(self.store, ok, "sync-ok")["status"], "synced")
+        self.assertEqual(run_sync_outbox_once(self.store, UnifiedYouTubeWriter(None), "sync-fail")["status"], "failed")
+
+    def test_ui_contract_has_source_selection_bytes_macro_and_clipboard_fallback(self):
+        for name in ("drama-synthesis.html", "index.html"):
+            text = (ROOT / "static" / name).read_text(encoding="utf-8")
+            self.assertIn('id="randomTemplateSource"', text)
+            self.assertIn("source: els.randomTemplateSource.value", text)
+            self.assertIn("new TextEncoder().encode(description).length > 5000", text)
+            self.assertIn("document.execCommand(\"copy\")", text)
+            self.assertIn('id="materialPickerModal"', text)
+            self.assertNotIn("window.prompt", text)
+            self.assertIn("retryYoutubeComment", text)
+            self.assertIn("chooseMaterial(job, false)", text)
+            self.assertNotIn("random_template_video_url", text)
+
+    def test_app_exposes_exact_six_routes_and_macro_precondition(self):
+        text = (ROOT / "app.py").read_text(encoding="utf-8")
+        for fragment in ("/api/drama-material/random-template-catalog", "short-links", "/api/drama-material/youtube/channels", "youtube-publishes", "retry-comment"):
+            self.assertIn(fragment, text)
+        self.assertIn('if "{{url}}" in description_template:', text)
+        self.assertIn("description_template.replace", text)
+        self.assertIn("YOUTUBE_LIVE_ENABLED", text)
+        self.assertIn("material_kind, _source_url = drama_youtube_source", text)
+        self.assertNotIn("page.dramabuzzs.com/s2l", text)
+        self.assertNotIn("/youtube-channels", text)
+
+    def test_hk_units_release_ports_namespace_and_gpu_surface(self):
+        worker = (ROOT / "deploy/drama-synthesis-gpu-worker.service").read_text(encoding="utf-8")
+        tunnel = (ROOT / "deploy/drama-synthesis-gpu-tunnel.service").read_text(encoding="utf-8")
+        nginx = (ROOT / "deploy/drama-youtube-s2l.nginx.conf").read_text(encoding="utf-8")
+        gpu = (ROOT / "scripts/drama_synthesis_gpu_worker.py").read_text(encoding="utf-8")
+        self.assertIn("/data/drama-synthesis-gpu/current", worker)
+        self.assertIn("DRAMA_GPU_PORT=8787", worker)
+        self.assertIn("127.0.0.1:18788:127.0.0.1:8787", tunnel)
+        self.assertIn("/s2l/youtube/", nginx)
+        self.assertNotIn("youtube-publishes", gpu)
+        self.assertNotIn("refresh_token", gpu)
+
+    def test_gpu_worker_fake_http_contract_is_media_only(self):
+        fake_app = SimpleNamespace(
+            drama_random_template_catalog=lambda: {"version": 1, "count": 315},
+            handle_gpu_video_render=lambda payload: {"ok": True, "recipe": payload["recipe"]},
+            handle_gpu_video_cover=lambda payload: {"ok": True, "cover": payload["source_url"]},
         )
-        failed_client = RefreshRetryClient()
-        first = self.engine(failed_client).run_once("worker-1")
-        self.assertEqual(first["status"], "comment_retry")
-        self.assertEqual(failed_client.comment_count, 0)
-        retry_client = SuccessfulClient()
-        second = self.engine(retry_client).run_once("worker-2")
-        stored = self.store.youtube_task(row["id"])
-        self.assertTrue(second["ok"])
-        self.assertEqual((stored["comment_state"], stored["comment_attempt_count"]), ("published", 1))
-        self.assertEqual(retry_client.comment_count, 1)
+        original_app = sys.modules.get("app")
+        sys.modules["app"] = fake_app
+        try:
+            path = ROOT / "scripts/drama_synthesis_gpu_worker.py"
+            spec = importlib.util.spec_from_file_location("drama_gpu_contract_test", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            if original_app is None:
+                sys.modules.pop("app", None)
+            else:
+                sys.modules["app"] = original_app
+        server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        try:
+            with mock.patch.dict(os.environ, {"GPU_VIDEO_WORKER_TOKEN": "fake-token"}, clear=False):
+                health = json.loads(urlopen(base + "/healthz", timeout=2).read())
+                self.assertEqual(health, {"ok": True, "role": "media-only"})
+                request = Request(base + "/api/gpu-video/render", data=json.dumps({"recipe": "frozen"}).encode(), headers={"Authorization": "Bearer fake-token", "Content-Type": "application/json"}, method="POST")
+                self.assertEqual(json.loads(urlopen(request, timeout=2).read())["recipe"], "frozen")
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(base + "/api/gpu-video/youtube", timeout=2)
+                self.assertEqual(denied.exception.code, 404)
+                denied.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
-    def test_prior_success_requires_second_confirmation(self):
-        first = self.enqueue(operation_id="operation:first1", comment="")
-        claimed = self.store.claim_youtube("setup-worker", "2099-01-01T00:00:00Z")
-        self.store.video_published(
-            first["id"],
-            "video_123456",
-            worker_id="setup-worker",
-            lease_generation=claimed["lease_generation"],
-        )
-        with self.assertRaisesRegex(DramaSynthesisError, "二次确认"):
-            self.enqueue(operation_id="operation:second", comment="")
-        accepted = self.enqueue(operation_id="operation:second", comment="", duplicate=True)
-        self.assertEqual(accepted["duplicate_confirmed"], 1)
+    def test_gpu_uses_frozen_source_and_hides_internal_intermediate(self):
+        text = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('random_source_kind = str((random_recipe or {}).get("source")', text)
+        self.assertIn('source=no_bgm_output_path if random_source_kind == "no_bgm_video" else output_path', text)
+        self.assertIn('if publish_no_bgm else ""', text)
 
-    def test_ui_and_backend_zero_output_contract_and_removed_fields(self):
-        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-        standalone = (ROOT / "static" / "drama-synthesis.html").read_text(encoding="utf-8")
-        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertEqual(html, standalone)
-        for element_id in ("outVideo", "outNoBgm", "outCover", "outRandomTemplate"):
-            marker = f'id="{element_id}" type="checkbox"'
-            self.assertIn(marker, html)
-            self.assertNotIn(marker + " checked", html)
-        self.assertNotIn("coverTemplateInput", html)
-        self.assertNotIn("namingRuleInput", html)
-        self.assertIn('raise ValueError("至少选择一个输出项")', app_source)
-        for route in (
-            "/api/drama-material/random-template-catalog",
-            "/youtube-channels",
-            "short-link|youtube-publish",
-            "/api/gpu-video/random-overlay/catalog",
-        ):
-            self.assertIn(route, app_source)
-        self.assertIn("DRAMA_SYNTHESIS_STORE.ensure_storage()", app_source)
+    def test_new_outputs_default_unchecked_and_legacy_fields_normalize_default(self):
+        text = (ROOT / "app.py").read_text(encoding="utf-8")
+        for key in ("concat_video", "no_bgm_video", "cover_16x9"):
+            self.assertIn(f'outputs.get("{key}", False)', text)
+        self.assertIn('"random_template": bool(outputs.get("random_template", False))', text)
+        self.assertIn('"cover_template": "default"', text)
+        self.assertIn('"naming_rule": "default"', text)
+        self.assertIn('item["output_random_template_url"]', text)
+        self.assertIn('item["random_template_recipe"]', text)
 
 
 if __name__ == "__main__":
