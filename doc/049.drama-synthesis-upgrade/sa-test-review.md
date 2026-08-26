@@ -4,4 +4,4 @@
 
 必须拒绝旧断言：旧短链域/target、singular route、top-level random config、旧 result 字段、默认三项选中、video ID 即成功、旧短状态/旧表、无 processing/outbox/macro 的成功路径。
 
-本评审只通过 Wave8 候选代码/测试合同；其后线上实查增量的当前状态以 `test-report.md` 为准。固定 public 合规风险和未完成的统一表生产门禁继续 HOLD；测试没有执行任何真实短链、MySQL 写入或 YouTube 外部发布。
+Wave8 候选与线上实查增量 code SHA `2b26b540660fd3687fa7c66e68a246d1a706136a` 的代码/测试合同均已独立 PASS；增量第四轮 P0/P1/P2=0/0/0，精确证据以 `test-report.md` 为准。固定 public 合规风险和未完成的统一表生产门禁继续 HOLD；测试没有执行任何真实短链、MySQL 写入或 YouTube 外部发布。
