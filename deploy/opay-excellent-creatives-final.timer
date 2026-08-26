@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate OPay excellent creatives final monthly snapshot on day 5
+
+[Timer]
+OnCalendar=*-*-05 10:00:00
+Unit=opay-excellent-creatives-refresh@final.service
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

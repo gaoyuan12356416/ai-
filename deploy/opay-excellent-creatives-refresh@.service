@@ -1,0 +1,27 @@
+[Unit]
+Description=OPay excellent creatives monthly %i refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/opay-excellent-creatives/current/ops/opay-excellent-creatives
+EnvironmentFile=/etc/opay-excellent-creatives.env
+ExecStart=/usr/bin/flock -n -E 75 /tmp/opay-excellent-creatives.lock /usr/bin/python3 /opt/opay-excellent-creatives/current/ops/opay-excellent-creatives/opay_excellent_creatives.py --latest-complete-month --stage %i --refresh --publish
+SuccessExitStatus=75
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=2h
+MemoryMax=1G
+PrivateTmp=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/opt/opay-excellent-creatives /root/codex_test
+ReadWritePaths=/mnt/data-disk/opay-excellent-creatives /usr/share/nginx/html/reports/opay-excellent-creatives /tmp
+
+[Install]
+WantedBy=multi-user.target

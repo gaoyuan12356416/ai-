@@ -1,0 +1,1629 @@
+{
+  "schema_version": 1,
+  "config_version": "2026-08-26-6c65d01ffc03",
+  "source": {
+    "file_name": "OPay素材卖点关键词.xlsx",
+    "sha256": "6c65d01ffc037134bb45f29420d8da9d846cb21338822e2737865afba2a89095",
+    "modified_at": "2026-08-26T07:45:06.195Z",
+    "sheets": {
+      "NG": "A1:K81",
+      "PK": "A1:D11"
+    }
+  },
+  "matching_policy": {
+    "exact_upload_tag_first": true,
+    "fallback": "boundary-aware longest non-overlapping aliases across material tag and file name",
+    "multiple_matches": true,
+    "unmatched_label": "待补关键词"
+  },
+  "summary": {
+    "ng_entries": 80,
+    "pk_entries": 10,
+    "unavailable_entries": 14,
+    "duplicate_display_keyword_entries": 2
+  },
+  "entries": [
+    {
+      "id": "NG-001",
+      "source_row": 2,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册用户给Airtime ₦300-₦300券+入金1W返₦50现金",
+      "audience": "纯新",
+      "upload_tag": "NUB_AT.N300+CB.N50",
+      "display_keyword": "NUB_AT.N300+CB.N50",
+      "match_aliases": [
+        "NUB_AT.N300+CB.N50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-002",
+      "source_row": 3,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册用户给Airtime ₦300-₦300券",
+      "audience": "纯新",
+      "upload_tag": "NUB_AT.N300",
+      "display_keyword": "NUB_AT.N300",
+      "match_aliases": [
+        "NUB_AT.N300"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-003",
+      "source_row": 4,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "超过30天未注册的Airtime新人礼_₦500-₦500券",
+      "audience": "纯新",
+      "upload_tag": "NUB_AT.N500",
+      "display_keyword": "NUB_AT.N500",
+      "match_aliases": [
+        "NUB_AT.N500"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-004",
+      "source_row": 5,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "UED制作的新人礼主体素材，未提及具体新人礼金额",
+      "audience": "纯新",
+      "upload_tag": "NUB_UED",
+      "display_keyword": "NUB_UED",
+      "match_aliases": [
+        "NUB_UED"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-005",
+      "source_row": 6,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "UED制作的Airtime ₦100-₦100券新人礼",
+      "audience": "纯新",
+      "upload_tag": "NUB_Airtime.N100-N100_UED",
+      "display_keyword": "NUB_AT.N100+CB.N50_UED",
+      "match_aliases": [
+        "NUB_Airtime.N100-N100_UED"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-006",
+      "source_row": 7,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "UED制作的Airtime ₦100-₦100券新人礼",
+      "audience": "纯新",
+      "upload_tag": "NUB_AT.N100_UED",
+      "display_keyword": "NUB_Airtime.N100",
+      "match_aliases": [
+        "NUB_AT.N100_UED"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": true
+    },
+    {
+      "id": "NG-007",
+      "source_row": 8,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册用户给的两张₦100券",
+      "audience": "纯新",
+      "upload_tag": "NUB_Cpn.N200",
+      "display_keyword": "NUB_Cpn.N200",
+      "match_aliases": [
+        "NUB_Cpn.N200"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-008",
+      "source_row": 9,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "GG25年12月的Airtime新人礼_₦100-₦100券",
+      "audience": "纯新",
+      "upload_tag": "NUB_AT.N100",
+      "display_keyword": "NUB_Airtime.N100",
+      "match_aliases": [
+        "NUB_AT.N100"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": true
+    },
+    {
+      "id": "NG-009",
+      "source_row": 10,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册给₦1250礼包",
+      "audience": "纯新",
+      "upload_tag": "NewUserBonus_N1250",
+      "display_keyword": "NUB_N1250",
+      "match_aliases": [
+        "NewUserBonus_N1250"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-010",
+      "source_row": 11,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册给₦1200礼包",
+      "audience": "纯新",
+      "upload_tag": "NewUserBonus_N1200",
+      "display_keyword": "NUB_N1200",
+      "match_aliases": [
+        "NewUserBonus_N1200"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-011",
+      "source_row": 12,
+      "app": "NG OPay",
+      "level1": "NewUserBonus/新人礼",
+      "level2": "注册给₦3050礼包",
+      "audience": "纯新",
+      "upload_tag": "NewUserBonus_N3050",
+      "display_keyword": "NUB_N3050",
+      "match_aliases": [
+        "NewUserBonus_N3050"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-012",
+      "source_row": 13,
+      "app": "NG OPay",
+      "level1": "Card/卡",
+      "level2": "通用-免费申请无维护费Free Apply&0 Maintainance fee",
+      "audience": "纯新",
+      "upload_tag": "Card",
+      "display_keyword": "Card",
+      "match_aliases": [
+        "Card"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-013",
+      "source_row": 14,
+      "app": "NG OPay",
+      "level1": "Card/卡",
+      "level2": "Verve卡10%返现活动",
+      "audience": "纯新",
+      "upload_tag": "Card_Verve.Cb.10%",
+      "display_keyword": "Card_Verve.CB.10%",
+      "match_aliases": [
+        "Card_Verve.Cb.10%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-014",
+      "source_row": 15,
+      "app": "NG OPay",
+      "level1": "Card/卡",
+      "level2": "Verve Card",
+      "audience": "纯新",
+      "upload_tag": "Card_Verve Card",
+      "display_keyword": "Card_VerveCard",
+      "match_aliases": [
+        "Card_Verve Card"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-015",
+      "source_row": 16,
+      "app": "NG OPay",
+      "level1": "Card/卡",
+      "level2": "Debit Card",
+      "audience": "纯新",
+      "upload_tag": "Card_Debit Card",
+      "display_keyword": "Card_DebitCard",
+      "match_aliases": [
+        "Card_Debit Card"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-016",
+      "source_row": 17,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦800，拉一人",
+      "audience": "纯新",
+      "upload_tag": "MGM_N800",
+      "display_keyword": "MGM_N800",
+      "match_aliases": [
+        "MGM_N800"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-017",
+      "source_row": 18,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦2400，拉3个人",
+      "audience": "纯新",
+      "upload_tag": "MGM_N2400",
+      "display_keyword": "MGM_N2400",
+      "match_aliases": [
+        "MGM_N2400"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-018",
+      "source_row": 19,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦4200",
+      "audience": "纯新",
+      "upload_tag": "MGM_N4200",
+      "display_keyword": "MGM_N4200",
+      "match_aliases": [
+        "MGM_N4200"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-019",
+      "source_row": 20,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦4600",
+      "audience": "纯新",
+      "upload_tag": "MGM_N4600",
+      "display_keyword": "MGM_N4600",
+      "match_aliases": [
+        "MGM_N4600"
+      ],
+      "status": "unavailable",
+      "status_label": "过期/不可用",
+      "note": "过期权益，不可用",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-020",
+      "source_row": 21,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦5600",
+      "audience": "纯新",
+      "upload_tag": "MGM_N5600",
+      "display_keyword": "MGM_N5600",
+      "match_aliases": [
+        "MGM_N5600"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-021",
+      "source_row": 22,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦5600针对13-17岁人群",
+      "audience": "纯新",
+      "upload_tag": "MGM_N5600_Junior",
+      "display_keyword": "MGM_N5600_Junior",
+      "match_aliases": [
+        "MGM_N5600_Junior"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-022",
+      "source_row": 23,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "邀请3个人，最多得₦6000",
+      "audience": "纯新",
+      "upload_tag": "MGM_N6000",
+      "display_keyword": "MGM_N6000",
+      "match_aliases": [
+        "MGM_N6000"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-023",
+      "source_row": 24,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "₦7200",
+      "audience": "纯新",
+      "upload_tag": "MGM_N7200",
+      "display_keyword": "MGM_N7200",
+      "match_aliases": [
+        "MGM_N7200"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-024",
+      "source_row": 25,
+      "app": "NG OPay",
+      "level1": "MGM/人拉人",
+      "level2": "UED的₦6000卡通素材",
+      "audience": "纯新",
+      "upload_tag": "MGM_6000_UED_Cartoon",
+      "display_keyword": "MGM_6000_UED_Cartoon",
+      "match_aliases": [
+        "MGM_6000_UED_Cartoon"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-025",
+      "source_row": 26,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "支付便捷方便",
+      "audience": "纯新",
+      "upload_tag": "EasyPayment_airtime",
+      "display_keyword": "EasyPay_Airtime",
+      "match_aliases": [
+        "EasyPayment_airtime"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-026",
+      "source_row": 27,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "支付便捷方便",
+      "audience": "纯新",
+      "upload_tag": "EasyPayment_data",
+      "display_keyword": "EasyPay_Data",
+      "match_aliases": [
+        "EasyPayment_data"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-027",
+      "source_row": 28,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "支付便捷方便",
+      "audience": "纯新",
+      "upload_tag": "EasyPayment_betting",
+      "display_keyword": "EasyPay_Betting",
+      "match_aliases": [
+        "EasyPayment_betting"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-028",
+      "source_row": 29,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "支付便捷方便",
+      "audience": "纯新",
+      "upload_tag": "EasyPayment_all",
+      "display_keyword": "EasyPay_All",
+      "match_aliases": [
+        "EasyPayment_all"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-029",
+      "source_row": 30,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "Airtime&Data充值返6%",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Data_Cb.6%",
+      "display_keyword": "Airtime_Data_Cb.6%",
+      "match_aliases": [
+        "Airtime_Data_Cb.6%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-030",
+      "source_row": 31,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "Airtime&Data充值返6%_UED卡通素材",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Data_Cb.6%_UED_Cartoon",
+      "display_keyword": "Airtime_Data_Cb.6%_UED_Cartoon",
+      "match_aliases": [
+        "Airtime_Data_Cb.6%_UED_Cartoon"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-031",
+      "source_row": 32,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "Airtime&Data的₦99券",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Data_Cpn.N99",
+      "display_keyword": "Airtime_Data_Cpn.N99",
+      "match_aliases": [
+        "Airtime_Data_Cpn.N99"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-032",
+      "source_row": 33,
+      "app": "NG OPay",
+      "level1": "Bills/生活缴费",
+      "level2": "Airtime&Data的FlashSale",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Data_FS.",
+      "display_keyword": "Airtime_Data_FS.",
+      "match_aliases": [
+        "Airtime_Data_FS."
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-033",
+      "source_row": 34,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "充值返现，6% cashback",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Cb.6%",
+      "display_keyword": "Airtime_CB.6%",
+      "match_aliases": [
+        "Airtime_Cb.6%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-034",
+      "source_row": 35,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "秒杀FlashSale_Buy ₦100 Airtime, pay ₦1",
+      "audience": "纯新",
+      "upload_tag": "Airtime_FS_N1forN100",
+      "display_keyword": "Airtime_FS_N1forN100",
+      "match_aliases": [
+        "Airtime_FS_N1forN100"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-035",
+      "source_row": 36,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "充值Airtime₦100-₦100",
+      "audience": "纯新",
+      "upload_tag": "Airtime_N100-N100",
+      "display_keyword": "Airtime_N100-N100",
+      "match_aliases": [
+        "Airtime_N100-N100"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-036",
+      "source_row": 37,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "充值Airtime₦100-₦100，UED制作的素材",
+      "audience": "纯新",
+      "upload_tag": "Airtime_N100-N100_UED",
+      "display_keyword": "Airtime_N100-N100_UED",
+      "match_aliases": [
+        "Airtime_N100-N100_UED"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-037",
+      "source_row": 38,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "充值₦100-₦99",
+      "audience": "纯新",
+      "upload_tag": "Airtime_N100-N99",
+      "display_keyword": "Airtime_N100-N99",
+      "match_aliases": [
+        "Airtime_N100-N99"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-038",
+      "source_row": 39,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "充值₦100券",
+      "audience": "纯新",
+      "upload_tag": "Airtime_N100",
+      "display_keyword": "Airtime_N100",
+      "match_aliases": [
+        "Airtime_N100"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-039",
+      "source_row": 40,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "₦99的Airtime Voucher",
+      "audience": "纯新",
+      "upload_tag": "Airtime_Cpn.N99",
+      "display_keyword": "Airtime_N99",
+      "match_aliases": [
+        "Airtime_Cpn.N99"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-040",
+      "source_row": 41,
+      "app": "NG OPay",
+      "level1": "Airtime/手机话费",
+      "level2": "免费充值",
+      "audience": "纯新",
+      "upload_tag": "Airtime_free",
+      "display_keyword": "Airtime_free",
+      "match_aliases": [
+        "Airtime_free"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-041",
+      "source_row": 42,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "充值返现，6% cashback",
+      "audience": "纯新",
+      "upload_tag": "Data_Cb.6%",
+      "display_keyword": "Data_Cb.6%",
+      "match_aliases": [
+        "Data_Cb.6%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-042",
+      "source_row": 43,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "秒杀50%折扣，FlashSale_Up to 50% off",
+      "audience": "纯新",
+      "upload_tag": "Data_FS.50%",
+      "display_keyword": "Data_FS.50%",
+      "match_aliases": [
+        "Data_FS.50%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-043",
+      "source_row": 44,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "₦1可得100MB流量",
+      "audience": "纯新",
+      "upload_tag": "Data_N1-100MB",
+      "display_keyword": "Data_N1-100MB",
+      "match_aliases": [
+        "Data_N1-100MB"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-044",
+      "source_row": 45,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "充值₦200，减₦99",
+      "audience": "纯新",
+      "upload_tag": "Data_N200-N99",
+      "display_keyword": "Data_N200-99",
+      "match_aliases": [
+        "Data_N200-N99"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-045",
+      "source_row": 46,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "₦99的Data Voucher",
+      "audience": "纯新",
+      "upload_tag": "Data_Cpn.N99",
+      "display_keyword": "Data_N99",
+      "match_aliases": [
+        "Data_Cpn.N99"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-046",
+      "source_row": 47,
+      "app": "NG OPay",
+      "level1": "Data/手机流量",
+      "level2": "赠送YouTube流量",
+      "audience": "纯新",
+      "upload_tag": "Data_Free_2G-YTNight",
+      "display_keyword": "Data_Free_2G-YTNight",
+      "match_aliases": [
+        "Data_Free_2G-YTNight"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-047",
+      "source_row": 48,
+      "app": "NG OPay",
+      "level1": "Electricity/电费",
+      "level2": "充值₦1000，减₦50",
+      "audience": "纯新",
+      "upload_tag": "Electricity_N1000-N50",
+      "display_keyword": "Electricity_N1000-N50",
+      "match_aliases": [
+        "Electricity_N1000-N50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-048",
+      "source_row": 49,
+      "app": "NG OPay",
+      "level1": "TV/电视费",
+      "level2": "充值₦1000，减₦50",
+      "audience": "纯新",
+      "upload_tag": "TV_N1000-N50",
+      "display_keyword": "TV_N1000-N50",
+      "match_aliases": [
+        "TV_N1000-N50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-049",
+      "source_row": 50,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "秒杀FlashSale_10% OFF for ₦500",
+      "audience": "纯新",
+      "upload_tag": "Betting_FS.10%forN500",
+      "display_keyword": "Betting_FS.10%forN500",
+      "match_aliases": [
+        "Betting_FS.10%forN500"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-050",
+      "source_row": 51,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "₦100 Discount",
+      "audience": "纯新",
+      "upload_tag": "Betting_N100",
+      "display_keyword": "Betting_N100",
+      "match_aliases": [
+        "Betting_N100"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-051",
+      "source_row": 52,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "₦150 Discount",
+      "audience": "回流",
+      "upload_tag": "Betting_N150",
+      "display_keyword": "Betting_N150",
+      "match_aliases": [
+        "Betting_N150"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-052",
+      "source_row": 53,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦500，给₦50 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N500_Cpn.N50",
+      "display_keyword": "BT_Dpst.N500_Cpn.N50",
+      "match_aliases": [
+        "Betting_Dpst.N500_Cpn.N50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-053",
+      "source_row": 54,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦1000，给₦50 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N1000_Cpn.N50",
+      "display_keyword": "BT_Dpst.N1000_Cpn.N50",
+      "match_aliases": [
+        "Betting_Dpst.N1000_Cpn.N50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-054",
+      "source_row": 55,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦2000，给₦100 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N2000_Cpn.N100",
+      "display_keyword": "BT_Dpst.N2000_Cpn.N100",
+      "match_aliases": [
+        "Betting_Dpst.N2000_Cpn.N100"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-055",
+      "source_row": 56,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦3000，给₦150 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N3000_Cpn.N150",
+      "display_keyword": "BT_Dpst.N3000_Cpn.N150",
+      "match_aliases": [
+        "Betting_Dpst.N3000_Cpn.N150"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-056",
+      "source_row": 57,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦4000，给₦150 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N4000_Cpn.N150",
+      "display_keyword": "BT_Dpst.N4000_Cpn.N150",
+      "match_aliases": [
+        "Betting_Dpst.N4000_Cpn.N150"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-057",
+      "source_row": 58,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦8000，给₦300 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N8000_Cpn.N300",
+      "display_keyword": "BT_Dpst.N8000_Cpn.N300",
+      "match_aliases": [
+        "Betting_Dpst.N8000_Cpn.N300"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-058",
+      "source_row": 59,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "储值₦15,000，给₦500 Coupon",
+      "audience": "纯新",
+      "upload_tag": "Betting_Dpst.N15K_Cpn.N500",
+      "display_keyword": "BT_Dpst.N15K_Cpn.N500",
+      "match_aliases": [
+        "Betting_Dpst.N15K_Cpn.N500"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-059",
+      "source_row": 60,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "充值返现1000奈拉",
+      "audience": "纯新/回流",
+      "upload_tag": "Betting_bet9jar_N1000",
+      "display_keyword": "BT_bet9jar_N1000",
+      "match_aliases": [
+        "Betting_bet9jar_N1000"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-060",
+      "source_row": 61,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "NOW WIN UP TO ₦1 BILLION！",
+      "audience": "纯新/回流",
+      "upload_tag": "Betting_bet9jar_N1B",
+      "display_keyword": "BT_bet9jar_N1B",
+      "match_aliases": [
+        "Betting_bet9jar_N1B"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-061",
+      "source_row": 62,
+      "app": "NG OPay",
+      "level1": "Betting/博彩",
+      "level2": "Predict for free & Win up to ₦10M",
+      "audience": "纯新/回流",
+      "upload_tag": "Betting_ilot_Win_N10M",
+      "display_keyword": "BT_ilot_Win_N10M",
+      "match_aliases": [
+        "Betting_ilot_Win_N10M"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-062",
+      "source_row": 63,
+      "app": "NG OPay",
+      "level1": "Saving/理财",
+      "level2": "15% P.A. 年度收益率",
+      "audience": "纯新",
+      "upload_tag": "Savings_P.A.15%",
+      "display_keyword": "Savings_P.A.15%",
+      "match_aliases": [
+        "Savings_P.A.15%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-063",
+      "source_row": 64,
+      "app": "NG OPay",
+      "level1": "Saving/理财",
+      "level2": "18% P.A. 年度收益率",
+      "audience": "纯新",
+      "upload_tag": "Savings_P.A.18%",
+      "display_keyword": "Savings_P.A.18%",
+      "match_aliases": [
+        "Savings_P.A.18%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-064",
+      "source_row": 65,
+      "app": "NG OPay",
+      "level1": "Saving/理财",
+      "level2": "25% P.A. 年度收益率",
+      "audience": "纯新",
+      "upload_tag": "Savings_P.A.25%",
+      "display_keyword": "Savings_P.A.25%",
+      "match_aliases": [
+        "Savings_P.A.25%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-065",
+      "source_row": 66,
+      "app": "NG OPay",
+      "level1": "CQZ/存取转",
+      "level2": "转账成功率100%",
+      "audience": "纯新",
+      "upload_tag": "CQZ_100%",
+      "display_keyword": "CQZ_100%",
+      "match_aliases": [
+        "CQZ_100%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-066",
+      "source_row": 67,
+      "app": "NG OPay",
+      "level1": "CQZ/存取转",
+      "level2": "周五免往其他银行转账手续费",
+      "audience": "纯新",
+      "upload_tag": "CQZ_FriFree",
+      "display_keyword": "CQZ_FriFree",
+      "match_aliases": [
+        "CQZ_FriFree"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-067",
+      "source_row": 68,
+      "app": "NG OPay",
+      "level1": "CQZ/存取转",
+      "level2": "对其他银行转账免手续费",
+      "audience": "纯新",
+      "upload_tag": "CQZ_Free",
+      "display_keyword": "CQZ_Free",
+      "match_aliases": [
+        "CQZ_Free"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-068",
+      "source_row": 69,
+      "app": "NG OPay",
+      "level1": "CQZ/存取转",
+      "level2": "转帐快",
+      "audience": "纯新",
+      "upload_tag": "CQZ_Fast",
+      "display_keyword": "CQZ_Fast",
+      "match_aliases": [
+        "CQZ_Fast"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-069",
+      "source_row": 70,
+      "app": "NG OPay",
+      "level1": "Security/安全感",
+      "level2": "UED制作的Night Guard夜间人脸识别保护",
+      "audience": "纯新",
+      "upload_tag": "Security_NightGuard_UED",
+      "display_keyword": "UED_NightGuard",
+      "match_aliases": [
+        "Security_NightGuard_UED"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-070",
+      "source_row": 71,
+      "app": "NG OPay",
+      "level1": "Security/安全感",
+      "level2": "UED制作的Large Transaction Shield大额转账保护",
+      "audience": "纯新",
+      "upload_tag": "Security_LargeTransShield_UED",
+      "display_keyword": "UED_LargeTransShield",
+      "match_aliases": [
+        "Security_LargeTransShield_UED"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-071",
+      "source_row": 72,
+      "app": "NG OPay",
+      "level1": "Security/安全感",
+      "level2": "无纸币，支付密码，防小偷",
+      "audience": "纯新",
+      "upload_tag": "Security",
+      "display_keyword": "Security",
+      "match_aliases": [
+        "Security"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-072",
+      "source_row": 73,
+      "app": "NG OPay",
+      "level1": "Security/安全感",
+      "level2": "XtraCova敢付敢赔",
+      "audience": "纯新",
+      "upload_tag": "Security_XtraCova",
+      "display_keyword": "Security_XtraCova",
+      "match_aliases": [
+        "Security_XtraCova"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-073",
+      "source_row": 74,
+      "app": "NG OPay",
+      "level1": "E-commerce/电商",
+      "level2": "3C_oraimo，价格折扣",
+      "audience": "纯新",
+      "upload_tag": "Ecommerce_3C_oraimo",
+      "display_keyword": "Ecommerce_3C_oraimo",
+      "match_aliases": [
+        "Ecommerce_3C_oraimo"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-074",
+      "source_row": 75,
+      "app": "NG OPay",
+      "level1": "Loan/贷款",
+      "level2": "最高贷款2百万奈拉",
+      "audience": "纯新",
+      "upload_tag": "Loan_N2M",
+      "display_keyword": "Loan_N2M",
+      "match_aliases": [
+        "Loan_N2M"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-075",
+      "source_row": 76,
+      "app": "NG OPay",
+      "level1": "Loan/贷款",
+      "level2": "最高贷款2百50万奈拉",
+      "audience": "纯新",
+      "upload_tag": "Loan_N2.5M",
+      "display_keyword": "Loan_N2.5M",
+      "match_aliases": [
+        "Loan_N2.5M"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-076",
+      "source_row": 77,
+      "app": "NG OPay",
+      "level1": "StuAmbassador/校园大使",
+      "level2": "",
+      "audience": "纯新",
+      "upload_tag": "StuAmbsdr_LeadAds_2501",
+      "display_keyword": "StuAmbsdr_2501",
+      "match_aliases": [
+        "StuAmbsdr_LeadAds_2501"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-077",
+      "source_row": 78,
+      "app": "NG OPay",
+      "level1": "Branding/品牌",
+      "level2": "",
+      "audience": "纯新",
+      "upload_tag": "Branding_EasyPayment",
+      "display_keyword": "Branding_EasyPayment",
+      "match_aliases": [
+        "Branding_EasyPayment"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-078",
+      "source_row": 79,
+      "app": "NG OPay",
+      "level1": "BackUserBonus/回流礼",
+      "level2": "一组回流生活缴费券：N99data，N100airtime，N400cash",
+      "audience": "回流",
+      "upload_tag": "BUB_AT.N100+DT.N99+CB.N400",
+      "display_keyword": "BUB_AT.N100+DT.N99+CB.N400",
+      "match_aliases": [
+        "BUB_AT.N100+DT.N99+CB.N400"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-079",
+      "source_row": 80,
+      "app": "NG OPay",
+      "level1": "网红视频",
+      "level2": "",
+      "audience": "纯新",
+      "upload_tag": "KOL_CQZ_100%",
+      "display_keyword": "KOL_CQZ_100%",
+      "match_aliases": [
+        "KOL_CQZ_100%"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "NG-080",
+      "source_row": 81,
+      "app": "NG OPay",
+      "level1": "Security/安全感",
+      "level2": "",
+      "audience": "纯新",
+      "upload_tag": "CQZ_General_Junior_UED",
+      "display_keyword": "CQZ_General_Junior_UED",
+      "match_aliases": [
+        "CQZ_General_Junior_UED"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-001",
+      "source_row": 2,
+      "app": "PK OPay",
+      "level1": "CQZ/存取转",
+      "level2": "CQZ_CB30",
+      "audience": "",
+      "upload_tag": "CQZ_CB30",
+      "display_keyword": "CQZ_CB30",
+      "match_aliases": [
+        "CQZ_CB30"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "每日首笔PKR50及以上的支付交易（转账，取现类除外），返现PKR30，每个自然月最高PKR300\nDaily: The first payment transaction of PKR50 or more each day (excluding transfers and withdrawals) will receive a cashback of PKR30, up to a maximum of PKR300 per calendar month.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-002",
+      "source_row": 3,
+      "app": "PK OPay",
+      "level1": "CQZ/存取转",
+      "level2": "CQZ_Free",
+      "audience": "",
+      "upload_tag": "CQZ_Free",
+      "display_keyword": "CQZ_Free",
+      "match_aliases": [
+        "CQZ_Free"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "存取转交易全都免费 （竞品跨行转出比比收费，最低PKR1）\nAll deposit, withdrawal, and transfer transactions are free of charge (competitors charge for cross-bank transfers, with a minimum fee of PKR1).",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-003",
+      "source_row": 4,
+      "app": "PK OPay",
+      "level1": "CQZ/存取转",
+      "level2": "CQZ_Fast",
+      "audience": "",
+      "upload_tag": "CQZ_Fast",
+      "display_keyword": "CQZ_Fast",
+      "match_aliases": [
+        "CQZ_Fast"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "转账快，到账快/Fast transfers with quick arrival.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-004",
+      "source_row": 5,
+      "app": "PK OPay",
+      "level1": "MPL/手机话费",
+      "level2": "MPL_AllFree",
+      "audience": "",
+      "upload_tag": "MPL_AllFree",
+      "display_keyword": "MPL_AllFree",
+      "match_aliases": [
+        "MPL_AllFree"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "套餐：全都免费（Jazzcash/EasyPaisa 每月前5笔免费，之后收费）\nAll free (Jazzcash/EasyPaisa: first 5 transactions per month are free, after which fees apply).",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-005",
+      "source_row": 6,
+      "app": "PK OPay",
+      "level1": "UBP/生活缴费",
+      "level2": "UBP_AllFree",
+      "audience": "",
+      "upload_tag": "UBP_AllFree",
+      "display_keyword": "UBP_AllFree",
+      "match_aliases": [
+        "UBP_AllFree"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "全都免费（Jazzcash/EasyPaisa 每月前3笔免费，之后收费）\nAll free (Jazzcash/EasyPaisa: first 3 transactions per month are free, after which fees apply).",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-006",
+      "source_row": 7,
+      "app": "PK OPay",
+      "level1": "NUB/新人礼",
+      "level2": "NUB_CB100+50",
+      "audience": "",
+      "upload_tag": "NUB_CB100+50",
+      "display_keyword": "NUB_CB100+50",
+      "match_aliases": [
+        "NUB_CB100+50"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "kyc返现100PKR，首入金300PKR及以上，返现PKR50\nKYC cashback of PKR100; first deposit of PKR300 or more will receive a cashback of PKR50.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-007",
+      "source_row": 8,
+      "app": "PK OPay",
+      "level1": "PPC/PayPak卡",
+      "level2": "PPC_LowFee",
+      "audience": "",
+      "upload_tag": "PPC_LowFee",
+      "display_keyword": "PPC_LowFee",
+      "match_aliases": [
+        "PPC_LowFee"
+      ],
+      "status": "unavailable",
+      "status_label": "不可用",
+      "note": "申卡费用市场最低\nCard application fees are the lowest in the market.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-008",
+      "source_row": 9,
+      "app": "PK OPay",
+      "level1": "PPC/PayPak卡",
+      "level2": "PPC_0AnnualFee",
+      "audience": "",
+      "upload_tag": "PPC_0AnnualFee",
+      "display_keyword": "PPC_0AnnualFee",
+      "match_aliases": [
+        "PPC_0AnnualFee"
+      ],
+      "status": "unavailable",
+      "status_label": "不可用",
+      "note": "卡免年费/No annual card fees.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-009",
+      "source_row": 10,
+      "app": "PK OPay",
+      "level1": "PPC/PayPak卡",
+      "level2": "PPC_0WithdrawalFee",
+      "audience": "",
+      "upload_tag": "PPC_0WithdrawalFee",
+      "display_keyword": "PPC_0WithdrawalFee",
+      "match_aliases": [
+        "PPC_0WithdrawalFee"
+      ],
+      "status": "unavailable",
+      "status_label": "不可用",
+      "note": "卡取现免费/Free card withdrawals.",
+      "duplicate_display_keyword": false
+    },
+    {
+      "id": "PK-010",
+      "source_row": 11,
+      "app": "PK OPay",
+      "level1": "General&Features/综合&性能",
+      "level2": "General_Free&Fast",
+      "audience": "",
+      "upload_tag": "General_Free&Fast",
+      "display_keyword": "General_Free&Fast",
+      "match_aliases": [
+        "General_Free&Fast"
+      ],
+      "status": "available",
+      "status_label": "可用",
+      "note": "APP永不崩溃，不卡顿，速度最快/Fastest,smoothly, never crashes\na) APP打开速度很快Lightning-fast APP launch（打开APP到让输密码我们现在平均在1.5S以内，竞品起码在4-5S,这是高频操作，用户的第一感知）\nb) 交易明细实时刷新(也是用户高频操作，竞品起码要loading好几秒，且有的竞品APP内只展示近20笔)\nc) 首页余额更新也快",
+      "duplicate_display_keyword": false
+    }
+  ],
+  "glossary": [
+    {
+      "source_row": 2,
+      "term": "人群——纯新",
+      "description": "未完成首次交易的用户"
+    },
+    {
+      "source_row": 3,
+      "term": "人群——回流",
+      "description": "历史有交易，超过30天未进行交易的用户"
+    },
+    {
+      "source_row": 4,
+      "term": "BUB",
+      "description": "Back User Bonus回流用户奖励"
+    },
+    {
+      "source_row": 5,
+      "term": "NUB",
+      "description": "New User Bonus新用用户奖励"
+    },
+    {
+      "source_row": 6,
+      "term": "AT.",
+      "description": "Airtime"
+    },
+    {
+      "source_row": 7,
+      "term": "DT.",
+      "description": "Data"
+    },
+    {
+      "source_row": 8,
+      "term": "BT.",
+      "description": "Betting"
+    },
+    {
+      "source_row": 9,
+      "term": "CPR_yyszj",
+      "description": "Carrier Price Raise_YunYingShangZhangJia"
+    },
+    {
+      "source_row": 10,
+      "term": "Dpst.",
+      "description": "Deposit"
+    },
+    {
+      "source_row": 11,
+      "term": "Cpn.",
+      "description": "Coupon/Voucher"
+    },
+    {
+      "source_row": 12,
+      "term": "Cb.",
+      "description": "Cashback"
+    },
+    {
+      "source_row": 13,
+      "term": "FS.",
+      "description": "Flash Sale"
+    },
+    {
+      "source_row": 14,
+      "term": "_UED",
+      "description": "UED制作素材"
+    },
+    {
+      "source_row": 15,
+      "term": "Influencer_",
+      "description": "盈量真人实拍视频"
+    }
+  ]
+}
