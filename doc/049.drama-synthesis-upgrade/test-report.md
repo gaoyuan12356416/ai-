@@ -27,7 +27,7 @@
 - UI 四项默认未选、零输出 backend guard、新 payload 删除字段。
 - `app.py`、核心模块、worker 和测试脚本 compile；两个静态入口共 4 个内联 JS 块语法通过。
 - 独立 QA：浏览器 8 PASS；targeted bugs 8/8；identity 7/7；stale writes 5/5；migration concurrency 400/400。
-- 最终 broad regression 一次收集 1,894：1,885 PASS、3 SKIP、5 FAIL、1 collection ERROR。全部 6 个非跳过 non-pass 均复现于 base，证明为 baseline/unrelated；对应文件在 `6f8bdf0..25b8af9` 未变化，不归因于候选。
+- 最终 broad regression 一次收集 1,894：1,885 PASS、3 SKIP、5 FAIL、1 collection ERROR。6 个非跳过 non-pass 经独立归类为 baseline/unrelated：其中 5 个位于 base..head 未变化的 implementation/test/static surfaces；ad-control route-order assertion 由 base AST 对比独立证明为既有行为。broad regression 只在 candidate 执行一次，未在 base 重跑。
 
 命令：
 

@@ -26,4 +26,4 @@
 - App import 与零输出集成检查：1 PASS。
 - 两个静态入口内联 JavaScript：4 blocks syntax PASS。
 - `git diff --check`、秘密扫描：PASS。
-- 最终 broad regression 仅执行一次：1,894 collected、1,885 PASS、3 SKIP、5 FAIL、1 collection ERROR；全部 6 个 non-pass 已证明为 baseline/unrelated，相关文件在 base..head 未变化。
+- 最终 broad regression 仅在 candidate 执行一次：1,894 collected、1,885 PASS、3 SKIP、5 FAIL、1 collection ERROR，未在 base 重跑。6 个 non-pass 经独立归类为 baseline/unrelated：5 个位于未变化的 implementation/test/static surfaces；ad-control route-order assertion 由 base AST 对比独立证明为既有行为。

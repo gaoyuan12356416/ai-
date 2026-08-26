@@ -40,4 +40,4 @@ git diff --check
 
 ## 完成记录
 
-- 实现和独立 QA 已完成；未执行生产写入、服务重启、Git push 或真实外部发布。最终 broad regression 的 6 个 non-pass 均证明为 baseline/unrelated。
+- 实现和独立 QA 已完成；未执行生产写入、服务重启、Git push 或真实外部发布。最终 broad regression 只在 candidate 执行一次，未在 base 重跑；6 个 non-pass 经独立归类为 baseline/unrelated，其中 5 个位于未变化的 implementation/test/static surfaces，ad-control route-order assertion 由 base AST 对比独立证明为既有行为。

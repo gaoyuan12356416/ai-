@@ -17,4 +17,4 @@
 
 ## QA 修订确认
 
-独立证据：targeted bugs 8/8、identity 7/7、stale writes 5/5、migration concurrency 400/400。最终 broad regression：1,894 collected / 1,885 PASS / 3 SKIP / 5 FAIL / 1 collection ERROR；6 个 non-pass 均在 base 复现且相关文件在 base..head 未变化，判定 baseline/unrelated。候选无 P0/P1。
+独立证据：targeted bugs 8/8、identity 7/7、stale writes 5/5、migration concurrency 400/400。最终 broad regression：1,894 collected / 1,885 PASS / 3 SKIP / 5 FAIL / 1 collection ERROR。6 个 non-pass 经独立归类为 baseline/unrelated：5 个位于未变化的 implementation/test/static surfaces；ad-control route-order assertion 由 base AST 对比独立证明为既有行为。broad regression 只在 candidate 执行一次，未在 base 重跑。候选无 P0/P1。
