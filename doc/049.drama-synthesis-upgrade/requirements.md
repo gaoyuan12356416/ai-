@@ -3,7 +3,7 @@
 ## 目标与边界
 
 - CPU `43.166.187.96` 保留页面、任务队列、SQLite、OAuth、YouTube 发布和统一表同步；全部视频制作迁到香港 GPU `43.154.250.89`。
-- 保持现有视觉、侧栏、表单、卡片和表格。所有输出复选框新建时默认不勾选，服务端拒绝零输出。
+- 保持现有视觉、侧栏、表单、卡片和表格。输出键精确为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；所有复选框新建时默认不勾选，服务端拒绝零输出。
 - 不改香港 GPU 现有 `ads_video_producer.service`；不静默双写或自动回退旧 GPU。
 - 本候选不执行部署、短链外写、真实 YouTube 上传/评论。生产代码部署授权也不包含任何真实 YouTube 上传/评论；外部发布必须另行精确授权。
 
@@ -36,7 +36,7 @@
 - `comment_status` 与 `sync_status` 独立。评论只在 confirmed published 后执行；评论失败只重试评论。同步使用 outbox，失败不改变视频已发布事实。
 - interrupted/5xx 查询 resumable session；无法证明未提交时 unknown 并禁止替代发布。processing/unknown 不重传。prior success 需二次确认。
 - 评论非空须 `youtube.force-ssl`；关闭评论、儿童内容或权限不足只影响评论子状态。凭据仅服务端，日志禁止 secret/session URI。
-- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；禁止 DELETE、DDL、任意 SQL。缺表/缺配置 fail closed，不能标记 sync 成功。
+- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；禁止 DELETE、DDL、任意 SQL。worker 必须从受控 RPC factory 构造 writer：仅 HTTPS 或 loopback HTTP、禁止 redirect、固定 payload allowlist/timeout，凭据只从 server-only 0600 文件读取。缺配置/认证/表/响应均 fail closed，不能标记 sync 成功。
 
 ## 香港 GPU 与验收
 

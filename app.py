@@ -772,7 +772,7 @@ from features.drama_synthesis.core import (
     freeze_random_recipe,
 )
 from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
-from features.drama_synthesis.youtube import YouTubeCredentialRepository
+from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -13476,7 +13476,7 @@ def normalize_outputs(raw_outputs):
 
         "cover_16x9": bool(outputs.get("cover_16x9", False)),
 
-        "random_template": bool(outputs.get("random_template", False)),
+        "random_template_video": bool(outputs.get("random_template_video", outputs.get("random_template", False))),
 
 
 
@@ -13615,7 +13615,7 @@ def selected_job_outputs_ready(job):
         return False
     if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
         return False
-    if outputs["random_template"]:
+    if outputs["random_template_video"]:
         recipe = DRAMA_SYNTHESIS_STORE.recipe(job.get("job_id", ""))
         if not recipe or not str(recipe.get("output_url") or "").strip():
             return False
@@ -14550,7 +14550,21 @@ def drama_random_template_catalog():
 
 
 def drama_youtube_repository():
-    return YouTubeCredentialRepository(run_mysql, schema=DB_NAME)
+    try:
+        timeout = int(os.environ.get("DRAMA_YOUTUBE_HTTP_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120
+    client = YouTubeHTTPClient(timeout=timeout)
+
+    def identity_probe(credential):
+        try:
+            token = client.refresh_access_token(credential)
+            client.verify_channel_identity(token, credential.channel_id)
+            return True
+        except Exception:
+            return False
+
+    return YouTubeCredentialRepository(run_mysql, schema=DB_NAME, identity_probe=identity_probe)
 
 
 def decorate_drama_synthesis_job(job):
@@ -22106,7 +22120,7 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
         candidates["output_video_no_bgm_url"] = str(
             job.get("output_video_no_bgm_url") or ""
         ).strip() or build_drama_public_url(job_id, "material_no_bgm.mp4")
-    if outputs["random_template"]:
+    if outputs["random_template_video"]:
         recipe = DRAMA_SYNTHESIS_STORE.recipe(job_id)
         if not recipe or not str(recipe.get("completed_at_utc") or ""):
             return False
@@ -79216,7 +79230,7 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         "outputs": {
             "concat_video": bool(outputs.get("concat_video", False)),
             "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
-            "random_template": bool(outputs.get("random_template", False)),
+            "random_template_video": bool(outputs.get("random_template_video", False)),
         },
         "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
         "await_cover_16x9": bool(await_cover_16x9),
@@ -79228,7 +79242,7 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
             for item in requested
         ],
     }
-    if outputs.get("random_template"):
+    if outputs.get("random_template_video"):
         stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
         if not stored_recipe:
             raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
@@ -79319,7 +79333,7 @@ def gpu_video_result_satisfies_outputs(result, outputs):
         url = str(result.get("output_video_no_bgm_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
             return False
-    if bool(outputs.get("random_template", False)):
+    if bool(outputs.get("random_template_video", False)):
         url = str(result.get("output_random_template_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
             return False
@@ -79429,7 +79443,7 @@ def _handle_gpu_video_render_unlocked(payload):
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
     await_cover_16x9 = bool(payload.get("await_cover_16x9") or payload.get("wait_for_cover"))
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
-    render_random = bool(outputs.get("random_template", False))
+    render_random = bool(outputs.get("random_template_video", False))
     random_recipe = payload.get("random_template_recipe") if render_random else None
     if render_random and not isinstance(random_recipe, dict):
         raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
@@ -80211,7 +80225,7 @@ def submit_job(payload, actor_session=None):
 
     validation = validate_content_request(app_id, content_id, episode_start, episode_end)
     job_id = uuid.uuid4().hex
-    if outputs["random_template"]:
+    if outputs["random_template_video"]:
         recipe = freeze_random_recipe(
             job_id=job_id,
             content_id=content_id,
@@ -82322,9 +82336,9 @@ def process_job(job):
     need_video_pipeline = (
         outputs["concat_video"]
         or outputs["no_bgm_video"]
-        or outputs["random_template"]
+        or outputs["random_template_video"]
     )
-    if outputs["random_template"] and not gpu_video_worker_enabled():
+    if outputs["random_template_video"] and not gpu_video_worker_enabled():
         raise DramaSynthesisError("drama_random_gpu_unavailable", "香港GPU随机模板服务暂不可用", 503)
 
 
@@ -84684,7 +84698,7 @@ def process_job(job):
             job["output_video_url"] = gpu_result.get("output_video_url", "")
         if outputs["no_bgm_video"]:
             job["output_video_no_bgm_url"] = gpu_result.get("output_video_no_bgm_url", "")
-        if outputs["random_template"]:
+        if outputs["random_template_video"]:
             stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
             expected_recipe_sha = str((stored_recipe or {}).get("recipe_sha256") or "")
             actual_recipe_sha = str(gpu_result.get("random_template_recipe_sha256") or "")

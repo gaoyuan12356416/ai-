@@ -30,7 +30,8 @@ from features.drama_synthesis.core import (  # noqa: E402
     build_long_url, freeze_random_recipe, render_wrapper_html,
 )
 from features.drama_synthesis.unified_youtube import (  # noqa: E402
-    UnifiedYouTubeWriter, run_sync_outbox_once, validate_controlled_operation,
+    ControlledRPCExecutor, UnifiedYouTubeWriter, build_unified_youtube_writer_from_env,
+    run_sync_outbox_once, validate_controlled_operation,
 )
 from features.drama_synthesis.youtube import (  # noqa: E402
     YouTubeCredential, YouTubeCredentialRepository, YouTubeHTTPClient,
@@ -124,6 +125,19 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses); self.trust_env = True; self.gets = 0
     def get(self, *_args, **_kwargs): self.gets += 1; return self.responses.pop(0)
+    def close(self): pass
+
+
+class FakeRPCSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.posts = []
+        self.trust_env = True
+
+    def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        return self.responses.pop(0)
+
     def close(self): pass
 
 
@@ -250,7 +264,16 @@ class UpgradeTests(unittest.TestCase):
         conn = sqlite3.connect(db)
         value = json.loads(conn.execute("SELECT outputs_json FROM drama_material_job").fetchone()[0])
         conn.close()
-        self.assertEqual(value, {"concat_video": True, "no_bgm_video": True, "cover_16x9": True, "random_template": False})
+        self.assertEqual(value, {"concat_video": True, "no_bgm_video": True, "cover_16x9": True, "random_template_video": False})
+
+    def test_outputs_migration_uses_authoritative_random_template_video_key(self):
+        db = self._legacy_db('{"concat_video": false,"random_template_video": true}')
+        migrate(db, apply=True, backup_path=self.root / "authoritative.backup.sqlite3")
+        conn = sqlite3.connect(db)
+        value = json.loads(conn.execute("SELECT outputs_json FROM drama_material_job").fetchone()[0])
+        conn.close()
+        self.assertTrue(value["random_template_video"])
+        self.assertNotIn("random_template", value)
 
     def test_outputs_migration_invalid_json_rolls_back(self):
         db = self._legacy_db("not-json")
@@ -391,11 +414,36 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaises(DramaSynthesisError):
             validate_controlled_operation("delete", "ads_youtube_videos")
 
+    def test_unified_rpc_factory_config_auth_redirect_and_unknown_fail_closed(self):
+        credential = self.root / "unified.token"
+        credential.write_text("fake-server-credential", encoding="utf-8")
+        if os.name != "nt": credential.chmod(0o600)
+        env = {
+            "DRAMA_YOUTUBE_UNIFIED_RPC_URL": "https://ledger.example.test/v1/youtube-sync",
+            "DRAMA_YOUTUBE_UNIFIED_RPC_CREDENTIAL_FILE": str(credential),
+            "DRAMA_YOUTUBE_UNIFIED_RPC_TIMEOUT": "5",
+        }
+        session = FakeRPCSession([FakeResponse(payload={"found": False}), FakeResponse(payload={"idempotent_success": True})])
+        writer = build_unified_youtube_writer_from_env(env, session_factory=lambda: session)
+        writer.sync("video", "video_rpc", {"video_id": "video_rpc"})
+        self.assertEqual([call[1]["json"]["action"] for call in session.posts], ["select", "insert"])
+        self.assertTrue(all(call[1]["allow_redirects"] is False for call in session.posts))
+        self.assertTrue(all(call[1]["headers"]["Authorization"].startswith("Bearer ") for call in session.posts))
+        with self.assertRaises(DramaSynthesisError):
+            build_unified_youtube_writer_from_env({}).sync("video", "video_missing", {"video_id": "video_missing"})
+        for response, expected in ((FakeResponse(status=401), "youtube_sync_auth_failed"), (FakeResponse(status=302), "youtube_sync_redirect_denied"), (FakeResponse(payload={}), "youtube_sync_response_invalid")):
+            failed = build_unified_youtube_writer_from_env(env, session_factory=lambda response=response: FakeRPCSession([response]))
+            with self.assertRaises(DramaSynthesisError) as raised:
+                failed.sync("video", "video_failed", {"video_id": "video_failed"})
+            self.assertEqual(raised.exception.code, expected)
+        with self.assertRaises(DramaSynthesisError):
+            ControlledRPCExecutor("https://ledger.example.test/v1", str(credential))("delete", "ads_youtube_videos", "video", {})
+
     def test_channel_repository_uses_channel_status_and_decimal_ids(self):
         seen = []
         token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
         credentials = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
-        repo = YouTubeCredentialRepository(lambda sql: seen.append(sql) or [("1", CHANNEL, "Current", "1", "2", token, credentials)])
+        repo = YouTubeCredentialRepository(lambda sql: seen.append(sql) or [("1", CHANNEL, "Current", "1", "2", token, credentials)], identity_probe=lambda _row: True)
         self.assertEqual(len(repo.list_for_app("1479")), 1)
         self.assertIn("ch.channel_status", seen[0])
         with self.assertRaises(DramaSynthesisError):
@@ -406,6 +454,25 @@ class UpgradeTests(unittest.TestCase):
         complete = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
         creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
         rows = [("1", CHANNEL, "upload-only", "1", "2", upload_only, creds), ("3", CHANNEL[:-1] + "B", "disabled", "2", "4", complete, creds)]
+        self.assertEqual(YouTubeCredentialRepository(lambda _sql: rows, identity_probe=lambda _row: True).list_for_app("1479"), [])
+
+    def test_channel_list_requires_runtime_refresh_identity_and_hides_failures(self):
+        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
+        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        other = CHANNEL[:-1] + "B"
+        rows = [("1", CHANNEL, "verified", "1", "2", token, creds), ("3", other, "hidden", "1", "4", token, creds)]
+        refreshes = []
+        identity_reads = []
+        mutations = []
+        def probe(row):
+            refreshes.append(row.account_id)
+            identity_reads.append(row.channel_id)
+            return row.channel_id == CHANNEL
+        items = YouTubeCredentialRepository(lambda _sql: rows, identity_probe=probe).list_for_app("1479")
+        self.assertEqual([item["channel_id"] for item in items], [CHANNEL])
+        self.assertEqual(refreshes, ["2", "4"])
+        self.assertEqual(identity_reads, [CHANNEL, other])
+        self.assertEqual(mutations, [])
         self.assertEqual(YouTubeCredentialRepository(lambda _sql: rows).list_for_app("1479"), [])
 
     def test_identity_probe_empty_multiple_and_mismatch_fail_closed(self):
@@ -474,12 +541,17 @@ class UpgradeTests(unittest.TestCase):
             text = (ROOT / "static" / name).read_text(encoding="utf-8")
             self.assertIn('id="randomTemplateSource"', text)
             self.assertIn("source: els.randomTemplateSource.value", text)
+            self.assertIn("random_template_video: els.outRandomTemplate.checked", text)
+            self.assertNotRegex(text, r"(?m)^\s*random_template:\s*els\.outRandomTemplate\.checked\s*,?\s*$")
             self.assertIn("new TextEncoder().encode(description).length > 5000", text)
             self.assertIn("document.execCommand(\"copy\")", text)
             self.assertIn('id="materialPickerModal"', text)
             self.assertNotIn("window.prompt", text)
             self.assertIn("retryYoutubeComment", text)
             self.assertIn("chooseMaterial(job, false)", text)
+            self.assertIn("无可用视频产物", text)
+            self.assertIn("随机模板配方审计", text)
+            self.assertNotIn("const [job, channels] = await Promise.all", text)
             self.assertNotIn("random_template_video_url", text)
 
     def test_app_exposes_exact_six_routes_and_macro_precondition(self):
@@ -489,6 +561,8 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn('if "{{url}}" in description_template:', text)
         self.assertIn("description_template.replace", text)
         self.assertIn("YOUTUBE_LIVE_ENABLED", text)
+        self.assertIn("token = client.refresh_access_token(credential)", text)
+        self.assertIn("client.verify_channel_identity(token, credential.channel_id)", text)
         self.assertIn("material_kind, _source_url = drama_youtube_source", text)
         self.assertNotIn("page.dramabuzzs.com/s2l", text)
         self.assertNotIn("/youtube-channels", text)
@@ -504,6 +578,8 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn("/s2l/youtube/", nginx)
         self.assertNotIn("youtube-publishes", gpu)
         self.assertNotIn("refresh_token", gpu)
+        publish_worker = (ROOT / "scripts/drama_youtube_publish_worker.py").read_text(encoding="utf-8")
+        self.assertIn("build_unified_youtube_writer_from_env()", publish_worker)
 
     def test_gpu_worker_fake_http_contract_is_media_only(self):
         fake_app = SimpleNamespace(
@@ -552,7 +628,7 @@ class UpgradeTests(unittest.TestCase):
         text = (ROOT / "app.py").read_text(encoding="utf-8")
         for key in ("concat_video", "no_bgm_video", "cover_16x9"):
             self.assertIn(f'outputs.get("{key}", False)', text)
-        self.assertIn('"random_template": bool(outputs.get("random_template", False))', text)
+        self.assertIn('"random_template_video": bool(outputs.get("random_template_video", outputs.get("random_template", False)))', text)
         self.assertIn('"cover_template": "default"', text)
         self.assertIn('"naming_rule": "default"', text)
         self.assertIn('item["output_random_template_url"]', text)

@@ -19109,6 +19109,15 @@ function buildJobRow(job) {
 
 
       ];
+      const frozenRecipe = job.random_template_recipe && typeof job.random_template_recipe === "object" ? job.random_template_recipe : null;
+      if (frozenRecipe) {
+        const assets = frozenRecipe.assets && typeof frozenRecipe.assets === "object" ? frozenRecipe.assets : {};
+        const layers = ["border", "corners", "opacity_video", "tint"].map(key => {
+          const asset = assets[key];
+          return `${key}=${asset && typeof asset === "object" ? (asset.name || "--") : "--"}`;
+        }).join("<br />");
+        detailResultCards.push(`<div class="card"><strong>随机模板配方审计</strong><div style="margin-top:8px;line-height:1.8;">资产版本：${navText(frozenRecipe.version || "--")} / ${navText(frozenRecipe.profile || "--")}<br />源视频：${navText(frozenRecipe.source || "--")}<br />资产集合：${navText(frozenRecipe.asset_set_sha256 || "--")}<br />${layers}</div></div>`);
+      }
       (job.short_links || []).forEach(link => {
         const shortValue = link.short_url ? `<a href="${navText(link.short_url)}" target="_blank">${navText(link.short_url)}</a>` : navText(link.error_message || "短链尚未发布");
         detailResultCards.push(`<div class="card"><strong>短链 · ${navText(link.material_kind || "视频")}</strong><div style="margin-top:8px;">状态：${navText(link.publish_state || "--")} · ${shortValue}</div></div>`);
@@ -19119,10 +19128,12 @@ function buildJobRow(job) {
         detailResultCards.push(`<div class="card"><strong>YouTube：${navText(task.title || task.channel_id || "发布任务")}</strong><div style="margin-top:8px;line-height:1.8;">视频状态：${navText(task.video_state || "--")}<br />评论状态：${navText(task.comment_status || "--")}<br />同步状态：${navText(task.sync_status || "--")}<br />任务状态：${navText(task.status || "--")}${task.error_message ? `<br />原因：${navText(task.error_message)}` : ""}</div>${retryComment}</div>`);
       });
       els.jobDetailResults.innerHTML = detailResultCards.join("");
+      const hasVideoMaterial = selectableMaterials(job, false).length > 0;
       els.jobDetailActions.innerHTML = job.status === "done" ? `
         <button class="btn btn-secondary" type="button" onclick="copyMaterialUrl('${job.job_id}')">复制素材 URL</button>
-        <button class="btn btn-secondary" type="button" onclick="createShortLink('${job.job_id}')">生成短链</button>
-        <button class="btn btn-primary" type="button" onclick="openYoutubePublish('${job.job_id}')">发布到 YouTube</button>
+        <button class="btn btn-secondary" type="button" ${hasVideoMaterial ? `onclick="createShortLink('${job.job_id}')"` : "disabled"}>生成短链</button>
+        <button class="btn btn-primary" type="button" ${hasVideoMaterial ? `onclick="openYoutubePublish('${job.job_id}')"` : "disabled"}>发布到 YouTube</button>
+        ${hasVideoMaterial ? "" : '<span class="hint">无可用视频产物</span>'}
       ` : "";
 
 
@@ -21082,7 +21093,7 @@ function buildJobRow(job) {
 
 
           cover_16x9: els.outCover.checked,
-          random_template: els.outRandomTemplate.checked
+          random_template_video: els.outRandomTemplate.checked
 
 
 
@@ -21287,7 +21298,7 @@ function buildJobRow(job) {
 
 
 
-        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9 && !payload.outputs.random_template) {
+        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9 && !payload.outputs.random_template_video) {
 
 
 
@@ -22383,7 +22394,7 @@ function buildJobRow(job) {
     }
     function chooseMaterial(job, includeCover) {
       const items = selectableMaterials(job, includeCover);
-      if (!items.length) throw new Error("当前任务没有可操作产物");
+      if (!items.length) throw new Error(includeCover ? "当前任务没有可操作产物" : "无可用视频产物");
       if (items.length === 1) return Promise.resolve(items[0]);
       els.materialPickerOptions.replaceChildren();
       items.forEach(item => {
@@ -22465,10 +22476,10 @@ function buildJobRow(job) {
 
     async function openYoutubePublish(jobId) {
       try {
-        const [job, channels] = await Promise.all([
-          api(`/api/drama-material/jobs/${jobId}`),
-          api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(job.app_id)}`)
-        ]);
+        const job = await api(`/api/drama-material/jobs/${jobId}`);
+        const videos = selectableMaterials(job, false);
+        if (!videos.length) throw new Error("无可用视频产物");
+        const channels = await api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(job.app_id)}`);
         if (!channels.items?.length) throw new Error("当前产品没有可用的 YouTube 上传频道");
         state.youtubePublishJob = job;
         state.youtubeOperationId = newYoutubeOperationId();
@@ -22481,12 +22492,7 @@ function buildJobRow(job) {
           els.youtubeChannel.appendChild(option);
         });
         els.youtubeSourceKind.replaceChildren();
-        [
-          ["concat_video", "合集视频（含 BGM）", job.output_video_url],
-          ["no_bgm_video", "去 BGM 合集视频", job.output_video_no_bgm_url],
-          ["random_template", "随机模板视频", job.output_random_template_url]
-        ].forEach(([value, label, url]) => {
-          if (!url) return;
+        videos.forEach(([value, label]) => {
           const option = document.createElement("option");
           option.value = value;
           option.textContent = label;

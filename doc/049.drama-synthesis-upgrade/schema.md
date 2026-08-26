@@ -2,7 +2,7 @@
 
 ## CPU SQLite
 
-- `drama_material_job.outputs_json` 继续使用既有列，仅把四个布尔键归一为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template`；不删旧列。
+- `drama_material_job.outputs_json` 继续使用既有列，仅把四个布尔键归一为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；历史错误键 `random_template` 只读归一，不作为新存储合同；不删旧列。
 - 随机模板 recipe ledger 冻结 job、source、manifest、assets、参数、recipe SHA、完成结果 URL/SHA/profile，完成后不可改写。
 - `drama_material_short_link` 对 `(job_id, material_kind)` 唯一；自增 `id` 是 gy 数字 namespace；content_id、target、short URL、wrapper SHA 与发布状态不可变。
 - `drama_youtube_publish` 是发布、处理、评论与凭据身份的权威任务账本，含冻结模板/渲染描述、source identity、resumable 状态、独立 `comment_status`/`sync_status`、lease owner/generation 与 unknown 标志。
@@ -12,7 +12,7 @@
 
 ## 外部统一 MySQL
 
-目标表精确为 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前只读证据确认三表尚不存在，因此候选不含 DDL。统一 writer 只接收受控 `select/insert/update`、精确表白名单、受限 payload 和 external ID；单进程并发 1，先 select 再 insert/update，结果必须声明 idempotent success。缺 executor、缺表、schema 不匹配或非白名单操作均 fail closed，outbox 保持失败待重试，禁止宣称同步成功。
+目标表精确为 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。当前只读证据确认三表尚不存在，因此候选不含 DDL。统一 writer 只接收受控 `select/insert/update`、精确表白名单、受限 payload 和 external ID；单进程并发 1，先 select 再 insert/update，结果必须声明 idempotent success。worker 的 executor 由受控 RPC env factory 构造，RPC 端负责表 schema/外部 ID 唯一约束；credential 只在 0600 文件。缺 executor、缺表、schema 不匹配或非白名单操作均 fail closed，outbox 保持失败待重试，禁止宣称同步成功。
 
 ## 文件所有权
 

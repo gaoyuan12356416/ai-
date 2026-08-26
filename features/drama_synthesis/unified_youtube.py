@@ -5,8 +5,13 @@ from __future__ import annotations
 import re
 import threading
 import json
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
+
+import requests
 
 from .core import DramaSynthesisError
 
@@ -17,6 +22,88 @@ TABLE_BY_KIND = {
 }
 ALLOWED_ACTIONS = frozenset({"select", "insert", "update"})
 EXTERNAL_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,255}")
+PAYLOAD_KEYS = frozenset({"publish_id", "video_id", "comment_id"})
+
+
+class ControlledRPCExecutor:
+    """Send a fixed operation envelope to an owner-provided ledger RPC."""
+
+    def __init__(self, url: str, credential_file: str, *, timeout: int = 15, session_factory=requests.Session):
+        parsed = urlsplit(str(url or "").strip())
+        loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        if (
+            parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or (parsed.scheme == "http" and not loopback)
+        ):
+            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步配置无效", 503)
+        path = Path(str(credential_file or ""))
+        if not path.is_absolute() or not path.is_file() or path.is_symlink():
+            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据未配置", 503)
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据权限不安全", 503)
+        raw = path.read_bytes()
+        try:
+            token = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            token = ""
+        if not 16 <= len(token) <= 4096 or any(char.isspace() for char in token):
+            raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步凭据无效", 503)
+        self.url = parsed.geturl()
+        self.token = token
+        self.timeout = max(3, min(int(timeout), 60))
+        self.session_factory = session_factory
+
+    def __call__(self, action: str, table: str, external_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        validate_controlled_operation(action, table)
+        if not EXTERNAL_ID_RE.fullmatch(str(external_id or "")) or not isinstance(payload, Mapping):
+            raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+        safe_payload = {str(key): value for key, value in payload.items() if str(key) in PAYLOAD_KEYS}
+        if len(safe_payload) != len(payload) or (action == "select" and safe_payload) or (action != "select" and not safe_payload):
+            raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+        session = self.session_factory()
+        session.trust_env = False
+        try:
+            response = session.post(
+                self.url,
+                json={"action": action, "table": table, "external_id": str(external_id), "payload": safe_payload},
+                headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
+                timeout=self.timeout,
+                allow_redirects=False,
+            )
+        except requests.RequestException:
+            raise DramaSynthesisError("youtube_sync_unavailable", "YouTube统一记录同步暂不可用", 503) from None
+        finally:
+            session.close()
+        if 300 <= response.status_code < 400:
+            raise DramaSynthesisError("youtube_sync_redirect_denied", "YouTube统一记录同步拒绝重定向", 503)
+        if response.status_code in {401, 403}:
+            raise DramaSynthesisError("youtube_sync_auth_failed", "YouTube统一记录同步认证失败", 503)
+        if response.status_code != 200:
+            raise DramaSynthesisError("youtube_sync_unavailable", "YouTube统一记录同步暂不可用", 503)
+        try:
+            result = response.json()
+        except ValueError:
+            result = None
+        if not isinstance(result, Mapping):
+            raise DramaSynthesisError("youtube_sync_response_invalid", "YouTube统一记录同步响应无效", 503)
+        if action == "select" and not isinstance(result.get("found"), bool):
+            raise DramaSynthesisError("youtube_sync_response_invalid", "YouTube统一记录同步响应无效", 503)
+        if action != "select" and result.get("idempotent_success") is not True:
+            raise DramaSynthesisError("youtube_sync_response_invalid", "YouTube统一记录同步响应无效", 503)
+        return dict(result)
+
+
+def build_unified_youtube_writer_from_env(env: Mapping[str, str] = os.environ, *, session_factory=requests.Session):
+    url = str(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_URL", "") or "").strip()
+    credential_file = str(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_CREDENTIAL_FILE", "") or "").strip()
+    if not url or not credential_file:
+        return UnifiedYouTubeWriter(None)
+    try:
+        timeout = int(env.get("DRAMA_YOUTUBE_UNIFIED_RPC_TIMEOUT", "15") or 15)
+    except (TypeError, ValueError):
+        timeout = 15
+    return UnifiedYouTubeWriter(ControlledRPCExecutor(url, credential_file, timeout=timeout, session_factory=session_factory))
 
 
 class UnifiedYouTubeWriter:
@@ -33,7 +120,7 @@ class UnifiedYouTubeWriter:
             raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
         if self.executor is None:
             raise DramaSynthesisError("youtube_sync_not_configured", "YouTube统一记录同步尚未配置", 503)
-        safe_payload = {str(key): value for key, value in payload.items() if str(key) in {"publish_id", "video_id", "comment_id"}}
+        safe_payload = {str(key): value for key, value in payload.items() if str(key) in PAYLOAD_KEYS}
         if not safe_payload:
             raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
         with self._gate:
@@ -67,4 +154,4 @@ def run_sync_outbox_once(store, writer: UnifiedYouTubeWriter, worker_id: str):
         return {"status": "failed", "claimed": True, "outbox_id": item["id"], "code": exc.code}
 
 
-__all__ = ["ALLOWED_ACTIONS", "TABLE_BY_KIND", "UnifiedYouTubeWriter", "run_sync_outbox_once", "validate_controlled_operation"]
+__all__ = ["ALLOWED_ACTIONS", "TABLE_BY_KIND", "ControlledRPCExecutor", "UnifiedYouTubeWriter", "build_unified_youtube_writer_from_env", "run_sync_outbox_once", "validate_controlled_operation"]

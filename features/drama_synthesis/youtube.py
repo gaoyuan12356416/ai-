@@ -83,11 +83,18 @@ class YouTubeCredential:
 class YouTubeCredentialRepository:
     """Read token JSON into process memory and return safe DTOs only."""
 
-    def __init__(self, query_runner: Callable[[str], Sequence[Sequence[Any]]], *, schema: str = "kunlunads_dev"):
+    def __init__(
+        self,
+        query_runner: Callable[[str], Sequence[Sequence[Any]]],
+        *,
+        schema: str = "kunlunads_dev",
+        identity_probe: Optional[Callable[[YouTubeCredential], bool]] = None,
+    ):
         if not callable(query_runner) or not re.fullmatch(r"[A-Za-z0-9_]+", schema):
             raise ValueError("invalid YouTube credential repository")
         self.query_runner = query_runner
         self.schema = schema
+        self.identity_probe = identity_probe
 
     def _query(self, where: str) -> list[YouTubeCredential]:
         sql = f"""
@@ -146,7 +153,13 @@ class YouTubeCredentialRepository:
         seen_channels = set()
         for row in rows:
             caps = row.capabilities
-            if not caps["eligible"] or row.channel_local_id in seen_channels:
+            if not caps["eligible"] or row.channel_local_id in seen_channels or self.identity_probe is None:
+                continue
+            try:
+                verified = bool(self.identity_probe(row))
+            except Exception:
+                verified = False
+            if not verified:
                 continue
             items.append(
                 {

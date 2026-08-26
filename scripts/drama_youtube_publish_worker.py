@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 import app as drama_app  # noqa: E402
 from features.drama_synthesis.unified_youtube import (  # noqa: E402
-    UnifiedYouTubeWriter, run_sync_outbox_once,
+    build_unified_youtube_writer_from_env, run_sync_outbox_once,
 )
 from features.drama_synthesis.youtube import (  # noqa: E402
     YouTubeHTTPClient,
@@ -69,7 +69,7 @@ def main() -> int:
     worker_id = "%s:%s" % (socket.gethostname(), os.getpid())
     poll_seconds = env_int("DRAMA_YOUTUBE_POLL_SECONDS", 10, 1, 300)
     sync_enabled = os.environ.get("DRAMA_YOUTUBE_UNIFIED_SYNC_ENABLED", "0") == "1"
-    sync_writer = UnifiedYouTubeWriter(None)
+    sync_writer = build_unified_youtube_writer_from_env()
     while not STOP:
         if os.environ.get("YOUTUBE_LIVE_ENABLED", "0") != "1":
             time.sleep(poll_seconds)

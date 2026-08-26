@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-OUTPUT_KEYS = ("concat_video", "no_bgm_video", "cover_16x9", "random_template")
+OUTPUT_KEYS = ("concat_video", "no_bgm_video", "cover_16x9", "random_template_video")
 REQUIRED_COLUMNS = {"id", "outputs_json", "output_video_url", "output_video_no_bgm_url", "cover_16x9_url"}
 
 
@@ -21,12 +21,12 @@ def normalize(row):
         raise ValueError("row %s has invalid outputs_json" % row["id"]) from exc
     if not isinstance(raw, dict):
         raise ValueError("row %s outputs_json is not an object" % row["id"])
-    legacy_random = bool(raw.get("random_template", raw.get("random_template_video", False)))
+    legacy_random = bool(raw.get("random_template_video", raw.get("random_template", False)))
     values = {
         "concat_video": bool(raw["concat_video"]) if "concat_video" in raw else bool(row["output_video_url"]),
         "no_bgm_video": bool(raw["no_bgm_video"]) if "no_bgm_video" in raw else bool(row["output_video_no_bgm_url"]),
         "cover_16x9": bool(raw["cover_16x9"]) if "cover_16x9" in raw else bool(row["cover_16x9_url"]),
-        "random_template": legacy_random,
+        "random_template_video": legacy_random,
     }
     return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

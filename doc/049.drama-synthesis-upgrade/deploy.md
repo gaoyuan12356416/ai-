@@ -4,6 +4,7 @@
 
 - QA commit 通过；备份 CPU SHA/systemd/nginx/env metadata/SQLite，不读取 secret；outputs dry-run 后事务迁移。
 - 外部 owner 提供三张统一表；否则 sync 保持失败/待重试，不能宣称链路通过。
+- 外部 owner 同时提供受控 RPC endpoint 与 server-only credential file；endpoint 只接受三表及 SELECT/INSERT/UPDATE，credential `root:service 0600`，配置 `DRAMA_YOUTUBE_UNIFIED_RPC_URL`/`...CREDENTIAL_FILE` 后先用 fake/只读 select 验证。redirect、401/403、未知 response 或缺表均阻断 release。
 - 建专用 owner/root `/mnt/data-disk/drama-youtube-short-links/s2l/youtube` 和 dedicated nginx location；数字 namespace 不共用。
 - `YOUTUBE_LIVE_ENABLED=0`；源 allowlist 精确为 `advertising-1306474899.cos.ap-hongkong.myqcloud.com,ai.yingliangads.com`，无 wildcard。
 
