@@ -12,6 +12,11 @@ SPEC = importlib.util.spec_from_file_location(
 )
 report = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(report)
+REGRESSION_SPEC = importlib.util.spec_from_file_location(
+    "validate_regression_snapshot", HERE / "validate_regression_snapshot.py"
+)
+regression = importlib.util.module_from_spec(REGRESSION_SPEC)
+REGRESSION_SPEC.loader.exec_module(regression)
 
 
 class BasicRuleTests(unittest.TestCase):
@@ -374,6 +379,46 @@ class ConfigurationAndMediaTests(unittest.TestCase):
 
 
 class SnapshotAndPublishTests(unittest.TestCase):
+    def test_frozen_2026_07_regression_fixture_is_internally_consistent(self):
+        fixture = json.loads(
+            (HERE / "fixtures" / "2026-07-regression.json").read_text(encoding="utf-8")
+        )
+        rows = fixture["selected_rows"]
+        keys = {
+            (row["channel"], row["app"], row["custom_source_id"])
+            for row in rows
+        }
+        self.assertEqual(fixture["row_count"], 26)
+        self.assertEqual(len(rows), len(keys))
+        self.assertEqual(fixture["channel_app_counts"], {
+            "Meta|NG OPay": 12,
+            "Meta|PK OPay": 4,
+            "TikTok|NG OPay": 10,
+        })
+        self.assertNotIn("Google", {row["channel"] for row in rows})
+        self.assertEqual(sum(item["ambiguous_ad_days"] for item in fixture["audits"]), 0)
+        self.assertEqual(
+            sum(item["selected_count"] for item in fixture["audits"]),
+            fixture["row_count"],
+        )
+
+        statuses = ["available"] * 22 + ["pending"] * 3 + ["unavailable"]
+        payload_rows = []
+        for index, item in enumerate(rows):
+            row = dict(item)
+            row["af_d0_first_transactions"] = row.pop("af_d0")
+            row["source_status"] = "available"
+            row["thumbnail_status"] = "available"
+            row["selling_point_status"] = statuses[index]
+            payload_rows.append(row)
+        payload = {
+            "month": fixture["month"],
+            "keyword_config_version": fixture["keyword_config_version"],
+            "rows": payload_rows,
+            "audits": fixture["audits"],
+        }
+        self.assertEqual(regression.validate(payload, fixture)["row_count"], 26)
+
     def test_final_snapshot_is_frozen_and_publish_is_atomic(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -24,7 +24,9 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：通过。
-- `python -m unittest discover ...`：23/23 通过。
+- `python -m unittest discover ...`：24/24 通过（含固化 2026-07 回归签名）。
 - `validate_frontend_contract.py`：通过。
 - Playwright 桌面与 390×844：筛选、证据、视频预览、CSV 均通过；控制台 0 error / 0 warning。
 - 本地预览夹具已删除，不进入 Git 提交。
+- 生产影子：2026-07 生成 26 条，复合键 26 个，歧义广告日 0；Meta/TikTok 产出，Google 0 估算。
+- 独立只读 SQL：六个渠道/App 平台消耗与 AF D0 汇总均与 JSON 一致；素材 4566082、4759574 的严格渠道粒度指标与 AF D0 一致。

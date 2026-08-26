@@ -1,0 +1,391 @@
+{
+  "schema_version": 1,
+  "month": "2026-07",
+  "captured_at": "2026-08-26T17:55:27+08:00",
+  "source_snapshot_sha256": "7fd2fb79432359effac8b42c8d44706b5ebac560da01b7f361f4433bed7eddd6",
+  "keyword_config_version": "2026-08-26-6c65d01ffc03",
+  "row_count": 26,
+  "channel_app_counts": {
+    "Meta|NG OPay": 12,
+    "Meta|PK OPay": 4,
+    "TikTok|NG OPay": 10
+  },
+  "rule_counts": {
+    "A": 24,
+    "A+B": 1,
+    "B": 1
+  },
+  "source_status_counts": {
+    "available": 26
+  },
+  "thumbnail_status_counts": {
+    "available": 26
+  },
+  "keyword_status_counts": {
+    "available": 22,
+    "pending": 3,
+    "unavailable": 1
+  },
+  "selected_rows": [
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 1641136,
+      "spend": 2593.93,
+      "impressions": 2861787,
+      "clicks": 120992,
+      "installs": 301,
+      "af_d0": 984,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 2072479,
+      "spend": 3021.92,
+      "impressions": 2243967,
+      "clicks": 175307,
+      "installs": 773,
+      "af_d0": 1553,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 2356757,
+      "spend": 2746.62,
+      "impressions": 2491519,
+      "clicks": 108504,
+      "installs": 887,
+      "af_d0": 1235,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 2875153,
+      "spend": 1752.2,
+      "impressions": 1365707,
+      "clicks": 122097,
+      "installs": 1692,
+      "af_d0": 687,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 3588712,
+      "spend": 1723.35,
+      "impressions": 1716125,
+      "clicks": 154628,
+      "installs": 1869,
+      "af_d0": 785,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 3900664,
+      "spend": 1965.89,
+      "impressions": 1812361,
+      "clicks": 166975,
+      "installs": 2386,
+      "af_d0": 725,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 3900671,
+      "spend": 1857.93,
+      "impressions": 2247866,
+      "clicks": 176819,
+      "installs": 2144,
+      "af_d0": 649,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 4105728,
+      "spend": 1747.68,
+      "impressions": 1085202,
+      "clicks": 57799,
+      "installs": 2203,
+      "af_d0": 1198,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 4178745,
+      "spend": 2367.88,
+      "impressions": 2314656,
+      "clicks": 249857,
+      "installs": 2971,
+      "af_d0": 1152,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 4178753,
+      "spend": 2561.2,
+      "impressions": 2655658,
+      "clicks": 241391,
+      "installs": 3382,
+      "af_d0": 1340,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 4473007,
+      "spend": 3910.26,
+      "impressions": 3862917,
+      "clicks": 296101,
+      "installs": 4016,
+      "af_d0": 2939,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "custom_source_id": 4566082,
+      "spend": 8152.44,
+      "impressions": 9685932,
+      "clicks": 828503,
+      "installs": 12365,
+      "af_d0": 3910,
+      "selection_rule": "A+B"
+    },
+    {
+      "channel": "Meta",
+      "app": "PK OPay",
+      "custom_source_id": 5158550,
+      "spend": 155.89,
+      "impressions": 308681,
+      "clicks": 1890,
+      "installs": 740,
+      "af_d0": 162,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "PK OPay",
+      "custom_source_id": 5179224,
+      "spend": 173.53,
+      "impressions": 424719,
+      "clicks": 3769,
+      "installs": 899,
+      "af_d0": 110,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "PK OPay",
+      "custom_source_id": 5179227,
+      "spend": 71.28,
+      "impressions": 165452,
+      "clicks": 1350,
+      "installs": 466,
+      "af_d0": 86,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "Meta",
+      "app": "PK OPay",
+      "custom_source_id": 5377926,
+      "spend": 86.51,
+      "impressions": 86841,
+      "clicks": 1272,
+      "installs": 282,
+      "af_d0": 88,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 2702469,
+      "spend": 4274.9,
+      "impressions": 5913869,
+      "clicks": 45808,
+      "installs": 2477,
+      "af_d0": 1586,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 3900669,
+      "spend": 5452.85,
+      "impressions": 8705122,
+      "clicks": 168839,
+      "installs": 2635,
+      "af_d0": 996,
+      "selection_rule": "B"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 3900677,
+      "spend": 7033.97,
+      "impressions": 13111225,
+      "clicks": 95367,
+      "installs": 3135,
+      "af_d0": 1852,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 3900679,
+      "spend": 10270.71,
+      "impressions": 16317339,
+      "clicks": 117180,
+      "installs": 4431,
+      "af_d0": 2961,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 3900682,
+      "spend": 5479.72,
+      "impressions": 8663473,
+      "clicks": 67849,
+      "installs": 2632,
+      "af_d0": 1448,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 4759574,
+      "spend": 15501.48,
+      "impressions": 22663199,
+      "clicks": 132572,
+      "installs": 6337,
+      "af_d0": 6479,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 4986962,
+      "spend": 3961.01,
+      "impressions": 7058355,
+      "clicks": 41262,
+      "installs": 1928,
+      "af_d0": 1621,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 4986965,
+      "spend": 3785.75,
+      "impressions": 6775216,
+      "clicks": 48111,
+      "installs": 847,
+      "af_d0": 907,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 4986966,
+      "spend": 5363.48,
+      "impressions": 10821016,
+      "clicks": 62214,
+      "installs": 2124,
+      "af_d0": 1733,
+      "selection_rule": "A"
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "custom_source_id": 4986967,
+      "spend": 3709.63,
+      "impressions": 5869963,
+      "clicks": 36108,
+      "installs": 1789,
+      "af_d0": 1297,
+      "selection_rule": "A"
+    }
+  ],
+  "audits": [
+    {
+      "channel": "Google",
+      "app": "NG OPay",
+      "selected_count": 0,
+      "platform_spend": 1247663.17,
+      "mapping_coverage": 0.0,
+      "mapping_gap_spend": 1247663.17,
+      "rule_a_available": false,
+      "af_total": 124815,
+      "af_mapped": 0,
+      "ambiguous_ad_days": 0
+    },
+    {
+      "channel": "Google",
+      "app": "PK OPay",
+      "selected_count": 0,
+      "platform_spend": 0.0,
+      "mapping_coverage": 0.0,
+      "mapping_gap_spend": 0.0,
+      "rule_a_available": false,
+      "af_total": 3820,
+      "af_mapped": 0,
+      "ambiguous_ad_days": 0
+    },
+    {
+      "channel": "Meta",
+      "app": "NG OPay",
+      "selected_count": 12,
+      "platform_spend": 101376.65,
+      "mapping_coverage": 1.0,
+      "mapping_gap_spend": 0.0,
+      "rule_a_available": true,
+      "af_total": 33281,
+      "af_mapped": 33281,
+      "ambiguous_ad_days": 0
+    },
+    {
+      "channel": "Meta",
+      "app": "PK OPay",
+      "selected_count": 4,
+      "platform_spend": 1941.84,
+      "mapping_coverage": 1.0,
+      "mapping_gap_spend": 0.0,
+      "rule_a_available": true,
+      "af_total": 967,
+      "af_mapped": 967,
+      "ambiguous_ad_days": 0
+    },
+    {
+      "channel": "TikTok",
+      "app": "NG OPay",
+      "selected_count": 10,
+      "platform_spend": 187280.86,
+      "mapping_coverage": 0.99489254,
+      "mapping_gap_spend": 956.53,
+      "rule_a_available": true,
+      "af_total": 44867,
+      "af_mapped": 44844,
+      "ambiguous_ad_days": 0
+    },
+    {
+      "channel": "TikTok",
+      "app": "PK OPay",
+      "selected_count": 0,
+      "platform_spend": 0.16,
+      "mapping_coverage": 1.0,
+      "mapping_gap_spend": 0.0,
+      "rule_a_available": true,
+      "af_total": 26,
+      "af_mapped": 26,
+      "ambiguous_ad_days": 0
+    }
+  ]
+}

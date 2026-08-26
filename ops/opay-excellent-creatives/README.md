@@ -18,6 +18,12 @@ python -m unittest discover -s ops\opay-excellent-creatives -p "test_*.py" -v
 python ops\opay-excellent-creatives\validate_frontend_contract.py
 ```
 
+2026-07 固化回归：
+
+```bash
+python3 validate_regression_snapshot.py /path/to/data/<version>/2026-07.json
+```
+
 关键词配置由用户工作簿只读生成：
 
 ```powershell
