@@ -30,18 +30,19 @@
 ## 实际部署记录
 
 - 分支：`codex/ai-game-performance-report-20260825`；
-- 当前生产运行提交：`c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
-- 当前 release：`/opt/ai-game-performance/releases/c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
-- 上一运行提交/release：`98045976290b92ce3d69d030ae45eab45f386760`；
+- 当前生产运行提交：`a63293b323f3a24afb5835d89d58e02d63b4139e`；
+- 当前 release：`/opt/ai-game-performance/releases/a63293b323f3a24afb5835d89d58e02d63b4139e`；
+- 上一运行提交/release：`c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
 - current：`/opt/ai-game-performance/current`；
 - SQLite：`/mnt/data-disk/ai-game-performance/cache/ai-game-performance.sqlite3`；
 - 公开目录：`/usr/share/nginx/html/reports/ai-game-performance`；
 - URL：`https://ai.yingliangads.com/reports/ai-game-performance/`；
-- 最终数据版本：`20260825T182509993602+0800`；
+- 最终数据版本：`20260826T165257950954+0800`；
 - 首次部署前备份：`/mnt/data-disk/ai-game-performance/backups/20260825T160520+0800-pre-2655aaf`；
 - 最终版本回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T162341+0800-pre-479398b`；
 - BUG-006 发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T170107+0800-pre-9804597`；
 - v6 展示精简发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T181629+0800-pre-c2ea2ac`；
+- 分钟单位热修复发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260826T164652+0800-pre-a63293b`；
 - 数据盘：UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`，BUG-006 发布前可用 84 GiB；
 - Nginx 仅 reload；未重启 `drama-material-api` 或 TT/X/Meta 发布服务。
 
@@ -118,3 +119,16 @@ v6 回滚到上一生产提交 `98045976290b92ce3d69d030ae45eab45f386760` 时使
 - 未查询 MySQL、未修改 Nginx/unit/env、未 reload Nginx，未重启 AI 主 API、TT/X/Meta 服务。
 
 精确回滚：确认刷新 service 为 inactive 后，将 `current` 原子切回 `98045976290b92ce3d69d030ae45eab45f386760`，从本节备份恢复 `public-before/index.html` 和 `public-before/latest.json`（清单最后切换）；保留 SQLite、新 release 和新数据版本用于审计，再复核哈希、匿名鉴权、登录态页面、timer、TT 报表和主 API。
+
+## 平均时长分钟单位热修复增量发布（2026-08-26）
+
+- GitHub/运行提交：`a63293b323f3a24afb5835d89d58e02d63b4139e`；release：`/opt/ai-game-performance/releases/a63293b323f3a24afb5835d89d58e02d63b4139e`；上一 release 为 `c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`。
+- 发布前备份：`/mnt/data-disk/ai-game-performance/backups/20260826T164652+0800-pre-a63293b`，旧 current、index、latest 及 SHA-256 清单校验通过。
+- GitHub 精确提交经服务器 20/20、前端契约、`node --check`、`git diff --check` 后进入发布。
+- 共享锁由正常 TT 60 日刷新占用时等待自然释放，未终止、绕过或并发扫库；获得锁后仅从既有 SQLite 执行 `--publish`。
+- 16:52:57 提交公开版本 `20260826T165257950954+0800` 并原子切换 current；公开 index 与 release `report.html` SHA-256 均为 `e8589878723a2116c530f30fa569bec49a52a54e9b61f85b701c85a7cf915b3e`。
+- SQLite `quick_check=ok`、`integrity_check=ok`，三视图各 17 个日文件完整；Nginx、主 API、timer、AI 报表鉴权和 TT 报表鉴权通过。
+- 生产登录态指标卡显示 `18.13 min`，表格显示 `18.31 min` 等分钟值，可见秒单位计数为 0；内部秒口径不变。
+- 未查询 MySQL、未修改或 reload Nginx，未重启 AI 主 API、TT/X/Meta 服务。
+
+精确回滚：确认 `ai-game-performance-refresh.service` 为 inactive，持有 `/tmp/tt_minis_multi_dim_dashboard.lock` 后，将 `/opt/ai-game-performance/current` 原子切回 `c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；从上述备份恢复 `public-before/index.html`，最后恢复 `public-before/latest.json` 作为提交点。保留 SQLite、新 release 和新数据版本，随后复核公开文件哈希、匿名 302、登录态秒单位、timer、TT 报表和主 API；无需 reload 或重启服务。

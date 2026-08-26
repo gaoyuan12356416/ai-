@@ -32,7 +32,7 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：PASS；
-- `python -m unittest discover ...`：19/19 PASS；
+- `python -m unittest discover ...`：20/20 PASS；
 - `python validate_frontend_contract.py`：PASS（含 `node --check`）；
 - `git diff --check`：PASS。
 - 验收缺陷修复后：19/19 PASS；新增 Node 行为测试验证六渠道、Google 不双计、Unity 兜底和来源行数守恒；前端契约与 `node --check` PASS。
@@ -45,3 +45,11 @@
 - `nginx -t`、匿名 302、登录态 200、timer、TT 回归、390×844：PASS。
 
 剩余验收：用户打开最终报表并手点 CSV 下载。
+
+## 平均时长分钟单位热修复评审（2026-08-26）
+
+- 评审编号：`CR-MIN-001`。只替换单位文字会造成数值大 60 倍，只改页面会造成 CSV 口径不一致；实现保持 `avg_play_duration_seconds` 与总播放秒数不变，仅在用户出口除以 60。
+- 指标卡和表格统一显示两位小数加 `min`；CSV 表头为 `平均游戏时长(min)`，值为同一两位小数分钟数。
+- Node 行为测试证明内部 `1098.31` 秒保持不变，页面为 `18.31 min`，CSV 为 `18.31`；静态契约禁止旧秒展示格式回归。
+- 运行提交/不可变 release：`a63293b323f3a24afb5835d89d58e02d63b4139e`；本地与服务器 20/20、前端契约、`node --check`、`git diff --check` 均通过。
+- 生产指标卡为 `18.13 min`，表格样本为 `18.31 min`，可见秒单位计数为 0；SQLite/JSON 秒口径、Nginx、主 API、timer 和 TT 报表回归通过。
