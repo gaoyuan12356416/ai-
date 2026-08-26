@@ -59,7 +59,7 @@ OPay 投放团队需要按月复盘 Google、Meta、TikTok 的优秀素材。原
 
 - 素材 ID 固定为永久 `ads_custom_source.id`。
 - `type=1` 显示 PIC，`type=2` 显示 VID。
-- 图片缓存缩略图；视频优先使用 `cover`，缺失时用 FFmpeg 提取代表帧。
+- 图片缓存缩略图；视频优先使用 `cover`，缺失时用 FFmpeg，服务器无 FFmpeg 时使用受超时控制的 OpenCV 子进程提取代表帧。
 - 已知 COS HTTP 地址升级为 HTTPS；源文件不镜像，失效时保留报表行并显示异常。
 - 制作者取 `designer`：数字按 `admin_users.id`，字符串按 `admin_users.username`；依次显示 `main_username`、`name`、`未登记`。
 - 首次上线时间优先使用最早 `auto_publish_dt`，否则回退最早实际投放 `dt`，详情显示来源。

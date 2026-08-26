@@ -30,7 +30,7 @@ git diff --check
 ## 风险与依赖
 
 - 生产只读 MySQL 命令由 `/root/codex_test/opera_product_daily_dashboard.py` 提供，真实凭据不进入仓库。
-- FFmpeg 为视频无封面时的可选降级；缺失不阻断月数据。
+- 视频无封面时优先 FFmpeg；服务器未提供 FFmpeg 包时由现有 OpenCV 运行库的受控子进程回退，失败仅降级单行。
 - Google 精确链路不足时按审计 0 行交付，禁止估算。
 - 生产发布前验证数据盘挂载、只读端点、GitHub SSH、Nginx 和旧报表回归。
 

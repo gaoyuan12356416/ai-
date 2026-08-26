@@ -39,6 +39,14 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("*-*-05 10:00:00", final)
         self.assertIn("@final.service", final)
 
+    def test_video_frame_has_bounded_opencv_fallback(self):
+        generator = (HERE / "opay_excellent_creatives.py").read_text(encoding="utf-8")
+        helper = (HERE / "extract_video_frame.py").read_text(encoding="utf-8")
+        self.assertIn('ROOT / "extract_video_frame.py"', generator)
+        self.assertIn("timeout=max(20, MEDIA_TIMEOUT_SECONDS * 3)", generator)
+        self.assertIn("cv2.VideoCapture", helper)
+        self.assertIn("CAP_PROP_POS_MSEC", helper)
+
 
 if __name__ == "__main__":
     unittest.main()

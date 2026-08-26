@@ -1720,10 +1720,8 @@ def build_thumbnail(row, data_root: Path):
             temporary_dir = Path(temporary)
             output_jpg = temporary_dir / "thumbnail.jpg"
             if material_type == "VID" and not cover_url:
-                if not ffmpeg:
-                    raise RuntimeError("ffmpeg_missing_for_video_frame")
-                process = subprocess.run(
-                    [
+                if ffmpeg:
+                    command = [
                         ffmpeg,
                         "-hide_banner",
                         "-loglevel",
@@ -1738,7 +1736,21 @@ def build_thumbnail(row, data_root: Path):
                         "-vf",
                         "scale='min(640,iw)':-2",
                         str(output_jpg),
-                    ],
+                    ]
+                else:
+                    helper = ROOT / "extract_video_frame.py"
+                    if not helper.exists():
+                        raise RuntimeError("video_frame_helper_missing")
+                    command = [
+                        sys.executable,
+                        str(helper),
+                        thumbnail_input,
+                        str(output_jpg),
+                        "--timeout-ms",
+                        str(MEDIA_TIMEOUT_SECONDS * 1000),
+                    ]
+                process = subprocess.run(
+                    command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=max(20, MEDIA_TIMEOUT_SECONDS * 3),
