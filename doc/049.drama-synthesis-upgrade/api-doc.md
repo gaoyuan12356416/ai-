@@ -41,7 +41,7 @@ HK internal catalog。要求 `Authorization: Bearer <GPU_VIDEO_WORKER_TOKEN>`；
 
 ### `GET /api/drama-material/jobs/<job_id>/youtube-channels`
 
-只允许完成任务。只返回当前 app 的 eligible channel：`channel_local_id,channel_id,channel_name,youtube_account_id,upload_eligible,comment_eligible`。
+只允许完成任务。只返回当前 app 的 eligible channel：`channel_local_id,channel_id,channel_name,youtube_account_id,upload_eligible,identity_eligible,comment_eligible`。仅有 upload scope 而无 identity-read scope 的映射不返回。
 
 ### `POST /api/drama-material/jobs/<job_id>/youtube-publish`
 
@@ -72,7 +72,12 @@ HK internal catalog。要求 `Authorization: Bearer <GPU_VIDEO_WORKER_TOKEN>`；
 | `drama_recipe_result_mismatch` | 502 | GPU 回传配方身份不符 |
 | `drama_short_link_publisher_not_configured` | 503 | 无短链发布适配器 |
 | `youtube_channel_not_eligible` | 409 | 频道/授权不符合条件 |
+| `youtube_identity_scope_missing` | 409 | 缺少频道身份读取权限 |
+| `youtube_channel_identity_mismatch` | 409 | 刷新 token 对应频道不是冻结频道，或返回空/多频道 |
+| `youtube_channel_identity_unauthorized` | 401/403 | token 无权核验频道身份 |
+| `youtube_channel_identity_unavailable` | 0/5xx | 身份核验暂时不可用，外部写入前可重试 |
 | `youtube_comment_scope_missing` | 409 | 评论缺少 force-ssl |
+| `youtube_stale_claim` | 409 | worker 的 owner/generation 已过期，状态写入被 fencing 拒绝 |
 | `youtube_duplicate_confirmation_required` | 409 | 已有成功，需二次确认 |
 | `youtube_previous_outcome_unknown` | 409 | 已有未知结果，禁止替代发布 |
 

@@ -17,7 +17,7 @@
 | DS-007 | 短链精确目标和 HTML | 参数顺序正确，无开放跳转脚本 | P0 | PASS |
 | DS-008 | 相同 job 重建短链 | ID/URL/文件内容幂等；目标不可变 | P0 | PASS |
 | DS-009 | publisher 未配置 | 503/failed，不返回伪成功 | P0 | PASS |
-| DS-010 | 频道 eligibility | 仅 status=1+refresh+client+upload scope | P0 | PASS |
+| DS-010 | 频道 eligibility | 仅 channel_status=1+refresh+client+upload+identity-read scope | P0 | PASS |
 | DS-011 | 评论 scope | 无 `youtube.force-ssl` 时拒绝/禁用 | P0 | PASS |
 | DS-012 | operation_id 重放 | 返回同一任务，不重复视频 | P0 | PASS |
 | DS-013 | 视频成功再评论 | 视频/评论分别记录 published | P0 | PASS |
@@ -35,6 +35,12 @@
 | DS-024 | raw legacy job 的随机模板 YouTube 来源 | 从已完成冻结 recipe/output 解析 URL | P0 | PASS |
 | DS-025 | SQL 标识对抗输入 | quote/backslash/越界 ID 在查询前失败关闭 | P0 | PASS |
 | DS-026 | 评论请求前临时失败 | 首次不发评论，known-safe retry 恰好发布一次 | P0 | PASS |
+| DS-027 | token 频道身份核验 | mismatch/empty/multiple 失败关闭；网络瞬态仅安全 retry；均不开始上传/评论 | P0 | PASS |
+| DS-028 | upload-only scope | 无 identity-read scope 的频道不展示、不入队 | P0 | PASS |
+| DS-029 | SQLite additive migration | 旧表自动增加 `lease_generation NOT NULL DEFAULT 0` 且旧行值为 0 | P0 | PASS |
+| DS-030 | 两 worker 到期重领对抗 | stale owner/generation 的 session/offset/published/fail/comment 写全部拒绝，current owner 正常完成 | P0 | PASS |
+| DS-031 | 下载与外部调用续租 | 下载分块 heartbeat；refresh/probe/query/begin/upload/comment 前续租 | P0 | PASS |
+| DS-032 | 评论请求后 runtime 中断 | attempt 已持久化，结果转 unknown，禁止自动重复评论 | P0 | PASS |
 
 ## 回归范围
 

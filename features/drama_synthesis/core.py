@@ -36,6 +36,18 @@ UPLOAD_SCOPES = frozenset(
         "youtube.force-ssl",
     }
 )
+IDENTITY_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtubepartner",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "youtube.readonly",
+        "youtube",
+        "youtubepartner",
+        "youtube.force-ssl",
+    }
+)
 COMMENT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 SHORT_BASE_URL = "https://page.dramabuzzs.com/s2l"
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2284/view"
@@ -97,8 +109,9 @@ def normalize_channel_scopes(value: Any) -> frozenset[str]:
 def scope_capabilities(scopes: Iterable[str]) -> Dict[str, bool]:
     normalized = normalize_channel_scopes(list(scopes))
     upload = bool(normalized & UPLOAD_SCOPES)
+    identity = bool(normalized & IDENTITY_SCOPES)
     comment = COMMENT_SCOPE in normalized or "youtube.force-ssl" in normalized
-    return {"upload_eligible": upload, "comment_eligible": comment}
+    return {"upload_eligible": upload, "identity_eligible": identity, "comment_eligible": comment}
 
 
 def _catalog_assets(catalog: Mapping[str, Any]) -> Dict[str, tuple[Dict[str, Any], ...]]:
@@ -315,6 +328,7 @@ class DramaSynthesisStore:
                 video_attempt_count INTEGER NOT NULL DEFAULT 0, comment_attempt_count INTEGER NOT NULL DEFAULT 0,
                 error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
                 lease_owner TEXT NOT NULL DEFAULT '', lease_expires_at_utc TEXT NOT NULL DEFAULT '',
+                lease_generation INTEGER NOT NULL DEFAULT 0,
                 created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
                 video_published_at_utc TEXT NOT NULL DEFAULT '', comment_published_at_utc TEXT NOT NULL DEFAULT ''
             )""",
@@ -332,6 +346,11 @@ class DramaSynthesisStore:
             try:
                 for statement in statements:
                     conn.execute(statement)
+                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(drama_youtube_publish_task)")}
+                if "lease_generation" not in columns:
+                    conn.execute(
+                        "ALTER TABLE drama_youtube_publish_task ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -520,6 +539,8 @@ class DramaSynthesisStore:
         capabilities = scope_capabilities(scopes)
         if not capabilities["upload_eligible"]:
             raise DramaSynthesisError("youtube_upload_scope_missing", "频道授权缺少视频上传权限", 409)
+        if not capabilities["identity_eligible"]:
+            raise DramaSynthesisError("youtube_identity_scope_missing", "频道授权缺少身份核验权限", 409)
         if comment_text and not capabilities["comment_eligible"]:
             raise DramaSynthesisError("youtube_comment_scope_missing", "频道授权缺少评论权限", 409)
         now = utc_now()
@@ -620,7 +641,7 @@ class DramaSynthesisStore:
                     return None
                 next_status = "publishing_video" if row["video_state"] != "published" else "publishing_comment"
                 updated = conn.execute(
-                    "UPDATE drama_youtube_publish_task SET status=?,lease_owner=?,lease_expires_at_utc=?,updated_at_utc=? WHERE id=? AND status=?",
+                    "UPDATE drama_youtube_publish_task SET status=?,lease_owner=?,lease_expires_at_utc=?,lease_generation=lease_generation+1,updated_at_utc=? WHERE id=? AND status=?",
                     (next_status, worker_id, lease_expires_at_utc, utc_now(), int(row["id"]), row["status"]),
                 ).rowcount
                 if updated != 1:
@@ -634,34 +655,80 @@ class DramaSynthesisStore:
             finally:
                 conn.close()
 
-    def set_upload_session(self, task_id: int, session_uri: str, source_size: int) -> None:
+    @staticmethod
+    def _stale_youtube_claim() -> DramaSynthesisError:
+        return DramaSynthesisError("youtube_stale_claim", "YouTube发布任务租约已失效", 409)
+
+    def renew_youtube_lease(
+        self,
+        task_id: int,
+        worker_id: str,
+        lease_generation: int,
+        lease_expires_at_utc: str,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish_task
+                       SET lease_expires_at_utc=?,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=?
+                         AND status IN ('publishing_video','publishing_comment')""",
+                    (lease_expires_at_utc, utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish_task WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def set_upload_session(
+        self,
+        task_id: int,
+        session_uri: str,
+        source_size: int,
+        *,
+        worker_id: str,
+        lease_generation: int,
+    ) -> None:
         parsed = urlsplit(str(session_uri or ""))
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or source_size <= 0:
             raise DramaSynthesisError("youtube_resumable_session_invalid", "YouTube断点续传会话无效", 502)
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "UPDATE drama_youtube_publish_task SET resumable_session_uri=?,source_size=?,video_attempt_count=video_attempt_count+1,updated_at_utc=? WHERE id=? AND video_state<>'published'",
-                    (session_uri, int(source_size), utc_now(), int(task_id)),
-                )
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish_task
+                       SET resumable_session_uri=?,source_size=?,video_attempt_count=video_attempt_count+1,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_video' AND video_state<>'published'""",
+                    (session_uri, int(source_size), utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
                 conn.commit()
             finally:
                 conn.close()
 
-    def set_upload_offset(self, task_id: int, next_byte: int) -> None:
+    def set_upload_offset(self, task_id: int, next_byte: int, *, worker_id: str, lease_generation: int) -> None:
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "UPDATE drama_youtube_publish_task SET next_byte=?,updated_at_utc=? WHERE id=? AND video_state<>'published'",
-                    (max(0, int(next_byte)), utc_now(), int(task_id)),
-                )
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish_task SET next_byte=?,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_video' AND video_state<>'published'""",
+                    (max(0, int(next_byte)), utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
                 conn.commit()
             finally:
                 conn.close()
 
-    def video_published(self, task_id: int, video_id: str) -> Dict[str, Any]:
+    def video_published(self, task_id: int, video_id: str, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", str(video_id or "")):
             raise DramaSynthesisError("youtube_video_identity_invalid", "YouTube视频ID无效", 502)
         now = utc_now()
@@ -669,16 +736,31 @@ class DramaSynthesisStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT * FROM drama_youtube_publish_task WHERE id=?", (int(task_id),)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM drama_youtube_publish_task WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), str(worker_id), int(lease_generation)),
+                ).fetchone()
                 if row is None:
-                    raise DramaSynthesisError("youtube_task_not_found", "YouTube发布任务不存在", 404)
+                    raise self._stale_youtube_claim()
                 if row["video_id"] and row["video_id"] != video_id:
                     raise DramaSynthesisError("youtube_video_identity_conflict", "YouTube视频身份冲突", 409)
-                terminal = "published" if row["comment_state"] == "skipped" else "video_published"
-                conn.execute(
-                    "UPDATE drama_youtube_publish_task SET status=?,video_state='published',video_id=?,unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',video_published_at_utc=?,updated_at_utc=? WHERE id=?",
-                    (terminal, video_id, now, now, int(task_id)),
-                )
+                terminal = row["comment_state"] == "skipped"
+                if terminal:
+                    updated = conn.execute(
+                        """UPDATE drama_youtube_publish_task
+                           SET status='published',video_state='published',video_id=?,unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',video_published_at_utc=?,updated_at_utc=?
+                           WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_video'""",
+                        (video_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                    ).rowcount
+                else:
+                    updated = conn.execute(
+                        """UPDATE drama_youtube_publish_task
+                           SET status='publishing_comment',video_state='published',video_id=?,unknown_outcome=0,error_code='',error_message='',video_published_at_utc=?,updated_at_utc=?
+                           WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_video'""",
+                        (video_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                    ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
                 conn.execute(
                     "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
                     (int(task_id), "video", "published", video_id, now),
@@ -691,7 +773,7 @@ class DramaSynthesisStore:
             finally:
                 conn.close()
 
-    def comment_published(self, task_id: int, comment_id: str) -> Dict[str, Any]:
+    def comment_published(self, task_id: int, comment_id: str, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
         if not str(comment_id or "").strip():
             raise DramaSynthesisError("youtube_comment_identity_invalid", "YouTube评论ID无效", 502)
         now = utc_now()
@@ -699,15 +781,24 @@ class DramaSynthesisStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT * FROM drama_youtube_publish_task WHERE id=?", (int(task_id),)).fetchone()
-                if row is None or row["video_state"] != "published" or not row["video_id"]:
+                row = conn.execute(
+                    "SELECT * FROM drama_youtube_publish_task WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), str(worker_id), int(lease_generation)),
+                ).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                if row["video_state"] != "published" or not row["video_id"]:
                     raise DramaSynthesisError("youtube_video_not_confirmed", "视频未确认发布，禁止评论", 409)
                 if row["comment_id"] and row["comment_id"] != comment_id:
                     raise DramaSynthesisError("youtube_comment_identity_conflict", "YouTube评论身份冲突", 409)
-                conn.execute(
-                    "UPDATE drama_youtube_publish_task SET status='published',comment_state='published',comment_id=?,unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',comment_published_at_utc=?,updated_at_utc=? WHERE id=?",
-                    (comment_id, now, now, int(task_id)),
-                )
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish_task
+                       SET status='published',comment_state='published',comment_id=?,unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',comment_published_at_utc=?,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_comment'""",
+                    (comment_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
                 conn.execute(
                     "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
                     (int(task_id), "comment", "published", str(comment_id)[:200], now),
@@ -720,7 +811,18 @@ class DramaSynthesisStore:
             finally:
                 conn.close()
 
-    def fail_youtube(self, task_id: int, *, phase: str, code: str, message: str, unknown: bool, retryable: bool = False) -> Dict[str, Any]:
+    def fail_youtube(
+        self,
+        task_id: int,
+        *,
+        worker_id: str,
+        lease_generation: int,
+        phase: str,
+        code: str,
+        message: str,
+        unknown: bool,
+        retryable: bool = False,
+    ) -> Dict[str, Any]:
         if phase not in {"video", "comment"}:
             raise ValueError("invalid YouTube phase")
         if unknown:
@@ -735,10 +837,17 @@ class DramaSynthesisStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.execute(
-                    f"UPDATE drama_youtube_publish_task SET status=?,{column}=?,unknown_outcome=?,error_code=?,error_message=?,lease_owner='',lease_expires_at_utc='',updated_at_utc=? WHERE id=?",
-                    (status, state, int(bool(unknown)), str(code)[:96], str(message)[:500], now, int(task_id)),
-                )
+                updated = conn.execute(
+                    f"""UPDATE drama_youtube_publish_task
+                        SET status=?,{column}=?,unknown_outcome=?,error_code=?,error_message=?,lease_owner='',lease_expires_at_utc='',updated_at_utc=?
+                        WHERE id=? AND lease_owner=? AND lease_generation=?""",
+                    (
+                        status, state, int(bool(unknown)), str(code)[:96], str(message)[:500], now,
+                        int(task_id), str(worker_id), int(lease_generation),
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
                 conn.execute(
                     "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
                     (int(task_id), phase, status, str(code)[:96], now),
@@ -751,14 +860,20 @@ class DramaSynthesisStore:
             finally:
                 conn.close()
 
-    def mark_comment_attempt(self, task_id: int) -> None:
+    def mark_comment_attempt(self, task_id: int, *, worker_id: str, lease_generation: int) -> None:
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "UPDATE drama_youtube_publish_task SET comment_attempt_count=comment_attempt_count+1,updated_at_utc=? WHERE id=? AND video_state='published' AND comment_state<>'published'",
-                    (utc_now(), int(task_id)),
-                )
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish_task
+                       SET comment_attempt_count=comment_attempt_count+1,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='publishing_comment'
+                         AND video_state='published' AND comment_state<>'published'""",
+                    (utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
                 conn.commit()
             finally:
                 conn.close()
@@ -766,6 +881,7 @@ class DramaSynthesisStore:
 
 __all__ = [
     "COMMENT_SCOPE",
+    "IDENTITY_SCOPES",
     "UPLOAD_SCOPES",
     "DramaSynthesisError",
     "DramaSynthesisStore",

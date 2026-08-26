@@ -30,7 +30,7 @@
 3. 随机成片必须是 H.264 High、720×1280；结果回传 output SHA、profile、recipe SHA，CPU 验证配方身份后才完成任务。
 4. 短链格式固定 `https://page.dramabuzzs.com/s2l/<id>.html`；目标固定 `https://www.dramawavew2a.com/ads/101/2284/view?cid=<job_id>&af_channel=ai_youtube`，参数顺序和编码固定。相同任务幂等复用；ID 对应目标不可变。
 5. `page.dramabuzzs.com` 当前为 CloudFront/S3，CPU/HK 均无已确认发布凭证。发布适配器未配置时必须失败关闭，不得声称短链成功。
-6. YouTube 频道只允许当前任务 `app_id` 下 `status=1`、有 refresh token、client config 和上传 scope 的映射。`status=2` 或缺失 scope 元数据均不可用。评论还必须有精确 `youtube.force-ssl`。
+6. YouTube 频道只允许当前任务 `app_id` 下 `channel_status=1`、有 refresh token、client config、上传 scope 和身份读取 scope 的映射。仅有 `youtube.upload`、`channel_status=2` 或缺失 scope 元数据均不可用。评论还必须有精确 `youtube.force-ssl`。
 7. 当前只读基线：app 1479 有 59 个映射；27 个可刷新且具备上传 scope，其中 4 个状态为 2；12 个同时具备评论 scope。所有现存 access token 均标记过期，因此只能服务端刷新。
 8. 请求用 `operation_id` 幂等；同任务同频道已有成功视频时必须二次确认；已有未知结果时禁止替代发布。
 9. 断点续传 session URI 必须在首个数据 PUT 前持久化。中断/5xx 后先用空 PUT 和 `Content-Range: bytes */<len>` 查询；308 续传，完成响应复用视频 ID，404 视为未知并失败关闭。
@@ -41,6 +41,8 @@
 - CPU：`app.py` 负责校验、冻结、API、审计和向 `127.0.0.1:18788` 提交 HK GPU。
 - HK GPU：独立 8788 HTTP 监听和独立反向隧道；上线时保留旧 18787，完成 canary 后再切 CPU URL。
 - YouTube：单独 systemd 异步 worker，从既有 MySQL 表按需读服务端凭证；SQLite 只存任务状态和发布身份。
+- 每次刷新 access token 后，以及创建 resumable session/发布评论前，必须用 `channels.list(part=id,mine=true)` 核验唯一频道与冻结 `channel_id` 完全一致；空、多频道、不匹配或未授权均失败关闭，网络/5xx 仅可在尚无外部写入时安全重试。
+- YouTube task claim 使用持久化 `lease_generation` fencing；claim 原子递增 generation，所有后续状态写入必须同时匹配 task、owner、generation。下载过程续租，并在每次外部调用前续租，过期 worker 不得覆盖重领 worker。
 - 短链：当前实现不可变文件系统适配器，只有 CloudFront/S3 所有者提供受审计发布挂载后才能配置。
 
 ## 验收标准
@@ -50,7 +52,7 @@
 - 随机产物在列表/详情展示；原三类产物继续工作。
 - 新 payload 不含 `cover_template`、`naming_rule`；历史数据仍可读取。
 - 短链目标、HTML、编码、幂等性、不可变性和无开放跳转均通过离线测试。
-- YouTube eligibility、视频/评论分态、断点重试、未知关闭、幂等、二次确认均通过 fake-client 测试；测试不访问真实 Google API。
+- YouTube eligibility、token 频道身份核验、lease generation fencing、视频/评论分态、断点重试、未知关闭、幂等、二次确认均通过 fake-client 测试；测试不访问真实 Google API。
 - 语法、定向测试、diff check 和秘密扫描通过；独立 QA 后才允许部署。
 
 ## 风险与待决依赖

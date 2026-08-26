@@ -8,7 +8,7 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | ---: | ---: | ---: | ---: |
-| Offline focused unittest | 24 | 24 | 0 | 0 |
+| Offline focused unittest | 29 | 29 | 0 | 0 |
 | Python compile targets | 6 | 6 | 0 | 0 |
 | App import/zero-output integration check | 1 | 1 | 0 | 0 |
 | Inline JavaScript syntax blocks | 4 | 4 | 0 | 0 |
@@ -18,7 +18,7 @@
 
 - 自动/手动 recipe、冻结/冲突、GPU identity。
 - 精确短链目标、wrapper、幂等、无 publisher 失败关闭。
-- YouTube channel eligibility、comment scope、operation idempotency、视频/评论分态、session query retry、unknown fail closed、duplicate confirmation。
+- YouTube channel eligibility（含 identity-read scope）、刷新后/外部写入前频道身份核验、comment scope、operation idempotency、generation fencing、续租 heartbeat、视频/评论分态、session query retry、unknown fail closed、duplicate confirmation。
 - UI 四项默认未选、零输出 backend guard、新 payload 删除字段。
 - `app.py`、核心模块、worker 和测试脚本 compile；两个静态入口共 4 个内联 JS 块语法通过。
 
@@ -31,11 +31,11 @@ python -m py_compile app.py features/drama_synthesis/core.py features/drama_synt
 
 ## 缺陷
 
-独立评审发现 3 个候选缺陷：BUG-001（P0 live schema 列名）、BUG-002（random-template YouTube source legacy-row 路径）与 BUG-003（known-safe 评论重试被跳过）。三项均已修复并有定向回归，仍待独立 QA 确认关闭。另增加十进制 ID 预校验，quote/backslash 对抗输入在 SQL 构造前失败关闭。
+独立评审/QA 共发现 5 个候选缺陷：BUG-001（live schema 列名）、BUG-002（random-template YouTube source legacy-row 路径）、BUG-003（known-safe 评论重试被跳过）、BUG-004（刷新 token 未绑定冻结频道）与 BUG-005（lease 缺少 generation fencing）。五项均已修复并有定向回归，仍待独立 QA 确认关闭。另增加十进制 ID 预校验，quote/backslash 对抗输入在 SQL 构造前失败关闭。
 
 ## 遗留风险
 
-- 404 expired 和 lease crash recovery 已有离线单测，仍需独立 QA 复核异常时序。
+- 404 expired、频道身份核验、generation fencing 与 lease crash recovery 已有离线对抗单测，仍需独立 QA 复核异常时序。
 - 浏览器视觉/legacy regression、HK 真机 asset/render/tunnel 仍待 QA/部署前演练。
 - CloudFront/S3 publisher 和 production COS hostname 是 P1 外部依赖；未配置时功能按设计失败关闭。
 

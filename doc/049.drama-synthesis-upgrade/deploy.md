@@ -57,7 +57,9 @@ DRAMA_API_PORT=8788
 6. CPU 先以 curl 通过 18788 读取 catalog，再提交非生产 canary；验证 recipe/output identities。
 7. 只有上述通过后才切 CPU `GPU_VIDEO_WORKER_URL` 并重启相关服务。
 8. YouTube worker 先保持 disabled；确认 1479 eligible list、source hostname allowlist、临时存储权限后才能启用。不得用真实发布做 health check。
-9. 公网已存在 `/s2l/1.html`。CDN owner 必须先核对既有 ID 命名空间和不可变对象；短链 publisher 未落实时 `DRAMA_SHORT_LINK_ROOT` 留空，对用户显示明确失败。
+9. 启动 worker 前执行应用自带 `ensure_storage()`；它通过 `PRAGMA table_info` 检查并在旧 SQLite 表缺列时仅执行 `ALTER TABLE drama_youtube_publish_task ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`。先备份 SQLite，并只读核验旧行 generation=0；不需要独立 MySQL DDL。
+10. disabled worker 下用 fake client 演练 token 频道 mismatch 和两 worker generation reclaim；确认没有真实 Google mutation，再进入后续授权 gate。
+11. 公网已存在 `/s2l/1.html`。CDN owner 必须先核对既有 ID 命名空间和不可变对象；短链 publisher 未落实时 `DRAMA_SHORT_LINK_ROOT` 留空，对用户显示明确失败。
 
 ## 验证
 

@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Sequence, Union
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Union
 from urllib.parse import quote, urlencode, urlsplit
 
 import requests
@@ -33,6 +33,7 @@ from .core import (
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 COMMENTS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
+CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
 
 
@@ -67,7 +68,12 @@ class YouTubeCredential:
     def capabilities(self) -> Dict[str, bool]:
         value = scope_capabilities(self.scopes)
         value["refreshable"] = bool(self.refresh_token and self.client_id and self.client_secret)
-        value["eligible"] = bool(self.channel_status == 1 and value["refreshable"] and value["upload_eligible"])
+        value["eligible"] = bool(
+            self.channel_status == 1
+            and value["refreshable"]
+            and value["upload_eligible"]
+            and value["identity_eligible"]
+        )
         return value
 
 
@@ -146,6 +152,7 @@ class YouTubeCredentialRepository:
                     "channel_name": row.channel_name,
                     "youtube_account_id": row.account_id,
                     "upload_eligible": True,
+                    "identity_eligible": True,
                     "comment_eligible": bool(caps["comment_eligible"]),
                 }
             )
@@ -216,7 +223,63 @@ class YouTubeHTTPClient:
             raise YouTubeHTTPError("youtube_token_refresh_failed", "YouTube授权已失效，请重新授权", status=response.status_code)
         return token
 
-    def download(self, url: str, target: Path, *, allowed_hosts: Iterable[str], max_bytes: int = 16 * 1024 * 1024 * 1024) -> int:
+    def verify_channel_identity(self, token: str, expected_channel_id: str) -> None:
+        session = self.session_factory()
+        session.trust_env = False
+        try:
+            response = session.get(
+                CHANNELS_URL + "?" + urlencode({"part": "id", "mine": "true"}),
+                headers={"Authorization": "Bearer " + token},
+                timeout=self.timeout,
+                allow_redirects=False,
+            )
+        except requests.RequestException:
+            raise YouTubeHTTPError(
+                "youtube_channel_identity_unavailable",
+                "YouTube频道身份核验暂时不可用",
+                retryable=True,
+            ) from None
+        finally:
+            session.close()
+        if response.status_code >= 500:
+            raise YouTubeHTTPError(
+                "youtube_channel_identity_unavailable",
+                "YouTube频道身份核验暂时不可用",
+                status=response.status_code,
+                retryable=True,
+            )
+        if response.status_code in (401, 403):
+            raise YouTubeHTTPError(
+                "youtube_channel_identity_unauthorized",
+                "YouTube频道身份核验未获授权",
+                status=response.status_code,
+            )
+        if response.status_code != 200:
+            raise YouTubeHTTPError(
+                "youtube_channel_identity_failed",
+                "YouTube频道身份核验失败",
+                status=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        items = payload.get("items") if isinstance(payload, Mapping) else None
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
+            raise YouTubeHTTPError("youtube_channel_identity_mismatch", "YouTube频道身份不匹配", status=409)
+        actual_channel_id = str(items[0].get("id") or "")
+        if not actual_channel_id or not secrets.compare_digest(actual_channel_id.encode(), str(expected_channel_id).encode()):
+            raise YouTubeHTTPError("youtube_channel_identity_mismatch", "YouTube频道身份不匹配", status=409)
+
+    def download(
+        self,
+        url: str,
+        target: Path,
+        *,
+        allowed_hosts: Iterable[str],
+        max_bytes: int = 16 * 1024 * 1024 * 1024,
+        heartbeat: Optional[Callable[[], Any]] = None,
+    ) -> int:
         parsed = urlsplit(str(url or ""))
         hosts = {str(item or "").strip().lower() for item in allowed_hosts if str(item or "").strip()}
         if parsed.scheme != "https" or not parsed.hostname or parsed.hostname.lower() not in hosts or parsed.username or parsed.password or parsed.fragment:
@@ -235,6 +298,8 @@ class YouTubeHTTPClient:
                 for chunk in response.iter_content(1024 * 1024):
                     if not chunk:
                         continue
+                    if heartbeat is not None:
+                        heartbeat()
                     total += len(chunk)
                     if total > max_bytes:
                         raise YouTubeHTTPError("youtube_source_too_large", "视频超过上传大小上限", status=413)
@@ -243,6 +308,9 @@ class YouTubeHTTPClient:
                 os.fsync(handle.fileno())
             os.replace(temporary, target)
         except YouTubeHTTPError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except DramaSynthesisError:
             temporary.unlink(missing_ok=True)
             raise
         except (OSError, requests.RequestException):
@@ -406,12 +474,14 @@ class YouTubePublishEngine:
             raise ValueError("YouTube source allowlist is required")
 
     def run_once(self, worker_id: str) -> Dict[str, Any]:
-        lease = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        task = self.store.claim_youtube(worker_id, lease)
+        worker_id = str(worker_id)
+        task = self.store.claim_youtube(worker_id, self._lease_expiry())
         if task is None:
             return {"ok": True, "status": "no_pending", "claimed": False}
         task_id = int(task["id"])
+        lease_generation = int(task["lease_generation"])
         try:
+            task = self._renew(task, worker_id)
             credential = self.credentials.credential(
                 app_id=task["app_id"],
                 channel_local_id=task["channel_local_id"],
@@ -420,23 +490,63 @@ class YouTubePublishEngine:
             )
             if task["comment_text"] and not credential.capabilities["comment_eligible"]:
                 raise YouTubeHTTPError("youtube_comment_scope_missing", "频道授权缺少评论权限", status=409)
+            task = self._renew(task, worker_id)
             token = self.client.refresh_access_token(credential)
+            task = self._renew(task, worker_id)
+            self.client.verify_channel_identity(token, task["channel_id"])
             if task["video_state"] != "published":
-                task = self._publish_video(task, token)
+                task = self._publish_video(task, token, worker_id)
                 if task["video_state"] != "published":
                     return {"ok": False, "status": task["status"], "task_id": task_id}
             if task["comment_state"] == "queued" or task["status"] == "publishing_comment":
-                self.store.mark_comment_attempt(task_id)
+                task = self._renew(task, worker_id)
+                self.client.verify_channel_identity(token, task["channel_id"])
+                task = self._renew(task, worker_id)
+                self.store.mark_comment_attempt(
+                    task_id,
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                )
+                task = self._renew(task, worker_id)
                 comment_id = self.client.publish_comment(token, video_id=task["video_id"], comment_text=task["comment_text"])
-                task = self.store.comment_published(task_id, comment_id)
+                task = self.store.comment_published(
+                    task_id,
+                    comment_id,
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                )
             return {"ok": True, "status": task["status"], "task_id": task_id, "claimed": True}
         except YouTubeHTTPError as exc:
             phase = "comment" if task.get("video_state") == "published" else "video"
-            failed = self.store.fail_youtube(task_id, phase=phase, code=exc.code, message=str(exc), unknown=exc.unknown, retryable=exc.retryable)
+            failed = self._fail_claim(
+                task_id,
+                worker_id,
+                lease_generation,
+                phase=phase,
+                code=exc.code,
+                message=str(exc),
+                unknown=exc.unknown,
+                retryable=exc.retryable,
+            )
+            if failed is None:
+                return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
         except DramaSynthesisError as exc:
+            if exc.code == "youtube_stale_claim":
+                return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
             phase = "comment" if task.get("video_state") == "published" else "video"
-            failed = self.store.fail_youtube(task_id, phase=phase, code=exc.code, message=str(exc), unknown=False, retryable=False)
+            failed = self._fail_claim(
+                task_id,
+                worker_id,
+                lease_generation,
+                phase=phase,
+                code=exc.code,
+                message=str(exc),
+                unknown=False,
+                retryable=False,
+            )
+            if failed is None:
+                return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
         except Exception:
             # A programming/runtime failure after an upload or comment attempt
@@ -447,42 +557,127 @@ class YouTubePublishEngine:
                 or int(task.get("video_attempt_count") or 0)
                 or (phase == "comment" and int(task.get("comment_attempt_count") or 0))
             )
-            failed = self.store.fail_youtube(
+            failed = self._fail_claim(
                 task_id,
+                worker_id,
+                lease_generation,
                 phase=phase,
                 code="youtube_worker_internal_error",
                 message="YouTube发布任务发生内部错误",
                 unknown=external_attempted,
                 retryable=not external_attempted,
             )
+            if failed is None:
+                return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
 
-    def _publish_video(self, task: Mapping[str, Any], token: str) -> Dict[str, Any]:
+    @staticmethod
+    def _lease_expiry() -> str:
+        return (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _renew(self, task: Mapping[str, Any], worker_id: str) -> Dict[str, Any]:
+        return self.store.renew_youtube_lease(
+            int(task["id"]),
+            worker_id,
+            int(task["lease_generation"]),
+            self._lease_expiry(),
+        )
+
+    def _fail_claim(
+        self,
+        task_id: int,
+        worker_id: str,
+        lease_generation: int,
+        **failure: Any,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return self.store.fail_youtube(
+                task_id,
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+                **failure,
+            )
+        except DramaSynthesisError as exc:
+            if exc.code == "youtube_stale_claim":
+                return None
+            raise
+
+    def _publish_video(self, task: Mapping[str, Any], token: str, worker_id: str) -> Dict[str, Any]:
         task_id = int(task["id"])
+        lease_generation = int(task["lease_generation"])
         root = self.work_root / ("task-%d" % task_id)
         source = root / "source.mp4"
         if not source.is_file():
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self.client.download(task["source_url"], source, allowed_hosts=self.allowed_source_hosts)
+            task = self._renew(task, worker_id)
+            self.client.download(
+                task["source_url"],
+                source,
+                allowed_hosts=self.allowed_source_hosts,
+                heartbeat=lambda: self._renew(task, worker_id),
+            )
         size = source.stat().st_size
         session_uri = str(task.get("resumable_session_uri") or "")
         offset = int(task.get("next_byte") or 0)
         if session_uri:
+            task = self._renew(task, worker_id)
             status = self.client.query_upload(session_uri, size)
             if status["state"] == "published":
-                return self.store.video_published(task_id, status["video_id"])
+                return self.store.video_published(
+                    task_id,
+                    status["video_id"],
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                )
             if status["state"] == "expired":
-                return self.store.fail_youtube(task_id, phase="video", code="youtube_resumable_session_expired_unknown", message="YouTube上传会话已过期，无法证明未发布", unknown=True)
+                return self.store.fail_youtube(
+                    task_id,
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                    phase="video",
+                    code="youtube_resumable_session_expired_unknown",
+                    message="YouTube上传会话已过期，无法证明未发布",
+                    unknown=True,
+                )
             offset = int(status.get("next_byte") or 0)
-            self.store.set_upload_offset(task_id, offset)
+            self.store.set_upload_offset(
+                task_id,
+                offset,
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+            )
         else:
+            task = self._renew(task, worker_id)
+            self.client.verify_channel_identity(token, task["channel_id"])
+            task = self._renew(task, worker_id)
             session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description"], size=size)
-            self.store.set_upload_session(task_id, session_uri, size)
+            self.store.set_upload_session(
+                task_id,
+                session_uri,
+                size,
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+            )
+            task = dict(task)
+            task["resumable_session_uri"] = session_uri
+            task["source_size"] = size
+            task["video_attempt_count"] = int(task.get("video_attempt_count") or 0) + 1
+        task = self._renew(task, worker_id)
         result = self.client.upload(session_uri, source, offset)
         if result["state"] == "published":
-            return self.store.video_published(task_id, result["video_id"])
+            return self.store.video_published(
+                task_id,
+                result["video_id"],
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+            )
         if result["state"] == "resume":
-            self.store.set_upload_offset(task_id, int(result.get("next_byte") or 0))
+            self.store.set_upload_offset(
+                task_id,
+                int(result.get("next_byte") or 0),
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+            )
             raise YouTubeHTTPError("youtube_upload_incomplete", "YouTube视频上传尚未完成", retryable=True)
         raise YouTubeHTTPError("youtube_resumable_session_expired_unknown", "YouTube上传会话已过期，无法证明未发布", unknown=True)
 
