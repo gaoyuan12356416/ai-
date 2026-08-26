@@ -765,6 +765,14 @@ from features.tt_drama_resources import (
     W2AResourceService,
 )
 from features.material_status_broadcast import service as material_status_service
+from features.drama_synthesis.core import (
+    DramaSynthesisError,
+    DramaSynthesisStore,
+    ImmutableFilesystemPublisher,
+    freeze_random_recipe,
+)
+from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
+from features.drama_synthesis.youtube import YouTubeCredentialRepository
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -1393,6 +1401,24 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 )
+
+DRAMA_SYNTHESIS_STORE = DramaSynthesisStore(JOB_DB_PATH)
+DRAMA_SHORT_LINK_ROOT = os.environ.get("DRAMA_SHORT_LINK_ROOT", "").strip()
+DRAMA_SHORT_LINK_PUBLISHER = (
+    ImmutableFilesystemPublisher(DRAMA_SHORT_LINK_ROOT)
+    if DRAMA_SHORT_LINK_ROOT
+    else None
+)
+DRAMA_RANDOM_OVERLAY_ROOT = os.environ.get("DRAMA_RANDOM_OVERLAY_ROOT", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256 = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256", ""
+).strip().lower()
+DRAMA_RANDOM_OVERLAY_FFMPEG = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFMPEG", "/usr/bin/ffmpeg"
+).strip()
+DRAMA_RANDOM_OVERLAY_FFPROBE = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFPROBE", "/usr/bin/ffprobe"
+).strip()
 
 NAVIGATION_CONFIG_PATH = os.environ.get(
 
@@ -13450,6 +13476,8 @@ def normalize_outputs(raw_outputs):
 
         "cover_16x9": bool(outputs.get("cover_16x9", True)),
 
+        "random_template_video": bool(outputs.get("random_template_video", False)),
+
 
 
 
@@ -13587,6 +13615,10 @@ def selected_job_outputs_ready(job):
         return False
     if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
         return False
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job.get("job_id", ""))
+        if not recipe or not str(recipe.get("output_url") or "").strip():
+            return False
     return True
 
 
@@ -14486,6 +14518,140 @@ def run_mysql(query):
 
 
 
+
+
+def drama_random_template_catalog():
+    if DRAMA_RANDOM_OVERLAY_ROOT and DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+        return catalog_from_assets(
+            DRAMA_RANDOM_OVERLAY_ROOT,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    if not GPU_VIDEO_WORKER_URL or not GPU_VIDEO_WORKER_TOKEN:
+        raise DramaSynthesisError(
+            "drama_template_catalog_unavailable",
+            "随机模板目录暂不可用",
+            503,
+        )
+    response = requests.get(
+        GPU_VIDEO_WORKER_URL + "/api/gpu-video/random-overlay/catalog",
+        headers={"Authorization": "Bearer " + GPU_VIDEO_WORKER_TOKEN},
+        timeout=min(60, GPU_VIDEO_WORKER_TIMEOUT),
+        allow_redirects=False,
+    )
+    if response.status_code >= 400:
+        raise DramaSynthesisError(
+            "drama_template_catalog_unavailable",
+            "随机模板目录暂不可用",
+            503,
+        )
+    payload = response.json()
+    return payload.get("item", payload)
+
+
+def drama_youtube_repository():
+    return YouTubeCredentialRepository(run_mysql, schema=DB_NAME)
+
+
+def decorate_drama_synthesis_job(job):
+    if not job:
+        return job
+    item = dict(job)
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(item.get("job_id", ""))
+    item["random_template"] = None
+    item["random_template_video_url"] = ""
+    if recipe:
+        frozen = dict(recipe.get("recipe") or {})
+        # The browser needs the frozen layer names and version, not server paths.
+        item["random_template"] = {
+            "mode": frozen.get("mode"),
+            "profile": frozen.get("profile"),
+            "version": frozen.get("version"),
+            "recipe_sha256": frozen.get("recipe_sha256"),
+            "layers": {
+                key: (value or {}).get("name", "")
+                for key, value in (frozen.get("assets") or {}).items()
+            },
+        }
+        item["random_template_video_url"] = str(recipe.get("output_url") or "")
+    item["short_link"] = DRAMA_SYNTHESIS_STORE.short_link(item.get("job_id", ""))
+    youtube_rows = DRAMA_SYNTHESIS_STORE.youtube_tasks_for_job(
+        item.get("job_id", ""), limit=20
+    )
+    safe_fields = (
+        "id", "channel_id", "source_kind", "title", "status", "video_state",
+        "comment_state", "video_id", "comment_id", "unknown_outcome",
+        "error_code", "error_message", "created_at_utc", "updated_at_utc",
+        "video_published_at_utc", "comment_published_at_utc",
+    )
+    item["youtube_publish_tasks"] = [
+        {key: row.get(key) for key in safe_fields} for row in youtube_rows
+    ]
+    result_preview = dict(item.get("result_preview") or {})
+    result_preview["random_template_video"] = item["random_template_video_url"]
+    item["result_preview"] = result_preview
+    return item
+
+
+def drama_synthesis_error_payload(exc):
+    payload = {"code": exc.code, "error": str(exc), "message": str(exc)}
+    payload.update(exc.details)
+    return payload
+
+
+def require_completed_drama_job(job_id):
+    job = fetch_job_row(job_id)
+    if not job:
+        raise DramaSynthesisError("drama_job_not_found", "任务不存在", 404)
+    if job.get("status") != "done" or not selected_job_outputs_ready(job):
+        raise DramaSynthesisError("drama_job_not_completed", "任务尚未完成", 409)
+    return job
+
+
+def drama_youtube_source(job, source_kind):
+    source_kind = str(source_kind or "").strip()
+    sources = {
+        "concat_video": str(job.get("output_video_url") or ""),
+        "no_bgm_video": str(job.get("output_video_no_bgm_url") or ""),
+        "random_template_video": str(job.get("random_template_video_url") or ""),
+    }
+    source_url = sources.get(source_kind, "")
+    if not source_url:
+        raise DramaSynthesisError("youtube_source_unavailable", "所选视频产物不可用", 409)
+    return source_kind, source_url
+
+
+def enqueue_drama_youtube_publish(job_id, payload):
+    job = require_completed_drama_job(job_id)
+    source_kind, source_url = drama_youtube_source(job, payload.get("source_kind"))
+    repository = drama_youtube_repository()
+    credential = repository.credential(
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=str(payload.get("channel_local_id") or ""),
+        account_id=str(payload.get("youtube_account_id") or ""),
+        expected_channel_id=str(payload.get("channel_id") or ""),
+    )
+    row = DRAMA_SYNTHESIS_STORE.enqueue_youtube(
+        operation_id=str(payload.get("operation_id") or ""),
+        job_id=job_id,
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=credential.channel_local_id,
+        channel_id=credential.channel_id,
+        youtube_account_id=credential.account_id,
+        source_kind=source_kind,
+        source_url=source_url,
+        title=payload.get("title"),
+        description=payload.get("description"),
+        comment_text=payload.get("comment"),
+        duplicate_confirmed=bool(payload.get("duplicate_confirmed", False)),
+        scopes=credential.scopes,
+    )
+    safe_fields = (
+        "id", "job_id", "channel_id", "source_kind", "title", "status",
+        "video_state", "comment_state", "video_id", "comment_id",
+        "unknown_outcome", "error_code", "error_message", "created_at_utc",
+        "updated_at_utc",
+    )
+    return {key: row.get(key) for key in safe_fields}
 
 
 def get_job_db_connection():
@@ -21928,11 +22094,17 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
         candidates["output_video_no_bgm_url"] = str(
             job.get("output_video_no_bgm_url") or ""
         ).strip() or build_drama_public_url(job_id, "material_no_bgm.mp4")
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job_id)
+        if not recipe or not str(recipe.get("completed_at_utc") or ""):
+            return False
+        candidates["random_template_video_url"] = str(recipe.get("output_url") or "")
 
     min_bytes = {
         "cover_16x9_url": 1024,
         "output_video_url": 1024 * 1024,
         "output_video_no_bgm_url": 1024 * 1024,
+        "random_template_video_url": 1024 * 1024,
     }
     for key, url in candidates.items():
         if not public_artifact_ready(url, min_bytes.get(key, 1)):
@@ -28803,7 +28975,7 @@ def fetch_job_row(job_id):
 
 
 
-    return enrich_material_job_timing(row_to_job(row)) if row else None
+    return decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) if row else None
 
 
 
@@ -31571,7 +31743,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-        "items": [enrich_material_job_timing(row_to_job(row)) for row in rows],
+        "items": [decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) for row in rows],
 
 
 
@@ -79032,6 +79204,7 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         "outputs": {
             "concat_video": bool(outputs.get("concat_video", True)),
             "no_bgm_video": bool(outputs.get("no_bgm_video", True)),
+            "random_template_video": bool(outputs.get("random_template_video", False)),
         },
         "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
         "await_cover_16x9": bool(await_cover_16x9),
@@ -79043,6 +79216,11 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
             for item in requested
         ],
     }
+    if outputs.get("random_template_video"):
+        stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+        if not stored_recipe:
+            raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+        payload["random_template_recipe"] = stored_recipe["recipe"]
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer %s" % GPU_VIDEO_WORKER_TOKEN,
@@ -79129,6 +79307,14 @@ def gpu_video_result_satisfies_outputs(result, outputs):
         url = str(result.get("output_video_no_bgm_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
             return False
+    if bool(outputs.get("random_template_video", False)):
+        url = str(result.get("random_template_video_url") or "").strip()
+        if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_output_sha256") or "")):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_recipe_sha256") or "")):
+            return False
     return True
 
 
@@ -79143,11 +79329,18 @@ def read_gpu_video_result(job_id, outputs):
         except Exception as exc:
             logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
 
-    result = {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+    result = {
+        "job_id": job_id,
+        "output_video_url": "",
+        "output_video_no_bgm_url": "",
+        "random_template_video_url": "",
+    }
     if bool(outputs.get("concat_video", True)):
         result["output_video_url"] = build_drama_public_url(job_id, "material.mp4")
     if bool(outputs.get("no_bgm_video", True)):
         result["output_video_no_bgm_url"] = build_drama_public_url(job_id, "material_no_bgm.mp4")
+    # Random-template results are never inferred from a public filename: the
+    # immutable output and recipe hashes in the manifest are part of identity.
     if gpu_video_result_satisfies_outputs(result, outputs):
         write_gpu_video_result(job_id, result)
         return result
@@ -79224,11 +79417,12 @@ def _handle_gpu_video_render_unlocked(payload):
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
     await_cover_16x9 = bool(payload.get("await_cover_16x9") or payload.get("wait_for_cover"))
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
-    render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True))
+    render_random = bool(outputs.get("random_template_video", False))
+    render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True) or render_random)
     render_no_bgm = bool(outputs.get("no_bgm_video", True))
     publish_concat = bool(outputs.get("concat_video", True))
     if not render_concat:
-        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": "", "random_template_video_url": ""}
 
     existing_result = read_gpu_video_result(job_id, outputs)
     if existing_result:
@@ -79256,6 +79450,7 @@ def _handle_gpu_video_render_unlocked(payload):
         "progress_detail": "",
         "output_video_url": "",
         "output_video_no_bgm_url": "",
+        "random_template_video_url": "",
     }
     segment_paths = []
     total_steps = (
@@ -79264,6 +79459,7 @@ def _handle_gpu_video_render_unlocked(payload):
         + 1
         + (1 if render_no_bgm else 0)
         + (1 if publish_concat else 0)
+        + (1 if render_random else 0)
     )
     completed_steps = 0
 
@@ -79364,15 +79560,45 @@ def _handle_gpu_video_render_unlocked(payload):
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
 
+    random_result = None
+    if render_random:
+        random_recipe = payload.get("random_template_recipe")
+        if not isinstance(random_recipe, dict):
+            raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+        if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+            raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+        public_random_path = os.path.join(public_dir, "material_random_template.mp4")
+        random_result = render_random_output(
+            source=output_path,
+            output=public_random_path,
+            recipe=random_recipe,
+            asset_root=DRAMA_RANDOM_OVERLAY_ROOT,
+            manifest_sha256=DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+            ffmpeg=DRAMA_RANDOM_OVERLAY_FFMPEG,
+            ffprobe=DRAMA_RANDOM_OVERLAY_FFPROBE,
+        )
+        job["random_template_video_url"] = publish_asset(public_random_path)
+        completed_steps += 1
+        update_render_stage(job, completed_steps, total_steps, "GPU 随机模板视频上传完成")
+
     result = {
         "job_id": job_id,
         "output_video_url": job.get("output_video_url", ""),
         "output_video_no_bgm_url": job.get("output_video_no_bgm_url", ""),
+        "random_template_video_url": job.get("random_template_video_url", ""),
     }
     if publish_concat and not result["output_video_url"]:
         raise RuntimeError("GPU concat video upload did not return a URL")
     if render_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
+    if render_random:
+        if not result["random_template_video_url"] or not random_result:
+            raise RuntimeError("GPU random-template video upload did not return a URL")
+        result.update({
+            "random_template_output_sha256": random_result["output_sha256"],
+            "random_template_output_profile": random_result["profile"],
+            "random_template_recipe_sha256": random_result["recipe_sha256"],
+        })
     write_gpu_video_result(job_id, result)
     cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
@@ -79968,6 +80194,16 @@ def submit_job(payload, actor_session=None):
 
 
     validation = validate_content_request(app_id, content_id, episode_start, episode_end)
+    job_id = uuid.uuid4().hex
+    if outputs["random_template_video"]:
+        recipe = freeze_random_recipe(
+            job_id=job_id,
+            content_id=content_id,
+            request=payload.get("random_template"),
+            catalog=drama_random_template_catalog(),
+        )
+        # Freeze before the legacy row becomes visible to the external worker.
+        DRAMA_SYNTHESIS_STORE.freeze_recipe(job_id, recipe)
 
 
 
@@ -80031,7 +80267,7 @@ def submit_job(payload, actor_session=None):
 
 
 
-        "job_id": uuid.uuid4().hex,
+        "job_id": job_id,
 
 
 
@@ -82067,7 +82303,13 @@ def process_job(job):
 
 
 
-    need_video_pipeline = outputs["concat_video"] or outputs["no_bgm_video"]
+    need_video_pipeline = (
+        outputs["concat_video"]
+        or outputs["no_bgm_video"]
+        or outputs["random_template_video"]
+    )
+    if outputs["random_template_video"] and not gpu_video_worker_enabled():
+        raise DramaSynthesisError("drama_random_gpu_unavailable", "香港GPU随机模板服务暂不可用", 503)
 
 
 
@@ -84426,6 +84668,20 @@ def process_job(job):
             job["output_video_url"] = gpu_result.get("output_video_url", "")
         if outputs["no_bgm_video"]:
             job["output_video_no_bgm_url"] = gpu_result.get("output_video_no_bgm_url", "")
+        if outputs["random_template_video"]:
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            expected_recipe_sha = str((stored_recipe or {}).get("recipe_sha256") or "")
+            actual_recipe_sha = str(gpu_result.get("random_template_recipe_sha256") or "")
+            if not expected_recipe_sha or not secrets.compare_digest(expected_recipe_sha, actual_recipe_sha):
+                raise DramaSynthesisError("drama_recipe_result_mismatch", "GPU随机模板结果与冻结配方不一致", 502)
+            job["random_template_video_url"] = str(gpu_result.get("random_template_video_url") or "")
+            DRAMA_SYNTHESIS_STORE.complete_recipe(
+                job["job_id"],
+                output_url=job["random_template_video_url"],
+                output_sha256=str(gpu_result.get("random_template_output_sha256") or ""),
+                output_profile=str(gpu_result.get("random_template_output_profile") or ""),
+                recipe_sha256=actual_recipe_sha,
+            )
         if outputs["cover_16x9"] and not job.get("cover_16x9_url") and os.path.isfile(public_cover_path):
             job["cover_16x9_url"] = publish_asset(public_cover_path)
         set_job_progress(job, status="rendering", progress=98, detail="GPU 服视频制作完成")
@@ -94332,6 +94588,27 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/gpu-video/random-overlay/catalog":
+            auth = self.headers.get("Authorization", "")
+            token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+            if not GPU_VIDEO_WORKER_TOKEN or not secrets.compare_digest(token, GPU_VIDEO_WORKER_TOKEN):
+                json_response(self, 403, {"error": "forbidden"})
+                return
+            try:
+                if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+                    raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+                json_response(
+                    self,
+                    200,
+                    {"item": catalog_from_assets(DRAMA_RANDOM_OVERLAY_ROOT, DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256)},
+                )
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("GPU random-template catalog failed")
+                json_response(self, 503, {"code": "drama_random_assets_unavailable", "error": "GPU随机模板素材不可用"})
+            return
+
         if parsed.path == "/api/public/tt-code/resolve":
             self._dispatch_tt_code_resolver(parsed)
             return
@@ -96517,6 +96794,37 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+
+        if parsed.path == "/api/drama-material/random-template-catalog":
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                catalog = drama_random_template_catalog()
+                json_response(self, 200, {"item": catalog})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama random-template catalog failed")
+                json_response(self, 503, {"code": "drama_template_catalog_unavailable", "error": "随机模板目录暂不可用"})
+            return
+
+        youtube_channels_match = re.fullmatch(
+            r"/api/drama-material/jobs/([0-9a-f]{32})/youtube-channels",
+            parsed.path,
+        )
+        if youtube_channels_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                job = require_completed_drama_job(youtube_channels_match.group(1))
+                items = drama_youtube_repository().list_for_app(str(job.get("app_id") or ""))
+                json_response(self, 200, {"items": items})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama YouTube channel listing failed")
+                json_response(self, 503, {"code": "youtube_channels_unavailable", "error": "YouTube频道列表暂不可用"})
+            return
 
         if parsed.path == "/api/drama-material/products":
 
@@ -100466,6 +100774,38 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        drama_action_match = re.fullmatch(
+            r"/api/drama-material/jobs/([0-9a-f]{32})/(short-link|youtube-publish)",
+            parsed.path,
+        )
+        if drama_action_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            job_id, drama_action = drama_action_match.groups()
+            try:
+                if drama_action == "short-link":
+                    require_completed_drama_job(job_id)
+                    payload = DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id, DRAMA_SHORT_LINK_PUBLISHER)
+                    audit_action = "create_drama_short_link"
+                    response_payload = {
+                        key: payload.get(key)
+                        for key in ("id", "short_url", "long_url", "publish_state", "published_at_utc", "reused")
+                    }
+                else:
+                    response_payload = enqueue_drama_youtube_publish(job_id, self._read_json())
+                    audit_action = "enqueue_drama_youtube_publish"
+                append_audit_log(
+                    self._session(), audit_action, "job", job_id,
+                    {"status": response_payload.get("status") or response_payload.get("publish_state", "")},
+                )
+                json_response(self, 202 if drama_action == "youtube-publish" else 200, response_payload)
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama synthesis action failed: %s", drama_action)
+                json_response(self, 500, {"code": "internal_error", "error": "操作失败"})
+            return
+
         if parsed.path == "/api/drama-material/jobs":
 
             if not self._require_module("drama_synthesis"):
@@ -100479,6 +100819,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 append_audit_log(self._session(), "create_job", "job", payload.get("job_id", ""), payload)
 
                 json_response(self, 202, payload)
+
+            except DramaSynthesisError as exc:
+
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
 
             except Exception as exc:
 
@@ -101271,6 +101615,7 @@ def main():
 
 
     ensure_job_table()
+    DRAMA_SYNTHESIS_STORE.ensure_storage()
 
     ensure_screenshot_job_table()
 

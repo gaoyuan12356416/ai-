@@ -1,0 +1,24 @@
+[Unit]
+Description=Drama Synthesis YouTube Publish Worker
+After=network-online.target drama-material-api.service
+Wants=network-online.target
+Requires=drama-material-api.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=-/root/drama_material_service/.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/drama_youtube_publish_worker.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/drama-youtube-publish /root/drama_material_service
+
+[Install]
+WantedBy=multi-user.target
