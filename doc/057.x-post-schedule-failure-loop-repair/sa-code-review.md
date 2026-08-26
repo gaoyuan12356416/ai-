@@ -17,6 +17,7 @@ Selector 脱敏查询、schedule runner known/unknown outcome、Store FIFO/容�
 | CR-003 | P1 | pool proof / historical errors | historical available 错误导致 proof `updated_count=0`，形成新循环 | 保留 NONBLOCKING/REVALIDATABLE 审计码，以独立 source 水合时间消费容量证明 | 已修复 |
 | CR-004 | P2 | source connection error | connect/close 异常可能带主机或凭据进入错误信息 | 统一转安全 `CandidateQueryError`，close 异常不覆盖根因 | 已修复 |
 | CR-005 | 测试增强 | bound drama recovery | mixed published/failed 与 relay 恢复需固化 | 增加原队列/计数/relay ledger 无新增队列断言 | 已完成 |
+| CR-006 | P1 | drama recovery env loader | 生产 schedule env 的两个非敏感现行键未进安全 allowlist，validate-only 会失败关闭 | 仅加入候选分页和单批修复上限；敏感键继续拒绝 | 已修复 |
 
 ## 编译 / 验证结果
 

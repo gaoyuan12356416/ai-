@@ -104,7 +104,9 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
             schedule.write_text(
                 "X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS="
                 "daily.example.test,drama.example.test\n"
-                "X_POST_SCHEDULE_DRAMA_APP_ID=1015\n",
+                "X_POST_SCHEDULE_DRAMA_APP_ID=1015\n"
+                "X_POST_SCHEDULE_CANDIDATE_POOL_LIMIT=50\n"
+                "X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN=17\n",
                 encoding="utf-8",
             )
             values = load_drama_environment_files(
@@ -119,6 +121,14 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
             self.assertEqual(
                 values["X_POST_SCHEDULE_DRAMA_APP_ID"],
                 "1015",
+            )
+            self.assertEqual(
+                values["X_POST_SCHEDULE_CANDIDATE_POOL_LIMIT"],
+                "50",
+            )
+            self.assertEqual(
+                values["X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN"],
+                "17",
             )
             self.assertEqual(
                 values["X_POST_MEDIA_REPAIR_TOKEN"],

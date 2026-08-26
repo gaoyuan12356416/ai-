@@ -22,6 +22,7 @@ Selector 安全查询、素材 FIFO/语言容量、计划 known/unknown outcome�
 - 独立代码审查发现 schedule 查询 DTO 丢失 `plan_attempted_at`、容量证据可由更旧候选事后凑满、历史 available 错误导致 proof=0 循环三个 P1；均已修复并新增负例。
 - 首次全回归发现 5 个新增稳定错误码未进入中文错误目录；补齐后目录测试与完整回归通过。
 - 首次全回归的 2 个 Windows 本地 HTTP 连接中止用例独立复跑 2/2 通过，完整复跑未重现。
+- 生产 validate-only 门禁首次发现恢复工具漏接两个已在线使用的非敏感 schedule 键；该次零 DB/X 写入，补 allowlist 后 9/9 聚焦及 796/796 全回归通过。
 
 ## 验证证据
 
