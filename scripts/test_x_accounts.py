@@ -94,6 +94,31 @@ class XAccountsTestCase(unittest.TestCase):
                 {**queue, "error_code": "unsafe\nsecret"}
             )
 
+    def test_safe_schedule_plan_query_preserves_plan_attempt_fence(self):
+        result = service._safe_schedule_plan_query_result(
+            {
+                "found": True,
+                "run": {
+                    "id": 345,
+                    "source_type": "material",
+                    "run_date": "2026-08-26",
+                    "publish_time": "07:50",
+                    "config_version": 22,
+                    "account_ids": [1, 2],
+                    "status": "claimed",
+                    "plan_attempted_at": "2026-08-25T23:50:10Z",
+                    "internal_only": "must-not-leak",
+                },
+                "queues": [],
+            }
+        )
+
+        self.assertEqual(
+            result["run"]["plan_attempted_at"],
+            "2026-08-25T23:50:10Z",
+        )
+        self.assertNotIn("internal_only", result["run"])
+
     def test_daily_account_scope_accepts_one_and_fifty_but_rejects_invalid_scope(self):
         self.assertEqual(service._daily_account_scope((7,)), (7,))
         fifty = tuple(range(1, 51))

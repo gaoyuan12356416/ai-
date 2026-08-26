@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -775,6 +776,125 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_schedule_stale_claim",
         )
 
+    def test_active_schedule_heartbeat_prevents_cross_midnight_stale_race(self):
+        self.save_schedule("material", [2], ["23:44"])
+        identity = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                26,
+                23,
+                44,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )["items"][0]
+        before = self.store.query_schedule_plan(
+            "material", "2026-07-26", "23:44"
+        )["run"]
+
+        with mock.patch.object(
+            service, "utc_now", return_value="2026-07-26T16:30:00Z"
+        ):
+            heartbeat = self.store.heartbeat_schedule_run(
+                identity["source_type"],
+                identity["run_date"],
+                identity["publish_time"],
+                identity["version"],
+                identity["account_ids"],
+            )
+
+        self.assertTrue(heartbeat["heartbeat_recorded"])
+        self.assertEqual(heartbeat["updated_at"], before["updated_at"])
+        self.assertEqual(
+            heartbeat["lease_heartbeat_at"], "2026-07-26T16:30:00Z"
+        )
+        self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                1,
+                59,
+                59,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        active = self.store.query_schedule_plan(
+            "material", "2026-07-26", "23:44"
+        )
+        self.assertEqual(active["run"]["status"], "claimed")
+
+        self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                2,
+                31,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        expired = self.store.query_schedule_plan(
+            "material", "2026-07-26", "23:44"
+        )
+        self.assertEqual(expired["run"]["status"], "stopped")
+
+    def test_plan_attempt_fence_is_exact_and_one_time(self):
+        self.save_schedule("material", [2], ["10:00"])
+        identity = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )["items"][0]
+
+        with mock.patch.object(
+            service, "utc_now", return_value="2026-07-27T02:00:11Z"
+        ):
+            fenced = self.store.heartbeat_schedule_run(
+                identity["source_type"],
+                identity["run_date"],
+                identity["publish_time"],
+                identity["version"],
+                identity["account_ids"],
+                plan_attempt=True,
+            )
+        self.assertTrue(fenced["plan_attempt_recorded"])
+        self.assertEqual(
+            fenced["plan_attempted_at"], "2026-07-27T02:00:11Z"
+        )
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.heartbeat_schedule_run(
+                identity["source_type"],
+                identity["run_date"],
+                identity["publish_time"],
+                identity["version"],
+                identity["account_ids"],
+                plan_attempt=True,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_schedule_plan_attempt_conflict",
+        )
+        self.assertEqual(
+            self.store.query_schedule_plan(
+                "material", "2026-07-27", "10:00"
+            )["queues"],
+            [],
+        )
+
     def test_previous_day_stale_claim_recovery_is_exact_and_audited(self):
         self.save_schedule("material", [2], ["10:00"])
         self._add_recovery_account(2)
@@ -977,7 +1097,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         self.assertEqual(within_grace["run"]["status"], "claimed")
 
-        expired = self.store.due_schedule_slots(
+        just_outside_grace = self.store.due_schedule_slots(
             datetime(
                 2026,
                 7,
@@ -989,11 +1109,29 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
             grace_seconds=90,
         )
-        self.assertEqual(expired["items"], [])
-        stopped = self.store.query_schedule_plan(
+        self.assertEqual(just_outside_grace["items"], [])
+        still_leased = self.store.query_schedule_plan(
             "material",
             "2026-07-26",
             "23:59",
+        )
+        self.assertEqual(still_leased["run"]["status"], "claimed")
+
+        expired = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                2,
+                0,
+                1,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(expired["items"], [])
+        stopped = self.store.query_schedule_plan(
+            "material", "2026-07-26", "23:59"
         )
         self.assertEqual(stopped["run"]["status"], "stopped")
 
@@ -1676,6 +1814,298 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(row[0], "material_not_video")
         self.assertEqual(queue_count, 0)
+
+    def test_material_fifo_accepts_only_exact_clean_language_capacity_proof(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        pools = self.store.add_pool_materials(
+            ["401", "402", "403", "404"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": value, "error_code": ""}
+                for value in ("401", "402", "403", "404")
+            ],
+        )["items"]
+        _oldest, selected_en, skipped_ja, selected_ja = pools
+        en_candidate = self.material_candidate(selected_en, 2)
+        ja_candidate = self.material_candidate(selected_ja, 3)
+        ja_candidate["material_language"] = "ja"
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
+        )
+        proof = self.store.record_pool_checks(
+            [
+                {
+                    "pool_item_id": skipped_ja["id"],
+                    "material_id": skipped_ja["material_id"],
+                    "material_language": "ja",
+                    "proof_reason": "language_capacity_full",
+                    "error_code": "",
+                }
+            ]
+        )
+        self.assertEqual(proof["updated_count"], 1)
+
+        created = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [en_candidate, ja_candidate],
+            fifo_capacity_skips=[
+                {
+                    "pool_item_id": skipped_ja["id"],
+                    "material_id": skipped_ja["material_id"],
+                    "material_language": "ja",
+                    "reason": "language_capacity_full",
+                }
+            ],
+            material_language_capacities={"en": 1, "ja": 1},
+        )
+
+        self.assertTrue(created["created"])
+        self.assertEqual(
+            [item["pool_item_id"] for item in created["queues"]],
+            [selected_en["id"], selected_ja["id"]],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            skipped = conn.execute(
+                "SELECT status,last_error_code,last_error_message "
+                "FROM x_post_material_pool WHERE id=?",
+                (skipped_ja["id"],),
+            ).fetchone()
+        self.assertEqual(skipped, ("unpublished", "", ""))
+
+    def test_material_fifo_rejects_capacity_proof_before_language_is_full(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        oldest, older, newest = self.store.add_pool_materials(
+            ["410", "411", "412"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "410", "error_code": ""},
+                {"material_id": "411", "error_code": ""},
+                {"material_id": "412", "error_code": ""},
+            ],
+        )["items"]
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
+        )
+        proof = self.store.record_pool_checks(
+            [
+                {
+                    "pool_item_id": newest["id"],
+                    "material_id": newest["material_id"],
+                    "material_language": "en",
+                    "proof_reason": "language_capacity_full",
+                    "error_code": "",
+                }
+            ]
+        )
+        self.assertEqual(proof["updated_count"], 1)
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [
+                    self.material_candidate(older, 2),
+                    self.material_candidate(oldest, 3),
+                ],
+                fifo_capacity_skips=[
+                    {
+                        "pool_item_id": newest["id"],
+                        "material_id": newest["material_id"],
+                        "material_language": "en",
+                        "reason": "language_capacity_full",
+                    }
+                ],
+                material_language_capacities={"en": 2},
+            )
+
+        self.assertEqual(
+            rejected.exception.code, "x_post_pool_fifo_conflict"
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
+                0,
+            )
+
+    def test_material_fifo_capacity_proof_accepts_historical_language_skip(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        oldest_en, skipped_ja, newest_ja = self.store.add_pool_materials(
+            ["421", "422", "423"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "421", "error_code": ""},
+                {
+                    "material_id": "422",
+                    "error_code": "material_language_not_scheduled",
+                    "error_message": "historical language configuration",
+                },
+                {"material_id": "423", "error_code": ""},
+            ],
+        )["items"]
+        self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
+        )
+        proof = self.store.record_pool_checks(
+            [
+                {
+                    "pool_item_id": skipped_ja["id"],
+                    "material_id": skipped_ja["material_id"],
+                    "material_language": "ja",
+                    "proof_reason": "language_capacity_full",
+                    "error_code": "",
+                }
+            ]
+        )
+        self.assertEqual(proof["updated_count"], 1)
+        en_candidate = self.material_candidate(oldest_en, 2)
+        ja_candidate = self.material_candidate(newest_ja, 3)
+        ja_candidate["material_language"] = "ja"
+
+        created = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [en_candidate, ja_candidate],
+            fifo_capacity_skips=[
+                {
+                    "pool_item_id": skipped_ja["id"],
+                    "material_id": skipped_ja["material_id"],
+                    "material_language": "ja",
+                    "reason": "language_capacity_full",
+                }
+            ],
+            material_language_capacities={"en": 1, "ja": 1},
+        )
+
+        self.assertTrue(created["created"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT status,last_error_code,source_material_language,"
+                "source_hydrated_at FROM x_post_material_pool WHERE id=?",
+                (skipped_ja["id"],),
+            ).fetchone()
+        self.assertEqual(row[0:3], (
+            "unpublished",
+            "material_language_not_scheduled",
+            "ja",
+        ))
+        self.assertTrue(row[3])
+
+    def test_material_fifo_capacity_proof_preserves_available_historical_codes(self):
+        historical_codes = (
+            "material_has_violation",
+            "material_source_tag_unsafe",
+            "material_tag_unsafe",
+            "x_long_video_requires_premium",
+            "invalid_media_dimensions",
+        )
+        for offset, error_code in enumerate(historical_codes, 1):
+            with self.subTest(error_code=error_code), tempfile.TemporaryDirectory() as root:
+                db_path = Path(root) / "x-post.sqlite3"
+                store = service.XPostStore(db_path)
+                config = store.save_schedule_config(
+                    "material",
+                    {
+                        "enabled": True,
+                        "timezone": "Asia/Shanghai",
+                        "account_ids": [2, 3],
+                        "publish_times": ["09:00"],
+                        "version": 1,
+                    },
+                    actor={"user_id": "admin-1", "name": "Admin"},
+                    eligible_account_ids=[2, 3],
+                    now=datetime(
+                        2026,
+                        7,
+                        27,
+                        8,
+                        0,
+                        tzinfo=service.BEIJING_TZ,
+                    ),
+                )
+                material_ids = [
+                    str(430 + offset * 10 + item) for item in range(1, 4)
+                ]
+                oldest_en, skipped_ja, newest_ja = store.add_pool_materials(
+                    material_ids,
+                    actor={"user_id": "admin-1", "name": "Admin"},
+                    validation_checks=[
+                        {"material_id": material_ids[0], "error_code": ""},
+                        {
+                            "material_id": material_ids[1],
+                            "error_code": error_code,
+                            "error_message": "historical evidence",
+                        },
+                        {"material_id": material_ids[2], "error_code": ""},
+                    ],
+                )["items"]
+                store.due_schedule_slots(
+                    datetime(
+                        2026,
+                        7,
+                        27,
+                        9,
+                        0,
+                        tzinfo=service.BEIJING_TZ,
+                    )
+                )
+                with contextlib.closing(sqlite3.connect(db_path)) as conn:
+                    checked_before = conn.execute(
+                        "SELECT last_checked_at FROM x_post_material_pool "
+                        "WHERE id=?",
+                        (skipped_ja["id"],),
+                    ).fetchone()[0]
+                proof = store.record_pool_checks(
+                    [
+                        {
+                            "pool_item_id": skipped_ja["id"],
+                            "material_id": skipped_ja["material_id"],
+                            "material_language": "ja",
+                            "proof_reason": "language_capacity_full",
+                            "error_code": "",
+                        }
+                    ]
+                )
+                self.assertEqual(proof["updated_count"], 1)
+                en_candidate = self.material_candidate(oldest_en, 2)
+                ja_candidate = self.material_candidate(newest_ja, 3)
+                ja_candidate["material_language"] = "ja"
+
+                created = store.create_schedule_plan(
+                    "material",
+                    "2026-07-27",
+                    "09:00",
+                    int(config["version"]),
+                    [en_candidate, ja_candidate],
+                    fifo_capacity_skips=[
+                        {
+                            "pool_item_id": skipped_ja["id"],
+                            "material_id": skipped_ja["material_id"],
+                            "material_language": "ja",
+                            "reason": "language_capacity_full",
+                        }
+                    ],
+                    material_language_capacities={"en": 1, "ja": 1},
+                )
+
+                self.assertTrue(created["created"])
+                with contextlib.closing(sqlite3.connect(db_path)) as conn:
+                    row = conn.execute(
+                        "SELECT last_checked_at,last_error_code,"
+                        "source_material_language,source_hydrated_at "
+                        "FROM x_post_material_pool WHERE id=?",
+                        (skipped_ja["id"],),
+                    ).fetchone()
+                self.assertEqual(row[0], checked_before)
+                self.assertEqual(row[1], error_code)
+                self.assertEqual(row[2], "ja")
+                self.assertTrue(row[3])
 
     def test_material_schedule_allows_latest_set_to_follow_account_capability_order(self):
         self.save_schedule("material", [2, 3], ["09:00"])
@@ -3509,6 +3939,491 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 ).fetchone()[0]
             )
 
+    def _failed_bound_drama_media_run(
+        self,
+        account_ids=(2, 3),
+        *,
+        published_count=0,
+        relay_first=False,
+    ):
+        saved = self.save_schedule("drama", list(account_ids), ["09:00"])
+        for index in range(len(account_ids)):
+            self.add_drama(
+                content_id="BOUND-DRAMA-%s" % (index + 1),
+                free_episode_count=2,
+            )
+        assignments = self.store.available_drama_pool_items(
+            limit=10,
+            account_ids=list(account_ids),
+        )
+        candidates = []
+        for index, assignment in enumerate(assignments):
+            candidate = self.drama_candidate(
+                assignment,
+                int(assignment["candidate_account_id"]),
+                int(assignment["next_sub_number"]),
+            )
+            candidate.update(
+                {
+                    "media_validation_mode": "deferred",
+                    "preflight_sha256": "",
+                    "preflight_size": 0,
+                    "preflight_duration": 0,
+                }
+            )
+            if relay_first and index == 0:
+                candidate.update(
+                    {
+                        "preflight_duration": 180.0,
+                        "delivery_mode": "premium_relay_repost",
+                        "relay_account_id": 9,
+                        "relay_account_username": "premium9",
+                    }
+                )
+            candidates.append(candidate)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            saved["version"],
+            candidates,
+            premium_account_ids=[],
+            premium_relay_accounts=(
+                [{"id": 9, "username": "premium9"}]
+                if relay_first
+                else []
+            ),
+        )
+        if not 0 <= int(published_count) < len(plan["queues"]):
+            self.fail("published_count must leave at least one failed queue")
+        for index, queue in enumerate(plan["queues"]):
+            if index < int(published_count):
+                self.publish_queue(
+                    queue,
+                    queue["episode_number"],
+                    post_id="bound-published-%s" % queue["id"],
+                )
+                continue
+            log = self.store.reserve_log(queue["id"])
+            self.store.mark_failed_if_reserved(
+                log["id"],
+                "invalid_media_dimensions",
+                "bound drama failed media dimensions before X",
+            )
+        failed_run = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(failed_run["status"], "completed_with_errors")
+        self.assertEqual(failed_run["published_count"], int(published_count))
+        self.assertEqual(
+            failed_run["failed_count"],
+            len(plan["queues"]) - int(published_count),
+        )
+        prepared = []
+        for index, queue in enumerate(plan["queues"], 1):
+            if index <= int(published_count):
+                continue
+            prepared.append(
+                {
+                    "queue_id": queue["id"],
+                    "pool_item_id": queue["drama_pool_item_id"],
+                    "content_id": queue["content_id"],
+                    "episode_number": queue["episode_number"],
+                    "expected_error_code": "invalid_media_dimensions",
+                    "material_url": (
+                        "https://media.example.test/repaired-bound-%s.mp4"
+                        % queue["id"]
+                    ),
+                    "preflight_sha256": ("%064x" % (600 + index))[-64:],
+                    "preflight_size": 4096 + index,
+                    "preflight_duration": (
+                        180.0
+                        if queue["delivery_mode"] == "premium_relay_repost"
+                        else 88.0 + index
+                    ),
+                    "media_repair_trigger_code": "invalid_media_dimensions",
+                    "media_repair_job_key": ("%064x" % (700 + index))[-64:],
+                    "media_repair_profile": "x-h264-bound-drama-v1",
+                    "media_repair_source_sha256": (
+                        "%064x" % (800 + index)
+                    )[-64:],
+                }
+            )
+        return plan, prepared
+
+    def test_bound_drama_failed_media_recovery_is_atomic_audited_and_historical_due(self):
+        plan, prepared = self._failed_bound_drama_media_run()
+        recovery_now = datetime(
+            2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            before = {
+                "run": conn.execute(
+                    "SELECT status,failed_count,lease_heartbeat_at,updated_at "
+                    "FROM x_post_schedule_run WHERE id=?",
+                    (plan["id"],),
+                ).fetchone(),
+                "queues": conn.execute(
+                    "SELECT q.id,q.status,q.material_url,q.original_material_url,"
+                    "q.media_validation_mode,q.preflight_sha256,l.status,"
+                    "l.error_code,p.last_error_code,p.next_sub_number,"
+                    "p.assigned_account_id,p.assigned_source_queue_id "
+                    "FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "JOIN x_post_drama_pool p ON p.id=q.drama_pool_item_id "
+                    "WHERE q.schedule_run_id=? ORDER BY q.id",
+                    (plan["id"],),
+                ).fetchall(),
+                "audit_count": conn.execute(
+                    "SELECT COUNT(*) FROM "
+                    "x_post_schedule_bound_drama_failed_media_recovery_audit"
+                ).fetchone()[0],
+            }
+
+        validated = self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["validated_queue_count"], len(prepared))
+        self.assertEqual(validated["updated_count"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            after_validate = {
+                "run": conn.execute(
+                    "SELECT status,failed_count,lease_heartbeat_at,updated_at "
+                    "FROM x_post_schedule_run WHERE id=?",
+                    (plan["id"],),
+                ).fetchone(),
+                "queues": conn.execute(
+                    "SELECT q.id,q.status,q.material_url,q.original_material_url,"
+                    "q.media_validation_mode,q.preflight_sha256,l.status,"
+                    "l.error_code,p.last_error_code,p.next_sub_number,"
+                    "p.assigned_account_id,p.assigned_source_queue_id "
+                    "FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "JOIN x_post_drama_pool p ON p.id=q.drama_pool_item_id "
+                    "WHERE q.schedule_run_id=? ORDER BY q.id",
+                    (plan["id"],),
+                ).fetchall(),
+                "audit_count": conn.execute(
+                    "SELECT COUNT(*) FROM "
+                    "x_post_schedule_bound_drama_failed_media_recovery_audit"
+                ).fetchone()[0],
+            }
+        self.assertEqual(after_validate, before)
+
+        recovered = self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="a" * 40,
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], len(prepared))
+        self.assertEqual(recovered["next_status"], "running")
+        restored_run = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(restored_run["status"], "running")
+        self.assertEqual(restored_run["failed_count"], 0)
+        self.assertEqual(restored_run["unknown_count"], 0)
+        self.assertEqual(restored_run["lease_heartbeat_at"], "2026-07-28T02:00:00Z")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT q.status,q.media_validation_mode,q.original_material_url,"
+                "q.material_url,q.preflight_sha256,q.preflight_size,"
+                "q.preflight_duration,l.status,l.attempt_count,l.error_code,"
+                "p.status,p.last_error_code,p.next_sub_number,"
+                "p.assigned_account_id,p.assigned_source_queue_id "
+                "FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "JOIN x_post_drama_pool p ON p.id=q.drama_pool_item_id "
+                "WHERE q.schedule_run_id=? ORDER BY q.id",
+                (plan["id"],),
+            ).fetchall()
+            audit_rows = conn.execute(
+                "SELECT recovery_reason,previous_run_status,previous_queue_status,"
+                "previous_log_status,previous_pool_status,previous_error_code,"
+                "queue_id,drama_pool_item_id,content_id,episode_number,account_id,"
+                "assigned_source_queue_id,final_material_url,preflight_sha256,"
+                "media_repair_job_key FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                "WHERE schedule_run_id=? ORDER BY queue_id",
+                (plan["id"],),
+            ).fetchall()
+        self.assertEqual(len(audit_rows), len(prepared))
+        self.assertTrue(all(row[0] == "queued" for row in rows))
+        self.assertTrue(all(row[1] == "preflight" for row in rows))
+        self.assertTrue(all(row[2] and row[2] != row[3] for row in rows))
+        self.assertTrue(all(len(row[4]) == 64 and row[5] > 0 for row in rows))
+        self.assertTrue(all(row[6] > 0 for row in rows))
+        self.assertTrue(all(row[7:10] == ("reserved", 0, "") for row in rows))
+        self.assertTrue(all(row[10:12] == ("active", "") for row in rows))
+        self.assertTrue(
+            all(
+                audit[0:6]
+                == (
+                    service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                    "completed_with_errors",
+                    "failed",
+                    "failed",
+                    "active",
+                    "invalid_media_dimensions",
+                )
+                for audit in audit_rows
+            )
+        )
+        due = self.store.due_schedule_slots(recovery_now)
+        self.assertEqual(
+            [item["slot_key"] for item in due["items"]],
+            [restored_run["slot_key"]],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE "
+                    "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                    "SET actor='other' WHERE schedule_run_id=?",
+                    (plan["id"],),
+                )
+
+        for item in audit_rows:
+            queue_id = int(item[6])
+            queue = self.store.get_queue(queue_id)
+            log = self.store.reserve_log(queue_id)
+            self.store.prepare_log(
+                log["id"],
+                "https://www.dramawavew2a.com/ads/101/2116/view?recovery=1",
+                "https://gy.g2flow.com/s2l/recovery-%s.html" % queue_id,
+                "offline recovery ledger test",
+            )
+            self.store.mark_publishing(log["id"])
+            self.store.mark_media_uploaded(log["id"], "offline-media-%s" % queue_id)
+            self.store.mark_published(
+                log["id"],
+                "offline-media-%s" % queue_id,
+                "offline-post-%s" % queue_id,
+                "https://x.example.test/offline-post-%s" % queue_id,
+            )
+        completed = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertNotIn(
+            completed["slot_key"],
+            [
+                item["slot_key"]
+                for item in self.store.due_schedule_slots(recovery_now)["items"]
+            ],
+        )
+
+    def test_bound_drama_failed_media_recovery_preserves_published_sibling(self):
+        plan, prepared = self._failed_bound_drama_media_run(
+            published_count=1
+        )
+        recovery_now = datetime(
+            2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            queue_count_before = conn.execute(
+                "SELECT COUNT(*) FROM x_post_queue"
+            ).fetchone()[0]
+            published_before = conn.execute(
+                "SELECT q.id,l.x_post_id FROM x_post_queue q "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.schedule_run_id=? AND q.status='published'",
+                (plan["id"],),
+            ).fetchone()
+
+        recovered = self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="e" * 40,
+            now=recovery_now,
+        )
+
+        self.assertEqual(recovered["updated_count"], 1)
+        restored_run = self.store.get_schedule_run(plan["id"])
+        self.assertEqual(restored_run["status"], "running")
+        self.assertEqual(restored_run["published_count"], 1)
+        self.assertEqual(restored_run["failed_count"], 0)
+        self.assertEqual(restored_run["unknown_count"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
+                queue_count_before,
+            )
+            published_after = conn.execute(
+                "SELECT q.id,l.x_post_id FROM x_post_queue q "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.schedule_run_id=? AND q.status='published'",
+                (plan["id"],),
+            ).fetchone()
+            queued_count = conn.execute(
+                "SELECT COUNT(*) FROM x_post_queue "
+                "WHERE schedule_run_id=? AND status='queued'",
+                (plan["id"],),
+            ).fetchone()[0]
+        self.assertEqual(published_after, published_before)
+        self.assertEqual(queued_count, 1)
+
+    def test_bound_drama_failed_media_recovery_restores_relay_without_new_queue(self):
+        plan, prepared = self._failed_bound_drama_media_run(
+            relay_first=True
+        )
+        recovery_now = datetime(
+            2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            queue_count_before = conn.execute(
+                "SELECT COUNT(*) FROM x_post_queue"
+            ).fetchone()[0]
+
+        recovered = self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="f" * 40,
+            now=recovery_now,
+        )
+
+        self.assertEqual(recovered["updated_count"], len(plan["queues"]))
+        frozen = self.store.query_schedule_plan(
+            "drama", "2026-07-27", "09:00"
+        )
+        self.assertEqual(
+            [queue["delivery_mode"] for queue in frozen["queues"]],
+            ["premium_relay_repost", "direct"],
+        )
+        self.assertEqual(
+            [queue["repost_status"] for queue in frozen["queues"]],
+            ["reserved", ""],
+        )
+        self.assertTrue(
+            all(queue["status"] == "queued" for queue in frozen["queues"])
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0],
+                queue_count_before,
+            )
+            relay = conn.execute(
+                "SELECT status,source_attempt_count,repost_attempt_count,"
+                "unknown_outcome FROM x_post_repost_ledger "
+                "WHERE queue_id=?",
+                (plan["queues"][0]["id"],),
+            ).fetchone()
+            audit_relay_counts = conn.execute(
+                "SELECT validated_relay_count FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                "WHERE schedule_run_id=? ORDER BY queue_id",
+                (plan["id"],),
+            ).fetchall()
+        self.assertEqual(relay, ("reserved", 0, 0, 0))
+        self.assertEqual(
+            sorted(row[0] for row in audit_relay_counts),
+            [0, 1],
+        )
+
+    def test_bound_drama_failed_media_recovery_rejects_partial_and_repeat(self):
+        plan, prepared = self._failed_bound_drama_media_run()
+        recovery_now = datetime(
+            2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+        )
+        with self.assertRaises(service.XPostError) as partial:
+            self.store.recover_failed_drama_schedule_queues(
+                plan["id"],
+                prepared[:1],
+                reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="b" * 40,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            partial.exception.code,
+            "x_post_bound_drama_failed_media_recovery_conflict",
+        )
+        self.store.recover_failed_drama_schedule_queues(
+            plan["id"],
+            prepared,
+            reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="b" * 40,
+            now=recovery_now,
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_drama_schedule_queues(
+                plan["id"],
+                prepared,
+                reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="b" * 40,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_bound_drama_failed_media_recovery_conflict",
+        )
+
+    def test_bound_drama_failed_media_recovery_rejects_binding_drift(self):
+        plan, prepared = self._failed_bound_drama_media_run()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_drama_pool SET next_sub_number=next_sub_number+1 "
+                "WHERE id=?",
+                (prepared[0]["pool_item_id"],),
+            )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as drifted:
+            self.store.recover_failed_drama_schedule_queues(
+                plan["id"],
+                prepared,
+                reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="c" * 40,
+                now=datetime(
+                    2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            drifted.exception.code,
+            "x_post_bound_drama_failed_media_recovery_conflict",
+        )
+
+    def _assert_bound_drama_recovery_log_conflict(self, column):
+        plan, prepared = self._failed_bound_drama_media_run()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET %s=1 WHERE queue_id=?" % column,
+                (prepared[0]["queue_id"],),
+            )
+            if column == "unknown_outcome":
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET unknown_count=1 WHERE id=?",
+                    (plan["id"],),
+                )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_drama_schedule_queues(
+                plan["id"],
+                prepared,
+                reason=service.BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit="d" * 40,
+                now=datetime(
+                    2026, 7, 28, 10, 0, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_bound_drama_failed_media_recovery_conflict",
+        )
+
+    def test_bound_drama_failed_media_recovery_rejects_started_attempt(self):
+        self._assert_bound_drama_recovery_log_conflict("attempt_count")
+
+    def test_bound_drama_failed_media_recovery_rejects_unknown_outcome(self):
+        self._assert_bound_drama_recovery_log_conflict("unknown_outcome")
+
     def test_failed_media_recovery_rebuilds_exact_frozen_queues_once(self):
         saved = self.save_schedule("material", [2, 3, 4], ["09:00"])
         pools = self.store.add_pool_materials(
@@ -5290,6 +6205,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
             self.assertIn(
                 "x_post_schedule_transient_media_recovery_audit",
+                tables,
+            )
+            self.assertIn(
+                "x_post_schedule_bound_drama_failed_media_recovery_audit",
                 tables,
             )
             self.assertIn("x_post_schedule_random_plan", tables)

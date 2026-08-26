@@ -152,6 +152,12 @@ FAILED_MEDIA_PREFLIGHT_RECOVERY_REASON = (
 FAILED_MEDIA_PREFLIGHT_ERROR_CODES = frozenset(
     {"invalid_media_codec", "invalid_media_dimensions", "media_too_large"}
 )
+BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON = (
+    "operator_bound_drama_failed_media_repair_v1"
+)
+BOUND_DRAMA_FAILED_MEDIA_ERROR_CODES = frozenset(
+    {"invalid_media_dimensions"}
+)
 DRAMA_POOL_RETRYABLE_VALIDATION_CODES = frozenset(
     {"x_long_video_requires_premium"}
 )
@@ -373,6 +379,14 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
 _REVALIDATABLE_MATERIAL_VALIDATION_SQL = "(" + ",".join(
     "'%s'" % code for code in sorted(REVALIDATABLE_MATERIAL_VALIDATION_CODES)
 ) + ")"
+MATERIAL_CAPACITY_PROOF_PRESERVED_ERROR_CODES = frozenset(
+    NONBLOCKING_MATERIAL_VALIDATION_CODES
+    | REVALIDATABLE_MATERIAL_VALIDATION_CODES
+)
+_MATERIAL_CAPACITY_PROOF_PRESERVED_ERROR_SQL = "(" + ",".join(
+    "'%s'" % code
+    for code in sorted(MATERIAL_CAPACITY_PROOF_PRESERVED_ERROR_CODES)
+) + ")"
 MATERIAL_FIFO_SKIP_CODES = frozenset(
     {
         "drama_not_yet_deliverable",
@@ -382,6 +396,7 @@ MATERIAL_FIFO_SKIP_CODES = frozenset(
         "x_long_video_requires_premium",
     }
 )
+SCHEDULE_RUN_LEASE_SECONDS = 2 * 60 * 60
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -1173,6 +1188,8 @@ def _material_fifo_selection_matches(
     premium_account_ids,
     *,
     validation_cutoff="",
+    capacity_skips=None,
+    material_language_capacities=None,
 ):
     """Replay the account-aware FIFO boundary from durable pool evidence."""
     actual_by_pool = {
@@ -1188,6 +1205,26 @@ def _material_fifo_selection_matches(
     if not premium_ids.issubset(account_id_set):
         return False
     selected_pool_ids = set()
+    try:
+        capacity_skip_by_pool = {
+            int(item["pool_item_id"]): item
+            for item in (capacity_skips or [])
+        }
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if len(capacity_skip_by_pool) != len(capacity_skips or []):
+        return False
+    try:
+        capacities = {
+            canonical_drama_language(language): int(count)
+            for language, count in (material_language_capacities or {}).items()
+        }
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if any(count <= 0 for count in capacities.values()):
+        return False
+    consumed_capacity_skips = set()
+    selected_language_counts = {}
     cutoff = str(validation_cutoff or "")
     for pool in pool_rows:
         if len(selected_pool_ids) == len(actual_by_pool):
@@ -1196,6 +1233,12 @@ def _material_fifo_selection_matches(
         values = actual_by_pool.get(pool_id)
         if values is not None:
             account_id = int(values["account_id"])
+            try:
+                material_language = canonical_drama_language(
+                    values.get("material_language")
+                )
+            except (TypeError, ValueError):
+                return False
             try:
                 duration = float(values.get("preflight_duration", 0) or 0)
             except (TypeError, ValueError, OverflowError):
@@ -1222,6 +1265,9 @@ def _material_fifo_selection_matches(
                 )
             ):
                 return False
+            selected_language_counts[material_language] = (
+                selected_language_counts.get(material_language, 0) + 1
+            )
             if str(pool["last_error_code"] or "") in (
                 DEFERRED_MATERIAL_VALIDATION_CODES
             ):
@@ -1243,10 +1289,45 @@ def _material_fifo_selection_matches(
 
         error_code = str(pool["last_error_code"] or "")
         checked_at = str(pool["last_checked_at"] or "")
+        capacity_skip = capacity_skip_by_pool.get(pool_id)
+        if capacity_skip is not None:
+            try:
+                skip_language = canonical_drama_language(
+                    capacity_skip.get("material_language")
+                )
+            except (TypeError, ValueError):
+                return False
+            if (
+                (
+                    error_code
+                    and error_code
+                    not in MATERIAL_CAPACITY_PROOF_PRESERVED_ERROR_CODES
+                )
+                or str(pool["material_id"] or "")
+                != str(capacity_skip.get("material_id", "") or "")
+                or str(pool["source_material_language"] or "")
+                != skip_language
+                or not cutoff
+                or not str(pool["source_hydrated_at"] or "")
+                or str(pool["source_hydrated_at"] or "") < cutoff
+                or str(capacity_skip.get("reason", "") or "")
+                != "language_capacity_full"
+                or selected_language_counts.get(skip_language, 0)
+                != capacities.get(skip_language, 0)
+            ):
+                return False
+            consumed_capacity_skips.add(pool_id)
+            continue
         checked_in_this_preflight = bool(
             error_code in MATERIAL_FIFO_SKIP_CODES
             and (not cutoff or (checked_at and checked_at >= cutoff))
         )
+        if error_code in REVALIDATABLE_MATERIAL_VALIDATION_CODES:
+            # A historical media/source failure cannot authorize a FIFO jump.
+            # It must have been reread by this claimed run.
+            checked_in_this_preflight = bool(
+                cutoff and checked_at and checked_at >= cutoff
+            )
         if error_code in DEFERRED_MATERIAL_VALIDATION_CODES:
             # Unlike historical nonblocking evidence, a delivery-time skip is
             # safe only after this claimed run has reread the source boundary.
@@ -1257,7 +1338,10 @@ def _material_fifo_selection_matches(
             )
         if not checked_in_this_preflight:
             return False
-    return selected_pool_ids == set(actual_by_pool)
+    return (
+        selected_pool_ids == set(actual_by_pool)
+        and consumed_capacity_skips == set(capacity_skip_by_pool)
+    )
 
 
 def ensure_storage(db_path):
@@ -1325,6 +1409,8 @@ def ensure_storage(db_path):
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     material_key TEXT NOT NULL UNIQUE,
                     material_id TEXT NOT NULL,
+                    source_material_language TEXT NOT NULL DEFAULT '',
+                    source_hydrated_at TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'unpublished'
                         CHECK(status IN ('unpublished','published')),
                     published_at TEXT NOT NULL DEFAULT '',
@@ -1563,6 +1649,8 @@ def ensure_storage(db_path):
                     error_message TEXT NOT NULL DEFAULT '',
                     started_at TEXT NOT NULL DEFAULT '',
                     finished_at TEXT NOT NULL DEFAULT '',
+                    lease_heartbeat_at TEXT NOT NULL DEFAULT '',
+                    plan_attempted_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(source_type,run_date,publish_time)
@@ -2033,6 +2121,90 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_bound_drama_failed_media_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL,
+                    queue_id INTEGER NOT NULL UNIQUE,
+                    drama_pool_item_id INTEGER NOT NULL,
+                    content_id TEXT NOT NULL,
+                    episode_number INTEGER NOT NULL CHECK(episode_number>0),
+                    replay_generation INTEGER NOT NULL CHECK(replay_generation>0),
+                    account_id INTEGER NOT NULL CHECK(account_id>0),
+                    assigned_source_queue_id INTEGER NOT NULL,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_bound_drama_failed_media_repair_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL CHECK(length(deployed_commit)=40),
+                    previous_run_status TEXT NOT NULL
+                        CHECK(previous_run_status='completed_with_errors'),
+                    previous_queue_status TEXT NOT NULL
+                        CHECK(previous_queue_status='failed'),
+                    previous_log_status TEXT NOT NULL
+                        CHECK(previous_log_status='failed'),
+                    previous_pool_status TEXT NOT NULL
+                        CHECK(previous_pool_status='active'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='invalid_media_dimensions'),
+                    previous_material_url TEXT NOT NULL,
+                    final_material_url TEXT NOT NULL,
+                    preflight_sha256 TEXT NOT NULL CHECK(length(preflight_sha256)=64),
+                    preflight_size INTEGER NOT NULL CHECK(preflight_size>0),
+                    preflight_duration REAL NOT NULL CHECK(preflight_duration>0),
+                    media_repair_trigger_code TEXT NOT NULL
+                        CHECK(media_repair_trigger_code='invalid_media_dimensions'),
+                    media_repair_job_key TEXT NOT NULL
+                        CHECK(length(media_repair_job_key)=64),
+                    media_repair_profile TEXT NOT NULL,
+                    media_repair_source_sha256 TEXT NOT NULL
+                        CHECK(length(media_repair_source_sha256)=64),
+                    validated_relay_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_relay_count IN (0,1)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(queue_id) REFERENCES x_post_queue(id),
+                    FOREIGN KEY(drama_pool_item_id) REFERENCES x_post_drama_pool(id),
+                    FOREIGN KEY(assigned_source_queue_id) REFERENCES x_post_queue(id)
+                )
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_bound_drama_failed_media_audit_immutable_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_bound_drama_failed_media_audit_immutable_update
+                BEFORE UPDATE ON
+                    x_post_schedule_bound_drama_failed_media_recovery_audit
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post bound drama failed media recovery audit immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_bound_drama_failed_media_audit_immutable_delete"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_bound_drama_failed_media_audit_immutable_delete
+                BEFORE DELETE ON
+                    x_post_schedule_bound_drama_failed_media_recovery_audit
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post bound drama failed media recovery audit immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_drama_replay_audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pool_item_id INTEGER NOT NULL,
@@ -2216,6 +2388,33 @@ def ensure_storage(db_path):
                     "ALTER TABLE x_post_schedule_run "
                     "ADD COLUMN schedule_mode TEXT NOT NULL DEFAULT 'fixed' "
                     "CHECK(schedule_mode IN ('fixed','random'))"
+                )
+            if "lease_heartbeat_at" not in schedule_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_run "
+                    "ADD COLUMN lease_heartbeat_at TEXT NOT NULL DEFAULT ''"
+                )
+            if "plan_attempted_at" not in schedule_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_run "
+                    "ADD COLUMN plan_attempted_at TEXT NOT NULL DEFAULT ''"
+                )
+
+            material_pool_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_material_pool)"
+                ).fetchall()
+            }
+            if "source_material_language" not in material_pool_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_material_pool ADD COLUMN "
+                    "source_material_language TEXT NOT NULL DEFAULT ''"
+                )
+            if "source_hydrated_at" not in material_pool_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_material_pool ADD COLUMN "
+                    "source_hydrated_at TEXT NOT NULL DEFAULT ''"
                 )
 
             drama_pool_columns = {
@@ -2520,6 +2719,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_failed_media_recovery_created "
                 "ON x_post_schedule_failed_media_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_bound_drama_failed_media_recovery_created "
+                "ON x_post_schedule_bound_drama_failed_media_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_corrective_created "
@@ -4694,7 +4897,9 @@ class XPostStore:
         }
         terminal_status_values = tuple(sorted(terminal_statuses))
         current_slot_keys = set(slots)
-        timestamp = utc_now()
+        timestamp = current.astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             configs = conn.execute(
@@ -4752,8 +4957,9 @@ class XPostStore:
                         "slot_key,source_type,run_date,publish_time,timezone,"
                         "config_version,account_ids_json,schedule_mode,"
                         "body_template,status,"
-                        "expected_count,queued_count,created_at,updated_at"
-                        ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?)",
+                        "expected_count,queued_count,created_at,updated_at,"
+                        "lease_heartbeat_at"
+                        ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?,?)",
                         (
                             slot_key,
                             config["source_type"],
@@ -4772,15 +4978,26 @@ class XPostStore:
                             len(slot_config["account_ids"]),
                             timestamp,
                             timestamp,
+                            timestamp,
                         ),
                     )
             current_run_date = current.date().isoformat()
+            lease_cutoff = (
+                current.astimezone(timezone.utc)
+                - timedelta(seconds=SCHEDULE_RUN_LEASE_SECONDS)
+            ).isoformat(timespec="seconds").replace("+00:00", "Z")
             stale_rows = conn.execute(
                 "SELECT id,run_date,publish_time FROM x_post_schedule_run "
-                "WHERE run_date<? AND status NOT IN (?,?,?,?,?)",
+                "WHERE run_date<? AND status NOT IN (?,?,?,?,?) "
+                "AND COALESCE(NULLIF(lease_heartbeat_at,''),updated_at)<=? "
+                "AND NOT (status='running' AND EXISTS("
+                "SELECT 1 FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit a "
+                "WHERE a.schedule_run_id=x_post_schedule_run.id))",
                 (
                     current_run_date,
                     *terminal_status_values,
+                    lease_cutoff,
                 ),
             ).fetchall()
             stale_run_ids = [
@@ -4850,7 +5067,11 @@ class XPostStore:
                 scope_values.extend((run_date, publish_time))
             scoped_runs_sql = (
                 "SELECT * FROM x_post_schedule_run "
-                "WHERE (%s) AND status NOT IN (?,?,?,?,?) "
+                "WHERE ((%s) OR (status='running' AND EXISTS("
+                "SELECT 1 FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit a "
+                "WHERE a.schedule_run_id=x_post_schedule_run.id))) "
+                "AND status NOT IN (?,?,?,?,?) "
                 "ORDER BY run_date,publish_time,source_type,id"
                 % " OR ".join(scope_clauses)
             )
@@ -5861,14 +6082,50 @@ class XPostStore:
             except ValueError:
                 raise XPostError("invalid_request", "error_code无效", 400) from None
             message = redact_text(raw.get("error_message", ""), 500) if code else ""
-            normalized.append((pool_item_id, code, message))
+            proof_reason = str(raw.get("proof_reason", "") or "").strip()
+            proof_material_id = ""
+            proof_language = ""
+            if proof_reason:
+                if proof_reason != "language_capacity_full" or code or message:
+                    raise XPostError(
+                        "invalid_request", "素材来源证明无效", 400
+                    )
+                proof_material_id = normalize_material_key(
+                    raw.get("material_id")
+                )
+                try:
+                    proof_language = canonical_drama_language(
+                        raw.get("material_language")
+                    )
+                except ValueError as exc:
+                    raise XPostError(
+                        "x_account_drama_language_invalid", str(exc), 400
+                    ) from None
+            normalized.append(
+                (
+                    pool_item_id,
+                    code,
+                    message,
+                    proof_reason,
+                    proof_material_id,
+                    proof_language,
+                )
+            )
         timestamp = utc_now()
         updated = 0
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for pool_item_id, code, message in normalized:
+            for (
+                pool_item_id,
+                code,
+                message,
+                proof_reason,
+                proof_material_id,
+                proof_language,
+            ) in normalized:
                 row = conn.execute(
-                    "SELECT id,status,material_key FROM x_post_material_pool WHERE id=?",
+                    "SELECT id,status,material_key,material_id,last_error_code "
+                    "FROM x_post_material_pool WHERE id=?",
                     (pool_item_id,),
                 ).fetchone()
                 if not row:
@@ -5884,11 +6141,37 @@ class XPostStore:
                     (pool_item_id, row["material_key"]),
                 ).fetchone():
                     continue
-                cursor = conn.execute(
-                    "UPDATE x_post_material_pool SET last_checked_at=?,last_error_code=?,"
-                    "last_error_message=?,updated_at=? WHERE id=? AND status='unpublished'",
-                    (timestamp, code, message, timestamp, pool_item_id),
-                )
+                if proof_reason:
+                    if str(row["material_id"] or "") != proof_material_id:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_fifo_conflict",
+                            "素材来源证明与素材池身份不一致",
+                            409,
+                        )
+                    cursor = conn.execute(
+                        "UPDATE x_post_material_pool SET "
+                        "source_material_language=?,source_hydrated_at=?,"
+                        "updated_at=? "
+                        "WHERE id=? AND status='unpublished' "
+                        "AND material_id=? "
+                        "AND (last_error_code='' OR last_error_code IN %s)"
+                        % _MATERIAL_CAPACITY_PROOF_PRESERVED_ERROR_SQL,
+                        (
+                            proof_language,
+                            timestamp,
+                            timestamp,
+                            pool_item_id,
+                            proof_material_id,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "UPDATE x_post_material_pool SET last_checked_at=?,"
+                        "last_error_code=?,last_error_message=?,updated_at=? "
+                        "WHERE id=? AND status='unpublished'",
+                        (timestamp, code, message, timestamp, pool_item_id),
+                    )
                 updated += int(cursor.rowcount or 0)
             conn.commit()
         return {"updated_count": updated}
@@ -8743,6 +9026,7 @@ class XPostStore:
             "error_message",
             "started_at",
             "finished_at",
+            "plan_attempted_at",
             "created_at",
             "updated_at",
         )
@@ -8825,6 +9109,86 @@ class XPostStore:
                 for row in queues
             ],
         }
+
+    def heartbeat_schedule_run(
+        self,
+        source_type,
+        run_date,
+        publish_time,
+        config_version,
+        account_ids,
+        *,
+        plan_attempt=False,
+    ):
+        """Renew only the active planner lease; never mutate FIFO evidence."""
+        source_type = _schedule_source_type(source_type)
+        run_date = _date_value(run_date, "run_date")
+        publish_time = _schedule_publish_time(publish_time)
+        config_version = _positive_int(config_version, "config_version")
+        account_ids = _schedule_account_ids(account_ids)
+        if not isinstance(plan_attempt, bool):
+            raise XPostError("invalid_request", "plan_attempt无效", 400)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT id,config_version,account_ids_json,status,"
+                "plan_attempted_at "
+                "FROM x_post_schedule_run "
+                "WHERE source_type=? AND run_date=? AND publish_time=?",
+                (source_type, run_date, publish_time),
+            ).fetchone()
+            if (
+                not run
+                or int(run["config_version"]) != config_version
+                or _schedule_account_ids(
+                    _json_array(run["account_ids_json"], "account_ids")
+                )
+                != account_ids
+                or str(run["status"]) not in {"claimed", "running"}
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_lease_conflict",
+                    "冻结批次已结束或执行租约范围不一致",
+                    409,
+                )
+            if plan_attempt:
+                queue_exists = conn.execute(
+                    "SELECT 1 FROM x_post_queue WHERE schedule_run_id=? LIMIT 1",
+                    (int(run["id"]),),
+                ).fetchone()
+                if str(run["plan_attempted_at"] or "") or queue_exists:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_plan_attempt_conflict",
+                        "冻结批次已登记过计划写入尝试",
+                        409,
+                    )
+                cursor = conn.execute(
+                    "UPDATE x_post_schedule_run SET lease_heartbeat_at=?,"
+                    "plan_attempted_at=? WHERE id=? AND status='claimed' "
+                    "AND plan_attempted_at=''",
+                    (timestamp, timestamp, int(run["id"])),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE x_post_schedule_run SET lease_heartbeat_at=? "
+                    "WHERE id=? AND status IN ('claimed','running')",
+                    (timestamp, int(run["id"])),
+                )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_lease_conflict",
+                    "冻结批次执行租约续期失败",
+                    409,
+                )
+            conn.commit()
+        item = self.get_schedule_run(int(run["id"]))
+        item["heartbeat_recorded"] = True
+        item["plan_attempt_recorded"] = bool(plan_attempt)
+        return item
 
     def record_schedule_failure(
         self,
@@ -10702,6 +11066,8 @@ class XPostStore:
         candidates,
         premium_account_ids=None,
         premium_relay_accounts=None,
+        fifo_capacity_skips=None,
+        material_language_capacities=None,
     ):
         source_type = _schedule_source_type(source_type)
         run_date = _date_value(run_date, "run_date")
@@ -10709,6 +11075,23 @@ class XPostStore:
         config_version = _positive_int(config_version, "config_version")
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
+        if fifo_capacity_skips is None:
+            fifo_capacity_skips = []
+        if (
+            not isinstance(fifo_capacity_skips, list)
+            or len(fifo_capacity_skips) > 1000
+        ):
+            raise XPostError(
+                "invalid_request", "fifo_capacity_skips无效", 400
+            )
+        if material_language_capacities is None:
+            material_language_capacities = {}
+        if not isinstance(material_language_capacities, dict):
+            raise XPostError(
+                "invalid_request",
+                "material_language_capacities无效",
+                400,
+            )
         if premium_relay_accounts is None:
             premium_relay_accounts = []
         if not isinstance(premium_relay_accounts, list):
@@ -10914,6 +11297,100 @@ class XPostStore:
                 "候选账号必须保持自动发布设置中的相对顺序",
                 409,
             )
+
+        normalized_capacity_skips = []
+        seen_capacity_pool_ids = set()
+        for raw_skip in fifo_capacity_skips:
+            if not isinstance(raw_skip, dict):
+                raise XPostError(
+                    "invalid_request", "fifo_capacity_skip必须是对象", 400
+                )
+            pool_item_id = _positive_int(
+                raw_skip.get("pool_item_id"), "pool_item_id"
+            )
+            material_id = _clean_text(
+                raw_skip.get("material_id"), "material_id", 64
+            )
+            try:
+                material_language = canonical_drama_language(
+                    raw_skip.get("material_language")
+                )
+            except ValueError as exc:
+                raise XPostError(
+                    "x_account_drama_language_invalid", str(exc), 400
+                ) from None
+            if (
+                source_type != "material"
+                or pool_item_id in seen_capacity_pool_ids
+                or str(raw_skip.get("reason", "") or "")
+                != "language_capacity_full"
+            ):
+                raise XPostError(
+                    "invalid_request", "fifo_capacity_skip无效", 400
+                )
+            seen_capacity_pool_ids.add(pool_item_id)
+            normalized_capacity_skips.append(
+                {
+                    "pool_item_id": pool_item_id,
+                    "material_id": material_id,
+                    "material_language": material_language,
+                    "reason": "language_capacity_full",
+                }
+            )
+
+        normalized_capacities = {}
+        for raw_language, raw_count in material_language_capacities.items():
+            try:
+                language = canonical_drama_language(raw_language)
+            except ValueError as exc:
+                raise XPostError(
+                    "x_account_drama_language_invalid", str(exc), 400
+                ) from None
+            count = _positive_int(raw_count, "material language capacity")
+            if language in normalized_capacities:
+                raise XPostError(
+                    "invalid_request",
+                    "material_language_capacities重复",
+                    400,
+                )
+            normalized_capacities[language] = count
+        if normalized_capacity_skips:
+            if (
+                not frozen["found"]
+                or sum(normalized_capacities.values()) != len(account_ids)
+            ):
+                raise XPostError(
+                    "x_post_pool_fifo_conflict",
+                    "素材语言容量证据必须绑定已冻结账号范围",
+                    409,
+                )
+            selected_language_counts = {}
+            for values in prepared:
+                try:
+                    language = canonical_drama_language(
+                        values["material_language"]
+                    )
+                except ValueError as exc:
+                    raise XPostError(
+                        "x_account_drama_language_invalid", str(exc), 400
+                    ) from None
+                selected_language_counts[language] = (
+                    selected_language_counts.get(language, 0) + 1
+                )
+            skipped_languages = {
+                item["material_language"]
+                for item in normalized_capacity_skips
+            }
+            if any(
+                selected_language_counts.get(language, 0)
+                != normalized_capacities.get(language, 0)
+                for language in skipped_languages
+            ):
+                raise XPostError(
+                    "x_post_pool_fifo_conflict",
+                    "素材语言尚未达到冻结批次容量",
+                    409,
+                )
 
         timestamp = utc_now()
         slot_key = "xpost:schedule:v1:%s:%s:%s" % (
@@ -11131,6 +11608,8 @@ class XPostStore:
                         if existing is not None
                         else ""
                     ),
+                    capacity_skips=normalized_capacity_skips,
+                    material_language_capacities=normalized_capacities,
                 ):
                     conn.rollback()
                     raise XPostError(
@@ -14144,6 +14623,558 @@ class XPostStore:
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
+
+    def recover_failed_drama_schedule_queues(
+        self,
+        run_id,
+        prepared_queues,
+        *,
+        reason,
+        actor,
+        deployed_commit,
+        validate_only=False,
+        now=None,
+    ):
+        """Re-arm one exact bound-drama pre-X media-failure manifest.
+
+        Historical schedule runs are accepted because the frozen queue, drama
+        binding, and zero-attempt log are the authority.  The method never
+        creates a queue or calls X; it only appends audit evidence and returns
+        the original queues to the reserved pre-X state in one transaction.
+        """
+        run_id = _positive_int(run_id, "run_id")
+        if (
+            not isinstance(prepared_queues, list)
+            or not prepared_queues
+            or len(prepared_queues) > MAX_DAILY_BATCH_SIZE
+        ):
+            raise XPostError(
+                "invalid_request",
+                "prepared_queues必须包含1到%s项" % MAX_DAILY_BATCH_SIZE,
+                400,
+            )
+        if not isinstance(validate_only, bool):
+            raise XPostError("invalid_request", "validate_only无效", 400)
+        if str(reason or "") != BOUND_DRAMA_FAILED_MEDIA_RECOVERY_REASON:
+            raise XPostError("invalid_request", "短剧媒体恢复原因无效", 400)
+        try:
+            actor = _clean_token(actor, "actor", 128)
+            deployed_commit = _clean_token(
+                deployed_commit, "deployed commit", 40
+            ).lower()
+        except ValueError:
+            raise XPostError(
+                "invalid_request", "恢复执行人或部署commit无效", 400
+            ) from None
+        if not re.fullmatch(r"[a-f0-9]{40}", deployed_commit):
+            raise XPostError("invalid_request", "部署commit无效", 400)
+
+        prepared = {}
+        seen_pool_ids = set()
+        for raw in prepared_queues:
+            if not isinstance(raw, dict):
+                raise XPostError(
+                    "invalid_request", "短剧媒体恢复项必须是对象", 400
+                )
+            queue_id = _positive_int(raw.get("queue_id"), "queue_id")
+            pool_item_id = _positive_int(
+                raw.get("pool_item_id"), "pool_item_id"
+            )
+            episode_number = _positive_int(
+                raw.get("episode_number"), "episode_number"
+            )
+            content_id = _drama_content_id(raw.get("content_id"))
+            try:
+                expected_error_code = _clean_token(
+                    raw.get("expected_error_code"),
+                    "expected error code",
+                    64,
+                )
+                repair_trigger = _clean_token(
+                    raw.get("media_repair_trigger_code"),
+                    "repair trigger",
+                    64,
+                )
+                repair_profile = _clean_token(
+                    raw.get("media_repair_profile"),
+                    "repair profile",
+                    128,
+                )
+            except ValueError:
+                raise XPostError(
+                    "invalid_request", "媒体恢复错误码或配置无效", 400
+                ) from None
+            if (
+                expected_error_code
+                not in BOUND_DRAMA_FAILED_MEDIA_ERROR_CODES
+                or repair_trigger != expected_error_code
+            ):
+                raise XPostError(
+                    "invalid_request", "仅允许恢复指定的短剧媒体预检错误", 400
+                )
+            material_url = str(raw.get("material_url", "") or "").strip()
+            parsed_url = urllib.parse.urlsplit(material_url)
+            if (
+                len(material_url) > 4096
+                or any(ord(char) < 32 for char in material_url)
+                or parsed_url.scheme != "https"
+                or not parsed_url.hostname
+                or parsed_url.username
+                or parsed_url.password
+                or parsed_url.fragment
+            ):
+                raise XPostError(
+                    "invalid_media_url", "修复后的素材地址必须是HTTPS URL", 400
+                )
+            repair_job_key = str(
+                raw.get("media_repair_job_key", "") or ""
+            ).lower()
+            repair_source_sha = str(
+                raw.get("media_repair_source_sha256", "") or ""
+            ).lower()
+            final_sha = str(raw.get("preflight_sha256", "") or "").lower()
+            if not all(
+                re.fullmatch(r"[a-f0-9]{64}", value)
+                for value in (repair_job_key, repair_source_sha, final_sha)
+            ):
+                raise XPostError(
+                    "invalid_request", "媒体恢复指纹或job key无效", 400
+                )
+            if isinstance(raw.get("preflight_size"), bool):
+                raise XPostError("invalid_request", "preflight_size无效", 400)
+            try:
+                preflight_size = int(raw.get("preflight_size"))
+                preflight_duration = float(raw.get("preflight_duration"))
+            except (TypeError, ValueError, OverflowError):
+                raise XPostError(
+                    "invalid_request", "媒体恢复预检值无效", 400
+                ) from None
+            if (
+                preflight_size <= 0
+                or preflight_size > DEFAULT_MAX_MEDIA_BYTES
+                or not math.isfinite(preflight_duration)
+                or preflight_duration <= 0
+                or preflight_duration > PREMIUM_MAX_DURATION_SECONDS
+            ):
+                raise XPostError(
+                    "invalid_request", "媒体恢复预检值超出范围", 400
+                )
+            if queue_id in prepared or pool_item_id in seen_pool_ids:
+                raise XPostError(
+                    "invalid_request", "queue_id和pool_item_id必须互不重复", 400
+                )
+            seen_pool_ids.add(pool_item_id)
+            prepared[queue_id] = {
+                "queue_id": queue_id,
+                "pool_item_id": pool_item_id,
+                "content_id": content_id,
+                "episode_number": episode_number,
+                "expected_error_code": expected_error_code,
+                "material_url": material_url,
+                "preflight_sha256": final_sha,
+                "preflight_size": preflight_size,
+                "preflight_duration": preflight_duration,
+                "media_repair_trigger_code": repair_trigger,
+                "media_repair_job_key": repair_job_key,
+                "media_repair_profile": repair_profile,
+                "media_repair_source_sha256": repair_source_sha,
+            }
+
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        timestamp = current.astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        queue_ids = tuple(sorted(prepared))
+        placeholders = ",".join("?" for _queue_id in queue_ids)
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?", (run_id,)
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT q.*,l.id AS log_id,l.status AS log_status,"
+                "l.attempt_count,l.x_media_id,l.x_post_id,l.x_post_url,"
+                "l.error_code AS log_error_code,"
+                "l.unknown_outcome AS log_unknown_outcome,l.started_at,"
+                "l.published_at,p.id AS bound_pool_id,"
+                "p.content_id AS pool_content_id,p.status AS pool_status,"
+                "p.free_episode_count,p.next_sub_number,"
+                "p.published_episode_count,p.replay_generation AS pool_generation,"
+                "p.assigned_account_id,p.assigned_at AS pool_assigned_at,"
+                "p.assigned_source_queue_id,"
+                "p.last_error_code AS pool_error_code,p.completed_at,"
+                "p.created_at AS bound_pool_created_at,"
+                "b.id AS binding_queue_id,b.source_type AS binding_source_type,"
+                "b.drama_pool_item_id AS binding_pool_item_id,"
+                "b.content_id AS binding_content_id,"
+                "b.episode_number AS binding_episode_number,"
+                "b.drama_replay_generation AS binding_generation,"
+                "b.account_id AS binding_account_id,"
+                "r.id AS relay_ledger_id,r.status AS relay_status,"
+                "r.source_attempt_count,r.repost_attempt_count,"
+                "r.source_post_id,r.source_post_url,r.repost_id,"
+                "r.error_code AS relay_error_code,"
+                "r.unknown_outcome AS relay_unknown_outcome,"
+                "r.source_published_at,r.reposted_at "
+                "FROM x_post_queue q "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_drama_pool p ON p.id=q.drama_pool_item_id "
+                "LEFT JOIN x_post_queue b ON b.id=p.assigned_source_queue_id "
+                "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.id IN (%s) ORDER BY q.id" % placeholders,
+                queue_ids,
+            ).fetchall()
+            all_failed = conn.execute(
+                "SELECT q.id FROM x_post_queue q "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.schedule_run_id=? AND q.status='failed' "
+                "AND l.status='failed' ORDER BY q.id",
+                (run_id,),
+            ).fetchall()
+            prior = conn.execute(
+                "SELECT 1 FROM "
+                "x_post_schedule_bound_drama_failed_media_recovery_audit "
+                "WHERE schedule_run_id=? OR queue_id IN (%s) LIMIT 1"
+                % placeholders,
+                (run_id,) + queue_ids,
+            ).fetchone()
+            frozen_account_ids = []
+            if run:
+                try:
+                    frozen_account_ids = _schedule_account_ids(
+                        _json_array(run["account_ids_json"], "account_ids")
+                    )
+                except XPostError:
+                    frozen_account_ids = []
+            conflict = bool(
+                not run
+                or str(run["source_type"] or "") != "drama"
+                or str(run["timezone"] or "") != SCHEDULE_TIMEZONE
+                or str(run["status"] or "") != "completed_with_errors"
+                or int(run["unknown_count"] or 0) != 0
+                or int(run["failed_count"] or 0) != len(queue_ids)
+                or int(run["published_count"] or 0) + len(queue_ids)
+                != int(run["expected_count"] or 0)
+                or int(run["queued_count"] or 0)
+                != int(run["expected_count"] or 0)
+                or tuple(int(row["id"]) for row in all_failed) != queue_ids
+                or len(rows) != len(queue_ids)
+                or prior is not None
+            )
+            normalized = []
+            queue_account_ids = set()
+            relay_count = 0
+            for row in rows:
+                item = prepared[int(row["id"])]
+                error_code = str(row["log_error_code"] or "")
+                is_relay = str(row["delivery_mode"] or "") == (
+                    PREMIUM_RELAY_REPOST_MODE
+                )
+                if is_relay:
+                    relay_count += 1
+                queue_generation = int(row["drama_replay_generation"] or 0)
+                expected_episode_key = (
+                    _drama_episode_key(
+                        item["content_id"],
+                        item["episode_number"],
+                        queue_generation,
+                    )
+                    if queue_generation > 0
+                    else ""
+                )
+                queue_account_ids.add(int(row["account_id"] or 0))
+                row_conflict = bool(
+                    int(row["schedule_run_id"] or 0) != run_id
+                    or str(row["source_type"] or "") != "drama"
+                    or str(row["status"] or "") != "failed"
+                    or int(row["drama_pool_item_id"] or 0)
+                    != item["pool_item_id"]
+                    or str(row["content_id"] or "") != item["content_id"]
+                    or int(row["episode_number"] or 0)
+                    != item["episode_number"]
+                    or queue_generation <= 0
+                    or str(row["episode_key"] or "") != expected_episode_key
+                    or int(row["account_id"] or 0) not in frozen_account_ids
+                    or str(row["media_validation_mode"] or "")
+                    != MEDIA_VALIDATION_DEFERRED
+                    or str(row["original_material_url"] or "")
+                    or str(row["media_repair_trigger_code"] or "")
+                    or str(row["media_repair_job_key"] or "")
+                    or str(row["media_repair_profile"] or "")
+                    or str(row["media_repair_source_sha256"] or "")
+                    or str(row["preflight_sha256"] or "")
+                    or int(row["preflight_size"] or 0) != 0
+                    or item["material_url"] == str(row["material_url"] or "")
+                    or str(row["log_status"] or "") != "failed"
+                    or int(row["attempt_count"] or 0) != 0
+                    or int(row["log_unknown_outcome"] or 0) != 0
+                    or error_code != item["expected_error_code"]
+                    or any(
+                        str(row[field] or "")
+                        for field in (
+                            "x_media_id",
+                            "x_post_id",
+                            "x_post_url",
+                            "started_at",
+                            "published_at",
+                        )
+                    )
+                    or row["bound_pool_id"] is None
+                    or str(row["pool_content_id"] or "")
+                    != item["content_id"]
+                    or str(row["pool_status"] or "") != "active"
+                    or int(row["next_sub_number"] or 0)
+                    != item["episode_number"]
+                    or int(row["published_episode_count"] or 0)
+                    != item["episode_number"] - 1
+                    or int(row["free_episode_count"] or 0)
+                    < item["episode_number"]
+                    or int(row["pool_generation"] or 0)
+                    != int(row["drama_replay_generation"] or 0)
+                    or int(row["assigned_account_id"] or 0)
+                    != int(row["account_id"] or 0)
+                    or not str(row["pool_assigned_at"] or "")
+                    or str(row["pool_error_code"] or "") != error_code
+                    or str(row["completed_at"] or "")
+                    or str(row["bound_pool_created_at"] or "")
+                    != str(row["drama_pool_created_at"] or "")
+                    or row["assigned_source_queue_id"] is None
+                    or row["binding_queue_id"] is None
+                    or str(row["binding_source_type"] or "") != "drama"
+                    or int(row["binding_pool_item_id"] or 0)
+                    != item["pool_item_id"]
+                    or str(row["binding_content_id"] or "")
+                    != item["content_id"]
+                    or int(row["binding_generation"] or 0)
+                    != int(row["drama_replay_generation"] or 0)
+                    or int(row["binding_account_id"] or 0)
+                    != int(row["account_id"] or 0)
+                    or int(row["binding_episode_number"] or 0)
+                    > item["episode_number"]
+                )
+                if is_relay:
+                    row_conflict = bool(
+                        row_conflict
+                        or row["relay_ledger_id"] is None
+                        or str(row["relay_status"] or "") != "failed"
+                        or int(row["source_attempt_count"] or 0) != 0
+                        or int(row["repost_attempt_count"] or 0) != 0
+                        or int(row["relay_unknown_outcome"] or 0) != 0
+                        or str(row["relay_error_code"] or "") != error_code
+                        or any(
+                            str(row[field] or "")
+                            for field in (
+                                "source_post_id",
+                                "source_post_url",
+                                "repost_id",
+                                "source_published_at",
+                                "reposted_at",
+                            )
+                        )
+                    )
+                else:
+                    row_conflict = bool(
+                        row_conflict or row["relay_ledger_id"] is not None
+                    )
+                if row_conflict:
+                    conflict = True
+                normalized.append((row, item, error_code, is_relay))
+            if len(queue_account_ids) != len(queue_ids):
+                conflict = True
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_bound_drama_failed_media_recovery_conflict",
+                    "批次、短剧绑定、队列或重制证据不满足一次性零X写入恢复条件",
+                    409,
+                )
+
+            result = {
+                "run_id": run_id,
+                "queue_ids": list(queue_ids),
+                "validated_queue_count": len(rows),
+                "validated_log_count": len(rows),
+                "validated_relay_count": relay_count,
+                "validate_only": validate_only,
+                "updated_count": 0,
+                "next_status": "running",
+            }
+            if validate_only:
+                conn.rollback()
+                return result
+
+            audit_ids = []
+            for row, item, error_code, is_relay in normalized:
+                audit_values = (
+                    run_id,
+                    int(row["id"]),
+                    item["pool_item_id"],
+                    item["content_id"],
+                    item["episode_number"],
+                    int(row["drama_replay_generation"]),
+                    int(row["account_id"]),
+                    int(row["assigned_source_queue_id"]),
+                    reason,
+                    actor,
+                    deployed_commit,
+                    "completed_with_errors",
+                    "failed",
+                    "failed",
+                    "active",
+                    error_code,
+                    str(row["material_url"]),
+                    item["material_url"],
+                    item["preflight_sha256"],
+                    item["preflight_size"],
+                    item["preflight_duration"],
+                    item["media_repair_trigger_code"],
+                    item["media_repair_job_key"],
+                    item["media_repair_profile"],
+                    item["media_repair_source_sha256"],
+                    1 if is_relay else 0,
+                    timestamp,
+                )
+                audit_cursor = conn.execute(
+                    "INSERT INTO "
+                    "x_post_schedule_bound_drama_failed_media_recovery_audit("
+                    "schedule_run_id,queue_id,drama_pool_item_id,content_id,"
+                    "episode_number,replay_generation,account_id,"
+                    "assigned_source_queue_id,recovery_reason,actor,"
+                    "deployed_commit,previous_run_status,previous_queue_status,"
+                    "previous_log_status,previous_pool_status,"
+                    "previous_error_code,previous_material_url,"
+                    "final_material_url,preflight_sha256,preflight_size,"
+                    "preflight_duration,media_repair_trigger_code,"
+                    "media_repair_job_key,media_repair_profile,"
+                    "media_repair_source_sha256,validated_relay_count,created_at) "
+                    "VALUES(%s)" % ",".join("?" for _value in audit_values),
+                    audit_values,
+                )
+                audit_ids.append(int(audit_cursor.lastrowid))
+                queue_cursor = conn.execute(
+                    "UPDATE x_post_queue SET material_url=?,"
+                    "original_material_url=?,media_repair_trigger_code=?,"
+                    "media_repair_job_key=?,media_repair_profile=?,"
+                    "media_repair_source_sha256=?,"
+                    "media_validation_mode='preflight',preflight_sha256=?,"
+                    "preflight_size=?,preflight_duration=?,status='queued',"
+                    "updated_at=? WHERE id=? AND schedule_run_id=? "
+                    "AND source_type='drama' AND status='failed' "
+                    "AND drama_pool_item_id=? AND content_id=? "
+                    "AND episode_number=? AND account_id=? "
+                    "AND media_validation_mode='deferred' AND material_url=?",
+                    (
+                        item["material_url"],
+                        str(row["material_url"]),
+                        item["media_repair_trigger_code"],
+                        item["media_repair_job_key"],
+                        item["media_repair_profile"],
+                        item["media_repair_source_sha256"],
+                        item["preflight_sha256"],
+                        item["preflight_size"],
+                        item["preflight_duration"],
+                        timestamp,
+                        int(row["id"]),
+                        run_id,
+                        item["pool_item_id"],
+                        item["content_id"],
+                        item["episode_number"],
+                        int(row["account_id"]),
+                        str(row["material_url"]),
+                    ),
+                )
+                log_cursor = conn.execute(
+                    "UPDATE x_post_publish_log SET status='reserved',"
+                    "error_code='',error_message='',unknown_outcome=0,updated_at=? "
+                    "WHERE id=? AND status='failed' AND attempt_count=0 "
+                    "AND unknown_outcome=0 AND error_code=?",
+                    (timestamp, int(row["log_id"]), error_code),
+                )
+                relay_cursor_count = 0
+                if is_relay:
+                    relay_cursor = conn.execute(
+                        "UPDATE x_post_repost_ledger SET status='reserved',"
+                        "error_code='',error_message='',unknown_outcome=0,updated_at=? "
+                        "WHERE id=? AND status='failed' "
+                        "AND source_attempt_count=0 AND repost_attempt_count=0 "
+                        "AND unknown_outcome=0 AND error_code=?",
+                        (timestamp, int(row["relay_ledger_id"]), error_code),
+                    )
+                    relay_cursor_count = int(relay_cursor.rowcount or 0)
+                pool_cursor = conn.execute(
+                    "UPDATE x_post_drama_pool SET status='active',"
+                    "last_checked_at=?,last_error_code='',"
+                    "last_error_message='',updated_at=? "
+                    "WHERE id=? AND content_id=? AND status='active' "
+                    "AND replay_generation=? AND next_sub_number=? "
+                    "AND assigned_account_id=? AND assigned_source_queue_id=? "
+                    "AND last_error_code=?",
+                    (
+                        timestamp,
+                        timestamp,
+                        item["pool_item_id"],
+                        item["content_id"],
+                        int(row["drama_replay_generation"]),
+                        item["episode_number"],
+                        int(row["account_id"]),
+                        int(row["assigned_source_queue_id"]),
+                        error_code,
+                    ),
+                )
+                if (
+                    int(queue_cursor.rowcount or 0) != 1
+                    or int(log_cursor.rowcount or 0) != 1
+                    or int(pool_cursor.rowcount or 0) != 1
+                    or relay_cursor_count != (1 if is_relay else 0)
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_bound_drama_failed_media_recovery_conflict",
+                        "短剧媒体失败恢复期间目标状态发生变化",
+                        409,
+                    )
+            self._sync_run(conn, queue_ids[0], timestamp)
+            run_cursor = conn.execute(
+                "UPDATE x_post_schedule_run SET status='running',"
+                "error_code='',error_message='',finished_at='',"
+                "lease_heartbeat_at=?,updated_at=? "
+                "WHERE id=? AND status IN ('queued','running') "
+                "AND failed_count=0 AND unknown_count=0",
+                (timestamp, timestamp, run_id),
+            )
+            updated_run = conn.execute(
+                "SELECT status,queued_count,published_count,failed_count,"
+                "unknown_count,lease_heartbeat_at "
+                "FROM x_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if (
+                int(run_cursor.rowcount or 0) != 1
+                or not updated_run
+                or str(updated_run["status"] or "") != "running"
+                or int(updated_run["queued_count"] or 0)
+                != int(run["queued_count"] or 0)
+                or int(updated_run["published_count"] or 0)
+                != int(run["published_count"] or 0)
+                or int(updated_run["failed_count"] or 0) != 0
+                or int(updated_run["unknown_count"] or 0) != 0
+                or str(updated_run["lease_heartbeat_at"] or "") != timestamp
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_bound_drama_failed_media_recovery_conflict",
+                    "恢复后的短剧批次未进入预期运行状态",
+                    409,
+                )
+            conn.commit()
+            result["audit_ids"] = audit_ids
+            result["updated_count"] = len(rows)
+            return result
 
     def recover_failed_material_schedule_queues(
         self,

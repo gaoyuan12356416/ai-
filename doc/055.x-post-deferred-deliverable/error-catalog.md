@@ -161,6 +161,9 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_schedule_config_changed` / `x_post_schedule_version_conflict` | 计划期间配置版本发生变化 | 本轮不建队列；按新配置等下一排期 |
 | `x_post_schedule_collision` / `x_post_schedule_slot_in_progress` | 同一时段冲突或正在执行 | 不并发重复执行 |
 | `x_post_schedule_run_exists` / `x_post_schedule_run_not_found` / `x_post_schedule_not_found` | run 已存在、缺失或时段不存在 | 幂等/状态冲突；重新读取，不盲重试 |
+| `x_post_schedule_lease_conflict` | 当前 run 的身份、状态或租约已变化 | 停止当前 runner；重新读取台账，不并发接管 |
+| `x_post_schedule_plan_attempt_conflict` | 建计划前的持久化尝试标记与当前 run 不一致 | `阻断/待核查`；不得再次调用建计划接口 |
+| `x_post_schedule_plan_unknown` | 已尝试建计划，但无法确认服务端是否落下 queue | 按未知写结果终态化；先查台账，禁止自动重建计划 |
 | `x_post_pool_required` / `x_post_pool_item_not_found` | 候选没有绑定素材池或池记录不存在 | `阻断` |
 | `x_post_pool_item_occupied` | 素材已被 queue/手动 reservation 占用 | 不重复创建 |
 | `x_post_pool_item_published` / `x_post_material_already_used` | 素材已经发布/进入历史队列 | 不重复发布 |
@@ -174,6 +177,10 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_schedule_preflight_failed` | 只读查询/未知预检异常的统一码 | 零 X 写入；修复根因后按审计恢复 |
 | `x_post_schedule_preflight_interrupted` | 预检进程被中断 | 仅 0 queue/0 log/0 unknown 时允许受控恢复 |
 | `x_post_schedule_operator_deferred_for_due_slot` | 运营恢复为了保护即将到期的正常时段而主动零写让路 | 不是素材错误；按既有 corrective 审计链恢复 |
+| `x_post_bound_drama_failed_media_recovery_conflict` | 绑定短剧失败媒体恢复的完整队列、绑定或审计证据不一致 | `阻断`；修正清单或现场漂移后重新 validate-only，不部分恢复 |
+| `x_post_bound_drama_manifest_invalid` | 短剧恢复清单格式、范围或身份无效 | `阻断`；修正精确清单，不猜测或部分执行 |
+| `x_post_bound_drama_episode_unavailable` | 清单中的绑定短剧集数已无法从来源精确读取 | `阻断`；重新只读核对来源与绑定漂移 |
+| `x_post_bound_drama_repair_proof_invalid` | GPU 修复结果缺少匹配的 job/source/media 证据 | `阻断`；不应用恢复、不触发 X |
 
 ## 手动发布与自动模板
 
@@ -269,6 +276,7 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_drama_pool_invalid_response` / `x_post_drama_pool_check_invalid_response` | 短剧池查询/校验响应无效 | 本轮零发布 |
 | `x_post_storage_preflight_invalid_response` | 数据盘预检响应无效 | `阻断` |
 | `x_post_schedule_invalid_response` / `x_post_schedule_plan_invalid_response` / `x_post_schedule_failure_invalid_response` | 排期 claim/plan/failure 审计响应无效 | `阻断/待核查` |
+| `x_post_schedule_heartbeat_invalid_response` | run 租约心跳响应不符合冻结身份合同 | 停止当前 runner；不得在租约未知时继续建计划或发布 |
 | `x_publish_invalid_response` | 发布接口响应与 queue/log 合同不一致 | 按可能未知结果处理，先查台账/X |
 | `unexpected_error` | runner 未分类异常 | 失败关闭；不得凭此自动重发 |
 

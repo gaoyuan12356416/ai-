@@ -83,6 +83,23 @@ class CandidateSelectionError(RuntimeError):
 class CandidateQueryError(CandidateSelectionError):
     """A read-only database query failed; the entire run must stop."""
 
+    code = "x_post_source_query_failed"
+    _MESSAGES = {
+        "source": "候选来源数据查询失败，请稍后重试",
+        "material": "素材来源数据查询失败，请稍后重试",
+        "drama": "短剧映射数据查询失败，请稍后重试",
+        "deploy_time": "短剧可投放时间查询失败，请稍后重试",
+    }
+
+    def __init__(self, query_stage="source"):
+        normalized_stage = str(query_stage or "").strip().lower()
+        if normalized_stage not in self._MESSAGES:
+            normalized_stage = "source"
+        self.query_stage = normalized_stage
+        self.error_code = self.code
+        self.error_message = self._MESSAGES[normalized_stage]
+        super().__init__(self.error_message)
+
 
 class PoolCandidateRejection(CandidateSelectionError):
     """A single pool item is unsafe or incomplete and must be skipped."""
@@ -206,29 +223,36 @@ def _float(value, label):
     return result
 
 
-def _cursor_rows(connection, sql, params):
+def _cursor_rows(connection, sql, params, *, query_stage="source"):
     statement = str(sql or "").lstrip()
     if not re.match(r"(?i)^SELECT\b", statement):
         raise CandidateSelectionError("selector attempted a non-read-only statement")
-    cursor = connection.cursor()
+    cursor = None
     try:
+        cursor = connection.cursor()
         cursor.execute(sql, tuple(params))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
     except CandidateSelectionError:
         raise
-    except Exception as exc:
-        raise CandidateQueryError(
-            "read-only candidate query failed: %s" % type(exc).__name__
-        ) from None
+    except Exception:
+        # The source exception can contain SQL text, connection details or
+        # credentials.  Persist only a stable code, a bounded stage and the
+        # corresponding operator-safe message.
+        raise CandidateQueryError(query_stage=query_stage) from None
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception:
+                # Cleanup failures must not replace the stable query outcome
+                # with a driver exception that may contain connection detail.
+                pass
 
 
-def _cursor_row(connection, sql, params):
-    rows = _cursor_rows(connection, sql, params)
+def _cursor_row(connection, sql, params, *, query_stage="source"):
+    rows = _cursor_rows(connection, sql, params, query_stage=query_stage)
     if len(rows) != 1:
         raise CandidateSelectionError("candidate check returned an ambiguous result")
     return rows[0]
@@ -292,6 +316,7 @@ class DramawaveCandidateSelector:
                 MAX_X_SOURCE_DURATION_SECONDS,
                 int(scan_limit),
             ),
+            query_stage="material",
         )
 
     def _material_tags(self, material_id):
@@ -301,7 +326,15 @@ class DramawaveCandidateSelector:
              WHERE rt.source_id = %s
              ORDER BY rt.id ASC
         """.format(schema=self.schema)
-        return [row.get("tag_name") for row in _cursor_rows(self.connection, sql, (material_id,))]
+        return [
+            row.get("tag_name")
+            for row in _cursor_rows(
+                self.connection,
+                sql,
+                (material_id,),
+                query_stage="material",
+            )
+        ]
 
     def _drama_rows(self, content_id, series_code, language):
         sql = """
@@ -313,7 +346,12 @@ class DramawaveCandidateSelector:
                AND r.series_code = %s
                AND r.language = %s
         """.format(schema=self.schema)
-        return _cursor_rows(self.connection, sql, (content_id, series_code, language))
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (content_id, series_code, language),
+            query_stage="drama",
+        )
 
     def _pool_material_rows(
         self,
@@ -350,6 +388,7 @@ class DramawaveCandidateSelector:
             self.connection,
             sql,
             (material_id,),
+            query_stage="material",
         )
 
     def _pool_drama_rows(self, content_id, language):
@@ -363,7 +402,12 @@ class DramawaveCandidateSelector:
                AND LOWER(TRIM(r.language)) = LOWER(%s)
              ORDER BY r.id ASC
         """.format(schema=self.schema)
-        return _cursor_rows(self.connection, sql, (content_id, language))
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (content_id, language),
+            query_stage="drama",
+        )
 
     def _drama_deploy_rows(self, content_id, language):
         """Load the authoritative Dramawave delivery time for one drama."""
@@ -380,6 +424,7 @@ class DramawaveCandidateSelector:
             self.connection,
             sql,
             (content_id, DEFAULT_DRAMAWAVE_APP_ID, language),
+            query_stage="deploy_time",
         )
 
     def _validate_drama_deploy_time(self, content_id, language):
@@ -1192,6 +1237,7 @@ def ranked_material_ids(
             MAX_X_SOURCE_DURATION_SECONDS,
             scan_limit,
         ),
+        query_stage="material",
     )
     values = []
     seen = set()

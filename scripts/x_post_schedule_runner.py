@@ -39,6 +39,7 @@ from features.x_accounts.language import (  # noqa: E402
     same_drama_language,
 )
 from features.x_posts.selector import (  # noqa: E402
+    CandidateQueryError,
     CandidateSelectionError,
     DEFAULT_SCHEMA,
     normalize_date,
@@ -81,6 +82,7 @@ DEFAULT_PREVIOUS_DAY_DUE_PATH = "/internal/posts/schedules/previous-day-due"
 DEFAULT_PLAN_QUERY_PATH = "/internal/posts/schedule-plan/query"
 DEFAULT_PLAN_PATH = "/internal/posts/schedule-plan"
 DEFAULT_FAILURE_PATH = "/internal/posts/schedule-runs/record-failure"
+DEFAULT_HEARTBEAT_PATH = "/internal/posts/schedule-runs/heartbeat"
 DEFAULT_DRAMA_POOL_PATH = "/internal/posts/drama-pool/available"
 DEFAULT_DRAMA_CHECK_PATH = "/internal/posts/drama-pool/check"
 DEFAULT_PREMIUM_RELAY_ACCOUNTS_PATH = (
@@ -119,6 +121,14 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
     }
 )
 MATERIAL_ASSIGNMENT_VERSION = "material-random-relay-v1"
+
+
+class MaterialScheduleCandidates(list):
+    """List-compatible plan carrying clean, run-scoped FIFO skip proof."""
+
+    def __init__(self, values=(), *, fifo_capacity_skips=None):
+        super().__init__(values)
+        self.fifo_capacity_skips = list(fifo_capacity_skips or [])
 
 
 def _is_ordered_account_subset(values, configured):
@@ -785,6 +795,38 @@ class ScheduleSidecarClient(SidecarClient):
             item["queues"], payload["account_ids"]
         )
 
+    def heartbeat_schedule_run(self, path, identity, *, plan_attempt=False):
+        payload = {
+            key: identity[key]
+            for key in (
+                "source_type",
+                "run_date",
+                "publish_time",
+                "version",
+                "account_ids",
+            )
+        }
+        payload["plan_attempt"] = bool(plan_attempt)
+        result = self.post(path, payload, write_may_have_happened=True)
+        item = result.get("item") if isinstance(result, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("source_type") != identity["source_type"]
+            or item.get("run_date") != identity["run_date"]
+            or item.get("publish_time") != identity["publish_time"]
+            or item.get("config_version") != identity["version"]
+            or item.get("account_ids") != identity["account_ids"]
+            or item.get("status") not in {"claimed", "running"}
+            or not isinstance(item.get("heartbeat_recorded"), bool)
+            or item.get("plan_attempt_recorded") is not bool(plan_attempt)
+        ):
+            raise SidecarError(
+                "x_post_schedule_heartbeat_invalid_response",
+                "Schedule heartbeat response is invalid",
+                unknown_outcome=True,
+            )
+        return item
+
     def record_schedule_failure(self, path, identity, code, message):
         payload = {
             "source_type": identity["source_type"],
@@ -1045,7 +1087,25 @@ def _preflight_failure_result(identity, exc, audit):
 
 def _open_source_connection(config, connection_factory):
     factory = connection_factory or _connect_from_config
-    return factory(config)
+    try:
+        return factory(config)
+    except CandidateSelectionError:
+        raise
+    except Exception:
+        # Driver connection errors can contain hosts, usernames or DSNs.
+        # Keep the same safe operator contract as cursor query failures.
+        raise CandidateQueryError("source") from None
+
+
+def _close_source_connection(connection):
+    close = getattr(connection, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            # Cleanup cannot turn a safe query result into a credential-bearing
+            # driver exception.
+            pass
 
 
 def _repair_client(config):
@@ -1147,6 +1207,8 @@ def _preflight_material_candidates(
     stable_shuffler=_stable_shuffled,
     accepted_by_account=None,
     repair_state=None,
+    capacity_skips=None,
+    heartbeat=None,
 ):
     """FIFO-preflight one page while preserving optional cross-page state."""
     target_count = len(accounts)
@@ -1154,6 +1216,8 @@ def _preflight_material_candidates(
         accepted_by_account = {}
     if repair_state is None:
         repair_state = {"attempted": 0}
+    if capacity_skips is None:
+        capacity_skips = []
     failures = []
     accounts_by_language = {}
     for account in accounts:
@@ -1212,6 +1276,8 @@ def _preflight_material_candidates(
     ) as temporary:
         root = Path(temporary)
         for candidate in candidates:
+            if callable(heartbeat):
+                heartbeat()
             if len(accepted_by_account) == target_count:
                 break
             try:
@@ -1253,6 +1319,20 @@ def _preflight_material_candidates(
                             ),
                             "error_code": "material_language_not_scheduled",
                             "error_message": "当前发布账号不包含该素材语言",
+                        }
+                    )
+                else:
+                    # This clean item is before a later-language selection in
+                    # the global FIFO order. Carry exact, run-scoped proof to
+                    # the sidecar instead of persisting a fake pool failure.
+                    capacity_skips.append(
+                        {
+                            "pool_item_id": candidate.get("pool_item_id"),
+                            "material_id": str(
+                                candidate.get("material_id", "") or ""
+                            ),
+                            "material_language": language,
+                            "reason": "language_capacity_full",
                         }
                     )
                 # The language is configured, but all targets of that language
@@ -1371,6 +1451,37 @@ def _preflight_material_candidates(
     return accepted, failures
 
 
+def _record_capacity_skip_proofs(sidecar, config, skips):
+    """Persist current-run source identity before an atomic FIFO skip."""
+    if not skips:
+        return
+    recorder = getattr(sidecar, "record_pool_checks", None)
+    if not callable(recorder):
+        raise ScheduleRunError(
+            "素材容量证明接口不可用",
+            "x_post_pool_fifo_conflict",
+        )
+    checks = [
+        {
+            "pool_item_id": int(item["pool_item_id"]),
+            "material_id": str(item["material_id"]),
+            "material_language": str(item["material_language"]),
+            "proof_reason": "language_capacity_full",
+            "error_code": "",
+            "error_message": "",
+        }
+        for item in skips
+    ]
+    for start in range(0, len(checks), 100):
+        batch = checks[start : start + 100]
+        result = recorder(config.pool_check_path, batch)
+        if int(result.get("updated_count") or 0) != len(batch):
+            raise ScheduleRunError(
+                "素材容量证明未完整写入冻结批次",
+                "x_post_pool_fifo_conflict",
+            )
+
+
 def _material_candidates(
     config,
     sidecar,
@@ -1384,6 +1495,7 @@ def _material_candidates(
     timestamp,
     assignment_identity=None,
     stable_shuffler=_stable_shuffled,
+    heartbeat=None,
 ):
     pool_items = sidecar.available_pool_items(
         config.material_pool_path, config.scan_limit
@@ -1400,6 +1512,7 @@ def _material_candidates(
     identity.setdefault("version", 1)
     accepted_by_account = {}
     repair_state = {"attempted": 0}
+    capacity_skips = []
     planned = []
     connection = _open_source_connection(config, connection_factory)
     try:
@@ -1409,21 +1522,39 @@ def _material_candidates(
         for start in range(0, len(pool_items), config.candidate_pool_limit):
             if len(accepted_by_account) == len(accounts):
                 break
+            if callable(heartbeat):
+                heartbeat()
             pool_batch = pool_items[
                 start : start + config.candidate_pool_limit
             ]
-            candidates, selector_rejections = select_pool_candidates(
-                connection,
-                pool_batch,
-                source_date,
-                limit=config.candidate_pool_limit,
-                schema=config.mysql_database,
-            )
+            try:
+                candidates, selector_rejections = select_pool_candidates(
+                    connection,
+                    pool_batch,
+                    source_date,
+                    limit=config.candidate_pool_limit,
+                    schema=config.mysql_database,
+                )
+            except CandidateQueryError:
+                # Preserve the frozen SQLite pool snapshot. Reconnect once and
+                # retry only this read-only hydration page.
+                _close_source_connection(connection)
+                connection = _open_source_connection(
+                    config, connection_factory
+                )
+                candidates, selector_rejections = select_pool_candidates(
+                    connection,
+                    pool_batch,
+                    source_date,
+                    limit=config.candidate_pool_limit,
+                    schema=config.mysql_database,
+                )
             _record_pool_checks_best_effort(
                 sidecar,
                 config,
                 selector_rejections,
             )
+            capacity_skip_start = len(capacity_skips)
             planned, planning_rejections = _preflight_material_candidates(
                 config,
                 sidecar,
@@ -1438,6 +1569,13 @@ def _material_candidates(
                 stable_shuffler=stable_shuffler,
                 accepted_by_account=accepted_by_account,
                 repair_state=repair_state,
+                capacity_skips=capacity_skips,
+                heartbeat=heartbeat,
+            )
+            _record_capacity_skip_proofs(
+                sidecar,
+                config,
+                capacity_skips[capacity_skip_start:],
             )
             _record_pool_checks_best_effort(
                 sidecar,
@@ -1445,15 +1583,16 @@ def _material_candidates(
                 planning_rejections,
             )
     finally:
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
+        _close_source_connection(connection)
     if not planned:
         raise ScheduleRunError(
             "no FIFO material candidate passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
-    return planned
+    return MaterialScheduleCandidates(
+        planned,
+        fifo_capacity_skips=capacity_skips,
+    )
 
 
 def _drama_candidates(
@@ -1719,13 +1858,11 @@ def _drama_candidates(
             "x_post_schedule_drama_shortage",
         )
     finally:
-        close = getattr(connection, "close", None)
-        if callable(close):
-            close()
+        _close_source_connection(connection)
 
 
 def _plan_payload(identity, candidates):
-    return {
+    payload = {
         "source_type": identity["source_type"],
         "run_date": identity["run_date"],
         "publish_time": identity["publish_time"],
@@ -1734,6 +1871,21 @@ def _plan_payload(identity, candidates):
         "source_date": candidates[0]["source_date"],
         "candidates": candidates,
     }
+    capacity_skips = getattr(candidates, "fifo_capacity_skips", None)
+    if capacity_skips:
+        payload["fifo_capacity_skips"] = list(capacity_skips)
+    return payload
+
+
+def _heartbeat_best_effort(sidecar, identity, *, plan_attempt=False):
+    heartbeat = getattr(sidecar, "heartbeat_schedule_run", None)
+    if not callable(heartbeat):
+        return None
+    return heartbeat(
+        DEFAULT_HEARTBEAT_PATH,
+        identity,
+        plan_attempt=plan_attempt,
+    )
 
 
 def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
@@ -1897,6 +2049,19 @@ def execute_schedule_tick(
             )
             batches.append(result)
             continue
+        if existing["found"] and existing["run"].get("plan_attempted_at"):
+            # The previous worker crossed the plan-write fence but did not
+            # leave queues. This successful ledger read makes it safe to
+            # terminalize; never reselect and issue another plan write.
+            exc = ScheduleRunError(
+                "上次计划创建结果未确认，已停止重复尝试",
+                "x_post_schedule_plan_unknown",
+            )
+            audit = _record_schedule_failure_best_effort(
+                sidecar, config, identity, exc
+            )
+            batches.append(_preflight_failure_result(identity, exc, audit))
+            continue
         if existing["found"] and existing["run"].get("status") != "claimed":
             raise ScheduleRunError(
                 "frozen schedule run has no queues",
@@ -1904,6 +2069,7 @@ def execute_schedule_tick(
             )
 
         try:
+            _heartbeat_best_effort(sidecar, identity)
             sidecar.preflight_storage(config.storage_preflight_path)
             accounts = _verify_accounts(sidecar, identity["account_ids"])
             source_date = previous_source_date(current)
@@ -1919,6 +2085,9 @@ def execute_schedule_tick(
                 }
                 if material_candidate_loader is _material_candidates:
                     material_loader_options["assignment_identity"] = identity
+                    material_loader_options["heartbeat"] = lambda: (
+                        _heartbeat_best_effort(sidecar, identity)
+                    )
                 candidates = material_candidate_loader(
                     config,
                     sidecar,
@@ -1952,6 +2121,7 @@ def execute_schedule_tick(
             # each later publish also verifies its account.
             _verify_accounts(sidecar, candidate_account_ids)
             sidecar.preflight_storage(config.storage_preflight_path)
+            _heartbeat_best_effort(sidecar, identity)
         except Exception as exc:
             audit = _record_schedule_failure_best_effort(
                 sidecar,
@@ -1964,10 +2134,56 @@ def execute_schedule_tick(
             )
             continue
 
-        queues = sidecar.create_schedule_plan(
-            config.plan_path,
-            _plan_payload(identity, candidates),
-        )
+        try:
+            _heartbeat_best_effort(
+                sidecar, identity, plan_attempt=True
+            )
+            queues = sidecar.create_schedule_plan(
+                config.plan_path,
+                _plan_payload(identity, candidates),
+            )
+        except SidecarError as exc:
+            # A structured HTTP error proves the atomic transaction rolled
+            # back and must terminalize the claimed run. For a lost response,
+            # read the ledger first: publish only an already-frozen queue set;
+            # never reselect or issue a second plan write in this tick.
+            if exc.unknown_outcome:
+                try:
+                    reconciled = sidecar.query_schedule_plan(
+                        config.plan_query_path, identity
+                    )
+                except Exception:
+                    batches.append(
+                        {
+                            **_preflight_failure_result(identity, exc, None),
+                            "status": "stopped",
+                            "error_code": "x_post_schedule_plan_unknown",
+                            "error_message": "计划创建结果待核对，未继续发布",
+                        }
+                    )
+                    continue
+                if reconciled["found"] and reconciled["queues"]:
+                    result = _publish_frozen_queues(
+                        config,
+                        sidecar,
+                        identity,
+                        reconciled["queues"],
+                        resumed=True,
+                    )
+                    batches.append(result)
+                    continue
+                exc = ScheduleRunError(
+                    "计划创建结果未确认，已停止重复尝试",
+                    "x_post_schedule_plan_unknown",
+                )
+            audit = _record_schedule_failure_best_effort(
+                sidecar,
+                config,
+                identity,
+                exc,
+            )
+            batches.append(_preflight_failure_result(identity, exc, audit))
+            continue
         if [queue["account_id"] for queue in queues] != candidate_account_ids:
             raise ScheduleRunError(
                 "created queue order does not match frozen schedule",

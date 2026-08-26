@@ -3903,6 +3903,7 @@ def _safe_schedule_plan_query_result(result):
         "error_message",
         "started_at",
         "finished_at",
+        "plan_attempted_at",
         "created_at",
         "updated_at",
     )
@@ -4039,6 +4040,8 @@ def query_post_schedule_plan_request(payload):
 def create_post_schedule_plan_request(payload):
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    store = XPostStore(POST_DB_PATH)
     candidates = payload.get("candidates")
     account_ids = payload.get("account_ids")
     if not isinstance(candidates, list) or not isinstance(account_ids, list):
@@ -4063,6 +4066,46 @@ def create_post_schedule_plan_request(payload):
     premium_relay_accounts = {}
     source_type = str(payload.get("source_type", "") or "").strip().lower()
     run_date = str(payload.get("run_date", "") or "").strip()
+    fifo_capacity_skips = payload.get("fifo_capacity_skips", [])
+    if not isinstance(fifo_capacity_skips, list):
+        raise ServiceError(
+            "invalid_request", "fifo_capacity_skips无效", 400
+        )
+    material_language_capacities = {}
+    if fifo_capacity_skips:
+        if source_type != "material":
+            raise ServiceError(
+                "invalid_request", "短剧计划不接受素材容量证据", 400
+            )
+        try:
+            frozen = store.query_schedule_plan(
+                source_type,
+                payload.get("run_date"),
+                payload.get("publish_time"),
+            )
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+        if not frozen.get("found"):
+            raise ServiceError(
+                "x_post_schedule_plan_incomplete",
+                "素材容量证据必须绑定已冻结批次",
+                409,
+            )
+        for frozen_account_id in frozen["run"]["account_ids"]:
+            account = find_account(int(frozen_account_id))
+            try:
+                language = canonical_drama_language(
+                    account.get("drama_language")
+                )
+            except ValueError as exc:
+                raise ServiceError(
+                    "x_account_drama_language_invalid",
+                    clean_text(exc),
+                    400,
+                ) from None
+            material_language_capacities[language] = (
+                material_language_capacities.get(language, 0) + 1
+            )
     for candidate, account_id in zip(candidates, requested_ids):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
@@ -4188,9 +4231,8 @@ def create_post_schedule_plan_request(payload):
     # Schedule queues download and probe one media file at a time. Reserve
     # capacity for that serialized working set, not the whole frozen batch.
     preflight_post_storage_request(1)
-    XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        result = XPostStore(POST_DB_PATH).create_schedule_plan(
+        result = store.create_schedule_plan(
             payload.get("source_type"),
             payload.get("run_date"),
             payload.get("publish_time"),
@@ -4202,6 +4244,8 @@ def create_post_schedule_plan_request(payload):
                 for accounts in premium_relay_accounts.values()
                 for account in accounts
             ],
+            fifo_capacity_skips=fifo_capacity_skips,
+            material_language_capacities=material_language_capacities,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -4265,6 +4309,38 @@ def record_post_schedule_failure_request(payload):
             "error_code",
             "error_message",
             "recorded",
+        )
+        if key in result
+    }
+
+
+def heartbeat_post_schedule_run_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).heartbeat_schedule_run(
+            payload.get("source_type"),
+            payload.get("run_date"),
+            payload.get("publish_time"),
+            payload.get("version"),
+            payload.get("account_ids"),
+            plan_attempt=payload.get("plan_attempt", False),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {
+        key: result[key]
+        for key in (
+            "id",
+            "source_type",
+            "run_date",
+            "publish_time",
+            "config_version",
+            "account_ids",
+            "status",
+            "heartbeat_recorded",
+            "plan_attempt_recorded",
         )
         if key in result
     }
@@ -4636,6 +4712,7 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/schedules/previous-day-due",
             "/internal/posts/schedule-plan",
             "/internal/posts/schedule-plan/query",
+            "/internal/posts/schedule-runs/heartbeat",
             "/internal/posts/schedule-runs/record-failure",
             "/internal/posts/drama-pool/available",
             "/internal/posts/drama-pool/check",
@@ -4903,6 +4980,16 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "item": record_post_schedule_failure_request(
+                            payload
+                        )
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/schedule-runs/heartbeat":
+                self.send_json(
+                    200,
+                    {
+                        "item": heartbeat_post_schedule_run_request(
                             payload
                         )
                     },

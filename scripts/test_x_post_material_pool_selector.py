@@ -84,7 +84,9 @@ class PoolCursor:
         if "ads_custom_source cs" in sql:
             material_id = str(params[0])
             if material_id in self.connection.query_error_material_ids:
-                raise RuntimeError("simulated read-only connection loss")
+                raise RuntimeError(
+                    "OperationalError password=super-secret SELECT private_schema"
+                )
             row = self.connection.materials.get(material_id)
             self.rows = [] if row is None else [row]
         elif "resource_tags" in sql:
@@ -95,8 +97,10 @@ class PoolCursor:
         elif "ads_drama_info i" in sql:
             content_id = str(params[0])
             material_id = content_id.lstrip("C")
-            if material_id in self.connection.query_error_material_ids:
-                raise RuntimeError("simulated read-only connection loss")
+            if material_id in self.connection.query_error_deploy_time_material_ids:
+                raise OSError(
+                    "socket host=db.internal password=super-secret SELECT deploy_time"
+                )
             self.rows = self.connection.deploy_rows.get(
                 material_id,
                 [deploy_row(material_id)],
@@ -104,6 +108,10 @@ class PoolCursor:
         elif "ads_drama_resource" in sql:
             content_id = str(params[0])
             material_id = content_id.lstrip("C")
+            if material_id in self.connection.query_error_drama_material_ids:
+                raise ValueError(
+                    "SELECT drama from private_schema token=super-secret"
+                )
             self.rows = self.connection.drama_rows.get(
                 material_id,
                 [drama_row(material_id)],
@@ -128,6 +136,8 @@ class PoolConnection:
         self.drama_rows = {}
         self.deploy_rows = {}
         self.query_error_material_ids = set()
+        self.query_error_drama_material_ids = set()
+        self.query_error_deploy_time_material_ids = set()
         self.calls = []
 
     def cursor(self):
@@ -594,7 +604,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         connection = PoolConnection([9, 10])
         connection.query_error_material_ids.add("9")
 
-        with self.assertRaises(CandidateQueryError):
+        with self.assertRaises(CandidateQueryError) as raised:
             select_pool_candidates(
                 connection,
                 [
@@ -604,6 +614,71 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 "2026-07-22",
                 limit=1,
             )
+
+        error = raised.exception
+        self.assertEqual(error.code, "x_post_source_query_failed")
+        self.assertEqual(error.error_code, "x_post_source_query_failed")
+        self.assertEqual(error.query_stage, "material")
+        self.assertEqual(str(error), "素材来源数据查询失败，请稍后重试")
+        self.assertNotIn("OperationalError", str(error))
+        self.assertNotIn("super-secret", str(error))
+        self.assertNotIn("SELECT", str(error))
+
+    def test_query_failure_exposes_only_bounded_stage_and_safe_chinese_message(self):
+        scenarios = (
+            (
+                "material",
+                "query_error_material_ids",
+                "素材来源数据查询失败，请稍后重试",
+            ),
+            (
+                "drama",
+                "query_error_drama_material_ids",
+                "短剧映射数据查询失败，请稍后重试",
+            ),
+            (
+                "deploy_time",
+                "query_error_deploy_time_material_ids",
+                "短剧可投放时间查询失败，请稍后重试",
+            ),
+        )
+        for stage, failure_set_name, expected_message in scenarios:
+            with self.subTest(stage=stage):
+                connection = PoolConnection([9])
+                getattr(connection, failure_set_name).add("9")
+                with self.assertRaises(CandidateQueryError) as raised:
+                    select_pool_candidates(
+                        connection,
+                        [pool_item(1, 9, "2026-07-23T00:00:01Z")],
+                        "2026-07-22",
+                        limit=1,
+                    )
+
+                error = raised.exception
+                self.assertEqual(error.code, "x_post_source_query_failed")
+                self.assertEqual(error.query_stage, stage)
+                self.assertEqual(str(error), expected_message)
+                for private_value in (
+                    "RuntimeError",
+                    "ValueError",
+                    "OSError",
+                    "super-secret",
+                    "private_schema",
+                    "db.internal",
+                    "SELECT",
+                ):
+                    self.assertNotIn(private_value, str(error))
+
+    def test_unknown_query_stage_is_reduced_to_safe_generic_source_stage(self):
+        error = CandidateQueryError(
+            "OperationalError SELECT secret FROM private_schema password=hunter2"
+        )
+
+        self.assertEqual(error.code, "x_post_source_query_failed")
+        self.assertEqual(error.query_stage, "source")
+        self.assertEqual(str(error), "候选来源数据查询失败，请稍后重试")
+        self.assertNotIn("OperationalError", str(error))
+        self.assertNotIn("hunter2", str(error))
 
 
 if __name__ == "__main__":

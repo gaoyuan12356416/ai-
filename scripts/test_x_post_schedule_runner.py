@@ -24,6 +24,7 @@ from features.x_posts.service import (  # noqa: E402
     _material_fifo_selection_matches,
 )
 from features.x_posts.drama_selector import DramaPoolRejection  # noqa: E402
+from features.x_posts.selector import CandidateQueryError  # noqa: E402
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
@@ -31,6 +32,7 @@ from scripts.x_post_schedule_runner import (  # noqa: E402
     _drama_candidates,
     _material_candidates,
     _preflight_material_candidates,
+    _record_capacity_skip_proofs,
     _retrying_media_downloader,
     execute_schedule_tick,
 )
@@ -150,6 +152,7 @@ class FakeSidecar:
         self.calls = []
         self.publish_errors = {}
         self.created_queues = None
+        self.create_error = None
         self.next_queue_id = 101
 
     def due_schedules(self, path, *, current, grace_seconds, limit):
@@ -185,6 +188,8 @@ class FakeSidecar:
 
     def create_schedule_plan(self, path, payload):
         self.calls.append(("create", path, payload))
+        if self.create_error is not None:
+            raise self.create_error
         if self.created_queues is not None:
             return list(self.created_queues)
         queues = []
@@ -412,6 +417,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "preflight_height": 1280,
             }
 
+        capacity_skips = []
         with mock.patch(
             "scripts.x_post_schedule_runner._preflight_candidate",
             side_effect=preflight,
@@ -432,6 +438,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                     "publish_time": "18:00",
                     "version": 22,
                 },
+                capacity_skips=capacity_skips,
             )
 
         self.assertEqual(
@@ -439,6 +446,39 @@ class ScheduleRunnerTests(unittest.TestCase):
             [(3, 11), (1, 12)],
         )
         self.assertEqual(failures, [])
+        self.assertEqual(
+            capacity_skips,
+            [
+                {
+                    "pool_item_id": 2,
+                    "material_id": "ja-2",
+                    "material_language": "ja",
+                    "reason": "language_capacity_full",
+                }
+            ],
+        )
+        proof_sidecar = mock.Mock()
+        proof_sidecar.record_pool_checks.return_value = {
+            "updated_count": 1
+        }
+        _record_capacity_skip_proofs(
+            proof_sidecar,
+            self.config,
+            capacity_skips,
+        )
+        proof_sidecar.record_pool_checks.assert_called_once_with(
+            self.config.pool_check_path,
+            [
+                {
+                    "pool_item_id": 2,
+                    "material_id": "ja-2",
+                    "material_language": "ja",
+                    "proof_reason": "language_capacity_full",
+                    "error_code": "",
+                    "error_message": "",
+                }
+            ],
+        )
 
     def test_material_preflight_repairs_codec_and_dimensions_before_freeze(self):
         candidate = {
@@ -684,6 +724,199 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(
             create_call[2]["candidates"][0]["media_validation_mode"],
             "preflight",
+        )
+
+    def test_material_query_failure_reconnects_once_without_changing_pool_snapshot(self):
+        pool_item = {
+            "id": 9,
+            "material_id": "9009",
+            "created_at": "2026-07-27T00:09:00Z",
+        }
+        opened = []
+
+        class Connection:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Sidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__([due_item(accounts=[11])])
+                self.pool_requests = []
+
+            def available_pool_items(self, path, limit):
+                self.pool_requests.append((path, limit))
+                return [dict(pool_item)]
+
+            def record_pool_checks(self, _path, checks):
+                return {"updated_count": len(checks)}
+
+            def verify_account(self, account_id):
+                item = super().verify_account(account_id)
+                item["drama_language"] = "en"
+                return item
+
+        def connection_factory(_config):
+            connection = Connection()
+            opened.append(connection)
+            return connection
+
+        hydrated = {
+            "pool_item_id": 9,
+            "pool_created_at": pool_item["created_at"],
+            "material_id": "9009",
+            "material_language": "en",
+            "media_kind": "video",
+            "source_duration": 30,
+            "content_id": "CONTENT-9009",
+            "material_url": "https://media.example.test/9009.mp4",
+            "material_name": "Episode 9009",
+            "drama_name": "Drama",
+            "tag": "Drama",
+            "description": "A complete episode description.",
+        }
+
+        def preflight(_config, candidate, account, *_args, **_kwargs):
+            return {
+                **candidate,
+                "account_id": account["id"],
+                "account_username": account["username"],
+                "page_name": account["display_name"],
+                "page_id": account["x_user_id"],
+                "preflight_sha256": "d" * 64,
+                "preflight_size": 7,
+                "preflight_duration": 30.0,
+                "preflight_width": 720,
+                "preflight_height": 1280,
+            }
+
+        sidecar = Sidecar()
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_pool_candidates",
+            side_effect=[
+                CandidateQueryError("material"),
+                ([hydrated], []),
+            ],
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            result = self.execute(
+                sidecar,
+                material_candidate_loader=_material_candidates,
+                connection_factory=connection_factory,
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+            )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(all(connection.closed for connection in opened))
+        self.assertEqual(sidecar.pool_requests, [(self.config.material_pool_path, 100)])
+        self.assertEqual(
+            [call[0] for call in sidecar.calls].count("create"), 1
+        )
+
+    def test_persistent_material_query_failure_is_terminal_and_creates_no_queue(self):
+        opened = []
+
+        class Connection:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Sidecar(FakeSidecar):
+            def available_pool_items(self, _path, _limit):
+                return [
+                    {
+                        "id": 9,
+                        "material_id": "9009",
+                        "created_at": "2026-07-27T00:09:00Z",
+                    }
+                ]
+
+            def verify_account(self, account_id):
+                item = super().verify_account(account_id)
+                item["drama_language"] = "en"
+                return item
+
+        def connection_factory(_config):
+            connection = Connection()
+            opened.append(connection)
+            return connection
+
+        sidecar = Sidecar([due_item(accounts=[11])])
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_pool_candidates",
+            side_effect=CandidateQueryError("material"),
+        ):
+            result = self.execute(
+                sidecar,
+                material_candidate_loader=_material_candidates,
+                connection_factory=connection_factory,
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+            )
+
+        self.assertEqual(result["batches"][0]["status"], "failed_preflight")
+        self.assertEqual(
+            result["batches"][0]["error_code"],
+            "x_post_source_query_failed",
+        )
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(all(connection.closed for connection in opened))
+        self.assertFalse(
+            any(call[0] in {"create", "publish"} for call in sidecar.calls)
+        )
+        self.assertEqual(
+            [call[0] for call in sidecar.calls].count("failure"), 1
+        )
+
+    def test_source_connection_failure_uses_safe_terminal_error(self):
+        class Sidecar(FakeSidecar):
+            def available_pool_items(self, _path, _limit):
+                return [
+                    {
+                        "id": 9,
+                        "material_id": "9009",
+                        "created_at": "2026-07-27T00:09:00Z",
+                    }
+                ]
+
+            def verify_account(self, account_id):
+                item = super().verify_account(account_id)
+                item["drama_language"] = "en"
+                return item
+
+        def rejected_connection(_config):
+            raise RuntimeError("password=DO_NOT_PERSIST host=private-db")
+
+        sidecar = Sidecar([due_item(accounts=[11])])
+        result = self.execute(
+            sidecar,
+            material_candidate_loader=_material_candidates,
+            connection_factory=rejected_connection,
+            downloader=object(),
+            prober=object(),
+            repair_client=None,
+        )
+
+        batch = result["batches"][0]
+        self.assertEqual(batch["status"], "failed_preflight")
+        self.assertEqual(batch["error_code"], "x_post_source_query_failed")
+        self.assertNotIn("DO_NOT_PERSIST", batch["error_message"])
+        self.assertNotIn("private-db", batch["error_message"])
+        failure = next(call for call in sidecar.calls if call[0] == "failure")
+        self.assertEqual(failure[3], "x_post_source_query_failed")
+        self.assertNotIn("DO_NOT_PERSIST", failure[4])
+        self.assertFalse(
+            any(call[0] in {"create", "publish"} for call in sidecar.calls)
         )
 
     def test_fifo_replay_accepts_current_language_skip(self):
@@ -1716,6 +1949,39 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(payload["version"], 3)
         self.assertTrue(write_flag)
 
+    def test_schedule_heartbeat_renews_exact_frozen_identity(self):
+        identity = due_item(accounts=[11])
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "id": 8,
+                        "source_type": "material",
+                        "run_date": "2026-07-27",
+                        "publish_time": "10:00",
+                        "config_version": 3,
+                        "account_ids": [11],
+                        "status": "claimed",
+                        "heartbeat_recorded": True,
+                        "plan_attempt_recorded": True,
+                    }
+                }
+            ]
+        )
+
+        item = client.heartbeat_schedule_run(
+            "/internal/posts/schedule-runs/heartbeat",
+            identity,
+            plan_attempt=True,
+        )
+
+        self.assertTrue(item["heartbeat_recorded"])
+        path, payload, write_flag = client.requests[0]
+        self.assertEqual(path, "/internal/posts/schedule-runs/heartbeat")
+        self.assertEqual(payload["account_ids"], [11])
+        self.assertTrue(payload["plan_attempt"])
+        self.assertTrue(write_flag)
+
     def test_drama_failure_audit_carries_exact_pool_binding(self):
         identity = due_item(source_type="drama", accounts=[11])
         identity["drama_pool_item_id"] = 41
@@ -1979,6 +2245,361 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(result["batches"][1]["status"], "published")
         self.assertIn(
             "failure", [call[0] for call in sidecar.calls]
+        )
+
+    def test_live_345_fifo_replay_accepts_exact_full_ja_capacity_boundary(self):
+        selected = [
+            (848, "6354576"),
+            (847, "6349553"),
+            (845, "6354578"),
+            (844, "6344731"),
+            (843, "6346930"),
+            (822, "5815645"),
+            (821, "5715382"),
+            (648, "5510465"),
+            (647, "5510290"),
+            (646, "5504914"),
+            (645, "5498196"),
+            (644, "5498193"),
+            (643, "6057758"),
+            (642, "6057264"),
+            (641, "6056423"),
+            (640, "6056422"),
+            (639, "6056419"),
+            (638, "6056169"),
+            (637, "6056114"),
+        ]
+        pool_order = selected[:7] + [(820, "4928471")] + selected[7:]
+        pool_rows = [
+            {
+                "id": pool_id,
+                "material_id": material_id,
+                "last_error_code": "",
+                "last_checked_at": "",
+                "source_material_language": (
+                    "ja" if pool_id == 820 else ""
+                ),
+                "source_hydrated_at": (
+                    "2026-08-25T23:50:05Z" if pool_id == 820 else ""
+                ),
+            }
+            for pool_id, material_id in pool_order
+        ]
+        prepared = [
+            {
+                "pool_item_id": pool_id,
+                "account_id": account_id,
+                "preflight_duration": 30.0,
+                "material_language": (
+                    "ja" if pool_id in {822, 821} else "en"
+                ),
+            }
+            for account_id, (pool_id, _material_id) in enumerate(
+                selected, 1
+            )
+        ]
+        capacity_skip = {
+            "pool_item_id": 820,
+            "material_id": "4928471",
+            "material_language": "ja",
+            "reason": "language_capacity_full",
+        }
+
+        self.assertFalse(
+            _material_fifo_selection_matches(
+                pool_rows, prepared, list(range(1, 20)), []
+            )
+        )
+        self.assertTrue(
+            _material_fifo_selection_matches(
+                pool_rows,
+                prepared,
+                list(range(1, 20)),
+                [],
+                validation_cutoff="2026-08-25T23:50:00Z",
+                capacity_skips=[capacity_skip],
+                material_language_capacities={"en": 17, "ja": 2},
+            )
+        )
+
+    def test_fifo_capacity_skip_cannot_be_filled_by_older_candidates(self):
+        pool_rows = [
+            {
+                "id": 4,
+                "material_id": "404",
+                "last_error_code": "",
+                "last_checked_at": "",
+                "source_material_language": "en",
+                "source_hydrated_at": "2026-08-25T23:50:05Z",
+            },
+            {
+                "id": 3,
+                "material_id": "403",
+                "last_error_code": "",
+                "last_checked_at": "",
+                "source_material_language": "",
+                "source_hydrated_at": "",
+            },
+            {
+                "id": 2,
+                "material_id": "402",
+                "last_error_code": "",
+                "last_checked_at": "",
+                "source_material_language": "",
+                "source_hydrated_at": "",
+            },
+        ]
+        prepared = [
+            {
+                "pool_item_id": 3,
+                "account_id": 1,
+                "preflight_duration": 30.0,
+                "material_language": "en",
+            },
+            {
+                "pool_item_id": 2,
+                "account_id": 2,
+                "preflight_duration": 30.0,
+                "material_language": "en",
+            },
+        ]
+
+        self.assertFalse(
+            _material_fifo_selection_matches(
+                pool_rows,
+                prepared,
+                [1, 2],
+                [],
+                validation_cutoff="2026-08-25T23:50:00Z",
+                capacity_skips=[
+                    {
+                        "pool_item_id": 4,
+                        "material_id": "404",
+                        "material_language": "en",
+                        "reason": "language_capacity_full",
+                    }
+                ],
+                material_language_capacities={"en": 2},
+            )
+        )
+
+    def test_fifo_capacity_skip_language_must_match_hydrated_source(self):
+        self.assertFalse(
+            _material_fifo_selection_matches(
+                [
+                    {
+                        "id": 4,
+                        "material_id": "404",
+                        "last_error_code": "",
+                        "last_checked_at": "",
+                        "source_material_language": "",
+                        "source_hydrated_at": "",
+                    },
+                    {
+                        "id": 3,
+                        "material_id": "403",
+                        "last_error_code": "",
+                        "last_checked_at": "",
+                        "source_material_language": "en",
+                        "source_hydrated_at": "2026-08-25T23:50:05Z",
+                    },
+                    {
+                        "id": 2,
+                        "material_id": "402",
+                        "last_error_code": "",
+                        "last_checked_at": "",
+                        "source_material_language": "",
+                        "source_hydrated_at": "",
+                    },
+                ],
+                [
+                    {
+                        "pool_item_id": 4,
+                        "account_id": 1,
+                        "preflight_duration": 30.0,
+                        "material_language": "ja",
+                    },
+                    {
+                        "pool_item_id": 2,
+                        "account_id": 2,
+                        "preflight_duration": 30.0,
+                        "material_language": "en",
+                    }
+                ],
+                [1, 2],
+                [],
+                validation_cutoff="2026-08-25T23:50:00Z",
+                capacity_skips=[
+                    {
+                        "pool_item_id": 3,
+                        "material_id": "403",
+                        "material_language": "ja",
+                        "reason": "language_capacity_full",
+                    }
+                ],
+                material_language_capacities={"ja": 1, "en": 1},
+            )
+        )
+
+    def test_known_plan_conflict_terminalizes_claim_without_publish_retry(self):
+        sidecar = FakeSidecar([due_item(accounts=[11])])
+        sidecar.create_error = SidecarError(
+            "x_post_pool_fifo_conflict",
+            "素材计划必须使用当前素材池最新的可用记录",
+            409,
+            False,
+        )
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["batches"][0]["status"], "failed_preflight")
+        self.assertEqual(
+            result["batches"][0]["error_code"],
+            "x_post_pool_fifo_conflict",
+        )
+        self.assertTrue(result["batches"][0]["failure_recorded"])
+        self.assertEqual(
+            [call[0] for call in sidecar.calls].count("create"), 1
+        )
+        self.assertEqual(
+            [call[0] for call in sidecar.calls].count("failure"), 1
+        )
+        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+
+    def test_prior_plan_attempt_marker_prevents_any_second_plan_write(self):
+        identity = due_item(accounts=[11])
+        sidecar = FakeSidecar([identity])
+        sidecar.existing[("material", "2026-07-27", "10:00", 3)] = {
+            "found": True,
+            "run": {
+                **frozen_run("material", 1),
+                "status": "claimed",
+                "plan_attempted_at": "2026-07-27T02:00:10Z",
+            },
+            "queues": [],
+        }
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(
+            result["batches"][0]["error_code"],
+            "x_post_schedule_plan_unknown",
+        )
+        self.assertTrue(result["batches"][0]["failure_recorded"])
+        self.assertFalse(
+            any(call[0] in {"create", "publish"} for call in sidecar.calls)
+        )
+
+    def test_unknown_plan_response_publishes_only_ledger_readback_queues(self):
+        identity = due_item(accounts=[11])
+
+        class ReconciledSidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__([identity])
+                self.query_count = 0
+                self.create_error = SidecarError(
+                    "x_sidecar_unreachable",
+                    "response lost",
+                    503,
+                    True,
+                )
+
+            def query_schedule_plan(self, path, requested_identity):
+                self.query_count += 1
+                if self.query_count == 1:
+                    return super().query_schedule_plan(
+                        path, requested_identity
+                    )
+                self.calls.append(("query", path, "material"))
+                return {
+                    "found": True,
+                    "run": frozen_run("material", 1),
+                    "queues": [queue(501, 11, 1)],
+                }
+
+        sidecar = ReconciledSidecar()
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(result["batches"][0]["resumed_existing_plan"])
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [501],
+        )
+        self.assertFalse(any(call[0] == "failure" for call in sidecar.calls))
+
+    def test_unknown_plan_response_with_empty_readback_terminalizes_once(self):
+        identity = due_item(accounts=[11])
+
+        class EmptyReadbackSidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__([identity])
+                self.query_count = 0
+                self.create_error = SidecarError(
+                    "x_sidecar_unreachable",
+                    "response lost",
+                    503,
+                    True,
+                )
+
+            def query_schedule_plan(self, path, requested_identity):
+                self.query_count += 1
+                if self.query_count == 1:
+                    return super().query_schedule_plan(
+                        path, requested_identity
+                    )
+                self.calls.append(("query", path, "material"))
+                return {
+                    "found": True,
+                    "run": {
+                        **frozen_run("material", 1),
+                        "status": "claimed",
+                        "plan_attempted_at": "2026-07-27T02:00:10Z",
+                    },
+                    "queues": [],
+                }
+
+        sidecar = EmptyReadbackSidecar()
+        result = self.execute(sidecar)
+
+        batch = result["batches"][0]
+        self.assertEqual(batch["status"], "failed_preflight")
+        self.assertEqual(batch["error_code"], "x_post_schedule_plan_unknown")
+        self.assertEqual(
+            [call[0] for call in sidecar.calls].count("failure"), 1
+        )
+        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+
+    def test_unknown_plan_and_failed_readback_stops_without_publish_or_failure_write(self):
+        class UnreadableSidecar(FakeSidecar):
+            def __init__(self):
+                super().__init__([due_item(accounts=[11])])
+                self.query_count = 0
+                self.create_error = SidecarError(
+                    "x_sidecar_unreachable",
+                    "response lost",
+                    503,
+                    True,
+                )
+
+            def query_schedule_plan(self, path, identity):
+                self.query_count += 1
+                if self.query_count == 1:
+                    return super().query_schedule_plan(path, identity)
+                raise SidecarError(
+                    "x_sidecar_unreachable", "readback failed", 503
+                )
+
+        sidecar = UnreadableSidecar()
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(
+            result["batches"][0]["error_code"],
+            "x_post_schedule_plan_unknown",
+        )
+        self.assertFalse(
+            any(call[0] in {"failure", "publish"} for call in sidecar.calls)
         )
 
     def test_drama_preflight_failure_preserves_pool_binding_for_audit(self):
