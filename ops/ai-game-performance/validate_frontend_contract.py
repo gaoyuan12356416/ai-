@@ -47,6 +47,9 @@ def main():
         'delivery:["effective_spend","source_spend","manual_cost"',
         "URL.createObjectURL",
         'new Blob(["\\ufeff"+lines.join("\\r\\n")]',
+        'MONEY.format(value/60)+" min"',
+        'key==="avg_play_duration_seconds"?(Number(value||0)/60).toFixed(2)',
+        'key==="avg_play_duration_seconds"?"平均游戏时长(min)"',
         "document.body.appendChild(link)",
         "window.setTimeout(()=>{URL.revokeObjectURL(link.href);link.remove()},1000)",
         "replaceChildren",
@@ -54,6 +57,7 @@ def main():
         require(contract in HTML, "missing frontend contract: %s" % contract)
     require('"渠道行"' not in HTML, "channel-row label must not be user-visible")
     require('"转化行"' not in HTML, "conversion-row label must not be user-visible")
+    require('MONEY.format(value)+" 秒"' not in HTML, "play duration must not be displayed in seconds")
     metrics = re.search(r"const VIEW_METRICS=(.*?);\s*const BASE_NUMERIC", HTML, flags=re.DOTALL)
     require(metrics, "missing view metrics declaration")
     require("source_row_count" not in metrics.group(1), "channel-row metric must not reach table or CSV")

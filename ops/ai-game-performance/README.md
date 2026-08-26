@@ -18,6 +18,7 @@ GitHub-maintained source for the standalone, Feishu-protected report at:
 - The channel view loads the versioned delivery and conversion day files together, appends them as parallel facts, and aggregates only after the operator selects dimensions. It never raw-joins the two fact tables; Google/Meta/TikTok effective spend still comes only from delivery, Unity from manual fallback, and organic/restricted remain zero-spend conversion channels.
 - Delivery `country` and conversion `country` remain separate dimensions.
 - Live `play_duration_seconds` is total play time. Average play time is `SUM(total seconds) / SUM(installs)`; the legacy average column is converted to total seconds on read.
+- Cards and tables display average play time as `seconds / 60` with the `min` unit. CSV exports the same minute value under `平均游戏时长(min)`; cached JSON and SQLite values remain seconds.
 - Browser requests never query MySQL.
 
 ## Cache and publish contract

@@ -11,6 +11,40 @@ HTML = (HERE / "report.html").read_text(encoding="utf-8")
 
 
 class FrontendChannelUnionTests(unittest.TestCase):
+    def test_play_duration_stays_seconds_internally_and_displays_minutes(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available")
+        scripts = re.findall(r"<script>(.*?)</script>", HTML, flags=re.DOTALL | re.IGNORECASE)
+        self.assertEqual(len(scripts), 1)
+        app = scripts[0].replace("bind();loadManifest().catch(showError);", "")
+        scenario = r"""
+selectedDims=[];
+const grouped=aggregate([{
+  play_total_seconds:1098.31,play_weight_installs:1
+}],[],"conversion");
+const assert=(condition,message)=>{if(!condition)throw new Error(message)};
+assert(grouped[0].avg_play_duration_seconds===1098.31,"internal duration must stay in seconds");
+assert(formatValue("avg_play_duration_seconds",grouped[0].avg_play_duration_seconds)==="18.31 min","display duration must use minutes");
+assert(exportLabel("avg_play_duration_seconds")==="平均游戏时长(min)","CSV duration header must declare minutes");
+assert(exportValue("avg_play_duration_seconds",grouped[0].avg_play_duration_seconds)==="18.31","CSV duration value must use minutes");
+console.log("duration_minutes=PASS");
+"""
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".js", encoding="utf-8", delete=False
+        ) as handle:
+            handle.write(app)
+            handle.write(scenario)
+            script = Path(handle.name)
+        try:
+            result = subprocess.run(
+                [node, str(script)], capture_output=True, text=True, timeout=30
+            )
+        finally:
+            script.unlink(missing_ok=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("duration_minutes=PASS", result.stdout)
+
     def test_channel_dimension_unions_both_facts_without_double_counting(self):
         node = shutil.which("node")
         if not node:
