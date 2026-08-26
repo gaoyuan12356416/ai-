@@ -34,15 +34,21 @@
 - 首版部署提交 `baac99aff6213f6204d4406c4a5616c2cd0373a9`；服务器既有 X 测试 796/796 通过。
 - Run 274 standalone validate-only：14/14，通过，报告 SHA256 `74b020d458183bd6eba205a96b6bbe481796ae3682851f4a7b1eda4a88bd937e`，DB/X 写入均为 0。
 - 首次 apply 在 queue trigger 处失败；SQLite 事务完整回滚，audit=0、修复 URL=0、Run 274/345 原状态不变、DB `quick_check=ok`、FK=0、timers inactive。
-- BUG-005 修复必须经 GitHub exact commit、Linux 800 项、备份副本生产同形态 apply 和生产 standalone validate-only 后，才允许再次对 live DB apply。
+- BUG-005 最终提交 `18d9cfb68ee330db633b769112f0a50e38bc3e7c`：独立审查 P0/P1=0；Linux 800/800，日志 SHA256 `764c73f77e056ec58e3658e2ad14fe05748e2f35da69d11ca656d76ea4917b50`。
+- 备份副本生产同形态 apply：14/14、audit=14、relay=10、queue 总数不变、Run 345 不变、quick=ok、FK=0；报告 SHA256 `83fe8f4eb9c5b729c8562e2ebe14af76ebed0ba120631cf42f5403012b188124`。
+- live standalone validate-only：14/14、updated=0、X write=false、业务行零变化；报告 SHA256 `74b020d458183bd6eba205a96b6bbe481796ae3682851f4a7b1eda4a88bd937e`。
+- live apply 前快照：`accounts-before-live-apply-18d9cfb68ee330db633b769112f0a50e38bc3e7c.sqlite3`，SHA256 `ef7aa5a324e7032e5600d9ac2c4c3cbc182d300a37e90e9a90213dcebd76a922`。live apply 14/14，Run 274=`running,16,16,2,0,0`，Run 345/queue 总数不变，X write=false，报告 SHA256 同备份副本 apply。
+- 14:43 自然 timer 验收：恢复的 14 条中 13 条一次发布成功；`129.6/109.533/136.32/117.3/105.877/52.181` 等短 relay 均通过媒体上传与 relay 状态机，`invalid_media_dimensions`/trigger 冲突未复现。queue 533 的 source Post 成功后，目标账号 8 Repost 被 X 以 HTTP 403 暂时锁定拒绝；attempt=1、unknown=0、终态 failed，未自动重试。
+- 15:00 安全暂停：Run 274=`completed_with_errors, published=15, failed=1, unknown=0`；Run 345 仍 `claimed`、`plan_attempted_at=''`、queue=0、X 尝试=0。schedule/claim timers inactive，sidecar 与 manual timer 保持 active。
 
 ## 验证步骤
 
 - 全部离线 X 测试通过，`git diff --check` 通过。
 - Sidecar active、GPU 18820 profile v5 healthy。
-- Run 345 不再出现周期性 `x_post_pool_fifo_conflict`。
+- Run 345 在观察期间未再写入一次 `x_post_pool_fifo_conflict`；当前因账号 8 锁定停在零计划写入安全点，解锁后再完成 live 计划验收。
 - Run 274 audit/queued/reserved 各 14，绑定和 episode 不变，`x_write_attempted=false`。
-- 自然 timer 执行时只发布 frozen queues；不额外创建测试 Post。
+- 自然 timer 只消费 frozen queues；没有额外创建测试 Post。
+- 账号 8 解锁前不得恢复 schedule/claim timers，也不得重跑 queue 533 的 source Post。解锁后必须先核验目标身份，再走保留既有 `source_post_id` 的 repost-only 审计恢复；禁止复用 pre-X 媒体 recovery CLI。
 
 ## 回滚方案
 
@@ -50,6 +56,7 @@
 2. 原子切回部署前 symlink，重启 OAuth sidecar。
 3. 新增 SQLite 列/审计表保留，不做破坏性逆迁移；旧代码会忽略。
 4. 若短剧 recovery 已 apply，不删除 audit、不回写旧 URL；保持 timers 停止并按 ledger 人工核对。
+5. 自然发布已经开始后禁止整库恢复 live-apply 前快照，否则会丢失已成功的 X Post ledger；只能回切代码 symlink，并以当前 ledger/X readback 做逐项补偿。
 
 ## 注意事项
 
