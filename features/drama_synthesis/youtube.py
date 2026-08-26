@@ -83,7 +83,7 @@ class YouTubeCredentialRepository:
     def _query(self, where: str) -> list[YouTubeCredential]:
         sql = f"""
             SELECT CAST(ch.id AS CHAR),COALESCE(ch.channel_id,''),COALESCE(ch.channel_name,''),
-                   CAST(COALESCE(ch.status,0) AS CHAR),CAST(a.id AS CHAR),
+                   CAST(COALESCE(ch.channel_status,0) AS CHAR),CAST(a.id AS CHAR),
                    COALESCE(a.account_token,''),COALESCE(a.account_credentials,'')
               FROM `{self.schema}`.ads_youtube_channels ch
               JOIN `{self.schema}`.ads_youtube_accounts a ON a.channel_id=ch.id
@@ -124,11 +124,15 @@ class YouTubeCredentialRepository:
         return result
 
     @staticmethod
-    def _quote(value: Any) -> str:
-        return "'" + str(value or "").replace("'", "''") + "'"
+    def _decimal_id(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", text) or int(text) > 9_223_372_036_854_775_807:
+            raise DramaSynthesisError("youtube_identifier_invalid", "YouTube%s标识无效" % label, 400)
+        return text
 
     def list_for_app(self, app_id: str) -> list[Dict[str, Any]]:
-        rows = self._query("CAST(ch.app_id AS CHAR)=" + self._quote(app_id))
+        app_id = self._decimal_id(app_id, "产品")
+        rows = self._query("CAST(ch.app_id AS UNSIGNED)=" + app_id)
         items = []
         seen_channels = set()
         for row in rows:
@@ -149,10 +153,13 @@ class YouTubeCredentialRepository:
         return items
 
     def credential(self, *, app_id: str, channel_local_id: str, account_id: str, expected_channel_id: str) -> YouTubeCredential:
+        app_id = self._decimal_id(app_id, "产品")
+        channel_local_id = self._decimal_id(channel_local_id, "频道")
+        account_id = self._decimal_id(account_id, "账号")
         where = (
-            "CAST(ch.app_id AS CHAR)=" + self._quote(app_id)
-            + " AND CAST(ch.id AS CHAR)=" + self._quote(channel_local_id)
-            + " AND CAST(a.id AS CHAR)=" + self._quote(account_id)
+            "CAST(ch.app_id AS UNSIGNED)=" + app_id
+            + " AND CAST(ch.id AS UNSIGNED)=" + channel_local_id
+            + " AND CAST(a.id AS UNSIGNED)=" + account_id
         )
         rows = self._query(where)
         if len(rows) != 1:
@@ -418,7 +425,7 @@ class YouTubePublishEngine:
                 task = self._publish_video(task, token)
                 if task["video_state"] != "published":
                     return {"ok": False, "status": task["status"], "task_id": task_id}
-            if task["comment_state"] == "queued" or task["status"] == "comment_retry":
+            if task["comment_state"] == "queued" or task["status"] == "publishing_comment":
                 self.store.mark_comment_attempt(task_id)
                 comment_id = self.client.publish_comment(token, video_id=task["video_id"], comment_text=task["comment_text"])
                 task = self.store.comment_published(task_id, comment_id)

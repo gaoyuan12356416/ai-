@@ -8,7 +8,7 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | ---: | ---: | ---: | ---: |
-| Offline focused unittest | 20 | 20 | 0 | 0 |
+| Offline focused unittest | 24 | 24 | 0 | 0 |
 | Python compile targets | 6 | 6 | 0 | 0 |
 | App import/zero-output integration check | 1 | 1 | 0 | 0 |
 | Inline JavaScript syntax blocks | 4 | 4 | 0 | 0 |
@@ -31,7 +31,7 @@ python -m py_compile app.py features/drama_synthesis/core.py features/drama_synt
 
 ## 缺陷
 
-实现自测未发现未关闭缺陷；`bugs/` 当前仅有记录说明。独立 QA 发现问题后新增缺陷文件并回流实现负责人。
+独立评审发现 3 个候选缺陷：BUG-001（P0 live schema 列名）、BUG-002（random-template YouTube source legacy-row 路径）与 BUG-003（known-safe 评论重试被跳过）。三项均已修复并有定向回归，仍待独立 QA 确认关闭。另增加十进制 ID 预校验，quote/backslash 对抗输入在 SQL 构造前失败关闭。
 
 ## 遗留风险
 

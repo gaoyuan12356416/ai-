@@ -31,6 +31,10 @@
 | DS-020 | 线上旧三产物/侧栏/表格回归 | 合同保持不变 | P0 | 待独立 QA 浏览器回归 |
 | DS-021 | 不含新移除字段 | 新 payload 无 cover template/naming rule | P1 | PASS |
 | DS-022 | credential/secret 泄漏扫描 | API/diff/log 无秘密值 | P0 | 待最终 gate |
+| DS-023 | YouTube live schema contract | SQL 使用 `ch.channel_status`，禁止 `ch.status` | P0 | PASS |
+| DS-024 | raw legacy job 的随机模板 YouTube 来源 | 从已完成冻结 recipe/output 解析 URL | P0 | PASS |
+| DS-025 | SQL 标识对抗输入 | quote/backslash/越界 ID 在查询前失败关闭 | P0 | PASS |
+| DS-026 | 评论请求前临时失败 | 首次不发评论，known-safe retry 恰好发布一次 | P0 | PASS |
 
 ## 回归范围
 

@@ -129,6 +129,11 @@ class ExpiredClient(SuccessfulClient):
         return {"state": "expired"}
 
 
+class RefreshRetryClient(SuccessfulClient):
+    def refresh_access_token(self, _credential):
+        raise YouTubeHTTPError("youtube_token_refresh_unavailable", "temporarily unavailable", retryable=True)
+
+
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -228,6 +233,28 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaises(DramaSynthesisError):
             self.store.freeze_recipe(JOB_ID, changed)
 
+    def test_random_template_youtube_source_resolves_from_frozen_output(self):
+        import app as drama_app
+
+        recipe = freeze_random_recipe(job_id=JOB_ID, content_id="drama-1", request={"mode": "auto"}, catalog=catalog())
+        self.store.freeze_recipe(JOB_ID, recipe)
+        output_url = "https://media.example.test/random-template.mp4"
+        self.store.complete_recipe(
+            JOB_ID,
+            output_url=output_url,
+            output_sha256="b" * 64,
+            output_profile=RECIPE_PROFILE,
+            recipe_sha256=recipe["recipe_sha256"],
+        )
+        raw_legacy_job = {
+            "job_id": JOB_ID,
+            "output_video_url": "",
+            "output_video_no_bgm_url": "",
+        }
+        with mock.patch.object(drama_app, "DRAMA_SYNTHESIS_STORE", self.store):
+            kind, resolved = drama_app.drama_youtube_source(raw_legacy_job, "random_template_video")
+        self.assertEqual((kind, resolved), ("random_template_video", output_url))
+
     def test_short_target_and_wrapper_are_exact_and_closed(self):
         target = build_long_url(JOB_ID)
         self.assertEqual(target, "https://www.dramawavew2a.com/ads/101/2284/view?cid=" + JOB_ID + "&af_channel=ai_youtube")
@@ -283,9 +310,49 @@ class UpgradeTests(unittest.TestCase):
             ("3", "UCcccccccccccccccccccccc", "missing-scope", "1", "103", token([]), credentials),
             ("4", "UCdddddddddddddddddddddd", "missing-refresh", "1", "104", token([UPLOAD_SCOPE], ""), credentials),
         ]
-        items = YouTubeCredentialRepository(lambda _sql: rows).list_for_app("1479")
+        def schema_contract_runner(sql):
+            self.assertIn("ch.channel_status", sql)
+            self.assertNotIn("ch.status", sql)
+            return rows
+
+        items = YouTubeCredentialRepository(schema_contract_runner).list_for_app("1479")
         self.assertEqual([item["channel_id"] for item in items], [CHANNEL_ID])
         self.assertTrue(items[0]["comment_eligible"])
+
+    def test_youtube_schema_contract_uses_live_channel_status_column(self):
+        captured = []
+
+        def runner(sql):
+            captured.append(sql)
+            if "ch.status" in sql or "ch.channel_status" not in sql:
+                raise AssertionError("query does not match live ads_youtube_channels schema")
+            return []
+
+        self.assertEqual(YouTubeCredentialRepository(runner).list_for_app("1479"), [])
+        self.assertEqual(len(captured), 1)
+
+    def test_youtube_sql_identifiers_reject_quote_and_backslash_adversaries(self):
+        captured = []
+        repository = YouTubeCredentialRepository(lambda sql: captured.append(sql) or [])
+        adversaries = ("1479' OR 1=1 --", r"1479\' OR 1=1 --", "0", "9223372036854775808")
+        for value in adversaries:
+            with self.assertRaises(DramaSynthesisError):
+                repository.list_for_app(value)
+            with self.assertRaises(DramaSynthesisError):
+                repository.credential(
+                    app_id="1479",
+                    channel_local_id=value,
+                    account_id="11",
+                    expected_channel_id=CHANNEL_ID,
+                )
+            with self.assertRaises(DramaSynthesisError):
+                repository.credential(
+                    app_id="1479",
+                    channel_local_id="22",
+                    account_id=value,
+                    expected_channel_id=CHANNEL_ID,
+                )
+        self.assertEqual(captured, [])
 
     def test_youtube_video_and_comment_have_separate_success_states(self):
         row = self.enqueue()
@@ -341,6 +408,20 @@ class UpgradeTests(unittest.TestCase):
         self.assertIsNone(self.store.claim_youtube("recovery-worker", "2099-01-01T00:00:00Z"))
         stored = self.store.youtube_task(row["id"])
         self.assertEqual((stored["status"], stored["comment_state"], stored["unknown_outcome"]), ("unknown", "unknown", 1))
+
+    def test_known_safe_pre_comment_failure_retries_comment_once(self):
+        row = self.enqueue(operation_id="operation:comment-retry")
+        self.store.video_published(row["id"], "video_123456")
+        failed_client = RefreshRetryClient()
+        first = self.engine(failed_client).run_once("worker-1")
+        self.assertEqual(first["status"], "comment_retry")
+        self.assertEqual(failed_client.comment_count, 0)
+        retry_client = SuccessfulClient()
+        second = self.engine(retry_client).run_once("worker-2")
+        stored = self.store.youtube_task(row["id"])
+        self.assertTrue(second["ok"])
+        self.assertEqual((stored["comment_state"], stored["comment_attempt_count"]), ("published", 1))
+        self.assertEqual(retry_client.comment_count, 1)
 
     def test_prior_success_requires_second_confirmation(self):
         first = self.enqueue(operation_id="operation:first1", comment="")

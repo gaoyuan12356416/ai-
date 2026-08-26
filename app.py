@@ -14609,10 +14609,15 @@ def require_completed_drama_job(job_id):
 
 def drama_youtube_source(job, source_kind):
     source_kind = str(source_kind or "").strip()
+    random_template_url = str(job.get("random_template_video_url") or "")
+    if source_kind == "random_template_video" and not random_template_url:
+        frozen = DRAMA_SYNTHESIS_STORE.recipe(str(job.get("job_id") or ""))
+        if frozen and str(frozen.get("completed_at_utc") or ""):
+            random_template_url = str(frozen.get("output_url") or "")
     sources = {
         "concat_video": str(job.get("output_video_url") or ""),
         "no_bgm_video": str(job.get("output_video_no_bgm_url") or ""),
-        "random_template_video": str(job.get("random_template_video_url") or ""),
+        "random_template_video": random_template_url,
     }
     source_url = sources.get(source_kind, "")
     if not source_url:

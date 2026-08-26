@@ -19,7 +19,7 @@
 
 ## 实现方验证摘要
 
-- focused offline unittest：20 PASS。
+- focused offline unittest：24 PASS。
 - Python compile：6 targets PASS。
 - App import 与零输出集成检查：1 PASS。
 - 两个静态入口内联 JavaScript：4 blocks syntax PASS。
