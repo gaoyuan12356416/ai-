@@ -45,15 +45,15 @@
 
 | 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| TC-026 | Unity 查询边界 | Fake MySQL/现网只读 Schema | 捕获单日 SQL | 使用 `idx_date`；精确 product/date/category 0；不 union category 1 | P0 | 本地通过 |
-| TC-027 | Unity 指标映射 | starts/views/clicks/installs 同时存在 | 标准化源行 | starts 为曝光、clicks 为点击、installs 为安装；views 不进入曝光；非法 varchar 数值失败关闭 | P0 | 本地通过 |
-| TC-028 | 来源 ID 隔离 | 两张源表均有相同正 ID | 同日写入 SQLite | Unity 使用负 ID，两行并存且无覆盖 | P0 | 本地通过 |
-| TC-029 | 同日游戏维度丰富 | 相同广告键跨日对应不同项目 | 丰富手工 Unity 行 | 只使用同日候选；同日多项目显式 ambiguous，无匹配保持未标记 | P0 | 失败优先发现后已修复，本地通过 |
-| TC-030 | 禁止指标 Join | Unity delivery 与 manual 粒度不同 | 执行丰富与日替换 | 只修改 game ID/name；两侧成本/安装/留存/曝光/点击不互抄 | P0 | 本地通过 |
-| TC-031 | Unity 总览守恒 | 同游戏同日两类事实 | 聚合 overview | 渠道指标各计一次；有效花费只取 manual fallback；source spend 不增加 | P0 | 本地通过 |
-| TC-032 | 旧缓存增量迁移 | 无 `source_game_id` 的 v6 SQLite | 连续执行两次 schema ensure | 原行/金额保留；新列默认空；迁移幂等 | P0 | 本地通过 |
-| TC-033 | 前端并列聚合/CPI | Unity delivery + conversion | 按渠道聚合 | Unity 渠道指标不双计；CPI 保持 `source_spend/source_installs` 且 Unity 为 0，手工兜底不进入 CPI | P0 | 本地 Node 通过 |
-| TC-034 | 生产只读对账 | 阴影缓存与真实 category 0 | 比较行数/installs/starts/clicks，并核对 category 1 排除 | MySQL、SQLite、JSON 精确一致；公开版本尚未切换 | P0 | 待执行 |
+| TC-026 | Unity 查询边界 | Fake MySQL/现网只读 Schema | 捕获单日 SQL | 使用 `idx_date`；精确 product/date/category 0；不 union category 1 | P0 | 生产通过 |
+| TC-027 | Unity 指标映射 | starts/views/clicks/installs 同时存在 | 标准化源行 | starts 为曝光、clicks 为点击、installs 为安装；views 不进入曝光；非法 varchar 数值失败关闭 | P0 | 生产通过 |
+| TC-028 | 来源 ID 隔离 | 两张源表均有相同正 ID | 同日写入 SQLite | Unity 使用负 ID，两行并存且无覆盖 | P0 | 生产通过 |
+| TC-029 | 同日游戏维度丰富 | 相同广告键跨日对应不同项目 | 丰富手工 Unity 行 | 只使用同日候选；同日多项目显式 ambiguous，无匹配保持未标记 | P0 | 失败优先修复后生产通过 |
+| TC-030 | 禁止指标 Join | Unity delivery 与 manual 粒度不同 | 执行丰富与日替换 | 只修改 game ID/name；两侧成本/安装/留存/曝光/点击不互抄 | P0 | 生产通过 |
+| TC-031 | Unity 总览守恒 | 同游戏同日两类事实 | 聚合 overview | 渠道指标各计一次；有效花费只取 manual fallback；source spend 不增加 | P0 | 生产通过 |
+| TC-032 | 旧缓存增量迁移 | 无 `source_game_id` 的 v6 SQLite | 连续执行两次 schema ensure | 原行/金额保留；新列默认空；迁移幂等 | P0 | 阴影与生产通过 |
+| TC-033 | 前端并列聚合/CPI | Unity delivery + conversion | 按渠道聚合 | Unity 渠道指标不双计；CPI 保持 `source_spend/source_installs` 且 Unity 为 0，手工兜底不进入 CPI | P0 | 生产浏览器通过 |
+| TC-034 | 生产只读对账 | 阴影缓存与真实 category 0 | 比较行数/installs/starts/clicks，并核对 category 1 排除 | MySQL、SQLite、JSON 精确一致；验收后原子切换公开版本 | P0 | 通过 |
 
 ## 回归范围
 
@@ -62,4 +62,4 @@
 - AI 主 API 健康和飞书鉴权子请求；
 - 不重启 TT、X、FB 自动发布服务。
 
-v7 未完成 TC-026 至 TC-034 前，不覆盖上述 v6 生产结论，也不建议发布。
+v7 的 TC-026 至 TC-034 已全部通过；生产运行提交、备份、阴影、浏览器和自然 timer 证据见 `deploy.md` 与 `test-report.md`。

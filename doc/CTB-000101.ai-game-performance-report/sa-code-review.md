@@ -32,7 +32,7 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：PASS；
-- `python -m unittest discover ...`：20/20 PASS；
+- `python -m unittest discover ...`：当前 v7 为 27/27 PASS；
 - `python validate_frontend_contract.py`：PASS（含 `node --check`）；
 - `git diff --check`：PASS。
 - 验收缺陷修复后：19/19 PASS；新增 Node 行为测试验证六渠道、Google 不双计、Unity 兜底和来源行数守恒；前端契约与 `node --check` PASS。
@@ -56,14 +56,14 @@
 
 ## v7 代码评审状态（2026-08-26）
 
-状态：本地门禁与独立代码评审通过，生产阴影仍待完成，尚无发布结论。
+状态：本地/服务器门禁、独立代码评审、生产阴影与发布回归全部通过。
 
 | 编号 | 严重级别 | 位置 | 当前意见 | 状态 |
 | --- | --- | --- | --- | --- |
-| CR-015 | 高 | Unity 查询 | 锁定 `idx_date/product/date/category=0` 与 starts 曝光语义 | 本地测试通过，待只读对账 |
+| CR-015 | 高 | Unity 查询 | 锁定 `idx_date/product/date/category=0` 与 starts 曝光语义 | 只读对账通过 |
 | CR-016 | 高 | `enrich_manual_unity_games` | 候选映射必须以同日为边界；失败优先测试已证明仅广告键会跨日串联 | 已修复并本地通过 |
 | CR-017 | 高 | 聚合 | raw Unity spend 不进入有效花费；CPI 后端/前端保持 source spend 除渠道安装，Unity 为 0 | 独立复核通过 |
-| CR-018 | 中 | SQLite | `source_game_id` 迁移必须增量、幂等且保留旧行；负 ID 防跨表冲突 | 本地通过，待缓存副本演练 |
-| CR-019 | 中 | 文案/契约 | 页面需明确 Unity 指标来源和 `Starts=曝光`，避免运营误读 | 静态契约通过，待浏览器验收 |
+| CR-018 | 中 | SQLite | `source_game_id` 迁移必须增量、幂等且保留旧行；负 ID 防跨表冲突 | 阴影与生产迁移通过 |
+| CR-019 | 中 | 文案/契约 | 页面需明确 Unity 指标来源和 `Starts=曝光`，避免运营误读 | 静态契约与生产浏览器通过 |
 
-独立评审发现的两个 P1 均已关闭：阴影命令使用精确 v7 release 与独立 cache/output；在线首次发布只在 `current` 指向同一 release 后完整刷新。生产 PASS 仍须等待真实阴影、备份、发布和验收证据。
+独立评审发现的两个 P1 均已关闭：阴影使用精确 v7 release 与独立 cache/output；在线首次发布使用同一审核 release 完整刷新。运行提交 `28cefbb0c6439bea53b243de2595e789002dfa64` 的 27/27、阴影全量对账、生产浏览器和自然 timer 均 PASS，无遗留 P0/P1。

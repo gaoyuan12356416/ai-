@@ -15,7 +15,8 @@
 
 ## 数据库变更
 
-无。MySQL 全程使用 `101.32.56.53:63350` 只读端点；不执行 DDL/DML。
+- MySQL 无变更：全程使用 `101.32.56.53:63350` 只读端点，不执行 DDL/DML。
+- SQLite 有 additive migration：在线缓存表 `delivery_fact` 幂等增加 `source_game_id TEXT NOT NULL DEFAULT ''`，不删表、不清数据；因此 v7 代码回滚必须同时恢复发布前 SQLite 在线备份。
 
 ## 部署步骤
 
@@ -30,21 +31,22 @@
 ## 实际部署记录
 
 - 分支：`codex/ai-game-performance-report-20260825`；
-- 当前生产运行提交：`a63293b323f3a24afb5835d89d58e02d63b4139e`；
-- 当前 release：`/opt/ai-game-performance/releases/a63293b323f3a24afb5835d89d58e02d63b4139e`；
-- 上一运行提交/release：`c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；
+- 当前生产运行提交：`28cefbb0c6439bea53b243de2595e789002dfa64`；
+- 当前 release：`/opt/ai-game-performance/releases/28cefbb0c6439bea53b243de2595e789002dfa64`；
+- 上一运行提交/release：`a63293b323f3a24afb5835d89d58e02d63b4139e`；
 - current：`/opt/ai-game-performance/current`；
 - SQLite：`/mnt/data-disk/ai-game-performance/cache/ai-game-performance.sqlite3`；
 - 公开目录：`/usr/share/nginx/html/reports/ai-game-performance`；
 - URL：`https://ai.yingliangads.com/reports/ai-game-performance/`；
-- 最终数据版本：`20260826T165257950954+0800`；
+- 最终验证数据版本：`20260826T174301241241+0800`；
 - 首次部署前备份：`/mnt/data-disk/ai-game-performance/backups/20260825T160520+0800-pre-2655aaf`；
-- 最终版本回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T162341+0800-pre-479398b`；
+- 首次报表发布回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T162341+0800-pre-479398b`；
 - BUG-006 发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T170107+0800-pre-9804597`；
 - v6 展示精简发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260825T181629+0800-pre-c2ea2ac`；
 - 分钟单位热修复发布前回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260826T164652+0800-pre-a63293b`；
+- v7 Unity 补数发布前完整回滚备份：`/mnt/data-disk/ai-game-performance/backups/20260826T171700+0800-pre-28cefbb`；
 - 数据盘：UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`，BUG-006 发布前可用 84 GiB；
-- Nginx 仅 reload；未重启 `drama-material-api` 或 TT/X/Meta 发布服务。
+- v7 未 reload Nginx；历次部署均未重启 `drama-material-api` 或 TT/X/Meta 发布服务。
 
 ## 验证步骤
 
@@ -61,28 +63,28 @@ curl -sS -I https://ai.yingliangads.com/reports/ai-game-performance/
 
 结果摘要：
 
-- 本地与服务器：19/19 PASS，前端契约与 `node --check` PASS；
-- 全量阴影：2026-08-10 至 2026-08-25，SQLite `quick_check=ok`，峰值 RSS 310,036 KiB；
-- 最终生产：443,363 条转化、14,002 条投放事实、1,961 条总览组合；
-- 2026-08-24 MySQL/SQLite 成本、安装、D1、总播放时长、收入、渠道花费/安装/曝光/点击逐项一致；
+- 本地与服务器：27/27 PASS，前端契约与 `node --check` PASS；
+- v7 全量阴影：2026-08-10 至 2026-08-26，SQLite `quick_check/integrity_check=ok`，峰值 RSS 321,976 KiB；
+- 最终生产窗口：487,895 条转化、21,568 条投放事实、2,329 条总览组合；
+- 2026-08-25 Unity MySQL/SQLite/JSON 为 1,188 行、安装 11,847、曝光 2,034,406、点击 1,017,135，逐项一致且 category 1 未并入；
 - 匿名页面/JSON 302 到正确飞书登录 next，登录态 HTML/清单/日文件为 200；
-- BUG-006 后自然 timer 17:12:10 触发、17:13:19 成功，公开版本 `20260825T171308367560+0800`；
+- v7 后自然 timer 17:42:25 触发、17:43:13 成功，公开版本 `20260826T174301241241+0800`；
 - `nginx -t`、Nginx、AI 主 API 和现有 TT 报表回归通过；
 - Chrome 桌面与 390×844 手机布局、三视图、筛选、分页通过。
 - v6 生产三视图、状态、质量提示、表格和导出字段契约均不再暴露“渠道行/转化行”；仅渠道维度仍聚合 6 行。
 
-## 回滚方案
+## 当前 v7 回滚方案
 
-v6 回滚到上一生产提交 `98045976290b92ce3d69d030ae45eab45f386760` 时使用备份 `20260825T181629+0800-pre-c2ea2ac`，全程保留 SQLite 和新版本数据目录：
+从 v7 回滚到上一生产提交 `a63293b323f3a24afb5835d89d58e02d63b4139e` 时使用完整备份 `/mnt/data-disk/ai-game-performance/backups/20260826T171700+0800-pre-28cefbb`：
 
-1. `systemctl stop ai-game-performance-refresh.timer`；
-2. 从备份的 `current-before` 创建临时 symlink，再用 `mv -Tf` 原子恢复 `/opt/ai-game-performance/current`；
-3. 将备份 `public-before/index.html` 与 `latest.json` 分别安装为同目录临时文件，先切 index、最后切 `latest.json` 提交点；
-4. 恢复备份的 env、Nginx 配置和两个 systemd unit；
-5. `systemctl daemon-reload && nginx -t && systemctl reload nginx`；
-6. `systemctl start ai-game-performance-refresh.timer`，复核匿名 302、登录态 200、TT 报表和 AI 主 API。
+1. 停止 timer 并确认 `ai-game-performance-refresh.service` 为 inactive，再持有共享锁；
+2. 将失败后的 SQLite、公开目录和 current 状态另存审计，不直接删除；
+3. 恢复备份中的发布前 SQLite 在线备份；
+4. 从 `current-before` 原子恢复 `/opt/ai-game-performance/current`；
+5. 恢复 `public-before/index.html`，最后恢复 `public-before/latest.json` 作为提交点；
+6. 启动 timer，复核 SQLite quick/integrity、公开哈希、匿名 302、登录态 200、TT 报表和 AI 主 API。
 
-若需要完全撤销首次部署，先停止/禁用 timer，再把新 Nginx/unit/env/current/public 移入新的回滚备份目录，不直接删除；恢复前状态后执行 `daemon-reload`、`nginx -t` 和 reload。
+v7 的 `source_game_id` 是 SQLite additive migration，不能只切旧代码并保留迁移后的在线数据库。下列章节保留 BUG-006、v6 与分钟单位热修复的历史发布/回滚证据，不代表当前生产版本。
 
 ## 注意事项
 
@@ -133,15 +135,15 @@ v6 回滚到上一生产提交 `98045976290b92ce3d69d030ae45eab45f386760` 时使
 
 精确回滚：确认 `ai-game-performance-refresh.service` 为 inactive，持有 `/tmp/tt_minis_multi_dim_dashboard.lock` 后，将 `/opt/ai-game-performance/current` 原子切回 `c2ea2ac6adc746694ce2d56bf02d62ca7a1bc6cc`；从上述备份恢复 `public-before/index.html`，最后恢复 `public-before/latest.json` 作为提交点。保留 SQLite、新 release 和新数据版本，随后复核公开文件哈希、匿名 302、登录态秒单位、timer、TT 报表和主 API；无需 reload 或重启服务。
 
-## v7 Unity 补数发布计划（2026-08-26，未部署）
+## v7 Unity 补数实际发布（2026-08-26）
 
-当前生产运行提交为 `a63293b323f3a24afb5835d89d58e02d63b4139e`。以下仅为待执行计划：
+- GitHub/生产运行提交：`28cefbb0c6439bea53b243de2595e789002dfa64`；release：`/opt/ai-game-performance/releases/28cefbb0c6439bea53b243de2595e789002dfa64`；上一 release：`a63293b323f3a24afb5835d89d58e02d63b4139e`。
+- 发布前完整备份：`/mnt/data-disk/ai-game-performance/backups/20260826T171700+0800-pre-28cefbb`。`current-before`、公开 index/latest、env/unit/timer、SQLite 在线备份和 SHA-256 清单均校验通过；备份库 `quick_check=ok`。
+- 共享锁先由正常 TT 60 日刷新占用，等待其自然完成；未强杀、绕过锁或并发扫库。精确 GitHub release 的服务器 27/27、前端契约、Python 编译及格式门禁全部通过。
+- 独立阴影：`/mnt/data-disk/ai-game-performance/shadow/20260826T172400+0800-28cefbb`，使用隔离 cache/output 完成 2026-08-10 至 2026-08-26 全量刷新，耗时 3 分 18.63 秒、峰值 RSS 321,976 KiB；SQLite quick/integrity、所有日文件及 MySQL→SQLite→JSON 对账通过。
+- 阴影全窗口 Unity category 0 为 6,530 行、安装 98,719、曝光 21,123,305、点击 11,095,086。稳定日 2026-08-25 为 1,188 行、安装 11,847、曝光 2,034,406、点击 1,017,135；category 1 未并入。
+- 在共享锁内停止 timer 并确认 service inactive 后，从同一 release 对在线 SQLite 执行完整刷新，先在 rollout-stage 验证，再原子切换 index/current/latest；首次生产版本 `20260826T174015329035+0800`。公开 index 与 release HTML SHA-256 均为 `1fee30c0beb1a3e3738deffb5ec31b284562cbd0787f402021b2c3ee87684dd4`。
+- 17:42:25 自然 timer 启动，17:43:13 成功退出，`Result=success`、`ExecMainStatus=0`，生成版本 `20260826T174301241241+0800`；Unity 全窗口与稳定日合计保持不变。
+- SQLite quick/integrity、`nginx -t`、匿名 AI 报表/清单与既有 TT 报表 302、主 API loopback 200、登录态 Chrome 桌面和 390×844 回归均通过。未写 MySQL，未 reload Nginx，未重启 AI 主 API 或 TT/X/Meta 服务。
 
-1. 合并前完成独立代码评审；本地 Python/Node/前端契约/编译/格式全部绿灯。
-2. 发布前记录 v6 `current/latest.json/index.html` 哈希、timer/锁/Nginx/API 状态，并备份 SQLite 与公开提交点；不得在共享刷新锁被占用时强杀或并发扫库。
-3. 从 GitHub 精确提交创建不可变 release；阴影命令必须同时指定独立 `--cache-db` 与 `--output-dir`，先验证 additive `source_game_id` 迁移可重复且绝不触碰在线 SQLite。
-4. 只读阴影刷新逐日读取 manual、custom delivery、Unity category 0；对账 Unity 行数、installs、starts、clicks，并单独证明 category 1 未并入。
-5. 阴影 `quick_check/integrity_check`、所有日文件和对账通过后，备份在线 SQLite，切换精确代码提交，并在共享锁内对在线缓存重复全量刷新；成功发布版本文件和 `latest.json` 后再完成公开验收。阴影缓存只作证据、不直接冒充在线提交点；不重启 AI 主 API 或 TT/X/Meta 服务。
-6. 验证按渠道与 `source_country` 分组：Unity 安装/曝光/点击出现，手工成本/测转安装不丢失，有效花费不双计，CPI 保持 `source_spend/source_installs=0`。
-
-回滚边界：停止/确认 refresh inactive 后，原子切回本节发布前记录的 v6 release，恢复发布前的 SQLite 在线备份，并最后恢复备份的 `index.html/latest.json`。失败 release 和迁移后 SQLite 另存审计，不能让旧代码继续读取残留 Unity delivery/游戏映射；若不恢复 SQLite，只能由旧代码全量重建完整保留窗口。当前尚无 v7 备份路径、提交、release 或公开版本，任何此类字段只能在真实执行后补写。
+精确回滚：停止 timer 并确认 refresh inactive，持有共享锁后先将失败后的 SQLite/公开目录/current 状态另存审计；从上述备份恢复发布前 SQLite 在线备份，原子切回 `a63293b323f3a24afb5835d89d58e02d63b4139e`，恢复 `public-before/index.html`，最后恢复 `public-before/latest.json` 作为提交点。随后启动 timer，复核 SQLite quick/integrity、公开哈希、匿名 302、登录态页面、TT 报表和主 API。不能只切旧代码而保留 v7 迁移后的在线 SQLite。

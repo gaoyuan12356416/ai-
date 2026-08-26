@@ -23,7 +23,7 @@ GitHub-maintained source for the standalone, Feishu-protected report at:
 - Cards and tables display average play time as `seconds / 60` with the `min` unit. CSV exports the same minute value under `平均游戏时长(min)`; cached JSON and SQLite values remain seconds.
 - Browser requests never query MySQL.
 
-The Unity additions above are the v7 target contract dated 2026-08-26. They remain unreleased until local regression, read-only shadow reconciliation, review, backup, and explicit deployment complete.
+The Unity additions above were released on 2026-08-26 from runtime commit `28cefbb0c6439bea53b243de2595e789002dfa64`. Production shadow reconciliation, backup, full refresh, browser QA, and a natural timer refresh all passed; the verified natural-refresh data version is `20260826T174301241241+0800`.
 
 ## Cache and publish contract
 

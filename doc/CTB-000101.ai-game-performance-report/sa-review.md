@@ -35,14 +35,14 @@ PM 已在 2026-08-25 将全部评审项写入 `requirements.md` v2，状态均�
 
 ## v7 增量评审（2026-08-26）
 
-结论：需求口径有条件通过，代码与生产发布尚未验收。
+结论：需求、代码、生产发布与回归验收通过。
 
 | 编号 | 严重级别 | 位置 | 评审结论 | 状态 |
 | --- | --- | --- | --- | --- |
-| SA-010 | 高 | Unity 查询 | 仅允许 `product='Neonarcade' AND category=0`，固定 `idx_date`；禁止与 category 1 求和 | 已采纳，待只读对账 |
-| SA-011 | 高 | 指标语义 | 曝光必须取 `starts`，不得误用 completed `views` | 已采纳，待回归 |
-| SA-012 | 高 | 事实合并 | Unity 渠道指标与手工转化继续分离；不接入 Unity raw spend，有效花费仍为手工兜底 | 已采纳，待回归 |
-| SA-013 | 高 | 游戏归属 | 映射键必须包含日期与 `campaign_id + creative_pack_id/ad_id`，只丰富游戏维度 | 已修复并通过本地回归，待只读对账 |
-| SA-014 | 中 | SQLite 兼容 | 负 source ID 隔离来源；`source_game_id` 只能增量迁移，不重建/清空旧缓存 | 已采纳，本地回归通过 |
+| SA-010 | 高 | Unity 查询 | 仅允许 `product='Neonarcade' AND category=0`，固定 `idx_date`；禁止与 category 1 求和 | 生产对账通过 |
+| SA-011 | 高 | 指标语义 | 曝光必须取 `starts`，不得误用 completed `views` | 自动化与生产通过 |
+| SA-012 | 高 | 事实合并 | Unity 渠道指标与手工转化继续分离；不接入 Unity raw spend，有效花费仍为手工兜底 | 自动化与生产通过 |
+| SA-013 | 高 | 游戏归属 | 映射键必须包含日期与 `campaign_id + creative_pack_id/ad_id`，只丰富游戏维度 | 已修复并通过生产对账 |
+| SA-014 | 中 | SQLite 兼容 | 负 source ID 隔离来源；`source_game_id` 只能增量迁移，不重建/清空旧缓存 | 阴影与生产迁移通过 |
 
-v7 不改变公开 JSON 列集合；改变的是 delivery 文件中 Unity 行的覆盖范围，渠道 CPI 仍保持既有 source-spend 口径。当前本地门禁与独立代码评审已绿；生产发布前仍须补齐阴影对账、备份与回滚证据。
+v7 不改变公开 JSON 列集合；改变的是 delivery 文件中 Unity 行的覆盖范围，渠道 CPI 仍保持既有 source-spend 口径。运行提交 `28cefbb0c6439bea53b243de2595e789002dfa64` 已完成独立评审、阴影、备份、原子发布、登录态浏览器和自然 timer 验收。

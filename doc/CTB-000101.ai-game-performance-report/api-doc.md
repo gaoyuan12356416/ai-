@@ -119,9 +119,9 @@
 - 客户端收到非 JSON 清单时显示中文登录失效/格式错误，不解析为业务数据；
 - 刷新/发布失败不会生成公开错误 JSON，而是继续保留上一 `latest.json`。
 
-## v7 Unity 数据契约（2026-08-26，待发布）
+## v7 Unity 数据契约（2026-08-26，已发布）
 
-公开 URL、三个视图和列名不变；成功发布 v7 后，`delivery` 日文件会新增 `channel="unityads_int"` 的渠道事实行：
+公开 URL、三个视图和列名不变；v7 `delivery` 日文件已新增 `channel="unityads_int"` 的渠道事实行：
 
 - `source_installs = ads_unity_insights.installs`；
 - `source_impressions = ads_unity_insights.starts`（Unity 官方 impressions）；
@@ -134,4 +134,4 @@
 
 客户端渠道 CPI 保持既有 `source_spend / source_installs`：Unity 的 source spend 为 0，因此 CPI 为 0；手工成本只作为单独标识的有效花费兜底，不进入 CPI。`source_country` 维度会继续把 Unity delivery 国家与“仅转化侧”分桶，不做伪 Join。
 
-本节是 v7 目标契约，不代表生产 `latest.json` 已包含 Unity 渠道行。
+生产运行提交为 `28cefbb0c6439bea53b243de2595e789002dfa64`；2026-08-26 自然刷新清单 `20260826T174301241241+0800` 已包含 Unity 渠道行。
