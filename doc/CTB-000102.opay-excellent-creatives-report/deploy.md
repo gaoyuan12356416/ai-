@@ -235,3 +235,90 @@ flock -n -E 75 /tmp/opay-excellent-creatives.lock \
 - 常规定时器及env不变，仍为每月3日初版/5日终版；current切V2后使用新默认`-v2.sqlite3`执行正常全渠道刷新，切回V1代码后恢复旧默认名。不要把`--google-only`、`--clone-cache-from`或`--rebuild`常驻到timer；新月份没有冻结基线，不能用历史修正命令。
 - 发布记录待负责人填写：GitHub SHA、服务器release/current、V1备份路径/哈希、V2缓存及七个月snapshot SHA、正式data_version、Meta/TT对比、FX缺口、独立QA结论、timer恢复状态、回滚验证环境及未执行项。
 - 本次交付七份文档及获准新增的独立验收脚本/测试；本地自动化结果另行报告，不把“命令已列出”“回填已启动”“单月canary成功”或“影子完成”表述为七个月正式发布/最终验收成功。主线程负责提交、服务器运行及发布记录，本执行者不commit/push或部署。
+
+## V2 实际发布记录（2026-08-27 12:09，北京时间）
+
+本节是上述计划的执行结果；V1首次部署的下线路由命令不适用于本次回滚。
+
+| 项目 | 实际值 |
+| --- | --- |
+| GitHub运行提交 | `533bbac77ae29d437d084732b7fddfc022754a93`，分支 `codex/opay-google-metrics-v2-20260827` |
+| 服务器 | `43.166.187.96` / `VM-0-108-centos` |
+| current目标 | `/opt/opay-excellent-creatives/releases/533bbac77ae29d437d084732b7fddfc022754a93` |
+| 正式数据版本 | `20260827T120935529360+0800` |
+| latest SHA256 | `f5ae1d646c8522758d23d158dec1e545aa5dc26914581dd5a18c05a493b6cecb` |
+| V1回滚release | `/opt/opay-excellent-creatives/releases/0cba014b56f1c6394a9d0d3be5d735a370f83659` |
+| V1回滚数据版本 | `20260826T184515557171+0800` |
+| 本次备份 | `/mnt/data-disk/opay-excellent-creatives/backups/20260827-pre-google-v2-112242` |
+| 备份manifest SHA256 | `23ef622485f36d2c66d78e58d925f560daf3a5afd3912ad79f005aad78131fd7` |
+| 验收与操作记录 | `/mnt/data-disk/opay-excellent-creatives/qa/acceptance-20260827-v2` |
+
+- 新release由GitHub克隆并checkout精确SHA，本地和服务器各93项测试、36项页面行为通过；最终代码以只读方式重算七个月缓存，全部入选键、基础字段和metrics与修订后影子一致。
+- 备份manifest中env/Nginx/unit/timer/旧HTML/旧latest及备份文件SHA全部核验；V1在线一致性备份与新V2缓存分离，两份SQLite `quick_check=ok`。数据盘挂载UUID仍为 `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`。
+- 独立七个月验收通过后，在独立锁内暂停两个timer（不disable）、原子切换current，再仅发布已验冻结快照；没有 `--refresh` 或 `--rebuild`。正式与影子所有月JSON除 `data_version` 外逐字段完全相同。正式结果192条、98个真实OPay素材ID；186条Meta/TT旧字段保持一致，新增GG月度记录6条。
+- 发布命令和结果见 `promotion-command.json`、`promotion-result.json`；正式版独立复核见 `production-seven-month-upgrade.json`，仍PASS。完整V1公开JSON基线保存在验收目录 `v1-public/`，其原不可变公网文件也保留。
+- 匿名HTML、latest、7个月JSON均200，无鉴权跳转，均有noindex；HTML/latest no-store，月JSON immutable。env/Nginx/unit/timer定义哈希均未改变，**没有Nginx reload、daemon-reload或主服务重启**。
+- 两个timer恢复enabled/active，下一次为2026-09-03和09-05北京时间10:00（保留原随机延迟）；两个refresh oneshot无在途任务。原AI Game Performance仍302，主站仍200，8787保持监听，`nginx -t`通过。
+- 回滚故障注入仅在独立影子目录完成：latest写入失败保留旧字节、先还原旧manifest再还原HTML/current后7个月可读。未为验收而把已成功上线的生产报表切回V1。浏览器原生CSV落盘位置未确认，实际七个月导出Blob/CSV内容均通过，详见测试报告。
+
+### 本次发布的精确回滚命令
+
+仅针对上述V2发布点；若current、配置或latest已被后续发布修改，断言会停止，须先确认新的回滚范围。保留新旧所有release、缓存和不可变月文件，不删除报表目录。以下**未在生产执行**；相同原子恢复顺序已在影子验证。
+
+```bash
+set -euo pipefail
+systemctl stop opay-excellent-creatives-initial.timer opay-excellent-creatives-final.timer
+flock -n -E 75 /tmp/opay-excellent-creatives.lock python3 - <<'PY'
+import hashlib, json, os, pathlib, sqlite3, subprocess, tempfile, uuid
+b = pathlib.Path('/mnt/data-disk/opay-excellent-creatives/backups/20260827-pre-google-v2-112242')
+w = pathlib.Path('/usr/share/nginx/html/reports/opay-excellent-creatives')
+c = pathlib.Path('/opt/opay-excellent-creatives/current')
+m = json.loads((b / 'manifest.json').read_text())
+assert str(c.resolve()) == '/opt/opay-excellent-creatives/releases/533bbac77ae29d437d084732b7fddfc022754a93'
+assert json.loads((w / 'latest.json').read_text())['data_version'] == '20260827T120935529360+0800'
+assert pathlib.Path(m['current']).is_dir()
+for stage in ('initial', 'final'):
+    unit = 'opay-excellent-creatives-refresh@%s.service' % stage
+    assert subprocess.check_output(['systemctl', 'show', unit, '--property=ActiveState', '--value'], text=True).strip() == 'inactive'
+for path, info in m['files'].items():
+    assert hashlib.sha256(pathlib.Path(info['backup']).read_bytes()).hexdigest() == info['sha256']
+    if not path.startswith(str(w)):
+        assert hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() == info['sha256']
+old = json.loads((b / 'latest.json').read_text())
+for month in old['months']:
+    assert (w / 'data' / old['data_version'] / (month['month'] + '.json')).is_file()
+db = sqlite3.connect('file:/mnt/data-disk/opay-excellent-creatives/cache/opay-excellent-creatives.sqlite3?mode=ro', uri=True)
+assert db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+assert db.execute("SELECT value FROM cache_meta WHERE key='schema_version'").fetchone()[0] == '1'
+db.close()
+for name in ('latest.json', 'index.html'):  # manifest first; V2 HTML reads V1 safely
+    data = (b / name).read_bytes()
+    fd, temporary = tempfile.mkstemp(prefix='.' + name + '.rollback-', dir=str(w))
+    with os.fdopen(fd, 'wb') as stream:
+        os.fchmod(stream.fileno(), 0o644)
+        stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary, w / name)
+link = c.parent / ('.current-rollback-' + uuid.uuid4().hex)
+os.symlink(m['current'], link); os.replace(link, c)
+assert str(c.resolve()) == m['current']
+assert hashlib.sha256((w / 'latest.json').read_bytes()).hexdigest() == m['files'][str(w / 'latest.json')]['sha256']
+print('RESTORED', old['data_version'], str(c.resolve()))
+PY
+python3 - <<'PY'
+import json, urllib.request
+url = 'https://ai.yingliangads.com/reports/opay-excellent-creatives/'
+with urllib.request.urlopen(url + 'latest.json', timeout=20) as response:
+    old = json.load(response)
+assert old['data_version'] == '20260826T184515557171+0800'
+assert len(old['months']) == 7
+for entry in old['months']:
+    with urllib.request.urlopen(url + 'data/' + old['data_version'] + '/' + entry['month'] + '.json', timeout=20) as response:
+        assert response.status == 200
+        assert json.load(response)['schema_version'] == 1
+print('ROLLBACK_PUBLIC_CHECK=PASS')
+PY
+systemctl start opay-excellent-creatives-initial.timer opay-excellent-creatives-final.timer
+systemctl list-timers 'opay-excellent-creatives*' --all --no-pager
+```
+
+任何断言/命令失败时停止后续动作并保留现场；尤其不可在数据/current不一致时恢复调度。配置未改时无需恢复配置文件或reload；若发现配置漂移，先另行核对，不用旧备份盲目覆盖后续修改。
