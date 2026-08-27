@@ -209,6 +209,34 @@ class AdsAiBootstrapTests(unittest.TestCase):
                 bootstrap._connect(invalid)
             connect.assert_not_called()
 
+    def test_mysql57_escaped_schema_underscore_matches_exact_admin_grant(self):
+        for rehearsal in (False, True):
+            for schema_name in ("ads_ai", "`ads_ai`", "'ads_ai'", r"`ads\_ai`"):
+                connection = admin_connection(rehearsal=rehearsal)
+                user = bootstrap.REHEARSAL_USER if rehearsal else bootstrap.ADMIN_USER
+                host = "%" if rehearsal else "43.166.187.96"
+                connection.show_grants[-1] = {
+                    "grant": "GRANT ALL PRIVILEGES ON %s.* TO `%s`@`%s`%s" % (
+                        schema_name, user, host, "" if rehearsal else " WITH GRANT OPTION",
+                    )
+                }
+                with self.subTest(rehearsal=rehearsal, schema_name=schema_name):
+                    self.assertEqual(bootstrap._validate_admin(connection.cursor(), writable=True, rehearsal=rehearsal), user + "@" + host)
+                self.assertEqual(connection.ddl, [])
+
+    def test_mysql57_schema_escape_does_not_accept_wildcards_other_schema_or_double_escape(self):
+        for schema_name in ("ads%ai", "`ads%ai`", "`ads_xai`", "`ads_ai_extra`", "`kunlunads_dev`",
+                            r"`ads\\_ai`", r"`ads\%ai`", r"ads\_ai", "`ads_ai", "ads_ai`", "*"):
+            connection = admin_connection(rehearsal=True)
+            connection.show_grants[-1] = {"grant": "GRANT ALL PRIVILEGES ON %s.* TO `drama_ads_ai_rehearsal`@`%%`" % schema_name}
+            with self.subTest(schema_name=schema_name), self.assertRaises(RuntimeError):
+                bootstrap._validate_admin(connection.cursor(), writable=True, rehearsal=True)
+            self.assertEqual(connection.ddl, [])
+        connection = admin_connection(rehearsal=True)
+        connection.show_grants[-1] = {"grant": r"GRANT ALL PRIVILEGES ON `ads\_ai`.* TO `unexpected_admin`@`%`"}
+        with self.assertRaises(RuntimeError):
+            bootstrap._validate_admin(connection.cursor(), writable=True, rehearsal=True)
+
     def test_production_apply_requires_explicit_new_evidence_and_clean_candidate(self):
         with mock.patch.object(bootstrap, "_connect") as connect:
             for kwargs in ({"apply": True}, {"apply": True, "candidate_git_sha": CANDIDATE}, {"evidence_file": "old.json"}):

@@ -183,7 +183,11 @@ def _validate_admin(cursor: Any, *, writable: bool, rehearsal: bool = False) -> 
     # The exact ads_ai ALL grant makes table/trigger metadata visible. No grants
     # are installed or changed here, and this admin never serves runtime RPC.
     user, host = account.split("@", 1)
-    pattern = (r"GRANT ALL PRIVILEGES ON [`']?ads_ai[`']?\.\* TO [`']?" + re.escape(user)
+    # MySQL 5.7's official-image initialization escapes the schema underscore
+    # in SHOW GRANTS. Accept only that exact single escape, not a general
+    # unescape operation that could turn wildcards/other schemas into ads_ai.
+    schema_pattern = r"(?:ads_ai|`ads_ai`|'ads_ai'|`ads\\_ai`)"
+    pattern = (r"GRANT ALL PRIVILEGES ON " + schema_pattern + r"\.\* TO [`']?" + re.escape(user)
                + r"[`']?@[`']?" + re.escape(host) + r"[`']?(?: WITH GRANT OPTION)?")
     if sum(bool(re.fullmatch(pattern, grant, re.IGNORECASE)) for grant in grants) != 1:
         raise RuntimeError("bootstrap admin lacks exact ads_ai metadata visibility")

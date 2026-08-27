@@ -43,6 +43,8 @@ bootstrap 和启用前由现有 ads_aius 管理身份检查无 trigger；runtime
 
 ## 本轮证据状态
 
+15:58 增量：f3d754e 已 GitHub push/readback 并在 CPU 精确 clean checkout；生产只读 dry-run PASS，三表均缺失。隔离 MySQL 5.7.44 的库名下划线转义使管理员预检拒绝，尚未创建任何表。BUG-026 两文件兼容修正已独立 23/23 定向测试和 6/6 内存对抗通过，固定 DDL/runtime parser 未变。新候选重新绑定实机发现与演练，原 262/262 仅作为未变代码基线，生产建表和外部发布仍未执行。
+
 15:23 只读核验 CPU 原应用 SHA 未变、20 个任务全部 done、SQLite quick_check=ok；尚无 production YouTube ledger。新隔离 MySQL 5.7.44 已启动，ads_ai 为空，数据盘独立目录/loopback 端口/0600 admin JSON 已确认。生产新表、writer、CPU 切流和外部测试仍待代码冻结及实机门禁；本段不将准备完成记为部署成功。
 
 冻结代码已完成独立 10 模块一次完整 262/262 PASS（14.628 秒，含 X30/TT11）。实现专项39项、root专项及旧204基线不与262相加。浏览器实查旧 UI 仍默认勾选，说明生产尚未换成新候选；当前登录管理员已确认“郜远”。实机阶段将在本候选 GitHub push 后进行，不能以离线通过替代真实 writer/发布结果。

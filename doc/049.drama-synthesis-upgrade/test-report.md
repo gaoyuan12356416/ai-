@@ -1,5 +1,11 @@
 # 测试报告
 
+## 最新增量：MySQL 5.7 库名授权兼容（BUG-026）
+
+f3d754e2d4d0912d0cb7bf63b98d01c5f6f554bb 已经 GitHub push/readback，CPU 精确 clean checkout 的生产 dry-run 通过，三表均不存在。隔离 MySQL 5.7.44 授权显示为精确 `ads\_ai`，bootstrap 在身份预检处停止，0 张表、0 DDL；没有改动生产表。
+
+两文件小修新增该精确显示形式，独立 23/23 定向测试及另 6/6 接受/拒绝内存对抗 PASS，网络/真实数据库调用均为 0；compile、Python 3.9 AST、diff-check 和测试前后 SHA 一致性通过。DDL、runtime parser、其余 16 源码/配置未变，原 262/262 证据保留为基线，不相加、不重跑、不改绑。新 GitHub 候选需重新运行生产只读发现和隔离 fresh-rehearsal。见 [BUG-026](bugs/BUG-026.md)。
+
 ## 最新增量：ads_ai 新表（代码冻结 QA PASS）
 
 用户最新确认原表只读，改为 ads_ai 新建专用三表。独立 SA/代码 QA 无剩余 P0/P1，指定10模块一次合并 **262/262 PASS，14.628秒**（含 X30/TT11 契约）。另 **15/15** 独立内存对抗 PASS，0.017秒，网络/真实数据库 tripwire 均0；35文件 compile/3.9 AST PASS，本机执行器是 Python3.14.3，不冒称实际3.9运行。18个候选源码/配置测试前后 SHA 一致，差异检查无空白错误。
