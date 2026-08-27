@@ -1,5 +1,11 @@
 # 测试报告
 
+## 实机兼容修正定向 QA：PASS（BUG-028/029）
+
+冻结的 HEX 读取与列表入口增量已独立复核，无新增 P0/P1。一次 `encoding + upgrade + canary` 定向 Python **119/119 PASS，6.717 秒**；两页 Node 行渲染 **16 checks PASS**。另独立纯内存读取/拒绝对抗 **6/6 PASS，0.222 秒**（包含实际 app.run_mysql AST 与 fake batch），Node **10 场景/20 次 handler 调用 PASS**；6 类外部 I/O 拦截均 0，非浏览器、非生产验收。3 Python compile/3.9 AST（实际 Python3.14.3）、Node --check/两页共4段 inline JS、diff 与新增文件尾空白、6 文件前后冻结 SHA 均通过。
+
+原库仅 SELECT，两 JSON 列 HEX 一次严格还原；坏 HEX、坏 UTF-8、非对象 JSON、字面反斜杠 scope 仍拒绝，未放宽身份/scope。原 app/core/RPC/canary/DDL 不变；下方 272 只属于 59f95e6 基线，不重跑、不与119相加。代码可提交后进入 CPU 真实读取与同一 operation prepare；真实上传/评论仍未完成。
+
 ## 本次现有账号 v3 冻结 QA：PASS（2026-08-27 16:45）
 
 独立 QA 唯一一次完整 10 suite **272/272 PASS，17.778 秒**（48+25+23+60+4+33+22+16+30+11）。另 15 项内存对抗：14 项首轮通过，1 项因 QA 夹具误选 DELETE 而非重复 SELECT，纠正夹具后仅定向复测通过；未修改源码、不重跑整套。35 文件 compile 与 Python3.9 AST 兼容通过，实际执行解释器 Python3.14.3。7 个冻结源码/配置/测试文件前后 SHA256 一致，diff-check PASS；DDL SHA256 08efc2e9d7e7bb52eb9bf041e9133acb214ca6dc8b8c7d86cb73d6d80ee8be38 未变。无新 P0/P1。108 专项和旧 262/23 均不与本次相加。

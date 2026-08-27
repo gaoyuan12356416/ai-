@@ -1,5 +1,15 @@
 # 剧集合成升级部署状态（2026-08-27）
 
+## 实机进展：CPU 已切换、v3 真实健康通过，验收修正中
+
+已从 GitHub 精确部署 CPU `59f95e6dc106a420fa2e326597c931ba712249f9`；API、原制作 worker、新 YouTube worker、新 writer 均 active/NRestarts=0，正式 live/sync 仍为 0。使用实际 drama-youtube OS 用户的 ads_aius/ads_ai v3 预检与鉴权 RPC 均通过，未鉴权 401；没有新增数据库账号。CPU 业务查询仍 63350/kunlunads_dev，制作明确指向 18788。20 个历史 done 保留，SQLite quick_check=ok；历史输出单事务归一后第二次 dry-run changes=0，新增本地账本为空。
+
+CPU 备份 `/mnt/data-disk/drama-synthesis-cpu/backups/20260827T1630-pre-shared-account`；切流机器报告在 `/mnt/data-disk/drama-youtube-ads-ai-deploy-20260827/59f95e6dc106a420fa2e326597c931ba712249f9/cpu-cutover.json`。旧原页面与仓库基线有素材需求预览差异，但新候选已保留线上原行为；不是未处理的覆盖冲突。
+
+HK 继续 e1f5a1d，已备份并在 16:42 左右将 COS_PREFIX/DRAMA_PUBLIC_BASE_URL 激活为 drama-materials；新增 worker 与其 Requires 隧道 active/NRestarts=0，旧 X 两 PID 91290/91292 未变。备份目录 `/data/drama-synthesis-gpu/backups/20260827T1650-pre-formal-prefix` 的 1650 只是目录标签，不是执行时间，实际时间见 activation.json。既有 ads_video_producer 的独立自重启状态未被本需求改动。
+
+浏览器登录郜远已验证默认四项未选、下拉移除、自动/手动四层 3/5/3/7 目录、多产物选择及“素材 URL 已复制”反馈。任务列表直达三操作遗漏已补入待部署修正（[BUG-029](bugs/BUG-029.md)）。唯一 canary prepare 在凭据资格阶段停止：原 Token 正常，MySQL batch 双重转义导致 scope 误判，见 [BUG-028](bugs/BUG-028.md)。发布行/短链/真实上传/评论均为 0；修正后继续同一 operation，不新建替代测试。以下 16:06 账号阻断是历史，不再适用。
+
 ## 最新覆盖决定：使用现有授权与现有数据库账号（2026-08-27 16:35）
 
 用户明确取消专用数据库账号隔离要求。按 [现行发布合同](ads-ai-new-tables-20260827.md) 使用 CPU 现有 ads_aius 和已有 YouTube OAuth，发布结果只写 ads_ai 三张新表；不创建/修改账号、不动原 MySQL 表。RPC v3 如实声明共享账号与应用表白名单，保留秘密保护、无 trigger/FK 检查、幂等与未知结果停止。无需再提供管理员凭据。以下专用账号/1410/旧库迁移内容均是历史，不再作为上线门禁；当前部署及真实测试尚待完成，最终实机状态另行记录。

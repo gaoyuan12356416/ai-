@@ -41,12 +41,17 @@ VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
 
 
-def _json_object(value: Any) -> Dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
+def _json_object_from_hex(value: Any) -> Dict[str, Any]:
+    """Decode the exact HEX projection, not mysql batch-escaped JSON text.
+
+    Invalid transport, UTF-8 or non-object JSON is ineligible. Never fall back
+    to raw JSON or unescape scope/secret strings a second time.
+    """
+    if type(value) is not str or not value or len(value) % 2 or re.fullmatch(r"[0-9A-Fa-f]+", value) is None:
+        return {}
     try:
-        decoded = json.loads(str(value or "{}"))
-    except (TypeError, ValueError):
+        decoded = json.loads(bytes.fromhex(value).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         return {}
     return dict(decoded) if isinstance(decoded, Mapping) else {}
 
@@ -101,7 +106,7 @@ class YouTubeCredentialRepository:
         sql = f"""
             SELECT CAST(ch.id AS CHAR),COALESCE(ch.channel_id,''),COALESCE(ch.channel_name,''),
                    CAST(COALESCE(ch.channel_status,0) AS CHAR),CAST(a.id AS CHAR),
-                   COALESCE(a.account_token,''),COALESCE(a.account_credentials,'')
+                   HEX(COALESCE(a.account_token,'')),HEX(COALESCE(a.account_credentials,''))
               FROM `{self.schema}`.ads_youtube_channels ch
               JOIN `{self.schema}`.ads_youtube_accounts a ON a.channel_id=ch.id
              WHERE {where}
@@ -113,12 +118,12 @@ class YouTubeCredentialRepository:
         for row in rows:
             if len(row) < 7:
                 continue
-            local_id, channel_id, channel_name, channel_status, account_id, token_text, credential_text = row[:7]
+            local_id, channel_id, channel_name, channel_status, account_id, token_hex, credential_hex = row[:7]
             identity = (str(local_id), str(account_id))
             if identity in seen:
                 continue
-            token = _json_object(token_text)
-            client = _client_config(_json_object(credential_text))
+            token = _json_object_from_hex(token_hex)
+            client = _client_config(_json_object_from_hex(credential_hex))
             scopes = normalize_channel_scopes(token)
             try:
                 status = int(channel_status or 0)

@@ -593,24 +593,26 @@ class UpgradeTests(unittest.TestCase):
 
     def test_channel_repository_uses_channel_status_and_decimal_ids(self):
         seen = []
-        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
-        credentials = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]}).encode("utf-8").hex()
+        credentials = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}}).encode("utf-8").hex()
         repo = YouTubeCredentialRepository(lambda sql: seen.append(sql) or [("1", CHANNEL, "Current", "1", "2", token, credentials)], identity_probe=lambda _row: True)
         self.assertEqual(len(repo.list_for_app("1479")), 1)
         self.assertIn("ch.channel_status", seen[0])
+        self.assertIn("HEX(COALESCE(a.account_token,''))", seen[0])
+        self.assertIn("HEX(COALESCE(a.account_credentials,''))", seen[0])
         with self.assertRaises(DramaSynthesisError):
             repo.list_for_app("1'\\ OR 1=1")
 
     def test_channel_list_hides_upload_only_and_status_two(self):
-        upload_only = json.dumps({"refresh_token": "r", "scope": [UPLOAD]})
-        complete = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
-        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        upload_only = json.dumps({"refresh_token": "r", "scope": [UPLOAD]}).encode("utf-8").hex()
+        complete = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]}).encode("utf-8").hex()
+        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}}).encode("utf-8").hex()
         rows = [("1", CHANNEL, "upload-only", "1", "2", upload_only, creds), ("3", CHANNEL[:-1] + "B", "disabled", "2", "4", complete, creds)]
         self.assertEqual(YouTubeCredentialRepository(lambda _sql: rows, identity_probe=lambda _row: True).list_for_app("1479"), [])
 
     def test_channel_list_requires_runtime_refresh_identity_and_hides_failures(self):
-        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]})
-        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+        token = json.dumps({"refresh_token": "r", "scope": [UPLOAD, READONLY]}).encode("utf-8").hex()
+        creds = json.dumps({"installed": {"client_id": "c", "client_secret": "s"}}).encode("utf-8").hex()
         other = CHANNEL[:-1] + "B"
         rows = [("1", CHANNEL, "verified", "1", "2", token, creds), ("3", other, "hidden", "1", "4", token, creds)]
         refreshes = []

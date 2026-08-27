@@ -45,7 +45,9 @@
 - `comment_status` 与 `sync_status` 独立。评论只在 confirmed published 后执行；评论失败只重试评论。同步使用 outbox，失败不改变视频已发布事实。
 - interrupted/5xx 查询 resumable session；无法证明未提交时 unknown 并禁止替代发布。processing/unknown 不重传。prior success 需二次确认。
 - 评论非空须 `youtube.force-ssl`；关闭评论、儿童内容或权限不足只影响评论子状态。凭据仅服务端，日志禁止 secret/session URI。
-- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。适配器仅写 `ads_ai` 的新 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`，运行账号只含三表 SELECT/INSERT/UPDATE，并发 1；原库只读、不双写。video/publish_log 完整冻结发布 payload，comment 完整冻结评论 payload，保留 payload_json/SHA256/canary marker，不截断、不构造旧队列 ID。外部 ID/发布 ID 唯一、同内容幂等、异内容冲突拒绝。CPU `127.0.0.1:18837` 受控 RPC 的 health 必须为 v2/ads_ai 且精确结构/索引/最小 grants 合格；18836 保留给 FB。token 分为 root 客户端及 drama-youtube 服务端两份同值 0600 文件，writer DB JSON 仅服务端所有。建表用独立 admin loader，仅 CREATE 缺表、不修改兼容表/原表；运行 writer 永不持有 DDL。所有坏配置、坏 payload 和权限/结构漂移 fail closed，outbox 依原 lease fencing 处理失败且不泄露内容。完整合同见 [ads_ai 新表发布合同](ads-ai-new-tables-20260827.md)。
+- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。使用现有 ads_aius 账号，但应用适配器仅允许 `ads_ai` 新 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 的 SELECT/INSERT/UPDATE，并发 1；原 MySQL 库只读、不双写。video/publish_log 完整冻结发布 payload，comment 完整冻结评论 payload，保留 payload_json/SHA256/canary marker，不截断、不构造旧队列 ID。外部 ID/发布 ID 唯一、同内容幂等、异内容冲突拒绝。CPU `127.0.0.1:18837` 受控 RPC health 必须为 v3/ads_ai，明确 shared-existing-account / application-table-allowlist / db_least_privilege=false；只检查所需能力，不宣称完整 grants 审计。每次写前确认结构/索引、TRIGGER 可见性、无 trigger/FK；18836 保留 FB。保留 root 客户端与 drama-youtube 服务端同值 0600 RPC token，writer DB JSON 仅服务端所有。三表已建成，本轮不再 DDL、不创建/修改数据库账号。坏配置、坏 payload 和必要能力/结构漂移 fail closed，outbox 保留 lease fencing。完整合同见 [ads_ai 新表发布合同](ads-ai-new-tables-20260827.md)。
+
+- 原频道授权 JSON 经 CPU MySQL batch 查询时必须以 HEX 两列传输并严格解码一次；不得直接接受被重复转义的 scope，亦不得用字符串替换放宽授权。仅在 CPU 内存刷新 access token，不更新原 token/credentials 表。列表操作列直接展示三个新入口，详情入口继续保留。
 
 ## 香港 GPU 与验收
 

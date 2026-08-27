@@ -18123,6 +18123,12 @@ function buildJobRow(job) {
       const creatorName = job.creator_name || job.creator_user_id || job.creator_open_id || "--";
       const creatorMeta = job.creator_user_id || job.creator_open_id || "";
       const elapsed = formatJobElapsed(job);
+      const hasVideoMaterial = selectableMaterials(job, false).length > 0;
+      const materialActions = job.status === "done" ? `
+        <button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); copyMaterialUrl('${job.job_id}')">复制素材 URL</button>
+        <button class="btn btn-secondary mini" type="button" ${hasVideoMaterial ? `onclick="event.stopPropagation(); createShortLink('${job.job_id}')"` : "disabled"}>生成短链</button>
+        <button class="btn btn-secondary mini" type="button" ${hasVideoMaterial ? `onclick="event.stopPropagation(); openYoutubePublish('${job.job_id}')"` : "disabled"}>发布到 YouTube</button>
+      ` : "";
       const retryButton = job.status === "done"
 
 
@@ -18545,6 +18551,7 @@ function buildJobRow(job) {
 
 
               <button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); downloadAll('${job.job_id}')">下载全部</button>
+              ${materialActions}
 
 
 
@@ -20930,7 +20937,7 @@ function buildJobRow(job) {
 
     async function loadRandomTemplateCatalog() {
       if (state.randomTemplateCatalog) return state.randomTemplateCatalog;
-      els.randomTemplateHint.textContent = "正在读取香港 GPU 模板目录…";
+      els.randomTemplateHint.textContent = "正在读取 CPU 模板目录…";
       const data = await api("/api/drama-material/random-template-catalog");
       state.randomTemplateCatalog = data.item;
       const mappings = [
