@@ -2,6 +2,8 @@
 
 ## 2026-08-27 图片/视频全基准与1000美元门槛（最新确认）
 
+GG图片视频基准不混入全Campaign的AF：benchmark.af_d0_first_transactions/cpa/cpa_finite、AF派生metrics、audit.af_total均为null；evidence.platform_cpa_available=false。素材池没有精确AF，不能用全渠道AF总数补齐，详见BUG-GCP-003。
+
 路径、schema_version=2及34列CSV保持不变；`selection_policy.google.version=picvid_cpc_1000_v2`。GG benchmark.spend/clicks/impressions/ctr/cpc和audit.platform_spend/platform_cpc/metric_source统一改为全部图片/视频池，metric_source=`ads_google_insights:type=3,asset_type=2/4`；platform_fx_*指图片视频池FX缺口。新增evidence.platform_spend_scope/platform_cpc_scope=`google_picture_video_assets`、rule_b_min_spend_usd=1000；policy新增baseline_source/cpc_weighting/min_spend。baseline_missing_account_days保留为Campaign参考缺日，不阻断新口径。其他渠道字段原样冻结。
 
 ## 共同约束

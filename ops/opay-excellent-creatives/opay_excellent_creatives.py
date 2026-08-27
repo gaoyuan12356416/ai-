@@ -1514,7 +1514,9 @@ def build_month_payload(
                     "source_row_count": 0,
                 },
             )
-            platform_d0 = af_totals.get(scope, 0)
+            # Campaign-level AF cannot be mixed with a PIC/VID-only spend and
+            # impression denominator. No exact asset AF means unknown, not zero.
+            platform_d0 = None if platform_id == 1 else af_totals.get(scope, 0)
             audit = audit_totals.get(scope, blank_scope_audit())
             coverage = None if total["spend_cents"] is None else ratio(audit["exact_spend_cents"], total["spend_cents"])
             scope_materials = [item for item in materials if (item["platform"], item["app"]) == scope]
@@ -1616,8 +1618,8 @@ def build_month_payload(
                             "material_cpa_finite": None if material["af_d0_count"] is None else material["af_d0_count"] > 0,
                             "platform_ctr": nullable_ctr(ctr_total["clicks"], ctr_total["impressions"]),
                             "platform_cpa": cpa_value(total["spend_cents"], platform_d0),
-                            "platform_cpa_finite": None if total["spend_cents"] is None else platform_d0 > 0,
-                            "platform_cpa_available": total["spend_cents"] is not None,
+                            "platform_cpa_finite": None if total["spend_cents"] is None or platform_d0 is None else platform_d0 > 0,
+                            "platform_cpa_available": total["spend_cents"] is not None and platform_d0 is not None,
                             "spend_rank": rank_map.get(custom_source_id),
                             "cumulative_spend_ratio": cumulative_map.get(custom_source_id) if total["spend_cents"] is None else cumulative_map.get(custom_source_id, 0),
                             "in_top_50_percent": in_top_half,
@@ -1671,7 +1673,7 @@ def build_month_payload(
                 "af_d0_first_transactions": platform_d0,
                 "ctr": nullable_ctr(total["clicks"], total["impressions"]),
                 "cpa": cpa_value(total["spend_cents"], platform_d0),
-                "cpa_finite": None if total["spend_cents"] is None else platform_d0 > 0,
+                "cpa_finite": None if total["spend_cents"] is None or platform_d0 is None else platform_d0 > 0,
             }
             attach_metrics(benchmark)
             if platform_id == 1:

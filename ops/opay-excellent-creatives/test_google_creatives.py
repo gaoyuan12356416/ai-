@@ -281,7 +281,7 @@ class GoogleMonthTests(unittest.TestCase):
                 self.assertEqual(len(payload["rows"]), 1)
                 self.assertEqual(payload["rows"][0]["selection_rule"], "A+B")
                 self.assertEqual(payload["rows"][0]["evidence"]["platform_ctr"], 0.01)
-                self.assertTrue(payload["rows"][0]["evidence"]["platform_cpa_available"])
+                self.assertFalse(payload["rows"][0]["evidence"]["platform_cpa_available"])
                 self.assertIsNone(payload["rows"][0]["evidence"]["platform_cpa"])
                 self.assertEqual(payload["rows"][0]["evidence"]["cumulative_spend_ratio"], 0.5)
                 audit = next(a for a in payload["audits"] if a["channel"] == "Google" and a["app"] == "NG OPay")

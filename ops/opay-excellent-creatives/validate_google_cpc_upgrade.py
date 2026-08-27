@@ -120,7 +120,7 @@ def raw_expected(connection, month):
             'fx_missing_native_spend': missing_native(assets),
             'platform_fx_missing_native_spend': missing_native(assets),
             'picture_video_clicks': clicks, 'picture_video_impressions': impressions,
-            'af_mapped': None, 'af_mapping_coverage': None,
+            'af_mapped': None, 'af_mapping_coverage': None, 'af_total': None,
         }
         output[app] = dict(selected=selected, available=bool(available), spend=spend,
             clicks=clicks, impressions=impressions, eligible=eligible, material_count=len(materials),
@@ -192,6 +192,7 @@ def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None, approve
                 audit = next(r for r in after['audits'] if r['channel'] == 'Google' and r['app'] == app)
                 bench = next(r for r in after['benchmarks'] if r['channel'] == 'Google' and r['app'] == app)
                 assert_fields(audit, exp['audit'], 'audit')
+                assert_fields(bench, {'af_d0_first_transactions': None, 'cpa': None, 'cpa_finite': None}, 'asset-scope AF benchmark')
                 require(audit['status'] == 'success', 'scope not refreshed successfully')
                 assert_fields(audit, {'selected_count': len(actual)}, 'audit')
                 assert_metric(audit['mapping_coverage'], exp['coverage'], 'audit mapping coverage', 8)
@@ -226,8 +227,8 @@ def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None, approve
                         'source_row_count': ex['source_rows'], 'ad_day_count': ex['source_rows'],
                         'asset_count': ex['asset_count'], 'fx_sources': ex['fx_sources'],
                         'material_cpa': None, 'material_cpa_finite': None,
-                        'platform_cpa_available': exp['spend'] is not None,
-                        'platform_cpa_finite': None if exp['spend'] is None else bench['af_d0_first_transactions'] > 0,
+                        'platform_cpa_available': False,
+                        'platform_cpa_finite': None,
                     }, 'evidence')
                     assert_metric(evidence['material_ctr'], D(ex['clicks']) / ex['impressions'] if ex['impressions'] else D(0), 'material CTR', 8)
                     assert_metric(evidence['exact_mapping_spend_coverage'], exp['coverage'], 'evidence mapping coverage', 8)

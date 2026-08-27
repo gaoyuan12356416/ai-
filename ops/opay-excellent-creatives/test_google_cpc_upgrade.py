@@ -157,6 +157,8 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
         for field in ('rule_a_pass', 'rule_b_pass', 'rule_a_available', 'in_top_50_percent',
                       'platform_cpa_available', 'platform_cpa_finite'):
             for value in (0, 1, 'true', None):
+                if validator.exact_equal(self.google(self.payload)['evidence'][field], value):
+                    continue
                 with self.subTest(field=field, value=value):
                     self.reject_mutation(lambda p: self.google(p)['evidence'].update({field: value}))
         for value in (0, 1, 'true', None, False):

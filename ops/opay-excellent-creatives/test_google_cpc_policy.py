@@ -125,6 +125,16 @@ class GoogleCpcPolicyTests(unittest.TestCase):
         self.assertFalse(report.rule_b_qualifies(row, total))
         self.assertTrue(report.rule_b_qualifies(row, total, minimum_spend_cents=100000))
 
+    def test_campaign_af_is_not_mixed_into_picvid_benchmark(self):
+        with mock.patch.object(report, 'month_aggregates', return_value=({}, {(1, 'NG OPay'): 124815}, {}, [])):
+            payload = self.build([(9, 2, 1000, 200), (10, 1, 1000, 20)])
+        bench = payload['benchmarks'][0]
+        self.assertIsNone(bench['af_d0_first_transactions'])
+        self.assertIsNone(bench['metrics']['d0_cpa'])
+        self.assertIsNone(bench['metrics']['apm'])
+        self.assertFalse(payload['rows'][0]['evidence']['platform_cpa_available'])
+        self.assertEqual(self.selected(payload), {9: 'A'})
+
     def test_publisher_rejects_frozen_old_google_policy_before_public_writes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
