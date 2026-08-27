@@ -125,3 +125,25 @@
 - `sa-test-review.md` 复核覆盖性；代码完成后由独立 QA 执行并补 `sa-code-review.md`、`test-report.md`，发现缺陷回交实现方，不在本次文档任务改这两份文件。
 - 除 Google 数据源/可用性和明确新增 metrics/schema 字段，V1 规则、只读端口、产品范围、关键词/媒体、终版冻结和旧系统仍需回归；对比使用真实生成的 payload。
 - 全量回滚若只做隔离环境演练或命令级复核，必须标注环境和未执行的生产步骤，不能沿用 V1 timer 演练声称 V2 完整回滚已通过。
+
+## Google CPC / 图片视频 CTR 增量用例（2026-08-27）
+
+下表新增最新规则验收，不重写V1/V2通过记录；“待QA”不是失败，也不是已通过。前端DOM夹具只验证真实内联JavaScript展示/导出，不证明后端公式或源数据。
+
+| 编号 | 场景 / 独立期望 | 执行状态 |
+| --- | --- | --- |
+| GCP-T01 | 全Campaign月USD=20000，素材6000/4500/4500/1000；累计阈值10000，前三项包含跨线及全部4500并列，不以已映射总额重定50% | 后端/原缓存待QA |
+| GCP-T02 | 平台CPC=2，素材CPC=1.5通过、等于2或大于2不通过；低于5000仍可A入选，A/B/A+B严格OR | 后端待QA；前端三标签/筛选PASS |
+| GCP-T03 | 平台USD=null/0/负值、点击0，以及完整eligible素材仅9999/平台20000：A不可用；恰10000可进入A判断；部分FX可知不能补足覆盖 | 后端待QA；三类中文暂停原因/独立B展示PASS |
+| GCP-T04 | 已映射PIC点击600/曝光1000，未映射VID点击400/曝光9000：B基准=1000/10000=0.1，非两个CTR均值；type3其他asset/type0不能混入 | 全候选原缓存待QA |
+| GCP-T05 | CampaignCTR=0.2但PIC+VIDCTR=0.1：素材CTR=0.12且USD>5000时B通过；5000或CTR等于0.1不通过；不受A暂停连带影响 | 后端待QA；不同基准展示PASS |
+| GCP-T06 | 同月同App全资产基准含未映射，不跨月份/App；基准缺失不能显示假0；未知CampaignUSD仍保留可用PIC+VIDCTR | 数据完整性待QA；审计空值/独立基准PASS |
+| GCP-T07 | Google详情CPC/null/0/小数精度、Campaign参考CTR、PIC+VID来源、AF/安装空、conversions仅详情 | 本地DOM PASS，真实月/浏览器待QA |
+| GCP-T08 | CSV原31列名称/位置/六项metrics不变，末尾仅追加3列；CPC原精度、scope=google_picture_video_assets，Meta/TT/历史缺值留空 | 本地DOM/Blob PASS，真实月CSV待QA |
+| GCP-T09 | 新policy零入选月显示新规则，旧快照显示历史规则；A/B/A+B筛选/徽标/证据一致，快照未被前端改写 | 本地DOM PASS |
+| GCP-T10 | source6→ads_youtube_videos→原type3→custom_source精确成功；断链/错App/非视频/冲突/一好一坏拒绝，direct-type3不回归 | 映射全量及只读源抽样待QA |
+| GCP-T11 | 新默认google-cpc.sqlite3独立clone；旧V2各表哈希不变；所有Meta/TT rows/benchmarks/audits全字段（含metrics）精确相等 | 独立验收器真实数据待QA |
+| GCP-T12 | 所有可见月份policy必须cpc_picvid_v1；旧/混合版本、缺月、提交前故障不改latest；回滚恢复当前V2基线而非更早V1 | 隔离发布/回滚待QA |
+| GCP-T13 | 桌面/390×844规则说明、审计/证据可读、横向滚动、图片视频/源文件及原生CSV下载；其他报表与timer无变更 | 浏览器/运行时待QA |
+
+本地命令：`python ops\opay-excellent-creatives\validate_frontend_contract.py` → 46/46行为项PASS（原36项保留、新增10项）。真实月导出需使用新 `--payload` 验证扩展列及原列，不把只检查字段存在当数值验收。

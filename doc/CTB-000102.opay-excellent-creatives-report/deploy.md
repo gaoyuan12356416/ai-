@@ -322,3 +322,31 @@ systemctl list-timers 'opay-excellent-creatives*' --all --no-pager
 ```
 
 任何断言/命令失败时停止后续动作并保留现场；尤其不可在数据/current不一致时恢复调度。配置未改时无需恢复配置文件或reload；若发现配置漂移，先另行核对，不用旧备份盲目覆盖后续修改。
+
+## Google CPC / 图片视频 CTR 发布交接（2026-08-27，未执行）
+
+本节是新政策的待执行计划，不是发布授权/结果；本执行者没有commit/push、服务器访问、cache克隆或timer操作。上文V1/V2 SHA、manifest、命令及回滚证据只属历史，不能直接宣称本增量上线。
+
+1. 合并Google CPC/PIC+VID规则、source6→YouTube→原type3映射修正、前端及独立验收器后，独立QA重跑最终后端/前端全量；主任务此前102项为映射修改前结果，不能作为最终门禁。
+2. GitHub-first：发布负责人在批准后提交/推送并记录精确SHA，服务器仅fetch/checkout该SHA；禁止服务器先热改。现场只读核验现行V2 release、latest/HTML、env和cache路径，保存哈希/备份，不能从本文旧记录猜当前状态。
+3. 保持原DATA_ROOT、旧V1/V2缓存、快照和媒体。用SQLite一致性clone（含已提交WAL）从已核验V2缓存到新`cache/opay-excellent-creatives-google-cpc.sqlite3`；新默认名按release生效，CLI/env优先级不变。若现行env显式绑定旧cache，先报告另行确认，不擅自覆盖env或旧库。
+4. 在明确新cache与独立stage目录执行获准月份的Google-only refresh/rebuild，无正式publish。验证YouTube桥接和未映射PIC+VID基准，FX未知如实审计。保留旧Meta/TT所有字段/事实；不要因新排名/媒体改变旧渠道结果。
+5. 对实际候选执行以下离线门禁。`--baseline-dir`必须当前V2基线，不是更早V1；下列占位符需现场填写，本次未执行：
+
+```text
+python ops/opay-excellent-creatives/validate_google_cpc_upgrade.py --baseline-dir <V2-public> --candidate-dir <google-cpc-stage> --cache-db <new-google-cpc.sqlite3> --baseline-cache <old-v2.sqlite3>
+python ops/opay-excellent-creatives/validate_frontend_contract.py --payload <每个真实候选月.json>
+```
+
+6. 所有公开可见月份必须包含`selection_policy.google.version=cpc_picvid_v1`；缺月/旧政策/混版本拒绝发布。先准备不可变月数据/媒体及兼容HTML，再最后原子替换`latest.json`；任一步失败旧latest逐字节不变。须独立验证原缓存旧表哈希及Meta/TT完整字段，不仅看总行数。
+7. 在独立输出目录演练提交失败与回滚，再记录真实浏览器桌面/移动端、CSV、规则说明、CPC/CTR来源及A暂停原因。正式切换/验收仅由获准发布负责人执行。
+
+回滚目标为本次切换前保存的**当前V2** release/cache/latest/HTML，不使用上文首次V1部署的下线或固定旧SHA命令。原子恢复上一清单及兼容HTML/release指向，保留新旧不可变版本/缓存供已打开页面和排障；不得删路由、覆写旧缓存、强杀在途作业或重启主服务。现有互斥/冻结门禁不变；本增量不改任何timer、cron、其他报表、Nginx/env或调度计划。
+
+待填写运行记录：`release_sha=PENDING`、`new_data_version=PENDING`、`candidate_manifest_sha256=PENDING`、`new/old_cache_hash_evidence=PENDING`、`independent_qa=PENDING`、`browser_csv_evidence=PENDING`、`atomic_publish/rollback_evidence=PENDING`。空缺不能记PASS。
+
+### 主任务提供的切换前备份记录（2026-08-27）
+
+以下由主任务现场提供，本前端/文档执行者未另行访问服务器：备份`/mnt/data-disk/opay-excellent-creatives/backups/20260827-pre-google-cpc`已创建，备份manifest SHA256=`4e97d77b1c301d249de9558963bb0bb9ca63538ed600c48d673a54cf2cdaff17`。包含公开7个月JSON、一致性`cache.sqlite3`、env/Nginx/unit/timer记录及index/latest。
+
+切换前current=`533bbac77ae29d437d084732b7fddfc022754a93`，公开data_version=`20260827T120935529360+0800`，latest SHA256=`f5ae1d646c8522758d23d158dec1e545aa5dc26914581dd5a18c05a493b6cecb`。两个timer均enabled/active，initial/final刷新service均inactive，无env cache override。以上是回滚基线，不是新政策发布结果；切换前若状态漂移须复核，不据本文操作在途任务。

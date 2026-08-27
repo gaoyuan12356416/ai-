@@ -109,3 +109,28 @@
 - 正式GG图片弹窗1200×1500加载成功；切换1月后审计区GG为0条、无占位行，主表仅保留原Meta/TT的34条，NG历史汇率缺口仍明确披露，随后恢复7月默认视图。此前移动端横向滚动与视频预览使用同一HTML的本地实际快照完成，不将其标成第二次生产移动端实测。
 - 原主站200、AI Game Performance302、8787监听与发布前一致；配置文件哈希不变，nginx -t通过；未reload或重启主服务。两个月度timer均恢复enabled/active，仍按3日/5日原计划运行。
 - 发布和回滚证据已写入deploy.md，V1缓存/release/版本文件均保留。结论：V2已上线，数据和功能验收通过；浏览器环境的原生CSV保存落点未验证项仍如上保留，不等同于导出内容失败。
+
+## Google CPC / 图片视频 CTR 本地前端交接（2026-08-27）
+
+结论：前端/文档可交独立QA；不是本次新政策的生产发布结论。上文V1/V2所有历史证据保留，不借用其93项/七个月/上线结果。此次仅编辑report.html、validate_frontend_contract.py和本目录9份Markdown；无commit/push、服务器或timer操作。
+
+已执行：`python ops\opay-excellent-creatives\validate_frontend_contract.py` → **46/46行为用例PASS，frontend contract PASS**。验证器运行实际未替换的内联JavaScript并检查语法，保留原36项并新增10项：新/历史规则说明、CPC与独立基准、null/0/精度、暂停原因、审计、A/B/A+B、CSV31+3列及Meta/TT不变。原25列表格、六项metrics、AF/安装缺失与conversions仅详情、BOM/转义/原精度及预览均在本地契约内覆盖。
+
+实现自测中验证器编辑的括号语法错误已修复并重新全量通过；无该项遗留失败。DOM/Blob测试不等于真实Chrome下载、移动端布局或源数据正确；本次未将合成夹具称为真实月数据。
+
+| 待完成证据 | 状态 / 责任 |
+| --- | --- |
+| 最终后端/映射全量与独立代码评审 | PENDING；主任务此前反馈102项仅为映射修改前结果，最终重跑由独立QA记录 |
+| 原始cache全候选/入选/benchmark/evidence独立核算 | PENDING；新validate_google_cpc_upgrade.py对真实V2基线/新stage/new与old cache执行 |
+| Meta/TT所有字段含metrics、旧cache表哈希守恒 | PENDING；不套用旧V1→V2忽略metrics规则 |
+| 全部真实候选月CSV/图像视频、桌面/390×844、原生下载 | PENDING；逐月--payload与浏览器证据待补 |
+| YouTube source6桥接只读源证据 / 独立默认cache / 全可见月policy门禁 | PENDING；后端及发布QA |
+| GitHub SHA、原子latest故障/回滚、正式版本及HTTP验收 | PENDING；本次不提交/不服务器，不改其他报表/timer |
+
+发布建议：等待最终独立QA与真实运行证据；本地46项通过只说明本前端交付已可测试，不自动放行生产。
+
+### 冻结前补充（2026-08-27）
+
+主任务最新反馈后端129项、前端46项通过，独立评审进行中；本执行者只对本地前端46项作直接执行确认，不将反馈计为独立QA签字。切换前一致性备份已由主任务提供并记入deploy.md，新政策生产结果仍PENDING。用户追加授权后同步更新本报表README当前规则/默认cache，并将旧V2 B-only/cache说明明确标为历史。
+
+冻结检查：前端46/46再次通过，限定交付路径的`git diff --check`通过；9份流程文档diff均仅新增、无历史删除。代码/文档已冻结待主任务提交与独立QA，本执行者不继续修改。

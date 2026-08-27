@@ -13,6 +13,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 METRIC_LABELS = ["D0首交CPA", "CPM", "APM", "CTR", "CVR", "安装→D0首交转化率"]
+CSV_LEGACY_HEADERS = [
+    "月份", "渠道", "素材缩略图", "素材源文件", "素材ID", "素材名称", "素材类型", "宣传App",
+    "消耗USD", "曝光", "点击", "安装", "AF D0首交数", *METRIC_LABELS,
+    "素材制作者", "首次上线时间", "上线时间来源", "卖点一级分类", "卖点关键词", "卖点状态",
+    "入选规则", "平台CTR", "平台CPA", "消耗排名", "累计消耗占比", "映射覆盖率",
+]
+CSV_CPC_HEADERS = ["素材CPC USD/点击", "平台CPC USD/点击", "平台CTR口径"]
 
 # The real inline script runs unchanged. Bootstrap waits on an inert fetch until
 # the async test supplies versioned local fixtures; no network or browser needed.
@@ -67,13 +74,19 @@ const complete={
     rule_a_available:true,rule_a_pass:true,rule_b_pass:true,source_row_count:2,
     data_quality:"严格素材映射；AF 按广告日精确回连"}
 };
-const google={...clone(complete),channel:"Google",custom_source_id:202,
+const google={...clone(complete),channel:"Google",custom_source_id:202,selection_rule:"B",
   installs:null,af_d0_first_transactions:null,platform_conversions:123.25,
   metrics:{d0_cpa:null,cpm:12.3456,apm:null,ctr:0.04,cvr:null,install_to_d0_rate:null},
-  evidence:{...clone(complete.evidence),material_cpa:null,material_cpa_finite:false,
+  evidence:{...clone(complete.evidence),material_cpa:null,material_cpa_finite:false,rule_a_available:false,rule_a_pass:false,
     af_status:"missing_asset_attribution",installs_status:"missing_asset_installs",
     data_quality:"Google 仅有精确素材平台指标，缺失素材级安装及 AF D0 归因。"}
 };
+const googleCpcRow={...clone(google),selection_rule:"A+B",spend:6000,
+  evidence:{...clone(google.evidence),rule_a_available:true,rule_a_pass:true,rule_b_pass:true,
+    rule_a_metric:"cpc",material_cpc:1.5,platform_cpc:2,platform_ctr:0.025,
+    platform_ctr_scope:"google_picture_video_assets",rule_a_unavailable_reason:""}
+};
+const googlePolicy={google:{version:"cpc_picvid_v1",operator:"OR"}};
 const zero={...clone(complete),custom_source_id:303,installs:0,af_d0_first_transactions:0,
   metrics:{d0_cpa:null,cpm:12.3456,apm:0,ctr:0,cvr:0,install_to_d0_rate:null},
   evidence:{...clone(complete.evidence),material_cpa:null,material_cpa_finite:false}
@@ -199,7 +212,7 @@ test("missing historical FX keeps audit values blank and explanation intact",()=
     message:"历史汇率不全，USD 基准及覆盖率留空；CTR 仍可用。"};
   setup([google],2,{audits:[audit]});renderAudits();renderKpis();
   const card=$("auditGrid").children[0];assert.equal(card.children[1].textContent,audit.message);
-  assert.deepEqual(card.children[2].children.map(c=>c.children[0].textContent),["","",""]);assert.equal($("kpiCoverage").textContent,"");
+  assert.deepEqual(card.children[2].children.slice(0,3).map(c=>c.children[0].textContent),["","",""]);assert.equal($("kpiCoverage").textContent,"");
 });
 test("real zero audit values and non-null median are preserved",()=>{
   setup([],2,{audits:[{platform_spend:0,mapping_coverage:0,mapping_gap_spend:0},{mapping_coverage:null},{mapping_coverage:0.8}]});
@@ -268,6 +281,83 @@ test("existing preview and source-file behavior remains intact",()=>{
   const video=$("modalBody").children[0].children[0];assert.equal(video.tagName,"VIDEO");assert.equal(video.controls,true);assert.equal(video.src,complete.source_url);
   $("modalClose").click();assert.equal($("modal").open,false);
 });
+test("Google current rules state full Campaign denominator, ties, CPC and all-asset weighted CTR",()=>{
+  setup([],2,{selection_policy:googlePolicy});renderRules();const text=$("googleRuleDefinition").textContent;
+  for(const token of ["全量 Campaign", "50%", "跨线", "并列", "CPC <", "USD 消耗 / 点击", "> 5000", "type=3", "asset_type=2/4", "含未映射", "总点击 / 总曝光", "非日或素材 CTR 算术平均", "A 暂停不连带暂停 B"])assert.ok(text.includes(token),token);
+  for(const token of ["USD 未知或≤0", "点击为0", "精确映射素材消耗不足平台50%"])assert.ok(text.includes(token),token);
+});
+test("historical month rules do not claim the new CPC policy",()=>{
+  setup([google]);renderRules();assert.match($("googleRuleDefinition").textContent,/历史快照.*仅 B/);
+  assert.match($("googleRuleDefinition").textContent,/不按新 CPC/);
+  setup([googleCpcRow]);renderRules();assert.match($("googleRuleDefinition").textContent,/素材 CPC < 平台 CPC/);
+  setup([],2,{audits:[{channel:"Google",rule_a_metric:"cpc"}]});renderRules();assert.match($("googleRuleDefinition").textContent,/素材 CPC < 平台 CPC/);
+});
+test("Google detail separates CPC, PIC VID baseline and reference Campaign CTR",()=>{
+  setup([googleCpcRow],2,{benchmarks:[{channel:"Google",app:"NG OPay",ctr:0.9,cpc:99}]});
+  openDetail(state.rows[0]);const values=details(),text=$("modalBody").textContent;
+  assert.equal(values["素材 CPC（USD/点击）"],"$1.500000 / 点击");assert.equal(values["平台 CPC（USD/点击）"],"$2.000000 / 点击");
+  assert.equal(values["平台 CTR"],"2.50%");assert.equal(values["Campaign 平台 CTR（参考）"],"90.00%");
+  assert.equal(values["平台 CTR 口径"],"Google 全部图片/视频资产（含未映射）");
+  assert.match(text,/平台 CPC 来源：ads_google_insights:type=0/);assert.match(text,/type=3,asset_type=2\/4/);
+  assert.match(text,/非日或素材 CTR 算术平均/);assert.equal(values["D0首交CPA"],"");
+});
+test("Google CPC evidence keeps explicit null and real zero distinct without inference",()=>{
+  const row=clone(googleCpcRow);row.evidence.material_cpc=null;row.evidence.platform_cpc=null;
+  setup([row],2,{benchmarks:[{channel:"Google",app:"NG OPay",cpc:2}]});openDetail(state.rows[0]);
+  assert.equal(details()["素材 CPC（USD/点击）"],"");assert.equal(details()["平台 CPC（USD/点击）"],"");
+  assert.equal(csvRow()[CSV_CPC_HEADERS[0]],"");assert.equal(csvRow()[CSV_CPC_HEADERS[1]],"");
+  row.evidence.material_cpc=0;row.evidence.platform_cpc=0;setup([row]);openDetail(state.rows[0]);
+  assert.equal(details()["素材 CPC（USD/点击）"],"$0.000000 / 点击");assert.equal(csvRow()[CSV_CPC_HEADERS[0]],0);
+  delete row.evidence.material_cpc;delete row.evidence.platform_cpc;
+  setup([row],2,{benchmarks:[{channel:"Meta",app:"NG OPay",cpc:123},{channel:"Google",app:"PK OPay",cpc:456},{channel:"Google",app:"NG OPay",cpc:2}]});
+  assert.equal(googleCpc(state.rows[0],"material_cpc"),null);assert.equal(googleCpc(state.rows[0],"platform_cpc"),2);
+});
+test("Google CPC display preserves small differences and exports unrounded evidence",()=>{
+  const row=clone(googleCpcRow);Object.assign(row.evidence,{material_cpc:0.00012345,platform_cpc:0.00012876});
+  setup([row]);openDetail(state.rows[0]);assert.equal(details()["素材 CPC（USD/点击）"],"$0.000123 / 点击");
+  assert.equal(details()["平台 CPC（USD/点击）"],"$0.000129 / 点击");assert.equal(csvRow()[CSV_CPC_HEADERS[0]],0.00012345);
+  assert.equal(csvRow()[CSV_CPC_HEADERS[1]],0.00012876);assert.equal(details()["规则 A"],"通过");
+});
+test("Google suspension reasons are visible verbatim and do not suppress B",()=>{
+  for(const reason of ["平台月度USD消耗不完整","平台消耗或点击为0，CPC不可比较","美元完整且精确映射的素材消耗不足平台50%"]){
+    const row=clone(googleCpcRow);row.selection_rule="B";Object.assign(row.evidence,{rule_a_available:false,rule_a_pass:false,rule_a_unavailable_reason:reason});
+    setup([row],2,{audits:[{channel:"Google",app:"NG OPay",selected_count:1,rule_a_available:false,rule_a_unavailable_reason:reason}]});
+    openDetail(state.rows[0]);renderAudits();assert.equal(details()["规则 A"],"暂停");assert.equal(details()["规则 A 暂停原因"],reason);
+    assert.equal(details()["规则 B"],"通过");assert.ok($("auditGrid").textContent.includes("规则 A 暂停："+reason));
+    assert.equal(csvRow()["入选规则"],"B");
+  }
+});
+test("Google audits retain both baselines even when platform USD and CPC are missing",()=>{
+  const audit={channel:"Google",app:"NG OPay",selected_count:1,platform_spend:null,platform_cpc:null,rule_a_available:false,
+    picture_video_ctr:0.025,picture_video_clicks:250,picture_video_impressions:10000,rule_a_unavailable_reason:"平台月度USD消耗不完整"};
+  setup([googleCpcRow],2,{audits:[audit],benchmarks:[{channel:"Google",app:"NG OPay",ctr:0.9,cpc:9}]});renderAudits();
+  const values=$("auditGrid").children[0].children[2].children.map(c=>c.children[0].textContent);
+  assert.deepEqual(values,["","","","","90.00%","2.50%","250","10,000"]);assert.match($("auditGrid").textContent,/全部图片\/视频资产（含未映射）/);
+  assert.match($("auditGrid").textContent,/总点击 \/ 总曝光/);
+});
+test("Google A B and A+B badges and filtering follow payload decisions without reselecting",()=>{
+  const rows=["A","B","A+B"].map((rule,index)=>({...clone(googleCpcRow),custom_source_id:500+index,selection_rule:rule,
+    evidence:{...clone(googleCpcRow.evidence),rule_a_pass:rule!=="B",rule_b_pass:rule!=="A"}}));
+  setup(rows);const before=JSON.stringify(state.payload);
+  for(const rule of ["A","B","A+B"]){$("ruleFilter").value=rule;applyFilters();assert.equal(state.filtered.length,1);assert.equal(tableRow(0)[23],rule);
+    openDetail(state.filtered[0]);assert.equal(details()["规则 A"],rule==="B"?"未通过":"通过");assert.equal(csvRow()["入选规则"],rule)}
+  assert.equal(JSON.stringify(state.payload),before);
+});
+test("CSV appends exactly three columns and preserves all legacy names and positions",()=>{
+  setup([complete,googleCpcRow,{...clone(complete),channel:"TikTok"}]);const data=csvData();
+  assert.equal(CSV_LEGACY_HEADERS.length,31);assert.deepEqual(data[0],[...CSV_LEGACY_HEADERS,...CSV_CPC_HEADERS]);
+  assert.deepEqual(data[1].slice(-3),[null,null,""]);assert.deepEqual(data[3].slice(-3),[null,null,""]);
+  assert.deepEqual(data[2].slice(-3),[1.5,2,"google_picture_video_assets"]);assert.equal(csvRow(2)["平台CTR"],0.025);
+  assert.equal(csvRow(1)["平台CTR"],0.03);assert.equal(csvRow(1)["平台CPA"],75);
+  setup([google]);assert.deepEqual(csvData()[1].slice(-3),[null,null,""]);
+});
+test("Meta and TikTok details and audits remain AF CPA based without Google evidence",()=>{
+  for(const channel of ["Meta","TikTok"]){setup([{...clone(complete),channel}],2,{audits:[{channel,rule_a_available:true}]});
+    openDetail(state.rows[0]);renderAudits();assert.equal(details()["平台 D0首交CPA"],"$75.00");assert.equal(details()["规则 A"],"通过");
+    assert.ok(!has(details(),"素材 CPC（USD/点击）"));assert.ok(!$("modalBody").textContent.includes("asset_type=2/4"));
+    assert.equal($("auditGrid").children[0].children[2].children.length,3);
+  }
+});
 async function asyncTests(){
   setup([google]);exportCsv();assert.equal(Buffer.from(await exportBlob.arrayBuffer()).toString("utf8"),buildCsv());
   assert.equal(download.name,"opay-excellent-creatives-2026-07.csv");assert.equal(revokedUrl,download.url);
@@ -329,7 +419,9 @@ state.rows=ACTUAL_PAYLOAD.rows.map((r,index)=>({...r,__index:index}));
     keys = ("d0_cpa", "cpm", "apm", "ctr", "cvr", "install_to_d0_rate")
     for result in results:
         expected_rows = [row for row in payload["rows"] if not result["channel"] or row["channel"] == result["channel"]]
-        parsed = list(csv.DictReader(io.StringIO(result["csv"].lstrip("\ufeff"))))
+        reader = csv.DictReader(io.StringIO(result["csv"].lstrip("\ufeff")))
+        parsed = list(reader)
+        assert reader.fieldnames == CSV_LEGACY_HEADERS + CSV_CPC_HEADERS
         assert result["row_count"] == len(parsed) == len(expected_rows)
         for actual, expected in zip(parsed, expected_rows):
             assert actual["素材ID"] == str(expected["custom_source_id"])
@@ -343,6 +435,23 @@ state.rows=ACTUAL_PAYLOAD.rows.map((r,index)=>({...r,__index:index}));
                     assert Decimal(actual[label]) == Decimal(str(value)), (label, actual[label], value)
             for label, key in (("安装", "installs"), ("AF D0首交数", "af_d0_first_transactions")):
                 assert actual[label] == ("" if expected[key] is None else str(expected[key]))
+            evidence = expected.get("evidence", {})
+            google = expected["channel"] in ("Google", "GG")
+            benchmark = next((b for b in payload.get("benchmarks", [])
+                              if b["channel"] in ("Google", "GG") and b["app"] == expected["app"]), {})
+            cpc_values = (evidence.get("material_cpc"), evidence.get("platform_cpc", benchmark.get("cpc")))
+            for label, value in zip(CSV_CPC_HEADERS[:2], cpc_values):
+                if not google or value is None:
+                    assert actual[label] == "", (label, actual[label])
+                else:
+                    assert Decimal(actual[label]) == Decimal(str(value)), (label, actual[label], value)
+            assert actual[CSV_CPC_HEADERS[2]] == ((evidence.get("platform_ctr_scope") or "") if google else "")
+            assert actual["入选规则"] == expected["selection_rule"]
+            ctr = evidence.get("platform_ctr")
+            if ctr is None:
+                assert actual["平台CTR"] == ""
+            else:
+                assert Decimal(actual["平台CTR"]) == Decimal(str(ctr))
         assert result["filename"] == "opay-excellent-creatives-%s.csv" % payload["month"]
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -367,6 +476,10 @@ def main():
         "素材制作者", "openPreview", "openDetail", "数据可用性", "row.metrics",
         "missing_asset_attribution", "missing_asset_installs", "platform_conversions",
         "CSV 按原始精度数值导出，不使用页面舍入值",
+        "googleRuleDefinition", "cpc_picvid_v1", "google_picture_video_assets",
+        "rule_a_unavailable_reason", "rule_a_metric", "picture_video_ctr",
+        "Meta / TikTok（不变）", "素材 AF D0 首交 CPA &lt; 平台 CPA",
+        *CSV_CPC_HEADERS,
         *METRIC_LABELS,
     ]
     missing = [item for item in required if item not in html]
@@ -392,9 +505,11 @@ def main():
     if len(scripts) != 1:
         raise SystemExit("expected exactly one inline script")
     run_node(scripts[0], syntax_only=True)
-    constants = "const HTML_IDS=%s;\nconst METRIC_LABELS=%s;\n" % (
+    constants = "const HTML_IDS=%s;\nconst METRIC_LABELS=%s;\nconst CSV_LEGACY_HEADERS=%s;\nconst CSV_CPC_HEADERS=%s;\n" % (
         json.dumps(re.findall(r'\bid="([^"]+)"', html), ensure_ascii=False),
         json.dumps(METRIC_LABELS, ensure_ascii=False),
+        json.dumps(CSV_LEGACY_HEADERS, ensure_ascii=False),
+        json.dumps(CSV_CPC_HEADERS, ensure_ascii=False),
     )
     run_node(constants + DOM_HARNESS + scripts[0] + BEHAVIOR_TESTS)
     if args.payload:

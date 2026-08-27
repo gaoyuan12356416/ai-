@@ -138,8 +138,48 @@ def fetch_month(report, month, app_config):
     return [dict(zip(GOOGLE_COLUMNS, row)) for row in report.run_mysql(sql, timeout=240)]
 
 
+def mapping_id(value):
+    raw = str(value).strip()
+    return int(raw) if raw.isascii() and raw.isdigit() and int(raw) > 0 else None
+
+
+def mapping_target(row):
+    """Validate every link before returning the FINAL custom-source ID."""
+    source_id = mapping_id(row.get("source_id"))
+    resource_id = mapping_id(row.get("resource_id"))
+    source_target = mapping_id(row.get("source_custom_id"))
+    # Legacy direct-type3 callers have only the original five query columns.
+    # Live queries also return s.id, so a missing/mismatched join fails closed.
+    source_row_id = mapping_id(row.get(
+        "source_row_id", row.get("source_id") if str(row.get("source_type")) == "3" else None,
+    ))
+    if not source_id or source_id != source_row_id or not resource_id:
+        return None
+    if str(row.get("source_type")) == "3":
+        return resource_id if source_target == resource_id else None
+    if str(row.get("source_type")) != "6":
+        return None
+    if str(row.get("youtube_video_id") or "").strip() in ("", "NULL", "\\N"):
+        return None
+    youtube_id = mapping_id(row.get("youtube_id"))
+    original_id = mapping_id(row.get("youtube_source_id"))
+    custom_id = mapping_id(row.get("original_custom_id"))
+    app_id = mapping_id(row.get("youtube_app_id"))
+    if (not youtube_id or youtube_id != source_target or youtube_id != resource_id
+            or not original_id or original_id != mapping_id(row.get("original_source_row_id"))
+            or str(row.get("original_source_type")) != "3" or not custom_id
+            or not app_id or app_id != mapping_id(row.get("youtube_app_setting_id"))):
+        return None
+    original_custom = row.get("youtube_original_source_id")
+    # MySQL batch output represents SQL NULL as the literal NULL string.
+    if original_custom is not None and str(original_custom).strip() not in ("", "NULL", "\\N"):
+        if mapping_id(original_custom) != custom_id:
+            return None
+    return custom_id
+
+
 def collapse_mappings(resource_ids, mapping_rows):
-    """An asset repeated in multiple ads is still one asset fact."""
+    """All candidate chains must agree; repeated ads never multiply facts."""
     grouped = collections.defaultdict(list)
     resources = set(resource_ids)
     for row in mapping_rows:
@@ -148,44 +188,60 @@ def collapse_mappings(resource_ids, mapping_rows):
     result = {}
     for resource in sorted(resources):
         rows = grouped[resource]
-        targets = {str(row["resource_id"]).strip() for row in rows}
-        valid = set()
-        invalid_chain = False
-        for row in rows:
-            target = str(row["resource_id"]).strip()
-            if (target.isascii() and target.isdigit() and int(target) > 0
-                    and str(row["source_type"]) == "3"
-                    and str(row["source_custom_id"]).strip() == target):
-                valid.add(int(target))
-            else:
-                invalid_chain = True
+        targets = [mapping_target(row) for row in rows]
+        valid = set(targets) - {None}
         if not rows:
             status, custom_id = "unmapped", None
-        elif len(targets) != 1 or len(valid) > 1:
+        elif len(valid) > 1:
             status, custom_id = "ambiguous", None
-        elif len(valid) == 1 and not invalid_chain:
+        elif len(valid) == 1 and None not in targets:
             status, custom_id = "exact", next(iter(valid))
         else:
             status, custom_id = "invalid_source", None
+        youtube_rows = [row for row in rows if str(row.get("source_type")) == "6"]
+        provenance = sorted({
+            (str(row["source_id"]), str(row["resource_id"]), str(row["source_type"]), str(row["source_custom_id"]))
+            for row in rows
+        })
+        # Keep the original four-field tuples intact. Tagged bridge tuples are
+        # persisted by the existing provenance_json writer, including bad links.
+        provenance.extend(sorted({
+            ("youtube_bridge",) + tuple(str(row.get(field)) for field in (
+                "source_id", "resource_id", "source_row_id", "source_type", "source_custom_id",
+                "youtube_id", "youtube_source_id", "youtube_original_source_id",
+                "original_source_row_id", "original_source_type", "original_custom_id",
+                "youtube_app_id", "youtube_app_setting_id", "youtube_app_name", "youtube_video_id",
+            ))
+            for row in youtube_rows
+        }))
         result[resource] = {
             "custom_source_id": custom_id, "mapping_status": status,
             "mapping_rows": len(rows),
-            "provenance": sorted({
-                (str(row["source_id"]), str(row["resource_id"]), str(row["source_type"]), str(row["source_custom_id"]))
-                for row in rows
-            }),
+            "provenance": provenance,
+            "youtube_app_names": sorted({str(row.get("youtube_app_name") or "") for row in youtube_rows}),
         }
     return result
 
 
 def fetch_mappings(report, resource_ids):
     rows = []
-    columns = ("asset_name", "source_id", "resource_id", "source_type", "source_custom_id")
+    columns = (
+        "asset_name", "source_id", "resource_id", "source_type", "source_custom_id",
+        "source_row_id", "youtube_id", "youtube_source_id", "youtube_original_source_id",
+        "original_source_row_id", "original_source_type", "original_custom_id",
+        "youtube_app_id", "youtube_app_setting_id", "youtube_app_name", "youtube_video_id",
+    )
     for part in report.chunked(sorted(set(resource_ids)), size=300):
         sql = """
-        SELECT r.asset_name,r.source_id,r.resource_id,s.source_type,s.source_id
+        SELECT r.asset_name,r.source_id,r.resource_id,s.source_type,s.source_id,
+          s.id,y.id,y.source_id,y.original_source_id,
+          original_source.id,original_source.source_type,original_source.source_id,
+          y.app_id,app_setting.id,app_setting.name,y.video_id
         FROM kunlunads_dev.ads_google_resource_mapping r
         LEFT JOIN kunlunads_dev.ads_source s ON s.id=r.source_id
+        LEFT JOIN kunlunads_dev.ads_youtube_videos y ON s.source_type=6 AND y.id=s.source_id
+        LEFT JOIN kunlunads_dev.ads_source original_source ON original_source.id=y.source_id
+        LEFT JOIN kunlunads_dev.ads_apps_setting app_setting ON app_setting.id=y.app_id
         WHERE r.asset_name IN (%s)
         """ % ",".join(report.sql_quote(key) for key in part)
         rows.extend(dict(zip(columns, row)) for row in report.run_mysql(sql, timeout=90))
@@ -298,7 +354,12 @@ def normalize_rows(report, sources, app_config, mappings, dimensions, currencies
             mapping_status = mapping.get("mapping_status", "unmapped")
             dimension = dimensions.get(custom_id)
             if mapping_status == "exact":
-                if not dimension:
+                youtube_apps = mapping.get("youtube_app_names", [])
+                if any(report.app_key(name) != app for name in youtube_apps):
+                    mapping_status = "app_mismatch"
+                elif youtube_apps and asset_type != 2:
+                    mapping_status = "type_mismatch"
+                elif not dimension:
                     mapping_status = "missing_material"
                 elif report.text(dimension.get("product")).casefold() != "opay":
                     mapping_status = "out_of_scope"
@@ -406,7 +467,9 @@ def month_aggregates(report, connection, month):
     audits = {}
     for app in report.APP_ORDER:
         totals[(1, app)] = {"spend_cents": None, "impressions": 0, "clicks": 0,
-                            "installs": None, "source_row_count": 0, "_usd": Decimal("0"), "_missing": 0}
+                            "installs": None, "source_row_count": 0, "_usd": Decimal("0"), "_missing": 0,
+                            "picture_video_impressions": 0, "picture_video_clicks": 0,
+                            "picture_video_ctr_complete": bool(refreshed)}
         audit = report.blank_scope_audit()
         audit.update({"refreshed": bool(refreshed), "fx_missing_rows": 0, "platform_fx_missing_rows": 0,
                       "baseline_missing_account_days": 0,
@@ -436,6 +499,10 @@ def month_aggregates(report, connection, month):
                 total["_usd"] += usd
             continue
         audit["source_row_count"] += 1
+        # Benchmark all image/video assets BEFORE mapping/FX exclusions; an
+        # unmapped asset still contributes real impressions and clicks.
+        total["picture_video_impressions"] += row["impressions"]
+        total["picture_video_clicks"] += row["clicks"]
         if amount(row["cost_micros"]) > 0 or row["impressions"] or row["clicks"]:
             asset_days[scope].add((row["dt"], row["account"]))
         asset_sets[scope].add(row["resource_id"])

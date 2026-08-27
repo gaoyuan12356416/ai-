@@ -6,9 +6,10 @@
 
 - 只统计素材产品 `OPay/Opay`；数据 App `OPay`、`OPay NGN`、`OPayPakistan`。
 - Meta/TikTok 只保留 `ads_source`、`resource_id`、`ads_custom_source.id` 三方一致的素材事实。
-- Google V2 使用 `ads_google_insights type=3` 的图片/视频素材事实，平台基准只取 `type=0`；不做广告组或 AF 分摊。
+- Google 使用 `ads_google_insights type=3, asset_type=2/4` 的图片/视频素材事实；Campaign消耗/CPC基准取`type=0`，B的CTR基准取全部图片/视频资产（含未映射）的总点击/总曝光，不做广告组或AF分摊。
 - Google `cost / 1000000` 还原原币，非USD使用可对账的历史汇率。素材任一天汇率不全则整月不评优，平台美元总额不全则留空。
-- Google 安装和素材级AF留空，`conversions`只在详情标为平台转化数；只按规则B入选。
+- Google 当前代码政策为`cpc_picvid_v1`：A=完整素材消耗累计至同月同App全量Campaign USD的50%（含跨线/并列）且素材CPC严格低于平台CPC；B=素材USD>5000且CTR严格高于全部PIC+VID加权CTR，A OR B，标记A/B/A+B。平台USD未知/非正、点击0或完整映射素材消耗不足平台50%时A暂停，B独立判断。
+- Google 安装和素材级AF留空，`conversions`仅详情；source6视频允许经`ads_youtube_videos → 原ads_source(type3) → custom_source`严格桥接，全部候选须合法一致。Meta/TikTok的A仍为AF D0首交CPA，规则与事实不变。
 - 六项 `metrics` 为 `d0_cpa/cpm/apm/ctr/cvr/install_to_d0_rate`；JSON版本2区分null与真实0。
 - AF 固定 `data_source=0` + `revenue_event_count1_0`，且运行时验证产品配置事件 `First_Transaction`。
 - 浏览器只读取静态 JSON；刷新仅访问只读端口 63350。
@@ -57,9 +58,20 @@ python3 opay_excellent_creatives.py --backfill --from-month 2026-01 --stage fina
 
 终版默认冻结。只有经过审计的历史修正才使用 `--rebuild`。`latest.json` 是公开提交点，任何失败都不得替换上一成功版本。
 
-## V1 → V2 隔离升级
+## 当前 Google CPC 隔离升级（2026-08-27，生产结果待补）
 
-默认缓存改为 `cache/opay-excellent-creatives-v2.sqlite3`；V1缓存禁止原地升级。
+新默认缓存为`cache/opay-excellent-creatives-google-cpc.sqlite3`，从当前V2缓存一致性克隆，旧V1/V2缓存/快照/媒体只读保留；显式CLI/env路径优先级不变。Google-only历史重建仍需`--refresh --rebuild`。详情显示CPC/基准来源/A暂停原因，CSV原31列不变、末尾追加2个CPC及CTR口径列。
+
+```text
+python validate_google_cpc_upgrade.py --baseline-dir <当前V2-public> --candidate-dir <新stage> --cache-db <新google-cpc.sqlite3> --baseline-cache <旧V2-cache>
+python validate_frontend_contract.py --payload <每个真实候选月.json>
+```
+
+独立验收覆盖原缓存全部候选/入选/基准/证据、Meta/TT全字段（含metrics）及旧缓存表哈希。GitHub-first精确SHA，所有可见月policy必须为`cpc_picvid_v1`，不可变数据先准备、`latest.json`最后原子替换；不改其他report/timer。备份和待填运行证据见`doc/CTB-000102.opay-excellent-creatives-report/deploy.md`最新章节，本说明不代表新政策已上线。
+
+## 历史：V1 → V2 隔离升级（旧V2专用，非当前执行步骤）
+
+历史V2仅允许Google规则B，并以Campaign CTR为B基准；当时默认缓存为`cache/opay-excellent-creatives-v2.sqlite3`，V1缓存禁止原地升级。以下旧命令仅保留历史，当前升级使用上节新默认cache和验收器，不直接执行本节。
 
 ```bash
 python3 opay_excellent_creatives.py --clone-cache-from /mnt/data-disk/opay-excellent-creatives/cache/opay-excellent-creatives.sqlite3 --check-cache

@@ -220,3 +220,25 @@
 | 回归脚本 `--non-google-only` | 用真实V2月payload比较冻结V1的Meta/TT签名，过滤GG预期新增，不放过Meta/TT变化；默认fixture是2026-07，不能替代其他六个月的逐月对账 |
 
 Google-only成功重建时，月数据`upgrade_audit`包含`baseline_schema_version`、`baseline_generated_at`、`preserved_non_google_rows`和`non_google_facts_and_selection_unchanged=true`。这是可核验的升级证据，不代替实际payload回归。V2不改变原有初版/终版常规刷新入口；未来新月份不能用仅历史修正的google-only代替全量刷新。具体命令、发布门禁和默认缓存回滚见`deploy.md`的V2章节。
+
+## Google CPC / 图片视频 CTR 契约增量（2026-08-27）
+
+保持schema_version=2、data_version及现有接口；以下Google专属增量覆盖上文历史B-only/Campaign-B口径。Meta/TT所有原字段/metrics保持，不允许通过忽略字段掩盖变化。
+
+| 路径 | 新增/变更含义 |
+| --- | --- |
+| `selection_policy.google` | 对象含`version: "cpc_picvid_v1"`、`rule_a`、`rule_b`、`operator: "OR"`及跨线/并列、加权口径说明；所有公开可见月必须同此policy版本 |
+| `rows[].selection_rule`（Google） | A、B或A+B；A=全Campaign月USD累计50%（含跨线/并列）且严格低CPC；B=素材USD>5000且严格高PIC+VID加权CTR |
+| `rows[].evidence.material_cpc / platform_cpc` | 素材/全Campaign USD消耗除以点击，有限number或null；单位USD/点击。不是AF CPA，零点击不可比 |
+| `rows[].evidence.rule_a_metric` | Google固定`"cpc"`；Meta/TT仍原AF CPA，不借此改写其证据 |
+| `rows[].evidence.rule_a_unavailable_reason` | A可用为空；不可用为中文原因：平台月USD不完整、平台金额非正/点击0、完整精确映射候选不足平台50% |
+| `rows[].evidence.platform_ctr` | Google改为同月同App全部PIC+VID资产总点击/总曝光；非Campaign CTR、非日/素材比率均值 |
+| `rows[].evidence.platform_ctr_scope` | Google固定`"google_picture_video_assets"`；全部type3 asset_type2/4，包含未映射资产 |
+| `benchmarks[]`（Google） | 原`spend/impressions/clicks/ctr`及metrics仍为Campaign；追加`cpc`、`picture_video_ctr`、`picture_video_clicks`、`picture_video_impressions` |
+| `audits[]`（Google） | 原审计字段保留，追加`rule_a_metric`、`rule_a_unavailable_reason`、`eligible_mapped_spend`、`platform_cpc`、`picture_video_ctr/clicks/impressions`及`rule_b_ctr_source`；平台CPC对应benchmark.cpc |
+
+前端原表25列和六项metrics不变。CSV原31列名称/顺序/数值不改，末尾新增第32列`素材CPC USD/点击`、第33列`平台CPC USD/点击`、第34列`平台CTR口径`。CPC使用证据原始数值，scope导出原字符串；非Google新列为空，历史未提供则为空；原`平台CTR`列仍在原位置，但新Google值为图片视频基准并由末列明示。转换数仍不进CSV/六项metrics，null仍留空、真实0不抹去。
+
+Google CPC页面显示6位小数并注明USD/点击，只影响展示不参与规则；CSV不沿用舍入。规则说明按`selection_policy.google.version`识别新政策，并兼容证据`rule_a_metric=cpc`；历史未升级快照不误标新规则。
+
+映射增加`source_type=6 → ads_youtube_videos → 原ads_source(source_type=3) → ads_custom_source.id`精确桥接，原direct-type3不变；桥接ID、App、视频类型及全部候选合法一致均须验证，禁止拿YouTube ID当素材ID。默认缓存更新为`<DATA_ROOT>/cache/opay-excellent-creatives-google-cpc.sqlite3`，CLI/env显式路径优先级不变；旧V2缓存只读保留。新验收入口为`validate_google_cpc_upgrade.py --baseline-dir <V2public> --candidate-dir <stage> --cache-db <new> --baseline-cache <old>`，须验证所有候选及入选/基准/证据、全MetaTT字段和旧表哈希，不只复核入选行。

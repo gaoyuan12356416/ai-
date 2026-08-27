@@ -104,3 +104,22 @@ git diff --check
 - 所有row/benchmark六项用独立Decimal公式核验，不import生成器计算函数；CPA/CPM最多6位、其余8位，null/zero区分。拒绝NaN/Infinity/溢出、重复JSON键/复合键、缺scope、混schema和校验中latest改变，输出逐月渠道数量/缺口与文件SHA。
 - 脚本只读、不连接MySQL/网络；ID类型和公开证据检查不能替代数据库真实性、历史FX对账、媒体或浏览器实测。单测用临时合成public，不算真实七个月升级验收。
 - 主线程负责将九个交付文件提交GitHub并在服务器运行；正式放行仍需真实七个月PASS、独立QA/媒体/CSV/移动端及发布门禁，命令见deploy.md。
+
+## Google CPC / 图片视频 CTR 开发增量（2026-08-27）
+
+本节替代历史 V2 的 Google B-only / Campaign B 基准计划，其余原边界保持。
+
+| 工作项 | 范围 / 所有者 | 本次状态 |
+| --- | --- | --- |
+| GCP-D01 | 后端主负责人：A累计50%+严格CPC、B全PIC+VID加权CTR、证据、独立新默认缓存、全可见月policy发布门禁 | 主任务反馈完成；102项为映射协作者后续修改前结果，不当最终QA |
+| GCP-D02 | 映射负责人：source6→YouTube→原type3，全部候选链/枚举/App验证 | 并行实现；本执行者不修改相关Python |
+| GCP-D03 | 本执行者：report.html、validate_frontend_contract.py | 已完成，本地46/46行为用例通过；原31列CSV后追加3列 |
+| GCP-D04 | 本执行者：本需求目录9份流程Markdown | 追加本日期章节；保留V1/V2历史记录 |
+| GCP-D05 | 独立QA：所有候选/入选/基准/证据、V2 MetaTT全字段、旧缓存表哈希 | 使用新validate_google_cpc_upgrade.py；真实数据执行待补 |
+| GCP-D06 | 发布负责人：GitHub精确SHA、一致性clone、独立回填、原子latest、回滚 | 未执行，需QA/授权门禁，不改其他report/timer |
+
+前端只消费快照证据，不重算排名、CPC/CTR选择或改变A/B标签。`selection_policy.google.version=cpc_picvid_v1`（或明确的新证据标记）控制规则说明，历史未升级月仍按旧证据说明，避免新HTML配旧latest时误标。
+
+已执行本地命令：`python ops\opay-excellent-creatives\validate_frontend_contract.py`，内联JS语法及46项DOM行为PASS。最终空白/范围检查见本次test-report。后续合并映射代码后由主任务/独立QA重跑后端全量，不沿用早期102项反馈。
+
+独立验收计划：`validate_google_cpc_upgrade.py --baseline-dir <当前V2-public> --candidate-dir <新stage> --cache-db <google-cpc.sqlite3> --baseline-cache <旧V2-cache>`；再对每个真实候选月运行 `validate_frontend_contract.py --payload <month.json>`。命令中的占位路径尚未绑定/执行；不得用合成DOM夹具替代真实月验收。

@@ -221,3 +221,16 @@ CLI 支持单月初版/终版、最近完整月份、历史回填、缓存检查
 - 2026-08-27：确认采用不改 V1 Meta/TT 列的独立 GG 表方案；在复制缓存上 1—7 月回填，新增 `--google-only`、`--clone-cache-from PATH`，冻结仍需 `--rebuild`。当前状态为文档/实现交接，非测试或发布完成。
 - 2026-08-27：稳定接口补充Campaign account-day缺失暂停B、preserve冻结签名、回归`--non-google-only`；数据根/旧快照媒体原地不变，V2默认`-v2.sqlite3`、影子`staging-public-v2`。实现方早期反馈51后端/34前端契约通过，非本文作者独立执行或生产发布结论。
 - 2026-08-27：收口为全部source候选链合法一致；空FX候选跳过、历史USD缺失按缺口；conversions允许有限非负小数；补Campaign原币缺口，APM页面固定4位/CSV原精度。新增独立离线升级验收入口，范围及执行边界见dev-plan/deploy，正式提交发布仍由主线程负责。
+
+## Google CPC / 图片视频 CTR 批准增量（2026-08-27，cpc_picvid_v1）
+
+本节为最新批准口径，仅覆盖 Google；上文 V1/V2 的 B-only、Campaign CTR 用于 B、默认缓存名和相关验收记录保留为历史，不作为本增量验收结论。Meta/TikTok 的 AF CPA 规则 A、规则 B、原有指标/归因和其他报表/定时器均不变。
+
+- GCP-REQ-01 / A：同月、同 App，按完整且精确映射的素材月 USD 消耗降序累计，阈值为**全量 Campaign 平台月 USD 总消耗的 50%**，包含跨线组及同消耗全部并列；并要求素材 CPC 严格小于平台 CPC。CPC = USD 消耗 / 点击，不能用 AF CPA、已映射消耗分母、已入选素材分母或舍入后的展示值替代。
+- GCP-REQ-02 / A 暂停：平台 USD 未知/不完整、平台 USD 非正、平台点击为 0，或完整且精确映射素材消耗不足平台消耗的 50% 时，该月该 Google App 的 A 不可用，返回 `rule_a_unavailable_reason`。部分 USD 已知的素材不能算完整候选。A 暂停不连带暂停 B。
+- GCP-REQ-03 / B：完整素材月 USD 严格 `>5000` 且素材 CTR 严格大于同月同 App 的全部图片/视频资产 `SUM(clicks)/SUM(impressions)`。基准来自 `ads_google_insights type=3 AND asset_type IN (2,4)`，包含未映射资产，不只取已映射/入选素材，不用 Campaign CTR，不平均每日/各素材 CTR。只有基准自身完整且可比较时才判定；不能因 Campaign USD 缺失否定完整的图片视频 CTR。
+- GCP-REQ-04 / 展示与契约：A OR B，标记 A/B/A+B。页面按渠道说明公式，在 Google 详情显示素材/平台 CPC、图片视频 CTR 来源和 A 暂停原因；审计区并列保留 Campaign 参考 CTR 与图片视频整体 CTR。原25列表格、六项 metrics、31个 CSV 原列/顺序不变，CSV 只在末尾追加素材 CPC、平台 CPC、CTR 口径三列；Google conversions 仍只在详情，安装/AF 及依赖指标仍 null。
+- GCP-REQ-05 / 映射修正：Google 视频允许精确链 `source_type=6 → ads_youtube_videos → 原 ads_source(source_type=3) → ads_custom_source.id`，保留原 direct-type3 路径。必须验证桥接 ID、App、视频枚举和全部候选链一致性；不把 YouTube 行 ID 当最终素材 ID，不允许一条好链掩盖坏链，不估算/分摊。
+- GCP-REQ-06 / 隔离与发布：新默认缓存为 `<DATA_ROOT>/cache/opay-excellent-creatives-google-cpc.sqlite3`，保留旧 V1/V2 缓存、快照和媒体；路径优先级不变。从已核验 V2 基线一致性克隆后 Google-only 显式重建，Meta/TT 全字段/旧表哈希守恒。GitHub-first 精确提交、独立验证、完整版本文件先准备、`latest.json` 最后原子替换；所有可见月份须带 `selection_policy.google.version=cpc_picvid_v1`，失败保留旧公开版本。
+
+当前交付仅前端、前端验证器及本目录 Markdown，未提交、未访问服务器。新规则全历史生成、YouTube 源库核验、独立 QA、浏览器实测及发布证据均待主任务补齐，不能沿用上文 V2 的通过数。

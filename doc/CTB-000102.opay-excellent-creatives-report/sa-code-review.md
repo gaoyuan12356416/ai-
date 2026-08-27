@@ -60,3 +60,12 @@
 - V2-CR-008（中）：常规3日/5日刷新需更新GG独占素材的制作者/封面。新增 `refresh_dimensions`，由主入口仅在非 `google_only` 时开启，与Meta/TT共享本次已刷新ID集合；历史升级仍仅补缺失维度。
 - 本地全量93/93；独立复测5/5及真实SQLite主入口验证通过：Google-only不修改已有维度且跳过Meta/TT/AF，常规刷新每个素材一次，下一次可继续同步后续修正。
 - 修订后的全历史影子版本 `20260827T115804942528+0800` 独立七个月验收通过：原186条Meta/TT原有字段、基准和审计完全一致，仅增加metrics；GG新增6条月度记录。最后维度修正不改变Google-only路径及上述历史快照。
+
+## Google CPC / 图片视频 CTR 前端自查交接（2026-08-27）
+
+本节仅为实现者自查，不冒充独立SA/QA评审；上述V1/V2通过结论保持历史效力。本执行者只改report.html、validate_frontend_contract.py和本目录Markdown，未修改其他协作者Python、未提交/部署。
+
+- 页面消费 `material_cpc/platform_cpc/rule_a_metric/platform_ctr_scope/rule_a_unavailable_reason`，平台CTR原列保持但Google含义明确为PIC+VID；Campaign原CTR在独立参考项保留。CPC显式null不从旧值/消耗反推，素材CPC缺失留空；仅平台CPC缺键可读同App Google benchmark.cpc。
+- Google A不可用原因按原文安全 `textContent` 展示；A/B/A+B不在浏览器重算。Meta/TT仍AF CPA，原25列表格、六项metrics及CSV前31列不变，新3列追加末尾；原始精度/BOM/引号/空值/预览路径保留。
+- 新HTML读取旧manifest/月数据时按历史规则说明，不把旧B-only数据标成CPC政策；版本提交仍以latest为准。
+- 自查并修复验证器编辑过程中的括号语法错误，修正后完整前端46/46通过；未遗留该错误。独立后端/映射代码评审、真实原缓存全候选重算、所有Meta/TT字段/旧表哈希检查和浏览器测试均待后续独立QA追加结果。

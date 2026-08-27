@@ -209,7 +209,7 @@ class GoogleMonthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
                 insert_dimension(connection)
-                self.populate(connection, [source(), source(id="456", resource_id="customers/1234567890/campaigns/456", type="0", asset_type="0", cost="100000000000", impressions="10000000", clicks="100000")])
+                self.populate(connection, [source(), source(resource_id="customers/1234567890/assets/999", clicks="0"), source(id="456", resource_id="customers/1234567890/campaigns/456", type="0", asset_type="0", cost="100000000000", impressions="10000000", clicks="100000")])
                 payload = self.build(connection)
                 rows = [row for row in payload["rows"] if row["channel"] == "Google"]
                 self.assertEqual(len(rows), 1)
@@ -256,13 +256,14 @@ class GoogleMonthTests(unittest.TestCase):
                 self.assertIsNone(materials[0]["af_d0_count"])
                 report.json_bytes({"platform_conversions": materials[0]["platform_conversions"]})
 
-    def test_missing_campaign_account_day_disables_rule_b(self):
+    def test_missing_campaign_disables_a_b_uses_asset_baseline(self):
         with tempfile.TemporaryDirectory() as temp:
             with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
                 insert_dimension(connection)
-                self.populate(connection, [source()])
+                self.populate(connection, [source(), source(resource_id="customers/1234567890/assets/999", clicks="0")])
                 payload = self.build(connection)
-                self.assertEqual(payload["rows"], [])
+                self.assertEqual(len(payload["rows"]), 1)
+                self.assertEqual(payload["rows"][0]["selection_rule"], "B")
                 audit = next(a for a in payload["audits"] if a["channel"] == "Google" and a["app"] == "NG OPay")
                 self.assertEqual(audit["baseline_missing_account_days"], 1)
                 benchmark = next(b for b in payload["benchmarks"] if b["channel"] == "Google" and b["app"] == "NG OPay")
@@ -273,7 +274,7 @@ class GoogleMonthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
                 insert_dimension(connection)
-                self.populate(connection, [source(), source(id="456", resource_id="campaign", type="0", asset_type="0", cost="100000000000", impressions="10000000", clicks="100000")])
+                self.populate(connection, [source(), source(resource_id="customers/1234567890/assets/999", clicks="0"), source(id="456", resource_id="campaign", type="0", asset_type="0", cost="100000000000", impressions="10000000", clicks="100000")])
                 connection.execute("UPDATE google_insight SET usd_amount=NULL,fx_status='fx_missing' WHERE row_type=0")
                 connection.commit()
                 payload = self.build(connection)

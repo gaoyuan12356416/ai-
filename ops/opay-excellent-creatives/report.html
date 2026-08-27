@@ -28,7 +28,7 @@
     <section class="hero">
       <div class="eyebrow">Creative Intelligence · OPay</div>
       <h1>月度优秀素材报表</h1>
-      <p>Google、Meta、TikTok 的严格素材表现复盘。规则基于平台 USD 指标与 AppsFlyer 统一 D0 首交，不对缺失粒度做估算。</p>
+      <p>Google、Meta、TikTok 的严格素材表现复盘。Google 按平台点击表现评优，Meta / TikTok 保留 AF D0 首交口径；不对缺失粒度做估算。</p>
       <div class="hero-meta">
         <span class="pill"><i class="dot"></i><span id="stageMeta">等待数据</span></span>
         <span class="pill" id="generatedMeta">生成时间 —</span>
@@ -37,6 +37,11 @@
     </section>
     <div class="notice"><strong>公开链接说明</strong><span>本页无需登录并已设置 noindex；任何获得链接的人仍可查看素材源文件和素材制作者。缺失数据留空，0 表示真实零值；Google 平台转化数仅在详情展示，不替代安装或 AF D0 首交，不做分摊或估算。</span></div>
     <div id="errorBox" class="error" hidden></div>
+    <section class="section audit" aria-label="分渠道入选规则">
+      <strong>入选规则 · 同月 / 同 App 比较，A 或 B 满足即入选，同时满足标记 A+B</strong>
+      <p class="detail-note" id="googleRuleDefinition">Google：正在读取本月规则版本…</p>
+      <p class="detail-note">Meta / TikTok（不变）：A = 累计消耗前 50%（同渠道平台 USD 总消耗为分母，含跨线及并列）且素材 AF D0 首交 CPA &lt; 平台 CPA；B = 素材月消耗 &gt; 5000 USD 且素材 CTR &gt; 同渠道平台 CTR。A 仍受原映射覆盖及 AF 可用性门槛约束。</p>
+    </section>
     <section class="toolbar" aria-label="报表筛选">
       <div class="filters">
         <div class="field"><label for="monthFilter">月份</label><select id="monthFilter"></select></div>
@@ -139,6 +144,31 @@
       if(numeric(e.platform_cpa)!==null)return numeric(e.platform_cpa);
       return (e.platform_cpa_available===true||Number(state.payload?.schema_version||1)<2)&&e.platform_cpa_finite===false?"∞":null;
     }
+    const isGoogle=row=>row.channel==="Google"||row.channel==="GG";
+    const googleCtrScope="google_picture_video_assets";
+    const googleCtrSource="ads_google_insights:type=3,asset_type=2/4；全部图片/视频资产（含未映射），总点击 / 总曝光，非日或素材 CTR 算术平均";
+    const cpcText=value=>numeric(value)===null?"":"$"+Number(value).toFixed(6)+" / 点击";
+    function googleCpc(row,key){
+      if(!isGoogle(row))return null;
+      const e=row.evidence||{};
+      if(has(e,key))return numeric(e[key]); // Explicit null is authoritative.
+      if(key==="platform_cpc")return numeric((state.payload?.benchmarks||[]).find(b=>isGoogle(b)&&b.app===row.app)?.cpc);
+      return null;
+    }
+    function ctrScopeText(row){
+      const scope=row.evidence?.platform_ctr_scope;
+      if(scope===googleCtrScope)return "Google 全部图片/视频资产（含未映射）";
+      if(scope)return String(scope);
+      return isGoogle(row)?"历史 Campaign 平台整体（非图片/视频基准）":"同渠道平台整体";
+    }
+    function renderRules(){
+      const current=state.payload?.selection_policy?.google?.version==="cpc_picvid_v1"||
+        (state.payload?.rows||[]).some(r=>isGoogle(r)&&r.evidence?.rule_a_metric==="cpc")||
+        (state.payload?.audits||[]).some(a=>isGoogle(a)&&a.rule_a_metric==="cpc");
+      $("googleRuleDefinition").textContent=current?
+        "Google：A = 按完整可核验素材 USD 消耗降序累计至全量 Campaign 平台月消耗的 50%（含跨线组及消耗并列），且素材 CPC < 平台 CPC（USD 消耗 / 点击）。平台 USD 未知或≤0、点击为0，或完整且精确映射素材消耗不足平台50%时，A 暂停。B = 素材月消耗 > 5000 USD 且素材 CTR > 全部图片/视频资产总点击 / 总曝光（type=3、asset_type=2/4，含未映射；非日或素材 CTR 算术平均）。A 暂停不连带暂停 B。":
+        "Google（历史快照）：仅 B = 素材月消耗 > 5000 USD 且素材 CTR > Campaign 平台整体 CTR；A 暂停。此月尚无 cpc_picvid_v1 规则标记，不按新 CPC / 图片视频口径解读。";
+    }
     function availabilityText(row,key,status){
       const labels={missing_asset_attribution:"缺失素材级 AF 归因",missing_asset_installs:"缺失素材级安装",verified:"已核验",available:"可用",exact:"精确可用"};
       const available=rowValue(row,key)!==null;
@@ -151,7 +181,7 @@
     async function loadManifest(){const response=await fetch("latest.json",{cache:"no-store"});if(!response.ok)throw new Error(`latest.json HTTP ${response.status}`);state.manifest=await response.json();const select=$("monthFilter");select.replaceChildren();for(const item of [...state.manifest.months].reverse())option(select,item.month,item.month+(item.stage==="final"?" · 终版":" · 初版"));select.value=state.manifest.latest_month;await loadMonth(select.value)}
     async function loadMonth(month){$("loading").hidden=false;try{const url=`data/${encodeURIComponent(state.manifest.data_version)}/${encodeURIComponent(month)}.json`;const response=await fetch(url,{cache:"force-cache"});if(!response.ok)throw new Error(`${month} 数据 HTTP ${response.status}`);state.payload=await response.json();state.rows=[...(state.payload.rows||[])].sort((a,b)=>{const av=rowValue(a,"spend"),bv=rowValue(b,"spend");return (av===null)-(bv===null)||(av!==null&&bv!==null?bv-av:0)||a.custom_source_id-b.custom_source_id});hydrateFilters();renderMeta();applyFilters();renderAudits()}finally{$("loading").hidden=true}}
     function hydrateFilters(){for(const [id,values] of [["channelFilter",unique(state.rows.map(r=>r.channel))],["appFilter",unique(state.rows.map(r=>r.app))],["typeFilter",unique(state.rows.map(r=>r.material_type))],["makerFilter",unique(state.rows.map(r=>r.maker))]]){const select=$(id),current=select.value;select.replaceChildren();option(select,"",id==="channelFilter"?"全部渠道":id==="appFilter"?"全部 App":id==="typeFilter"?"全部类型":"全部制作者");values.forEach(v=>option(select,v));if(values.includes(current))select.value=current}}
-    function renderMeta(){const entry=state.manifest.months.find(x=>x.month===state.payload.month)||{};$("stageMeta").textContent=`${state.payload.month} · ${entry.stage==="final"?"终版":"初版"}`;$("generatedMeta").textContent="生成 "+new Date(state.payload.generated_at).toLocaleString("zh-CN",{hour12:false});$("versionMeta").textContent="版本 "+state.manifest.data_version;document.title=`${state.payload.month} OPay 月度优秀素材`}
+    function renderMeta(){const entry=state.manifest.months.find(x=>x.month===state.payload.month)||{};$("stageMeta").textContent=`${state.payload.month} · ${entry.stage==="final"?"终版":"初版"}`;$("generatedMeta").textContent="生成 "+new Date(state.payload.generated_at).toLocaleString("zh-CN",{hour12:false});$("versionMeta").textContent="版本 "+state.manifest.data_version;document.title=`${state.payload.month} OPay 月度优秀素材`;renderRules()}
     function applyFilters(){const f={channel:$("channelFilter").value,app:$("appFilter").value,type:$("typeFilter").value,keyword:$("keywordFilter").value.trim().toLocaleLowerCase(),maker:$("makerFilter").value,rule:$("ruleFilter").value};state.filtered=state.rows.filter(r=>(!f.channel||r.channel===f.channel)&&(!f.app||r.app===f.app)&&(!f.type||r.material_type===f.type)&&(!f.keyword||String(r.selling_point_keywords||"").toLocaleLowerCase().includes(f.keyword))&&(!f.maker||r.maker===f.maker)&&(!f.rule||r.selection_rule===f.rule));renderTable();renderKpis()}
     function renderKpis(){
       const count=state.filtered.length,spends=state.filtered.map(r=>rowValue(r,"spend")).filter(v=>v!==null),d0Values=state.filtered.map(r=>rowValue(r,"af_d0_first_transactions")).filter(v=>v!==null);
@@ -161,7 +191,27 @@
       $("kpiD0Note").textContent=!count?"当前筛选无素材，AF 数据留空":!d0Values.length?`AF 数据全部缺失（0/${count} 条可用），不按 0 计入`:`仅统计可用值（${d0Values.length}/${count} 条）${d0Values.length<count?`，${count-d0Values.length} 条缺失未计入`:" · 统一严格 D0"}`;
       $("resultMeta").textContent=`${fmtInt.format(count)} 条结果 · ${spend===null?"消耗数据缺失":"消耗 "+metric(spend,"money")}`;
     }
-    function renderAudits(){const grid=$("auditGrid");grid.replaceChildren();for(const audit of state.payload.audits||[]){const card=document.createElement("article");card.className="audit"+(audit.rule_a_available?"":" warn");const title=document.createElement("div");title.className="audit-title";const name=document.createElement("span");name.textContent=`${audit.channel} · ${audit.app}`;const tag=document.createElement("span");tag.className="audit-tag";tag.textContent=`入选 ${audit.selected_count}`;title.append(name,tag);const message=document.createElement("div");message.className="audit-message";message.textContent=audit.message;const metrics=document.createElement("div");metrics.className="audit-metrics";for(const [label,value] of [["平台消耗",metric(audit.platform_spend,"money")],["映射覆盖",pct(audit.mapping_coverage)],["缺口",metric(audit.mapping_gap_spend,"money")]]){const box=document.createElement("span");box.textContent=label;const b=document.createElement("b");b.textContent=value;box.appendChild(b);metrics.appendChild(box)}card.append(title,message,metrics);grid.appendChild(card)}}
+    function renderAudits(){
+      const grid=$("auditGrid");grid.replaceChildren();
+      for(const audit of state.payload.audits||[]){
+        const card=document.createElement("article");card.className="audit"+(audit.rule_a_available?"":" warn");
+        const title=document.createElement("div");title.className="audit-title";
+        const name=document.createElement("span");name.textContent=`${audit.channel} · ${audit.app}`;
+        const tag=document.createElement("span");tag.className="audit-tag";tag.textContent=`入选 ${audit.selected_count}`;title.append(name,tag);
+        const message=document.createElement("div");message.className="audit-message";message.textContent=audit.message;
+        const metrics=document.createElement("div");metrics.className="audit-metrics";
+        const items=[["平台消耗",metric(audit.platform_spend,"money")],["映射覆盖",pct(audit.mapping_coverage)],["缺口",metric(audit.mapping_gap_spend,"money")]];
+        const google=isGoogle(audit),benchmark=(state.payload.benchmarks||[]).find(b=>b.channel===audit.channel&&b.app===audit.app)||{};
+        if(google)items.push(["Campaign 平台 CPC",cpcText(has(audit,"platform_cpc")?audit.platform_cpc:has(audit,"cpc")?audit.cpc:benchmark.cpc)],
+          ["Campaign 平台 CTR",pct(benchmark.ctr,2)],["图片/视频整体 CTR",pct(audit.picture_video_ctr,2)],
+          ["图片/视频总点击",metric(audit.picture_video_clicks)],["图片/视频总曝光",metric(audit.picture_video_impressions)]);
+        for(const [label,value] of items){const box=document.createElement("span");box.textContent=label;const b=document.createElement("b");b.textContent=value;box.appendChild(b);metrics.appendChild(box)}
+        card.append(title,message,metrics);
+        if(google&&audit.rule_a_available===false){const note=document.createElement("p");note.className="detail-note";note.textContent="规则 A 暂停："+(audit.rule_a_unavailable_reason||"本月未提供可用的 A 基准，请查看渠道缺口说明");card.appendChild(note)}
+        if(google&&has(audit,"picture_video_ctr")){const note=document.createElement("p");note.className="detail-note";note.textContent="B 基准来源："+googleCtrSource;card.appendChild(note)}
+        grid.appendChild(card);
+      }
+    }
     function renderTable(){
       const body=$("tableBody");body.replaceChildren();$("emptyState").hidden=state.filtered.length>0;
       for(const r of state.filtered){
@@ -185,9 +235,18 @@
     function openDetail(r){
       const wrap=document.createElement("div"),e=r.evidence||{},cpa=platformCpa(r);
       const items=[...metricColumns.map(column=>[column.label,metricText(r,column)]),["安装",metric(rowValue(r,"installs"))],["AF D0 首交",metric(rowValue(r,"af_d0_first_transactions"))],["平台 CTR",pct(e.platform_ctr,2)],["平台 D0首交CPA",cpa==="∞"?cpa:metric(cpa,"money")],["消耗排名",e.spend_rank?`第 ${e.spend_rank} 组`:"—"],["累计消耗占比",pct(e.cumulative_spend_ratio)],["精确映射覆盖",pct(e.exact_mapping_spend_coverage)],["规则 A",e.rule_a_available?(e.rule_a_pass?"通过":"未通过"):"暂停"],["规则 B",e.rule_b_pass?"通过":"未通过"],["上线时间来源",r.first_launch_source==="platform_success"?"平台成功发布时间":"最早实际投放"],["素材映射",e.mapping_status==="exact"?"精确映射":e.mapping_status||"—"],["素材数据行",metric(e.source_row_count)]];
-      const google=r.channel==="Google"||r.channel==="GG";
-      if(google)items.push(["Google 平台转化数",numeric(r.platform_conversions)===null?"":String(r.platform_conversions)]);
+      const google=isGoogle(r),benchmark=(state.payload?.benchmarks||[]).find(b=>b.channel===r.channel&&b.app===r.app)||{};
+      if(google){
+        items.push(["素材 CPC（USD/点击）",cpcText(googleCpc(r,"material_cpc"))],["平台 CPC（USD/点击）",cpcText(googleCpc(r,"platform_cpc"))],
+          ["平台 CTR 口径",ctrScopeText(r)],["Campaign 平台 CTR（参考）",pct(benchmark.ctr,2)],
+          ["Google 平台转化数",numeric(r.platform_conversions)===null?"":String(r.platform_conversions)]);
+        if(e.rule_a_available===false)items.push(["规则 A 暂停原因",e.rule_a_unavailable_reason||"本月未提供可用的 A 基准，请查看渠道审计"]);
+      }
       detailGrid(wrap,items);
+      if(google&&(e.rule_a_metric==="cpc"||e.platform_ctr_scope===googleCtrScope)){
+        const note=document.createElement("p");note.className="detail-note";
+        note.textContent="A 比较 CPC（USD 消耗 / 点击）；排名分母：同月同 App 全量 Campaign USD 消耗，平台 CPC 来源：ads_google_insights:type=0。B CTR 基准来源："+googleCtrSource+"。页面仅展示快照判定，展示舍入不参与选优。";wrap.appendChild(note);
+      }
       if(google){const note=document.createElement("p");note.className="detail-note";note.textContent="Google 平台转化数（conversions）不等同于安装或 AF D0 首交，不参与 AF 汇总，也不用于补齐缺失指标。";wrap.appendChild(note)}
       detailHeading(wrap,"数据可用性");
       const availability=[["AF D0 首交",availabilityText(r,"af_d0_first_transactions",e.af_status)],["安装",availabilityText(r,"installs",e.installs_status)],["USD 消耗",availabilityText(r,"spend",e.usd_status)]];
@@ -200,8 +259,8 @@
     }
     function csvData(){
       // Export raw numeric precision (ratios stay fractions); UI rounding is display-only.
-      const headers=["月份","渠道","素材缩略图","素材源文件","素材ID","素材名称","素材类型","宣传App","消耗USD","曝光","点击","安装","AF D0首交数",...metricColumns.map(column=>column.label),"素材制作者","首次上线时间","上线时间来源","卖点一级分类","卖点关键词","卖点状态","入选规则","平台CTR","平台CPA","消耗排名","累计消耗占比","映射覆盖率"];
-      const rows=state.filtered.map(r=>{const e=r.evidence||{};return [r.month,r.channel,r.thumbnail_url,r.source_url,r.custom_source_id,r.material_name,r.material_type,r.app,...["spend","impressions","clicks","installs","af_d0_first_transactions"].map(key=>rowValue(r,key)),...metricColumns.map(column=>metricValue(r,column)),r.maker,r.first_launch_date,r.first_launch_source,r.selling_point_level1,r.selling_point_keywords,r.selling_point_status_label,r.selection_rule,numeric(e.platform_ctr),platformCpa(r),e.spend_rank,numeric(e.cumulative_spend_ratio),numeric(e.exact_mapping_spend_coverage)]});
+      const headers=["月份","渠道","素材缩略图","素材源文件","素材ID","素材名称","素材类型","宣传App","消耗USD","曝光","点击","安装","AF D0首交数",...metricColumns.map(column=>column.label),"素材制作者","首次上线时间","上线时间来源","卖点一级分类","卖点关键词","卖点状态","入选规则","平台CTR","平台CPA","消耗排名","累计消耗占比","映射覆盖率","素材CPC USD/点击","平台CPC USD/点击","平台CTR口径"];
+      const rows=state.filtered.map(r=>{const e=r.evidence||{};return [r.month,r.channel,r.thumbnail_url,r.source_url,r.custom_source_id,r.material_name,r.material_type,r.app,...["spend","impressions","clicks","installs","af_d0_first_transactions"].map(key=>rowValue(r,key)),...metricColumns.map(column=>metricValue(r,column)),r.maker,r.first_launch_date,r.first_launch_source,r.selling_point_level1,r.selling_point_keywords,r.selling_point_status_label,r.selection_rule,numeric(e.platform_ctr),platformCpa(r),e.spend_rank,numeric(e.cumulative_spend_ratio),numeric(e.exact_mapping_spend_coverage),googleCpc(r,"material_cpc"),googleCpc(r,"platform_cpc"),isGoogle(r)?e.platform_ctr_scope||"":""]});
       return [headers,...rows];
     }
     function buildCsv(){return "\uFEFF"+csvData().map(row=>row.map(escCsv).join(",")).join("\r\n")}
