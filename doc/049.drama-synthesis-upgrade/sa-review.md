@@ -1,5 +1,7 @@
 # SA 需求评审
 
+> 2026-08-27 补充：同意先完成 `hk-gpu-setup-20260827.md` 的独立运行交付，保持 CPU 18787 不切流。实际部署前新增 BUG-012，旧“仅剩外部门禁”状态被本补充取代；真实部署验收必须覆盖非 root 用户、systemd 路径、CUDA/模型、资产权限及 CPU key 的精确隧道限制。
+
 状态：Wave8 exact SHA `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 需求/架构合同经独立 QA PASS，0 P0/P1；production HOLD 仅剩下述外部门禁。
 
 ## 架构决策

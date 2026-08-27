@@ -1,5 +1,7 @@
 # 开发计划
 
+> 2026-08-27 更新：发布预检新增运行交付缺陷 BUG-012；旧离线 QA 结论不覆盖新主机可安装性。用户授权的下一阶段仅为香港 GPU 独立搭建与隔离验证，详见 `hk-gpu-setup-20260827.md`。以下历史“仅剩外部门禁”描述不能作为当前整体发布结论。
+
 状态：Wave8 exact SHA `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 与线上实查增量 code SHA `2b26b540660fd3687fa7c66e68a246d1a706136a` 已独立 QA PASS，增量 P0/P1/P2=0/0/0。仅 gy 隔离目录/Nginx 基础配置已上线；候选应用、RPC、DDL 和外部发布均未上线。
 
 1. 冻结 requirement/SA/API/schema/test/deploy 合同并清除旧域、旧 route、旧 result、video-ID-success 描述。

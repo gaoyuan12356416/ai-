@@ -1,5 +1,9 @@
 # 测试用例
 
+## 2026-08-27 香港 GPU 授权隔离验收补充
+
+此前 fake-only 边界用于离线测试。用户本次已授权独立 HK 运行搭建及真实媒体样本（不含真实平台发布）：验证固定 runtime、Demucs 离线四模型、manifest 逐文件 SHA、专用用户路径权限、无凭据输出、8787/18788 健康与鉴权、concat/no-BGM/cover-intro/random 真实编码、COS 独立 canary 文件以及 legacy18787/X 服务不变。仍禁止正式 CPU 任务、数据库迁移、YouTube 上传/评论及 OAuth 刷新。
+
 全部外部 HTTP/文件发布/统一表为 fake 或 temp；禁止真实短链、YouTube、评论和服务器写入。
 
 | 组 | 核心用例 |
