@@ -1,0 +1,20 @@
+{
+  "event_type": "replication_failed",
+  "editor_username": "editor_demo",
+  "items": [
+    {
+      "resource_id": "RES-20260827-001",
+      "resource_name": "暮色心约",
+      "original_material_id": "MAT-000101",
+      "original_material_name": "暮色心约_原始素材_01.mp4",
+      "failed_languages": ["法语", "日语"]
+    },
+    {
+      "resource_id": "RES-20260827-002",
+      "resource_name": "星河与你",
+      "original_material_id": "MAT-000102",
+      "original_material_name": "星河与你_原始素材_02.mp4",
+      "failed_languages": ["西班牙语", "韩语"]
+    }
+  ]
+}

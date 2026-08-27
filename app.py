@@ -765,6 +765,8 @@ from features.tt_drama_resources import (
     W2AResourceService,
 )
 from features.material_status_broadcast import service as material_status_service
+from features.material_replication_broadcast import delivery as material_replication_delivery
+from features.material_replication_broadcast import service as material_replication_service
 from features.drama_synthesis.core import (
     DramaSynthesisError,
     DramaSynthesisStore,
@@ -47678,10 +47680,14 @@ class MaterialStatusDeliveryError(RuntimeError):
         message,
         retryable=False,
         refresh_token=False,
+        uncertain=False,
     ):
         self.code = str(code or "delivery_failed")
         self.retryable = bool(retryable)
         self.refresh_token = bool(refresh_token)
+        # Observational metadata for the new batch path; legacy retry/fallback
+        # decisions continue to use their original fields unchanged.
+        self.uncertain = bool(uncertain)
         super().__init__(
             material_status_service.redact_sensitive_text(message, limit=500)
         )
@@ -48061,12 +48067,14 @@ def material_status_feishu_response(
             "%s_invalid_response" % operation,
             "Feishu %s returned invalid JSON" % operation,
             retryable=response.status_code >= 500,
+            uncertain=(operation == "message_send"),
         ) from None
     if not isinstance(data, dict) or "code" not in data:
         raise MaterialStatusDeliveryError(
             "%s_invalid_response" % operation,
             "Feishu %s response is missing a result code" % operation,
             retryable=True,
+            uncertain=(operation == "message_send"),
         )
     feishu_code = data.get("code")
     retryable_codes = {
@@ -48104,6 +48112,7 @@ def material_status_feishu_response(
             ),
             retryable=retryable,
             refresh_token=refresh_token,
+            uncertain=(operation == "message_send" and response.status_code >= 500),
         )
     return data
 
@@ -48193,6 +48202,7 @@ def send_material_status_feishu_text(
             retryable=False,
         )
     data = None
+    send_outcome_uncertain = False
     for auth_attempt in range(2):
         try:
             tenant_access_token = get_feishu_tenant_access_token()
@@ -48217,12 +48227,14 @@ def send_material_status_feishu_text(
                 "feishu_send_unavailable",
                 "Feishu send unavailable: %s" % exc.__class__.__name__,
                 retryable=True,
+                uncertain=True,
             ) from None
         except Exception as exc:
             raise MaterialStatusDeliveryError(
                 "feishu_send_unavailable",
                 "Feishu send unavailable: %s" % exc.__class__.__name__,
                 retryable=True,
+                uncertain=True,
             ) from None
         try:
             data = material_status_feishu_response(
@@ -48232,6 +48244,10 @@ def send_material_status_feishu_text(
             )
             break
         except MaterialStatusDeliveryError as exc:
+            # Keep any earlier send uncertainty across the internal token retry.
+            # A later explicit rejection cannot prove the first send failed.
+            send_outcome_uncertain = send_outcome_uncertain or exc.uncertain
+            exc.uncertain = send_outcome_uncertain
             if exc.refresh_token and auth_attempt == 0:
                 continue
             raise
@@ -48245,6 +48261,7 @@ def send_material_status_feishu_text(
             "message_send_invalid_response",
             "Feishu message_send response is missing message_id",
             retryable=True,
+            uncertain=True,
         )
     return {
         "message_id": message_id,
@@ -48595,6 +48612,57 @@ def material_status_worker_ready():
     except Exception:
         logging.exception("material status broadcast worker is unavailable")
         return False
+
+
+MATERIAL_REPLICATION_WEBHOOK_TOKENS = tuple(
+    item.strip()
+    for item in os.environ.get("MATERIAL_REPLICATION_WEBHOOK_TOKENS", "").split(",")
+    if item.strip()
+)
+MATERIAL_REPLICATION_RUNTIME = None
+MATERIAL_REPLICATION_RUNTIME_LOCK = threading.Lock()
+
+
+def material_replication_record_audit(row):
+    append_audit_log(
+        None,
+        "material_replication_" + row["status"],
+        "material_replication_broadcast",
+        material_replication_service.format_batch_id(row["id"]),
+        {
+            "status": row["status"],
+            "delivery_kind": row.get("delivery_kind", ""),
+            "attempt_count": row["attempt_count"],
+            "failure_code": row.get("last_error_code", ""),
+        },
+    )
+
+
+def get_material_replication_runtime():
+    global MATERIAL_REPLICATION_RUNTIME
+    with MATERIAL_REPLICATION_RUNTIME_LOCK:
+        if MATERIAL_REPLICATION_RUNTIME is None:
+            MATERIAL_REPLICATION_RUNTIME = material_replication_delivery.ReplicationRuntime(
+                JOB_DB_PATH,
+                MATERIAL_REPLICATION_WEBHOOK_TOKENS,
+                MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
+                resolve_material_status_optimizer,
+                lookup_material_status_feishu_open_id,
+                send_material_status_feishu_text,
+                dependencies_ready=lambda: bool(
+                    FEISHU_APP_ID and FEISHU_APP_SECRET
+                    and ADMIN_MAPPING_MYSQL_HOST and ADMIN_MAPPING_MYSQL_USER
+                    and (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME)
+                ),
+                audit=material_replication_record_audit,
+            )
+        return MATERIAL_REPLICATION_RUNTIME
+
+
+def handle_material_replication_webhook_request(handler):
+    material_replication_delivery.handle_request(
+        handler, get_material_replication_runtime(), json_response,
+    )
 
 
 def handle_material_status_webhook_request(handler):
@@ -99809,6 +99877,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             self._dispatch_ad_control_v3(parsed)
             return
 
+        if parsed.path == material_replication_delivery.ENDPOINT:
+            handle_material_replication_webhook_request(self)
+            return
+
         if (
             parsed.path
             == "/api/integrations/v1/material-task-status-events"
@@ -101816,6 +101888,16 @@ def main():
         )
     except Exception:
         logging.exception("material status broadcast worker startup failed")
+
+    try:
+        replication_runtime = get_material_replication_runtime()
+        replication_runtime.start()
+        logging.info(
+            "material replication batch worker configured=%s",
+            replication_runtime.configured(),
+        )
+    except Exception:
+        logging.exception("material replication batch worker startup failed")
 
 
 

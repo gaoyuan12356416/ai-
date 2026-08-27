@@ -1,0 +1,888 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "自动复刻批次飞书播报接口（待上线）",
+    "version": "1.0.0-pending",
+    "description": "状态：待上线，不代表生产可调用或真实飞书送达验收完成。上游每 2 小时汇总 replication_started、每 1 小时汇总 replication_failed，并负责跨批次只推新增；每次一个剪辑师、一种事件类型。接收方独立 outbox 可靠接收后尽快异步通知，不增加周期、不创建复刻、不轮询/写入素材业务表、不新增资源 20 分钟提醒。旧 /api/integrations/v1/material-task-status-events 保持不变，Token/重试隔离；同次失败不要同时调用新旧接口。"
+  },
+  "servers": [
+    {
+      "url": "https://ai.yingliangads.com",
+      "description": "计划生产地址；当前状态：待上线"
+    }
+  ],
+  "tags": [
+    {
+      "name": "MaterialReplication",
+      "description": "已汇总复刻批次异步通知，非复刻任务执行接口"
+    }
+  ],
+  "paths": {
+    "/api/integrations/v1/material-replication-events": {
+      "post": {
+        "tags": [
+          "MaterialReplication"
+        ],
+        "operationId": "acceptMaterialReplicationEvent",
+        "summary": "可靠接收复刻汇总批次（待上线）",
+        "description": "严格整批接收；同键同规范化内容返回原批次当前状态，JSON 对象键序无关，但 items/failed_languages 顺序有意义；同键改内容/顺序为 409。上游超时或 5xx 保持原键原内容按 1、5、30、120 秒重试；202 后不为补发而换键。收件人经 editor_username -> admin_users.username（大小写敏感精确匹配）-> admin_users.id -> admin_user_group.sub_user_id（status=0）-> email（复用既有用户名/邮箱映射缓存）-> 按邮箱查询飞书得到 open_id（首次发送前冻结）。空用户名、映射失败或明确私聊失败走既有兜底群。结果不确定时只在最多 3300 秒窗口内以同一冻结目标、正文和 UUID 尝试，最多 5 次；之后 delivery_unknown，不盲目换目标兜底。不承诺端到端严格 exactly-once。 最终消息大小预检仅对新批次执行；原键原内容重放读取原批次，不因未来模板变大拒绝或新增发送。",
+        "security": [
+          {
+            "MaterialReplicationBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "首次发送前由上游持久化的业务批次唯一键；ASCII 8–128 字符，HTTP 重试必须复用原键与原内容。",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+            },
+            "example": "mrb-start-editor-demo-20260827-1400-001"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON，Content-Type application/json（可附 charset=utf-8）。顶层和每项禁止额外字段。原始体最多 32768 字节，最终飞书请求 JSON 含兜底包装和转义最多 131072 字节。 HTTP 客户端须提供唯一合法 Content-Length；不接受分块/压缩体、重复 JSON 对象字段或 NaN/Infinity。 128 KiB 是本接口较官方文本消息 150 KB 更保守的上限，3300 秒也较相同 UUID 的官方 1 小时窗口留有余量。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplicationStartedRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReplicationFailedRequest"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "event_type",
+                  "mapping": {
+                    "replication_started": "#/components/schemas/ReplicationStartedRequest",
+                    "replication_failed": "#/components/schemas/ReplicationFailedRequest"
+                  }
+                }
+              },
+              "examples": {
+                "replication_started": {
+                  "$ref": "#/components/examples/ReplicationStarted"
+                },
+                "replication_failed": {
+                  "$ref": "#/components/examples/ReplicationFailed"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "已可靠接收或同键同内容已存在。202 不等于送达；无必需 GET，可用原键原内容 POST 读取原批次当前状态。 同键同内容重放不重新渲染正文，不受未来模板扩大影响。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedResponse"
+                },
+                "examples": {
+                  "accepted": {
+                    "summary": "首次接收，尚未送达",
+                    "value": {
+                      "code": "accepted",
+                      "message": "批次已接收，等待投递",
+                      "batch_id": "MRB-0000000001",
+                      "duplicate": false,
+                      "item_count": 2,
+                      "delivery_status": "queued",
+                      "delivery_kind": "",
+                      "received_at": "2026-08-27T06:00:00Z"
+                    }
+                  },
+                  "duplicatePrivate": {
+                    "summary": "重复提交，已确认私聊",
+                    "value": {
+                      "code": "duplicate_accepted",
+                      "message": "批次已接收",
+                      "batch_id": "MRB-0000000001",
+                      "duplicate": true,
+                      "item_count": 2,
+                      "delivery_status": "delivered",
+                      "delivery_kind": "private",
+                      "received_at": "2026-08-27T06:00:00Z"
+                    }
+                  },
+                  "duplicateFallback": {
+                    "summary": "重复提交，仅确认兜底群",
+                    "value": {
+                      "code": "duplicate_accepted",
+                      "message": "批次已接收",
+                      "batch_id": "MRB-0000000001",
+                      "duplicate": true,
+                      "item_count": 2,
+                      "delivery_status": "delivered",
+                      "delivery_kind": "fallback",
+                      "received_at": "2026-08-27T06:00:00Z"
+                    }
+                  },
+                  "duplicateUnknown": {
+                    "summary": "重复提交，结果未知，不重置投递",
+                    "value": {
+                      "code": "duplicate_accepted",
+                      "message": "批次已接收",
+                      "batch_id": "MRB-0000000001",
+                      "duplicate": true,
+                      "item_count": 2,
+                      "delivery_status": "delivery_unknown",
+                      "delivery_kind": "",
+                      "received_at": "2026-08-27T06:00:00Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 传输/Content-Length 不合法、分块/压缩体、体接收超时/中断，或非法 UTF-8 JSON/重复对象字段/非 JSON 数值，或缺少/非法幂等键；先修正请求。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                },
+                "examples": {
+                  "invalid_request": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "HTTP 请求不合法"
+                    }
+                  },
+                  "invalid_json": {
+                    "value": {
+                      "code": "invalid_json",
+                      "message": "JSON 无法解析"
+                    }
+                  },
+                  "idempotency_key_required": {
+                    "value": {
+                      "code": "idempotency_key_required",
+                      "message": "Idempotency-Key 必填"
+                    }
+                  },
+                  "invalid_idempotency_key": {
+                    "value": {
+                      "code": "invalid_idempotency_key",
+                      "message": "Idempotency-Key 格式不合法"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "本接口专属 Token 缺失或错误，不能使用旧接口 Token。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedError"
+                },
+                "examples": {
+                  "invalid_token": {
+                    "value": {
+                      "code": "invalid_token",
+                      "message": "Token 无效"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "相同键对应不同内容或数组顺序；核对原批次，不能换键掩盖未知结果。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotencyConflictError"
+                },
+                "examples": {
+                  "idempotency_conflict": {
+                    "value": {
+                      "code": "idempotency_conflict",
+                      "message": "相同幂等键对应不同请求内容"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "原始 UTF-8 请求体超过 32768 字节，或最终飞书请求 JSON（含兜底/页脚/转义）超过 131072 字节；整批拒绝，上游缩小并为各新子批次分配新键，不自动拆分。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayloadTooLargeError"
+                },
+                "examples": {
+                  "payload_too_large": {
+                    "value": {
+                      "code": "payload_too_large",
+                      "message": "请求体超过 32 KiB，请缩小批次"
+                    }
+                  },
+                  "message_too_large": {
+                    "value": {
+                      "code": "message_too_large",
+                      "message": "最终飞书请求超过 128 KiB，请缩小批次"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type 必须为 application/json，UTF-8 编码。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedMediaTypeError"
+                },
+                "examples": {
+                  "unsupported_media_type": {
+                    "value": {
+                      "code": "unsupported_media_type",
+                      "message": "Content-Type 必须为 application/json"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "字段、类型、数量、长度、单行或事件条件非法；整批拒绝，无部分接收。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidPayloadError"
+                },
+                "examples": {
+                  "invalid_payload": {
+                    "value": {
+                      "code": "invalid_payload",
+                      "message": "items[0].failed_languages 必须为非空数组"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "配置或可靠存储暂不可用；保留原键原内容按 1、5、30、120 秒退避重试。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableError"
+                },
+                "examples": {
+                  "service_unavailable": {
+                    "value": {
+                      "code": "service_unavailable",
+                      "message": "服务暂不可用"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-release-status": "待上线",
+        "x-max-request-utf8-bytes": 32768,
+        "x-max-feishu-request-utf8-bytes": 131072
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "MaterialReplicationBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "本接口专属至少 32 个无空白 ASCII 字符的随机 Token",
+        "description": "通过安全渠道单独提供，与旧接口分开。仅放 Authorization 请求头，不能放 URL、JSON、日志或公开代码。 Token 不含空白字符。"
+      }
+    },
+    "schemas": {
+      "EditorUsername": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 100,
+        "description": "剪辑师系统用户名，必填；trim 和 NFC 后 0–100 个 Unicode 字符，保留大小写，按 admin_users.username 大小写敏感精确匹配。空字符串允许，直接进入既有兜底群。不是显示名、手机号、邮箱或 open_id。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+        "example": "editor_demo",
+        "x-normalization": {
+          "trim": true,
+          "unicode": "NFC",
+          "case": "preserve"
+        },
+        "x-forbidden-unicode-categories": [
+          "Cc",
+          "Cf",
+          "Cs",
+          "Zl",
+          "Zp"
+        ]
+      },
+      "ReplicationStartedItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "resource_id",
+          "resource_name",
+          "original_material_id",
+          "original_material_name"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "资源 ID；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "RES-20260827-001",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "resource_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "资源名；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "暮色心约",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "original_material_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "原始素材 ID；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "MAT-000101",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "original_material_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "原始素材名；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "暮色心约_原始素材_01.mp4",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          }
+        },
+        "description": "已发起条目恰好四字段，必须省略 failed_languages，传空数组也不允许。"
+      },
+      "ReplicationFailedItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "resource_id",
+          "resource_name",
+          "original_material_id",
+          "original_material_name",
+          "failed_languages"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "资源 ID；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "RES-20260827-001",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "resource_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "资源名；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "暮色心约",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "original_material_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "原始素材 ID；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "MAT-000101",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "original_material_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^\\r\\n]+$",
+            "description": "原始素材名；非空单行，去除首尾空白并 NFC 规范化后按 Unicode 字符数计长，不按 UTF-8 字节数。ID 即使仅含数字也必须传字符串。 只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+            "example": "暮色心约_原始素材_01.mp4",
+            "x-normalization": {
+              "trim": true,
+              "unicode": "NFC",
+              "case": "preserve"
+            },
+            "x-forbidden-unicode-categories": [
+              "Cc",
+              "Cf",
+              "Cs",
+              "Zl",
+              "Zp"
+            ]
+          },
+          "failed_languages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "description": "逐项必填的失败语种，元素非空单行、trim/NFC 后 1–100 个 Unicode 字符，保留顺序，用“、”连接。",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[^\\r\\n]+$",
+              "x-normalization": {
+                "trim": true,
+                "unicode": "NFC",
+                "case": "preserve"
+              },
+              "description": "只接受单行可显示文本；拒绝 Unicode 类别 Cc/Cf/Cs/Zl/Zp（控制、格式、代理码点、行/段分隔），即使位于首尾也不允许。",
+              "x-forbidden-unicode-categories": [
+                "Cc",
+                "Cf",
+                "Cs",
+                "Zl",
+                "Zp"
+              ]
+            },
+            "example": [
+              "法语",
+              "日语"
+            ]
+          }
+        },
+        "description": "失败条目恰好五字段，逐项必填非空 failed_languages。"
+      },
+      "ReplicationStartedRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_type",
+          "editor_username",
+          "items"
+        ],
+        "properties": {
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "replication_started"
+            ]
+          },
+          "editor_username": {
+            "$ref": "#/components/schemas/EditorUsername"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/ReplicationStartedItem"
+            },
+            "description": "同一剪辑师、同一事件类型，保持素材顺序；任一项不合法整批拒绝，不部分接收。"
+          }
+        },
+        "description": "顶层恰好三个字段，不接受 task_id、产出素材、final_status、手机号、邮箱、open_id 或自定义目标。请求体最多 32768 个 UTF-8 字节，最终飞书请求 JSON 含兜底包装/转义最多 131072 字节。字段长度校验在服务 trim/NFC 后执行，调用方宜先规范化。",
+        "x-max-request-utf8-bytes": 32768,
+        "x-max-feishu-request-utf8-bytes": 131072
+      },
+      "ReplicationFailedRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_type",
+          "editor_username",
+          "items"
+        ],
+        "properties": {
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "replication_failed"
+            ]
+          },
+          "editor_username": {
+            "$ref": "#/components/schemas/EditorUsername"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/ReplicationFailedItem"
+            },
+            "description": "同一剪辑师、同一事件类型，保持素材顺序；任一项不合法整批拒绝，不部分接收。"
+          }
+        },
+        "description": "顶层恰好三个字段，不接受 task_id、产出素材、final_status、手机号、邮箱、open_id 或自定义目标。请求体最多 32768 个 UTF-8 字节，最终飞书请求 JSON 含兜底包装/转义最多 131072 字节。字段长度校验在服务 trim/NFC 后执行，调用方宜先规范化。",
+        "x-max-request-utf8-bytes": 32768,
+        "x-max-feishu-request-utf8-bytes": 131072
+      },
+      "AcceptedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "batch_id",
+          "duplicate",
+          "item_count",
+          "delivery_status",
+          "delivery_kind",
+          "received_at"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "duplicate_accepted"
+            ],
+            "description": "首次 accepted；同键同内容 duplicate_accepted。"
+          },
+          "message": {
+            "type": "string",
+            "description": "可读提示，不依赖具体提示文案判断业务。"
+          },
+          "batch_id": {
+            "type": "string",
+            "pattern": "^MRB-[0-9]{10,}$",
+            "example": "MRB-0000000001",
+            "description": "首次接收分配，重复提交保持原号。"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "accepted 为 false；duplicate_accepted 为 true。"
+          },
+          "item_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "素材数，不是语言数或复刻成功数。"
+          },
+          "delivery_status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "retry",
+              "delivered",
+              "dead_letter",
+              "delivery_unknown"
+            ],
+            "description": "当前异步投递状态：待处理、处理中、待有限重试、已确认送达、明确不可恢复、结果未知并停止盲目重试/兜底。"
+          },
+          "delivery_kind": {
+            "type": "string",
+            "enum": [
+              "",
+              "private",
+              "fallback"
+            ],
+            "description": "只在 delivery_status=delivered 时为 private 或 fallback，其他状态为空字符串（不是 null）。兜底群送达不等于私聊送达。"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "example": "2026-08-27T06:00:00Z",
+            "description": "首次接收时间，RFC3339 UTC，Z 后缀；重复提交不变。"
+          }
+        },
+        "description": "202 仅为可靠持久化接收，不代表飞书送达或复刻成功。同键同内容返回原批次当前状态，不新建批次、不重置终态。"
+      },
+      "BadRequestError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "invalid_json",
+              "idempotency_key_required",
+              "invalid_idempotency_key"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "UnauthorizedError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_token"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "IdempotencyConflictError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "idempotency_conflict"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "PayloadTooLargeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "payload_too_large",
+              "message_too_large"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "UnsupportedMediaTypeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "unsupported_media_type"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "InvalidPayloadError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_payload"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      },
+      "ServiceUnavailableError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "service_unavailable"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "安全中文提示，不含凭据、内部地址或异常栈。"
+          }
+        }
+      }
+    },
+    "examples": {
+      "ReplicationStarted": {
+        "summary": "已发起，省略 failed_languages",
+        "value": {
+          "event_type": "replication_started",
+          "editor_username": "editor_demo",
+          "items": [
+            {
+              "resource_id": "RES-20260827-001",
+              "resource_name": "暮色心约",
+              "original_material_id": "MAT-000101",
+              "original_material_name": "暮色心约_原始素材_01.mp4"
+            },
+            {
+              "resource_id": "RES-20260827-002",
+              "resource_name": "星河与你",
+              "original_material_id": "MAT-000102",
+              "original_material_name": "星河与你_原始素材_02.mp4"
+            }
+          ]
+        }
+      },
+      "ReplicationFailed": {
+        "summary": "失败，逐项附失败语种",
+        "value": {
+          "event_type": "replication_failed",
+          "editor_username": "editor_demo",
+          "items": [
+            {
+              "resource_id": "RES-20260827-001",
+              "resource_name": "暮色心约",
+              "original_material_id": "MAT-000101",
+              "original_material_name": "暮色心约_原始素材_01.mp4",
+              "failed_languages": [
+                "法语",
+                "日语"
+              ]
+            },
+            {
+              "resource_id": "RES-20260827-002",
+              "resource_name": "星河与你",
+              "original_material_id": "MAT-000102",
+              "original_material_name": "星河与你_原始素材_02.mp4",
+              "failed_languages": [
+                "西班牙语",
+                "韩语"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "externalDocs": {
+    "description": "飞书官方 SDK CreateMessageReqBody；2026-08-27 核对 v3.10.0。官方文本请求体 150 KB、同 UUID 1 小时窗口；本接口采用保守的 128 KiB/3300 秒。",
+    "url": "https://pkg.go.dev/github.com/larksuite/oapi-sdk-go/v3/service/im/v1#CreateMessageReqBody"
+  }
+}

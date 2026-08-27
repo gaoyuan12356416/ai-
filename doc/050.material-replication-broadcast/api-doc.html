@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="自动复刻批次飞书播报接口 v1：请求、示例、幂等、大小限制、状态和兜底规则。当前状态待上线。">
+  <title>自动复刻批次飞书播报接口 · 待上线</title>
+  <style>
+:root{color-scheme:light;--ink:#172033;--muted:#647089;--line:#dfe5ee;--soft:#f5f7fb;--brand:#315efb;--brand-soft:#eef2ff;--warn:#8f5700;--shadow:0 18px 50px rgba(23,32,51,.08)}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;background:#f1f4f9;color:var(--ink);font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+main{width:min(1120px,calc(100% - 32px));margin:32px auto 72px;background:#fff;border:1px solid rgba(223,229,238,.9);border-radius:22px;box-shadow:var(--shadow);overflow:hidden}
+header{padding:46px 52px 34px;background:radial-gradient(circle at 92% 8%,rgba(49,94,251,.16),transparent 34%),linear-gradient(135deg,#fff 0%,#f7f9ff 100%);border-bottom:1px solid var(--line)}
+.eyebrow{margin:0 0 14px;color:var(--brand);font-size:12px;font-weight:750;letter-spacing:.12em}h1,h2,h3{line-height:1.35}h1{margin:0 0 13px;font-size:clamp(27px,4vw,40px);letter-spacing:-.025em}h2{margin:42px 0 16px;font-size:23px}h3{margin:28px 0 12px;font-size:18px}p{margin:12px 0}.subtitle{color:var(--muted);font-size:16px;max-width:820px}
+.meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:22px}.pill{display:inline-flex;align-items:center;min-height:30px;padding:4px 11px;border:1px solid #d9e0ff;border-radius:999px;background:var(--brand-soft);color:#274bc8;font-size:13px;font-weight:650}.pill.pending{border-color:#f1d394;background:#fff5df;color:var(--warn)}
+.notice{margin-top:23px;padding:13px 16px;border-left:4px solid #e28a19;border-radius:8px;background:#fff7e9;color:#784500;font-size:14px}.notice strong{font-weight:750}
+nav{padding:22px 52px;background:#fbfcff;border-bottom:1px solid var(--line)}.toc-label{font-size:12px;letter-spacing:.08em;color:var(--muted);margin:0 0 10px}.toc-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 24px}.toc-grid a{font-size:14px;text-decoration:none;padding:3px 0}
+article{padding:4px 52px 50px}article>p:first-child{margin-top:24px}a{color:#2855d8;text-underline-offset:3px}a:hover{color:#12379f}a:focus-visible{outline:3px solid #b8c8ff;outline-offset:4px;border-radius:3px}
+.endpoint{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px;align-items:center;margin:18px 0;padding:16px;border:1px solid #cfdbff;border-radius:14px;background:#f7f9ff}.method{padding:5px 10px;border-radius:8px;background:var(--brand);color:#fff;font-weight:750;letter-spacing:.04em}.endpoint code{padding:0;background:transparent;color:var(--ink);overflow-wrap:anywhere}
+code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}code{padding:2px 5px;border-radius:5px;background:var(--soft);color:#253b80;overflow-wrap:anywhere}pre{position:relative;margin:14px 0 23px;padding:20px;overflow:auto;border:1px solid #26344c;border-radius:14px;background:#172033;color:#edf3ff;font-size:13px;line-height:1.65;white-space:pre;tab-size:2}pre code{padding:0;background:transparent;color:inherit;border-radius:0;overflow-wrap:normal}pre.message{white-space:pre-wrap;overflow-wrap:anywhere}pre[data-language]::before{display:block;content:attr(data-language);margin-bottom:12px;text-transform:uppercase;font-size:10px;letter-spacing:.12em;color:#a6badf}
+.table-wrap{max-width:100%;overflow-x:auto;margin:12px 0 22px;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:separate;border-spacing:0;font-size:14px}th,td{padding:11px 13px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th:last-child,td:last-child{border-right:0}tr:last-child td{border-bottom:0}th{background:var(--soft);font-size:13px;color:#43506a;white-space:nowrap}td:first-child{min-width:110px}td code{font-size:12.5px}strong{font-weight:700}ul{padding-left:23px;margin:15px 0}li{padding:3px 0}footer{padding:23px 52px;border-top:1px solid var(--line);background:var(--soft);color:var(--muted);font-size:13px}
+td:first-child code{white-space:nowrap}
+@media(max-width:720px){main{width:100%;margin:0;border:0;border-radius:0;box-shadow:none}header{padding-top:32px}header,article,nav,footer{padding-left:20px;padding-right:20px}.toc-grid{grid-template-columns:1fr}.endpoint{grid-template-columns:1fr}.method{justify-self:start}h2{font-size:21px}th,td{min-width:130px}pre{padding:16px;font-size:12px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media print{body{background:#fff;font-size:11px}main{width:100%;margin:0;border:0;border-radius:0;box-shadow:none}header,article,nav,footer{padding:18px}nav{display:none}pre{white-space:pre-wrap;overflow-wrap:anywhere;border-color:#c5cedd;background:#f5f7fb;color:#172033;font-size:10px}pre code{color:inherit}h2,h3{break-after:avoid}tr{break-inside:avoid}.table-wrap{overflow:visible}table{font-size:10px}a{color:inherit}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">INTEGRATION / MATERIAL REPLICATION</p>
+    <h1>自动复刻批次飞书播报接口</h1>
+    <p class="subtitle">上游按剪辑师汇总已发起与失败素材，接收方可靠接收后尽快异步通知。独立接口、严格整批校验、可追踪的批次投递。</p>
+    <div class="meta">
+      <span class="pill pending">待上线</span>
+      <span class="pill">API v1</span>
+      <span class="pill">HTTPS + 专属 Bearer Token</span>
+      <span class="pill">OpenAPI 3.0.3</span>
+      <span class="pill">2026-08-27</span>
+    </div>
+    <div class="notice"><strong>202 是可靠接收，不是飞书已送达。</strong> 兜底群送达不等于剪辑师私聊送达；结果不确定时不盲目更换目标补发。本文状态为待上线，示例不能视为生产可调用证明。</div>
+  </header>
+  <nav aria-label="文档目录">
+    <p class="toc-label">接口对接目录</p>
+    <div class="toc-grid"><a href="#section-1">1. 接口与职责</a>
+      <a href="#section-2">2. 请求头与鉴权</a>
+      <a href="#section-3">3. 请求体与校验</a>
+      <a href="#section-4">4. 完整请求示例</a>
+      <a href="#section-5">5. HTTP 202 响应</a>
+      <a href="#section-6">6. 幂等与上游重试</a>
+      <a href="#section-7">7. 错误响应</a>
+      <a href="#section-8">8. 收件人、兜底与未知结果</a>
+      <a href="#section-9">9. 飞书消息示例</a>
+      <a href="#section-10">10. 上线前对接清单</a></div>
+  </nav>
+  <article>
+    <p>本文是待上线合同，不代表地址现已可用或已完成真实飞书送达验收。上游发送已经汇总的自动复刻事件，接收方可靠接收后尽快异步通知对应剪辑师，不创建或重试复刻任务。</p>
+    <p>配套文件：<a href="api-doc.html">独立 HTML</a> · <a href="openapi.json">OpenAPI 3.0.3</a> · <a href="examples/started.json">发起示例</a> · <a href="examples/failed.json">失败示例</a>。本文包含完整字段、请求、响应和投递规则，无需查阅旧接口文档即可对接。</p>
+    <h2 id="section-1">1. 接口与职责</h2>
+    <div class="endpoint"><span class="method">POST</span><code>https://ai.yingliangads.com/api/integrations/v1/material-replication-events</code></div>
+    <div class="table-wrap"><table><thead><tr><th scope="col">事项</th><th scope="col">上游负责</th><th scope="col">接收方负责</th></tr></thead><tbody><tr><td>汇总周期</td><td>已发起每 2 小时、失败每 1 小时汇总；跨批次只推新增</td><td>接收后尽快异步投递，不再增加汇总周期</td></tr><tr><td>批次划分</td><td>每次一个剪辑师、一个事件类型，最多 50 条素材</td><td>整批校验、持久化接收，保持条目和失败语种顺序</td></tr><tr><td>去重</td><td>持久化业务批次/幂等键/原内容；避免跨批次业务重复</td><td>仅对同一幂等键防重复；相同内容换键仍视为新批次</td></tr><tr><td>超限</td><td>适当缩小并拆成新子批次，为各子批次分配新键</td><td>超限拒绝，不截断、不自动拆批</td></tr><tr><td>通知对象</td><td>仅填写剪辑师系统用户名</td><td>精确映射私聊，符合规则才用既有兜底群</td></tr></tbody></table></div>
+    <p>旧 <code>POST /api/integrations/v1/material-task-status-events</code> 保持不变，使用自己的 Token、最终状态合同和重试队列。同一次复刻失败不要再同时调用旧接口，否则会产生业务重复播报。</p>
+    <p>新接口不接收 <code>task_id</code>、产出素材、<code>final_status</code>、手机号、邮箱、<code>open_id</code> 或群 ID；不读取/写入素材复刻业务表，不新增资源 20 分钟提醒，不触发真实复刻或复刻重试。</p>
+    <h2 id="section-2">2. 请求头与鉴权</h2>
+    <div class="table-wrap"><table><thead><tr><th scope="col">请求头</th><th scope="col">必填</th><th scope="col">规则</th></tr></thead><tbody><tr><td><code>Authorization</code></td><td>是</td><td><code>Bearer &lt;本接口专属Token&gt;</code>；Token 至少 32 个无空白 ASCII 字符，与旧接口分开配置，安全渠道单独提供</td></tr><tr><td><code>Content-Type</code></td><td>是</td><td><code>application/json</code>；请求体编码 UTF-8，可附 <code>charset=utf-8</code></td></tr><tr><td><code>Idempotency-Key</code></td><td>是</td><td>8–128 个 ASCII 字符，匹配 <code>^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$</code></td></tr></tbody></table></div>
+    <p>幂等键示例：<code>mrb-start-editor-demo-20260827-1400-001</code>。键在首次发送前应由上游落库；不要每次 HTTP 重试临时生成一个新键。</p>
+    <p>HTTP 客户端须提供唯一、合法的 <code>Content-Length</code>（curl 会自动生成）。不支持分块传输或压缩请求体；JSON 对象内字段名不得重复，不能使用 <code>NaN</code> / <code>Infinity</code> 等非 JSON 数值。</p>
+    <p>全程使用 HTTPS。不要把 Token 放在 URL、请求体、前端页面、截图、日志、群消息或公开代码中。以下 curl 仅引用安全注入的环境变量，不包含真实 Token；上线并完成授权前不要向生产地址执行示例。</p>
+    <h2 id="section-3">3. 请求体与校验</h2>
+    <p>顶层 JSON 对象恰好包含三个必填字段，不允许其他字段。</p>
+    <div class="table-wrap"><table><thead><tr><th scope="col">字段</th><th scope="col">类型</th><th scope="col">必填</th><th scope="col">规则</th></tr></thead><tbody><tr><td><code>event_type</code></td><td>string</td><td>是</td><td>只能为 <code>replication_started</code>（已发起）或 <code>replication_failed</code>（失败）</td></tr><tr><td><code>editor_username</code></td><td>string</td><td>是</td><td>剪辑师的系统用户名，单行可显示文本；去除首尾空白、NFC 规范化后 0–100 个 Unicode 字符；空字符串允许，直接进入兜底群</td></tr><tr><td><code>items</code></td><td>array</td><td>是</td><td>1–50 条素材；同一剪辑师、同一事件类型，顺序保留</td></tr></tbody></table></div>
+    <p>每条 <code>items</code> 对象的字段如下，除 <code>failed_languages</code> 的事件条件外均必须存在。</p>
+    <div class="table-wrap"><table><thead><tr><th scope="col">字段</th><th scope="col">类型</th><th scope="col">长度 / 数量</th><th scope="col">规则</th></tr></thead><tbody><tr><td><code>resource_id</code></td><td>string</td><td>1–128</td><td>资源 ID，非空单行；数字 ID 也必须加引号</td></tr><tr><td><code>resource_name</code></td><td>string</td><td>1–255</td><td>资源名，非空单行</td></tr><tr><td><code>original_material_id</code></td><td>string</td><td>1–128</td><td>原始素材 ID，非空单行</td></tr><tr><td><code>original_material_name</code></td><td>string</td><td>1–255</td><td>原始素材名，非空单行</td></tr><tr><td><code>failed_languages</code></td><td>string[]</td><td>1–32 项，每项 1–100 字符</td><td><strong>失败事件每项必填；已发起事件必须省略</strong>，不是传 <code>[]</code>；元素非空单行，顺序保留</td></tr></tbody></table></div>
+    <p>文本去除首尾空白后做 Unicode NFC 规范化，大小写保持不变。字段长度按规范化后的 Unicode 字符数计算，不按 UTF-8 字节数计算；纯空白的必需文本仍视为空值。不接受多行素材信息、<code>null</code>、数字代替字符串或类型自动转换。</p>
+    <p>所有字符串拒绝控制字符、零宽格式字符、孤立代理码点及 Unicode 行/段分隔符（类别 <code>Cc</code> / <code>Cf</code> / <code>Cs</code> / <code>Zl</code> / <code>Zp</code>）；即使这些字符位于首尾，也不能当作可修剪空白。普通首尾空格可去除。</p>
+    <p>任何缺字段、额外字段、非法事件类型、空数组、超长或不合法条目都会整批拒绝，不部分接收。请求仅允许一个用户名；请用系统中的 <code>admin_users.username</code>，不要猜测显示名或别名。</p>
+    <h3 id="section-3-1">两层大小限制</h3>
+    <div class="table-wrap"><table><thead><tr><th scope="col">限制对象</th><th scope="col">上限</th><th scope="col">超限响应</th></tr></thead><tbody><tr><td>HTTP 原始请求体的 UTF-8 字节数</td><td>32 KiB = 32,768 字节</td><td><code>413 payload_too_large</code></td></tr><tr><td>最终飞书请求 JSON 的 UTF-8 字节数</td><td>128 KiB = 131,072 字节</td><td><code>413 message_too_large</code></td></tr></tbody></table></div>
+    <p>第二层包含所有条目、固定文案、页脚、兜底包装和 JSON 转义开销，不能仅用 <code>items</code> 数量或字符数判断。即使原请求小于 32 KiB，最终消息仍可能超限。接收方不自动拆批或截断；整批拒绝后，上游拆为更小的新批次并为各新子批次分配新键。已经返回 <code>202</code> 的批次不能以“拆批”为由换键重发相同内容。</p>
+    <p>最终消息大小预检针对新批次；已接收批次的同键同内容重提读取原批次状态，不因未来模板文案扩大而重新拒绝，也不重新渲染或发送。</p>
+    <p>128 KiB 是本接口的保守边界，不是飞书官方限制的原文。2026-08-27 核对的飞书官方 SDK v3.10.0 文档将文本消息请求体上限记为 150 KB，并要求内容 JSON 转义；调用本接口仍以 128 KiB 为准。<a href="https://pkg.go.dev/github.com/larksuite/oapi-sdk-go/v3/service/im/v1#CreateMessageReqBody">官方 SDK：CreateMessageReqBody</a></p>
+    <h2 id="section-4">4. 完整请求示例</h2>
+    <p>示例中的资源、素材和 <code>editor_demo</code> 均为演示值；正式调用必须换成真实业务值。</p>
+    <h3 id="section-4-1">4.1 已发起批次</h3>
+    <pre class="sample" data-language="json"><code>{
+  &quot;event_type&quot;: &quot;replication_started&quot;,
+  &quot;editor_username&quot;: &quot;editor_demo&quot;,
+  &quot;items&quot;: [
+    {
+      &quot;resource_id&quot;: &quot;RES-20260827-001&quot;,
+      &quot;resource_name&quot;: &quot;暮色心约&quot;,
+      &quot;original_material_id&quot;: &quot;MAT-000101&quot;,
+      &quot;original_material_name&quot;: &quot;暮色心约_原始素材_01.mp4&quot;
+    },
+    {
+      &quot;resource_id&quot;: &quot;RES-20260827-002&quot;,
+      &quot;resource_name&quot;: &quot;星河与你&quot;,
+      &quot;original_material_id&quot;: &quot;MAT-000102&quot;,
+      &quot;original_material_name&quot;: &quot;星河与你_原始素材_02.mp4&quot;
+    }
+  ]
+}</code></pre>
+    <h3 id="section-4-2">4.2 失败批次</h3>
+    <pre class="sample" data-language="json"><code>{
+  &quot;event_type&quot;: &quot;replication_failed&quot;,
+  &quot;editor_username&quot;: &quot;editor_demo&quot;,
+  &quot;items&quot;: [
+    {
+      &quot;resource_id&quot;: &quot;RES-20260827-001&quot;,
+      &quot;resource_name&quot;: &quot;暮色心约&quot;,
+      &quot;original_material_id&quot;: &quot;MAT-000101&quot;,
+      &quot;original_material_name&quot;: &quot;暮色心约_原始素材_01.mp4&quot;,
+      &quot;failed_languages&quot;: [&quot;法语&quot;, &quot;日语&quot;]
+    },
+    {
+      &quot;resource_id&quot;: &quot;RES-20260827-002&quot;,
+      &quot;resource_name&quot;: &quot;星河与你&quot;,
+      &quot;original_material_id&quot;: &quot;MAT-000102&quot;,
+      &quot;original_material_name&quot;: &quot;星河与你_原始素材_02.mp4&quot;,
+      &quot;failed_languages&quot;: [&quot;西班牙语&quot;, &quot;韩语&quot;]
+    }
+  ]
+}</code></pre>
+    <h3 id="section-4-3">4.3 curl</h3>
+    <p>以下为 Bash 示例。在含 <code>examples</code> 的文档目录执行，<code>MATERIAL_REPLICATION_TOKEN</code> 应由安全环境注入。两个业务批次使用不同的幂等键，重试时复用各自原键与原文件内容。</p>
+    <pre class="sample" data-language="bash"><code>curl --request POST \
+  'https://ai.yingliangads.com/api/integrations/v1/material-replication-events' \
+  --header &quot;Authorization: Bearer ${MATERIAL_REPLICATION_TOKEN}&quot; \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: mrb-start-editor-demo-20260827-1400-001' \
+  --data-binary '@examples/started.json'
+
+curl --request POST \
+  'https://ai.yingliangads.com/api/integrations/v1/material-replication-events' \
+  --header &quot;Authorization: Bearer ${MATERIAL_REPLICATION_TOKEN}&quot; \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: mrb-failed-editor-demo-20260827-1400-001' \
+  --data-binary '@examples/failed.json'</code></pre>
+    <h2 id="section-5">5. HTTP 202 响应</h2>
+    <p>首次可靠落库接收：</p>
+    <pre class="sample" data-language="json"><code>{
+  &quot;code&quot;: &quot;accepted&quot;,
+  &quot;message&quot;: &quot;批次已接收，等待投递&quot;,
+  &quot;batch_id&quot;: &quot;MRB-0000000001&quot;,
+  &quot;duplicate&quot;: false,
+  &quot;item_count&quot;: 2,
+  &quot;delivery_status&quot;: &quot;queued&quot;,
+  &quot;delivery_kind&quot;: &quot;&quot;,
+  &quot;received_at&quot;: &quot;2026-08-27T06:00:00Z&quot;
+}</code></pre>
+    <p>原键原内容重复提交的示例（这次读取时已确认私聊送达）：</p>
+    <pre class="sample" data-language="json"><code>{
+  &quot;code&quot;: &quot;duplicate_accepted&quot;,
+  &quot;message&quot;: &quot;批次已接收&quot;,
+  &quot;batch_id&quot;: &quot;MRB-0000000001&quot;,
+  &quot;duplicate&quot;: true,
+  &quot;item_count&quot;: 2,
+  &quot;delivery_status&quot;: &quot;delivered&quot;,
+  &quot;delivery_kind&quot;: &quot;private&quot;,
+  &quot;received_at&quot;: &quot;2026-08-27T06:00:00Z&quot;
+}</code></pre>
+    <div class="table-wrap"><table><thead><tr><th scope="col">响应字段</th><th scope="col">类型</th><th scope="col">说明</th></tr></thead><tbody><tr><td><code>code</code></td><td>string</td><td>首次为 <code>accepted</code>，同键同内容为 <code>duplicate_accepted</code></td></tr><tr><td><code>message</code></td><td>string</td><td>可读提示；业务判断使用 <code>code</code> 和状态字段，不依赖提示文案</td></tr><tr><td><code>batch_id</code></td><td>string</td><td>服务生成的批次号，例如 <code>MRB-0000000001</code>；重复请求保持原号</td></tr><tr><td><code>duplicate</code></td><td>boolean</td><td>是否命中已存在的同键同内容批次</td></tr><tr><td><code>item_count</code></td><td>integer</td><td>本批素材数，1–50；不是语言数或复刻成功数</td></tr><tr><td><code>delivery_status</code></td><td>string</td><td>当前异步投递状态，见下表</td></tr><tr><td><code>delivery_kind</code></td><td>string</td><td>仅确认送达后为 <code>private</code> 或 <code>fallback</code>；其他状态为空字符串 <code>&quot;&quot;</code>，不是 <code>null</code></td></tr><tr><td><code>received_at</code></td><td>string</td><td>首次接收时间，RFC3339 UTC，以 <code>Z</code> 结尾；重复请求不改变</td></tr></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th scope="col"><code>delivery_status</code></th><th scope="col">含义</th><th scope="col"><code>delivery_kind</code></th></tr></thead><tbody><tr><td><code>queued</code></td><td>已持久化，待处理</td><td><code>&quot;&quot;</code></td></tr><tr><td><code>processing</code></td><td>正在处理</td><td><code>&quot;&quot;</code></td></tr><tr><td><code>retry</code></td><td>等待本功能的有限重试</td><td><code>&quot;&quot;</code></td></tr><tr><td><code>delivered</code></td><td>已确认投递成功</td><td><code>private</code>（私聊）或 <code>fallback</code>（兜底群）</td></tr><tr><td><code>dead_letter</code></td><td>明确不可恢复，已停止自动处理</td><td><code>&quot;&quot;</code></td></tr><tr><td><code>delivery_unknown</code></td><td>无法确认是否送达，已停止盲目重试/兜底</td><td><code>&quot;&quot;</code></td></tr></tbody></table></div>
+    <p><strong>202 不等于飞书已经送达；兜底群送达不等于剪辑师私聊送达。</strong> 重复请求返回原批次的当前状态，不会自动重置 <code>delivered</code>、<code>dead_letter</code> 或 <code>delivery_unknown</code>。本期没有必需的 GET 查询接口；对账可原键原内容重新 POST。</p>
+    <h2 id="section-6">6. 幂等与上游重试</h2>
+    <p>同一键只对应一个业务批次。服务比较规范化后的全部字段，保留 <code>items</code> / <code>failed_languages</code> 顺序；JSON 对象字段顺序无关。相同键的内容或数组顺序改变即 <code>409 idempotency_conflict</code>。</p>
+    <div class="table-wrap"><table><thead><tr><th scope="col">结果</th><th scope="col">上游处理</th></tr></thead><tbody><tr><td>网络超时、连接中断、<code>5xx</code></td><td>保留原键和原内容，按 1、5、30、120 秒间隔重试；不要创建替代批次</td></tr><tr><td><code>202 accepted</code> / <code>202 duplicate_accepted</code></td><td>停止接收重试；如需对账仍用原键原内容读取，不为了“再发一次”换键</td></tr><tr><td>其他 <code>4xx</code></td><td>先按错误修正请求；不盲目重试</td></tr><tr><td><code>409 idempotency_conflict</code></td><td>核对已存原批次与本次内容；不换键绕过冲突或掩盖未知结果</td></tr><tr><td><code>413</code></td><td>被拒绝的批次由上游缩小后拆成真正的新子批次，各用新键</td></tr></tbody></table></div>
+    <p>接收端只防同键重复，不保证相同业务内容跨新键去重。上游应避免跨周期重复，也不要让同一复刻失败同时走新旧接口。外部通信可能出现未知结果，因此本接口不承诺端到端严格 exactly-once。</p>
+    <h2 id="section-7">7. 错误响应</h2>
+    <p>错误体固定为可读的 <code>code</code> / <code>message</code>，不返回凭据、内部地址或异常栈。</p>
+    <pre class="sample" data-language="json"><code>{
+  &quot;code&quot;: &quot;invalid_payload&quot;,
+  &quot;message&quot;: &quot;items[0].failed_languages 必须为非空数组&quot;
+}</code></pre>
+    <div class="table-wrap"><table><thead><tr><th scope="col">HTTP</th><th scope="col"><code>code</code></th><th scope="col">含义</th><th scope="col">处理</th></tr></thead><tbody><tr><td>400</td><td><code>invalid_request</code></td><td>Content-Length 不合法、分块/压缩传输，或请求体接收超时/中断</td><td>修正 HTTP 请求</td></tr><tr><td>400</td><td><code>invalid_json</code></td><td>无法解析有效 UTF-8 JSON、重复对象字段或非 JSON 数值</td><td>修正 JSON 编码与语法</td></tr><tr><td>400</td><td><code>idempotency_key_required</code></td><td>缺少幂等键</td><td>增加请求头</td></tr><tr><td>400</td><td><code>invalid_idempotency_key</code></td><td>幂等键长度或字符不符合规则</td><td>修正为 8–128 字符的规定格式</td></tr><tr><td>401</td><td><code>invalid_token</code></td><td>Token 缺失或不正确</td><td>核对本接口专属 Token，不使用旧 Token</td></tr><tr><td>409</td><td><code>idempotency_conflict</code></td><td>原键已对应不同内容/顺序</td><td>核对原批次，不能盲目换键重发</td></tr><tr><td>413</td><td><code>payload_too_large</code></td><td>原始请求体超过 32 KiB</td><td>上游缩小批次</td></tr><tr><td>413</td><td><code>message_too_large</code></td><td>最终飞书请求 JSON 超过 128 KiB</td><td>上游缩小批次，考虑兜底包装与转义开销</td></tr><tr><td>415</td><td><code>unsupported_media_type</code></td><td>Content-Type 不是 JSON</td><td>使用 <code>application/json</code></td></tr><tr><td>422</td><td><code>invalid_payload</code></td><td>字段/类型/数量/长度或事件专属字段不合法</td><td>整批修正；无部分接收</td></tr><tr><td>503</td><td><code>service_unavailable</code></td><td>配置或可靠存储暂不可用</td><td>原键原内容退避重试，持续失败时联系维护方</td></tr></tbody></table></div>
+    <h2 id="section-8">8. 收件人、兜底与未知结果</h2>
+    <p>映射链仅由服务控制：</p>
+    <pre class="message" data-language="text"><code>editor_username
+  → admin_users.username（大小写敏感、精确匹配）
+  → admin_users.id
+  → admin_user_group.sub_user_id（有效 status=0）
+  → admin_user_group.email（复用既有用户名/邮箱映射缓存）
+  → 按邮箱查询飞书得到 open_id
+  → 首次发送前冻结目标，通知对应剪辑师私聊</code></pre>
+    <p>空 <code>editor_username</code> 允许接收，直接进入既有兜底群。未找到唯一有效映射、缺少有效邮箱/open_id，或收到确定的私聊失败结果时，使用既有兜底群。消息保留原批次正文并补充中文原因，不向调用方公开内部群标识。</p>
+    <p>复用的是用户名/邮箱身份映射缓存，不是 open_id 缓存。每个新批次解析出飞书 open_id 后，在首次发送前冻结目标；已冻结请求的重试不重复选择或更换收件人。</p>
+    <p>发送前将目标、正文和 UUID 持久化冻结。网络超时或连接中断不等于发送失败：如果不能确认飞书是否已经接收，只在最多 3300 秒的安全重试窗口内，对同一冻结目标、正文和 UUID 进行有限重试，最多 5 次投递尝试。仍不能确认或超出窗口则标记 <code>delivery_unknown</code>，不改目标、不换 UUID、不盲目转发兜底群。</p>
+    <p>3300 秒是我方留有余量的重试边界，不是官方 UUID 时限。官方 SDK 对相同 UUID 描述为 1 小时内最多成功发送一条消息；本接口不能据此承诺跨任意时间的 exactly-once。<a href="https://pkg.go.dev/github.com/larksuite/oapi-sdk-go/v3/service/im/v1#CreateMessageReqBody">官方 SDK：Uuid 字段</a></p>
+    <p>已接收的批次若进入兜底、死信或未知状态，不需要上游再创建新键发送一遍；保留批次号供维护方对账。新功能的重试策略与旧接口完全隔离。</p>
+    <h2 id="section-9">9. 飞书消息示例</h2>
+    <h3 id="section-9-1">9.1 已发起</h3>
+    <pre class="message" data-language="text"><code>【自动复刻任务已发起】
+
+以下素材已自动发起复刻任务：
+
+1. 资源ID：RES-20260827-001
+   资源名：暮色心约
+   原始素材ID：MAT-000101
+   原始素材名：暮色心约_原始素材_01.mp4
+
+2. 资源ID：RES-20260827-002
+   资源名：星河与你
+   原始素材ID：MAT-000102
+   原始素材名：星河与你_原始素材_02.mp4
+
+素材语种包含：西班牙语、法语、阿拉伯语、俄语、葡萄牙语、日语、繁体中文、泰语、印度尼西亚语、德语、越南语、意大利语、土耳其语、波兰语、罗马尼亚语、捷克语、韩语。
+
+批次编号：MRB-0000000001</code></pre>
+    <p>“素材语种包含”是固定业务说明，不代表 17 个语种已全部复刻成功，也不是调用方可配置的执行参数。</p>
+    <h3 id="section-9-2">9.2 失败</h3>
+    <pre class="message" data-language="text"><code>【自动复刻失败】
+
+以下素材自动复刻失败：
+
+1. 资源ID：RES-20260827-001
+   资源名：暮色心约
+   原始素材ID：MAT-000101
+   原始素材名：暮色心约_原始素材_01.mp4
+   失败语种：法语、日语
+
+2. 资源ID：RES-20260827-002
+   资源名：星河与你
+   原始素材ID：MAT-000102
+   原始素材名：星河与你_原始素材_02.mp4
+   失败语种：西班牙语、韩语
+
+备注：复刻失败一般是算法失败，重试基本也不会成功。
+
+批次编号：MRB-0000000002</code></pre>
+    <p>失败语种来自每项 <code>failed_languages</code>，用“、”按原顺序连接。固定备注是一般性业务提示，不是本接口对每次失败根因的算法诊断；通知失败也不会生成复刻重试任务。</p>
+    <h2 id="section-10">10. 上线前对接清单</h2>
+    <ul>
+    <li>确认本接口已上线并从安全渠道取得专属 Token；当前文档状态仍为待上线。</li>
+    <li>使用真实系统用户名，不传显示名、邮箱、手机号或 open_id；用户名为空时应明确接受兜底群通知。</li>
+    <li>按剪辑师/事件类型划分批次，失败逐项带失败语种，发起逐项不带该字段。</li>
+    <li>上游持久化键与原内容，按既定周期仅推新增，避免与旧最终状态接口双发。</li>
+    <li>接收重试与业务补发分开：超时/5xx 原键原内容，202 后不换键重复发送。</li>
+    <li>验证双大小上限、所有字段边界和错误分支；只做批准的联调，不自动向生产发送演示消息。</li>
+    <li>以 <code>delivery_status</code> 与 <code>delivery_kind</code> 解释投递结果，保留 <code>batch_id</code> 对账，不把 202 或兜底送达当成私聊送达。</li>
+    </ul>
+  </article>
+  <footer>接口 v1 · 状态：待上线 · 文档日期：2026-08-27<br>本页内嵌完整说明与示例，不依赖 JavaScript、外部字体或在线文档库。真实 Token 通过安全渠道单独提供。</footer>
+</main>
+</body>
+</html>
