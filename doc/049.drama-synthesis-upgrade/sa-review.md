@@ -1,8 +1,10 @@
 # SA 需求评审（2026-08-27 现行）
 
-候选 `c719bebf72be900ec3853858dc53b36b83beffd2` 已独立代码 QA、GitHub push/readback；合并回归 166/166、25 文件语法/Python 3.9 AST PASS，另五项内存 mock 媒体对抗 PASS，不能叠加为更多用例或视作真实媒体验收。当前整体发布仍 HOLD，并非“仅剩外部门禁”：HK dark 的同 job/payload 第二次 POST 实测重复制作，缓存窄修仅本地完成、尚待独立回归和增量发布复验；生产数据库合法管理/迁移/写入权限也未具备。
+HK 独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 已经 GitHub-first 部署，v3 auto/manual 与真实重启后幂等复用验收 PASS，独立 QA 核对报告及 8 PNG 后无新增阻断。此前 c719 的重复 POST 失败为已修复历史，不再作为当前 HK 阻塞。
 
-用户已授权环境完成后继续部署，并仅指定 Shahrul Ikmal 做一次内部 unlisted 视频及一条评论；不授权 public 测试。全部支持操作仅 SSH，禁止腾讯云管理后台。CPU 主应用未切流，仍保留 legacy 18787；现状及后续实证以 [测试报告](test-report.md) 与 [HK 实测记录](hk-gpu-setup-20260827.md) 为准。
+HK 增量六套代码测试共 188 项：首次 187 PASS + 1 项文档文本合同 FAIL（13.567 秒），仅补回文档后复测该失败项 1/1 PASS（0.050 秒）；没有再次整套运行，不能写一次 188 全绿。27 文件语法/Python 3.9 AST PASS，旧 166/focused 22 不叠加。CPU 候选和三表演练仍绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`。
+
+整体正式发布仍 HOLD：生产合法 admin/migrator/writer 权限尚未具备，HK 仍使用 canary COS 前缀。用户已授权环境完成后继续部署，并仅指定 Shahrul Ikmal 做一次内部 unlisted 视频及一条评论；不授权 public 测试。全部支持操作仅 SSH，禁止腾讯云管理后台。CPU 主应用未部署/重启、未切流，仍保留 legacy 18787；现状以 [部署状态页](deployment-status-20260827.md)、[测试报告](test-report.md) 与 [HK 实测记录](hk-gpu-setup-20260827.md) 为准。
 
 ## 架构决策
 
@@ -20,10 +22,11 @@
 - 生产已在现有 `gy.g2flow.com` TLS server 内加入隔离 `/s2l/youtube` location，并建立 app-owned root；未创建域名/DNS/证书，未生成真实短链文件。正式代码切换前仍须校验 writer owner、Nginx 只读与 X 路由不变。
 - 三张统一 YouTube 表的真实 READ ONLY 一致性 snapshot 与 CPU loopback MySQL 5.7.44 恢复/迁移演练已 PASS：视频 244151、评论 53、日志 55105，总计 299309 行，证据绑定 CPU 候选 c719beb。精确目录、SHA 与时效见 [migration.md](migration.md)。这不是 Tencent API 备份或全集群灾备验收。
 - 生产 `ads_aius` 对 `kunlunads_dev` 仍只有 SELECT/SHOW VIEW；没有合法 admin/migrator/writer，生产 DDL/RPC/真实 canary 因权限硬阻塞。须由合法管理员配置一次性 migrator 的逐表 SELECT/INSERT/CREATE/ALTER，迁移后撤销销毁；长期 writer 仅逐表 SELECT/INSERT/UPDATE、从未持有 DDL。禁止 wildcard、DROP/DELETE/GRANT OPTION 等扩权；`127.0.0.1:18837` health 必须新鲜验证精确合同，18836 保留现有 FB 隧道。
-- HK c719beb 已完成真实 auto concat/no-BGM/random 与 COS 三文件下载、5 秒/150 帧/解码检查，但重复 POST 幂等失败，因此不能据此切 CPU 正式流量；完整双模式与修复后的幂等验收仍待主代理完成。
+- HK e1f5 的 v3 auto + manual 共 4 输出、完整下载解码及封面 callback PASS；两个随机输出均 720×1280/High/5 秒/150 帧。fresh 79.44 秒，真实重启 worker+tunnel 后、fixture HTTP 服务未运行时，两 job 重复 POST 均 200，manifest SHA/mtime 不变、workdir 无重建，replay 1.710 秒、Result=success。报告与 8 PNG 的独立只读复核不另算真机执行。
+- HK COS 仍为 `drama-synthesis-canary/20260827`。正式激活须先独立备份配置、切 production prefix 后验收；不得因 dark/canary 测试通过而宣布正式发布，也不得重启/切换现有 X 或 ads 服务。
 - 固定 public 的正式功能合规风险独立保留；一次 unlisted 测试授权和代码 QA 均不代表该风险已接受或正式 live/sync 可以开启。
 - 真正 YouTube 上传/评论当前均为 0；指定一次测试已有授权，但必须先解除上述技术/权限门禁。HK 始终不接收 YouTube/OAuth/数据库发布凭据。
 
 ## 历史边界
 
-2026-08-26 Wave8 `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883` 及后续旧候选的架构复审、当时仅 gy 基础配置已部署的状态均是历史记录。旧“仅剩外部门禁”“真实 canary 尚未授权”结论不再适用；旧测试计数不并入 2026-08-27 的 166 例。
+2026-08-26 Wave8 `85c0b3cda58aeab50765a9ecb09e79a1bbf7e883`、后续旧候选及 2026-08-27 c719 的 166 例属于历史批次，不能叠加到当前 188 项。c719 的媒体幂等失败已在 e1f5 闭环，但 CPU 三表证据不得随之改绑。旧“真实 canary 尚未授权”或“缓存仍待部署复验”不能作为当前结论；当前待补的是合法生产权限/凭据和正式激活门禁。

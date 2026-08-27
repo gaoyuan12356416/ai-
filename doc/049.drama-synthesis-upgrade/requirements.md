@@ -5,7 +5,7 @@
 - CPU `43.166.187.96` 保留页面、任务队列、SQLite、OAuth、YouTube 发布和统一表同步；全部视频制作迁到香港 GPU `43.154.250.89`。
 - 保持现有视觉、侧栏、表单、卡片和表格。输出键精确为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；所有复选框新建时默认不勾选，服务端拒绝零输出。
 - 不改香港 GPU 现有 `ads_video_producer.service`；不静默双写或自动回退旧 GPU。
-- 已在现有 `gy.g2flow.com` 站点内完成隔离静态目录与 Nginx location 基础配置；未部署本候选应用代码、未生成真实短链文件、未执行统一表写入或真实 YouTube 上传/评论。生产代码部署授权也不包含任何真实 YouTube 上传/评论；外部发布必须另行精确授权。
+- 已在现有 `gy.g2flow.com` 站点内完成隔离静态目录与 Nginx location 基础配置；未生成真实 YouTube 短链、未执行生产统一表写入或真实 YouTube 上传/评论。2026-08-27 用户已明确授权补齐环境后继续部署，并指定 Shahrul Ikmal 测试；按附件仅允许单次内部 unlisted 视频与一条评论，不含 public 测试或其他平台发布。所有支持操作仅通过 SSH，禁止腾讯云管理后台。HK 隔离环境与媒体验收已完成，CPU 正式发布仍被目标库合法授权阻塞；精确状态见 [部署记录](deployment-status-20260827.md)。
 
 ## 随机模板与兼容
 
@@ -45,4 +45,4 @@
 - release `/data/drama-synthesis-gpu/releases/<git_sha>`，`current` 原子 symlink；unit `drama-synthesis-gpu-worker.service` 仅监听 `127.0.0.1:8787`。
 - 香港反向隧道把 CPU `127.0.0.1:18788` 映射到 HK 8787；legacy 18787 保留。
 - GPU worker 只暴露 health/catalog/render，校验完整 manifest/每文件 SHA，发布 COS 结果；不持有 YouTube 凭据。
-- 验收覆盖历史兼容、315 recipe、冻结、精确短链/fbclid/原子冲突、宏、OAuth identity、resumable/processing、comment、outbox、unknown、防重、lease fencing、迁移并发和 GPU topology；全部外部调用使用 fake/temp。
+- 离线自动化验收覆盖历史兼容、315 recipe、冻结、精确短链/fbclid/原子冲突、宏、OAuth identity、resumable/processing、comment、outbox、unknown、防重、lease fencing、迁移并发和 GPU topology；这些用例的外部调用使用 fake/temp，不替代真实验收。真实 HK 小样与三表隔离恢复另行取证；指定频道的单次内部 unlisted/评论/三表回读须在合法数据库授权及生产部署门禁通过后执行，不得把代码 QA 当成真实发布成功。

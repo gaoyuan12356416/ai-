@@ -2,7 +2,7 @@
 
 ## 当前结论与授权
 
-最新已 QA、GitHub push/readback 的代码候选为 `c719bebf72be900ec3853858dc53b36b83beffd2`。独立合并回归 166/166 PASS，不代表正式发布放行。HK 已运行该 dark release，auto 真实媒体/COS 下载、时长、帧数与解码通过，但同 job/payload 第二次 POST 幂等断言失败；缓存窄修仅本地完成，独立回归、HK 增量发布与真实复验待完成。CPU 主应用未切流。实时证据以 [测试报告](test-report.md) 和 [HK 实测记录](hk-gpu-setup-20260827.md) 为准。
+HK 已通过 GitHub-first 部署 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，真实 auto/manual 共 4 个产物、完整解码、封面回调、重复 POST 与服务重启重放均 PASS；独立报告及 8 帧复核通过。CPU 应用候选与三表演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能把证据改绑到 HK SHA 或后续 docs-only SHA。CPU 主应用未切流，整体正式发布仍 HOLD。最终快照见 [部署状态](deployment-status-20260827.md)、[测试报告](test-report.md) 和 [HK 实测记录](hk-gpu-setup-20260827.md)。
 
 用户已授权环境完成后继续部署，并指定 Shahrul Ikmal 做一次内部 unlisted 视频及一条评论。所有支持/服务器操作仅通过 SSH；禁止腾讯云管理后台、public 测试、无关平台发布及修改现有 X/ads_video_producer。不新建收费云集群。旧文档“尚未授权 canary”“必须 Tencent API 云备份”的口径已失效。
 
@@ -36,7 +36,7 @@
 ## 分阶段部署步骤
 
 1. HK 精确发布依赖与媒体资产：固定 Python 3.10.20、torch/torchaudio 2.5.1+cu124、完整依赖锁、Demucs 本地四模型；核对 FB v3 manifest 028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f、20 文件/520297533 bytes 及逐文件 SHA。
-2. 在与实际 worker 一致的 systemd 用户、资源限额及 ReadWritePaths 下预检，验证 health/auth/catalog、concat/no-BGM/cover-intro/random、完整双模式、重复 POST 幂等和失败后恢复。仅前一条成功或普通服务用户命令成功不足以切流。当前重复 POST 失败需先关闭缺陷。
+2. 在与实际 worker 一致的 systemd 用户、资源限额及 ReadWritePaths 下预检，验证 health/auth/catalog、concat/no-BGM/cover-intro/random、完整双模式与重复 POST 幂等。e1f5a1d 真实 fresh 与重启 replay 已通过；旧 c719beb 的重复制作缺陷已关闭，旧 v2 失败证据保留，不冒充新版本结果。
 3. 按迁移文档核对真实三表 snapshot/恢复证据。当前已 PASS 的数据为视频 244151、评论 53、日志 55105；候选、manifest、report、evidence SHA 必须逐项匹配，不能手填 PASS、沿用过期证据或伪装成云 API 备份。
 4. 由合法管理员提供最小权限 migrator/writer 后，才执行生产 dry-run→带 evidence/candidate SHA 的 apply→二次 dry-run→撤销 migrator→最终 writer 验证。当前在此权限门禁 HOLD，不能拿 ads_aius 替代。
 5. 检查 writer 路径可遍历、代码可读，并以实际服务身份执行：
@@ -51,7 +51,8 @@ runuser -u drama-youtube -- /usr/bin/python3 \
 
 6. 独立启动 writer，保留鉴权的 GET /health。必须返回 contract=drama-youtube-writer-preflight-v1、固定 schema/writer_identity、writable/schema_verified/indexes_verified=true 和 grant_fingerprint。仅 URL/凭据存在不是健康通过；401、跳转、超时、只读实例或结构/权限漂移均阻断，不允许先刷新 OAuth/上传再发现 writer 不可用。
 7. CPU SQLite 先只读 dry-run，再带新绝对备份路径事务迁移；完成前后 integrity/输出合同检查。Nginx -t、短链 root --check；X 现有路径仍 200，YouTube 未生成数字路径 404、POST 403。
-8. 全部门禁通过后才按已授权范围发布 CPU 主应用、drain 后显式切向 18788，并执行以下单次 canary。正式 public 入口不得因测试而打开。
+8. HK 仍处于 `COS_PREFIX=drama-synthesis-canary/20260827` 的 dark 配置。正式激活前核对队列 idle，备份 `/etc/drama-synthesis-gpu/worker.env` 并记录 SHA，把 `COS_PREFIX` 与 `DRAMA_PUBLIC_BASE_URL` 一致切到现行业务前缀 `drama-materials`（COS domain 保持 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`），以实际服务身份预检，仅重启新增 worker/tunnel，复核 health/auth/catalog 与持久化结果。保留隔离样本及其旧绝对 URL，不移动/重写 canary manifest 或 COS 文件。该生产前缀激活目前尚未执行。
+9. 全部门禁通过后才按已授权范围发布精确 CPU 候选 c719beb、drain 后显式切向 18788，并执行以下单次 canary。正式 public 入口不得因测试而打开；只有指定 canary 的视频处理、评论、三表回读及幂等全部通过，才进行正式 live/sync 放行与最终业务验收。
 
 ## 指定频道内部 canary
 
@@ -88,7 +89,7 @@ python scripts/drama_youtube_canary.py --action run \
 
 ## 回滚与历史边界
 
-- 当前 CPU 尚未切流时，只回退/停止新增 HK release/tunnel，不切动原 18787，不停止旧 X 或 ads 服务。SSH key 回退必须比对原备份与当前文件 SHA，发现并发变化即停止，不覆盖其他 key。
+- 当前 CPU 尚未切流时，安全回滚为停止新增 HK worker/tunnel，不切动原 18787，不停止旧 X 或 ads 服务。HK 切换备份为 `/data/drama-synthesis-gpu/backups/20260827T123135+0800-pre-e1f5a1d`；其中 c719beb 旧缓存不理解版本 2 manifest 合同，不能盲退二进制后自动 claim/replay 新版本已完成 job。须先冻结并审查，保留 manifest/COS，不重制或覆盖。SSH key 回退必须比对原备份与当前文件 SHA，发现并发变化即停止，不覆盖其他 key。
 - 若后续已切流：先关闭 live/sync、停止新 claim并审查 processing/unknown，drain 后按记录切回 legacy 18787，再停新 tunnel；CPU/HK current 分别回退已记录 GitHub SHA。
 - 停统一 writer、回应用 SHA，保留 additive 列/索引、短链、external IDs 和 outbox；禁止反向 DDL、删外部对象、用共享库整库恢复回退无关写入。不得把未知发布任务交给不兼容的旧 worker。
 - 本次表级 snapshot/rehearsal 是限定迁移的数据保护与可恢复性证据，不证明全集群灾备。YouTube 删除、全集群恢复或新增付费云资源均不在此次测试授权内。

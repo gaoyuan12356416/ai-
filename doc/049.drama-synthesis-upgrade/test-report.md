@@ -1,14 +1,18 @@
 # 测试报告
 
+## 当前结论（2026-08-27 12:38，北京时间）
+
+HK 隔离 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 的真实自动/手动合成、封面回调、下载解码、即时重复提交及服务重启后重放均通过；报告与 8 帧经独立只读 QA 复核 PASS。CPU 候选/三表演练仍绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，CPU 正式应用尚未发布/切流。生产数据库合法授权未具备，YouTube 实际上传/评论仍为 0，整体 production release HOLD。见 [部署状态](deployment-status-20260827.md)。
+
 ## HK 缓存增量独立复验（2026-08-27）
 
-在 CPU 候选 c719beb 之后新增的 HK 缓存修复已独立 QA 通过，当前仅允许提交并部署新的 HK 隔离 release；CPU 候选和三表证据仍绑定 c719beb，不转移到新 SHA。真实 v3 fresh/replay 与服务重启重放尚待执行，不据代码回归宣称已完成媒体最终验收。
+在 CPU 候选 c719beb 之后新增的 HK 缓存修复已独立 QA 通过，并由 GitHub 精确 SHA e1f5a1d 部署到 HK 隔离 release。v3 fresh 报告耗时 79.44 秒；实际重启 worker/tunnel 后，replay-only unit 运行 1.710 秒、Result=success。代码回归、主流程 SSH 实测和独立报告/8 帧复核分别取证，不将一种证据冒充另一种。
 
 - 六套合并共 188 项，首次 187 PASS、1 项因迁移文档缺少实际错误字符串失败；补回说明后该项定向复测 PASS。没有重复整套，不称“一次全绿”。此统计包含下文 166 基础用例，不相加。
 - 27 文件语法及 Python 3.9 AST、diff 检查通过；5 个缓存增量冻结代码文件测试前后 SHA 一致。
 - 新版本清单校验失败、HEAD 异常和配方冲突不回退重制；独立发现的缺失 profile P2 已修复，缺失/错误 profile 在 HEAD 之前拒绝。见 BUG-020、BUG-021。
 
-## 2026-08-27 最新结论
+## CPU 候选 c719beb 基线与正式发布边界
 
 代码候选 `c719bebf72be900ec3853858dc53b36b83beffd2` 已完成独立 QA，GitHub push/readback 已由发布主代理确认。代码 QA PASS，整体 production release 仍为 HOLD；不能把代码缺陷修复、隔离环境准备或表级演练等同于正式发布完成。
 
@@ -16,11 +20,13 @@
 
 频道冻结为 app `1479` / local channel `263` / account `255` / YouTube channel `UCHJ1jFaYuW8g5EM7hM5pPpg`；唯一 operation 为 `drama-hk-deploy-unlisted-20260827-shahrul-263`。正式 HTTP/UI 仍固定 public，不能传入 canary 参数绕过正式开关；内部 CLI 的 live/sync 开关均保持 `0`。
 
-### 唯一合并回归统计
+保留附件已确认的上线风险：正式页面固定 public 与附件所引 YouTube 最低功能要求中的隐私选择要求存在合规风险。测试通过不能消除该风险；如平台审核要求整改，应在正式启用前由业务确认三态选择，不能擅自把测试视频改成 public 或将其隐私改成 private 来绕过评论验收。
+
+### c719beb 阶段合并回归统计
 
 | 验证 | 本轮结果 | 证据边界 |
 | --- | --- | --- |
-| 五个 Python suite 一次合并执行 | 166/166 PASS，12.151 秒 | 独立 QA；是本轮唯一 unittest 总数 |
+| 五个 Python suite 一次合并执行 | 166/166 PASS，12.151 秒 | 独立 QA；c719beb 阶段计数，已包含在上文 188 项内，不相加 |
 | 25 文件语法及 Python 3.9 AST | PASS | 语法兼容检查，不替代 CPU/HK 运行验收 |
 | 冻结范围与 diff | 12 个冻结文件测试前后 SHA 一致；`git diff --check` PASS | 文档后续更新不改变已测代码 |
 | 独立媒体对抗 | 另 5 项 PASS | 内存 mock，不叠加到 166，也不算真实 FFmpeg/CUDA/COS 验收 |
@@ -46,8 +52,8 @@ python -B -m unittest scripts.test_drama_synthesis_gpu_runtime scripts.test_dram
 
 | 项目 | 已确认 | 尚未完成 |
 | --- | --- | --- |
-| HK dark 环境 | 最新 `c719bebf…ffd2` 已运行；auto 模式真实 concat/no-BGM/random、3 个 COS 文件下载、5 秒/150 帧及解码通过 | 同 job、同 payload 第二次 POST 重复制作，幂等断言 FAIL；缓存窄修已本地完成，独立合并回归、增量发布及完整双模式/重试实测仍待完成 |
-| Demucs 真实 CUDA 专项 | 专用用户、mdx_extra_q 四模型：1 秒静音输出 44100 帧/peak 0；2 秒反相立体声输出 88200 帧/peak 0.0079345703125，均 finite；非假模型 | 此专项不代替整条媒体路径的幂等与双模式验收 |
+| HK dark 环境 | e1f5a1d 真实 auto/manual 共 4 个产物通过；两随机成片 720×1280 High、5 秒/150 帧、完整解码；封面回调、即时重复 POST、服务重启重放与 manifest SHA/mtime 不变全部 PASS | 当前仍使用隔离 COS 前缀；正式前缀激活和 CPU 切入尚未完成，不等于完整生产发布 |
+| Demucs 真实 CUDA 专项 | 专用用户、mdx_extra_q 四模型：1 秒静音输出 44100 帧/peak 0；2 秒反相立体声输出 88200 帧/peak 0.0079345703125，均 finite；非假模型 | 专项与上行 HTTP 全链路验收分别记录，不重复计数 |
 | CPU 主应用 | 仍保持旧 `18787`，未切流；新 `18788` 为隔离路径 | 主应用发布/切流和业务读回 |
 | 三表数据保护 | SSH 真实一致性 snapshot + CPU 本机隔离 MySQL `5.7.44` 恢复/迁移演练 PASS；299309 行 | 该结果仅证明本次三表范围，不能替代合法生产迁移账号，也不是全集群灾备；详情见 [迁移文档](migration.md) |
 | 生产数据库/RPC | 当前 `ads_aius` 对 `kunlunads_dev` 只有 SELECT/SHOW VIEW | 无合法 admin/migrator/writer，阻塞生产 DDL、健康 RPC 和真正 YouTube 测试；不得复用只读账号绕过 |
@@ -59,15 +65,19 @@ python -B -m unittest scripts.test_drama_synthesis_gpu_runtime scripts.test_dram
 - `rehearsal-result.json` SHA-256：`0178a8b633c6433cffca4be32cdb4b5adfaa47e63bcaafb1398d847455d7d43b`。
 - `backup-evidence.json` SHA-256：`36579d5ed7a2234d821638b3644c4b32ce024354cbdc136aa97b53dbc3fe9dec`。
 
-证据类型是 `table_snapshot_rehearsal`，不是 Tencent API 云备份或 CynosDB 全集群灾备证明。后续主代理将在 [HK 实测记录](hk-gpu-setup-20260827.md) 及本报告追加幂等修复与最终状态。
+证据类型是 `table_snapshot_rehearsal`，不是 Tencent API 云备份或 CynosDB 全集群灾备证明。证据仍绑定 c719beb；后续生产 apply 前重新核对时效和候选，不改绑到 HK e1f5a1d 或 docs-only 提交。
+
+HK 最终报告为 `/data/drama-synthesis-gpu/work/acceptance/http-media-20260827-v3.json`，SHA-256 `40746316694eeb4d34fb4511713acb13b8de14cff382f6116fdd99f1351f2175`；auto/manual job 分别为 `309b8450f03fd01de853cf4fa8b184ed`、`8474911734767ff621d9ddcdd7363565`。重启重放时未运行 fixture HTTP 服务，两 job 均返回 200，manifest SHA/mtime 未变，未重建工作目录。主流程同时验证渲染繁忙 503、health/catalog 可用及封面回调 200。4 个产物 SHA 和服务 PID 见 [HK 实测记录](hk-gpu-setup-20260827.md)。
+
+独立 QA 只读核对该 JSON 的 SHA/配方/产物映射，并查看每个随机视频的 0.5/1.1/3.1/4.8 秒共 8 帧：片头保留、两段顺序正确、末段与模板继续变化，抽样未见冻结。该次没有操作服务器或重跑测试；503 和 1.710 秒仍引用主流程 SSH 证据，不伪称独立真机复测。
 
 ### 缺陷与发布建议
 
-BUG-013/014/016/017 与 canary 两项 P1（BUG-018/019）的代码修复已通过独立复验；BUG-015 已有上述真实静音/反相 CUDA 专项证据。具体环境验收不能因缺陷代码关闭而自动记 PASS，见 [缺陷索引](bugs/README.md)。独立离线 QA 冻结时未发现残留 P0/P1；后续真机新增的重复 POST 幂等失败由主代理维护 BUG-020，不能据旧 QA 宣称当前无集成缺陷。
+BUG-013/014 与 canary 两项 P1（BUG-018/019）的代码修复已通过独立复验；BUG-012/015/016/017/020 的运行环境、模型、滤镜线程、时间轴和缓存问题已由最终 HK 实测闭环，BUG-021 缺失 profile P2 已修复并独立复验。见 [缺陷索引](bugs/README.md)。独立最终代码/证据评审无新增阻断，但尚未执行 CPU 生产/YouTube 集成，不宣称这些未测环节没有缺陷。
 
-缓存增量目前仅完成本地修复与开发者 focused 21/21；不并入上面的 c719beb 独立 166 例，不代表已推送/部署或真机修复通过。独立合并回归、HK 新 SHA 与最终实测由主代理后续追加；CPU 候选和三表演练证据仍绑定 c719beb。
+缓存增量已推送、部署 e1f5a1d 并通过实际双模式及重启幂等验证。独立 188 项首次 187 PASS，1 项迁移文档真实错误字符串补回后定向复测 PASS；27 文件语法/AST 与 diff PASS。实现者 focused 22 例和旧 166 例均包含于该范围，不叠加；CPU 候选和三表演练证据仍绑定 c719beb。
 
-可继续授权范围内的隔离实测；已有三表证据在 apply 前须重新核对 SHA/时效，不能重复覆盖已完成演练目录。不得提前打开正式 live/sync、切 CPU 流量或执行 public 测试。真实 canary 的授权已经具备，当前阻塞是前置环境/权限门禁，不是“用户尚未授权”。
+取得目标库合法管理员或最小权限 migrator/writer 配置后，可继续已授权的生产部署；已有三表证据在 apply 前须重新核对 SHA/时效，不能重复覆盖已完成演练目录。不得提前打开正式 live/sync、切 CPU 流量或执行 public 测试。真实 canary 的用户授权已经具备，当前阻塞是数据库账号权限，不是“用户尚未授权测试”；随后仍须完成正式前缀激活、CPU 运行与真实发布验收。
 
 ## 历史：2026-08-26 Wave8 与线上实查增量
 
