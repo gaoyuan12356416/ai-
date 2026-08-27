@@ -88,3 +88,14 @@
 - 使用实际7月JSON执行未改写的页面内联JavaScript，调用筛选、渲染和 `exportCsv()`，捕获真实Blob并用CSV解析器逐字段对比：全部28行、GG2行，六项指标、安装/AF空值和文件名均通过。此项不以合成示例替代真实月数据。
 - Chrome页面人工操作：GG筛选/PK零行、六项主表与详情、AF全缺失提示通过；390×844设置下CSS视口375px（含滚动条），页面宽375px、表格容器349px、内容2260px，横向scrollLeft达到1250px，无页面横向溢出。GG图片原文件预览成功，naturalWidth=1200。
 - 浏览器驱动未回传CSV下载事件，无法确认该Chrome配置中的原生保存落点；未将点击按钮或脚本Blob验证写成“原生文件保存验收通过”。下载历史页面受工具安全策略限制，未绕过。使用上述实际数据Blob/CSV解析作为安全替代验证，原生保存位置属于剩余浏览器环境核对项。
+
+### 全历史影子验收（正式切换前）
+
+- 修订后回填单元 `opay-google-v2-backfill-acf8b66.service` 成功退出0。影子版本 `20260827T115804942528+0800`，manifest SHA256 `87f2c1ca94d855a48ed3ec9ad30c5792230d144d21a0749e85fece5dc90103b6`。
+- 独立 `validate_v2_upgrade.py` 实际七个月PASS；原186条Meta/TikTok所有原字段、基准、审计均与线上V1一致，独立Decimal核算六项指标通过。
+- 各月总行数：34、26、18、24、34、28、28，共192条；其中GG依次0、0、0、1、2、1、2，共6条月度记录，均为NG OPay且仅B。1—3月未用当前汇率补造NGN金额；缺口以原币披露。
+- 所有7个真实月JSON执行页面原生内联导出函数并逐字段核对CSV通过，含全部/Google两种筛选共14个产物；7月另与冻结V1回归签名核验26条非GG记录PASS。
+- 证据目录：`/mnt/data-disk/opay-excellent-creatives/qa/acceptance-20260827-v2`，含 `seven-month-upgrade.json`、各月frontend日志、14个CSV和7月回归结果。
+- 最终维度刷新修正后本地93/93、独立窄范围5/5通过；Google-only不改历史维度，正常3日/5日刷新共享/独占素材元数据每次各一次。
+- 图片预览外，TikTok素材4759574视频预览加载成功（readyState=4，1080×1920，无media error）。本条为浏览器预览，不代表实际发布到其他平台。
+- 失败保留/回滚在独立影子目录实演：注入latest提交失败时旧manifest逐字节不变；成功发布V2后先恢复V1 manifest、再恢复HTML和current链接，7个月V1均可读且V2文件保留。证据：`qa/rollback-drill-47f3881-9avo5zai/result.json`；未进行线上生产切回演练。

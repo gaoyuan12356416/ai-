@@ -370,18 +370,18 @@ def store_month(report, connection, month, rows, mappings, metadata):
         )
 
 
-def refresh_month(report, connection, month):
+def refresh_month(report, connection, month, *, refresh_dimensions=False, refreshed_material_ids=None):
     report.assert_read_only()
     config = load_app_config(report)
     sources = fetch_month(report, month, config)
     resources = {report.text(row["resource_id"]) for row in sources if report.integer(row["type"]) == 3}
     mappings = fetch_mappings(report, resources)
     ids = {entry["custom_source_id"] for entry in mappings.values() if entry["custom_source_id"]}
-    # Only fetch missing dimensions during a Google-only backfill. Existing
-    # Meta/TikTok material metadata must not be refreshed as a side effect.
+    # Historical Google-only backfills keep existing dimensions frozen. Normal
+    # day-3/day-5 runs refresh Google-only makers/covers too, once per run.
     report.ensure_dimensions(connection, [
         {"platform": 0, "source_id": 0, "resource_id": key} for key in ids
-    ])
+    ], force=refresh_dimensions, refreshed_material_ids=refreshed_material_ids)
     dimensions = report.material_dim_map(connection, ids)
     currencies = fetch_currencies(report, {row["account"] for row in sources})
     fx_rows = fetch_fx_rows(report, month)

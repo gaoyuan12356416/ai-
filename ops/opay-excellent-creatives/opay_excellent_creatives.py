@@ -1115,7 +1115,10 @@ def refresh_month(month: str, cache_db: Path = DEFAULT_CACHE_DB, *, rebuild=Fals
             )
             af_rows = fetch_af_day(day, product_config)
             summaries.append(process_day(connection, day, insight_rows, af_rows))
-        google_summary = google_creatives.refresh_month(google_context(), connection, month)
+        google_summary = google_creatives.refresh_month(
+            google_context(), connection, month,
+            refresh_dimensions=not google_only, refreshed_material_ids=refreshed_material_ids,
+        )
         connection.execute(
             "INSERT OR REPLACE INTO cache_meta(key,value) VALUES(?,?)",
             ("last_refresh_%s" % month, bj_now().isoformat()),

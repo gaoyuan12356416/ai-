@@ -299,6 +299,31 @@ class GoogleMonthTests(unittest.TestCase):
             insights.assert_not_called()
             af.assert_not_called()
 
+    def test_google_metadata_refresh_is_normal_run_only_and_once(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
+            insert_dimension(connection)
+            changed = dict(connection.execute("SELECT * FROM material_dim WHERE custom_source_id=9").fetchone())
+            changed["maker"] = "更新制作者"
+            mappings = google.collapse_mappings([RESOURCE], [mapping()])
+            with mock.patch.object(report, "assert_read_only"), \
+                    mock.patch.object(report, "fetch_ads_source_dims", return_value=[]), \
+                    mock.patch.object(report, "fetch_material_dims", side_effect=lambda ids: [changed] if 9 in ids else []), \
+                    mock.patch.object(google, "load_app_config", return_value=CONFIG), \
+                    mock.patch.object(google, "fetch_month", return_value=[source()]), \
+                    mock.patch.object(google, "fetch_mappings", return_value=mappings), \
+                    mock.patch.object(google, "fetch_currencies", return_value={"1234567890": "USD"}), \
+                    mock.patch.object(google, "fetch_fx_rows", return_value=[]):
+                google.refresh_month(report.google_context(), connection, "2026-07", refresh_dimensions=False)
+                self.assertEqual(connection.execute("SELECT maker FROM material_dim WHERE custom_source_id=9").fetchone()[0], "测试制作者")
+                seen = set()
+                google.refresh_month(report.google_context(), connection, "2026-07", refresh_dimensions=True, refreshed_material_ids=seen)
+                self.assertEqual(connection.execute("SELECT maker FROM material_dim WHERE custom_source_id=9").fetchone()[0], "更新制作者")
+                self.assertIn(9, seen)
+                changed["maker"] = "不应重复读取"
+                google.refresh_month(report.google_context(), connection, "2026-07", refresh_dimensions=True, refreshed_material_ids=seen)
+                self.assertEqual(connection.execute("SELECT maker FROM material_dim WHERE custom_source_id=9").fetchone()[0], "更新制作者")
+
 
 class CacheAndUpgradeTests(unittest.TestCase):
     def test_v1_cannot_be_upgraded_in_place(self):
