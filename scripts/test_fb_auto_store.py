@@ -32,6 +32,68 @@ class StoreTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.now = datetime(2026, 8, 17, 2, 30, tzinfo=timezone.utc); self.store = FBAutoPostStore(Path(self.tmp.name) / "fb.sqlite3", now_fn=lambda: self.now, rng=random.Random(1)); self.actor = ActorScope("u", "测试", False, "248")
         self.template = self.store.create_template(payload(), self.actor, {"app_id": "1479", "product": "Dramawave"})
     def tearDown(self): self.tmp.cleanup()
+
+    def reset_fixture(self):
+        from scripts.fb_auto_post_reset_pending import snapshot
+        template = self.enable()
+        planned = (self.now + timedelta(hours=1)).isoformat(timespec='seconds')
+        due = self.stage_due('auto:reset-fixture', planned_publish_at_utc=planned)
+        class EligiblePages(Pages):
+            def list_pages(self, *_args, **_kwargs): return super().list_pages()[0:1]
+        result = self.store.create_run(template['id'], due['slot_key'], 'auto', self.actor, EligiblePages(), Materials(), planned_publish_at_utc=planned, expected_template_version=template['version'])
+        self.store.complete_due_slot(due['id'], run_id=result['run_id'])
+        task = self.store.claim_prepare_next('prep', 3600)
+        self.store.complete_prepare(task['id'], {'media_url':'https://cdn.example/prepared.mp4','sha256':'a'*64,'size_bytes':10,'duration_seconds':30,'profile':'tt-post-random-overlay-h264-720x1280-v3'})
+        with self.store.connect() as conn: expected = snapshot(conn, [result['run_id']], now=self.now)
+        return expected, task['id']
+
+    def test_reset_future_prepared_run_preserves_identity_and_is_idempotent(self):
+        from scripts.fb_auto_post_reset_pending import reset_pending
+        expected, task_id = self.reset_fixture()
+        result = reset_pending(self.store, expected, 'test-reset-operation')
+        again = reset_pending(self.store, expected, 'test-reset-operation')
+        self.assertTrue(again['idempotent'])
+        self.assertEqual(result['due_ids'], again['due_ids'])
+        with self.store.connect() as conn:
+            old = dict(conn.execute('SELECT * FROM fb_auto_task WHERE id=?', (task_id,)).fetchone())
+            due = dict(conn.execute('SELECT * FROM fb_auto_due_slot WHERE id=?', (result['due_ids'][0],)).fetchone())
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM fb_auto_publish_ledger').fetchone()[0], 0)
+        self.assertEqual(old['status'], 'skipped')
+        for key in ('page_id','material_id','gpu_job_id','prepared_sha256','short_url','attempt_count'):
+            self.assertEqual(old[key], expected[0]['tasks'][0][key])
+        self.assertEqual((due['status'], due['planned_publish_at_utc']), ('pending', expected[0]['run']['planned_publish_at_utc']))
+
+    def test_reset_refuses_attempt_evidence_even_without_graph_id(self):
+        from scripts.fb_auto_post_reset_pending import reset_pending
+        expected, task_id = self.reset_fixture()
+        self.store.record_attempt(task_id, 1, credential_id='c', fb_user_id='u', result_kind='definite_failure')
+        with self.assertRaisesRegex(ValueError, 'publication evidence'):
+            reset_pending(self.store, expected, 'test-reset-operation')
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute('SELECT status FROM fb_auto_task WHERE id=?', (task_id,)).fetchone()[0], 'ready')
+
+    def test_reset_refuses_preview_drift_and_inflight_work(self):
+        from scripts.fb_auto_post_reset_pending import reset_pending
+        expected, task_id = self.reset_fixture()
+        with self.store.connect() as conn: conn.execute('UPDATE fb_auto_task SET material_id=? WHERE id=?', ('changed', task_id))
+        with self.assertRaisesRegex(ValueError, 'preview changed'):
+            reset_pending(self.store, expected, 'test-reset-operation')
+        with self.store.connect() as conn: conn.execute("UPDATE fb_auto_task SET status='preparing' WHERE id=?", (task_id,))
+        with self.assertRaisesRegex(ValueError, 'in-flight'):
+            reset_pending(self.store, expected, 'test-reset-operation')
+
+    def test_reset_refuses_past_slots(self):
+        from scripts.fb_auto_post_reset_pending import reset_pending
+        expected, _ = self.reset_fixture()
+        self.now += timedelta(hours=2)
+        with self.assertRaisesRegex(ValueError, 'only future'):
+            reset_pending(self.store, expected, 'test-reset-operation')
+
+    def test_reset_page_adapter_rechecks_exact_scope(self):
+        from scripts.fb_auto_post_reset_pending import ExactPages
+        adapter = ExactPages(Pages(), ['6'], ['10001'])
+        with self.assertRaisesRegex(ValueError, 'approved replacement scope'):
+            adapter.list_pages(['6'], is_admin=True, owner_user_id='248')
     def enable(self, template=None):
         template = template or self.store.get_template(self.template["id"], self.actor)
         if template["status"] != "enabled":

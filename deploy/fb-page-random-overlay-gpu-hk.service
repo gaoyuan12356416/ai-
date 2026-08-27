@@ -1,0 +1,25 @@
+[Unit]
+Description=FB Page prepare-only random-overlay GPU worker (Hong Kong)
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/var/lib/fb-page-random-overlay
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/fb-page-random-overlay/current
+EnvironmentFile=/etc/fb-page-random-overlay-gpu.env
+ExecStart=/opt/fb-page-random-overlay/venv/bin/python /opt/fb-page-random-overlay/current/scripts/fb_random_overlay_gpu_worker.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=true
+ReadWritePaths=/var/lib/fb-page-random-overlay
+UMask=0077
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

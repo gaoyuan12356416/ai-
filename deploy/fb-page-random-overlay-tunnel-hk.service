@@ -1,0 +1,23 @@
+[Unit]
+Description=Dedicated reverse tunnel for FB Page preparation from Hong Kong GPU
+After=network-online.target fb-page-random-overlay-gpu.service
+Wants=network-online.target
+Requires=fb-page-random-overlay-gpu.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/ssh -i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts -R 127.0.0.1:18836:127.0.0.1:8836 root@43.166.187.96
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/x-post-media-repair-tunnel
+
+[Install]
+WantedBy=multi-user.target
