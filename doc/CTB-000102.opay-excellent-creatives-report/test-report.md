@@ -59,3 +59,25 @@
 ## 发布建议
 
 通过。保持终版冻结和显式 `--rebuild` 约束，按北京时间每月 3 日初版、5 日终版运行。
+
+## V2 验证记录（2026-08-27）
+
+上文为 V1 发布证据，以下单独记录 V2；未完成的全历史、浏览器和正式发布步骤不计为通过。
+
+- 本地后端 53/53，前端行为 36/36；包括 APM 固定四位与 CSV 原始数值一致、null/0/∞、平台USD缺失但CTR完整、平台账户日缺失停B。
+- 服务器 Python 3.9 后端 53/53；只读 MySQL入口63350、`@@read_only=1`。
+- 7月隔离 canary 单元 `opay-google-v2-canary-308d712.service` 成功退出0；28行=原26行+Google NG2行。原线上current和latest未切换。
+- 原事实表逐行一致：platform_daily 1,272；af_daily 299,206；material_daily 373,324；daily_audit 1,272；ads_source_dim 4,137。旧cache保持schema1。
+
+### GG 只读 SQL 抽样
+
+从 `ads_google_resource_mapping` + `ads_source` 独立复核唯一 custom_source，再查询 `ads_google_insights type=3`；分账户日核验历史汇率候选确能复现 `spend/spend_usd`，不以缓存计算函数自证。
+
+| custom_source.id | 资产资源数 | 账户日数 | USD消耗 | 曝光 | 点击 | 平台转化数 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2072578 | 1 | 31 | 16643.90 | 3554565 | 544644 | 19830 |
+| 3393516 | 4 | 106 | 5056.98 | 1397087 | 143438 | 6204 |
+
+两行均仅按B入选；安装、AF D0首交、CPA/APM/CVR/安装首交转化率保持null。平台转化数只在详情出现。
+
+7月NG平台另有账号9969655472的10条Campaign日记录（7月2—11日）缺少可核验历史FX，原币NGN合计13802269.035107，不能使用其他账户或当前汇率补齐。因此平台USD总额/CPA/覆盖率null；完整type0曝光点击仍构成可用CTR基准。

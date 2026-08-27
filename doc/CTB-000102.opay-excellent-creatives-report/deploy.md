@@ -101,3 +101,137 @@ curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://ai.yingliangad
 - `latest.json` 必须最后切换。
 - 最终月份冻结后禁止普通 timer 改写；修复历史数据必须显式 `--rebuild` 并保留差异审计。
 - 缩略图/源文件异常不得阻塞整月；数据库、AF 配置或发布提交失败必须阻塞并保留旧版本。
+
+## V2 发布与回滚计划追加（2026-08-27，未执行）
+
+以上发布SHA、备份、数据版本和首次部署回滚演练均属于V1历史记录，不是当前生产状态核验，也不是V2已发布证据。本节对齐稳定接口，生产命令/回滚仍待验证；本次执行者不commit/push、不连接生产、不运行以下服务器命令。2026-08-27实现方反馈后端51项、前端行为契约34项通过，不等于生产发布或独立最终QA通过。
+
+### V2 不变项与隔离路径
+
+- 无MySQL DDL/DML，仍用入口`101.32.56.53:63350`并独立要求`@@read_only=1`。代理后端`@@port`不是入口端口，不能因此转用63353。
+- V1 Meta/TT事实表不改列；新增独立GG表。必须使用`--clone-cache-from`创建一致性V2副本，不直接升级旧缓存，不裸拷贝仍有WAL的SQLite主文件。
+- 数据范围固定`2026-01`—`2026-07`，在副本上`--google-only --refresh --rebuild`；Meta/TT原事实及既有业务字段不变。GG使用type3 video2/image4严格回连与历史FX，type0仅作平台基准。
+- 公开路径、Nginx、timer/unit定义、现有env、旧AI Game Performance及主API均不改，无需Nginx reload、daemon-reload或主AI服务重启。现有env未设`OPAY_REPORT_CACHE_DB`时，新release自动使用V2默认缓存；只切代码release/静态版本，不复制示例env覆盖生产。
+
+| 对象 | 路径约定 | 保护要求 |
+| --- | --- | --- |
+| GitHub精确release | `/opt/opay-excellent-creatives/releases/<V2_SHA>` | 必须来自已核验的GitHub提交；不直接SCP本地源代码替代 |
+| V1源缓存 | `/mnt/data-disk/opay-excellent-creatives/cache/opay-excellent-creatives.sqlite3` | 上线前根据真实env/current核对；仅作为只读克隆来源，保留可回滚 |
+| 既有数据根 | `/mnt/data-disk/opay-excellent-creatives` | env保持不变；快照以month/stage/version隔离，保留V1版本/媒体 |
+| V2默认缓存 | `/mnt/data-disk/opay-excellent-creatives/cache/opay-excellent-creatives-v2.sqlite3` | 与V1文件分离；clone目标首次必须不存在，重跑不重复clone覆盖 |
+| 影子公开产物 | `/mnt/data-disk/opay-excellent-creatives/staging-public-v2` | 不挂到公网Nginx；验证完整schema2七个月/媒体后才推广 |
+| 正式公开目录 | `/usr/share/nginx/html/reports/opay-excellent-creatives` | 原路由保留；不可变版本文件先准备，latest最后原子替换 |
+| 上线前备份 | `/mnt/data-disk/opay-excellent-creatives/backups/<timestamp>-pre-v2-<sha>` | 记录真实旧release/env/current/清单/HTML/unit/timer状态及哈希，不复用V1首次部署的absent记录 |
+
+### V2 实施顺序与门禁
+
+1. 实现完成后先完成本地自测及独立代码/本地QA；六项公式、null/zero、FX切换/缺失、映射重复、CLI护栏有证据。由有提交权限的负责人执行GitHub-first提交/推送并记录精确SHA，服务器fetch/checkout同一SHA到新release；本次无提交SHA可报告。
+2. 现场只读记录旧`current`解析目标、env、缓存路径/版本、`latest.json`字节与数据版本、各月快照SHA、Nginx和timer/oneshot状态；核实`OPAY_REPORT_CACHE_DB`未设置且数据根与计划一致。若存在显式override则停止自动切换并核对实际路径，不静默改env。验证数据盘、空间、GitHub及63350护栏；旧文档SHA不代替现场回滚点。
+3. 在任何正式切换前生成并校验完整备份。暂停的范围仅为本报表两个timer，记录原enabled/active状态；若refresh@initial/final仍运行，等待其自然完成或退出本次窗口，不强杀在途工作。使用本报表独立锁，锁占用退出75不算回填成功。
+4. 一致性clone到新的V2缓存，验证`quick_check`、源快照/副本Meta/TT事实签名、冻结状态和V1表列结构；然后只在V2副本回填1—7月，不带正式`--publish`。新GG表可写，旧源缓存不得写。
+5. 每月完成记录checkpoint、来源/映射/历史FX版本、原币与USD审计、快照SHA和差异。所有七个月成功后再生成影子发布产物；任一月份失败或不完整都不得将已完成子集替换线上清单。
+6. 独立QA使用实际JSON及`--non-google-only`比较Meta/TT冻结业务签名，检查preserve/upgrade_audit并完成其余月份对账；另核验GG严格链路、`spend_cents>500000`、CTR严格大于、仅B、AF/安装null、六项metrics、CSV/移动端。仅FX缺口不丢完整CTR；若asset-day缺同App/账户/日Campaign基准，则该scope的CTR为null且B暂停，必须另测，不能借别账户/日期基准。
+7. 通过影子门禁后准备正式不可变版本文件、缩略图和兼容schema1的V2 HTML，并在同一目标文件系统内以临时文件/目录原子替换。不能把数据盘到Web目录的跨文件系统移动当成原子操作；应先复制到目标文件系统的临时位置并校验。
+8. 发布窗口内保持互斥，`current`切至V2 release，env/data-root/Nginx/timer定义保持原样；确认新代码默认缓存解析到`cache/opay-excellent-creatives-v2.sqlite3`副本，新HTML能读仍在服务的V1清单。核验全部月份schema2/snapshot SHA/preserve证据后，最后原子替换`latest.json`作为公开提交点，不能clone后未rebuild就直接publish。
+9. 验证新公开清单/七个月JSON/schema2/媒体、桌面/390×844/CSV/控制台、旧系统、只读抽样；任何关键失败按下述原子回滚。只有验证成功才按原状态恢复timer，记录实际发布SHA、data_version、备份点和验证结果。
+
+### V2 候选命令：clone、隔离回填与影子产物
+
+以下是稳定接口的服务器Bash候选命令，仍待独立执行/发布验证；必须先替换已确认的40位GitHub SHA，核对现有env数据根及两种默认缓存名。只在已授权流程运行，不能把`--cache-db`指向V1源库。
+
+```bash
+set -euo pipefail
+opay_v2_sha='<待确认的40位GitHub提交SHA>'
+[[ "$opay_v2_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
+opay_v2_release="/opt/opay-excellent-creatives/releases/$opay_v2_sha"
+opay_v2_script="$opay_v2_release/ops/opay-excellent-creatives/opay_excellent_creatives.py"
+opay_v1_cache=/mnt/data-disk/opay-excellent-creatives/cache/opay-excellent-creatives.sqlite3
+opay_v2_root=/mnt/data-disk/opay-excellent-creatives
+opay_v2_cache="$opay_v2_root/cache/opay-excellent-creatives-v2.sqlite3"
+opay_v2_web="$opay_v2_root/staging-public-v2"
+test -f "$opay_v2_script"
+test -r "$opay_v1_cache"
+test ! -e "$opay_v2_cache"
+python3 "$opay_v2_script" --help
+
+flock -n -E 75 /tmp/opay-excellent-creatives.lock \
+  python3 "$opay_v2_script" \
+  --clone-cache-from "$opay_v1_cache" --check-cache \
+  --cache-db "$opay_v2_cache" --data-root "$opay_v2_root" --output-dir "$opay_v2_web"
+
+flock -n -E 75 /tmp/opay-excellent-creatives.lock \
+  python3 "$opay_v2_script" \
+  --backfill --from-month 2026-01 --to-month 2026-07 --stage final \
+  --google-only --refresh --rebuild \
+  --cache-db "$opay_v2_cache" --data-root "$opay_v2_root" --output-dir "$opay_v2_web"
+
+flock -n -E 75 /tmp/opay-excellent-creatives.lock \
+  python3 "$opay_v2_script" \
+  --backfill --from-month 2026-01 --to-month 2026-07 --stage final --publish \
+  --cache-db "$opay_v2_cache" --data-root "$opay_v2_root" --output-dir "$opay_v2_web"
+```
+
+- 第一条业务命令只clone/检查；第二条刷新并重建被冻结的七个月，不发布；第三条仅把已验证快照发布到非公开影子目录，不带`--google-only`（因为它必须搭配`--refresh`）。整个代码块不写正式公开路径。
+- 一旦clone成功，后续重跑不能再执行clone段或覆盖目标，应核对checkpoint后只运行缺失/待重试月份的`--month YYYY-MM --google-only --refresh --rebuild`，仍显式传V2三个路径。
+- 若CLI或完整性检查失败，保留源库/旧公开版本与失败现场，先核验准确目标再决定如何处理失败的V2产物；不删除V1、不自动覆盖非空V2缓存。
+- FX候选来自同日/账户的`exchange_rate`、`last_exchange_rate`，空/非法候选跳过，其他候选可核验即可；正消耗历史行缺spend_usd仍按缺口，不跳过/补0。无唯一可核验FX的非零金额fail-closed、不套当前汇率；零cost可保留0但不伪称FX已验证。素材`fx_missing_native_spend`与Campaign `platform_fx_missing_native_spend`按币种分开披露，不当USD。
+
+### V2 验证与正式提交命令（计划，未执行）
+
+```bash
+python3 -m py_compile "$opay_v2_script"
+python3 -m unittest discover -s "$opay_v2_release/ops/opay-excellent-creatives" -p 'test_*.py' -v
+python3 "$opay_v2_release/ops/opay-excellent-creatives/validate_frontend_contract.py"
+sqlite3 "$opay_v2_cache" 'PRAGMA quick_check;'
+```
+
+回归脚本现已提供`--non-google-only`。读取影子`latest.json`的真实`data_version`后，用实际月JSON而不是fixture自身验证：
+
+```bash
+opay_shadow_version='<影子latest.json实际data_version>'
+[[ "$opay_shadow_version" =~ ^[0-9]{8}T[0-9]{12,20}[+-][0-9]{4}$ ]] || exit 2
+test -f "$opay_v2_web/data/$opay_shadow_version/2026-07.json"
+python3 "$opay_v2_release/ops/opay-excellent-creatives/validate_regression_snapshot.py" \
+  "$opay_v2_web/data/$opay_shadow_version/2026-07.json" --non-google-only
+```
+
+默认fixture只覆盖2026-07；七个月完整对账须使用新增独立离线验收器。基线目录须为切换前冻结/备份的V1 public，含自身latest及其引用data文件，不可指向已经切V2的线上目录。以下仍为待服务器实际执行命令，不是本地合成fixture自测结果：
+
+```bash
+opay_v1_public='<本次备份清单中已核验的V1 public绝对路径>'
+test -r "$opay_v1_public/latest.json"
+python3 "$opay_v2_release/ops/opay-excellent-creatives/validate_v2_upgrade.py" \
+  --baseline-dir "$opay_v1_public" --candidate-dir "$opay_v2_web"
+```
+
+验收器只读、不连接MySQL；退出0/JSON `status=PASS`才通过，失败退出1，参数错误退出2。须同为2026-01—07七个final月、每月六个benchmark/audit scope；Meta/TT全部原row/benchmark/audit字段仅忽略顶层metrics后完全一致，GG仅B、正整数ID、USD>5000/严格CTR/AF安装null，所有row/benchmark独立公式满足6/8位精度。摘要含逐月渠道数量、FX/映射及两类原币缺口、文件SHA；拒绝NaN/Infinity、重复键、缺scope、混schema和校验中latest改变。
+
+上述检查不能替代源库全部候选链合法一致、历史FX原始证据、媒体/CSV和390×844移动端实测。另核对conversions有限非负小数仅详情、APM页面固定4位而CSV原精度；不改V1 fixture自证通过。正式publish的可见月份不能假设由`--from-month/--to-month`自动过滤，须以七个月验收结果和同一缓存快照清单作硬门禁。
+
+以下正式提交命令只有在备份、七个月影子QA、互斥锁、V2 current/默认缓存解析和原子发布门禁全部满足后才可运行；env仍保持原样：
+
+```bash
+flock -n -E 75 /tmp/opay-excellent-creatives.lock \
+  python3 "$opay_v2_script" \
+  --backfill --from-month 2026-01 --to-month 2026-07 --stage final --publish \
+  --cache-db "$opay_v2_cache" --data-root "$opay_v2_root" \
+  --output-dir /usr/share/nginx/html/reports/opay-excellent-creatives
+```
+
+正式发布不得重新拉取事实或自动重算已验快照；若生成新的`data_version`，以相同snapshot SHA证明仍是验过的数据，再提交清单。`latest.json`提交前任何异常保持旧清单字节/哈希不变；提交后发现异常进入回滚，不宣称“没影响”。
+
+### V2 原子回滚程序（待验证，不执行V1首次下线命令）
+
+1. 保持/暂停本报表两个timer，获取同一发布锁并确认oneshot不在运行；保存失败版本、数据版本、日志及checkpoint，不强杀其他任务。
+2. 从本次`pre-v2`备份清单核对旧`latest.json`、旧HTML、原release/current目标、旧env/缓存根及其SHA；确认旧清单引用的全部版本文件和媒体仍存在。缺少任一回滚对象则停止切换并报告，禁止猜测旧SHA。
+3. 保持已验证兼容schema1的V2 HTML，将备份旧`latest.json`先写入正式公开目录的同文件系统临时文件，校验后原子替换正式`latest.json`。这是数据回滚提交点；不能先放回只认V1语义的旧HTML而继续暴露schema2清单。
+4. 旧清单恢复后，以同目录临时文件原子恢复旧HTML；env保持未变，把`current`通过同目录临时链接原子切回原V1 release。原V1代码默认名为`cache/opay-excellent-creatives.sqlite3`，确认实际解析回该文件而不是`-v2.sqlite3`，不能仅在新代码下省略`--cache-db`冒充回滚。timer在代码/路径/公开版本一致前不得恢复。
+5. V2 release、缓存、不可变data版本、快照、缩略图和审计全部保留，已打开V2页面仍可读取其固定版本；不删除V1/GG表、不倒灌V2缓存到V1、不执行Git强制回退或V1首次部署的移走公开路由操作。
+6. 本流程未改unit/env/Nginx，不需daemon-reload或reload。复核原公开报表200/七个月可读、旧鉴权/API不变、缓存路径与两份数据库完整性正确，再按上线前记录恢复timer运行状态（不改其定义）。
+7. 记录旧/新SHA、回滚清单哈希、开始/结束时间、命令和检查结果。命令级复核、影子实演、生产实演分别注明；本次V2未执行上述回滚，不将V1 timer演练计入V2通过数。
+
+### V2 定时器与交付记录
+
+- 常规定时器及env不变，仍为每月3日初版/5日终版；current切V2后使用新默认`-v2.sqlite3`执行正常全渠道刷新，切回V1代码后恢复旧默认名。不要把`--google-only`、`--clone-cache-from`或`--rebuild`常驻到timer；新月份没有冻结基线，不能用历史修正命令。
+- 发布记录待负责人填写：GitHub SHA、服务器release/current、V1备份路径/哈希、V2缓存及七个月snapshot SHA、正式data_version、Meta/TT对比、FX缺口、独立QA结论、timer恢复状态、回滚验证环境及未执行项。
+- 本次交付七份文档及获准新增的独立验收脚本/测试；本地自动化结果另行报告，不把“命令已列出”“回填已启动”“单月canary成功”或“影子完成”表述为七个月正式发布/最终验收成功。主线程负责提交、服务器运行及发布记录，本执行者不commit/push或部署。

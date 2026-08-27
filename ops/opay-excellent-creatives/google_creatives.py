@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -43,6 +44,26 @@ def whole(value):
     return int(result)
 
 
+def optional_amount(value):
+    """A missing FX candidate is a business gap, not a malformed asset fact."""
+    try:
+        return amount(value)
+    except ValueError:
+        return None
+
+
+def conversion_count(value):
+    result = amount(value)
+    if result < 0:
+        raise ValueError("negative Google conversion count")
+    # Google conversions are double-valued, unlike impressions/clicks. SQLite
+    # also retains fractional values in pre-release INTEGER-affinity caches.
+    numeric = float(result)
+    if not math.isfinite(numeric):
+        raise ValueError("non-finite Google conversion count")
+    return int(result) if result == result.to_integral_value() and result <= 9223372036854775807 else numeric
+
+
 def usd_cents(value):
     return int((value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
@@ -55,7 +76,7 @@ def ensure_schema(connection):
           resource_id TEXT NOT NULL, row_type INTEGER NOT NULL,
           asset_type INTEGER NOT NULL, cost_micros TEXT NOT NULL,
           impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
-          conversions INTEGER NOT NULL, source_id TEXT NOT NULL,
+          conversions REAL NOT NULL, source_id TEXT NOT NULL,
           updated_at TEXT NOT NULL, custom_source_id INTEGER,
           mapping_status TEXT NOT NULL, currency TEXT NOT NULL,
           fx_rate TEXT, fx_status TEXT NOT NULL, usd_amount TEXT,
@@ -129,17 +150,20 @@ def collapse_mappings(resource_ids, mapping_rows):
         rows = grouped[resource]
         targets = {str(row["resource_id"]).strip() for row in rows}
         valid = set()
+        invalid_chain = False
         for row in rows:
             target = str(row["resource_id"]).strip()
             if (target.isascii() and target.isdigit() and int(target) > 0
                     and str(row["source_type"]) == "3"
                     and str(row["source_custom_id"]).strip() == target):
                 valid.add(int(target))
+            else:
+                invalid_chain = True
         if not rows:
             status, custom_id = "unmapped", None
         elif len(targets) != 1 or len(valid) > 1:
             status, custom_id = "ambiguous", None
-        elif len(valid) == 1:
+        elif len(valid) == 1 and not invalid_chain:
             status, custom_id = "exact", next(iter(valid))
         else:
             status, custom_id = "invalid_source", None
@@ -147,7 +171,7 @@ def collapse_mappings(resource_ids, mapping_rows):
             "custom_source_id": custom_id, "mapping_status": status,
             "mapping_rows": len(rows),
             "provenance": sorted({
-                (str(row["source_id"]), str(row["resource_id"]), str(row["source_type"]))
+                (str(row["source_id"]), str(row["resource_id"]), str(row["source_type"]), str(row["source_custom_id"]))
                 for row in rows
             }),
         }
@@ -223,14 +247,18 @@ that reconciles every positive daily report row within one USD cent.
         candidates = None
         positive = 0
         for row in rows:
-            native, dollars = amount(row["spend"]), amount(row["spend_usd"])
-            if native <= 0 or dollars < 0:
+            native, dollars = optional_amount(row["spend"]), optional_amount(row["spend_usd"])
+            if native is not None and native <= 0:
+                continue
+            if native is None or dollars is None or dollars < 0:
+                positive += 1
+                candidates = set()
                 continue
             positive += 1
             matches = set()
             for name in ("exchange_rate", "last_exchange_rate"):
-                rate = amount(row[name])
-                if rate > 0 and abs((native / rate).quantize(CENT, rounding=ROUND_HALF_UP) - dollars) <= CENT:
+                rate = optional_amount(row.get(name))
+                if rate is not None and rate > 0 and abs((native / rate).quantize(CENT, rounding=ROUND_HALF_UP) - dollars) <= CENT:
                     matches.add(rate)
             candidates = matches if candidates is None else candidates & matches
         if not positive:
@@ -297,7 +325,7 @@ def normalize_rows(report, sources, app_config, mappings, dimensions, currencies
             "dt": day, "app": app, "account": account, "resource_id": resource,
             "row_type": row_type, "asset_type": asset_type,
             "cost_micros": str(raw_cost), "impressions": whole(source["impressions"]),
-            "clicks": whole(source["clicks"]), "conversions": whole(source["conversions"]),
+            "clicks": whole(source["clicks"]), "conversions": conversion_count(source["conversions"]),
             "source_id": str(source["id"]), "updated_at": report.text(source["updated_at"]),
             "custom_source_id": custom_id, "mapping_status": mapping_status,
             "currency": currency, "fx_rate": str(rate) if rate else None,
@@ -383,6 +411,7 @@ def month_aggregates(report, connection, month):
         audit.update({"refreshed": bool(refreshed), "fx_missing_rows": 0, "platform_fx_missing_rows": 0,
                       "baseline_missing_account_days": 0,
                       "mapping_status_counts": collections.Counter(), "fx_missing_native_spend": collections.defaultdict(Decimal),
+                      "platform_fx_missing_native_spend": collections.defaultdict(Decimal),
                       "incomplete_material_count": 0, "asset_count": 0, "_exact_usd": Decimal("0"),
                       "_ambiguous_usd": Decimal("0"), "_invalid_usd": Decimal("0"), "_outside_usd": Decimal("0")})
         audits[(1, app)] = audit
@@ -402,6 +431,7 @@ def month_aggregates(report, connection, month):
             total["clicks"] += row["clicks"]
             if usd is None:
                 total["_missing"] += 1
+                audit["platform_fx_missing_native_spend"][row["currency"] or "UNKNOWN"] += amount(row["cost_micros"]) / MICROS
             else:
                 total["_usd"] += usd
             continue
@@ -426,14 +456,14 @@ def month_aggregates(report, connection, month):
         target = materials.setdefault(key, {
             "platform": 1, "app": row["app"], "custom_source_id": row["custom_source_id"],
             "spend_cents": None, "impressions": 0, "clicks": 0, "installs": None,
-            "af_d0_count": None, "platform_conversions": 0, "source_row_count": 0,
+            "af_d0_count": None, "platform_conversions": Decimal("0"), "source_row_count": 0,
             "ad_days": 0, "resource_tags": set(), "first_auto_publish_dt": "",
             "first_delivery_dt": "", "asset_resources": set(), "fx_sources": set(),
             "_usd": Decimal("0"), "_missing": 0,
         })
         target["impressions"] += row["impressions"]
         target["clicks"] += row["clicks"]
-        target["platform_conversions"] += row["conversions"]
+        target["platform_conversions"] += amount(row["conversions"])
         target["source_row_count"] += 1
         target["ad_days"] += 1
         target["asset_resources"].add(row["resource_id"])
@@ -463,13 +493,15 @@ def month_aggregates(report, connection, month):
         audit["invalid_mapping_spend_cents"] = usd_cents(audit.pop("_invalid_usd"))
         audit["out_of_scope_spend_cents"] = usd_cents(audit.pop("_outside_usd"))
         audit["asset_count"] = len(asset_sets[scope])
-        audit["fx_missing_native_spend"] = {
-            currency: float(value.quantize(CENT, rounding=ROUND_HALF_UP))
-            for currency, value in audit["fx_missing_native_spend"].items()
-        }
+        for field in ("fx_missing_native_spend", "platform_fx_missing_native_spend"):
+            audit[field] = {
+                currency: float(value.quantize(CENT, rounding=ROUND_HALF_UP))
+                for currency, value in audit[field].items()
+            }
         total.pop("_usd")
         total.pop("_missing")
     for material in materials.values():
+        material["platform_conversions"] = conversion_count(material["platform_conversions"])
         if not material["_missing"]:
             material["spend_cents"] = usd_cents(material["_usd"])
         else:

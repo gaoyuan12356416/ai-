@@ -1649,8 +1649,12 @@ def build_month_payload(
                 note = "计算成功，入选%d条；按规则B评优，素材级AF和安装留空。" % selected_count
                 if not audit["refreshed"]:
                     note = "Google 素材缓存尚未刷新，未生成估算数据。"
-                if audit["fx_missing_rows"] or audit["platform_fx_missing_rows"]:
+                if audit["fx_missing_rows"]:
                     note += "历史汇率缺失或无法核验：%d条素材日记录，%d个素材月不参与评优；不使用当前汇率。" % (audit["fx_missing_rows"], audit["incomplete_material_count"])
+                if audit["platform_fx_missing_rows"]:
+                    note += "另有%d条Campaign日记录缺少可核验历史汇率，平台USD总消耗、CPA及覆盖率留空。" % audit["platform_fx_missing_rows"]
+                    if total.get("ctr_complete"):
+                        note += "CTR仍按完整曝光/点击计算。"
                 if audit["invalid_row_count"]:
                     note += "素材映射缺口%d条记录。" % audit["invalid_row_count"]
                 if audit["baseline_missing_account_days"]:
@@ -1689,6 +1693,7 @@ def build_month_payload(
                 audits[-1].update({name: audit[name] for name in (
                     "fx_missing_rows", "platform_fx_missing_rows", "incomplete_material_count",
                     "asset_count", "mapping_status_counts", "fx_missing_native_spend",
+                    "platform_fx_missing_native_spend",
                     "baseline_missing_account_days",
                 )})
                 audits[-1]["metric_source"] = "ads_google_insights:type=0"

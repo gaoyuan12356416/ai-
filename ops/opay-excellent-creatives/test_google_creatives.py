@@ -102,6 +102,21 @@ class GoogleMappingTests(unittest.TestCase):
         result = google.collapse_mappings([RESOURCE], [mapping(asset_name=RESOURCE.upper())])
         self.assertEqual(result[RESOURCE]["mapping_status"], "unmapped")
 
+    def test_one_valid_chain_cannot_hide_an_invalid_candidate(self):
+        for invalid in (mapping(source_custom_id="10"), mapping(source_type="6"), mapping(source_type="NULL")):
+            result = google.collapse_mappings([RESOURCE], [mapping(), invalid])[RESOURCE]
+            self.assertEqual(result["mapping_status"], "invalid_source")
+            self.assertIsNone(result["custom_source_id"])
+
+    def test_fractional_platform_conversions_do_not_become_installs(self):
+        rows, _, _ = normalized([source(conversions="123.4567891234")])
+        self.assertEqual(rows[0]["conversions"], 123.4567891234)
+        with self.assertRaisesRegex(ValueError, "negative Google conversion"):
+            normalized([source(conversions="-0.1")])
+        for invalid in ("NaN", "Infinity", "1e1000"):
+            with self.assertRaises(ValueError):
+                normalized([source(conversions=invalid)])
+
     def test_material_scope_type_and_missing_metadata(self):
         for dims, status in (({}, "missing_material"), ({9: {"product": "OperaNews", "material_type": 2}}, "out_of_scope"),
                              ({9: {"product": "Opay", "material_type": 1}}, "type_mismatch")):
@@ -141,6 +156,19 @@ class HistoricalFxTests(unittest.TestCase):
 
     def test_current_historical_column_is_also_a_candidate(self):
         rates = google.resolve_fx({"1234567890": "NGN"}, [rate_row(exchange_rate="1376.62", last_exchange_rate="1371.87")])
+        self.assertEqual(rates[("2026-07-01", "1234567890")][0], Decimal("1376.62"))
+
+    def test_missing_candidate_does_not_hide_a_verified_rate(self):
+        for missing in (None, "NULL", "", "NaN"):
+            rates = google.resolve_fx({"1234567890": "NGN"}, [rate_row(exchange_rate="1376.62", last_exchange_rate=missing)])
+            self.assertEqual(rates[("2026-07-01", "1234567890")][0], Decimal("1376.62"))
+            rates = google.resolve_fx({"1234567890": "NGN"}, [rate_row(exchange_rate=missing, last_exchange_rate=missing)])
+            self.assertIsNone(rates[("2026-07-01", "1234567890")][0])
+
+    def test_unusable_historical_spend_is_an_fx_gap(self):
+        rates = google.resolve_fx({"1234567890": "NGN"}, [rate_row(spend_usd=None)])
+        self.assertEqual(rates[("2026-07-01", "1234567890")][1], "fx_unreconciled")
+        rates = google.resolve_fx({"1234567890": "NGN"}, [rate_row(), rate_row(spend="0", spend_usd=None)])
         self.assertEqual(rates[("2026-07-01", "1234567890")][0], Decimal("1376.62"))
 
     def test_absent_or_unreconciled_fx_stays_unknown(self):
@@ -217,6 +245,17 @@ class GoogleMonthTests(unittest.TestCase):
                 _, _, materials = google.month_aggregates(report.google_context(), connection, "2026-07")
                 self.assertEqual(materials[0]["spend_cents"], 201)
 
+    def test_fractional_conversion_cache_and_sum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
+                insert_dimension(connection)
+                self.populate(connection, [source(conversions="123.4567891234"), source(dt="2026-07-02", conversions="0.1")])
+                _, _, materials = google.month_aggregates(report.google_context(), connection, "2026-07")
+                self.assertEqual(materials[0]["platform_conversions"], 123.5567891234)
+                self.assertIsNone(materials[0]["installs"])
+                self.assertIsNone(materials[0]["af_d0_count"])
+                report.json_bytes({"platform_conversions": materials[0]["platform_conversions"]})
+
     def test_missing_campaign_account_day_disables_rule_b(self):
         with tempfile.TemporaryDirectory() as temp:
             with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
@@ -244,6 +283,10 @@ class GoogleMonthTests(unittest.TestCase):
                 self.assertFalse(payload["rows"][0]["evidence"]["platform_cpa_available"])
                 self.assertIsNone(payload["rows"][0]["evidence"]["platform_cpa"])
                 self.assertIsNone(payload["rows"][0]["evidence"]["cumulative_spend_ratio"])
+                audit = next(a for a in payload["audits"] if a["channel"] == "Google" and a["app"] == "NG OPay")
+                self.assertEqual(audit["platform_fx_missing_rows"], 1)
+                self.assertEqual(audit["platform_fx_missing_native_spend"], {"USD": 100000})
+                self.assertIn("Campaign日记录", audit["message"])
 
     def test_google_only_does_not_fetch_meta_tiktok_or_af(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(report, "assert_read_only"), \

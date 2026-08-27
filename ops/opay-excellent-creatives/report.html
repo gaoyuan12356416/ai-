@@ -17,6 +17,7 @@
     .section{margin-top:20px}.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin:0 2px 10px}.section-head h2{font-size:18px;margin:0}.section-head p{margin:0;color:var(--muted);font-size:12px}.audit-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}.audit{position:relative;background:#fff;border:1px solid var(--line);border-radius:15px;padding:15px 16px;overflow:hidden}.audit:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--brand)}.audit.warn:before{background:var(--gold)}.audit-title{display:flex;justify-content:space-between;font-weight:800}.audit-tag{font-size:11px;color:var(--muted)}.audit-message{font-size:12px;color:#52615c;margin:6px 0 10px;min-height:38px}.audit-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.audit-metrics span{font-size:11px;color:var(--muted)}.audit-metrics b{display:block;font-size:13px;color:var(--ink)}
     .table-card{background:#fff;border:1px solid var(--line);border-radius:19px;overflow:hidden;box-shadow:0 10px 36px rgba(16,34,27,.05)}.table-meta{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 17px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.table-wrap{overflow:auto;max-height:70vh}table{width:100%;border-collapse:separate;border-spacing:0;min-width:1580px}th{position:sticky;top:0;z-index:2;background:#f3f7f5;color:#54645e;font-size:11px;text-align:left;padding:11px 10px;border-bottom:1px solid var(--line);white-space:nowrap}td{padding:11px 10px;border-bottom:1px solid #edf2ef;vertical-align:middle}tbody tr:hover{background:#f8fbf9}.num{text-align:right;font-variant-numeric:tabular-nums}.thumb{width:82px;height:56px;border-radius:9px;border:1px solid var(--line);object-fit:cover;background:#eef3f0;display:block;cursor:pointer}.thumb-empty{display:grid;place-items:center;width:82px;height:56px;border-radius:9px;background:#eef3f0;color:#7b8984;font-size:11px}.material-name{max-width:220px;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.id{font-weight:800;font-variant-numeric:tabular-nums}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;background:#e8f6ef;color:#0a724a;font-size:11px;font-weight:800;white-space:nowrap}.badge.gold{background:#fff4d9;color:#8a5e00}.badge.gray{background:#eef1f0;color:#65716d}.badge.red{background:#fdebea;color:#a83936}.keyword{max-width:210px;white-space:normal}.source-link{color:var(--brand-dark);font-weight:800;text-decoration:none}.source-link.disabled{color:#9aa5a1;pointer-events:none}.detail-btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:8px;padding:6px 9px;cursor:pointer;font-weight:700}.empty{padding:60px 20px;text-align:center;color:var(--muted)}
     dialog{border:0;padding:0;border-radius:20px;box-shadow:0 24px 90px rgba(0,0,0,.28);width:min(920px,92vw);max-height:90vh;color:var(--ink)}dialog::backdrop{background:rgba(4,20,15,.68);backdrop-filter:blur(4px)}.modal-head{display:flex;justify-content:space-between;align-items:center;padding:17px 20px;border-bottom:1px solid var(--line)}.modal-head h3{margin:0;font-size:17px}.close{border:0;background:#edf3f0;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:20px}.modal-body{padding:20px;overflow:auto;max-height:calc(90vh - 70px)}.preview-media{display:block;max-width:100%;max-height:68vh;margin:auto;border-radius:14px;background:#08120e}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.detail-item{background:var(--soft);border-radius:12px;padding:10px 12px}.detail-item span{display:block;color:var(--muted);font-size:11px}.detail-item b{display:block;margin-top:2px}.point-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.loading{position:fixed;inset:0;z-index:90;background:rgba(245,250,247,.82);display:grid;place-items:center;backdrop-filter:blur(7px)}.loading[hidden]{display:none}.loader{width:42px;height:42px;border:4px solid #cde7da;border-top-color:var(--brand);border-radius:50%;animation:spin .9s linear infinite;margin:auto}.loading p{text-align:center;color:#416153;font-weight:700}@keyframes spin{to{transform:rotate(360deg)}}
+    .table-wrap{max-width:100%;overflow-x:auto;overflow-y:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}table{min-width:2260px}.num{white-space:nowrap}.table-meta{flex-wrap:wrap}.kpi-value{min-height:1.55em}.detail-item{min-width:0;overflow-wrap:anywhere}.detail-note{font-size:12px;color:var(--muted)}
     .error{margin:20px 0;padding:16px;border:1px solid #efc0bd;border-radius:14px;background:#fff1f0;color:#8f302d}.footer{margin-top:24px;color:#75827d;text-align:center;font-size:11px}
     @media(max-width:1100px){.filters{grid-template-columns:repeat(3,1fr)}.audit-grid{grid-template-columns:repeat(2,1fr)}.kpis{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.shell{padding:14px 12px 38px}.hero{padding:25px 20px;border-radius:20px}.hero h1{font-size:25px}.toolbar{position:static}.filters{grid-template-columns:1fr 1fr}.actions{grid-column:1/-1}.audit-grid,.kpis,.detail-grid{grid-template-columns:1fr}.notice{display:block}.notice strong{display:block;margin-bottom:4px}}
   </style>
@@ -34,7 +35,7 @@
         <span class="pill" id="versionMeta">版本 —</span>
       </div>
     </section>
-    <div class="notice"><strong>公开链接说明</strong><span>本页无需登录并已设置 noindex；任何获得链接的人仍可查看素材源文件和素材制作者。Google V1 只展示精确数据缺口，不生成分摊或估算素材。</span></div>
+    <div class="notice"><strong>公开链接说明</strong><span>本页无需登录并已设置 noindex；任何获得链接的人仍可查看素材源文件和素材制作者。缺失数据留空，0 表示真实零值；Google 平台转化数仅在详情展示，不替代安装或 AF D0 首交，不做分摊或估算。</span></div>
     <div id="errorBox" class="error" hidden></div>
     <section class="toolbar" aria-label="报表筛选">
       <div class="filters">
@@ -45,13 +46,13 @@
         <div class="field"><label for="keywordFilter">卖点关键词</label><input id="keywordFilter" type="search" placeholder="输入关键词"></div>
         <div class="field"><label for="makerFilter">素材制作者</label><select id="makerFilter"><option value="">全部制作者</option></select></div>
         <div class="field"><label for="ruleFilter">入选规则</label><select id="ruleFilter"><option value="">全部规则</option><option>A</option><option>B</option><option>A+B</option></select></div>
-        <div class="actions"><button class="btn btn-secondary" id="resetBtn">重置</button><button class="btn btn-primary" id="csvBtn">导出当前 CSV</button></div>
+        <div class="actions"><button class="btn btn-secondary" id="resetBtn">重置</button><button class="btn btn-primary" id="csvBtn" title="CSV 按原始精度数值导出，不使用页面舍入值；成本单位 USD，APM 为首交/千曝光，比率为小数（0.01 = 1%）">导出当前 CSV</button></div>
       </div>
     </section>
     <section class="kpis" aria-label="筛选结果概览">
       <div class="kpi"><div class="kpi-label">入选素材</div><div class="kpi-value" id="kpiRows">0</div><div class="kpi-sub">当前筛选结果</div></div>
       <div class="kpi"><div class="kpi-label">素材消耗</div><div class="kpi-value" id="kpiSpend">$0</div><div class="kpi-sub">平台 USD</div></div>
-      <div class="kpi"><div class="kpi-label">AF D0 首交</div><div class="kpi-value" id="kpiD0">0</div><div class="kpi-sub">统一严格 D0</div></div>
+      <div class="kpi"><div class="kpi-label">AF D0 首交</div><div class="kpi-value" id="kpiD0"></div><div class="kpi-sub" id="kpiD0Note">仅统计可用值；缺失不按 0 计入</div></div>
       <div class="kpi"><div class="kpi-label">映射覆盖中位数</div><div class="kpi-value" id="kpiCoverage">0%</div><div class="kpi-sub">六个渠道 / App 审计</div></div>
     </section>
     <section class="section">
@@ -61,10 +62,10 @@
     <section class="section">
       <div class="section-head"><div><h2>优秀素材</h2><p>默认按素材消耗从高到低；无入选时不创建占位行。</p></div></div>
       <div class="table-card">
-        <div class="table-meta"><span id="resultMeta">0 条结果</span><span>点击缩略图预览，点击“证据”查看完整入选口径</span></div>
-        <div class="table-wrap">
+        <div class="table-meta"><span id="resultMeta">0 条结果</span><span>可横向滚动查看全部指标；点击缩略图预览，“证据”查看数据可用性</span></div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="优秀素材宽表，可横向滚动">
           <table>
-            <thead><tr><th>月份</th><th>渠道</th><th>缩略图</th><th>源文件</th><th>素材 ID / 名称</th><th>类型</th><th>宣传 App</th><th class="num">消耗</th><th class="num">曝光</th><th class="num">点击</th><th class="num">安装</th><th class="num">AF D0 首交</th><th>素材制作者</th><th>首次上线</th><th>卖点一级分类</th><th>卖点关键词</th><th>卖点状态</th><th>入选规则</th><th>详情</th></tr></thead>
+            <thead><tr><th>月份</th><th>渠道</th><th>缩略图</th><th>源文件</th><th>素材 ID / 名称</th><th>类型</th><th>宣传 App</th><th class="num">消耗</th><th class="num">曝光</th><th class="num">点击</th><th class="num">安装</th><th class="num">AF D0 首交</th><th class="num">D0首交CPA</th><th class="num">CPM</th><th class="num">APM</th><th class="num">CTR</th><th class="num">CVR</th><th class="num">安装→D0首交转化率</th><th>素材制作者</th><th>首次上线</th><th>卖点一级分类</th><th>卖点关键词</th><th>卖点状态</th><th>入选规则</th><th>详情</th></tr></thead>
             <tbody id="tableBody"></tbody>
           </table>
           <div class="empty" id="emptyState" hidden>当前筛选条件下没有优秀素材；请查看上方渠道审计。</div>
@@ -76,27 +77,135 @@
   <dialog id="modal"><div class="modal-head"><h3 id="modalTitle"></h3><button class="close" id="modalClose" aria-label="关闭">×</button></div><div class="modal-body" id="modalBody"></div></dialog>
   <script>
     "use strict";
-    const $=id=>document.getElementById(id),fmtInt=new Intl.NumberFormat("zh-CN"),fmtMoney=new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:2});
+    const $=id=>document.getElementById(id),fmtInt=new Intl.NumberFormat("zh-CN"),fmtMoney=new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:2}),fmtDecimal=new Intl.NumberFormat("zh-CN",{minimumFractionDigits:4,maximumFractionDigits:4});
     const state={manifest:null,payload:null,rows:[],filtered:[]};
+    const metricColumns=[
+      {key:"d0_cpa",label:"D0首交CPA",kind:"money"},
+      {key:"cpm",label:"CPM",kind:"money"},
+      {key:"apm",label:"APM",kind:"decimal"},
+      {key:"ctr",label:"CTR",kind:"pct"},
+      {key:"cvr",label:"CVR",kind:"pct"},
+      {key:"install_to_d0_rate",label:"安装→D0首交转化率",kind:"pct"}
+    ];
     const escCsv=value=>'"'+String(value??"").replaceAll('"','""')+'"';
-    const pct=value=>(Number(value||0)*100).toFixed(1)+"%";
-    const metric=(value,kind)=>kind==="money"?fmtMoney.format(Number(value||0)):kind==="pct"?pct(value):fmtInt.format(Number(value||0));
+    const has=(object,key)=>Object.prototype.hasOwnProperty.call(object||{},key);
+    const numeric=value=>((typeof value==="number"||(typeof value==="string"&&value.trim()!==""))&&Number.isFinite(Number(value)))?Number(value):null;
+    const pct=(value,digits=1)=>numeric(value)===null?"":(Number(value)*100).toFixed(digits)+"%";
+    const metric=(value,kind)=>numeric(value)===null?"":kind==="money"?fmtMoney.format(Number(value)):kind==="pct"?pct(value,2):kind==="decimal"?fmtDecimal.format(Number(value)):fmtInt.format(Number(value));
+    function quotient(numerator,denominator,factor=1,digits=8){
+      if(numeric(numerator)===null||!(numeric(denominator)>0))return null;
+      const value=numeric(numerator)/numeric(denominator)*factor;
+      return Number.isFinite(value)?Number(value.toFixed(digits)):null;
+    }
+    function rowValue(row,key){
+      const e=row.evidence||{};
+      if(key==="af_d0_first_transactions"&&e.af_status==="missing_asset_attribution")return null;
+      if(key==="installs"&&e.installs_status==="missing_asset_installs")return null;
+      return numeric(row[key]);
+    }
+    function rowMetric(row,key){
+      // A v2 null is authoritative: never replace it with legacy evidence or conversions.
+      if(has(row.metrics,key))return numeric(row.metrics[key]);
+      if(Number(state.payload?.schema_version)>=2||row.metrics)return null;
+      const e=row.evidence||{},d0=rowValue(row,"af_d0_first_transactions"),installs=rowValue(row,"installs");
+      const legacy={
+        d0_cpa:d0===null?null:has(e,"material_cpa")?numeric(e.material_cpa):quotient(row.spend,d0,1,6),
+        cpm:quotient(row.spend,row.impressions,1000,6),
+        apm:quotient(d0,row.impressions,1000),
+        ctr:has(e,"material_ctr")?numeric(e.material_ctr):numeric(row.impressions)===0&&numeric(row.clicks)!==null?0:quotient(row.clicks,row.impressions),
+        cvr:quotient(installs,row.clicks),
+        install_to_d0_rate:quotient(d0,installs)
+      };
+      return legacy[key]??null;
+    }
+    function metricValue(row,column){
+      if(column.key==="d0_cpa"){
+        const d0=rowValue(row,"af_d0_first_transactions");
+        if(d0===null)return null;
+        // Infinity is a display-only string, never a number added to the JSON payload.
+        if(d0===0&&rowValue(row,"spend")!==null)return "∞";
+      }
+      return rowMetric(row,column.key);
+    }
+    function metricText(row,column){const value=metricValue(row,column);return value==="∞"?value:metric(value,column.kind)}
+    function platformCpa(row){
+      const e=row.evidence||{},benchmark=(state.payload?.benchmarks||[]).find(b=>b.channel===row.channel&&b.app===row.app);
+      if(e.platform_cpa_available===false)return null;
+      if(benchmark){
+        if(numeric(benchmark.spend)===null)return null;
+        if(numeric(benchmark.af_d0_first_transactions)===0)return "∞";
+        return numeric(benchmark.cpa);
+      }
+      if(numeric(e.platform_cpa)!==null)return numeric(e.platform_cpa);
+      return (e.platform_cpa_available===true||Number(state.payload?.schema_version||1)<2)&&e.platform_cpa_finite===false?"∞":null;
+    }
+    function availabilityText(row,key,status){
+      const labels={missing_asset_attribution:"缺失素材级 AF 归因",missing_asset_installs:"缺失素材级安装",verified:"已核验",available:"可用",exact:"精确可用"};
+      const available=rowValue(row,key)!==null;
+      return `${available?"可用":"缺失，留空"}${labels[status]?" · "+labels[status]:""}`;
+    }
     function option(select,value,label=value){const o=document.createElement("option");o.value=value;o.textContent=label;select.appendChild(o)}
     function badge(text,kind=""){const span=document.createElement("span");span.className="badge "+kind;span.textContent=text;return span}
     function cell(row,textValue,className=""){const td=document.createElement("td");td.className=className;td.textContent=textValue;row.appendChild(td);return td}
     function unique(values){return [...new Set(values.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),"zh-CN"))}
     async function loadManifest(){const response=await fetch("latest.json",{cache:"no-store"});if(!response.ok)throw new Error(`latest.json HTTP ${response.status}`);state.manifest=await response.json();const select=$("monthFilter");select.replaceChildren();for(const item of [...state.manifest.months].reverse())option(select,item.month,item.month+(item.stage==="final"?" · 终版":" · 初版"));select.value=state.manifest.latest_month;await loadMonth(select.value)}
-    async function loadMonth(month){$("loading").hidden=false;try{const url=`data/${encodeURIComponent(state.manifest.data_version)}/${encodeURIComponent(month)}.json`;const response=await fetch(url,{cache:"force-cache"});if(!response.ok)throw new Error(`${month} 数据 HTTP ${response.status}`);state.payload=await response.json();state.rows=[...(state.payload.rows||[])].sort((a,b)=>b.spend-a.spend||a.custom_source_id-b.custom_source_id);hydrateFilters();renderMeta();applyFilters();renderAudits()}finally{$("loading").hidden=true}}
+    async function loadMonth(month){$("loading").hidden=false;try{const url=`data/${encodeURIComponent(state.manifest.data_version)}/${encodeURIComponent(month)}.json`;const response=await fetch(url,{cache:"force-cache"});if(!response.ok)throw new Error(`${month} 数据 HTTP ${response.status}`);state.payload=await response.json();state.rows=[...(state.payload.rows||[])].sort((a,b)=>{const av=rowValue(a,"spend"),bv=rowValue(b,"spend");return (av===null)-(bv===null)||(av!==null&&bv!==null?bv-av:0)||a.custom_source_id-b.custom_source_id});hydrateFilters();renderMeta();applyFilters();renderAudits()}finally{$("loading").hidden=true}}
     function hydrateFilters(){for(const [id,values] of [["channelFilter",unique(state.rows.map(r=>r.channel))],["appFilter",unique(state.rows.map(r=>r.app))],["typeFilter",unique(state.rows.map(r=>r.material_type))],["makerFilter",unique(state.rows.map(r=>r.maker))]]){const select=$(id),current=select.value;select.replaceChildren();option(select,"",id==="channelFilter"?"全部渠道":id==="appFilter"?"全部 App":id==="typeFilter"?"全部类型":"全部制作者");values.forEach(v=>option(select,v));if(values.includes(current))select.value=current}}
     function renderMeta(){const entry=state.manifest.months.find(x=>x.month===state.payload.month)||{};$("stageMeta").textContent=`${state.payload.month} · ${entry.stage==="final"?"终版":"初版"}`;$("generatedMeta").textContent="生成 "+new Date(state.payload.generated_at).toLocaleString("zh-CN",{hour12:false});$("versionMeta").textContent="版本 "+state.manifest.data_version;document.title=`${state.payload.month} OPay 月度优秀素材`}
     function applyFilters(){const f={channel:$("channelFilter").value,app:$("appFilter").value,type:$("typeFilter").value,keyword:$("keywordFilter").value.trim().toLocaleLowerCase(),maker:$("makerFilter").value,rule:$("ruleFilter").value};state.filtered=state.rows.filter(r=>(!f.channel||r.channel===f.channel)&&(!f.app||r.app===f.app)&&(!f.type||r.material_type===f.type)&&(!f.keyword||String(r.selling_point_keywords||"").toLocaleLowerCase().includes(f.keyword))&&(!f.maker||r.maker===f.maker)&&(!f.rule||r.selection_rule===f.rule));renderTable();renderKpis()}
-    function renderKpis(){const spend=state.filtered.reduce((s,r)=>s+Number(r.spend||0),0),d0=state.filtered.reduce((s,r)=>s+Number(r.af_d0_first_transactions||0),0);const coverages=(state.payload.audits||[]).map(a=>Number(a.mapping_coverage||0)).sort((a,b)=>a-b),middle=coverages.length?(coverages.length%2?coverages[(coverages.length-1)/2]:(coverages[coverages.length/2-1]+coverages[coverages.length/2])/2):0;$("kpiRows").textContent=fmtInt.format(state.filtered.length);$("kpiSpend").textContent=fmtMoney.format(spend);$("kpiD0").textContent=fmtInt.format(d0);$("kpiCoverage").textContent=pct(middle);$("resultMeta").textContent=`${fmtInt.format(state.filtered.length)} 条结果 · 消耗 ${fmtMoney.format(spend)}`}
-    function renderAudits(){const grid=$("auditGrid");grid.replaceChildren();for(const audit of state.payload.audits||[]){const card=document.createElement("article");card.className="audit"+(audit.rule_a_available?"":" warn");const title=document.createElement("div");title.className="audit-title";const name=document.createElement("span");name.textContent=`${audit.channel} · ${audit.app}`;const tag=document.createElement("span");tag.className="audit-tag";tag.textContent=`入选 ${audit.selected_count}`;title.append(name,tag);const message=document.createElement("div");message.className="audit-message";message.textContent=audit.message;const metrics=document.createElement("div");metrics.className="audit-metrics";for(const [label,value] of [["平台消耗",fmtMoney.format(audit.platform_spend||0)],["映射覆盖",pct(audit.mapping_coverage)],["缺口",fmtMoney.format(audit.mapping_gap_spend||0)]]){const box=document.createElement("span");box.textContent=label;const b=document.createElement("b");b.textContent=value;box.appendChild(b);metrics.appendChild(box)}card.append(title,message,metrics);grid.appendChild(card)}}
-    function renderTable(){const body=$("tableBody");body.replaceChildren();$("emptyState").hidden=state.filtered.length>0;for(const r of state.filtered){const tr=document.createElement("tr");cell(tr,r.month);cell(tr,r.channel);const thumbTd=document.createElement("td");if(r.thumbnail_status==="available"&&r.thumbnail_url){const img=document.createElement("img");img.className="thumb";img.loading="lazy";img.alt=`素材 ${r.custom_source_id}`;img.src=r.thumbnail_url;img.addEventListener("click",()=>openPreview(r));thumbTd.appendChild(img)}else{const empty=document.createElement("div");empty.className="thumb-empty";empty.textContent="缩略图异常";thumbTd.appendChild(empty)}tr.appendChild(thumbTd);const sourceTd=document.createElement("td");const a=document.createElement("a");a.className="source-link"+(r.source_status==="available"?"":" disabled");a.textContent=r.source_status==="available"?"打开源文件":"源文件异常";a.href=r.source_url||"#";a.target="_blank";a.rel="noopener noreferrer";sourceTd.appendChild(a);tr.appendChild(sourceTd);const idTd=document.createElement("td");const id=document.createElement("div");id.className="id";id.textContent=r.custom_source_id;const name=document.createElement("div");name.className="material-name";name.title=r.material_name||"";name.textContent=r.material_name||"—";idTd.append(id,name);tr.appendChild(idTd);cell(tr,r.material_type);cell(tr,r.app);cell(tr,fmtMoney.format(r.spend||0),"num");cell(tr,fmtInt.format(r.impressions||0),"num");cell(tr,fmtInt.format(r.clicks||0),"num");cell(tr,fmtInt.format(r.installs||0),"num");cell(tr,fmtInt.format(r.af_d0_first_transactions||0),"num");cell(tr,r.maker||"未登记");const launch=cell(tr,r.first_launch_date||"—");launch.title=r.first_launch_source==="platform_success"?"平台成功发布时间":"最早实际投放日期";cell(tr,r.selling_point_level1||"未分类");cell(tr,r.selling_point_keywords||"待补关键词","keyword");const statusTd=document.createElement("td");statusTd.appendChild(badge(r.selling_point_status_label||"待补关键词",r.selling_point_status==="unavailable"?"red":r.selling_point_status==="pending"?"gray":r.selling_point_status==="mixed"?"gold":""));tr.appendChild(statusTd);const ruleTd=document.createElement("td");ruleTd.appendChild(badge(r.selection_rule,"gold"));tr.appendChild(ruleTd);const detailTd=document.createElement("td");const btn=document.createElement("button");btn.className="detail-btn";btn.textContent="证据";btn.addEventListener("click",()=>openDetail(r));detailTd.appendChild(btn);tr.appendChild(detailTd);body.appendChild(tr)}}
+    function renderKpis(){
+      const count=state.filtered.length,spends=state.filtered.map(r=>rowValue(r,"spend")).filter(v=>v!==null),d0Values=state.filtered.map(r=>rowValue(r,"af_d0_first_transactions")).filter(v=>v!==null);
+      const spend=spends.length?spends.reduce((s,v)=>s+v,0):count?null:0,d0=d0Values.length?d0Values.reduce((s,v)=>s+v,0):null;
+      const coverages=(state.payload.audits||[]).map(a=>numeric(a.mapping_coverage)).filter(v=>v!==null).sort((a,b)=>a-b),middle=coverages.length?(coverages.length%2?coverages[(coverages.length-1)/2]:(coverages[coverages.length/2-1]+coverages[coverages.length/2])/2):null;
+      $("kpiRows").textContent=fmtInt.format(count);$("kpiSpend").textContent=metric(spend,"money");$("kpiD0").textContent=metric(d0);$("kpiCoverage").textContent=pct(middle);
+      $("kpiD0Note").textContent=!count?"当前筛选无素材，AF 数据留空":!d0Values.length?`AF 数据全部缺失（0/${count} 条可用），不按 0 计入`:`仅统计可用值（${d0Values.length}/${count} 条）${d0Values.length<count?`，${count-d0Values.length} 条缺失未计入`:" · 统一严格 D0"}`;
+      $("resultMeta").textContent=`${fmtInt.format(count)} 条结果 · ${spend===null?"消耗数据缺失":"消耗 "+metric(spend,"money")}`;
+    }
+    function renderAudits(){const grid=$("auditGrid");grid.replaceChildren();for(const audit of state.payload.audits||[]){const card=document.createElement("article");card.className="audit"+(audit.rule_a_available?"":" warn");const title=document.createElement("div");title.className="audit-title";const name=document.createElement("span");name.textContent=`${audit.channel} · ${audit.app}`;const tag=document.createElement("span");tag.className="audit-tag";tag.textContent=`入选 ${audit.selected_count}`;title.append(name,tag);const message=document.createElement("div");message.className="audit-message";message.textContent=audit.message;const metrics=document.createElement("div");metrics.className="audit-metrics";for(const [label,value] of [["平台消耗",metric(audit.platform_spend,"money")],["映射覆盖",pct(audit.mapping_coverage)],["缺口",metric(audit.mapping_gap_spend,"money")]]){const box=document.createElement("span");box.textContent=label;const b=document.createElement("b");b.textContent=value;box.appendChild(b);metrics.appendChild(box)}card.append(title,message,metrics);grid.appendChild(card)}}
+    function renderTable(){
+      const body=$("tableBody");body.replaceChildren();$("emptyState").hidden=state.filtered.length>0;
+      for(const r of state.filtered){
+        const tr=document.createElement("tr");cell(tr,r.month);cell(tr,r.channel);const thumbTd=document.createElement("td");
+        if(r.thumbnail_status==="available"&&r.thumbnail_url){const img=document.createElement("img");img.className="thumb";img.loading="lazy";img.alt=`素材 ${r.custom_source_id}`;img.src=r.thumbnail_url;img.addEventListener("click",()=>openPreview(r));thumbTd.appendChild(img)}else{const empty=document.createElement("div");empty.className="thumb-empty";empty.textContent="缩略图异常";thumbTd.appendChild(empty)}tr.appendChild(thumbTd);
+        const sourceTd=document.createElement("td"),a=document.createElement("a");a.className="source-link"+(r.source_status==="available"?"":" disabled");a.textContent=r.source_status==="available"?"打开源文件":"源文件异常";a.href=r.source_url||"#";a.target="_blank";a.rel="noopener noreferrer";sourceTd.appendChild(a);tr.appendChild(sourceTd);
+        const idTd=document.createElement("td"),id=document.createElement("div"),name=document.createElement("div");id.className="id";id.textContent=r.custom_source_id;name.className="material-name";name.title=r.material_name||"";name.textContent=r.material_name||"—";idTd.append(id,name);tr.appendChild(idTd);
+        cell(tr,r.material_type);cell(tr,r.app);
+        for(const key of ["spend","impressions","clicks","installs","af_d0_first_transactions"])cell(tr,metric(rowValue(r,key),key==="spend"?"money":"int"),"num");
+        for(const column of metricColumns)cell(tr,metricText(r,column),"num");
+        cell(tr,r.maker||"未登记");const launch=cell(tr,r.first_launch_date||"—");launch.title=r.first_launch_source==="platform_success"?"平台成功发布时间":"最早实际投放日期";cell(tr,r.selling_point_level1||"未分类");cell(tr,r.selling_point_keywords||"待补关键词","keyword");
+        const statusTd=document.createElement("td");statusTd.appendChild(badge(r.selling_point_status_label||"待补关键词",r.selling_point_status==="unavailable"?"red":r.selling_point_status==="pending"?"gray":r.selling_point_status==="mixed"?"gold":""));tr.appendChild(statusTd);
+        const ruleTd=document.createElement("td");ruleTd.appendChild(badge(r.selection_rule,"gold"));tr.appendChild(ruleTd);
+        const detailTd=document.createElement("td"),btn=document.createElement("button");btn.className="detail-btn";btn.textContent="证据";btn.addEventListener("click",()=>openDetail(r));detailTd.appendChild(btn);tr.appendChild(detailTd);body.appendChild(tr);
+      }
+    }
     function openDialog(title,content){$("modalTitle").textContent=title;const body=$("modalBody");body.replaceChildren();body.appendChild(content);$("modal").showModal()}
     function openPreview(r){const wrap=document.createElement("div");if(!r.source_url||r.source_status!=="available"){wrap.textContent="源文件当前不可用。"}else if(r.material_type==="VID"){const video=document.createElement("video");video.className="preview-media";video.controls=true;video.preload="metadata";video.src=r.source_url;wrap.appendChild(video)}else{const img=document.createElement("img");img.className="preview-media";img.alt=r.material_name||String(r.custom_source_id);img.src=r.source_url;wrap.appendChild(img)}openDialog(`素材预览 · ${r.custom_source_id}`,wrap)}
-    function openDetail(r){const wrap=document.createElement("div"),e=r.evidence||{};const grid=document.createElement("div");grid.className="detail-grid";const items=[["素材 CTR",pct(e.material_ctr)],["平台 CTR",pct(e.platform_ctr)],["素材 CPA",e.material_cpa_finite?fmtMoney.format(e.material_cpa):"∞"],["平台 CPA",e.platform_cpa_finite?fmtMoney.format(e.platform_cpa):"∞"],["消耗排名",e.spend_rank?`第 ${e.spend_rank} 组`:"—"],["累计消耗占比",pct(e.cumulative_spend_ratio)],["精确映射覆盖",pct(e.exact_mapping_spend_coverage)],["规则 A",e.rule_a_available?(e.rule_a_pass?"通过":"未通过"):"暂停"],["规则 B",e.rule_b_pass?"通过":"未通过"],["上线时间来源",r.first_launch_source==="platform_success"?"平台成功发布时间":"最早实际投放"],["素材映射",e.mapping_status||"—"],["素材数据行",fmtInt.format(e.source_row_count||0)]];for(const [label,value] of items){const item=document.createElement("div");item.className="detail-item";const s=document.createElement("span");s.textContent=label;const b=document.createElement("b");b.textContent=value;item.append(s,b);grid.appendChild(item)}wrap.appendChild(grid);const heading=document.createElement("h4");heading.textContent="卖点匹配";heading.style.margin="18px 0 6px";wrap.appendChild(heading);const points=document.createElement("div");points.className="point-list";if((r.selling_points||[]).length){for(const p of r.selling_points)points.appendChild(badge(`${p.level1} · ${p.keyword}`,p.status==="unavailable"?"red":""))}else points.appendChild(badge("待补关键词","gray"));wrap.appendChild(points);openDialog(`入选证据 · ${r.custom_source_id}`,wrap)}
-    function exportCsv(){const headers=["月份","渠道","素材缩略图","素材源文件","素材ID","素材名称","素材类型","宣传App","消耗USD","曝光","点击","安装","AF D0首交数","素材制作者","首次上线时间","上线时间来源","卖点一级分类","卖点关键词","卖点状态","入选规则","素材CTR","素材CPA","平台CTR","平台CPA","消耗排名","累计消耗占比","映射覆盖率"];const rows=state.filtered.map(r=>{const e=r.evidence||{};return [r.month,r.channel,r.thumbnail_url,r.source_url,r.custom_source_id,r.material_name,r.material_type,r.app,r.spend,r.impressions,r.clicks,r.installs,r.af_d0_first_transactions,r.maker,r.first_launch_date,r.first_launch_source,r.selling_point_level1,r.selling_point_keywords,r.selling_point_status_label,r.selection_rule,e.material_ctr,e.material_cpa_finite?e.material_cpa:"Infinity",e.platform_ctr,e.platform_cpa_finite?e.platform_cpa:"Infinity",e.spend_rank,e.cumulative_spend_ratio,e.exact_mapping_spend_coverage]});const csv="\uFEFF"+[headers,...rows].map(row=>row.map(escCsv).join(",")).join("\r\n");const url=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"})),a=document.createElement("a");a.href=url;a.download=`opay-excellent-creatives-${state.payload.month}.csv`;a.click();URL.revokeObjectURL(url)}
+    function detailGrid(wrap,items){const grid=document.createElement("div");grid.className="detail-grid";for(const [label,value] of items){const item=document.createElement("div"),s=document.createElement("span"),b=document.createElement("b");item.className="detail-item";s.textContent=label;b.textContent=value??"";item.append(s,b);grid.appendChild(item)}wrap.appendChild(grid)}
+    function detailHeading(wrap,text){const heading=document.createElement("h4");heading.textContent=text;heading.style.margin="18px 0 6px";wrap.appendChild(heading)}
+    function openDetail(r){
+      const wrap=document.createElement("div"),e=r.evidence||{},cpa=platformCpa(r);
+      const items=[...metricColumns.map(column=>[column.label,metricText(r,column)]),["安装",metric(rowValue(r,"installs"))],["AF D0 首交",metric(rowValue(r,"af_d0_first_transactions"))],["平台 CTR",pct(e.platform_ctr,2)],["平台 D0首交CPA",cpa==="∞"?cpa:metric(cpa,"money")],["消耗排名",e.spend_rank?`第 ${e.spend_rank} 组`:"—"],["累计消耗占比",pct(e.cumulative_spend_ratio)],["精确映射覆盖",pct(e.exact_mapping_spend_coverage)],["规则 A",e.rule_a_available?(e.rule_a_pass?"通过":"未通过"):"暂停"],["规则 B",e.rule_b_pass?"通过":"未通过"],["上线时间来源",r.first_launch_source==="platform_success"?"平台成功发布时间":"最早实际投放"],["素材映射",e.mapping_status==="exact"?"精确映射":e.mapping_status||"—"],["素材数据行",metric(e.source_row_count)]];
+      const google=r.channel==="Google"||r.channel==="GG";
+      if(google)items.push(["Google 平台转化数",numeric(r.platform_conversions)===null?"":String(r.platform_conversions)]);
+      detailGrid(wrap,items);
+      if(google){const note=document.createElement("p");note.className="detail-note";note.textContent="Google 平台转化数（conversions）不等同于安装或 AF D0 首交，不参与 AF 汇总，也不用于补齐缺失指标。";wrap.appendChild(note)}
+      detailHeading(wrap,"数据可用性");
+      const availability=[["AF D0 首交",availabilityText(r,"af_d0_first_transactions",e.af_status)],["安装",availabilityText(r,"installs",e.installs_status)],["USD 消耗",availabilityText(r,"spend",e.usd_status)]];
+      if(typeof e.platform_cpa_available==="boolean")availability.push(["平台 CPA 基准",e.platform_cpa_available?"可用":"缺失，平台 USD 基准不完整，CPA 留空"]);
+      detailGrid(wrap,availability);
+      if(google&&e.metric_source){const note=document.createElement("p");note.className="detail-note";note.textContent="平台指标来源："+e.metric_source;wrap.appendChild(note)}
+      if(e.data_quality){const note=document.createElement("p");note.className="detail-note";note.textContent=e.data_quality;wrap.appendChild(note)}
+      detailHeading(wrap,"卖点匹配");const points=document.createElement("div");points.className="point-list";
+      if((r.selling_points||[]).length){for(const p of r.selling_points)points.appendChild(badge(`${p.level1} · ${p.keyword}`,p.status==="unavailable"?"red":""))}else points.appendChild(badge("待补关键词","gray"));wrap.appendChild(points);openDialog(`入选证据 · ${r.custom_source_id}`,wrap);
+    }
+    function csvData(){
+      // Export raw numeric precision (ratios stay fractions); UI rounding is display-only.
+      const headers=["月份","渠道","素材缩略图","素材源文件","素材ID","素材名称","素材类型","宣传App","消耗USD","曝光","点击","安装","AF D0首交数",...metricColumns.map(column=>column.label),"素材制作者","首次上线时间","上线时间来源","卖点一级分类","卖点关键词","卖点状态","入选规则","平台CTR","平台CPA","消耗排名","累计消耗占比","映射覆盖率"];
+      const rows=state.filtered.map(r=>{const e=r.evidence||{};return [r.month,r.channel,r.thumbnail_url,r.source_url,r.custom_source_id,r.material_name,r.material_type,r.app,...["spend","impressions","clicks","installs","af_d0_first_transactions"].map(key=>rowValue(r,key)),...metricColumns.map(column=>metricValue(r,column)),r.maker,r.first_launch_date,r.first_launch_source,r.selling_point_level1,r.selling_point_keywords,r.selling_point_status_label,r.selection_rule,numeric(e.platform_ctr),platformCpa(r),e.spend_rank,numeric(e.cumulative_spend_ratio),numeric(e.exact_mapping_spend_coverage)]});
+      return [headers,...rows];
+    }
+    function buildCsv(){return "\uFEFF"+csvData().map(row=>row.map(escCsv).join(",")).join("\r\n")}
+    function exportCsv(){const url=URL.createObjectURL(new Blob([buildCsv()],{type:"text/csv;charset=utf-8"})),a=document.createElement("a");a.href=url;a.download=`opay-excellent-creatives-${state.payload.month}.csv`;a.click();URL.revokeObjectURL(url)}
     for(const id of ["channelFilter","appFilter","typeFilter","makerFilter","ruleFilter"])$(id).addEventListener("change",applyFilters);$("keywordFilter").addEventListener("input",applyFilters);$("monthFilter").addEventListener("change",event=>loadMonth(event.target.value).catch(showError));$("resetBtn").addEventListener("click",()=>{for(const id of ["channelFilter","appFilter","typeFilter","makerFilter","ruleFilter"])$(id).value="";$("keywordFilter").value="";applyFilters()});$("csvBtn").addEventListener("click",exportCsv);$("modalClose").addEventListener("click",()=>$("modal").close());$("modal").addEventListener("click",event=>{if(event.target===$("modal"))$("modal").close()});
     function showError(error){$("loading").hidden=true;const box=$("errorBox");box.hidden=false;box.textContent="报表加载失败："+(error?.message||String(error))}
     loadManifest().catch(showError);
