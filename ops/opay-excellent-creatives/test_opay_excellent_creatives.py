@@ -286,7 +286,7 @@ class ConfigurationAndMediaTests(unittest.TestCase):
                 "exact_material_ad_rows": 0,
                 "ambiguous_ad_days": 0,
             },
-        ):
+        ), mock.patch.object(report.google_creatives, "refresh_month", return_value={}):
             report.refresh_month("2026-07", Path(tmp) / "cache.sqlite3")
         self.assertTrue(ensure.call_args.kwargs["force"])
 

@@ -11,13 +11,13 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_FIXTURE = HERE / "fixtures" / "2026-07-regression.json"
 
 
-def payload_signature(payload):
+def payload_signature(payload, non_google_only=False):
     rows = sorted(
-        payload.get("rows", []),
+        [row for row in payload.get("rows", []) if not non_google_only or row["channel"] != "Google"],
         key=lambda row: (row["channel"], row["app"], row["custom_source_id"]),
     )
     audits = sorted(
-        payload.get("audits", []), key=lambda item: (item["channel"], item["app"])
+        [item for item in payload.get("audits", []) if not non_google_only or item["channel"] != "Google"], key=lambda item: (item["channel"], item["app"])
     )
     return {
         "month": payload.get("month"),
@@ -74,9 +74,13 @@ def expected_signature(fixture):
     return {key: fixture[key] for key in payload_signature({}).keys()}
 
 
-def validate(payload, fixture):
-    actual = payload_signature(payload)
+def validate(payload, fixture, non_google_only=False):
+    actual = payload_signature(payload, non_google_only=non_google_only)
     expected = expected_signature(fixture)
+    if non_google_only:
+        if any(row["channel"] == "Google" for row in expected["selected_rows"]):
+            raise ValueError("non-Google comparison requires the V1 baseline fixture")
+        expected["audits"] = [item for item in expected["audits"] if item["channel"] != "Google"]
     if actual != expected:
         raise AssertionError(
             "2026-07 regression mismatch\nexpected=%s\nactual=%s"
@@ -92,10 +96,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("payload", type=Path)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+    parser.add_argument("--non-google-only", action="store_true", help="compare unchanged Meta/TikTok against the frozen V1 baseline")
     args = parser.parse_args(argv)
     payload = json.loads(args.payload.read_text(encoding="utf-8"))
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
-    signature = validate(payload, fixture)
+    signature = validate(payload, fixture, non_google_only=args.non_google_only)
     print(
         json.dumps(
             {"status": "PASS", "month": signature["month"], "row_count": signature["row_count"]},

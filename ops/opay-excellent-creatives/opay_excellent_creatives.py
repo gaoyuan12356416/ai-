@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import types
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -33,12 +34,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import google_creatives
+
 BJ_TZ = timezone(timedelta(hours=8))
 PUBLIC_URL = "https://ai.yingliangads.com/reports/opay-excellent-creatives/"
 DEFAULT_DATA_ROOT = Path(
     os.environ.get("OPAY_REPORT_DATA_ROOT", "/mnt/data-disk/opay-excellent-creatives")
 )
-DEFAULT_CACHE_DB = DEFAULT_DATA_ROOT / "cache" / "opay-excellent-creatives.sqlite3"
+DEFAULT_CACHE_DB = Path(os.environ.get(
+    "OPAY_REPORT_CACHE_DB",
+    str(DEFAULT_DATA_ROOT / "cache" / "opay-excellent-creatives-v2.sqlite3"),
+))
 DEFAULT_WEB_DIR = Path(
     os.environ.get(
         "OPAY_REPORT_WEB_DIR",
@@ -62,7 +70,7 @@ MEDIA_TIMEOUT_SECONDS = int(os.environ.get("OPAY_REPORT_MEDIA_TIMEOUT_SECONDS", 
 MEDIA_MAX_BYTES = int(os.environ.get("OPAY_REPORT_MEDIA_MAX_BYTES", str(25 * 1024 * 1024)))
 MEDIA_WORKERS = max(1, min(12, int(os.environ.get("OPAY_REPORT_MEDIA_WORKERS", "6"))))
 MYSQL_ERROR_MAX_CHARS = 400
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_START_MONTH = "2026-01"
 SAFE_MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 SAFE_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -77,6 +85,7 @@ KNOWN_APP_ALIASES = {
     "opay": "NG OPay",
     "opay ngn": "NG OPay",
     "opaypakistan": "PK OPay",
+    "opay pakistan": "PK OPay",
 }
 DEFAULT_MEDIA_HOST_SUFFIXES = (
     ".myqcloud.com",
@@ -157,6 +166,16 @@ def cents(value) -> int:
 
 def dollars(value_cents: int) -> float:
     return round(int(value_cents or 0) / 100.0, 2)
+
+
+def nullable_dollars(value_cents):
+    return None if value_cents is None else dollars(value_cents)
+
+
+def google_context():
+    # Also works for the importlib-loaded test module, which is not necessarily
+    # registered in sys.modules. Network helpers remain mockable in one place.
+    return types.SimpleNamespace(**globals())
 
 
 def number(value, digits: int = 6) -> float:
@@ -364,7 +383,7 @@ def fetch_insight_day(day: str):
       COALESCE(DATE_FORMAT(auto_publish_dt,'%%Y-%%m-%%d'),''),
       DATE_FORMAT(updated_at,'%%Y-%%m-%%d %%H:%%i:%%s')
     FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(pss)
-    WHERE product='Opay' AND dt=%s AND platform IN (0,1,3)
+    WHERE product='Opay' AND dt=%s AND platform IN (0,3)
     ORDER BY id
     """ % sql_quote(day)
     return [dict(zip(INSIGHT_COLUMNS, row)) for row in run_mysql(sql, timeout=180)]
@@ -408,14 +427,54 @@ def cache_conn(cache_db: Path = DEFAULT_CACHE_DB):
     cache_db.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(cache_db), timeout=30)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=FULL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    ensure_cache_schema(connection)
+    try:
+        ensure_cache_schema(connection)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
+def clone_cache(source: Path, target: Path):
+    source, target = Path(source).resolve(), Path(target).resolve()
+    if not source.is_file() or source == target or target.exists():
+        raise RuntimeError("clone requires an existing source and a new, distinct destination")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".opay-clone-", suffix=".sqlite3", dir=str(target.parent))
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with contextlib.closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as reader:
+            with contextlib.closing(sqlite3.connect(str(temporary))) as writer:
+                reader.backup(writer)
+                writer.execute("INSERT OR REPLACE INTO cache_meta(key,value) VALUES('v2_clone_source',?)", (str(source),))
+                writer.execute("INSERT OR REPLACE INTO cache_meta(key,value) VALUES('v2_clone_at',?)", (bj_now().isoformat(),))
+                writer.commit()
+                ensure_cache_schema(writer)
+                if writer.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise RuntimeError("cloned cache failed integrity check")
+                writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                writer.execute("PRAGMA journal_mode=DELETE")
+        # A hard-link commit is atomic and, unlike replace(), cannot overwrite
+        # a destination another process created while the backup was running.
+        os.link(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"source": str(source), "target": str(target), "status": "cloned"}
+
+
 def ensure_cache_schema(connection) -> None:
+    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache_meta'").fetchone()
+    if exists:
+        metadata = dict(connection.execute("SELECT key,value FROM cache_meta"))
+        version = integer(metadata.get("schema_version"))
+        if version > SCHEMA_VERSION:
+            raise RuntimeError("cache schema is newer than this release")
+        if version == 1 and not metadata.get("v2_clone_source"):
+            raise RuntimeError("V1 cache is frozen; use --clone-cache-from into a separate V2 cache")
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS cache_meta (
@@ -528,6 +587,7 @@ def ensure_cache_schema(connection) -> None:
           ON af_daily(dt,platform,app);
         """
     )
+    google_creatives.ensure_schema(connection)
     connection.execute(
         "INSERT OR REPLACE INTO cache_meta(key,value) VALUES('schema_version',?)",
         (str(SCHEMA_VERSION),),
@@ -1032,16 +1092,16 @@ def process_day(connection, day: str, insight_source_rows, af_rows):
     }
 
 
-def refresh_month(month: str, cache_db: Path = DEFAULT_CACHE_DB, *, rebuild=False):
+def refresh_month(month: str, cache_db: Path = DEFAULT_CACHE_DB, *, rebuild=False, google_only=False):
     month = validate_month(month)
     start_date, end_date = month_bounds(month)
     assert_read_only()
-    product_config = load_product_config()
+    product_config = load_product_config() if not google_only else None
     summaries = []
     refreshed_source_ids = set()
     refreshed_material_ids = set()
     with contextlib.closing(cache_conn(cache_db)) as connection:
-        for day in each_date(start_date, end_date):
+        for day in ([] if google_only else each_date(start_date, end_date)):
             insight_rows = fetch_insight_day(day)
             ensure_dimensions(
                 connection,
@@ -1055,6 +1115,7 @@ def refresh_month(month: str, cache_db: Path = DEFAULT_CACHE_DB, *, rebuild=Fals
             )
             af_rows = fetch_af_day(day, product_config)
             summaries.append(process_day(connection, day, insight_rows, af_rows))
+        google_summary = google_creatives.refresh_month(google_context(), connection, month)
         connection.execute(
             "INSERT OR REPLACE INTO cache_meta(key,value) VALUES(?,?)",
             ("last_refresh_%s" % month, bj_now().isoformat()),
@@ -1067,6 +1128,7 @@ def refresh_month(month: str, cache_db: Path = DEFAULT_CACHE_DB, *, rebuild=Fals
         "af_rows": sum(item["af_rows"] for item in summaries),
         "exact_material_ad_rows": sum(item["exact_material_ad_rows"] for item in summaries),
         "ambiguous_ad_days": sum(item["ambiguous_ad_days"] for item in summaries),
+        "google": google_summary,
     }
 
 
@@ -1217,10 +1279,37 @@ def ratio(numerator, denominator) -> float:
     return number(numerator / denominator, 8) if denominator else 0.0
 
 
+def nullable_ctr(clicks, impressions):
+    return None if clicks is None or impressions is None else ratio(clicks, impressions)
+
+
 def cpa_value(spend_cents: int, d0_count: int):
-    if d0_count <= 0:
+    if spend_cents is None or d0_count is None or d0_count <= 0:
         return None
     return number((spend_cents / 100.0) / d0_count, 6)
+
+
+def derived_metrics(spend, impressions, clicks, installs, af_d0):
+    def quotient(numerator, denominator, scale=1, digits=8):
+        if numerator is None or denominator is None or denominator <= 0:
+            return None
+        return number(float(numerator) / denominator * scale, digits)
+    return {
+        "d0_cpa": quotient(spend, af_d0, digits=6),
+        "cpm": quotient(spend, impressions, scale=1000, digits=6),
+        "apm": quotient(af_d0, impressions, scale=1000),
+        "ctr": nullable_ctr(clicks, impressions),
+        "cvr": quotient(installs, clicks),
+        "install_to_d0_rate": quotient(af_d0, installs),
+    }
+
+
+def attach_metrics(row):
+    row["metrics"] = derived_metrics(
+        row.get("spend"), row.get("impressions"), row.get("clicks"),
+        row.get("installs"), row.get("af_d0_first_transactions"),
+    )
+    return row
 
 
 def ctr_strictly_greater(clicks_a, impressions_a, clicks_b, impressions_b):
@@ -1400,6 +1489,10 @@ def build_month_payload(
     if stage not in ("initial", "final"):
         raise ValueError("stage must be initial or final")
     platform_totals, af_totals, audit_totals, materials = month_aggregates(connection, month)
+    google_totals, google_audits, google_materials = google_creatives.month_aggregates(google_context(), connection, month)
+    platform_totals.update(google_totals)
+    audit_totals.update(google_audits)
+    materials = [item for item in materials if item["platform"] != 1] + google_materials
     dims = material_dim_map(connection, [item["custom_source_id"] for item in materials])
     rows = []
     benchmarks = []
@@ -1420,14 +1513,16 @@ def build_month_payload(
             )
             platform_d0 = af_totals.get(scope, 0)
             audit = audit_totals.get(scope, blank_scope_audit())
-            coverage = ratio(audit["exact_spend_cents"], total["spend_cents"])
-            rule_a_available = total["spend_cents"] > 0 and coverage >= 0.5 and platform_d0 > 0
+            coverage = None if total["spend_cents"] is None else ratio(audit["exact_spend_cents"], total["spend_cents"])
+            rule_a_available = platform_id != 1 and total["spend_cents"] > 0 and coverage >= 0.5 and platform_d0 > 0
             scope_materials = [item for item in materials if (item["platform"], item["app"]) == scope]
             top_ids, rank_map, cumulative_map = top_half_members(
-                scope_materials, total["spend_cents"]
+                [item for item in scope_materials if item["spend_cents"] is not None], total["spend_cents"] or 0
             )
             selected_count = 0
             for material in scope_materials:
+                if material["spend_cents"] is None:
+                    continue
                 custom_source_id = material["custom_source_id"]
                 dim = dims.get(custom_source_id)
                 if not dim or text(dim.get("product")).casefold() != "opay":
@@ -1439,7 +1534,7 @@ def build_month_payload(
                     total["spend_cents"],
                     platform_d0,
                 )
-                rule_b = rule_b_qualifies(material, total)
+                rule_b = (platform_id != 1 or total.get("ctr_complete", False)) and rule_b_qualifies(material, total)
                 if not (rule_a or rule_b):
                     continue
                 selected_count += 1
@@ -1456,6 +1551,8 @@ def build_month_payload(
                 auto_dt = material["first_auto_publish_dt"]
                 launch_date = auto_dt or material["first_delivery_dt"]
                 launch_source = "platform_success" if auto_dt else "first_delivery"
+                if platform_id == 1:
+                    launch_date = google_creatives.earliest_launch(connection, custom_source_id, app, launch_date)
                 rows.append(
                     {
                         "month": month,
@@ -1497,12 +1594,13 @@ def build_month_payload(
                             "material_cpa": cpa_value(
                                 material["spend_cents"], material["af_d0_count"]
                             ),
-                            "material_cpa_finite": material["af_d0_count"] > 0,
-                            "platform_ctr": ratio(total["clicks"], total["impressions"]),
+                            "material_cpa_finite": None if material["af_d0_count"] is None else material["af_d0_count"] > 0,
+                            "platform_ctr": nullable_ctr(total["clicks"], total["impressions"]),
                             "platform_cpa": cpa_value(total["spend_cents"], platform_d0),
-                            "platform_cpa_finite": platform_d0 > 0,
+                            "platform_cpa_finite": None if total["spend_cents"] is None else platform_d0 > 0,
+                            "platform_cpa_available": total["spend_cents"] is not None,
                             "spend_rank": rank_map.get(custom_source_id),
-                            "cumulative_spend_ratio": cumulative_map.get(custom_source_id, 0),
+                            "cumulative_spend_ratio": cumulative_map.get(custom_source_id) if total["spend_cents"] is None else cumulative_map.get(custom_source_id, 0),
                             "in_top_50_percent": in_top_half,
                             "rule_a_available": rule_a_available,
                             "rule_a_pass": rule_a,
@@ -1520,25 +1618,43 @@ def build_month_payload(
                         },
                     }
                 )
+                if platform_id == 1:
+                    rows[-1]["platform_conversions"] = material["platform_conversions"]
+                    rows[-1]["evidence"].update({
+                        "af_status": "missing_asset_attribution", "installs_status": "missing_asset_installs",
+                        "usd_status": "verified", "fx_sources": sorted(material["fx_sources"]),
+                        "asset_count": len(material["asset_resources"]),
+                        "metric_source": "ads_google_insights:type=3",
+                        "data_quality": "Google 素材级消耗/曝光/点击；严格素材映射；AF与安装缺失；不分摊广告组数据",
+                    })
+                else:
+                    rows[-1]["evidence"].update({"af_status": "available", "installs_status": "available", "usd_status": "verified"})
+                attach_metrics(rows[-1])
             benchmark = {
                 "month": month,
                 "channel": channel_name,
                 "app": app,
-                "spend": dollars(total["spend_cents"]),
+                "spend": nullable_dollars(total["spend_cents"]),
                 "impressions": total["impressions"],
                 "clicks": total["clicks"],
                 "installs": total["installs"],
                 "af_d0_first_transactions": platform_d0,
-                "ctr": ratio(total["clicks"], total["impressions"]),
+                "ctr": nullable_ctr(total["clicks"], total["impressions"]),
                 "cpa": cpa_value(total["spend_cents"], platform_d0),
-                "cpa_finite": platform_d0 > 0,
+                "cpa_finite": None if total["spend_cents"] is None else platform_d0 > 0,
             }
+            attach_metrics(benchmark)
             benchmarks.append(benchmark)
             if channel_name == "Google":
-                note = (
-                    "当前仓库未同时提供可验证完整的素材级 USD 指标与素材级 AF D0 归因；"
-                    "V1 严格排除，不做广告组或资产分摊。"
-                )
+                note = "计算成功，入选%d条；按规则B评优，素材级AF和安装留空。" % selected_count
+                if not audit["refreshed"]:
+                    note = "Google 素材缓存尚未刷新，未生成估算数据。"
+                if audit["fx_missing_rows"] or audit["platform_fx_missing_rows"]:
+                    note += "历史汇率缺失或无法核验：%d条素材日记录，%d个素材月不参与评优；不使用当前汇率。" % (audit["fx_missing_rows"], audit["incomplete_material_count"])
+                if audit["invalid_row_count"]:
+                    note += "素材映射缺口%d条记录。" % audit["invalid_row_count"]
+                if audit["baseline_missing_account_days"]:
+                    note += "Campaign平台基准缺少%d个账户投放日，暂停规则B。" % audit["baseline_missing_account_days"]
             elif selected_count == 0:
                 note = "计算成功，入选0条。"
             else:
@@ -1548,13 +1664,13 @@ def build_month_payload(
                     "month": month,
                     "channel": channel_name,
                     "app": app,
-                    "status": "success",
+                    "status": "not_refreshed" if platform_id == 1 and not audit["refreshed"] else "success",
                     "message": note,
                     "selected_count": selected_count,
                     "mapping_coverage": coverage,
                     "exact_mapped_spend": dollars(audit["exact_spend_cents"]),
-                    "platform_spend": dollars(total["spend_cents"]),
-                    "mapping_gap_spend": dollars(
+                    "platform_spend": nullable_dollars(total["spend_cents"]),
+                    "mapping_gap_spend": None if total["spend_cents"] is None else dollars(
                         max(0, total["spend_cents"] - audit["exact_spend_cents"])
                     ),
                     "rule_a_available": rule_a_available,
@@ -1564,11 +1680,18 @@ def build_month_payload(
                     "strict_gap_spend": dollars(audit["strict_gap_spend_cents"]),
                     "ambiguous_ad_days": audit["ambiguous_ad_days"],
                     "invalid_row_count": audit["invalid_row_count"],
-                    "af_mapping_coverage": ratio(audit["af_mapped"], platform_d0),
-                    "af_mapped": audit["af_mapped"],
+                    "af_mapping_coverage": None if platform_id == 1 else ratio(audit["af_mapped"], platform_d0),
+                    "af_mapped": None if platform_id == 1 else audit["af_mapped"],
                     "af_total": platform_d0,
                 }
             )
+            if platform_id == 1:
+                audits[-1].update({name: audit[name] for name in (
+                    "fx_missing_rows", "platform_fx_missing_rows", "incomplete_material_count",
+                    "asset_count", "mapping_status_counts", "fx_missing_native_spend",
+                    "baseline_missing_account_days",
+                )})
+                audits[-1]["metric_source"] = "ads_google_insights:type=0"
     rows.sort(key=lambda item: (-item["spend"], item["channel"], item["app"], item["custom_source_id"]))
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1903,6 +2026,36 @@ def base_snapshot_for_stage(connection, month: str, stage: str):
     return load_snapshot(Path(state["snapshot_path"]), state["snapshot_sha256"])
 
 
+def non_google_signature(payload):
+    fields = ("spend", "impressions", "clicks", "installs", "af_d0_first_transactions", "selection_rule")
+    return {
+        (row["channel"], row["app"], integer(row["custom_source_id"])): tuple(row.get(field) for field in fields)
+        for row in payload.get("rows", []) if row["channel"] != "Google"
+    }
+
+
+def preserve_non_google_snapshot(baseline, payload):
+    if baseline is None or non_google_signature(baseline) != non_google_signature(payload):
+        raise RuntimeError("Google-only upgrade changed frozen Meta/TikTok facts or selection")
+    preserved = json.loads(json.dumps([row for row in baseline["rows"] if row["channel"] != "Google"]))
+    for row in preserved:
+        attach_metrics(row)
+    payload["rows"] = preserved + [row for row in payload["rows"] if row["channel"] == "Google"]
+    payload["rows"].sort(key=lambda row: (-row["spend"], row["channel"], row["app"], row["custom_source_id"]))
+    for field in ("benchmarks", "audits"):
+        previous = json.loads(json.dumps([row for row in baseline.get(field, []) if row["channel"] != "Google"]))
+        if field == "benchmarks":
+            previous = [attach_metrics(row) for row in previous]
+        payload[field] = previous + [row for row in payload[field] if row["channel"] == "Google"]
+        payload[field].sort(key=lambda row: (CHANNEL_ORDER.index(row["channel"]), APP_ORDER.index(row["app"])))
+    payload["upgrade_audit"] = {
+        "baseline_schema_version": baseline.get("schema_version"),
+        "baseline_generated_at": baseline.get("generated_at"),
+        "preserved_non_google_rows": len(preserved),
+        "non_google_facts_and_selection_unchanged": True,
+    }
+
+
 def save_month_snapshot(
     month: str,
     stage: str,
@@ -1911,6 +2064,8 @@ def save_month_snapshot(
     data_root: Path = DEFAULT_DATA_ROOT,
     rebuild=False,
     media_enabled=True,
+    preserve_non_google=False,
+    refresh_google_launch=False,
 ):
     month = validate_month(month)
     if stage not in ("initial", "final"):
@@ -1931,8 +2086,26 @@ def save_month_snapshot(
         keyword_config = load_keyword_config()
         overrides = load_keyword_overrides()
         base = base_snapshot_for_stage(connection, month, stage)
+        if preserve_non_google:
+            baseline_state = final_existing or existing
+            if not baseline_state:
+                raise RuntimeError("Google-only rebuild requires a frozen baseline month")
+            base = load_snapshot(Path(baseline_state["snapshot_path"]), baseline_state["snapshot_sha256"])
         payload = build_month_payload(connection, month, stage, keyword_config, overrides)
-        payload["rows"] = prepare_media(payload["rows"], data_root, enabled=media_enabled)
+        if refresh_google_launch and any(row["channel"] == "Google" for row in payload["rows"]):
+            refresh_state = connection.execute("SELECT metadata_json FROM google_month_refresh WHERE month=?", (month,)).fetchone()
+            config = json.loads(refresh_state[0])["app_config"]
+            google_creatives.refresh_launch_dates(google_context(), connection, payload["rows"], config)
+            for row in payload["rows"]:
+                if row["channel"] == "Google":
+                    row["first_launch_date"] = google_creatives.earliest_launch(connection, row["custom_source_id"], row["app"], row["first_launch_date"])
+        if preserve_non_google:
+            preserve_non_google_snapshot(base, payload)
+            google_rows = prepare_media([row for row in payload["rows"] if row["channel"] == "Google"], data_root, enabled=media_enabled)
+            by_key = {(row["app"], row["custom_source_id"]): row for row in google_rows}
+            payload["rows"] = [by_key[(row["app"], row["custom_source_id"])] if row["channel"] == "Google" else row for row in payload["rows"]]
+        else:
+            payload["rows"] = prepare_media(payload["rows"], data_root, enabled=media_enabled)
         payload["stage_diff"] = compute_stage_diff(base, payload)
         generated_at = payload["generated_at"]
         version = bj_now().strftime("%Y%m%dT%H%M%S%f%z")
@@ -2042,6 +2215,8 @@ def publish_visible_state(
             load_snapshot(Path(state["snapshot_path"]), state["snapshot_sha256"])
             for state in states
         ]
+        if any(integer(payload.get("schema_version")) != SCHEMA_VERSION for payload in payloads):
+            raise RuntimeError("all visible months must be rebuilt for the current schema before publishing")
         data_version = bj_now().strftime("%Y%m%dT%H%M%S%f%z")
         if not SAFE_VERSION_PATTERN.fullmatch(data_version):
             raise RuntimeError("invalid generated data version")
@@ -2134,6 +2309,10 @@ def check_cache(cache_db: Path = DEFAULT_CACHE_DB):
             "daily_audit",
             "month_state",
             "publish_audit",
+            "google_insight",
+            "google_asset_mapping",
+            "google_month_refresh",
+            "google_asset_launch",
         ):
             counts[table] = integer(connection.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0])
         date_bounds = connection.execute("SELECT MIN(dt),MAX(dt) FROM platform_daily").fetchone()
@@ -2157,6 +2336,8 @@ def parse_args(argv=None):
     parser.add_argument("--to-month")
     parser.add_argument("--stage", choices=("initial", "final"), default="final")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--google-only", action="store_true", help="refresh Google while preserving frozen Meta/TikTok facts")
+    parser.add_argument("--clone-cache-from", type=Path, help="online-copy a frozen cache into a new V2 destination")
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--check-cache", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
@@ -2182,10 +2363,14 @@ def requested_months(args):
 
 def main(argv=None):
     args = parse_args(argv)
-    if not any((args.refresh, args.publish, args.check_cache)):
-        raise SystemExit("choose --refresh, --publish, or --check-cache")
+    if not any((args.refresh, args.publish, args.check_cache, args.clone_cache_from)):
+        raise SystemExit("choose --refresh, --publish, --check-cache, or --clone-cache-from")
+    if args.google_only and not args.refresh:
+        raise SystemExit("--google-only requires --refresh")
     validate_storage_root(args.data_root)
     result = {"schema_version": SCHEMA_VERSION}
+    if args.clone_cache_from:
+        result["clone"] = clone_cache(args.clone_cache_from, args.cache_db)
     if args.check_cache:
         result["cache"] = check_cache(args.cache_db)
     months = requested_months(args)
@@ -2195,6 +2380,8 @@ def main(argv=None):
             existing = current_month_state(connection, month, args.stage)
             final_existing = current_month_state(connection, month, "final")
         frozen = existing or (args.stage == "initial" and final_existing)
+        if args.google_only and not (existing or final_existing):
+            raise RuntimeError("Google-only refresh requires a frozen baseline; use full refresh for new months")
         if frozen and not args.rebuild:
             generated.append(
                 {
@@ -2206,7 +2393,7 @@ def main(argv=None):
             continue
         month_result = {"month": month, "stage": args.stage}
         if args.refresh:
-            month_result["refresh"] = refresh_month(month, args.cache_db, rebuild=args.rebuild)
+            month_result["refresh"] = refresh_month(month, args.cache_db, rebuild=args.rebuild, google_only=args.google_only)
         month_result["snapshot"] = save_month_snapshot(
             month,
             args.stage,
@@ -2214,8 +2401,11 @@ def main(argv=None):
             data_root=args.data_root,
             rebuild=args.rebuild,
             media_enabled=not args.skip_media_checks,
+            preserve_non_google=args.google_only,
+            refresh_google_launch=args.refresh,
         )
         generated.append(month_result)
+        print(json.dumps({"month_complete": month_result}, ensure_ascii=False, allow_nan=False), file=sys.stderr, flush=True)
     if generated:
         result["months"] = generated
     if args.publish:
