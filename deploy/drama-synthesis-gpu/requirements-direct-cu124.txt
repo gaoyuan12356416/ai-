@@ -1,0 +1,15 @@
+# Linux x86_64 / CPython 3.10.20 / CUDA 12.4 runtime only.
+# Install into /data/drama-synthesis-gpu/runtime/py310-cu124-v1.
+# These are pinned direct dependencies, NOT a complete transitive lock.
+# Archive the installed pip freeze and wheel hashes before accepting a release.
+# Official torch/torchaudio pairing: https://pytorch.org/get-started/previous-versions/
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchaudio==2.5.1+cu124
+demucs==4.0.1
+diffq==0.2.4
+numpy==1.26.4
+soundfile==0.12.1
+requests==2.32.5
+cos-python-sdk-v5==1.9.44
+Pillow==11.3.0

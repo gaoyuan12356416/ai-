@@ -754,7 +754,7 @@ class UpgradeTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GPU_VIDEO_WORKER_TOKEN": "fake-token"}, clear=False):
                 health = json.loads(urlopen(base + "/healthz", timeout=2).read())
                 self.assertEqual(health, {"ok": True, "role": "media-only"})
-                request = Request(base + "/api/gpu-video/render", data=json.dumps({"recipe": "frozen"}).encode(), headers={"Authorization": "Bearer fake-token", "Content-Type": "application/json"}, method="POST")
+                request = Request(base + "/api/gpu-video/render", data=json.dumps({"job_id": JOB_ID, "recipe": "frozen"}).encode(), headers={"Authorization": "Bearer fake-token", "Content-Type": "application/json"}, method="POST")
                 self.assertEqual(json.loads(urlopen(request, timeout=2).read())["recipe"], "frozen")
                 with self.assertRaises(HTTPError) as denied:
                     urlopen(base + "/api/gpu-video/youtube", timeout=2)

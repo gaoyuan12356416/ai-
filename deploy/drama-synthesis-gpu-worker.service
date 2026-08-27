@@ -11,15 +11,25 @@ WorkingDirectory=/data/drama-synthesis-gpu/current
 EnvironmentFile=/etc/drama-synthesis-gpu/worker.env
 Environment=DRAMA_GPU_HOST=127.0.0.1
 Environment=DRAMA_GPU_PORT=8787
-ExecStart=/usr/bin/python3.9 /data/drama-synthesis-gpu/current/scripts/drama_synthesis_gpu_worker.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+ExecStartPre=/data/drama-synthesis-gpu/runtime/current/bin/python /data/drama-synthesis-gpu/current/scripts/check_drama_synthesis_gpu_runtime.py
+ExecStart=/data/drama-synthesis-gpu/runtime/current/bin/python /data/drama-synthesis-gpu/current/scripts/drama_synthesis_gpu_worker.py
 Restart=always
 RestartSec=5
+TimeoutStartSec=120
 TimeoutStopSec=14400
+UMask=0077
+Nice=10
+CPUQuota=200%
+TasksMax=128
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/data/drama-synthesis-gpu/assets
+ReadOnlyPaths=/data/drama-synthesis-gpu/assets /data/drama-synthesis-gpu/models /data/drama-synthesis-gpu/runtime /data/drama-synthesis-gpu/python
 ReadWritePaths=/data/drama-synthesis-gpu/work /data/drama-synthesis-gpu/results
 
 [Install]
