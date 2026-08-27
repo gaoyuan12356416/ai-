@@ -1,14 +1,14 @@
 # SA 需求评审（2026-08-27 现行）
 
-HK 独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 已经 GitHub-first 部署，v3 auto/manual 与真实重启后幂等复用验收 PASS，独立 QA 核对报告及 8 PNG 后无新增阻断。此前 c719 的重复 POST 失败为已修复历史，不再作为当前 HK 阻塞。
+用户最新确认全部业务查询归 CPU。CPU 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 用本地固定 SHA manifest 替代 GPU 目录查询；独立 204/204 回归、CPU 3.9.6 实际文件/原函数验证 PASS。页面与任务协调端不依赖 GPU 查询目录，也无需媒体素材包；HK 仅完整参数制作、上传 COS 并回传。详见 [职责边界](cpu-gpu-boundary-20260827.md)。
 
-HK 增量六套代码测试共 188 项：首次 187 PASS + 1 项文档文本合同 FAIL（13.567 秒），仅补回文档后复测该失败项 1/1 PASS（0.050 秒）；没有再次整套运行，不能写一次 188 全绿。27 文件语法/Python 3.9 AST PASS，旧 166/focused 22 不叠加。CPU 候选和三表演练仍绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`。
+HK 独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 的 v3 auto/manual、重启复用和独立报告/8 PNG 验收仍有效，本次未重跑或改动 HK。此前 188 项及 c719 的 166 项为历史批次，不与新 204 项相加；旧三表演练只绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能改绑新 CPU 候选。
 
 整体正式发布仍 HOLD：生产合法 admin/migrator/writer 权限尚未具备，HK 仍使用 canary COS 前缀。用户已授权环境完成后继续部署，并仅指定 Shahrul Ikmal 做一次内部 unlisted 视频及一条评论；不授权 public 测试。全部支持操作仅 SSH，禁止腾讯云管理后台。CPU 主应用未部署/重启、未切流，仍保留 legacy 18787；现状以 [部署状态页](deployment-status-20260827.md)、[测试报告](test-report.md) 与 [HK 实测记录](hk-gpu-setup-20260827.md) 为准。
 
 ## 架构决策
 
-- CPU 是任务、OAuth、发布、审计和同步账本唯一协调端；HK 是无 YouTube 凭据的媒体执行端。
+- CPU 是全部业务查询、模板选择/配方冻结、任务、OAuth、发布、审计和同步账本唯一协调端；HK 是无业务数据库/YouTube 凭据的媒体执行端，只校验本地制作资源和处理完整媒体参数。CPU 目录缺配置/漂移失败关闭，不向 GPU fallback。
 - 复用 FB v3 immutable manifest/recipe，业务 recipe 额外冻结 source。
 - gy 使用独立 `/s2l/youtube/` namespace 和 app-owned root，避免与 X/TT/FB writer 冲突。
 - SQLite 保证短链/发布/outbox 幂等；统一表使用严格白名单适配器，缺依赖时 sync fail closed。

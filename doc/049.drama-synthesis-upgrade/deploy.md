@@ -2,7 +2,7 @@
 
 ## 当前结论与授权
 
-HK 已通过 GitHub-first 部署 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，真实 auto/manual 共 4 个产物、完整解码、封面回调、重复 POST 与服务重启重放均 PASS；独立报告及 8 帧复核通过。CPU 应用候选与三表演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能把证据改绑到 HK SHA 或后续 docs-only SHA。CPU 主应用未切流，整体正式发布仍 HOLD。最终快照见 [部署状态](deployment-status-20260827.md)、[测试报告](test-report.md) 和 [HK 实测记录](hk-gpu-setup-20260827.md)。
+CPU 最新待发布候选为 `40042f9692fbec58caa5abbf41af35e9aefb54bc`，将模板目录查询改为 CPU 本地只读 manifest；独立 204/204 回归及 CPU Python 3.9.6 真实文件/原函数验证 PASS，但生产应用未切换。HK 仍运行已验收的 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，真实 auto/manual 共 4 个产物、下载解码、封面及重启复用 PASS。旧三表演练只绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能改绑新候选或 docs-only SHA。整体正式发布仍 HOLD。见 [职责边界](cpu-gpu-boundary-20260827.md)、[部署状态](deployment-status-20260827.md) 和 [测试报告](test-report.md)。
 
 用户已授权环境完成后继续部署，并指定 Shahrul Ikmal 做一次内部 unlisted 视频及一条评论。所有支持/服务器操作仅通过 SSH；禁止腾讯云管理后台、public 测试、无关平台发布及修改现有 X/ads_video_producer。不新建收费云集群。旧文档“尚未授权 canary”“必须 Tencent API 云备份”的口径已失效。
 
@@ -12,6 +12,7 @@ HK 已通过 GitHub-first 部署 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，�
 
 - 保存 CPU/HK 原 Git SHA、服务 PID、systemd/Nginx/env 元数据、SQLite 一致性备份与端口；密钥、数据库行、真实配置不进入 Git/报告。
 - 新代码从 GitHub 精确 SHA 拉取并保留回滚版本；离线测试通过不能替代运行验收。
+- 所有业务查询仅 CPU：剧集/素材 URL、模板目录与配方冻结、任务/频道/OAuth/短链/YouTube/三表。HK 只接收完整参数制作、上传 COS 并返回结果，不持有业务数据库或发布凭据，不因缺参回查。
 - CPU 正式制作路径保持 legacy 127.0.0.1:18787；HK dark 仅通过新 18788 隧道访问 8787。完整媒体、幂等、队列 idle/drain 与其他发布前置条件均通过后才能显式切换，无 fallback/dual-write。
 - 当前路径是 [migration.md](migration.md) 的真实三表 READ ONLY 一致性 snapshot + CPU 本机隔离 MySQL 5.7 恢复演练。机器生成的 SHA 绑定证据已 PASS，仅覆盖三表，不代表全集群备份/灾备已验证。
 - 生产 DDL 使用一次性 drama_youtube_migrator@43.166.187.96，仅三张精确表的 SELECT/INSERT/CREATE/ALTER；长期 drama_youtube_writer@43.166.187.96 仅 SELECT/INSERT/UPDATE，从未持有 DDL。禁止 schema wildcard、DELETE/DROP/INDEX/GRANT OPTION 与额外 routine/proxy 权限；迁移后撤销并销毁 migrator。
@@ -25,6 +26,7 @@ HK 已通过 GitHub-first 部署 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，�
 | HK 解释器/模型/资产 | /data/drama-synthesis-gpu/runtime/current/bin/python；独立 models/assets/work/results；无 /root 依赖、无 YouTube/DB 发布凭据 |
 | HK worker | 专用 drama-synthesis-gpu 用户；127.0.0.1:8787；保留 ProtectHome/ProtectSystem 与实际 ReadWritePaths；render 并发默认 1 |
 | CPU 新制作隧道 | 127.0.0.1:18788→HK 8787；保留原 18787、18820 与 X 隧道限制 |
+| CPU 模板目录 | `/mnt/data-disk/drama-synthesis-catalog/fb-v3-028326ab2114/manifest.json`；原始 7921 bytes、root:root 0444，目录 0755；仅元数据，不含媒体素材 |
 | 统一 writer | 127.0.0.1:18837；18836 属于 FB reverse tunnel，禁止占用 |
 | writer 代码 | root:root 0755 的 `/opt/drama-youtube-unified-writer/releases/<candidate_git_sha>`，current 指向候选 |
 | gy wrapper | /mnt/data-disk/drama-youtube-short-links/s2l/youtube；复用现有域名/TLS/Nginx，不修改 X `/s2l/<数字>.html` |
@@ -35,6 +37,7 @@ HK 已通过 GitHub-first 部署 `e1f5a1d04cfb510df9c2444ac592adec2827508b`，�
 
 ## 分阶段部署步骤
 
+0. CPU 的上述 manifest 已安装并回读 SHA `028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f`。正式发布前先备份实际 API/任务 worker 配置，在两者实际配置源设置 `DRAMA_RANDOM_OVERLAY_MANIFEST_FILE` 为该绝对路径，并配置相同 `DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256`；用实际执行身份确认可读。HK 不设置这个 CPU-only 文件变量，继续独立校验本地素材。缺配置/指纹失败须 503，不加 GPU fallback。此次只在独立 GitHub checkout 验证，尚未改生产 env。旧 c719 三表证据须按新 CPU 候选重验/更新，不能手工改 SHA 复用。
 1. HK 精确发布依赖与媒体资产：固定 Python 3.10.20、torch/torchaudio 2.5.1+cu124、完整依赖锁、Demucs 本地四模型；核对 FB v3 manifest 028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f、20 文件/520297533 bytes 及逐文件 SHA。
 2. 在与实际 worker 一致的 systemd 用户、资源限额及 ReadWritePaths 下预检，验证 health/auth/catalog、concat/no-BGM/cover-intro/random、完整双模式与重复 POST 幂等。e1f5a1d 真实 fresh 与重启 replay 已通过；旧 c719beb 的重复制作缺陷已关闭，旧 v2 失败证据保留，不冒充新版本结果。
 3. 按迁移文档核对真实三表 snapshot/恢复证据。当前已 PASS 的数据为视频 244151、评论 53、日志 55105；候选、manifest、report、evidence SHA 必须逐项匹配，不能手填 PASS、沿用过期证据或伪装成云 API 备份。
@@ -52,7 +55,7 @@ runuser -u drama-youtube -- /usr/bin/python3 \
 6. 独立启动 writer，保留鉴权的 GET /health。必须返回 contract=drama-youtube-writer-preflight-v1、固定 schema/writer_identity、writable/schema_verified/indexes_verified=true 和 grant_fingerprint。仅 URL/凭据存在不是健康通过；401、跳转、超时、只读实例或结构/权限漂移均阻断，不允许先刷新 OAuth/上传再发现 writer 不可用。
 7. CPU SQLite 先只读 dry-run，再带新绝对备份路径事务迁移；完成前后 integrity/输出合同检查。Nginx -t、短链 root --check；X 现有路径仍 200，YouTube 未生成数字路径 404、POST 403。
 8. HK 仍处于 `COS_PREFIX=drama-synthesis-canary/20260827` 的 dark 配置。正式激活前核对队列 idle，备份 `/etc/drama-synthesis-gpu/worker.env` 并记录 SHA，把 `COS_PREFIX` 与 `DRAMA_PUBLIC_BASE_URL` 一致切到现行业务前缀 `drama-materials`（COS domain 保持 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`），以实际服务身份预检，仅重启新增 worker/tunnel，复核 health/auth/catalog 与持久化结果。保留隔离样本及其旧绝对 URL，不移动/重写 canary manifest 或 COS 文件。该生产前缀激活目前尚未执行。
-9. 全部门禁通过后才按已授权范围发布精确 CPU 候选 c719beb、drain 后显式切向 18788，并执行以下单次 canary。正式 public 入口不得因测试而打开；只有指定 canary 的视频处理、评论、三表回读及幂等全部通过，才进行正式 live/sync 放行与最终业务验收。
+9. 全部门禁通过后才按已授权范围发布精确 CPU 候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc`、drain 后显式切向 18788，并执行以下单次 canary。正式 public 入口不得因测试而打开；只有指定 canary 的视频处理、评论、三表回读及幂等全部通过，才进行正式 live/sync 放行与最终业务验收。
 
 ## 指定频道内部 canary
 

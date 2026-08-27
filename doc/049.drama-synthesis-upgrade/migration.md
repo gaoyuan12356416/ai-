@@ -2,7 +2,9 @@
 
 ## 当前状态与范围
 
-候选 `c719bebf72be900ec3853858dc53b36b83beffd2` 已独立代码 QA 并 GitHub push/readback。主代理已通过 SSH 完成真实三表一致性 snapshot 与 CPU 本机隔离 MySQL 5.7.44 恢复/迁移演练，结果 PASS；这只证明指定三表的可恢复性、数据/结构守恒与本次 additive migration 幂等，不是 Tencent API 云备份，更不是 CynosDB 全集群灾备已验证。
+最新 CPU 候选为 `40042f9692fbec58caa5abbf41af35e9aefb54bc`（CPU-only 模板目录）；本次未执行数据库操作。以下真实三表证据仍只绑定历史候选 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能改绑新候选或 docs-only SHA。新候选正式 apply 前须按精确 SHA 和时效要求重验/更新新证据，不覆盖旧目录。
+
+历史候选 c719beb 已独立代码 QA 并 GitHub push/readback。主代理已通过 SSH 完成真实三表一致性 snapshot 与 CPU 本机隔离 MySQL 5.7.44 恢复/迁移演练，结果 PASS；这只证明指定三表的可恢复性、数据/结构守恒与本次 additive migration 幂等，不是 Tencent API 云备份，更不是 CynosDB 全集群灾备已验证。
 
 当前生产 `ads_aius` 对 `kunlunads_dev` 只有 SELECT/SHOW VIEW，没有合法 admin/migrator/writer；因此生产 DDL、writer/RPC 和真正 YouTube 测试仍 HOLD。演练成功不能绕过该权限门禁。全部支持操作仅通过 SSH，禁止腾讯云管理后台、不购买新云集群。
 

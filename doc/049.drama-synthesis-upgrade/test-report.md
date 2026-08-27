@@ -1,6 +1,18 @@
 # 测试报告
 
-## 当前结论（2026-08-27 12:38，北京时间）
+## 当前结论：CPU 查询边界（2026-08-27 14:47，北京时间）
+
+CPU 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 已 GitHub push/readback；模板目录只读 CPU 原始 manifest，不请求 GPU 或媒体素材包。独立七套唯一一次合并 **204/204 PASS，13.639 秒**；另外 15 项纯内存对抗 PASS，不叠加 204。3 个 Python 文件 compile/3.9 AST、4 文件冻结 SHA、diff-check PASS，无新增 P0/P1。
+
+最后的 13 份文档一致性复核 PASS；修改文档后仅对受影响的部署/迁移文本合同定向复测，1/1 PASS、0.034 秒，不叠加 204 或伪称第二次整套。代码冻结未变化。
+
+CPU 数据盘已安装 7921-byte、固定 SHA 的只读 manifest；GitHub 拉取精确候选到独立干净 checkout 后，CPU Python 3.9.6 使用真实文件执行 app 原函数（AST 提取），315 组合、auto/manual 冻结、坏配置/坏指纹 503 均 PASS；socket/HTTP/SQLite/媒体包 tripwire 为 0。不启动整个 app，不替代生产 HTTP 测试。生产 API/job worker PID、app.py SHA 不变，未改 env 或重启；具体路径、blob/recipe SHA 见 [职责与验证记录](cpu-gpu-boundary-20260827.md)。
+
+HK 本次未更新/重启/重制，仍为 e1f5a1d，沿用下文真实媒体证据。旧三表演练仍只绑定 c719beb，不改绑新 CPU 候选。CPU 正式上线、HK 正式前缀激活与指定频道实际发布仍待生产数据库合法写权限及后续门禁，真实 YouTube 上传/评论仍为 0，整体 production release HOLD。当前状态见 [部署状态](deployment-status-20260827.md)。
+
+已知非阻断风险：现有共享媒体 URL 下载器并非来源/重定向强白名单，正常业务链路无 GPU 业务查询不等于网络级隔离；本次不扩大修改 X/FB/TT 共享下载器。相关评审见 [SA 代码评审](sa-code-review.md)。实现者 16 项专项、旧 188/166 等均已包含于本轮 204 范围，不叠加；此次没有重跑历史浏览器或真实 YouTube 用例。
+
+## 历史结论（2026-08-27 12:38，北京时间）
 
 HK 隔离 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 的真实自动/手动合成、封面回调、下载解码、即时重复提交及服务重启后重放均通过；报告与 8 帧经独立只读 QA 复核 PASS。CPU 候选/三表演练仍绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，CPU 正式应用尚未发布/切流。生产数据库合法授权未具备，YouTube 实际上传/评论仍为 0，整体 production release HOLD。见 [部署状态](deployment-status-20260827.md)。
 

@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-- CPU `43.166.187.96` 保留页面、任务队列、SQLite、OAuth、YouTube 发布和统一表同步；全部视频制作迁到香港 GPU `43.154.250.89`。
+- CPU `43.166.187.96` 负责全部业务查询与协调：剧集/分集/素材地址、模板目录与配方冻结、任务状态、频道/OAuth、短链、YouTube 发布/评论和统一表同步；页面、队列、SQLite 均留 CPU。香港 GPU `43.154.250.89` 只接收完整制作参数，下载素材、制作、上传 COS，再把结果返回 CPU；不持有业务数据库或 YouTube 凭据，不以缺参为由回查 CPU/数据库。
 - 保持现有视觉、侧栏、表单、卡片和表格。输出键精确为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；所有复选框新建时默认不勾选，服务端拒绝零输出。
 - 不改香港 GPU 现有 `ads_video_producer.service`；不静默双写或自动回退旧 GPU。
 - 已在现有 `gy.g2flow.com` 站点内完成隔离静态目录与 Nginx location 基础配置；未生成真实 YouTube 短链、未执行生产统一表写入或真实 YouTube 上传/评论。2026-08-27 用户已明确授权补齐环境后继续部署，并指定 Shahrul Ikmal 测试；按附件仅允许单次内部 unlisted 视频与一条评论，不含 public 测试或其他平台发布。所有支持操作仅通过 SSH，禁止腾讯云管理后台。HK 隔离环境与媒体验收已完成，CPU 正式发布仍被目标库合法授权阻塞；精确状态见 [部署记录](deployment-status-20260827.md)。
@@ -12,6 +12,7 @@
 请求使用 `advanced_options.random_template={mode,source,layers}`。`source` 必填且仅为 `concat_video` 或 `no_bgm_video`；即使源普通输出未被选择，也允许内部生成但不对外返回。
 
 - auto 从 FB v3 的 border 3、corners 3、opacity_video 5、tint 7 中稳定选择，共 315 种；light 不参与。manual 必须提供四层有效 asset ID。
+- CPU 模板目录读取本地 `DRAMA_RANDOM_OVERLAY_MANIFEST_FILE` 指定的原始、SHA 固定的 FB manifest（7921 bytes），不请求 GPU catalog，也不复制/读取视频素材包。缺文件、指纹或内容无效时返回 503，不回退到 GPU。GPU 独立核验本机制作素材与冻结配方；其本地目录诊断、结果缓存/COS 可用性校验属于制作环节，不承担业务查询。详见 [CPU/GPU 职责与验收](cpu-gpu-boundary-20260827.md)。
 - 冻结 source、asset manifest SHA、四层 asset identity、recipe/version、安全 rotation/scale/tint opacity 参数；重试复用同一 recipe。
 - 结果字段固定为 `output_random_template_url` 与 `random_template_recipe`。
 - recipe 审计 UI 仅以 DOM `textContent`/文本节点展示 version/profile/source/asset-set/layers；所有服务端值均视为不可信，禁止拼入 `innerHTML`。
@@ -44,5 +45,5 @@
 
 - release `/data/drama-synthesis-gpu/releases/<git_sha>`，`current` 原子 symlink；unit `drama-synthesis-gpu-worker.service` 仅监听 `127.0.0.1:8787`。
 - 香港反向隧道把 CPU `127.0.0.1:18788` 映射到 HK 8787；legacy 18787 保留。
-- GPU worker 只暴露 health/catalog/render，校验完整 manifest/每文件 SHA，发布 COS 结果；不持有 YouTube 凭据。
+- GPU worker 只暴露制作相关 health/本地 catalog 诊断/render/cover 接口，校验完整 manifest/每文件 SHA，发布 COS 结果；CPU 页面与任务查询不调用其 catalog。GPU 不启动 `app.main()`、业务查询或任务恢复，不持有数据库/YouTube 凭据。
 - 离线自动化验收覆盖历史兼容、315 recipe、冻结、精确短链/fbclid/原子冲突、宏、OAuth identity、resumable/processing、comment、outbox、unknown、防重、lease fencing、迁移并发和 GPU topology；这些用例的外部调用使用 fake/temp，不替代真实验收。真实 HK 小样与三表隔离恢复另行取证；指定频道的单次内部 unlisted/评论/三表回读须在合法数据库授权及生产部署门禁通过后执行，不得把代码 QA 当成真实发布成功。

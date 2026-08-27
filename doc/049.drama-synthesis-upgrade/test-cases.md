@@ -2,9 +2,11 @@
 
 ## 2026-08-27 现行范围与结果边界
 
+最新 CPU 候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 将所有业务查询保留 CPU，其中模板目录只读固定 SHA 的本机 manifest；HK 只制作和上传 COS。新增 16 项已进入独立一次七套 **204/204 PASS（13.639 秒）**；另外 15 项纯内存对抗单列 PASS。CPU Python 3.9.6 真实 manifest/原函数隔离验证通过；生产应用未切换。下文 HK 188 与 c719 166 是历史批次，不与 204 叠加。
+
 用户已授权通过 SSH 完成 HK 环境、部署、三表备份/隔离恢复演练，并在门禁通过后只用 Shahrul Ikmal 执行一次内部 unlisted 视频与一条评论；禁止腾讯云管理后台和 public 测试。正式 HTTP/UI 仍固定 public，内部 CLI 不打开正式 live/sync。CPU 未切流前继续保持 18787，HK 通过 18788 隔离验证，不触碰 X/ads_video_producer。
 
-HK 当前 GitHub-first 部署版本为 `e1f5a1d04cfb510df9c2444ac592adec2827508b`；CPU 待部署候选及 299309 行真实三表恢复演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`。HK 双模式及重启复用已通过，不再沿用 c719 阶段重复 POST 失败的当前结论。
+HK 当前 GitHub-first 部署版本为 `e1f5a1d04cfb510df9c2444ac592adec2827508b`；299309 行旧三表恢复演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能改绑最新 CPU 候选。HK 双模式及重启复用已通过，不再沿用 c719 阶段重复 POST 失败的当前结论。
 
 | 证据批次 | 实际执行结果与边界 |
 | --- | --- |
@@ -22,6 +24,7 @@ v3 报告为 `/data/drama-synthesis-gpu/work/acceptance/http-media-20260827-v3.j
 |---|---|
 | 输出/迁移 | `random_template_video` 权威键 true 全链路；四项默认 false；零输出拒绝；旧错误键只归一输入；旧 cover/naming accept-ignore-default；历史 migration backup/dry-run/apply/idempotency/rollback/并发 |
 | 随机模板 | source 枚举；315/无 light；manual 四层；manifest/file SHA；冻结/retry；内部 source 不外返；exact result |
+| CPU 查询边界 | 原始 manifest metadata-only，无 HTTP/DB/媒体包访问；315/无 light；与 GPU 目录及 auto/manual recipe identity 一致；缺配置/错 SHA 无 fallback；regular/非 symlink/绝对路径/有界长度；文件打开竞态/增长截断/同长改写；重复 JSON/错误版本/类别/字段/名字/大小/UTF8/NaN 脱敏失败；HK 本地诊断保留；CPU 实际文件与原函数隔离验证 |
 | 操作/UI | 单/多素材；copy video/cover；cover-only 显示“无可用视频产物”且 short/YT disabled；真实 Playwright fake API 验证 modal 顺序 fetch；Clipboard primary/fallback/error；recipe 审计仅 DOM textContent；hostile img/onerror/script/quotes 0 执行/0 注入且文本可见 |
 | 短链 | unique(job,kind)；独立 ID；gy path；base/order/encoding；content/job；仅 fbclid；无 redirect；atomic/idempotent/concurrency/conflict；缺 writer阻断 |
 | 宏 | description replace-all；无宏不生成；短链失败零 mutation；冻结 template/rendered；title/comment 不解析；渲染后 bytes |
