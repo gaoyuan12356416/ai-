@@ -270,12 +270,19 @@ def validate_google_scope(scope, benchmark, audit, rows):
             require(audit.get(field) is None, label + " unknown platform USD must keep " + field + " null")
     for field in ("fx_missing_rows", "platform_fx_missing_rows", "incomplete_material_count"):
         integer(required_field(audit, field, label), label + "." + field)
+    for field in ("fx_missing_native_spend", "platform_fx_missing_native_spend"):
+        amounts = required_field(audit, field, label)
+        require(isinstance(amounts, dict), label + "." + field + " must be grouped by currency")
+        for currency, value in amounts.items():
+            require(isinstance(currency, str) and currency, label + " missing native currency")
+            numeric(value, label + "." + field + "." + currency)
     require(audit.get("af_mapped") is None and audit.get("af_mapping_coverage") is None,
             label + " asset AF audit must remain null")
 
     for row in rows:
         item = "%s material %s" % (label, row["custom_source_id"])
         require(row.get("selection_rule") == "B", item + " may select only rule B")
+        numeric(required_field(row, "platform_conversions", item), item + ".platform_conversions")
         spend = numeric(row.get("spend"), item + ".spend")
         require(spend > Decimal(5000), item + " spend must be strictly > 5000 USD")
         for field in ("installs", "af_d0_first_transactions"):
@@ -313,6 +320,8 @@ def monthly_summary(month, before, after, audits):
             gap[key] = None if value is None else str(value)
         for key in ("fx_missing_rows", "platform_fx_missing_rows", "incomplete_material_count", "baseline_missing_account_days"):
             gap[key] = audit.get(key)
+        for key in ("fx_missing_native_spend", "platform_fx_missing_native_spend"):
+            gap[key] = {currency: str(value) for currency, value in audit.get(key, {}).items()}
         gaps.append(gap)
     return {
         "month": month,

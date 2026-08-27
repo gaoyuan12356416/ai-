@@ -86,6 +86,7 @@ def candidate_payload(baseline):
             audit.update(selected_count=1 if audit["app"] == "NG OPay" else 0,
                          metric_source="ads_google_insights:type=0", af_mapped=None, af_mapping_coverage=None,
                          fx_missing_rows=0, platform_fx_missing_rows=0, incomplete_material_count=0,
+                         fx_missing_native_spend={}, platform_fx_missing_native_spend={},
                          baseline_missing_account_days=0)
     return payload
 
@@ -143,6 +144,21 @@ class UpgradeValidatorTests(unittest.TestCase):
         self.assertEqual(report["month_count"], 7)
         self.assertEqual(report["months"][-1]["candidate_channel_counts"], {"Google": 1, "Meta": 1, "TikTok": 1})
         self.assertEqual(report["months"][-1]["google_gaps"][1]["selected_count"], 0)
+
+    def test_native_fx_gaps_are_preserved_and_not_converted_to_usd(self):
+        self.gg("audits").update(fx_missing_native_spend={"NGN": 12345.67}, platform_fx_missing_native_spend={"NGN": 13802269.04})
+        self.write_reports()
+        gap = self.assert_pass()["months"][-1]["google_gaps"][0]
+        self.assertEqual(gap["fx_missing_native_spend"], {"NGN": "12345.67"})
+        self.assertEqual(gap["platform_fx_missing_native_spend"], {"NGN": "13802269.04"})
+        self.gg("audits")["fx_missing_native_spend"]["NGN"] = -1
+        self.write_reports()
+        self.assert_fail("finite and nonnegative")
+
+    def test_negative_platform_conversions_are_rejected(self):
+        self.gg()["platform_conversions"] = -0.1
+        self.write_reports()
+        self.assert_fail("platform_conversions.*finite and nonnegative")
 
     def test_read_only_no_network_or_subprocess(self):
         before = {str(path.relative_to(self.root)): hashlib.sha256(path.read_bytes()).hexdigest()

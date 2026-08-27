@@ -69,3 +69,12 @@ python3 validate_regression_snapshot.py /path/to/v2/2026-07.json --non-google-on
 ```
 
 Google-only 重建强制对照每月原终版 Meta/TikTok 的基础指标和入选集合；媒体、关键词、制作者及原审计也从冻结快照保留。正式切换前必须完成全部月份、独立数据校验和页面测试。代码回滚时旧版重新使用原V1缓存，不覆盖其事实或快照。
+
+真实产物验证（不连接数据库）：
+
+```bash
+python3 validate_v2_upgrade.py --baseline-dir /usr/share/nginx/html/reports/opay-excellent-creatives --candidate-dir /mnt/data-disk/opay-excellent-creatives/staging-public-v2
+python3 validate_frontend_contract.py --payload /path/to/v2/2026-07.json --csv-output-dir /mnt/data-disk/opay-excellent-creatives/qa/csv
+```
+
+前者独立比较七个月全部非Google字段并重新计算六项公式；后者用真实月JSON执行页面原始CSV导出函数，对全部结果和Google筛选结果的Blob逐字段解析，生成可复核CSV。自动Blob检查不等同于确认某台浏览器的原生下载保存位置。

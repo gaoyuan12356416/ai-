@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Check the standalone page and execute its JS against a small, local DOM fixture."""
 
+import argparse
+import csv
+import io
 import json
 import re
 import subprocess
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -285,7 +289,7 @@ asyncTests().catch(error=>{console.error(error);process.exitCode=1});
 """
 
 
-def run_node(script, *, syntax_only=False):
+def run_node(script, *, syntax_only=False, capture=False):
     process = subprocess.run(
         ["node", "--check"] if syntax_only else ["node"],
         input=script,
@@ -297,11 +301,63 @@ def run_node(script, *, syntax_only=False):
     )
     if process.returncode:
         raise SystemExit(process.stdout + process.stderr)
-    if process.stdout:
+    if process.stdout and not capture:
         print(process.stdout.rstrip())
+    return process.stdout
+
+
+def verify_payload_csv(constants, script, payload_path, output_dir=None):
+    """Exercise the actual inline export function with a generated month, not fixture numbers."""
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    probe = r'''
+state.payload=ACTUAL_PAYLOAD;
+state.rows=ACTUAL_PAYLOAD.rows.map((r,index)=>({...r,__index:index}));
+(async()=>{
+  const outputs=[];
+  for(const channel of ["","Google"]){
+    for(const id of ["channelFilter","appFilter","typeFilter","keywordFilter","makerFilter","ruleFilter"])$(id).value="";
+    $("channelFilter").value=channel;
+    applyFilters(); exportCsv();
+    outputs.push({channel,row_count:state.filtered.length,filename:download.name,csv:await exportBlob.text()});
+  }
+  console.log(JSON.stringify(outputs));
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+    results = json.loads(run_node(constants + DOM_HARNESS + script + "\nconst ACTUAL_PAYLOAD="
+                                  + json.dumps(payload, ensure_ascii=False, allow_nan=False) + ";\n" + probe, capture=True))
+    summary = []
+    keys = ("d0_cpa", "cpm", "apm", "ctr", "cvr", "install_to_d0_rate")
+    for result in results:
+        expected_rows = [row for row in payload["rows"] if not result["channel"] or row["channel"] == result["channel"]]
+        parsed = list(csv.DictReader(io.StringIO(result["csv"].lstrip("\ufeff"))))
+        assert result["row_count"] == len(parsed) == len(expected_rows)
+        for actual, expected in zip(parsed, expected_rows):
+            assert actual["素材ID"] == str(expected["custom_source_id"])
+            for label, key in zip(METRIC_LABELS, keys):
+                value = expected["metrics"][key]
+                if key == "d0_cpa" and expected.get("af_d0_first_transactions") == 0 and expected.get("spend") is not None:
+                    assert actual[label] == "∞"
+                elif value is None:
+                    assert actual[label] == "", (label, actual[label])
+                else:
+                    assert Decimal(actual[label]) == Decimal(str(value)), (label, actual[label], value)
+            for label, key in (("安装", "installs"), ("AF D0首交数", "af_d0_first_transactions")):
+                assert actual[label] == ("" if expected[key] is None else str(expected[key]))
+        assert result["filename"] == "opay-excellent-creatives-%s.csv" % payload["month"]
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / (payload["month"] + "-" + (result["channel"] or "all") + ".csv")).write_bytes(result["csv"].encode("utf-8"))
+        summary.append({"channel": result["channel"] or "all", "rows": len(parsed)})
+    print(json.dumps({"actual_csv": "PASS", "month": payload["month"], "scopes": summary}, ensure_ascii=False))
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--payload", type=Path, help="also verify the real inline CSV exporter against an actual month")
+    parser.add_argument("--csv-output-dir", type=Path, help="optional generated QA CSV artifacts")
+    args = parser.parse_args()
+    if args.csv_output_dir and not args.payload:
+        parser.error("--csv-output-dir requires --payload")
     html = (HERE / "report.html").read_text(encoding="utf-8")
     required = [
         '<meta name="robots" content="noindex,nofollow,noarchive">',
@@ -341,6 +397,8 @@ def main():
         json.dumps(METRIC_LABELS, ensure_ascii=False),
     )
     run_node(constants + DOM_HARNESS + scripts[0] + BEHAVIOR_TESTS)
+    if args.payload:
+        verify_payload_csv(constants, scripts[0], args.payload, args.csv_output_dir)
     print("frontend contract: PASS")
 
 
