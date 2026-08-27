@@ -382,7 +382,7 @@ class DeploymentSafetyTests(SafetyFixture):
         command.assert_not_called()
         self.assertEqual(paths["NGINX"].read_text(), "later-config")
 
-    def test_verification_submits_only_invalid_batches(self):
+    def verification_fixture(self):
         backup = Path(self.temp.name) / "verify-backup"
         backup.mkdir()
         live = Path(self.temp.name) / "live"
@@ -394,6 +394,10 @@ class DeploymentSafetyTests(SafetyFixture):
         }), encoding="utf-8")
         env = Path(self.temp.name) / "verify.env"
         env.write_text("MATERIAL_REPLICATION_WEBHOOK_TOKENS=" + TOKEN + "\n", encoding="utf-8")
+        return backup, live, env
+
+    def test_verification_submits_only_invalid_batches(self):
+        backup, live, env = self.verification_fixture()
         calls = []
 
         def rejected(base, path, expected, token="", body=b"{}"):
@@ -403,7 +407,7 @@ class DeploymentSafetyTests(SafetyFixture):
         with (
             mock.patch.object(deploy, "LIVE", live), mock.patch.object(deploy, "ENV", env),
             mock.patch.object(deploy, "probe", side_effect=rejected),
-            mock.patch.object(deploy, "stats", return_value={}),
+            mock.patch.object(deploy, "stats", return_value={"material_replication_broadcast_outbox": {}}),
             mock.patch.object(deploy, "command", side_effect=lambda args: "active" if "is-active" in args else "123"),
             mock.patch("builtins.print"),
         ):
@@ -419,6 +423,24 @@ class DeploymentSafetyTests(SafetyFixture):
                 self.assertEqual(path, delivery.ENDPOINT)
                 with self.assertRaises(service.ReplicationError):
                     service.normalize_payload(json.loads(body))
+
+    def test_verification_missing_outbox_fails_without_writing_proof(self):
+        backup, live, env = self.verification_fixture()
+        for snapshot in ({}, {"material_status_broadcast_outbox": {}}):
+            with (
+                self.subTest(snapshot=snapshot),
+                mock.patch.object(deploy, "LIVE", live), mock.patch.object(deploy, "ENV", env),
+                mock.patch.object(deploy, "probe", return_value={"status": 401}),
+                mock.patch.object(deploy, "stats", return_value=snapshot),
+                mock.patch.object(deploy, "command", return_value="active"),
+                mock.patch.object(deploy, "atomic_bytes") as write_proof,
+                mock.patch("builtins.print") as print_result,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "new outbox was not initialized"):
+                    deploy.verify(backup)
+                write_proof.assert_not_called()
+                print_result.assert_not_called()
+                self.assertFalse((backup / "verification.json").exists())
 
     def test_token_bearing_probe_never_follows_redirect(self):
         captured = []

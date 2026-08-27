@@ -72,7 +72,7 @@ python3 scripts/deploy_material_replication.py apply \
 - 新接口带正确 Token，但正文 32,769 字节：`413 payload_too_large`。
 - 旧接口不带 Token：`401 invalid_token`。
 
-校验请求不跟随重定向，不把 Token 转发至其他 URL。共 8 个拒绝请求，任何响应都不得产生批次。验证同时检查主服务 active、已安装文件哈希、旧播报模块哈希、新 outbox 零记录，保存 `verification.json`。
+校验请求不跟随重定向，不把 Token 转发至其他 URL。共 8 个拒绝请求，任何响应都不得产生批次。验证同时检查主服务 active、已安装文件哈希、旧播报模块哈希、新 outbox 已完成初始化且零记录，保存 `verification.json`。缺表不能等同于空队列，初始化失败必须使上线验收失败。
 
 ```bash
 python3 scripts/deploy_material_replication.py verify --backup <prepared_backup绝对路径>

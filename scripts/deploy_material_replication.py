@@ -129,6 +129,8 @@ def verify(backup):
         probes.append(probe(base, new_path, 413, token, b"x" * 32769))
         probes.append(probe(base, "/api/integrations/v1/material-task-status-events", 401))
     snapshot = stats()
+    if "material_replication_broadcast_outbox" not in snapshot:
+        raise RuntimeError("new outbox was not initialized; check worker startup")
     if snapshot.get("material_replication_broadcast_outbox"):
         raise RuntimeError("new outbox is not empty after rejection-only verification")
     result = {"verified_at": datetime.now(timezone.utc).isoformat(), "probes": probes,
