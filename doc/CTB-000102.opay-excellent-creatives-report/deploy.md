@@ -1,5 +1,9 @@
 # 部署文档
 
+## 最新发布
+
+Google CPC / 图片视频CTR新规则已于2026-08-27北京时间15:22上线，精确提交`72f2e7440e16d8d3ea782ce9eea31176d21c0797`。当前版本、七个月结果、备份及精确回滚程序见[Google CPC实际发布记录](release-google-cpc-20260827.md)。下文V1/V2部署与PENDING交接均为历史，不替代该最新记录。
+
 ## 变更内容
 
 - 新增独立公开静态路径 `/reports/opay-excellent-creatives/`。
