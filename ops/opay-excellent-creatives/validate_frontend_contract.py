@@ -364,6 +364,13 @@ test("PIC VID 1000 policy states both asset baselines and no A minimum",()=>{
   for(const token of ["全部图片/视频资产月消耗", "50%", "跨线", "并列", "总 USD 消耗 / 总点击", "A 无最低消耗门槛", "> 1000", "含未映射", "NG/PK 独立计算", "不混入 Campaign"])assert.ok(text.includes(token),token);
   assert.ok(!text.includes("> 5000"));assert.ok(!text.includes("全量 Campaign 平台月消耗"));
 });
+test("PIC VID platform CPA explains missing same-scope AF rather than incomplete USD",()=>{
+  const row=clone(google);Object.assign(row.evidence,{platform_cpa_available:false,platform_spend_scope:"google_picture_video_assets"});
+  setup([row],2,{benchmarks:[{channel:"Google",app:"NG OPay",spend:121.72,cpa:null,af_d0_first_transactions:null}]});
+  openDetail(state.rows[0]);assert.equal(details()["平台 D0首交CPA"],"");assert.equal(csvRow()["平台CPA"],"");
+  assert.match($("modalBody").textContent,/图片\/视频素材池无同口径 AF 数据，CPA 留空/);
+  assert.doesNotMatch($("modalBody").textContent,/平台 USD 基准不完整/);
+});
 test("PIC VID audits and details never mislabel the asset baseline as Campaign",()=>{
   const row=clone(googleCpcRow);row.evidence.platform_spend_scope="google_picture_video_assets";
   const audit={channel:"Google",app:"NG OPay",platform_spend:7000,platform_cpc:2,picture_video_ctr:0.025,metric_source:"ads_google_insights:type=3,asset_type=2/4"};

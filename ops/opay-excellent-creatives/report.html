@@ -258,7 +258,7 @@
       if(google){const note=document.createElement("p");note.className="detail-note";note.textContent="Google 平台转化数（conversions）不等同于安装或 AF D0 首交，不参与 AF 汇总，也不用于补齐缺失指标。";wrap.appendChild(note)}
       detailHeading(wrap,"数据可用性");
       const availability=[["AF D0 首交",availabilityText(r,"af_d0_first_transactions",e.af_status)],["安装",availabilityText(r,"installs",e.installs_status)],["USD 消耗",availabilityText(r,"spend",e.usd_status)]];
-      if(typeof e.platform_cpa_available==="boolean")availability.push(["平台 CPA 基准",e.platform_cpa_available?"可用":"缺失，平台 USD 基准不完整，CPA 留空"]);
+      if(typeof e.platform_cpa_available==="boolean")availability.push(["平台 CPA 基准",e.platform_cpa_available?"可用":google&&picvidPolicy(r)?"缺失，图片/视频素材池无同口径 AF 数据，CPA 留空":"缺失，平台 USD 基准不完整，CPA 留空"]);
       detailGrid(wrap,availability);
       if(google&&e.metric_source){const note=document.createElement("p");note.className="detail-note";note.textContent="平台指标来源："+e.metric_source;wrap.appendChild(note)}
       if(e.data_quality){const note=document.createElement("p");note.className="detail-note";note.textContent=e.data_quality;wrap.appendChild(note)}
