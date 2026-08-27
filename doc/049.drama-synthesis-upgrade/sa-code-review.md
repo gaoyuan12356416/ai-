@@ -1,5 +1,13 @@
 # SA 代码评审
 
+## 本次 v3 冻结结论：PASS
+
+独立复核未发现新 P0/P1；272/272 唯一整套通过，15 项纯内存对抗最终通过，35 文件 compile/3.9 AST、7 文件冻结 SHA 与 diff-check 均通过。共享凭据与应用 SQL 白名单是诚实边界，不声称数据库隔离或全量授权审计。所需能力、TRIGGER 可见性、无 trigger/FK 在每次写前重验；固定 DDL、不可变 payload 和原 MySQL 只读合同未变。可进入 GitHub 精确版本部署，真实 v3/上传/评论/新表记录另验。
+
+## 最新覆盖范围：现有账号 v3（2026-08-27 16:35）
+
+按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
+
 ## 最新 ads_ai 新表增量
 
 设计及冻结代码已独立 SA/QA 接受，无剩余 P0/P1、新P2。262/262 一次完整回归、15/15独立对抗、35文件compile/3.9AST、18源码/配置前后SHA一致。镜像pin、datadir真实路径与Feishu原始操作者合同修复完成；生产真实门禁另验，不把代码 PASS 视为上线完成。当前以 [新表合同](ads-ai-new-tables-20260827.md) 为准，旧库权限阻塞不适用于用户最新新表范围。

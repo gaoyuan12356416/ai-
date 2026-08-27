@@ -1,5 +1,9 @@
 # 缺陷记录
 
+## 最新覆盖决定（2026-08-27）：BUG-027 被需求变更取代
+
+用户明确取消专用数据库账号隔离，授权现有凭据与 token 发布、只写 ads_ai 新三表。BUG-027 为 SUPERSEDED BY REQUIREMENT CHANGE，不是账号创建成功；无需管理员支持，不再执行下方账号步骤。现行 RPC v3 使用共享账号与应用 SQL 白名单并如实声明 db_least_privilege=false，原表不写。当前部署与实际发布验收另见 [现行合同](../ads-ai-new-tables-20260827.md)。
+
 ## 2026-08-27 当前状态（16:06，北京时间）
 
 新三表已完成，原表零写，整体正式发布仍 HOLD。当前唯一已确认的部署权限阻断是**创建专用 DB writer 账号**，不是 `ads_ai` 无写权限。候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f` 已 GitHub/readback、CPU clean；16:00 fresh-table rehearsal 9 checks PASS，16:01:35 生产 63353 仅 CREATE `ads_ai.ads_youtube_videos`、`ads_ai.ads_youtube_comments`、`ads_ai.ads_youtube_publish_log` 成功且完整兼容，apply 后管理员验证无 trigger/FK；16:06 经 63350 核验三表各 0 行。

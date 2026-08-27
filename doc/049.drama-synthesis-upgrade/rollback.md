@@ -1,5 +1,9 @@
 # 回滚运行手册
 
+## 最新覆盖决定：使用现有授权与现有数据库账号（2026-08-27 16:35）
+
+用户明确取消专用数据库账号隔离要求。按 [现行发布合同](ads-ai-new-tables-20260827.md) 使用 CPU 现有 ads_aius 和已有 YouTube OAuth，发布结果只写 ads_ai 三张新表；不创建/修改账号、不动原 MySQL 表。RPC v3 如实声明共享账号与应用表白名单，保留秘密保护、无 trigger/FK 检查、幂等与未知结果停止。无需再提供管理员凭据。以下专用账号/1410/旧库迁移内容均是历史，不再作为上线门禁；当前部署及真实测试尚待完成，最终实机状态另行记录。
+
 最新范围按 [ads_ai 新表合同](ads-ai-new-tables-20260827.md)。原库完全只读；回滚保留新三表、已确认视频/评论、SQLite/outbox、短链/COS，不反向 DDL、不复制或恢复旧库。下文旧 additive-column 表述仅属停用方案；实际先停新 claim、关 live/sync、审查 in-flight/unknown 后再回退此次文件/env/drop-in 与 18788 切流。
 
 触发条件：六 API/权限异常、recipe 或 wrapper identity 漂移、migration 非零二次 dry-run、GPU manifest/render 偏差、tunnel/health 失败、YouTube processing/unknown 防重失效、统一 outbox 错误写成功。

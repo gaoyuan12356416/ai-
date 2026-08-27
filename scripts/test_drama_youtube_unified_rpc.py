@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for the dedicated ads_ai ledger and least-privilege RPC."""
+"""Offline tests for the ads_ai ledger and approved shared-account RPC."""
 from __future__ import annotations
 
 import copy
@@ -30,7 +30,7 @@ from features.drama_synthesis.unified_youtube_rpc import (
     load_database_credential_file, inspect_owned_tables,
 )
 from scripts.test_drama_synthesis_upgrade import unified_comment_payload, unified_video_payload
-from scripts.drama_youtube_unified_writer_rpc import ControlledWriterHandler, HEALTH_PATH, RPC_PATH
+from scripts.drama_youtube_unified_writer_rpc import ControlledWriterHandler, HEALTH_PATH, RPC_PATH, build_ledger
 
 
 def exact_show_grants(user=WRITER_USER, privileges=RUNTIME_TABLE_PRIVILEGES, account_quote="'"):
@@ -55,6 +55,7 @@ class FakeCursor:
     def execute(self, sql, params=()):
         c = self.connection
         c.sql.append(sql)
+        c.sql_params.append(tuple(params))
         if sql.startswith("SELECT DATABASE()"):
             self.result = [{"database_name": c.schema, "read_only": c.read_only, "account_name": c.account}]
         elif sql.startswith("SELECT VERSION()"):
@@ -62,14 +63,14 @@ class FakeCursor:
         elif sql.startswith("SHOW GRANTS"):
             self.result = copy.deepcopy(c.show_grants if c.show_grants is not None else exact_show_grants(account_quote=c.show_grant_account_quote))
         elif "information_schema.USER_PRIVILEGES" in sql:
-            self.result = list(c.global_privileges)
+            self.result = [row for row in c.global_privileges if row.get("PRIVILEGE_TYPE") in params[1:]]
         elif "information_schema.SCHEMA_PRIVILEGES" in sql:
-            self.result = list(c.schema_privileges)
+            self.result = [row for row in c.schema_privileges
+                           if row.get("TABLE_SCHEMA") in params[1:3] and row.get("PRIVILEGE_TYPE") in params[3:]]
         elif "information_schema.TABLE_PRIVILEGES" in sql:
-            self.result = [
-                {"TABLE_SCHEMA": SCHEMA, "TABLE_NAME": table, "PRIVILEGE_TYPE": privilege, "IS_GRANTABLE": "NO"}
-                for table in REQUIRED_COLUMNS for privilege in RUNTIME_TABLE_PRIVILEGES
-            ] + list(c.table_privileges_extra)
+            self.result = [row for row in c.table_privileges + c.table_privileges_extra
+                           if row.get("TABLE_SCHEMA") == params[1] and row.get("TABLE_NAME") in params[2:5]
+                           and row.get("PRIVILEGE_TYPE") in params[5:]]
         elif "information_schema.COLUMN_PRIVILEGES" in sql:
             self.result = list(c.column_privileges)
         elif "information_schema.TABLES" in sql:
@@ -167,7 +168,11 @@ class FakeConnection:
         self.show_grants = None
         self.show_grant_account_quote = "'"
         self.global_privileges = []
-        self.schema_privileges = []
+        self.schema_privileges = [
+            {"TABLE_SCHEMA": SCHEMA, "PRIVILEGE_TYPE": privilege, "IS_GRANTABLE": "YES"}
+            for privilege in sorted(RUNTIME_TABLE_PRIVILEGES | {"TRIGGER", "CREATE", "DELETE", "ALTER"})
+        ]
+        self.table_privileges = []
         self.table_privileges_extra = []
         self.column_privileges = []
         self.table_override = {}
@@ -181,6 +186,7 @@ class FakeConnection:
         self.fail_create = ""
         self.race_record = None
         self.sql = []
+        self.sql_params = []
         self.ddl = []
         self.inserts = 0
         self.commits = 0
@@ -215,17 +221,31 @@ class HTTPFakeLedger:
 
 
 class UnifiedRPCRepositoryTests(unittest.TestCase):
-    def test_health_v2_ads_ai_only(self):
+    def test_health_v3_is_explicit_shared_account_application_allowlist(self):
         health = UnifiedYouTubeLedger(lambda: FakeConnection()).health()
         self.assertEqual(health["schema"], "ads_ai")
-        self.assertEqual(health["contract"], "drama-youtube-writer-preflight-v2")
+        self.assertEqual(health["contract"], "drama-youtube-writer-preflight-v3")
+        self.assertEqual(health["writer_identity"], "ads_aius@43.166.187.96")
+        self.assertEqual(health["credential_mode"], "shared-existing-account")
+        self.assertEqual(health["write_boundary"], "application-table-allowlist")
+        self.assertIs(health["db_least_privilege"], False)
+        self.assertIs(health["triggers_verified"], True)
+        self.assertIs(health["foreign_keys_verified"], True)
         self.assertEqual(validate_writer_health(health), health)
         for changed in (
-            {"contract": "drama-youtube-writer-preflight-v1"}, {"schema": "kunlunads_dev"},
-            {"writer_identity": "ads_aius@43.166.187.96"}, {"unexpected": True},
+            {"contract": "drama-youtube-writer-preflight-v1"}, {"contract": "drama-youtube-writer-preflight-v2"},
+            {"schema": "kunlunads_dev"}, {"writer_identity": "drama_youtube_writer@43.166.187.96"},
+            {"writer_identity": "ads_aius@%"}, {"unexpected": True}, {"db_least_privilege": True},
+            {"db_least_privilege": 0}, {"credential_mode": "dedicated-account"},
+            {"write_boundary": "database-grants"}, {"triggers_verified": False}, {"foreign_keys_verified": False},
         ):
             with self.subTest(changed=changed), self.assertRaises(DramaSynthesisError):
                 validate_writer_health(dict(health, **changed))
+        for field in health:
+            invalid = dict(health)
+            invalid.pop(field)
+            with self.subTest(missing=field), self.assertRaises(DramaSynthesisError):
+                validate_writer_health(invalid)
 
     def test_full_payload_and_canary_roundtrip_without_legacy_projection(self):
         video = dict(unified_video_payload(), source_url="https://example.test/" + "a" * 3500,
@@ -249,10 +269,11 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
         UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", canary)
         self.assertEqual(c.rows["ads_youtube_videos"][0]["canary_operation_id"], CANARY_OPERATION_ID)
 
-    def test_runtime_credential_loader_cannot_be_used_for_bootstrap(self):
+    def test_runtime_credential_loader_keeps_exact_existing_identity_and_target(self):
         valid = {"host": "101.32.56.53", "port": 63353, "user": WRITER_USER, "password": "x" * 32, "database": SCHEMA}
-        for change in ({}, {"user": "ads_aius"}, {"database": "kunlunads_dev"}, {"port": 63350},
-                       {"port": "63353"}, {"host": "127.0.0.1"}, {"unexpected": True}, {"password": "short"}):
+        for change in ({}, {"user": "drama_youtube_writer"}, {"database": "kunlunads_dev"}, {"port": 63350},
+                       {"port": "63353"}, {"host": "127.0.0.1"}, {"unexpected": True}, {"password": ""},
+                       {"password": None}, {"password": 123}, {"password": "a\x00b"}, {"password": "a" * 1025}):
             value = dict(valid, **change)
             with mock.patch("features.drama_synthesis.unified_youtube_rpc.read_secure_owned_file", return_value=json.dumps(value).encode()):
                 if change:
@@ -261,7 +282,31 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
                 else:
                     self.assertEqual(load_database_credential_file("/fixture"), valid)
                     with self.assertRaises(RuntimeError):
-                        load_database_credential_file("/fixture", expected_user="ads_aius")
+                        load_database_credential_file("/fixture", expected_user="drama_youtube_writer")
+
+    def test_existing_password_is_preserved_without_random_password_assumption(self):
+        for password in ("x", "short", " old p@ss'\\\";密码\n\t "):
+            valid = {"host": "101.32.56.53", "port": 63353, "user": "ads_aius", "password": password, "database": SCHEMA}
+            with self.subTest(length=len(password)), mock.patch(
+                "features.drama_synthesis.unified_youtube_rpc.read_secure_owned_file", return_value=json.dumps(valid).encode(),
+            ), mock.patch("scripts.drama_youtube_unified_writer_rpc.pymysql.connect") as connect:
+                ledger = build_ledger()
+                ledger.connect_factory()
+            self.assertEqual(connect.call_args.kwargs["password"], password)
+            self.assertEqual(connect.call_args.kwargs["user"], "ads_aius")
+            self.assertEqual(connect.call_args.kwargs["database"], SCHEMA)
+            self.assertNotIn("init_command", connect.call_args.kwargs)
+
+    def test_runtime_bad_target_or_driver_keys_fail_before_connect(self):
+        valid = {"host": "101.32.56.53", "port": 63353, "user": "ads_aius", "password": "short", "database": SCHEMA}
+        for changed in ({"host": "localhost"}, {"port": 63350}, {"database": "kunlunads_dev"},
+                        {"user": "root"}, {"init_command": "UPDATE kunlunads_dev.ads_youtube_videos SET id=0"},
+                        {"client_flag": 65536}, {"port": True}):
+            with self.subTest(changed=changed), mock.patch(
+                "features.drama_synthesis.unified_youtube_rpc.read_secure_owned_file", return_value=json.dumps(dict(valid, **changed)).encode(),
+            ), mock.patch("scripts.drama_youtube_unified_writer_rpc.pymysql.connect") as connect, self.assertRaises(RuntimeError):
+                build_ledger()
+            connect.assert_not_called()
 
     def test_insert_update_reuse_and_missing_update(self):
         connection = FakeConnection()
@@ -382,13 +427,15 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
 
     def test_health_rejects_identity_schema_indexes_and_indirect_writes(self):
         changes = [
-            ("schema", "kunlunads_dev"), ("account", "ads_aius@43.166.187.96"), ("read_only", 1),
+            ("schema", "kunlunads_dev"), ("account", "drama_youtube_writer@43.166.187.96"), ("read_only", 1),
+            ("account", "ads_aius@%"), ("account", "ads_aius@localhost"),
             ("read_only", None), ("existing", set()), ("extra_column", True), ("missing_index", True),
             ("table_override", {"TABLE_TYPE": "VIEW"}), ("table_override", {"ENGINE": "MyISAM"}),
             ("table_override", {"TABLE_COMMENT": "unowned"}),
             ("column_override", {"EXTRA": "STORED GENERATED"}),
             ("index_override", {"SUB_PART": 5}), ("index_override", {"NON_UNIQUE": 1}),
             ("foreign_keys", [{"TABLE_NAME": "ads_youtube_videos", "REFERENCED_TABLE_SCHEMA": "kunlunads_dev"}]),
+            ("triggers", [{"TRIGGER_NAME": "writes_old_schema", "EVENT_OBJECT_TABLE": "ads_youtube_videos"}]),
         ]
         for attribute, value in changes:
             c = FakeConnection()
@@ -396,41 +443,70 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
             with self.subTest(attribute=attribute, value=value), self.assertRaises(LedgerRPCError):
                 UnifiedYouTubeLedger(lambda: c).health()
 
-    def test_health_rejects_every_wider_grant_shape(self):
-        extras = [
-            "GRANT ALL PRIVILEGES ON ads_ai.* TO 'drama_youtube_writer'@'43.166.187.96'",
-            "GRANT EXECUTE ON PROCEDURE ads_ai.p TO 'drama_youtube_writer'@'43.166.187.96'",
-            "GRANT PROXY ON ''@'' TO 'drama_youtube_writer'@'43.166.187.96'",
-            "GRANT SELECT ON kunlunads_dev.ads_youtube_videos TO 'drama_youtube_writer'@'43.166.187.96'",
-        ]
-        for grant in extras:
-            c = FakeConnection()
-            c.show_grants = exact_show_grants() + [{"grant": grant}]
-            with self.subTest(grant=grant), self.assertRaises(LedgerRPCError):
-                UnifiedYouTubeLedger(lambda: c).health()
-        for attribute, value in (
-            ("global_privileges", [{"PRIVILEGE_TYPE": "PROCESS", "IS_GRANTABLE": "NO"}]),
-            ("schema_privileges", [{"TABLE_SCHEMA": SCHEMA, "PRIVILEGE_TYPE": "SELECT"}]),
-            ("column_privileges", [{"COLUMN_NAME": "video_id", "PRIVILEGE_TYPE": "SELECT"}]),
-            ("table_privileges_extra", [{"TABLE_SCHEMA": SCHEMA, "TABLE_NAME": "ads_youtube_videos", "PRIVILEGE_TYPE": "DELETE", "IS_GRANTABLE": "NO"}]),
-        ):
-            c = FakeConnection()
-            setattr(c, attribute, value)
-            with self.subTest(attribute=attribute), self.assertRaises(LedgerRPCError):
-                UnifiedYouTubeLedger(lambda: c).health()
+    def test_shared_schema_grants_and_other_readonly_schemas_do_not_create_unrelated_gate(self):
         c = FakeConnection()
-        c.show_grants = exact_show_grants()
-        c.show_grants[-1]["grant"] += " WITH GRANT OPTION"
+        c.global_privileges = [{"PRIVILEGE_TYPE": "USAGE", "IS_GRANTABLE": "NO"}]
+        c.schema_privileges += [
+            {"TABLE_SCHEMA": schema, "PRIVILEGE_TYPE": privilege, "IS_GRANTABLE": "NO"}
+            for schema in ("kunlunads_dev", "ads_analysis", "ads_business", "ads_setting")
+            for privilege in ("SELECT", "SHOW VIEW")
+        ]
+        health = UnifiedYouTubeLedger(lambda: c).health()
+        self.assertTrue(health["ok"])
+        self.assertFalse(health["db_least_privilege"])
+        self.assertFalse(any(sql.startswith("SHOW GRANTS") or "COLUMN_PRIVILEGES" in sql for sql in c.sql))
+        checks = [(sql, params) for sql, params in zip(c.sql, c.sql_params) if "_PRIVILEGES" in sql]
+        self.assertEqual(len(checks), 3)
+        for sql, params in checks:
+            self.assertIn("WHERE GRANTEE=%s", sql)
+            self.assertIn("PRIVILEGE_TYPE IN (%s,%s,%s,%s)", sql)
+            self.assertEqual(params[0], "'ads_aius'@'43.166.187.96'")
+            self.assertNotIn("kunlunads_dev", params)
+            if "SCHEMA_PRIVILEGES" in sql:
+                self.assertIn("TABLE_SCHEMA IN (%s,%s)", sql)
+                self.assertEqual(params[1:3], (SCHEMA, r"ads\_ai"))
+            if "TABLE_PRIVILEGES" in sql:
+                self.assertIn("TABLE_NAME IN (%s,%s,%s)", sql)
+                self.assertEqual(params[1:5], (SCHEMA,) + tuple(TABLE_BY_KIND.values()))
+
+    def test_effective_global_schema_table_capabilities_can_combine(self):
+        c = FakeConnection()
+        c.global_privileges = [{"PRIVILEGE_TYPE": "SELECT", "IS_GRANTABLE": "NO"}]
+        c.schema_privileges = [{"TABLE_SCHEMA": r"ads\_ai", "PRIVILEGE_TYPE": "TRIGGER", "IS_GRANTABLE": "YES"}]
+        c.table_privileges = [
+            {"TABLE_SCHEMA": SCHEMA, "TABLE_NAME": table, "PRIVILEGE_TYPE": privilege, "IS_GRANTABLE": "NO"}
+            for table in TABLE_BY_KIND.values() for privilege in ("INSERT", "UPDATE")
+        ]
+        self.assertTrue(UnifiedYouTubeLedger(lambda: c).health()["ok"])
+        c.table_privileges.pop()
         with self.assertRaises(LedgerRPCError):
             UnifiedYouTubeLedger(lambda: c).health()
 
-    def test_runtime_does_not_claim_hidden_trigger_absence(self):
+    def test_missing_required_capability_fails_before_insert_or_hidden_trigger_query(self):
+        for missing in ("SELECT", "INSERT", "UPDATE", "TRIGGER"):
+            c = FakeConnection()
+            c.schema_privileges = [row for row in c.schema_privileges if row["PRIVILEGE_TYPE"] != missing]
+            with self.subTest(missing=missing), self.assertRaises(LedgerRPCError) as error:
+                UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
+            self.assertEqual(error.exception.code, "youtube_sync_trigger_visibility_invalid" if missing == "TRIGGER" else "youtube_sync_grant_mismatch")
+            self.assertEqual(c.inserts, 0)
+            self.assertFalse(any("information_schema.TRIGGERS" in sql for sql in c.sql))
+
+    def test_wrong_schema_and_uncontrolled_escapes_never_supply_required_capabilities(self):
+        for schema in ("kunlunads_dev", "ads%ai", r"ads\\_ai", "ads_ai_extra"):
+            c = FakeConnection()
+            c.schema_privileges = [dict(row, TABLE_SCHEMA=schema) for row in c.schema_privileges]
+            with self.subTest(schema=schema), self.assertRaises(LedgerRPCError):
+                UnifiedYouTubeLedger(lambda: c).health()
+
+    def test_runtime_proves_visible_trigger_absence_and_rechecks_before_insert(self):
         c = FakeConnection()
         UnifiedYouTubeLedger(lambda: c).health()
-        self.assertFalse(any("information_schema.TRIGGERS" in sql for sql in c.sql))
+        self.assertTrue(any("information_schema.TRIGGERS" in sql for sql in c.sql))
         c.triggers = [{"TRIGGER_NAME": "forbidden", "EVENT_OBJECT_TABLE": "ads_youtube_videos"}]
         with self.assertRaises(LedgerRPCError):
-            inspect_owned_tables(c.cursor(), inspect_triggers=True)
+            UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
+        self.assertEqual(c.inserts, 0)
 
     def test_operation_preflight_rejects_drift_before_insert(self):
         c = FakeConnection()
@@ -439,11 +515,34 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
             UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
         self.assertEqual(c.inserts, 0)
 
-    def test_exact_quoted_grant_accounts_remain_supported(self):
-        for quote in ("'", chr(96)):
+    def test_literal_schema_underscore_privileges_remain_supported(self):
+        for schema in (SCHEMA, r"ads\_ai"):
             c = FakeConnection()
-            c.show_grant_account_quote = quote
+            c.schema_privileges = [dict(row, TABLE_SCHEMA=schema) for row in c.schema_privileges]
             self.assertTrue(UnifiedYouTubeLedger(lambda: c).health()["ok"])
+
+    def test_arbitrary_sql_old_schema_and_table_inputs_fail_before_connection(self):
+        for action, table, external in (
+            ("delete", "ads_youtube_videos", "video_1"),
+            ("insert", "kunlunads_dev.ads_youtube_videos", "video_1"),
+            ("insert", "ads_ai.ads_youtube_videos", "video_1"),
+            ("insert", "ads_other", "video_1"),
+            ("insert", "ads_youtube_videos; DELETE FROM kunlunads_dev.ads_youtube_videos", "video_1"),
+            ("SELECT 1", "ads_youtube_videos", "video_1"),
+            ("select", "ads_youtube_videos", "video_1' OR 1=1"),
+        ):
+            connect = mock.Mock()
+            with self.subTest(action=action, table=table), self.assertRaises(DramaSynthesisError):
+                UnifiedYouTubeLedger(connect).execute(action, table, external, {})
+            connect.assert_not_called()
+
+    def test_payload_sql_characters_remain_bound_values_only(self):
+        c = FakeConnection()
+        title = "test'); DELETE FROM kunlunads_dev.ads_youtube_videos; --"
+        UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", dict(unified_video_payload(), title=title))
+        self.assertEqual(c.inserts, 1)
+        self.assertFalse(any(title in sql or "kunlunads_dev" in sql for sql in c.sql))
+        self.assertTrue(any(title in params for params in c.sql_params))
 
     def test_loopback_handler_health_auth_and_exact_envelope(self):
         server = HTTPServer(("127.0.0.1", 0), ControlledWriterHandler)

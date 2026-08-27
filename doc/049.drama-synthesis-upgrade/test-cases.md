@@ -1,5 +1,9 @@
 # 测试用例
 
+## 最新覆盖范围：现有账号 v3（2026-08-27 16:35）
+
+按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
+
 ## ads_ai 新表增量
 
 固定 SQL 仅三条 CREATE；同名视图/错误所有权/列索引/触发器/外键均拒绝；全缺、部分兼容、全兼容与并发创建失败均不改原表；高熵独立 writer、最小 grants、v2 health、旧 schema/v1 拒绝；完整 payload Unicode/长字段精确回读、乱序/幂等/冲突；所有旧迁移入口零网络拒绝。真实演练固定新隔离目录/端口和候选 SHA，生产 dry-run、apply、启用前 admin 无 trigger 及 runtime 健康分开取证。canary 继续要求恰好一个 unlisted 视频、一条评论、新三表各一条且原表不写。见 [新表合同](ads-ai-new-tables-20260827.md)。

@@ -752,7 +752,8 @@ class UpgradeTests(unittest.TestCase):
         for document in (deploy_doc, migration_doc):
             self.assertIn("ads-ai-new-tables-20260827.md", document)
         current = (ROOT / "doc/049.drama-synthesis-upgrade/ads-ai-new-tables-20260827.md").read_text(encoding="utf-8")
-        for fragment in ("ads_ai", "bootstrap_drama_youtube_ads_ai.py", "drama-youtube-writer-preflight-v2",
+        for fragment in ("ads_ai", "bootstrap_drama_youtube_ads_ai.py", "drama-youtube-writer-preflight-v3",
+                         "shared-existing-account", "application-table-allowlist", "db_least_privilege=false",
                          "63350", "63353", "SELECT/INSERT/UPDATE", "不复制", "原表"):
             self.assertIn(fragment, current)
 

@@ -46,17 +46,28 @@ ENTITY_PAYLOAD_KEYS = {
     "publish_log": VIDEO_PAYLOAD_KEYS,
 }
 TABLE_TO_KIND = {table: kind for kind, table in TABLE_BY_KIND.items()}
-WRITER_HEALTH_CONTRACT = "drama-youtube-writer-preflight-v2"
+WRITER_HEALTH_CONTRACT = "drama-youtube-writer-preflight-v3"
+WRITER_CREDENTIAL_MODE = "shared-existing-account"
+WRITER_WRITE_BOUNDARY = "application-table-allowlist"
 
 
 def validate_writer_health(value: Mapping[str, Any]) -> dict[str, Any]:
-    required = {"ok", "contract", "schema", "writer_identity", "writable", "schema_verified", "indexes_verified", "grant_fingerprint"}
+    required = {
+        "ok", "contract", "schema", "writer_identity", "writable", "schema_verified",
+        "indexes_verified", "grant_fingerprint", "credential_mode", "write_boundary",
+        "db_least_privilege", "triggers_verified", "foreign_keys_verified",
+    }
     if (
         not isinstance(value, Mapping) or set(value) != required
         or value.get("ok") is not True or value.get("contract") != WRITER_HEALTH_CONTRACT
         or value.get("schema") != "ads_ai"
-        or value.get("writer_identity") != "drama_youtube_writer@43.166.187.96"
-        or any(value.get(key) is not True for key in ("writable", "schema_verified", "indexes_verified"))
+        or value.get("writer_identity") != "ads_aius@43.166.187.96"
+        or value.get("credential_mode") != WRITER_CREDENTIAL_MODE
+        or value.get("write_boundary") != WRITER_WRITE_BOUNDARY
+        or value.get("db_least_privilege") is not False
+        or any(value.get(key) is not True for key in (
+            "writable", "schema_verified", "indexes_verified", "triggers_verified", "foreign_keys_verified",
+        ))
         or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("grant_fingerprint") or ""))
     ):
         raise DramaSynthesisError("youtube_sync_health_invalid", "YouTube统一记录服务身份、表结构或权限未通过预检", 503)

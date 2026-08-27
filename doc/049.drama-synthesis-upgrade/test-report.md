@@ -1,5 +1,15 @@
 # 测试报告
 
+## 本次现有账号 v3 冻结 QA：PASS（2026-08-27 16:45）
+
+独立 QA 唯一一次完整 10 suite **272/272 PASS，17.778 秒**（48+25+23+60+4+33+22+16+30+11）。另 15 项内存对抗：14 项首轮通过，1 项因 QA 夹具误选 DELETE 而非重复 SELECT，纠正夹具后仅定向复测通过；未修改源码、不重跑整套。35 文件 compile 与 Python3.9 AST 兼容通过，实际执行解释器 Python3.14.3。7 个冻结源码/配置/测试文件前后 SHA256 一致，diff-check PASS；DDL SHA256 08efc2e9d7e7bb52eb9bf041e9133acb214ca6dc8b8c7d86cb73d6d80ee8be38 未变。无新 P0/P1。108 专项和旧 262/23 均不与本次相加。
+
+覆盖共享账号必要能力、TRIGGER 可见性、无 trigger/FK、精确身份/目标/五字段凭据、固定新三表 SQL、原表与任意 SQL 拒绝、旧 v2/虚假 DBleastpriv 健康拒绝且零 OAuth/上传/评论/claim。QA 全程零真实网络/数据库调用。代码放行不代表线上发布完成；下一步必须以真实服务用户验证 v3、CPU 切换及单次 Shahrul Ikmal unlisted 验收。
+
+## 最新覆盖范围：现有账号 v3（2026-08-27 16:35）
+
+按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
+
 ## 当前实机结论：新表已创建，账号权限门禁未通过（16:06）
 
 GitHub 精确候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f` 在 CPU clean checkout 完成：生产只读发现 PASS、全新隔离 MySQL 5.7.44 九项建表/载荷/幂等/隔离演练 PASS、生产仅 CREATE 三张 ads_ai 专用表 PASS。apply 后管理员验证无 trigger/FK；随后 63350 每表回读 0 行。原表未写入、未复制数据。报告及 SHA 见 [新表合同与证据](ads-ai-new-tables-20260827.md)。

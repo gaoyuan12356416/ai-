@@ -1,5 +1,9 @@
 # API 合同
 
+## 最新覆盖范围：现有账号 v3（2026-08-27 16:35）
+
+按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
+
 2026-08-27 最新增量不改变 HTTP/前端合同：仅将结果 ledger 改为 ads_ai 专用新表，原库继续只读频道/OAuth。受控 RPC health 升为 v2/ads_ai，旧版拒绝；见 [新表合同](ads-ai-new-tables-20260827.md)。
 
 全部 API 复用登录、模块权限、CSRF 和 operator audit；错误不返回 token、session URI 或内部 SQL。

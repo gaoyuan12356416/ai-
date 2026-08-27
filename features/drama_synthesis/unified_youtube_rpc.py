@@ -1,7 +1,8 @@
 """Dedicated ads_ai YouTube ledger: full immutable facts, no legacy writes.
 
-The caller cannot supply SQL. Schema ownership/bootstrap is separate from the
-least-privilege runtime account; update means exact compare-and-reuse only.
+The caller cannot supply SQL. The approved existing database account is shared;
+the write boundary is an application table allowlist, not database least privilege.
+Schema/bootstrap is separate; update means exact compare-and-reuse only.
 """
 from __future__ import annotations
 
@@ -12,12 +13,13 @@ from typing import Any, Callable, Dict, Mapping
 
 from .unified_youtube import (
     ALLOWED_ACTIONS, TABLE_BY_KIND, TABLE_TO_KIND, WRITER_HEALTH_CONTRACT,
+    WRITER_CREDENTIAL_MODE, WRITER_WRITE_BOUNDARY,
     read_secure_owned_file, validate_controlled_operation,
     validate_entity_payload, validate_external_id,
 )
 
 SCHEMA = "ads_ai"
-WRITER_USER = "drama_youtube_writer"
+WRITER_USER = "ads_aius"
 ACCOUNT_HOST = "43.166.187.96"
 RUNTIME_TABLE_PRIVILEGES = frozenset({"SELECT", "INSERT", "UPDATE"})
 TABLE_OWNERSHIP_COMMENT = "drama-synthesis:youtube-ledger:ads_ai:v2"
@@ -172,8 +174,8 @@ def inspect_owned_tables(cursor: Any, *, allow_missing: bool = False,
                          inspect_triggers: bool = False) -> Dict[str, str]:
     """Check every object before any CREATE, without inspecting business rows.
 
-    Only the validated ads_aius bootstrap/admin can attest trigger absence.
-    Runtime has no TRIGGER grant and deliberately makes no such claim.
+    The caller must prove TRIGGER visibility before requesting an absence check.
+    The shared runtime account and bootstrap both have that capability checked.
     """
     params = (SCHEMA,) + tuple(TABLE_BY_KIND.values())
     suffix = " WHERE TABLE_SCHEMA=%s AND TABLE_NAME IN (%s,%s,%s)"
@@ -212,146 +214,70 @@ def inspect_owned_tables(cursor: Any, *, allow_missing: bool = False,
     return state
 
 
-def validate_exact_account_grants(
-    cursor: Any,
-    current_user: str,
-    *,
-    expected_user: str,
-    expected_table_privileges: frozenset[str],
-) -> str:
-    if current_user != "%s@%s" % (expected_user, ACCOUNT_HOST):
+def validate_shared_account_capabilities(cursor: Any, current_user: str) -> str:
+    """Prove required capabilities only, never claim database least privilege.
+
+    All metadata queries are scoped to the fixed grantee and required
+    capabilities. Other schemas, routine grants and account secrets are not
+    queried. TRIGGER is required so an empty TRIGGERS result is meaningful.
+    """
+    if current_user != "%s@%s" % (WRITER_USER, ACCOUNT_HOST):
         raise LedgerRPCError("youtube_sync_database_identity_invalid", 503)
-    grantee = "'%s'@'%s'" % (expected_user, ACCOUNT_HOST)
-    cursor.execute("SHOW GRANTS FOR CURRENT_USER()")
-    grant_rows = list(cursor.fetchall())
-    grants = []
-    for row in grant_rows:
-        if isinstance(row, Mapping) and row:
-            grants.append(str(next(iter(row.values()))))
-    if not grants:
-        raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    # MySQL 5.7 SHOW GRANTS normally renders account names with identifier
-    # quotes (backticks); compatible forks can use SQL string quotes instead.
-    # Accept only those quote wrappers around the exact frozen account.
-    account_pattern = r"[`']?%s[`']?@[`']?%s[`']?" % (
-        re.escape(expected_user),
-        re.escape(ACCOUNT_HOST),
+    grantee = "'%s'@'%s'" % (WRITER_USER, ACCOUNT_HOST)
+    privileges = tuple(sorted(RUNTIME_TABLE_PRIVILEGES | {"TRIGGER"}))
+    tables = tuple(TABLE_BY_KIND.values())
+    # mysql.db can retain the literal underscore escape used by MySQL 5.7.
+    # Do not interpret arbitrary SQL LIKE patterns as an approved schema.
+    schema_names = (SCHEMA, r"ads\_ai")
+    queries = (
+        ("global", "SELECT PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.USER_PRIVILEGES "
+         "WHERE GRANTEE=%s AND PRIVILEGE_TYPE IN (%s,%s,%s,%s)", (grantee,) + privileges, 4),
+        ("schema", "SELECT TABLE_SCHEMA,PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES "
+         "WHERE GRANTEE=%s AND TABLE_SCHEMA IN (%s,%s) AND PRIVILEGE_TYPE IN (%s,%s,%s,%s)",
+         (grantee,) + schema_names + privileges, 8),
+        ("table", "SELECT TABLE_SCHEMA,TABLE_NAME,PRIVILEGE_TYPE,IS_GRANTABLE "
+         "FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE=%s AND TABLE_SCHEMA=%s "
+         "AND TABLE_NAME IN (%s,%s,%s) AND PRIVILEGE_TYPE IN (%s,%s,%s,%s)",
+         (grantee, SCHEMA) + tables + privileges, 12),
     )
-    usage_pattern = re.compile(
-        r"^GRANT\s+USAGE\s+ON\s+\*\.\*\s+TO\s+%s"
-        r"$"
-        % account_pattern,
-        re.IGNORECASE,
-    )
-    table_pattern = re.compile(
-        r"^GRANT\s+(?P<privileges>[A-Z][A-Z ,]*)\s+ON\s+"
-        r"[`']?%s[`']?\.[`']?(?P<table>[A-Z0-9_]+)[`']?\s+TO\s+%s$"
-        % (re.escape(SCHEMA), account_pattern),
-        re.IGNORECASE,
-    )
-    usage_count = 0
-    shown_table_privileges: Dict[str, frozenset[str]] = {}
-    expected_tables = set(TABLE_BY_KIND.values())
-    for raw_grant in grants:
-        normalized = re.sub(r"\s+", " ", raw_grant.strip())
-        upper = normalized.upper()
-        if "WITH GRANT OPTION" in upper or upper.startswith("GRANT PROXY"):
+    effective = {table: set() for table in tables}
+    observed = set()
+    for scope, sql, params, maximum in queries:
+        cursor.execute(sql, params)
+        rows = list(cursor.fetchall())
+        if len(rows) > maximum:
             raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-        if usage_pattern.fullmatch(normalized):
-            usage_count += 1
-            continue
-        match = table_pattern.fullmatch(normalized)
-        if not match:
-            raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-        table = str(match.group("table") or "")
-        privileges = [item.strip().upper() for item in match.group("privileges").split(",")]
-        privilege_set = frozenset(privileges)
-        if (
-            table not in expected_tables
-            or table in shown_table_privileges
-            or len(privileges) != len(privilege_set)
-            or privilege_set != expected_table_privileges
-        ):
-            raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-        shown_table_privileges[table] = privilege_set
-    if usage_count != 1 or set(shown_table_privileges) != expected_tables:
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
+            privilege = row.get("PRIVILEGE_TYPE")
+            grantable = row.get("IS_GRANTABLE")
+            schema = row.get("TABLE_SCHEMA", "")
+            table = row.get("TABLE_NAME", "")
+            if (privilege not in privileges or grantable not in {"YES", "NO"}
+                    or scope == "schema" and schema not in schema_names
+                    or scope == "table" and (schema != SCHEMA or table not in effective)):
+                raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
+            item = (scope, schema, table, privilege, grantable)
+            if item in observed:
+                raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
+            observed.add(item)
+            for target in (tables if scope != "table" else (table,)):
+                effective[target].add(privilege)
+    if any(not RUNTIME_TABLE_PRIVILEGES <= values for values in effective.values()):
         raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    cursor.execute(
-        "SELECT PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE=%s",
-        (grantee,),
-    )
-    user_privileges = set()
-    for row in cursor.fetchall():
-        if not isinstance(row, Mapping):
-            raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-        user_privileges.add(
-            (
-                str(row.get("PRIVILEGE_TYPE") or "").upper(),
-                str(row.get("IS_GRANTABLE") or "").upper(),
-            )
-        )
-    # USAGE means no global privileges.  MySQL 5.7 commonly omits that
-    # pseudo-privilege from USER_PRIVILEGES, while compatible servers may
-    # expose it explicitly; both shapes represent the same empty privilege
-    # set and every real global privilege remains forbidden.
-    if user_privileges not in (set(), {("USAGE", "NO")}):
-        raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    cursor.execute(
-        "SELECT TABLE_SCHEMA,PRIVILEGE_TYPE,IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE=%s",
-        (grantee,),
-    )
-    if list(cursor.fetchall()):
-        raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    cursor.execute(
-        "SELECT TABLE_SCHEMA,TABLE_NAME,PRIVILEGE_TYPE,IS_GRANTABLE "
-        "FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE=%s",
-        (grantee,),
-    )
-    actual = set()
-    for row in cursor.fetchall():
-        if not isinstance(row, Mapping) or str(row.get("IS_GRANTABLE") or "") != "NO":
-            raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-        actual.add(
-            (
-                str(row.get("TABLE_SCHEMA") or ""),
-                str(row.get("TABLE_NAME") or ""),
-                str(row.get("PRIVILEGE_TYPE") or "").upper(),
-            )
-        )
-    expected = {
-        (SCHEMA, table, privilege)
-        for table in TABLE_BY_KIND.values()
-        for privilege in expected_table_privileges
-    }
-    if actual != expected:
-        raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    cursor.execute(
-        "SELECT TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,PRIVILEGE_TYPE,IS_GRANTABLE "
-        "FROM information_schema.COLUMN_PRIVILEGES WHERE GRANTEE=%s",
-        (grantee,),
-    )
-    if list(cursor.fetchall()):
-        raise LedgerRPCError("youtube_sync_grant_mismatch", 503)
-    # MySQL 5.7 (including the live CynosDB 5.7.18 build) has no
-    # information_schema.ROUTINE_PRIVILEGES table. Routine grants are still
-    # fail-closed because SHOW GRANTS above accepts only USAGE plus the three
-    # exact table-grant statements; EXECUTE/ALTER ROUTINE/PROCEDURE/FUNCTION
-    # statements cannot match that allowlist.
+    if any("TRIGGER" not in values for values in effective.values()):
+        raise LedgerRPCError("youtube_sync_trigger_visibility_invalid", 503)
     canonical = {
-        "account": current_user,
-        "schema": SCHEMA,
-        "global": ["USAGE"],
-        "tables": {
-            table: sorted(expected_table_privileges)
-            for table in sorted(expected_tables)
-        },
+        "account": current_user, "schema": SCHEMA, "credential_mode": WRITER_CREDENTIAL_MODE,
+        "write_boundary": WRITER_WRITE_BOUNDARY, "required_capabilities": sorted(observed),
     }
     encoded = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def load_database_credential_file(path_text: str, *, expected_user: str = WRITER_USER) -> Mapping[str, Any]:
-    """The exact runtime writer only; bootstrap has an independent loader."""
+    """The approved existing account only; target and driver keys stay fixed."""
     if expected_user != WRITER_USER:
         raise RuntimeError("writer database identity is invalid")
     try:
@@ -365,7 +291,7 @@ def load_database_credential_file(path_text: str, *, expected_user: str = WRITER
             or value["port"] != 63353 or value.get("database") != SCHEMA or value.get("user") != WRITER_USER):
         raise RuntimeError("writer database credential target is invalid")
     password = value.get("password")
-    if type(password) is not str or not 32 <= len(password) <= 1024 or any(ord(char) < 32 for char in password):
+    if type(password) is not str or not 1 <= len(password) <= 1024 or "\x00" in password:
         raise RuntimeError("writer database credential file is invalid")
     return dict(value)
 
@@ -420,15 +346,14 @@ class UnifiedYouTubeLedger:
                 or type(identity.get("read_only")) is not int or identity["read_only"] != 0
                 or identity.get("account_name") != "%s@%s" % (WRITER_USER, ACCOUNT_HOST)):
             raise LedgerRPCError("youtube_sync_database_identity_invalid", 503)
-        grant_fingerprint = validate_exact_account_grants(
-            cursor, str(identity["account_name"]), expected_user=WRITER_USER,
-            expected_table_privileges=RUNTIME_TABLE_PRIVILEGES,
-        )
-        inspect_owned_tables(cursor)
+        grant_fingerprint = validate_shared_account_capabilities(cursor, str(identity["account_name"]))
+        inspect_owned_tables(cursor, inspect_triggers=True)
         return {
             "ok": True, "contract": WRITER_HEALTH_CONTRACT, "schema": self.schema,
             "writer_identity": str(identity["account_name"]), "writable": True,
             "schema_verified": True, "indexes_verified": True, "grant_fingerprint": grant_fingerprint,
+            "credential_mode": WRITER_CREDENTIAL_MODE, "write_boundary": WRITER_WRITE_BOUNDARY,
+            "db_least_privilege": False, "triggers_verified": True, "foreign_keys_verified": True,
         }
 
     def health(self) -> Mapping[str, Any]:
@@ -528,6 +453,6 @@ __all__ = [
     "REQUIRED_COLUMN_DEFINITIONS", "REQUIRED_COLUMNS", "REQUIRED_INDEXES_BY_TABLE",
     "RECORD_COLUMNS_BY_KIND", "RUNTIME_TABLE_PRIVILEGES", "SCHEMA", "TABLE_OWNERSHIP_COMMENT",
     "UnifiedYouTubeLedger", "WRITER_USER", "_comment_record", "_publish_log_record", "_video_record",
-    "inspect_owned_tables", "load_database_credential_file", "validate_exact_account_grants",
+    "inspect_owned_tables", "load_database_credential_file", "validate_shared_account_capabilities",
     "validate_required_schema_rows", "validate_required_index_rows",
 ]

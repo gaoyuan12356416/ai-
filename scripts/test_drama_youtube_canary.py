@@ -36,7 +36,7 @@ from features.drama_synthesis.youtube import (
     YouTubeCredential, YouTubeHTTPClient, YouTubeHTTPError, YouTubePublishEngine,
 )
 from scripts import drama_youtube_canary as cli
-from scripts.test_drama_youtube_unified_rpc import FakeConnection, exact_show_grants
+from scripts.test_drama_youtube_unified_rpc import FakeConnection
 
 
 JOB_ID = "c" * 32
@@ -420,9 +420,9 @@ class CanaryTests(unittest.TestCase):
         row = self.prepare()
         changes = (
             ("schema_drift", True),
-            ("table_privileges_extra", [{"TABLE_SCHEMA": "ads_ai", "TABLE_NAME": "ads_youtube_videos",
-                                         "PRIVILEGE_TYPE": "DELETE", "IS_GRANTABLE": "NO"}]),
-            ("show_grants", exact_show_grants() + [{"Grants": "GRANT PROXY ON 'other'@'%' TO 'drama_youtube_writer'@'43.166.187.96'"}]),
+            ("schema_privileges", []),
+            ("account", "drama_youtube_writer@43.166.187.96"),
+            ("triggers", [{"TRIGGER_NAME": "writes_old_schema", "EVENT_OBJECT_TABLE": "ads_youtube_videos"}]),
         )
         for attribute, value in changes:
             with self.subTest(attribute=attribute), mock.patch.object(self.connection, attribute, value), self.assertRaises(LedgerRPCError):
@@ -430,6 +430,24 @@ class CanaryTests(unittest.TestCase):
         self.assertEqual((self.client.refreshes, self.client.begins, self.client.uploads), (0, 0, 0))
         self.assertEqual(self.store.youtube_canary_task()["video_attempt_count"], 0)
         self.assertEqual(self.store.youtube_canary_task()["status"], "queued")
+
+    def test_old_or_misrepresented_shared_health_stops_before_any_youtube_call(self):
+        row = self.prepare()
+        healthy = self.ledger.health()
+        invalid = [dict(healthy, **change) for change in (
+            {"contract": "drama-youtube-writer-preflight-v2"},
+            {"db_least_privilege": True}, {"credential_mode": "dedicated-account"},
+            {"write_boundary": "database-grants"}, {"writer_identity": "root@localhost"},
+        )]
+        missing = dict(healthy)
+        missing.pop("credential_mode")
+        invalid.append(missing)
+        for health in invalid:
+            with self.subTest(health=health), mock.patch.object(self.executor, "health", return_value=health), self.assertRaises(DramaSynthesisError):
+                cli.run_canary(self.app, authorized_args("run", canary_task_id=row["id"]), env=self.env, engine=self.engine, writer=self.writer)
+        self.assertEqual((self.client.refreshes, self.client.begins, self.client.uploads, self.client.comments), (0, 0, 0, 0))
+        self.assertEqual(self.store.youtube_canary_task()["video_attempt_count"], 0)
+        self.assertEqual(self.store.youtube_canary_task()["lease_generation"], 0)
 
     def test_run_requires_explicit_disabled_formal_gates(self):
         row = self.prepare()
@@ -795,7 +813,10 @@ class CanaryTests(unittest.TestCase):
         for change in ({"schema": "other"}, {"schema": "kunlunads_dev"},
                        {"writer_identity": "root@localhost"}, {"indexes_verified": False},
                        {"writable": False}, {"grant_fingerprint": ""}, {"contract": "legacy-health"},
-                       {"contract": "drama-youtube-writer-preflight-v1"}):
+                       {"contract": "drama-youtube-writer-preflight-v1"},
+                       {"contract": "drama-youtube-writer-preflight-v2"},
+                       {"credential_mode": "dedicated-account"}, {"db_least_privilege": True},
+                       {"triggers_verified": False}, {"foreign_keys_verified": False}):
             with self.subTest(change=change), self.assertRaises(DramaSynthesisError):
                 validate_writer_health(dict(payload, **change))
         with mock.patch.object(session, "get", side_effect=__import__("requests").Timeout("PRIVATE_VALUE")), self.assertRaises(DramaSynthesisError):

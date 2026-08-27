@@ -1,5 +1,9 @@
 # SA 测试用例评审
 
+## 最新覆盖范围：现有账号 v3（2026-08-27 16:35）
+
+按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
+
 ## 最新 ads_ai 增量（冻结代码验收通过）
 
 新增新三表为空时创建、兼容重复执行、冲突对象停止、完整 Unicode/长 URL/描述回写、乱序与幂等、异内容拒绝、额外权限/v1/旧库失败关闭、旧迁移入口拒绝且零网络。实机新建表演练与生产最小身份健康分别验收，演练不假称真实生产 writer 身份。独立 QA 在实现冻结后唯一执行完整回归；旧结果不叠加。见 [新合同](ads-ai-new-tables-20260827.md)。

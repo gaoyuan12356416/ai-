@@ -88,7 +88,7 @@ def build_ledger() -> UnifiedYouTubeLedger:
 
 
 class ControlledWriterHandler(BaseHTTPRequestHandler):
-    server_version = "DramaYouTubeWriter/2"
+    server_version = "DramaYouTubeWriter/3"
     sys_version = ""
 
     def log_message(self, _format: str, *_args: Any) -> None:
