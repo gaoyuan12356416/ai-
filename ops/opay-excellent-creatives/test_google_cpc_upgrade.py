@@ -66,7 +66,7 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
             return payload
 
         kwargs.setdefault('materials', [(9, 6000, 100000, 2000)])
-        kwargs.setdefault('extra', [source(resource_id='customers/1234567890/assets/999', cost='0', clicks='0')])
+        kwargs.setdefault('extra', [source(resource_id='customers/1234567890/assets/999', cost='1000000000', clicks='0')])
         with mock.patch.object(report, 'build_month_payload', side_effect=capture):
             payload = policy_fixtures.GoogleCpcPolicyTests().build(**kwargs)
         # Match the actual public JSON reader's Decimal semantics.
@@ -104,25 +104,25 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
         self.assertEqual(result['status'], 'PASS')
         self.assertEqual(result['months'][0]['google'][1]['count'], 0)
 
-    def test_zero_campaign_usd_preserves_generator_cumulative_zero_and_b(self):
+    def test_zero_campaign_usd_does_not_change_picvid_a(self):
         self.build_fixture(campaign_spend=0)
         row = self.google(self.payload)
-        self.assertEqual(row['selection_rule'], 'B')
-        self.assertEqual(row['evidence']['cumulative_spend_ratio'], 0)
+        self.assertEqual(row['selection_rule'], 'A+B')
+        self.assertEqual(row['evidence']['cumulative_spend_ratio'], Decimal('0.85714286'))
         self.assertEqual(self.validate()['status'], 'PASS')
         self.reject_mutation(lambda p: self.google(p)['evidence'].update(cumulative_spend_ratio=None), 'finite JSON number')
 
-    def test_missing_campaign_fx_keeps_b_and_null_cumulative(self):
+    def test_missing_campaign_fx_keeps_picvid_a_and_cumulative(self):
         self.build_fixture(missing_campaign_fx=True)
-        self.assertEqual(self.google(self.payload)['selection_rule'], 'B')
-        self.assertIsNone(self.google(self.payload)['evidence']['cumulative_spend_ratio'])
+        self.assertEqual(self.google(self.payload)['selection_rule'], 'A+B')
+        self.assertEqual(self.google(self.payload)['evidence']['cumulative_spend_ratio'], Decimal('0.85714286'))
         self.assertEqual(self.validate()['status'], 'PASS')
-        self.reject_mutation(lambda p: self.google(p, 'audits').update(platform_fx_missing_rows=0))
-        self.reject_mutation(lambda p: self.google(p, 'audits').update(platform_fx_missing_native_spend={}))
+        self.reject_mutation(lambda p: self.google(p, 'audits').update(platform_fx_missing_rows=1))
+        self.reject_mutation(lambda p: self.google(p, 'audits').update(platform_fx_missing_native_spend={'USD': 10000}))
 
     def test_missing_campaign_account_day_keeps_b(self):
         self.build_fixture(mutate_cache=lambda c: c.execute('DELETE FROM google_insight WHERE row_type=0'))
-        self.assertEqual(self.google(self.payload)['selection_rule'], 'B')
+        self.assertEqual(self.google(self.payload)['selection_rule'], 'A+B')
         self.assertEqual(self.validate()['status'], 'PASS')
         self.reject_mutation(lambda p: self.google(p, 'audits').update(baseline_missing_account_days=0))
 
@@ -131,7 +131,8 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
                   source(resource_id='campaign2', type='0', asset_type='0', dt='2026-07-02', cost='0')]
         self.build_fixture(materials=[(9, 4000, 10000, 800), (10, 3000, 10000, 600)],
                            extra=extras, incomplete_material=10)
-        self.assertEqual(self.payload['rows'], [])
+        self.assertEqual([r['custom_source_id'] for r in self.payload['rows']], [9])
+        self.assertEqual(self.payload['rows'][0]['selection_rule'], 'B')
         self.assertEqual(self.validate()['status'], 'PASS')
         audit = self.google(self.payload, 'audits')
         self.assertEqual(audit['eligible_mapped_spend'], 4000)
@@ -141,8 +142,9 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
                 self.reject_mutation(lambda p: self.google(p, 'audits').update({field: bad}))
 
     def test_crossover_ties_and_cpc_equality_exclusion(self):
-        self.build_fixture(materials=[(9, 4000, 10000, 800), (10, 2000, 10000, 400),
-                                      (11, 2000, 10000, 200), (12, 500, 10000, 100)])
+        self.build_fixture(materials=[(9, 400, 10000, 80), (10, 200, 10000, 40),
+                                      (11, 200, 10000, 20), (12, 50, 10000, 10)],
+                           extra=[source(resource_id='customers/1234567890/assets/999', cost='650000000', clicks='0')])
         self.assertEqual({r['custom_source_id'] for r in self.payload['rows']}, {9, 10})
         self.assertEqual(self.validate()['status'], 'PASS')
 
@@ -172,7 +174,7 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
 
     def test_wrong_or_missing_provenance_and_missing_value_statuses_are_rejected(self):
         for field in ('mapping_status', 'metric_source', 'usd_status', 'af_status', 'installs_status',
-                      'platform_ctr_scope', 'rule_a_metric'):
+                      'platform_ctr_scope', 'platform_spend_scope', 'platform_cpc_scope', 'rule_a_metric'):
             with self.subTest(field=field):
                 self.reject_mutation(lambda p: self.google(p)['evidence'].update({field: 'wrong'}))
                 self.reject_mutation(lambda p: self.google(p)['evidence'].pop(field))
@@ -238,6 +240,18 @@ class GoogleCpcUpgradeTests(unittest.TestCase):
         imports.update(alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names)
         self.assertNotIn('opay_excellent_creatives', imports)
         self.assertNotIn('google_creatives', imports)
+
+    def test_approved_july_fixture_guard_rejects_id_spend_and_group_drift(self):
+        approved = json.loads((Path(__file__).parent / 'fixtures/2026-07-google-picvid-approved.json').read_text())
+        payload = {'rows': [dict(r, channel='Google', evidence={k: r[k] for k in ('rule_a_pass', 'rule_b_pass')}) for r in approved['rows']],
+                   'benchmarks': [dict(s, channel='Google') for s in approved['scopes']]}
+        validator.validate_approved_july(payload, approved)
+        self.assertEqual(len(payload['rows']), 46)
+        for key, value in (('custom_source_id', 999), ('spend', '0'), ('selection_rule', 'B')):
+            mutated = copy.deepcopy(payload)
+            mutated['rows'][0][key] = value
+            with self.assertRaises(ValidationError):
+                validator.validate_approved_july(mutated, approved)
 
 
 if __name__ == '__main__':

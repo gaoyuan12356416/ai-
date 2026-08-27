@@ -489,15 +489,19 @@ def month_aggregates(report, connection, month):
         usd = amount(row["usd_amount"]) if row["usd_amount"] is not None else None
         if row["row_type"] == 0:
             campaign_days[scope].add((row["dt"], row["account"]))
-            total["source_row_count"] += 1
-            total["impressions"] += row["impressions"]
-            total["clicks"] += row["clicks"]
-            if usd is None:
-                total["_missing"] += 1
-                audit["platform_fx_missing_native_spend"][row["currency"] or "UNKNOWN"] += amount(row["cost_micros"]) / MICROS
-            else:
-                total["_usd"] += usd
             continue
+        if row["row_type"] != 3 or row["asset_type"] not in (2, 4):
+            continue
+        # Both A (spend/CPC) and B (CTR) use the complete image/video pool,
+        # including unmapped assets. Campaign data is never mixed into it.
+        total["source_row_count"] += 1
+        total["impressions"] += row["impressions"]
+        total["clicks"] += row["clicks"]
+        if usd is None:
+            total["_missing"] += 1
+            audit["platform_fx_missing_native_spend"][row["currency"] or "UNKNOWN"] += amount(row["cost_micros"]) / MICROS
+        else:
+            total["_usd"] += usd
         audit["source_row_count"] += 1
         # Benchmark all image/video assets BEFORE mapping/FX exclusions; an
         # unmapped asset still contributes real impressions and clicks.
@@ -543,12 +547,12 @@ def month_aggregates(report, connection, month):
             target["_usd"] += usd
     for scope, total in totals.items():
         missing_baseline = len(asset_days[scope] - campaign_days[scope])
-        total["ctr_complete"] = bool(refreshed) and missing_baseline == 0
-        # An empty *successfully read* campaign scope is a measured zero; a
+        total["ctr_complete"] = bool(refreshed)
+        # An empty *successfully read* image/video scope is a measured zero; a
         # non-refreshed scope or any unknown currency portion stays unknown.
-        if refreshed and not total["_missing"] and not missing_baseline:
+        if refreshed and not total["_missing"]:
             total["spend_cents"] = usd_cents(total["_usd"])
-        if missing_baseline or not refreshed:
+        if not refreshed:
             total["impressions"] = None
             total["clicks"] = None
         audit = audits[scope]

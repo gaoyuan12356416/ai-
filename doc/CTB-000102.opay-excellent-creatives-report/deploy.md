@@ -1,5 +1,9 @@
 # 部署文档
 
+## 2026-08-27 图片/视频全基准与1000美元门槛（最新确认）
+
+本轮以 [release-google-picvid-1000-20260827.md](release-google-picvid-1000-20260827.md) 的精确commit、备份、命令及验收为准，历史段落仅用于追溯。只读MySQL63350；独立缓存/影子目录重算1—7月；7月46条审批样本与旧渠道全字段为切换门禁。仅发布已验快照；临时停本报表两个timer，互斥锁内切current及latest后恢复，配置/调度不变；失败恢复旧HTML/latest/current，保留新旧cache及版本。
+
 ## 最新发布
 
 Google CPC / 图片视频CTR新规则已于2026-08-27北京时间15:22上线，精确提交`72f2e7440e16d8d3ea782ce9eea31176d21c0797`。当前版本、七个月结果、备份及精确回滚程序见[Google CPC实际发布记录](release-google-cpc-20260827.md)。下文V1/V2部署与PENDING交接均为历史，不替代该最新记录。

@@ -358,6 +358,28 @@ test("Meta and TikTok details and audits remain AF CPA based without Google evid
     assert.equal($("auditGrid").children[0].children[2].children.length,3);
   }
 });
+test("PIC VID 1000 policy states both asset baselines and no A minimum",()=>{
+  setup([],2,{selection_policy:{google:{version:"picvid_cpc_1000_v2"}}});renderRules();
+  const text=$("googleRuleDefinition").textContent;
+  for(const token of ["全部图片/视频资产月消耗", "50%", "跨线", "并列", "总 USD 消耗 / 总点击", "A 无最低消耗门槛", "> 1000", "含未映射", "NG/PK 独立计算", "不混入 Campaign"])assert.ok(text.includes(token),token);
+  assert.ok(!text.includes("> 5000"));assert.ok(!text.includes("全量 Campaign 平台月消耗"));
+});
+test("PIC VID audits and details never mislabel the asset baseline as Campaign",()=>{
+  const row=clone(googleCpcRow);row.evidence.platform_spend_scope="google_picture_video_assets";
+  const audit={channel:"Google",app:"NG OPay",platform_spend:7000,platform_cpc:2,picture_video_ctr:0.025,metric_source:"ads_google_insights:type=3,asset_type=2/4"};
+  setup([row],2,{selection_policy:{google:{version:"picvid_cpc_1000_v2"}},audits:[audit],benchmarks:[{channel:"Google",app:"NG OPay",ctr:0.025,cpc:2}]});
+  renderAudits();openDetail(state.rows[0]);
+  assert.ok($("auditGrid").textContent.includes("图片/视频整体 CPC"));assert.ok(!$("auditGrid").textContent.includes("Campaign 平台"));
+  assert.equal(details()["图片/视频平台 CTR（参考）"],"2.50%");assert.ok(!has(details(),"Campaign 平台 CTR（参考）"));
+  assert.match($("modalBody").textContent,/A 无最低消耗门槛/);assert.match($("modalBody").textContent,/B 消耗 > 1000/);
+  assert.equal(csvRow()["平台CPC USD/点击"],2);assert.equal(csvRow()["平台CTR"],0.025);
+});
+test("small PK A rows remain visible and exportable under confirmed policy",()=>{
+  const row=clone(googleCpcRow);Object.assign(row,{app:"PK OPay",spend:1.48,selection_rule:"A"});
+  Object.assign(row.evidence,{rule_a_pass:true,rule_b_pass:false,platform_spend_scope:"google_picture_video_assets"});
+  setup([row],2,{selection_policy:{google:{version:"picvid_cpc_1000_v2"}}});applyFilters();
+  assert.equal(state.filtered.length,1);assert.equal(csvRow()["消耗USD"],1.48);assert.equal(csvRow()["入选规则"],"A");
+});
 async function asyncTests(){
   setup([google]);exportCsv();assert.equal(Buffer.from(await exportBlob.arrayBuffer()).toString("utf8"),buildCsv());
   assert.equal(download.name,"opay-excellent-creatives-2026-07.csv");assert.equal(revokedUrl,download.url);
@@ -476,7 +498,7 @@ def main():
         "素材制作者", "openPreview", "openDetail", "数据可用性", "row.metrics",
         "missing_asset_attribution", "missing_asset_installs", "platform_conversions",
         "CSV 按原始精度数值导出，不使用页面舍入值",
-        "googleRuleDefinition", "cpc_picvid_v1", "google_picture_video_assets",
+        "googleRuleDefinition", "cpc_picvid_v1", "picvid_cpc_1000_v2", "google_picture_video_assets",
         "rule_a_unavailable_reason", "rule_a_metric", "picture_video_ctr",
         "Meta / TikTok（不变）", "素材 AF D0 首交 CPA &lt; 平台 CPA",
         *CSV_CPC_HEADERS,

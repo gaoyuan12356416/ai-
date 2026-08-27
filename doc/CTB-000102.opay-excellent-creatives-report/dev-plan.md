@@ -1,5 +1,9 @@
 # 开发计划
 
+## 2026-08-27 图片/视频全基准与1000美元门槛（最新确认）
+
+独立分支 `codex/opay-google-picvid-1000-20260827`，基于396a296；更新Google聚合、GG独立B阈值、页面解释、policy标识与独立验收器。新默认缓存 `cache/opay-excellent-creatives-google-picvid-1000.sqlite3`，一致性克隆现行google-cpc库。`python -m unittest discover -s ops/opay-excellent-creatives -p 'test_*.py'`；`python ops/opay-excellent-creatives/validate_frontend_contract.py`；GitHub精确SHA后全月影子重算、校验、原子推广。
+
 ## 开发范围
 
 实现独立 OPay 月度优秀素材静态报表，包括关键词导入、只读日缓存、严格映射与选优、媒体缓存、版本发布、前端、定时任务、测试、文档和生产回填。

@@ -146,6 +146,7 @@
     }
     const isGoogle=row=>row.channel==="Google"||row.channel==="GG";
     const googleCtrScope="google_picture_video_assets";
+    const picvidPolicy=row=>state.payload?.selection_policy?.google?.version==="picvid_cpc_1000_v2"||row?.evidence?.platform_spend_scope===googleCtrScope||row?.metric_source==="ads_google_insights:type=3,asset_type=2/4";
     const googleCtrSource="ads_google_insights:type=3,asset_type=2/4；全部图片/视频资产（含未映射），总点击 / 总曝光，非日或素材 CTR 算术平均";
     const cpcText=value=>numeric(value)===null?"":"$"+Number(value).toFixed(6)+" / 点击";
     function googleCpc(row,key){
@@ -162,6 +163,10 @@
       return isGoogle(row)?"历史 Campaign 平台整体（非图片/视频基准）":"同渠道平台整体";
     }
     function renderRules(){
+      if(picvidPolicy()){
+        $("googleRuleDefinition").textContent="Google：A = 按完整可核验素材 USD 消耗降序累计至全部图片/视频资产月消耗的 50%（含跨线组及消耗并列），且素材 CPC < 图片/视频整体 CPC（总 USD 消耗 / 总点击）；A 无最低消耗门槛。图片/视频平台 USD 未知或≤0、点击为0，或完整且精确映射素材消耗不足该平台池50%时，A 暂停。B = 素材月消耗 > 1000 USD 且素材 CTR > 图片/视频整体 CTR（总点击 / 总曝光）。所有基准均为 type=3、asset_type=2/4，含未映射资产；非日或素材比率算术平均，不混入 Campaign、文字或其他层级。NG/PK 独立计算；A 暂停不连带暂停 B。";
+        return;
+      }
       const current=state.payload?.selection_policy?.google?.version==="cpc_picvid_v1"||
         (state.payload?.rows||[]).some(r=>isGoogle(r)&&r.evidence?.rule_a_metric==="cpc")||
         (state.payload?.audits||[]).some(a=>isGoogle(a)&&a.rule_a_metric==="cpc");
@@ -202,13 +207,16 @@
         const metrics=document.createElement("div");metrics.className="audit-metrics";
         const items=[["平台消耗",metric(audit.platform_spend,"money")],["映射覆盖",pct(audit.mapping_coverage)],["缺口",metric(audit.mapping_gap_spend,"money")]];
         const google=isGoogle(audit),benchmark=(state.payload.benchmarks||[]).find(b=>b.channel===audit.channel&&b.app===audit.app)||{};
-        if(google)items.push(["Campaign 平台 CPC",cpcText(has(audit,"platform_cpc")?audit.platform_cpc:has(audit,"cpc")?audit.cpc:benchmark.cpc)],
-          ["Campaign 平台 CTR",pct(benchmark.ctr,2)],["图片/视频整体 CTR",pct(audit.picture_video_ctr,2)],
-          ["图片/视频总点击",metric(audit.picture_video_clicks)],["图片/视频总曝光",metric(audit.picture_video_impressions)]);
+        if(google){
+          items.push([picvidPolicy(audit)?"图片/视频整体 CPC":"Campaign 平台 CPC",cpcText(has(audit,"platform_cpc")?audit.platform_cpc:has(audit,"cpc")?audit.cpc:benchmark.cpc)]);
+          if(!picvidPolicy(audit))items.push(["Campaign 平台 CTR",pct(benchmark.ctr,2)]);
+          items.push(["图片/视频整体 CTR",pct(audit.picture_video_ctr,2)],
+            ["图片/视频总点击",metric(audit.picture_video_clicks)],["图片/视频总曝光",metric(audit.picture_video_impressions)]);
+        }
         for(const [label,value] of items){const box=document.createElement("span");box.textContent=label;const b=document.createElement("b");b.textContent=value;box.appendChild(b);metrics.appendChild(box)}
         card.append(title,message,metrics);
         if(google&&audit.rule_a_available===false){const note=document.createElement("p");note.className="detail-note";note.textContent="规则 A 暂停："+(audit.rule_a_unavailable_reason||"本月未提供可用的 A 基准，请查看渠道缺口说明");card.appendChild(note)}
-        if(google&&has(audit,"picture_video_ctr")){const note=document.createElement("p");note.className="detail-note";note.textContent="B 基准来源："+googleCtrSource;card.appendChild(note)}
+        if(google&&has(audit,"picture_video_ctr")){const note=document.createElement("p");note.className="detail-note";note.textContent=(picvidPolicy(audit)?"A/B 平台消耗、CPC、CTR 均仅统计图片/视频；CPC = 总USD消耗 / 总点击。CTR 来源：":"B 基准来源：")+googleCtrSource;card.appendChild(note)}
         grid.appendChild(card);
       }
     }
@@ -238,14 +246,14 @@
       const google=isGoogle(r),benchmark=(state.payload?.benchmarks||[]).find(b=>b.channel===r.channel&&b.app===r.app)||{};
       if(google){
         items.push(["素材 CPC（USD/点击）",cpcText(googleCpc(r,"material_cpc"))],["平台 CPC（USD/点击）",cpcText(googleCpc(r,"platform_cpc"))],
-          ["平台 CTR 口径",ctrScopeText(r)],["Campaign 平台 CTR（参考）",pct(benchmark.ctr,2)],
+          ["平台 CTR 口径",ctrScopeText(r)],[picvidPolicy(r)?"图片/视频平台 CTR（参考）":"Campaign 平台 CTR（参考）",pct(benchmark.ctr,2)],
           ["Google 平台转化数",numeric(r.platform_conversions)===null?"":String(r.platform_conversions)]);
         if(e.rule_a_available===false)items.push(["规则 A 暂停原因",e.rule_a_unavailable_reason||"本月未提供可用的 A 基准，请查看渠道审计"]);
       }
       detailGrid(wrap,items);
       if(google&&(e.rule_a_metric==="cpc"||e.platform_ctr_scope===googleCtrScope)){
         const note=document.createElement("p");note.className="detail-note";
-        note.textContent="A 比较 CPC（USD 消耗 / 点击）；排名分母：同月同 App 全量 Campaign USD 消耗，平台 CPC 来源：ads_google_insights:type=0。B CTR 基准来源："+googleCtrSource+"。页面仅展示快照判定，展示舍入不参与选优。";wrap.appendChild(note);
+        note.textContent=(picvidPolicy(r)?"A 比较 CPC（总 USD 消耗 / 总点击）；排名分母：同月同 App 全部图片/视频 USD 消耗，A 无最低消耗门槛；平台 CPC 来源：ads_google_insights:type=3,asset_type=2/4。B 消耗 > 1000 USD，CTR 基准来源：":"A 比较 CPC（USD 消耗 / 点击）；排名分母：同月同 App 全量 Campaign USD 消耗，平台 CPC 来源：ads_google_insights:type=0。B CTR 基准来源：")+googleCtrSource+"。页面仅展示快照判定，展示舍入不参与选优。";wrap.appendChild(note);
       }
       if(google){const note=document.createElement("p");note.className="detail-note";note.textContent="Google 平台转化数（conversions）不等同于安装或 AF D0 首交，不参与 AF 汇总，也不用于补齐缺失指标。";wrap.appendChild(note)}
       detailHeading(wrap,"数据可用性");

@@ -1,0 +1,539 @@
+{
+  "month": "2026-07",
+  "approval_date": "2026-08-27",
+  "source_audit_generated_at": "2026-08-27T16:49:32.872604+08:00",
+  "source_rows": 140003,
+  "source_asset_count": 6391,
+  "scopes": [
+    {
+      "app": "NG OPay",
+      "spend": "358682.21",
+      "clicks": 7450399,
+      "impressions": 319809411,
+      "count": 40,
+      "groups": {
+        "A+B": 10,
+        "B": 28,
+        "A": 2
+      }
+    },
+    {
+      "app": "PK OPay",
+      "spend": "121.72",
+      "clicks": 4178,
+      "impressions": 103949,
+      "count": 6,
+      "groups": {
+        "A": 6
+      }
+    }
+  ],
+  "rows": [
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2072578,
+      "spend": "16643.90",
+      "clicks": 544644,
+      "impressions": 3554565,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1508604,
+      "spend": "12050.97",
+      "clicks": 219733,
+      "impressions": 2771928,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2786191,
+      "spend": "8312.67",
+      "clicks": 156833,
+      "impressions": 6105984,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1337250,
+      "spend": "7702.48",
+      "clicks": 32428,
+      "impressions": 1210684,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3368139,
+      "spend": "5105.90",
+      "clicks": 62664,
+      "impressions": 1095288,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393516,
+      "spend": "5056.98",
+      "clicks": 143438,
+      "impressions": 1397087,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393587,
+      "spend": "4271.42",
+      "clicks": 184539,
+      "impressions": 2404183,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3365044,
+      "spend": "3888.54",
+      "clicks": 51081,
+      "impressions": 1201840,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393531,
+      "spend": "3549.30",
+      "clicks": 41877,
+      "impressions": 911179,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1689972,
+      "spend": "3140.04",
+      "clicks": 117167,
+      "impressions": 702676,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 4597117,
+      "spend": "2871.16",
+      "clicks": 131510,
+      "impressions": 1956542,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2828225,
+      "spend": "2693.14",
+      "clicks": 77465,
+      "impressions": 2501955,
+      "selection_rule": "A+B",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393536,
+      "spend": "2615.74",
+      "clicks": 41450,
+      "impressions": 1234549,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3569769,
+      "spend": "2192.69",
+      "clicks": 50547,
+      "impressions": 2694484,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393532,
+      "spend": "1940.24",
+      "clicks": 27697,
+      "impressions": 701289,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3365038,
+      "spend": "1904.72",
+      "clicks": 24142,
+      "impressions": 809895,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 4046231,
+      "spend": "1865.81",
+      "clicks": 62460,
+      "impressions": 2801318,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3365041,
+      "spend": "1715.88",
+      "clicks": 14413,
+      "impressions": 472276,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 4568430,
+      "spend": "1695.08",
+      "clicks": 51596,
+      "impressions": 1380629,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3365013,
+      "spend": "1686.02",
+      "clicks": 32443,
+      "impressions": 1197292,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 4680742,
+      "spend": "1625.83",
+      "clicks": 27270,
+      "impressions": 1020891,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3569755,
+      "spend": "1589.17",
+      "clicks": 28561,
+      "impressions": 653380,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1452497,
+      "spend": "1574.22",
+      "clicks": 36125,
+      "impressions": 348824,
+      "selection_rule": "A+B",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2639661,
+      "spend": "1511.08",
+      "clicks": 46656,
+      "impressions": 1282617,
+      "selection_rule": "A+B",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2828229,
+      "spend": "1504.29",
+      "clicks": 72908,
+      "impressions": 1777418,
+      "selection_rule": "A+B",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2734719,
+      "spend": "1407.12",
+      "clicks": 37026,
+      "impressions": 712302,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 4568444,
+      "spend": "1380.75",
+      "clicks": 43247,
+      "impressions": 363698,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3393523,
+      "spend": "1368.40",
+      "clicks": 21458,
+      "impressions": 683225,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1325355,
+      "spend": "1255.57",
+      "clicks": 27542,
+      "impressions": 1168238,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2171726,
+      "spend": "1231.58",
+      "clicks": 65468,
+      "impressions": 1449858,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2734726,
+      "spend": "1213.52",
+      "clicks": 37126,
+      "impressions": 1459851,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 1325358,
+      "spend": "1168.38",
+      "clicks": 105418,
+      "impressions": 1649682,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2604872,
+      "spend": "1164.01",
+      "clicks": 19402,
+      "impressions": 370943,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3569753,
+      "spend": "1156.18",
+      "clicks": 20797,
+      "impressions": 403281,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2711514,
+      "spend": "1148.65",
+      "clicks": 23660,
+      "impressions": 542498,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 3365026,
+      "spend": "1148.41",
+      "clicks": 6919,
+      "impressions": 264222,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2734728,
+      "spend": "1109.14",
+      "clicks": 32098,
+      "impressions": 227018,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2080716,
+      "spend": "1074.58",
+      "clicks": 55398,
+      "impressions": 1443885,
+      "selection_rule": "B",
+      "material_type": "VID",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2243987,
+      "spend": "1049.62",
+      "clicks": 60673,
+      "impressions": 511459,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "NG OPay",
+      "custom_source_id": 2604885,
+      "spend": "1047.37",
+      "clicks": 13462,
+      "impressions": 261863,
+      "selection_rule": "B",
+      "material_type": "PIC",
+      "rule_a_pass": false,
+      "rule_b_pass": true
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 4568515,
+      "spend": "2.04",
+      "clicks": 77,
+      "impressions": 2254,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 4881489,
+      "spend": "1.89",
+      "clicks": 245,
+      "impressions": 1330,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 4638664,
+      "spend": "1.68",
+      "clicks": 66,
+      "impressions": 1151,
+      "selection_rule": "A",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 4205874,
+      "spend": "1.64",
+      "clicks": 100,
+      "impressions": 1404,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 5266455,
+      "spend": "1.53",
+      "clicks": 95,
+      "impressions": 2467,
+      "selection_rule": "A",
+      "material_type": "VID",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    },
+    {
+      "app": "PK OPay",
+      "custom_source_id": 4680686,
+      "spend": "1.48",
+      "clicks": 51,
+      "impressions": 1377,
+      "selection_rule": "A",
+      "material_type": "PIC",
+      "rule_a_pass": true,
+      "rule_b_pass": false
+    }
+  ]
+}

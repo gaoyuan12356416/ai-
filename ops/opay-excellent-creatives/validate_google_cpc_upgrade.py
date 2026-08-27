@@ -46,9 +46,7 @@ def raw_expected(connection, month):
         asset_days = {(r['dt'], r['account']) for r in assets
                       if D(r['cost_micros']) > 0 or r['impressions'] or r['clicks']}
         missing_days = asset_days - campaign_days
-        spend = None if missing_days or any(r['usd_amount'] is None for r in campaigns) else cents(sum((D(r['usd_amount']) for r in campaigns), D(0)))
-        campaign_clicks = None if missing_days else sum(r['clicks'] for r in campaigns)
-        campaign_impressions = None if missing_days else sum(r['impressions'] for r in campaigns)
+        spend = None if any(r['usd_amount'] is None for r in assets) else cents(sum((D(r['usd_amount']) for r in assets), D(0)))
         clicks = sum(r['clicks'] for r in assets)
         impressions = sum(r['impressions'] for r in assets)
         groups = collections.defaultdict(list)
@@ -71,9 +69,9 @@ def raw_expected(connection, month):
                 'source_rows': len(rows), 'asset_count': len({r['resource_id'] for r in rows}),
                 'fx_sources': sorted({r['fx_status'] for r in rows})}
         eligible = sum(r['spend'] for r in materials.values())
-        available = spend is not None and spend > 0 and bool(campaign_clicks) and eligible * 2 >= spend
+        available = spend is not None and spend > 0 and bool(clicks) and eligible * 2 >= spend
         reason = ('平台月度USD消耗不完整' if spend is None else
-                  '平台消耗或点击为0，CPC不可比较' if spend <= 0 or not campaign_clicks else
+                  '平台消耗或点击为0，CPC不可比较' if spend <= 0 or not clicks else
                   '美元完整且精确映射的素材消耗不足平台50%' if eligible * 2 < spend else '')
         top, ranks, cumulative = set(), {}, {}
         running = 0
@@ -90,8 +88,8 @@ def raw_expected(connection, month):
                     ranks[ident], cumulative[ident] = rank, D(running) / spend
         selected = {}
         for ident, row in materials.items():
-            a = available and ident in top and row['clicks'] > 0 and row['spend'] * campaign_clicks < spend * row['clicks']
-            b = row['spend'] > 500000 and row['impressions'] > 0 and (row['clicks'] > 0 if not impressions else row['clicks'] * impressions > clicks * row['impressions'])
+            a = available and ident in top and row['clicks'] > 0 and row['spend'] * clicks < spend * row['clicks']
+            b = row['spend'] > 100000 and row['impressions'] > 0 and (row['clicks'] > 0 if not impressions else row['clicks'] * impressions > clicks * row['impressions'])
             if a or b:
                 selected[ident] = dict(row, rule='A+B' if a and b else 'A' if a else 'B',
                     a=bool(a), b=bool(b), in_top=bool(available and ident in top),
@@ -104,7 +102,7 @@ def raw_expected(connection, month):
         audit = {
             'status': 'success', 'rule_a_available': bool(available),
             'rule_a_metric': 'cpc', 'rule_a_unavailable_reason': reason,
-            'metric_source': 'ads_google_insights:type=0',
+            'metric_source': 'ads_google_insights:type=3,asset_type=2/4',
             'rule_b_ctr_source': 'ads_google_insights:type=3,asset_type=2/4',
             'eligible_mapped_spend': D(eligible) / 100,
             'platform_spend': None if spend is None else D(spend) / 100,
@@ -114,18 +112,17 @@ def raw_expected(connection, month):
             'out_of_scope_spend': D(status_spend(lambda status: status == 'out_of_scope')) / 100,
             'invalid_mapping_spend': D(status_spend(lambda status: status not in ('exact', 'ambiguous', 'out_of_scope'))) / 100,
             'fx_missing_rows': sum(r['usd_amount'] is None for r in assets),
-            'platform_fx_missing_rows': sum(r['usd_amount'] is None for r in campaigns),
+            'platform_fx_missing_rows': sum(r['usd_amount'] is None for r in assets),
             'incomplete_material_count': incomplete, 'mapping_status_counts': dict(status_counts),
             'invalid_row_count': len(assets) - status_counts['exact'],
             'asset_count': len({r['resource_id'] for r in assets}),
             'baseline_missing_account_days': len(missing_days),
             'fx_missing_native_spend': missing_native(assets),
-            'platform_fx_missing_native_spend': missing_native(campaigns),
+            'platform_fx_missing_native_spend': missing_native(assets),
             'picture_video_clicks': clicks, 'picture_video_impressions': impressions,
             'af_mapped': None, 'af_mapping_coverage': None,
         }
         output[app] = dict(selected=selected, available=bool(available), spend=spend,
-            campaign_clicks=campaign_clicks, campaign_impressions=campaign_impressions,
             clicks=clicks, impressions=impressions, eligible=eligible, material_count=len(materials),
             audit=audit, coverage=None if spend is None else D(exact_spend) / spend if spend else D(0),
             reason=reason)
@@ -142,7 +139,23 @@ def table_digest(connection, table):
     return digest.hexdigest()
 
 
-def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None):
+def validate_approved_july(payload, approved):
+    actual = {(r['app'], r['custom_source_id']): r for r in payload['rows'] if r['channel'] == 'Google'}
+    expected = {(r['app'], r['custom_source_id']): r for r in approved['rows']}
+    require(set(actual) == set(expected), 'approved July selected set mismatch')
+    for key, row in actual.items():
+        saved = expected[key]
+        for field in ('clicks', 'impressions', 'selection_rule', 'material_type'):
+            require(exact_equal(row[field], saved[field]), 'approved July ' + field + ' mismatch')
+        require(D(str(row['spend'])) == D(saved['spend']), 'approved July spend mismatch')
+        assert_fields(row['evidence'], {field: saved[field] for field in ('rule_a_pass', 'rule_b_pass')}, 'approved July evidence')
+    for scope in approved['scopes']:
+        bench = next(r for r in payload['benchmarks'] if r['channel'] == 'Google' and r['app'] == scope['app'])
+        require(D(str(bench['spend'])) == D(scope['spend']), 'approved July baseline spend mismatch')
+        assert_fields(bench, {field: scope[field] for field in ('clicks', 'impressions')}, 'approved July baseline')
+
+
+def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None, approved_july=None):
     baseline_dir, candidate_dir = Path(baseline_dir).resolve(), Path(candidate_dir).resolve()
     old, old_entries, old_sha = load_manifest(baseline_dir, 2, 'baseline')
     new, new_entries, new_sha = load_manifest(candidate_dir, 2, 'candidate')
@@ -158,7 +171,12 @@ def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None):
             require(db.execute('SELECT 1 FROM google_month_refresh WHERE month=?', (month,)).fetchone(), 'missing Google refresh: ' + month)
             before, _ = load_month(baseline_dir, old, old_entries[month], 2, 'baseline')
             after, _ = load_month(candidate_dir, new, new_entries[month], 2, 'candidate')
-            require(after['selection_policy']['google']['version'] == 'cpc_picvid_v1', 'policy version')
+            if approved_july and month == '2026-07':
+                validate_approved_july(after, json.loads(Path(approved_july).read_text(encoding='utf-8')))
+                result['approved_july'] = 'PASS'
+            require(after['selection_policy']['google']['version'] == 'picvid_cpc_1000_v2', 'policy version')
+            assert_fields(after['selection_policy']['google'], {'baseline_source': 'ads_google_insights:type=3,asset_type=2/4',
+                          'rule_b_min_spend_usd': 1000}, 'policy')
             for field in ('rows', 'benchmarks', 'audits'):
                 a, b = index_records(before, field, month, 'old'), index_records(after, field, month, 'new')
                 a = {k: v for k, v in a.items() if k[0] != 'Google'}
@@ -177,12 +195,12 @@ def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None):
                 require(audit['status'] == 'success', 'scope not refreshed successfully')
                 assert_fields(audit, {'selected_count': len(actual)}, 'audit')
                 assert_metric(audit['mapping_coverage'], exp['coverage'], 'audit mapping coverage', 8)
-                require(bench['spend'] == (None if exp['spend'] is None else D(exp['spend']) / 100), 'campaign USD mismatch')
-                require(bench['clicks'] == exp['campaign_clicks'] and bench['impressions'] == exp['campaign_impressions'], 'campaign facts mismatch')
+                require(bench['spend'] == (None if exp['spend'] is None else D(exp['spend']) / 100), 'picture/video USD mismatch')
+                require(bench['clicks'] == exp['clicks'] and bench['impressions'] == exp['impressions'], 'picture/video facts mismatch')
                 require(bench['picture_video_clicks'] == exp['clicks'] and bench['picture_video_impressions'] == exp['impressions'], 'PIC/VID benchmark mismatch')
                 ctr = D(exp['clicks']) / exp['impressions'] if exp['impressions'] else D(0)
                 assert_metric(bench['picture_video_ctr'], ctr, 'picture-video CTR', 8)
-                platform_cpc = D(exp['spend']) / 100 / exp['campaign_clicks'] if exp['spend'] is not None and exp['campaign_clicks'] else None
+                platform_cpc = D(exp['spend']) / 100 / exp['clicks'] if exp['spend'] is not None and exp['clicks'] else None
                 assert_metric(bench['cpc'], platform_cpc, 'platform CPC', 6)
                 assert_metric(audit['picture_video_ctr'], ctr, 'audit picture-video CTR', 8)
                 assert_metric(audit['platform_cpc'], platform_cpc, 'audit platform CPC', 6)
@@ -202,6 +220,8 @@ def validate(baseline_dir, candidate_dir, cache_db, baseline_cache=None):
                         'metric_source': 'ads_google_insights:type=3',
                         'af_status': 'missing_asset_attribution', 'installs_status': 'missing_asset_installs',
                         'platform_ctr_scope': 'google_picture_video_assets',
+                        'platform_spend_scope': 'google_picture_video_assets',
+                        'platform_cpc_scope': 'google_picture_video_assets', 'rule_b_min_spend_usd': 1000,
                         'picture_video_clicks': exp['clicks'], 'picture_video_impressions': exp['impressions'],
                         'source_row_count': ex['source_rows'], 'ad_day_count': ex['source_rows'],
                         'asset_count': ex['asset_count'], 'fx_sources': ex['fx_sources'],
@@ -231,5 +251,6 @@ if __name__ == '__main__':
     parser.add_argument('--candidate-dir', required=True)
     parser.add_argument('--cache-db', required=True)
     parser.add_argument('--baseline-cache')
+    parser.add_argument('--approved-july', help='user-approved July what-if fixture; all 46 rows must match')
     args = parser.parse_args()
     print(json.dumps(validate(**vars(args)), ensure_ascii=False))

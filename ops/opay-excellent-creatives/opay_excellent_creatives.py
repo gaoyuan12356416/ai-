@@ -45,7 +45,7 @@ DEFAULT_DATA_ROOT = Path(
 )
 DEFAULT_CACHE_DB = Path(os.environ.get(
     "OPAY_REPORT_CACHE_DB",
-    str(DEFAULT_DATA_ROOT / "cache" / "opay-excellent-creatives-google-cpc.sqlite3"),
+    str(DEFAULT_DATA_ROOT / "cache" / "opay-excellent-creatives-google-picvid-1000.sqlite3"),
 ))
 DEFAULT_WEB_DIR = Path(
     os.environ.get(
@@ -1329,8 +1329,8 @@ def cpa_strictly_lower(spend_a_cents, d0_a, spend_b_cents, d0_b):
     return spend_a_cents * d0_b < spend_b_cents * d0_a
 
 
-def rule_b_qualifies(material, platform_total):
-    return integer(material.get("spend_cents")) > 500000 and ctr_strictly_greater(
+def rule_b_qualifies(material, platform_total, *, minimum_spend_cents=500000):
+    return integer(material.get("spend_cents")) > minimum_spend_cents and ctr_strictly_greater(
         integer(material.get("clicks")),
         integer(material.get("impressions")),
         integer(platform_total.get("clicks")),
@@ -1552,7 +1552,8 @@ def build_month_payload(
                     total["spend_cents"],
                     total["clicks"] if platform_id == 1 else platform_d0,
                 )
-                rule_b = (platform_id != 1 or total.get("picture_video_ctr_complete", False)) and rule_b_qualifies(material, ctr_total)
+                rule_b = (platform_id != 1 or total.get("picture_video_ctr_complete", False)) and rule_b_qualifies(
+                    material, ctr_total, minimum_spend_cents=100000 if platform_id == 1 else 500000)
                 if not (rule_a or rule_b):
                     continue
                 selected_count += 1
@@ -1644,6 +1645,9 @@ def build_month_payload(
                         "asset_count": len(material["asset_resources"]),
                         "metric_source": "ads_google_insights:type=3",
                         "rule_a_metric": "cpc",
+                        "platform_spend_scope": "google_picture_video_assets",
+                        "platform_cpc_scope": "google_picture_video_assets",
+                        "rule_b_min_spend_usd": 1000,
                         "rule_a_unavailable_reason": rule_a_reason,
                         "material_cpc": cpa_value(material["spend_cents"], material["clicks"]),
                         "platform_cpc": cpa_value(total["spend_cents"], total["clicks"] or 0),
@@ -1677,7 +1681,7 @@ def build_month_payload(
                                   "picture_video_impressions": ctr_total["impressions"]})
             benchmarks.append(benchmark)
             if channel_name == "Google":
-                note = "计算成功，入选%d条；A：平台累计消耗前50%%且CPC更低；B：消耗>5000美元且CTR高于图片/视频整体CTR。AF和安装留空。" % selected_count
+                note = "计算成功，入选%d条；A：累计消耗达到图片/视频总消耗前50%%且CPC低于图片/视频整体CPC，无最低消耗门槛；B：消耗>1000美元且CTR高于图片/视频整体CTR。AF和安装留空。" % selected_count
                 if rule_a_reason:
                     note += "A组暂停：%s。" % rule_a_reason
                 if not audit["refreshed"]:
@@ -1685,13 +1689,13 @@ def build_month_payload(
                 if audit["fx_missing_rows"]:
                     note += "历史汇率缺失或无法核验：%d条素材日记录，%d个素材月不参与评优；不使用当前汇率。" % (audit["fx_missing_rows"], audit["incomplete_material_count"])
                 if audit["platform_fx_missing_rows"]:
-                    note += "另有%d条Campaign日记录缺少可核验历史汇率，平台USD总消耗、CPA及覆盖率留空。" % audit["platform_fx_missing_rows"]
+                    note += "图片/视频平台池有%d条日记录缺少可核验历史汇率，平台USD总消耗、CPC及覆盖率留空。" % audit["platform_fx_missing_rows"]
                     if total.get("ctr_complete"):
                         note += "CTR仍按完整曝光/点击计算。"
                 if audit["invalid_row_count"]:
                     note += "素材映射缺口%d条记录。" % audit["invalid_row_count"]
                 if audit["baseline_missing_account_days"]:
-                    note += "Campaign平台基准缺少%d个账户投放日；B组独立使用图片/视频素材CTR。" % audit["baseline_missing_account_days"]
+                    note += "Campaign参考数据缺少%d个账户投放日；不影响本次图片/视频基准。" % audit["baseline_missing_account_days"]
             elif selected_count == 0:
                 note = "计算成功，入选0条。"
             else:
@@ -1729,7 +1733,7 @@ def build_month_payload(
                     "platform_fx_missing_native_spend",
                     "baseline_missing_account_days",
                 )})
-                audits[-1]["metric_source"] = "ads_google_insights:type=0"
+                audits[-1]["metric_source"] = "ads_google_insights:type=3,asset_type=2/4"
                 audits[-1].update({"rule_a_metric": "cpc", "rule_a_unavailable_reason": rule_a_reason,
                                    "eligible_mapped_spend": dollars(eligible_spend),
                                    "platform_cpc": benchmark["cpc"],
@@ -1751,9 +1755,12 @@ def build_month_payload(
             "rule_a_min_mapping_coverage": 0.5,
             "spend_unit": "USD",
             "google": {
-                "version": "cpc_picvid_v1",
-                "rule_a": "累计素材消耗前50%（分母为Campaign平台总消耗）且素材CPC严格低于平台CPC",
-                "rule_b": "素材月消耗>5000 USD且素材CTR严格高于图片和视频总点击/总曝光",
+                "version": "picvid_cpc_1000_v2",
+                "rule_a": "累计素材消耗前50%（分母为全部图片和视频素材总消耗）且素材CPC严格低于图片和视频总USD消耗/总点击；无最低消耗门槛",
+                "rule_b": "素材月消耗>1000 USD且素材CTR严格高于图片和视频总点击/总曝光",
+                "baseline_source": "ads_google_insights:type=3,asset_type=2/4",
+                "rule_b_min_spend_usd": 1000,
+                "cpc_weighting": "sum_usd_spend/sum_clicks; all image/video assets including unmapped",
                 "operator": "OR", "crossing_and_spend_ties_included": True,
                 "ctr_weighting": "sum_clicks/sum_impressions; all image/video assets including unmapped",
             },
@@ -2269,7 +2276,7 @@ def publish_visible_state(
         ]
         if any(integer(payload.get("schema_version")) != SCHEMA_VERSION for payload in payloads):
             raise RuntimeError("all visible months must be rebuilt for the current schema before publishing")
-        if any(payload.get("selection_policy", {}).get("google", {}).get("version") != "cpc_picvid_v1"
+        if any(payload.get("selection_policy", {}).get("google", {}).get("version") != "picvid_cpc_1000_v2"
                for payload in payloads):
             raise RuntimeError("all visible months must be rebuilt for the Google CPC/image-video policy before publishing")
         data_version = bj_now().strftime("%Y%m%dT%H%M%S%f%z")

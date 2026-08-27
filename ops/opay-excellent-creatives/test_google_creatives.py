@@ -214,13 +214,13 @@ class GoogleMonthTests(unittest.TestCase):
                 rows = [row for row in payload["rows"] if row["channel"] == "Google"]
                 self.assertEqual(len(rows), 1)
                 row = rows[0]
-                self.assertEqual((row["custom_source_id"], row["spend"], row["selection_rule"]), (9, 6000, "B"))
+                self.assertEqual((row["custom_source_id"], row["spend"], row["selection_rule"]), (9, 6000, "A+B"))
                 self.assertIsNone(row["installs"])
                 self.assertIsNone(row["af_d0_first_transactions"])
                 self.assertIsNone(row["metrics"]["cvr"])
                 self.assertEqual(row["metrics"]["cpm"], 6)
                 self.assertEqual(row["platform_conversions"], 100)
-                self.assertFalse(row["evidence"]["rule_a_available"])
+                self.assertTrue(row["evidence"]["rule_a_available"])
                 self.assertEqual(row["evidence"]["platform_ctr"], 0.01)
                 report.json_bytes(payload)
 
@@ -256,19 +256,19 @@ class GoogleMonthTests(unittest.TestCase):
                 self.assertIsNone(materials[0]["af_d0_count"])
                 report.json_bytes({"platform_conversions": materials[0]["platform_conversions"]})
 
-    def test_missing_campaign_disables_a_b_uses_asset_baseline(self):
+    def test_missing_campaign_does_not_disable_picvid_a_or_b(self):
         with tempfile.TemporaryDirectory() as temp:
             with contextlib.closing(report.cache_conn(Path(temp) / "cache.sqlite3")) as connection:
                 insert_dimension(connection)
                 self.populate(connection, [source(), source(resource_id="customers/1234567890/assets/999", clicks="0")])
                 payload = self.build(connection)
                 self.assertEqual(len(payload["rows"]), 1)
-                self.assertEqual(payload["rows"][0]["selection_rule"], "B")
+                self.assertEqual(payload["rows"][0]["selection_rule"], "A+B")
                 audit = next(a for a in payload["audits"] if a["channel"] == "Google" and a["app"] == "NG OPay")
                 self.assertEqual(audit["baseline_missing_account_days"], 1)
                 benchmark = next(b for b in payload["benchmarks"] if b["channel"] == "Google" and b["app"] == "NG OPay")
-                self.assertIsNone(benchmark["ctr"])
-                self.assertIsNone(benchmark["spend"])
+                self.assertEqual(benchmark["ctr"], 0.01)
+                self.assertEqual(benchmark["spend"], 12000)
 
     def test_platform_usd_missing_does_not_disable_complete_ctr(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -279,15 +279,15 @@ class GoogleMonthTests(unittest.TestCase):
                 connection.commit()
                 payload = self.build(connection)
                 self.assertEqual(len(payload["rows"]), 1)
-                self.assertEqual(payload["rows"][0]["selection_rule"], "B")
+                self.assertEqual(payload["rows"][0]["selection_rule"], "A+B")
                 self.assertEqual(payload["rows"][0]["evidence"]["platform_ctr"], 0.01)
-                self.assertFalse(payload["rows"][0]["evidence"]["platform_cpa_available"])
+                self.assertTrue(payload["rows"][0]["evidence"]["platform_cpa_available"])
                 self.assertIsNone(payload["rows"][0]["evidence"]["platform_cpa"])
-                self.assertIsNone(payload["rows"][0]["evidence"]["cumulative_spend_ratio"])
+                self.assertEqual(payload["rows"][0]["evidence"]["cumulative_spend_ratio"], 0.5)
                 audit = next(a for a in payload["audits"] if a["channel"] == "Google" and a["app"] == "NG OPay")
-                self.assertEqual(audit["platform_fx_missing_rows"], 1)
-                self.assertEqual(audit["platform_fx_missing_native_spend"], {"USD": 100000})
-                self.assertIn("Campaign日记录", audit["message"])
+                self.assertEqual(audit["platform_fx_missing_rows"], 0)
+                self.assertEqual(audit["platform_fx_missing_native_spend"], {})
+                self.assertNotIn("Campaign日记录", audit["message"])
 
     def test_google_only_does_not_fetch_meta_tiktok_or_af(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(report, "assert_read_only"), \
