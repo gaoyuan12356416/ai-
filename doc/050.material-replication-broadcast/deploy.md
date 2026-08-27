@@ -1,6 +1,6 @@
 # A组自动复刻播报 V1：部署与回滚
 
-状态：待上线。本文操作须由维护方执行；真实凭据不进入 Git、日志、截图或接口文档。
+状态：已上线（2026-08-27 18:00:03，Asia/Shanghai），无真实测试播报。本文操作须由维护方执行；真实凭据不进入 Git、日志、截图或接口文档。
 
 ## 变更与边界
 
@@ -96,4 +96,40 @@ python3 scripts/deploy_material_replication.py rollback --backup <prepared_backu
 
 ## 实际发布记录
 
-待填：正式发布提交、备份目录、服务 PID、8 项拒绝验证结果、测试报告引用。未完成验证前，外部文档维持“待上线”。
+| 项目 | 实际结果 |
+|---|---|
+| GitHub 发布提交 | `0a391260f6de1d2e99b351b21d41a613866a5cfb` |
+| GitHub 分支 | `codex/material-replication-broadcast-20260827`，已推送 |
+| 精确 release | `/mnt/data-disk/material-replication-broadcast/releases/0a391260f6de1d2e99b351b21d41a613866a5cfb` |
+| 备份目录 | `/mnt/data-disk/material-replication-broadcast/backups/20260827-175953-pre-0a391260`，权限 `0700` |
+| 备份与迁移演练 | 在线 SQLite backup、quick_check=ok、在副本上建表且旧队列计数不变 |
+| 文件核对 | 全部已部署文件、备份文件和新增配置 SHA256 匹配 manifest；旧播报 service.py 未变化 |
+| 主服务 PID | 变更前 `1116402` → 变更后 `1123265`，active |
+| 新 worker | 日志 `2026-08-27 18:00:01,059 ... material replication batch worker configured=True`，启动失败记录为 0 |
+| Token | 仅服务器 `/etc/material-replication-webhook.env`，权限 `0600`；真实值不进入任何交付文档 |
+| Nginx | `nginx -t` 通过、reload 完成、active |
+| 其他生产 worker | `drama-material-job-worker.service` 仍 active；本次未重启该服务 |
+| 上线拒绝验证 | 8/8 通过；详见下表与 [机器可读记录](evidence/deployment-verification.json) |
+| 新队列 | 表已存在、0 条批次，无测试入队 |
+| 旧队列 | 变更前后均 `delivered=6410`，无待处理记录；生产/截图/广告素材任务状态计数不变 |
+| CPU 同范围回归 | Python 3.9.6，244/244 PASS，16.792 秒，失败/错误/跳过/外网调用均 0 |
+| CPU 回归日志 | `/mnt/data-disk/material-replication-broadcast/qa/final.qOYRqR/regression.log` |
+
+| 请求 | 本机 8787 | 生产 HTTPS |
+|---|---|---|
+| 新接口，无 Token | `401 invalid_token` | `401 invalid_token` |
+| 新接口，专属 Token + 空 items | `422 invalid_payload` | `422 invalid_payload` |
+| 新接口，专属 Token + 32,769 字节 | `413 payload_too_large` | `413 payload_too_large` |
+| 旧接口，无 Token | `401 invalid_token` | `401 invalid_token` |
+
+生产服务器保留完整 `manifest.json` 和 `verification.json`。本地独立评审及完整统计见 [测试报告](test-report.md)。回滚脚本已通过隔离 Mock 对完整/部分发布、配置漂移和活动任务门禁的测试；**没有在生产执行回滚演练**。
+
+本版本可供上游接入，但首次真实业务批次的飞书私聊/兜底送达仍需按授权进行业务验收。部署过程没有提交任何合法生产批次，不能将这些拒绝校验冒充生产 `202` 或实际送达验证。
+
+本次发布的精确回滚命令（先检查活动任务与源文件/配置漂移）：
+
+```bash
+cd /mnt/data-disk/material-replication-broadcast/releases/0a391260f6de1d2e99b351b21d41a613866a5cfb
+python3 scripts/deploy_material_replication.py rollback \
+  --backup /mnt/data-disk/material-replication-broadcast/backups/20260827-175953-pre-0a391260
+```

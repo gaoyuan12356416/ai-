@@ -1,14 +1,14 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "自动复刻批次飞书播报接口（待上线）",
-    "version": "1.0.0-pending",
-    "description": "状态：待上线，不代表生产可调用或真实飞书送达验收完成。上游每 2 小时汇总 replication_started、每 1 小时汇总 replication_failed，并负责跨批次只推新增；每次一个剪辑师、一种事件类型。接收方独立 outbox 可靠接收后尽快异步通知，不增加周期、不创建复刻、不轮询/写入素材业务表、不新增资源 20 分钟提醒。旧 /api/integrations/v1/material-task-status-events 保持不变，Token/重试隔离；同次失败不要同时调用新旧接口。"
+    "title": "自动复刻批次飞书播报接口（已上线）",
+    "version": "1.0.0",
+    "description": "状态：已上线；真实飞书送达未试发验收。生产接口可在取得专属 Token 和业务授权后调用。上线代码 0a391260f6de1d2e99b351b21d41a613866a5cfb；2026-08-27 完成 244/244 项隔离回归及 8/8 项线上非发送检查，未创建真实测试批次或飞书试发。202 入队及投递流程由隔离 Mock 回归验证，实际送达仍需首个获准业务批次验收。部署与回滚记录见同目录 deploy.md。上游每 2 小时汇总 replication_started、每 1 小时汇总 replication_failed，并负责跨批次只推新增；每次一个剪辑师、一种事件类型。接收方独立 outbox 可靠接收后尽快异步通知，不增加周期、不创建复刻、不轮询/写入素材业务表、不新增资源 20 分钟提醒。旧 /api/integrations/v1/material-task-status-events 保持不变，Token/重试隔离；同次失败不要同时调用新旧接口。"
   },
   "servers": [
     {
       "url": "https://ai.yingliangads.com",
-      "description": "计划生产地址；当前状态：待上线"
+      "description": "生产地址；已上线；真实飞书送达未试发验收"
     }
   ],
   "tags": [
@@ -24,7 +24,7 @@
           "MaterialReplication"
         ],
         "operationId": "acceptMaterialReplicationEvent",
-        "summary": "可靠接收复刻汇总批次（待上线）",
+        "summary": "可靠接收复刻汇总批次（已上线）",
         "description": "严格整批接收；同键同规范化内容返回原批次当前状态，JSON 对象键序无关，但 items/failed_languages 顺序有意义；同键改内容/顺序为 409。上游超时或 5xx 保持原键原内容按 1、5、30、120 秒重试；202 后不为补发而换键。收件人经 editor_username -> admin_users.username（大小写敏感精确匹配）-> admin_users.id -> admin_user_group.sub_user_id（status=0）-> email（复用既有用户名/邮箱映射缓存）-> 按邮箱查询飞书得到 open_id（首次发送前冻结）。空用户名、映射失败或明确私聊失败走既有兜底群。结果不确定时只在最多 3300 秒窗口内以同一冻结目标、正文和 UUID 尝试，最多 5 次；之后 delivery_unknown，不盲目换目标兜底。不承诺端到端严格 exactly-once。 最终消息大小预检仅对新批次执行；原键原内容重放读取原批次，不因未来模板变大拒绝或新增发送。",
         "security": [
           {
@@ -295,7 +295,7 @@
             }
           }
         },
-        "x-release-status": "待上线",
+        "x-release-status": "已上线；真实飞书送达未试发验收",
         "x-max-request-utf8-bytes": 32768,
         "x-max-feishu-request-utf8-bytes": 131072
       }
@@ -307,7 +307,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "本接口专属至少 32 个无空白 ASCII 字符的随机 Token",
-        "description": "通过安全渠道单独提供，与旧接口分开。仅放 Authorization 请求头，不能放 URL、JSON、日志或公开代码。 Token 不含空白字符。"
+        "description": "通过安全渠道单独提供，与旧接口分开。仅放 Authorization 请求头，不能放 URL、JSON、日志或公开代码。 Token 不含空白字符。 专属 Token 仅在服务端以 root 所有、0600 权限保管，通过安全渠道提供给获准调用方，不随文档发送。"
       }
     },
     "schemas": {

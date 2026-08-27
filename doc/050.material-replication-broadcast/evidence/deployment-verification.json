@@ -1,0 +1,44 @@
+{
+  "source": "/mnt/data-disk/material-replication-broadcast/backups/20260827-175953-pre-0a391260/verification.json",
+  "deployed_commit": "0a391260f6de1d2e99b351b21d41a613866a5cfb",
+  "verified_at": "2026-08-27T10:00:03.076417+00:00",
+  "probes": [
+    {"base": "http://127.0.0.1:8787", "status": 401, "code": "invalid_token"},
+    {"base": "http://127.0.0.1:8787", "status": 422, "code": "invalid_payload"},
+    {"base": "http://127.0.0.1:8787", "status": 413, "code": "payload_too_large"},
+    {"base": "http://127.0.0.1:8787", "status": 401, "code": "invalid_token"},
+    {"base": "https://ai.yingliangads.com", "status": 401, "code": "invalid_token"},
+    {"base": "https://ai.yingliangads.com", "status": 422, "code": "invalid_payload"},
+    {"base": "https://ai.yingliangads.com", "status": 413, "code": "payload_too_large"},
+    {"base": "https://ai.yingliangads.com", "status": 401, "code": "invalid_token"}
+  ],
+  "stats": {
+    "material_status_broadcast_outbox": {"delivered": 6410},
+    "material_replication_broadcast_outbox": {},
+    "drama_material_job": {"done": 20},
+    "drama_screenshot_job": {"done": 1021, "failed": 180},
+    "ad_material_task": {
+      "demand_review": 2, "done": 20, "draft": 1, "failed": 3,
+      "material_abandoned": 3, "material_review": 5
+    }
+  },
+  "real_test_messages": 0,
+  "service_pid": "1123265",
+  "post_deployment_audit": {
+    "pre_service_pid": "1116402",
+    "all_backup_and_config_hashes_match": true,
+    "backup_quick_check": "ok",
+    "backup_mode": "0700",
+    "token_file_mode": "0600",
+    "worker_configured": true,
+    "worker_startup_failures": 0,
+    "legacy_module_unchanged": true,
+    "app_sha256": "782ce12cf17890b1efd6d834e53a14debb5747fec7fe143794eaa34705f0278d"
+  },
+  "cpu_regression": {
+    "python": "3.9.6", "tests": 244, "failures": 0, "errors": 0,
+    "skipped": 0, "external_network_attempts": 0, "seconds": 16.792,
+    "log": "/mnt/data-disk/material-replication-broadcast/qa/final.qOYRqR/regression.log"
+  },
+  "acceptance_boundary": "Deployment and rejection-only probes passed. No valid production batch or real Feishu test message was submitted. Real delivery requires an authorized business batch."
+}
