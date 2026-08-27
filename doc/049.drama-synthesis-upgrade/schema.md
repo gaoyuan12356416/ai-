@@ -2,7 +2,7 @@
 
 ## 2026-08-27 现行状态
 
-代码合同对应 c719bebf72be900ec3853858dc53b36b83beffd2；真实三表 snapshot + CPU 本机隔离 MySQL5.7.44 恢复/迁移演练已 PASS。生产 ads_aius 仍只有 SELECT/SHOW VIEW，无合法 admin/migrator/writer，生产 additive DDL 未因演练通过而获准执行。现行证据/权限见 [migration.md](migration.md)；旧 API 备份路线不是当前必选项，禁止腾讯云管理后台，不声称全集群灾备通过。
+用户最新明确要求仅在 ads_ai 新建三表；原表不写、不改、不复制。固定结构见 `deploy/drama-youtube-ads-ai-v2.sql`，完整所有权/最小权限/CREATE-only 门禁见 [新表合同](ads-ai-new-tables-20260827.md)。旧 c719 的恢复证明只保留历史，不绑定新 schema 或新候选。
 
 ## CPU SQLite
 
@@ -16,7 +16,11 @@
 
 `ensure_storage()` 仅做幂等 additive 初始化/补列。内部 canary CLI 不调用它；先要求已准备好的真实 CPU ledger，status 使用 mode=ro。禁止 DROP、DELETE、反向迁移和历史重解释。
 
-## 外部统一 MySQL
+## 当前 MySQL：ads_ai 专用新表
+
+新 `ads_youtube_videos` 与 `ads_youtube_publish_log` 保存完整发布字段，`ads_youtube_comments` 保存完整评论字段；所有表保存 payload_json、payload_sha256、canary_operation_id、创建时间。固定 InnoDB/utf8mb4_bin/所有权 COMMENT、精确唯一索引，无 trigger/FK。缺表才 CREATE，兼容表只复验，不改写历史。runtime 仅三表 SELECT/INSERT/UPDATE，健康合同 v2，禁止原库写入、旧字段映射和负数队列 ID。
+
+## 历史 MySQL 方案（已停用，不作为执行合同）
 
 三张 legacy 表均位于 `kunlunads_dev`：`ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。2026-08-27 一致性 snapshot 的实际行数为 244151、53、55105，共299309；2026-08-26 的近似行数仅属历史。生产迁移只增加 nullable ASCII/binary `drama_external_video_id`、`drama_external_comment_id`、`drama_external_publish_id` 与唯一索引，历史行保持 NULL，不回填或重解释。
 

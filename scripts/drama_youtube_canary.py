@@ -106,7 +106,7 @@ def validate_authorization(args: argparse.Namespace) -> None:
         or args.confirm_channel_id != CANARY_CHANNEL_ID or args.confirm_account_id != CANARY_ACCOUNT_ID
     ):
         raise CanaryCLIError("canary_target_confirmation_mismatch")
-    if not re.fullmatch(r"[1-9][0-9]{0,9}", str(args.operator_user_id or "")) or int(args.operator_user_id) > 2_147_483_647:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(args.operator_user_id or "")):
         raise CanaryCLIError("canary_operator_required")
     if args.action == "prepare":
         if not JOB_ID_RE.fullmatch(str(args.job_id or "")) or args.source_kind not in SOURCE_KINDS or args.canary_task_id is not None:

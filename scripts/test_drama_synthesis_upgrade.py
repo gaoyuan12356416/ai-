@@ -28,6 +28,7 @@ from features.drama_synthesis.core import (  # noqa: E402
     COMMENT_SCOPE, DramaSynthesisError, DramaSynthesisStore,
     ImmutableFilesystemPublisher, RECIPE_CATEGORIES, RECIPE_PROFILE,
     build_long_url, freeze_random_recipe, render_wrapper_html,
+    _video_sync_payload, _comment_sync_payload,
 )
 from features.drama_synthesis.unified_youtube import (  # noqa: E402
     ControlledRPCExecutor, UnifiedYouTubeWriter, build_unified_youtube_writer_from_env,
@@ -51,7 +52,7 @@ def unified_video_payload(*, publish_id=1, video_id="video_1"):
         "video_id": video_id,
         "app_id": 1479,
         "channel_local_id": 1,
-        "operator_user_id": 803,
+        "operator_user_id": "c31ggb2g",
         "job_id": JOB_ID,
         "content_id": "2284",
         "source_kind": "concat_video",
@@ -69,7 +70,7 @@ def unified_comment_payload(*, publish_id=1, video_id="video_1", comment_id="com
         "video_id": video_id,
         "comment_id": comment_id,
         "channel_local_id": 1,
-        "operator_user_id": 803,
+        "operator_user_id": "c31ggb2g",
         "comment_text": "hello",
         "published_at_utc": "2026-08-26T00:00:00Z",
     }
@@ -199,15 +200,40 @@ class UpgradeTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def enqueue(self, operation="operation:test-0001", comment="", description="required", confirmed=False):
+    def enqueue(self, operation="operation:test-0001", comment="", description="required", confirmed=False, operator="c31ggb2g"):
         return self.store.enqueue_youtube(
             operation_id=operation, job_id=JOB_ID, content_id="2284", app_id="1479",
             channel_local_id="1", channel_id=CHANNEL, youtube_account_id="2",
             source_kind="concat_video", source_url="https://example.test/video.mp4",
             title="Title", description_template=description, description_rendered=description,
             comment_text=comment, duplicate_confirmed=confirmed,
-            scopes=(UPLOAD, READONLY, COMMENT_SCOPE), operator_user_id="803", operator_name="tester",
+            scopes=(UPLOAD, READONLY, COMMENT_SCOPE), operator_user_id=operator, operator_name="tester",
         )
+
+    def test_operator_string_is_preserved_in_all_outbox_payloads(self):
+        for index, actor in enumerate(("c31ggb2g", "892fd2e8", "", "原始身份_é", "Actor_ID-1")):
+            with self.subTest(actor=actor):
+                row = self.enqueue(operation="operation:actor-%08d" % index, operator=actor)
+                self.assertEqual(row["operator_user_id"], actor)
+                row["video_id"] = "video_actor1"
+                video = _video_sync_payload(row, "video_actor1", "2026-08-27T00:00:00Z")
+                row["comment_text"] = "actor audit"
+                comment = _comment_sync_payload(row, "comment_actor1", "2026-08-27T00:00:00Z")
+                self.assertEqual(video["operator_user_id"], actor)
+                self.assertEqual(comment["operator_user_id"], actor)
+                validate_entity_payload("video", "video_actor1", video)
+                validate_entity_payload("publish_log", str(row["id"]), video)
+                validate_entity_payload("comment", "comment_actor1", comment)
+
+    def test_operator_is_not_silently_truncated_or_control_normalized(self):
+        for value in (803, "a" * 129, "line\nactor", "actor\u202e", "actor\ud800"):
+            with self.subTest(value=repr(value)), self.assertRaises(DramaSynthesisError):
+                self.enqueue(operator=value)
+        connection = sqlite3.connect(self.store.db_path)
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM drama_youtube_publish").fetchone()[0], 0)
+        finally:
+            connection.close()
 
     def test_random_source_is_required_and_exact(self):
         with self.assertRaises(DramaSynthesisError):
@@ -307,6 +333,7 @@ class UpgradeTests(unittest.TestCase):
             ROOT / "scripts/drama_youtube_unified_writer_rpc.py",
             ROOT / "scripts/migrate_drama_synthesis_outputs.py",
             ROOT / "scripts/migrate_drama_youtube_unified_schema.py",
+            ROOT / "scripts/bootstrap_drama_youtube_ads_ai.py",
         ]
         for path in files:
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 9))
@@ -723,11 +750,11 @@ class UpgradeTests(unittest.TestCase):
         deploy_doc = (ROOT / "doc/049.drama-synthesis-upgrade/deploy.md").read_text(encoding="utf-8")
         migration_doc = (ROOT / "doc/049.drama-synthesis-upgrade/migration.md").read_text(encoding="utf-8")
         for document in (deploy_doc, migration_doc):
-            self.assertIn("runuser -u drama-youtube -- /usr/bin/python3", document)
-            self.assertIn("/opt/drama-youtube-unified-writer/current/scripts/", document)
-        self.assertIn("writer database credential file is invalid", migration_doc)
-        self.assertIn("releases/<candidate_git_sha>", migration_doc)
-        self.assertIn("rehearsal_result_sha256", migration_doc)
+            self.assertIn("ads-ai-new-tables-20260827.md", document)
+        current = (ROOT / "doc/049.drama-synthesis-upgrade/ads-ai-new-tables-20260827.md").read_text(encoding="utf-8")
+        for fragment in ("ads_ai", "bootstrap_drama_youtube_ads_ai.py", "drama-youtube-writer-preflight-v2",
+                         "63350", "63353", "SELECT/INSERT/UPDATE", "不复制", "原表"):
+            self.assertIn(fragment, current)
 
     def test_gpu_worker_fake_http_contract_is_media_only(self):
         fake_app = SimpleNamespace(

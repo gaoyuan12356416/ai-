@@ -1,5 +1,9 @@
 # SA 代码评审
 
+## 最新 ads_ai 新表增量
+
+设计及冻结代码已独立 SA/QA 接受，无剩余 P0/P1、新P2。262/262 一次完整回归、15/15独立对抗、35文件compile/3.9AST、18源码/配置前后SHA一致。镜像pin、datadir真实路径与Feishu原始操作者合同修复完成；生产真实门禁另验，不把代码 PASS 视为上线完成。当前以 [新表合同](ads-ai-new-tables-20260827.md) 为准，旧库权限阻塞不适用于用户最新新表范围。
+
 ## 2026-08-27 CPU-only catalog 增量
 
 独立审查新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 的 4 个冻结文件，未发现新增 P0/P1。七套一次合并 204/204 PASS（13.639 秒），另 15 项文件/JSON/no-fallback 对抗 PASS；3 Python 文件 compile/3.9 AST、diff-check、测试前后冻结 SHA 一致。root 随后经 SSH 在 CPU 独立 checkout 验证真实 manifest 与原函数，无生产应用/数据库变更；两类证据不混称。

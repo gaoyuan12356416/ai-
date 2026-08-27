@@ -31,12 +31,12 @@ from features.drama_synthesis.core import (
 from features.drama_synthesis.unified_youtube import (
     ControlledRPCExecutor, UnifiedYouTubeWriter, run_sync_outbox_once, validate_entity_payload, validate_writer_health,
 )
-from features.drama_synthesis.unified_youtube_rpc import UnifiedYouTubeLedger
+from features.drama_synthesis.unified_youtube_rpc import LedgerRPCError, UnifiedYouTubeLedger
 from features.drama_synthesis.youtube import (
     YouTubeCredential, YouTubeHTTPClient, YouTubeHTTPError, YouTubePublishEngine,
 )
 from scripts import drama_youtube_canary as cli
-from scripts.test_drama_youtube_unified_rpc import FakeConnection
+from scripts.test_drama_youtube_unified_rpc import FakeConnection, exact_show_grants
 
 
 JOB_ID = "c" * 32
@@ -45,6 +45,7 @@ SCOPES = frozenset({COMMENT_SCOPE})
 VIDEO_ID = "canary_video_1"
 EXPIRES = "2099-01-01T00:00:00Z"
 BLOB = b"offline-canary-fixture-mp4"
+ACTOR_ID = "c31ggb2g"
 
 
 def authorized_args(action="prepare", **changes):
@@ -53,7 +54,7 @@ def authorized_args(action="prepare", **changes):
         "--operation-id", CANARY_OPERATION_ID, "--confirm-app-id", CANARY_APP_ID,
         "--confirm-channel-local-id", CANARY_CHANNEL_LOCAL_ID,
         "--confirm-channel-id", CANARY_CHANNEL_ID, "--confirm-account-id", CANARY_ACCOUNT_ID,
-        "--operator-user-id", "803",
+        "--operator-user-id", ACTOR_ID,
     ])
     if action == "prepare":
         args.job_id = JOB_ID
@@ -279,6 +280,32 @@ class CanaryTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.sql("SELECT * FROM drama_youtube_publish"))
 
+    def test_canary_actor_requires_a_real_shape_nonempty_string(self):
+        for value in (None, "", " ", "-1", "bad/id", "a" * 129, "actor\n", "actor\u202e", "操作者"):
+            with self.subTest(value=repr(value)), self.assertRaisesRegex(cli.CanaryCLIError, "canary_operator_required"):
+                self.prepare(operator_user_id=value)
+        self.app.require_completed_drama_job.assert_not_called()
+        self.assertFalse(self.sql("SELECT * FROM drama_youtube_publish"))
+
+    def test_direct_store_cannot_bypass_canary_actor_validation(self):
+        with mock.patch.object(self.store, "enqueue_youtube_canary", wraps=self.store.enqueue_youtube_canary) as enqueue:
+            row = self.prepare()
+        request = dict(enqueue.call_args.kwargs)
+        for actor in ("", "操作者", "-1", "a" * 129):
+            with self.subTest(actor=actor), self.assertRaises(DramaSynthesisError):
+                self.store.enqueue_youtube_canary(**dict(request, operator_user_id=actor))
+        self.assertEqual(self.store.youtube_task(row["id"])["operator_user_id"], ACTOR_ID)
+        self.assertEqual(len(self.sql("SELECT id FROM drama_youtube_publish")), 1)
+
+    def test_invalid_persisted_canary_actor_stops_before_claim_or_oauth(self):
+        row = self.prepare()
+        for actor in ("", "操作者"):
+            self.sql("UPDATE drama_youtube_publish SET operator_user_id=? WHERE id=?", (actor, row["id"]))
+            with self.subTest(actor=actor), self.assertRaises(DramaSynthesisError):
+                self.tick(row["id"])
+        self.assertEqual((self.client.refreshes, self.client.begins, self.client.uploads, self.client.comments), (0, 0, 0, 0))
+        self.assertEqual(self.sql("SELECT lease_generation FROM drama_youtube_publish")[0]["lease_generation"], 0)
+
     def test_incomplete_job_and_unknown_source_fail_before_enqueue(self):
         self.app.require_completed_drama_job.side_effect = DramaSynthesisError("drama_job_not_completed", "not done", 409)
         with self.assertRaises(DramaSynthesisError):
@@ -357,10 +384,15 @@ class CanaryTests(unittest.TestCase):
         self.assertEqual([len(rows) for rows in self.connection.rows.values()], [1, 1, 1])
         video = self.connection.rows["ads_youtube_videos"][0]
         self.assertEqual(video["privacy_status"], "unlisted")
-        self.assertEqual(video["channel_id"], 263)
-        log = json.loads(self.connection.rows["ads_youtube_publish_log"][0]["log"])
+        self.assertEqual(video["channel_local_id"], 263)
+        self.assertEqual(video["operator_user_id"], ACTOR_ID)
+        self.assertEqual(video["source_url"], SOURCE)
+        log = json.loads(self.connection.rows["ads_youtube_publish_log"][0]["payload_json"])
         self.assertEqual(log["canary_operation_id"], CANARY_OPERATION_ID)
         self.assertEqual(log["privacy_status"], "unlisted")
+        self.assertEqual(log["channel_local_id"], 263)
+        self.assertEqual(log["operator_user_id"], ACTOR_ID)
+        self.assertEqual(self.connection.rows["ads_youtube_comments"][0]["operator_user_id"], ACTOR_ID)
 
     def test_prepare_does_not_open_live_gate(self):
         with mock.patch.dict(os.environ, self.env, clear=True):
@@ -386,8 +418,14 @@ class CanaryTests(unittest.TestCase):
 
     def test_writer_health_schema_or_grant_drift_stops_before_any_youtube_call(self):
         row = self.prepare()
-        for attribute in ("schema_drift", "grant_extra", "proxy_grant_extra"):
-            with self.subTest(attribute=attribute), mock.patch.object(self.connection, attribute, True), self.assertRaises(Exception):
+        changes = (
+            ("schema_drift", True),
+            ("table_privileges_extra", [{"TABLE_SCHEMA": "ads_ai", "TABLE_NAME": "ads_youtube_videos",
+                                         "PRIVILEGE_TYPE": "DELETE", "IS_GRANTABLE": "NO"}]),
+            ("show_grants", exact_show_grants() + [{"Grants": "GRANT PROXY ON 'other'@'%' TO 'drama_youtube_writer'@'43.166.187.96'"}]),
+        )
+        for attribute, value in changes:
+            with self.subTest(attribute=attribute), mock.patch.object(self.connection, attribute, value), self.assertRaises(LedgerRPCError):
                 cli.run_canary(self.app, authorized_args("run", canary_task_id=row["id"]), env=self.env, engine=self.engine, writer=self.writer)
         self.assertEqual((self.client.refreshes, self.client.begins, self.client.uploads), (0, 0, 0))
         self.assertEqual(self.store.youtube_canary_task()["video_attempt_count"], 0)
@@ -754,8 +792,10 @@ class CanaryTests(unittest.TestCase):
             session = FakeHTTPSession(payload, status=status)
             with self.subTest(status=status), self.assertRaises(DramaSynthesisError):
                 executor.health()
-        for change in ({"schema": "other"}, {"writer_identity": "root@localhost"}, {"indexes_verified": False},
-                       {"writable": False}, {"grant_fingerprint": ""}, {"contract": "legacy-health"}):
+        for change in ({"schema": "other"}, {"schema": "kunlunads_dev"},
+                       {"writer_identity": "root@localhost"}, {"indexes_verified": False},
+                       {"writable": False}, {"grant_fingerprint": ""}, {"contract": "legacy-health"},
+                       {"contract": "drama-youtube-writer-preflight-v1"}):
             with self.subTest(change=change), self.assertRaises(DramaSynthesisError):
                 validate_writer_health(dict(payload, **change))
         with mock.patch.object(session, "get", side_effect=__import__("requests").Timeout("PRIVATE_VALUE")), self.assertRaises(DramaSynthesisError):

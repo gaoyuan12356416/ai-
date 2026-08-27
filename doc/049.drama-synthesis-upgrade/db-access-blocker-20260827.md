@@ -1,5 +1,9 @@
 # 当前部署所需的数据库授权
 
+## 已被新范围取代
+
+用户最新明确仅在 ads_ai 新建表，原表无需写入。CPU 实查 ads_aius 对 ads_ai.* 有 ALL PRIVILEGES WITH GRANT OPTION；可以继续新表 bootstrap 与最小 writer 配置，不再等待下文旧库权限。当前门禁见 [新表合同](ads-ai-new-tables-20260827.md)。下文是旧范围的真实历史诊断，不是当前阻塞，也不授权原库写入。
+
 ## 当前问题
 
 CPU 的 SSH 可以正常使用，环境搭建和三表备份/本机恢复演练已由代理执行。阻塞不是 Linux 权限，而是目标 MySQL 的账号权限：已有 `ads_aius@43.166.187.96` 对 `kunlunads_dev` 只有 SELECT/SHOW VIEW，不能添加本方案需要的三个字段/索引，也不能为发布结果写入三张表。其他 schema 上的授权不能转用。

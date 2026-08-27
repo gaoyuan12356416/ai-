@@ -1,5 +1,11 @@
 # 测试报告
 
+## 最新增量：ads_ai 新表（代码冻结 QA PASS）
+
+用户最新确认原表只读，改为 ads_ai 新建专用三表。独立 SA/代码 QA 无剩余 P0/P1，指定10模块一次合并 **262/262 PASS，14.628秒**（含 X30/TT11 契约）。另 **15/15** 独立内存对抗 PASS，0.017秒，网络/真实数据库 tripwire 均0；35文件 compile/3.9 AST PASS，本机执行器是 Python3.14.3，不冒称实际3.9运行。18个候选源码/配置测试前后 SHA 一致，差异检查无空白错误。
+
+BUG-023/024/025 已修复并独立复核。实现专项39、root专项（含1项Windows测试连接未关闭后定向修复）、旧迁移4项均不与262相加。可进入 GitHub 精确候选和 SSH fresh-rehearsal 门禁；生产新表/最小权限writer/CPU切流/真实YouTube结果另行验证。下方204/188/166为旧候选历史，不冒充本轮新表验收。现行 [新表合同](ads-ai-new-tables-20260827.md)。
+
 ## 当前结论：CPU 查询边界（2026-08-27 14:47，北京时间）
 
 CPU 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 已 GitHub push/readback；模板目录只读 CPU 原始 manifest，不请求 GPU 或媒体素材包。独立七套唯一一次合并 **204/204 PASS，13.639 秒**；另外 15 项纯内存对抗 PASS，不叠加 204。3 个 Python 文件 compile/3.9 AST、4 文件冻结 SHA、diff-check PASS，无新增 P0/P1。

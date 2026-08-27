@@ -1,62 +1,43 @@
 #!/usr/bin/env python3
-"""Offline tests for the fixed legacy YouTube-ledger writer."""
-
+"""Offline tests for the dedicated ads_ai ledger and least-privilege RPC."""
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
 from http.client import HTTPConnection
 from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
+import pymysql
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(ROOT))
 
-from features.drama_synthesis.unified_youtube_rpc import (  # noqa: E402
-    LedgerRPCError,
-    MIGRATOR_TABLE_PRIVILEGES,
-    MIGRATOR_USER,
-    REQUIRED_COLUMN_DEFINITIONS,
-    REQUIRED_COLUMNS,
-    REQUIRED_UNIQUE_INDEX_BY_TABLE,
-    RUNTIME_TABLE_PRIVILEGES,
-    WRITER_USER,
-    UnifiedYouTubeLedger,
-    _comment_record,
-    _publish_log_record,
-    _video_record,
-    load_database_credential_file,
+from features.drama_synthesis.core import CANARY_APP_ID, CANARY_CHANNEL_LOCAL_ID, CANARY_OPERATION_ID, DramaSynthesisError
+from features.drama_synthesis.unified_youtube import WRITER_HEALTH_CONTRACT, TABLE_BY_KIND, validate_writer_health, validate_entity_payload
+from features.drama_synthesis.unified_youtube_rpc import (
+    LedgerRPCError, REQUIRED_COLUMN_DEFINITIONS, REQUIRED_COLUMNS, REQUIRED_INDEXES_BY_TABLE,
+    RUNTIME_TABLE_PRIVILEGES, SCHEMA, TABLE_OWNERSHIP_COMMENT, WRITER_USER,
+    UnifiedYouTubeLedger, _comment_record, _publish_log_record, _video_record,
+    load_database_credential_file, inspect_owned_tables,
 )
-from scripts.test_drama_synthesis_upgrade import (  # noqa: E402
-    unified_comment_payload,
-    unified_video_payload,
-)
-from scripts import migrate_drama_youtube_unified_schema as migration  # noqa: E402
-from scripts.drama_youtube_unified_writer_rpc import (  # noqa: E402
-    ControlledWriterHandler,
-    HEALTH_PATH,
-    RPC_PATH,
-)
+from scripts.test_drama_synthesis_upgrade import unified_comment_payload, unified_video_payload
+from scripts.drama_youtube_unified_writer_rpc import ControlledWriterHandler, HEALTH_PATH, RPC_PATH
 
 
-def exact_show_grants(user, privileges, account_quote="`"):
-    account = "%s%s%s@%s43.166.187.96%s" % (
-        account_quote, user, account_quote, account_quote, account_quote,
-    )
+def exact_show_grants(user=WRITER_USER, privileges=RUNTIME_TABLE_PRIVILEGES, account_quote="'"):
+    account = "%s%s%s@%s43.166.187.96%s" % (account_quote, user, account_quote, account_quote, account_quote)
     rows = [{"grant": "GRANT USAGE ON *.* TO " + account}]
     for table in sorted(REQUIRED_COLUMNS):
-        rows.append({
-            "grant": "GRANT %s ON `kunlunads_dev`.`%s` TO %s"
-            % (", ".join(sorted(privileges)), table, account)
-        })
+        rows.append({"grant": "GRANT %s ON ads_ai.%s TO %s" % (", ".join(sorted(privileges)), table, account)})
     return rows
 
 
@@ -72,116 +53,102 @@ class FakeCursor:
         return False
 
     def execute(self, sql, params=()):
+        c = self.connection
+        c.sql.append(sql)
         if sql.startswith("SELECT DATABASE()"):
-            self.result = [{
-                "database_name": "kunlunads_dev",
-                "read_only": 0,
-                "account_name": "drama_youtube_writer@43.166.187.96",
-            }]
-            return 1
-        if "information_schema.COLUMNS" in sql:
+            self.result = [{"database_name": c.schema, "read_only": c.read_only, "account_name": c.account}]
+        elif sql.startswith("SELECT VERSION()"):
+            self.result = [{"version": "5.7.44"}]
+        elif sql.startswith("SHOW GRANTS"):
+            self.result = copy.deepcopy(c.show_grants if c.show_grants is not None else exact_show_grants(account_quote=c.show_grant_account_quote))
+        elif "information_schema.USER_PRIVILEGES" in sql:
+            self.result = list(c.global_privileges)
+        elif "information_schema.SCHEMA_PRIVILEGES" in sql:
+            self.result = list(c.schema_privileges)
+        elif "information_schema.TABLE_PRIVILEGES" in sql:
             self.result = [
-                {
-                    "TABLE_NAME": table,
-                    "COLUMN_NAME": column,
-                    "COLUMN_TYPE": definition[0],
-                    "IS_NULLABLE": definition[1],
-                    "COLUMN_DEFAULT": definition[2],
-                    "CHARACTER_SET_NAME": definition[3],
-                    "COLLATION_NAME": definition[4],
-                    "EXTRA": definition[5],
-                }
-                for table, definitions in REQUIRED_COLUMN_DEFINITIONS.items()
-                for column, definition in definitions.items()
-            ]
-            if self.connection.schema_drift:
-                next(
-                    row for row in self.result
-                    if row["TABLE_NAME"] == "ads_youtube_videos" and row["COLUMN_NAME"] == "queue_id"
-                )["COLUMN_TYPE"] = "int(10) unsigned"
-            return len(self.result)
-        if sql.startswith("SHOW GRANTS"):
-            self.result = exact_show_grants(
-                WRITER_USER,
-                RUNTIME_TABLE_PRIVILEGES,
-                self.connection.show_grant_account_quote,
-            )
-            if self.connection.proxy_grant_extra:
-                self.result.append({
-                    "grant": "GRANT PROXY ON ''@'' TO 'drama_youtube_writer'@'43.166.187.96'"
-                })
-            if self.connection.routine_grant_extra:
-                self.result.append({
-                    "grant": "GRANT EXECUTE ON PROCEDURE `kunlunads_dev`.`unexpected_routine` "
-                    "TO `drama_youtube_writer`@`43.166.187.96`"
-                })
-            return len(self.result)
-        if "information_schema.USER_PRIVILEGES" in sql:
-            self.result = []
-            if self.connection.global_grant_extra:
-                self.result.append({"PRIVILEGE_TYPE": "PROCESS", "IS_GRANTABLE": "NO"})
-            return len(self.result)
-        if "information_schema.SCHEMA_PRIVILEGES" in sql:
-            self.result = []
-            return 0
-        if "information_schema.TABLE_PRIVILEGES" in sql:
+                {"TABLE_SCHEMA": SCHEMA, "TABLE_NAME": table, "PRIVILEGE_TYPE": privilege, "IS_GRANTABLE": "NO"}
+                for table in REQUIRED_COLUMNS for privilege in RUNTIME_TABLE_PRIVILEGES
+            ] + list(c.table_privileges_extra)
+        elif "information_schema.COLUMN_PRIVILEGES" in sql:
+            self.result = list(c.column_privileges)
+        elif "information_schema.TABLES" in sql:
             self.result = [
-                {
-                    "TABLE_SCHEMA": "kunlunads_dev",
-                    "TABLE_NAME": table,
-                    "PRIVILEGE_TYPE": privilege,
-                    "IS_GRANTABLE": "NO",
-                }
-                for table in REQUIRED_COLUMNS
-                for privilege in RUNTIME_TABLE_PRIVILEGES
+                {"TABLE_NAME": table, "TABLE_TYPE": "BASE TABLE", "ENGINE": "InnoDB",
+                 "TABLE_COLLATION": "utf8mb4_bin", "TABLE_COMMENT": TABLE_OWNERSHIP_COMMENT}
+                for table in sorted(c.existing)
             ]
-            if self.connection.grant_extra:
-                self.result.append({
-                    "TABLE_SCHEMA": "kunlunads_dev",
-                    "TABLE_NAME": "ads_youtube_videos",
-                    "PRIVILEGE_TYPE": "DELETE",
-                    "IS_GRANTABLE": "NO",
-                })
-            return len(self.result)
-        if "information_schema.COLUMN_PRIVILEGES" in sql:
-            self.result = []
-            if self.connection.column_grant_extra:
-                self.result.append({
-                    "TABLE_SCHEMA": "kunlunads_dev",
-                    "TABLE_NAME": "ads_youtube_videos",
-                    "COLUMN_NAME": "video_id",
-                    "PRIVILEGE_TYPE": "SELECT",
-                    "IS_GRANTABLE": "NO",
-                })
-            return len(self.result)
-        if "information_schema.STATISTICS" in sql:
+            if self.result:
+                self.result[0].update(c.table_override)
+        elif "information_schema.COLUMNS" in sql:
             self.result = [
-                {
-                    "TABLE_NAME": table,
-                    "INDEX_NAME": index_name,
-                    "NON_UNIQUE": 0,
-                    "SEQ_IN_INDEX": 1,
-                    "COLUMN_NAME": column_name,
-                }
-                for table, (index_name, column_name) in REQUIRED_UNIQUE_INDEX_BY_TABLE.items()
+                {"TABLE_NAME": table, "COLUMN_NAME": column, "COLUMN_TYPE": definition[0],
+                 "IS_NULLABLE": definition[1], "COLUMN_DEFAULT": definition[2],
+                 "CHARACTER_SET_NAME": definition[3], "COLLATION_NAME": definition[4], "EXTRA": definition[5]}
+                for table in sorted(c.existing)
+                for column, definition in REQUIRED_COLUMN_DEFINITIONS[table].items()
             ]
-            return len(self.result)
-        if sql.startswith("SELECT `id`"):
-            table = re.search(r"FROM `kunlunads_dev`.`([^`]+)`", sql).group(1)
-            external_column = re.search(r"WHERE `([^`]+)`=%s", sql).group(1)
-            external_id = params[0]
-            self.result = [dict(row) for row in self.connection.rows[table] if row.get(external_column) == external_id][:2]
-            return len(self.result)
-        if sql.startswith("INSERT INTO"):
-            match = re.search(r"INSERT INTO `kunlunads_dev`.`([^`]+)` \(([^)]+)\)", sql)
-            table = match.group(1)
-            columns = [item.strip("`") for item in match.group(2).split(",")]
+            if c.column_override and self.result:
+                self.result[0].update(c.column_override)
+            if c.schema_drift and self.result:
+                self.result[0]["COLUMN_TYPE"] = "varchar(1)"
+            if c.extra_column and self.result:
+                self.result.append(dict(self.result[0], COLUMN_NAME="unexpected"))
+        elif "information_schema.STATISTICS" in sql:
+            self.result = [
+                {"TABLE_NAME": table, "INDEX_NAME": index, "NON_UNIQUE": non_unique,
+                 "SEQ_IN_INDEX": position, "COLUMN_NAME": column, "SUB_PART": None,
+                 "INDEX_TYPE": "BTREE", "COLLATION": "A"}
+                for table in sorted(c.existing)
+                for index, (non_unique, columns) in REQUIRED_INDEXES_BY_TABLE[table].items()
+                for position, column in enumerate(columns, 1)
+            ]
+            if c.index_override and self.result:
+                self.result[0].update(c.index_override)
+            if c.missing_index and self.result:
+                self.result.pop()
+        elif "information_schema.KEY_COLUMN_USAGE" in sql:
+            self.result = list(c.foreign_keys)
+        elif "information_schema.TRIGGERS" in sql:
+            self.result = list(c.triggers)
+        elif sql.startswith("CREATE TABLE ads_ai."):
+            table = re.match(r"CREATE TABLE ads_ai\.(\w+) \(", sql).group(1)
+            if table == c.fail_create:
+                raise RuntimeError("simulated CREATE failure")
+            if table in c.existing:
+                raise pymysql.err.OperationalError(1050, "table already exists")
+            c.existing.add(table)
+            c.ddl.append(sql)
+            self.result = []
+        elif sql.startswith("SELECT id,"):
+            table = re.search(r"FROM ads_ai\.(\w+)", sql).group(1)
+            names = re.findall(r"(\w+)=%s", sql)
+            self.result = [
+                dict(row) for row in c.rows[table]
+                if any(row.get(name) == value for name, value in zip(names, params))
+            ][:3]
+        elif sql.startswith("INSERT INTO ads_ai."):
+            match = re.match(r"INSERT INTO ads_ai\.(\w+) \(([^)]+)\)", sql)
+            table, columns = match.group(1), match.group(2).split(",")
             record = dict(zip(columns, params))
-            record["id"] = len(self.connection.rows[table]) + 1
-            self.connection.rows[table].append(record)
+            record["id"] = len(c.rows[table]) + 1
+            if c.race_record is not None:
+                c.rows[table].append(dict(c.race_record, id=record["id"]))
+                c.race_record = None
+                raise pymysql.err.IntegrityError(1062, "duplicate fixture")
+            for row in c.rows[table]:
+                for _index, (_non_unique, key_columns) in REQUIRED_INDEXES_BY_TABLE[table].items():
+                    if all(row.get(key) == record.get(key) for key in key_columns):
+                        raise pymysql.err.IntegrityError(1062, "duplicate fixture")
+            c.rows[table].append(record)
+            c.inserts += 1
             self.result = []
-            return 1
-        raise AssertionError("unexpected SQL: " + sql)
+        elif sql.startswith("SELECT payload_json,payload_sha256 FROM ads_ai."):
+            table = sql.rsplit(".", 1)[1]
+            self.result = [{"payload_json": row["payload_json"], "payload_sha256": row["payload_sha256"]} for row in c.rows[table]]
+        else:
+            raise AssertionError("unexpected SQL: " + sql)
+        return len(self.result)
 
     def fetchall(self):
         return list(self.result)
@@ -191,21 +158,33 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self):
-        self.rows = {
-            "ads_youtube_videos": [],
-            "ads_youtube_comments": [],
-            "ads_youtube_publish_log": [],
-        }
+    def __init__(self, *, existing=True):
+        self.rows = {table: [] for table in TABLE_BY_KIND.values()}
+        self.existing = set(self.rows) if existing else set()
+        self.schema = SCHEMA
+        self.account = WRITER_USER + "@43.166.187.96"
+        self.read_only = 0
+        self.show_grants = None
+        self.show_grant_account_quote = "'"
+        self.global_privileges = []
+        self.schema_privileges = []
+        self.table_privileges_extra = []
+        self.column_privileges = []
+        self.table_override = {}
+        self.column_override = {}
+        self.index_override = {}
+        self.extra_column = False
+        self.missing_index = False
+        self.schema_drift = False
+        self.foreign_keys = []
+        self.triggers = []
+        self.fail_create = ""
+        self.race_record = None
+        self.sql = []
+        self.ddl = []
+        self.inserts = 0
         self.commits = 0
         self.rollbacks = 0
-        self.grant_extra = False
-        self.global_grant_extra = False
-        self.column_grant_extra = False
-        self.routine_grant_extra = False
-        self.proxy_grant_extra = False
-        self.show_grant_account_quote = "`"
-        self.schema_drift = False
 
     def cursor(self):
         return FakeCursor(self)
@@ -223,109 +202,12 @@ class FakeConnection:
         return None
 
 
-class MigrationCursor:
-    def __init__(self, connection):
-        self.connection = connection
-        self.result = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
-
-    def execute(self, sql, params=()):
-        if sql.startswith("SELECT DATABASE()"):
-            self.result = [{
-                "database_name": "kunlunads_dev",
-                "account_name": "drama_youtube_migrator@43.166.187.96",
-                "server_read_only": 0,
-            }]
-        elif sql.startswith("SHOW GRANTS"):
-            self.result = exact_show_grants(MIGRATOR_USER, MIGRATOR_TABLE_PRIVILEGES)
-        elif "information_schema.USER_PRIVILEGES" in sql:
-            self.result = []
-        elif "information_schema.SCHEMA_PRIVILEGES" in sql:
-            self.result = []
-        elif "information_schema.TABLE_PRIVILEGES" in sql:
-            self.result = [
-                {
-                    "TABLE_SCHEMA": "kunlunads_dev",
-                    "TABLE_NAME": table,
-                    "PRIVILEGE_TYPE": privilege,
-                    "IS_GRANTABLE": "NO",
-                }
-                for table in migration.MIGRATIONS
-                for privilege in MIGRATOR_TABLE_PRIVILEGES
-            ]
-        elif "information_schema.COLUMN_PRIVILEGES" in sql:
-            self.result = []
-        elif "information_schema.COLUMNS" in sql:
-            table = params[1]
-            spec = migration.MIGRATIONS[table]
-            self.result = []
-            for column, definition in REQUIRED_COLUMN_DEFINITIONS[table].items():
-                if column == spec["column"] and not self.connection.state[table]["column"]:
-                    continue
-                self.result.append({
-                    "TABLE_NAME": table,
-                    "COLUMN_NAME": column,
-                    "COLUMN_TYPE": definition[0],
-                    "IS_NULLABLE": definition[1],
-                    "COLUMN_DEFAULT": definition[2],
-                    "CHARACTER_SET_NAME": definition[3],
-                    "COLLATION_NAME": definition[4],
-                    "EXTRA": definition[5],
-                })
-        elif "information_schema.STATISTICS" in sql:
-            table = params[1]
-            spec = migration.MIGRATIONS[table]
-            self.result = []
-            if self.connection.state[table]["index"]:
-                self.result.append({
-                    "INDEX_NAME": spec["index"],
-                    "NON_UNIQUE": 0,
-                    "SEQ_IN_INDEX": 1,
-                    "COLUMN_NAME": spec["column"],
-                })
-        elif sql.startswith("SELECT COUNT(*) AS duplicate_groups"):
-            self.result = [{"duplicate_groups": 0}]
-        elif sql.startswith("ALTER TABLE"):
-            table = re.search(r"ALTER TABLE `kunlunads_dev`.`([^`]+)`", sql).group(1)
-            if "ADD COLUMN" in sql:
-                self.connection.state[table]["column"] = True
-            self.connection.state[table]["index"] = True
-            self.connection.ddl.append(sql)
-            self.result = []
-        else:
-            raise AssertionError("unexpected migration SQL: " + sql)
-        return len(self.result)
-
-    def fetchall(self):
-        return list(self.result)
-
-    def fetchone(self):
-        return self.result[0] if self.result else None
-
-
-class MigrationConnection:
-    def __init__(self):
-        self.state = {table: {"column": False, "index": False} for table in migration.MIGRATIONS}
-        self.ddl = []
-
-    def cursor(self):
-        return MigrationCursor(self)
-
-    def close(self):
-        return None
-
-
 class HTTPFakeLedger:
     def __init__(self):
         self.calls = []
 
     def health(self):
-        return {"ok": True, "schema": "kunlunads_dev", "grant_fingerprint": "f" * 64}
+        return UnifiedYouTubeLedger(lambda: FakeConnection()).health()
 
     def execute(self, action, table, external_id, payload):
         self.calls.append((action, table, external_id, payload))
@@ -333,185 +215,235 @@ class HTTPFakeLedger:
 
 
 class UnifiedRPCRepositoryTests(unittest.TestCase):
-    def test_legacy_record_projection_is_bounded_and_safe(self):
-        video_payload = unified_video_payload()
-        video = _video_record(video_payload)
-        self.assertEqual((video["video_id"], video["app_id"], video["channel_id"]), ("video_1", 1479, 1))
-        self.assertEqual(video["template_make_id"], 0)
-        self.assertEqual(video["queue_id"], -1)
-        self.assertLessEqual(len(video["video_description"]), 3000)
-        comment = _comment_record(unified_comment_payload())
-        self.assertEqual((comment["video_id"], comment["comment"]), ("video_1", "hello"))
-        publish_log = _publish_log_record(video_payload)
-        safe_log = json.loads(publish_log["log"])
-        self.assertEqual((publish_log["type_id"], publish_log["status"]), (3, 1))
-        self.assertEqual(publish_log["created_queue"], video["queue_id"])
-        self.assertNotIn(video_payload["description_rendered"], publish_log["log"])
-        self.assertNotIn(video_payload["source_url"], publish_log["log"])
-        self.assertEqual(safe_log["video_id"], "video_1")
+    def test_health_v2_ads_ai_only(self):
+        health = UnifiedYouTubeLedger(lambda: FakeConnection()).health()
+        self.assertEqual(health["schema"], "ads_ai")
+        self.assertEqual(health["contract"], "drama-youtube-writer-preflight-v2")
+        self.assertEqual(validate_writer_health(health), health)
+        for changed in (
+            {"contract": "drama-youtube-writer-preflight-v1"}, {"schema": "kunlunads_dev"},
+            {"writer_identity": "ads_aius@43.166.187.96"}, {"unexpected": True},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(DramaSynthesisError):
+                validate_writer_health(dict(health, **changed))
 
-    def test_credential_file_is_exact_and_not_environment_derived(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "writer-db.json"
-            value = {
-                "host": "101.32.56.53",
-                "port": 63353,
-                "user": "drama_youtube_writer",
-                "password": "x" * 32,
-                "database": "kunlunads_dev",
-            }
-            path.write_text(json.dumps(value), encoding="utf-8")
-            if os.name != "nt":
-                path.chmod(0o600)
-            self.assertEqual(load_database_credential_file(str(path), expected_user=WRITER_USER), value)
-            with self.assertRaises(RuntimeError):
-                load_database_credential_file(str(path), expected_user=MIGRATOR_USER)
-            if os.name != "nt":
-                path.chmod(0o640)
-                with self.assertRaises(RuntimeError):
-                    load_database_credential_file(str(path), expected_user=WRITER_USER)
-                path.chmod(0o600)
-            path.write_text(json.dumps(dict(value, unexpected="reject")), encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                load_database_credential_file(str(path))
+    def test_full_payload_and_canary_roundtrip_without_legacy_projection(self):
+        video = dict(unified_video_payload(), source_url="https://example.test/" + "a" * 3500,
+                     description_rendered="é" * 2000 + "🙂" * 200 + "a" * 200,
+                     content_id="剧集😀" * 40)
+        for build in (_video_record, _publish_log_record):
+            record = build(video)
+            self.assertEqual(json.loads(record["payload_json"]), video)
+            self.assertEqual(record["description_rendered"], video["description_rendered"])
+            self.assertEqual(record["source_url"], video["source_url"])
+            self.assertEqual(record["content_id"], video["content_id"])
+            self.assertEqual(record["publish_id"], 1)
+            self.assertNotIn("queue_id", record)
+            self.assertNotIn("created_queue", record)
+            self.assertEqual(record["payload_sha256"], hashlib.sha256(record["payload_json"].encode()).hexdigest())
+        comment = unified_comment_payload()
+        self.assertEqual(json.loads(_comment_record(comment)["payload_json"]), comment)
+        canary = dict(video, privacy_status="unlisted", canary_operation_id=CANARY_OPERATION_ID,
+                      app_id=int(CANARY_APP_ID), channel_local_id=int(CANARY_CHANNEL_LOCAL_ID))
+        c = FakeConnection()
+        UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", canary)
+        self.assertEqual(c.rows["ads_youtube_videos"][0]["canary_operation_id"], CANARY_OPERATION_ID)
 
-    def test_insert_reuse_conflict_and_missing_update(self):
+    def test_runtime_credential_loader_cannot_be_used_for_bootstrap(self):
+        valid = {"host": "101.32.56.53", "port": 63353, "user": WRITER_USER, "password": "x" * 32, "database": SCHEMA}
+        for change in ({}, {"user": "ads_aius"}, {"database": "kunlunads_dev"}, {"port": 63350},
+                       {"port": "63353"}, {"host": "127.0.0.1"}, {"unexpected": True}, {"password": "short"}):
+            value = dict(valid, **change)
+            with mock.patch("features.drama_synthesis.unified_youtube_rpc.read_secure_owned_file", return_value=json.dumps(value).encode()):
+                if change:
+                    with self.subTest(change=change), self.assertRaises(RuntimeError):
+                        load_database_credential_file("/fixture")
+                else:
+                    self.assertEqual(load_database_credential_file("/fixture"), valid)
+                    with self.assertRaises(RuntimeError):
+                        load_database_credential_file("/fixture", expected_user="ads_aius")
+
+    def test_insert_update_reuse_and_missing_update(self):
         connection = FakeConnection()
         ledger = UnifiedYouTubeLedger(lambda: connection)
         payload = unified_video_payload()
-        self.assertEqual(
-            ledger.execute("select", "ads_youtube_videos", "video_1", {}),
-            {"found": False},
-        )
-        self.assertEqual(
-            ledger.execute("insert", "ads_youtube_videos", "video_1", payload),
-            {"idempotent_success": True, "reused": False},
-        )
-        self.assertEqual(
-            ledger.execute("insert", "ads_youtube_videos", "video_1", payload),
-            {"idempotent_success": True, "reused": True},
-        )
-        with self.assertRaises(LedgerRPCError) as conflict:
-            ledger.execute(
-                "insert",
-                "ads_youtube_videos",
-                "video_1",
-                dict(payload, title="different"),
-            )
-        self.assertEqual(conflict.exception.code, "youtube_sync_identity_conflict")
-        with self.assertRaises(LedgerRPCError) as missing:
-            ledger.execute(
-                "update",
-                "ads_youtube_videos",
-                "video_2",
-                unified_video_payload(video_id="video_2"),
-            )
-        self.assertEqual(missing.exception.code, "youtube_sync_identity_missing")
+        self.assertEqual(ledger.execute("select", "ads_youtube_videos", "video_1", {}), {"found": False})
+        self.assertEqual(ledger.execute("insert", "ads_youtube_videos", "video_1", payload), {"idempotent_success": True, "reused": False})
+        self.assertEqual(ledger.execute("update", "ads_youtube_videos", "video_1", payload), {"idempotent_success": True, "reused": True})
+        with self.assertRaises(LedgerRPCError) as error:
+            ledger.execute("update", "ads_youtube_videos", "video_2", unified_video_payload(publish_id=2, video_id="video_2"))
+        self.assertEqual(error.exception.code, "youtube_sync_identity_missing")
+        self.assertEqual(connection.inserts, 1)
 
-    def test_health_requires_exact_schema_indexes_and_writer_identity(self):
-        ledger = UnifiedYouTubeLedger(lambda: FakeConnection())
-        health = ledger.health()
-        self.assertEqual((health["ok"], health["schema"]), (True, "kunlunads_dev"))
-        self.assertRegex(health["grant_fingerprint"], r"^[0-9a-f]{64}$")
-
-        live_quote_shape = FakeConnection()
-        live_quote_shape.show_grant_account_quote = "'"
-        self.assertTrue(UnifiedYouTubeLedger(lambda: live_quote_shape).health()["ok"])
-
-        grant_drift = FakeConnection()
-        grant_drift.grant_extra = True
-        with self.assertRaises(LedgerRPCError) as grant_error:
-            UnifiedYouTubeLedger(lambda: grant_drift).health()
-        self.assertEqual(grant_error.exception.code, "youtube_sync_grant_mismatch")
-
-        for attribute in (
-            "global_grant_extra", "column_grant_extra", "routine_grant_extra",
-            "proxy_grant_extra",
+    def test_complete_immutable_payload_mismatch_is_rejected(self):
+        for field, changed in (
+            ("title", "new title"), ("description_rendered", "required "),
+            ("source_url", "https://example.test/different.mp4"), ("content_id", "new content"),
+            ("job_id", "b" * 32), ("channel_local_id", 2), ("operator_user_id", "cf1edggd"),
+            ("published_at_utc", "2026-08-26T00:00:01Z"),
         ):
-            grant_drift = FakeConnection()
-            setattr(grant_drift, attribute, True)
-            with self.subTest(attribute=attribute), self.assertRaises(LedgerRPCError) as grant_error:
-                UnifiedYouTubeLedger(lambda: grant_drift).health()
-            self.assertEqual(grant_error.exception.code, "youtube_sync_grant_mismatch")
+            c = FakeConnection()
+            ledger = UnifiedYouTubeLedger(lambda: c)
+            payload = unified_video_payload()
+            ledger.execute("insert", "ads_youtube_videos", "video_1", payload)
+            with self.subTest(field=field), self.assertRaises(LedgerRPCError) as error:
+                ledger.execute("insert", "ads_youtube_videos", "video_1", dict(payload, **{field: changed}))
+            self.assertEqual(error.exception.code, "youtube_sync_identity_conflict")
+            self.assertEqual(c.inserts, 1)
 
-        schema_drift = FakeConnection()
-        schema_drift.schema_drift = True
-        with self.assertRaises(LedgerRPCError) as schema_error:
-            UnifiedYouTubeLedger(lambda: schema_drift).health()
-        self.assertEqual(schema_error.exception.code, "youtube_sync_schema_mismatch")
+    def test_publish_and_external_ids_are_both_unique(self):
+        for kind, payload, alternate in (
+            ("video", unified_video_payload(), unified_video_payload(video_id="video_2")),
+            ("comment", unified_comment_payload(), unified_comment_payload(comment_id="comment_2")),
+            ("publish_log", unified_video_payload(), unified_video_payload(publish_id=2)),
+        ):
+            c = FakeConnection()
+            ledger = UnifiedYouTubeLedger(lambda: c)
+            key = {"video": "video_id", "comment": "comment_id", "publish_log": "publish_id"}[kind]
+            ledger.execute("insert", TABLE_BY_KIND[kind], str(payload[key]), payload)
+            with self.subTest(kind=kind), self.assertRaises(LedgerRPCError):
+                ledger.execute("insert", TABLE_BY_KIND[kind], str(alternate[key]), alternate)
+            self.assertEqual(c.inserts, 1)
 
-    def test_backup_evidence_is_exact_fresh_and_rehearsed(self):
-        example = json.loads(
-            (ROOT / "deploy/drama-youtube-backup-evidence.example.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(set(example), migration.BACKUP_EVIDENCE_KEYS)
-        self.assertEqual(example["migration_contract_sha256"], migration.MIGRATION_CONTRACT_SHA256)
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "backup-evidence.json"
-            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-            candidate_git_sha = "a" * 40
-            evidence = {
-                "cluster_id": migration.CLUSTER_ID,
-                "schema": migration.SCHEMA,
-                "backup_id": "backup-20260826",
-                "backup_status": "SUCCESS",
-                "backup_completed_at_utc": now,
-                "verified_at_utc": now,
-                "verification_source": "tencent_cynosdb_api",
-                "rehearsal_status": "PASS",
-                "rehearsal_at_utc": now,
-                "restore_instance_id": "cynosdbmysql-restored1",
-                "migration_contract_sha256": migration.MIGRATION_CONTRACT_SHA256,
-                "candidate_git_sha": candidate_git_sha,
-                "rehearsal_result_sha256": "b" * 64,
-            }
-            path.write_text(json.dumps(evidence), encoding="utf-8")
-            if os.name != "nt":
-                path.chmod(0o600)
-            loaded = migration.load_backup_evidence_file(
-                str(path), candidate_git_sha=candidate_git_sha
-            )
-            self.assertRegex(loaded["evidence_sha256"], r"^[0-9a-f]{64}$")
-            path.write_text(json.dumps(dict(evidence, rehearsal_status="SKIPPED")), encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                migration.load_backup_evidence_file(str(path))
-            path.write_text(json.dumps(evidence), encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                migration.load_backup_evidence_file(str(path), candidate_git_sha="c" * 40)
-            path.write_text(
-                json.dumps(dict(evidence, restore_instance_id=migration.CLUSTER_ID)),
-                encoding="utf-8",
-            )
-            with self.assertRaises(RuntimeError):
-                migration.load_backup_evidence_file(str(path))
+    def test_feishu_operator_id_is_lossless_text_for_all_three_tables(self):
+        for operator in ("892fd2e8", "c31ggb2g", "cf1edggd", "Mixed_CASE-01", "", "操作者😀", "a" * 128, " ID "):
+            for kind, payload, key in (("video", unified_video_payload(), "video_id"),
+                                       ("publish_log", unified_video_payload(), "publish_id"),
+                                       ("comment", unified_comment_payload(), "comment_id")):
+                payload["operator_user_id"] = operator
+                c = FakeConnection()
+                ledger = UnifiedYouTubeLedger(lambda: c)
+                with self.subTest(operator=operator, kind=kind):
+                    ledger.execute("insert", TABLE_BY_KIND[kind], str(payload[key]), payload)
+                    row = c.rows[TABLE_BY_KIND[kind]][0]
+                    self.assertIs(type(row["operator_user_id"]), str)
+                    self.assertEqual(row["operator_user_id"], operator)
+                    self.assertEqual(json.loads(row["payload_json"])["operator_user_id"], operator)
 
-    def test_additive_migration_dry_run_apply_and_idempotent_recheck(self):
-        connection = MigrationConnection()
-        config = {
-            "host": migration.HOST,
-            "port": migration.PORT,
-            "user": MIGRATOR_USER,
-            "password": "x" * 32,
-            "database": migration.SCHEMA,
-        }
-        evidence = {"evidence_sha256": "e" * 64}
-        candidate_git_sha = "a" * 40
-        with mock.patch.object(migration, "load_database_credential_file", return_value=config), mock.patch.object(migration, "load_backup_evidence_file", return_value=evidence), mock.patch.object(migration, "_connect", return_value=connection):
-            dry = migration.migrate("ignored", apply=False, cluster_id=migration.CLUSTER_ID)
-            self.assertEqual((dry["complete"], len(dry["plan"]), connection.ddl), (False, 3, []))
-            applied = migration.migrate(
-                "ignored",
-                apply=True,
-                cluster_id=migration.CLUSTER_ID,
-                backup_evidence_file="backup-evidence.json",
-                candidate_git_sha=candidate_git_sha,
-            )
-            self.assertTrue(applied["complete"])
-            self.assertEqual(len(applied["applied"]), 3)
-            self.assertEqual(applied["candidate_git_sha"], candidate_git_sha)
-            self.assertTrue(all("ALGORITHM=INPLACE, LOCK=NONE" in sql for sql in connection.ddl))
-            second = migration.migrate("ignored", apply=False, cluster_id=migration.CLUSTER_ID)
-            self.assertEqual((second["complete"], second["plan"]), (True, []))
+    def test_operator_id_rejects_numeric_oversize_and_unicode_controls(self):
+        for operator in (None, 0, 803, True, "a" * 129, "bad\x00id", "bad\x1fid", "bad\x7fid", "bad\x85id", "bad\u202eid", "bad\ud800id"):
+            for kind, payload, key in (("video", unified_video_payload(), "video_id"),
+                                       ("publish_log", unified_video_payload(), "publish_id"),
+                                       ("comment", unified_comment_payload(), "comment_id")):
+                payload["operator_user_id"] = operator
+                with self.subTest(operator=repr(operator), kind=kind), self.assertRaises(DramaSynthesisError):
+                    validate_entity_payload(kind, str(payload[key]), payload)
+
+    def test_canary_payload_requires_nonempty_safe_operator_at_ingress(self):
+        for operator in ("", "操作者", "_leading", "has space", "a.b", "-leading"):
+            for kind, payload, key in (("video", unified_video_payload(), "video_id"),
+                                       ("publish_log", unified_video_payload(), "publish_id"),
+                                       ("comment", unified_comment_payload(), "comment_id")):
+                payload.update(operator_user_id=operator, canary_operation_id=CANARY_OPERATION_ID,
+                               channel_local_id=int(CANARY_CHANNEL_LOCAL_ID))
+                if kind != "comment":
+                    payload.update(app_id=int(CANARY_APP_ID), privacy_status="unlisted")
+                with self.subTest(operator=operator, kind=kind), self.assertRaises(DramaSynthesisError):
+                    validate_entity_payload(kind, str(payload[key]), payload)
+
+    def test_same_publish_identity_cannot_change_feishu_operator(self):
+        for kind, payload, key in (("video", unified_video_payload(), "video_id"),
+                                   ("publish_log", unified_video_payload(), "publish_id"),
+                                   ("comment", unified_comment_payload(), "comment_id")):
+            payload["operator_user_id"] = "892fd2e8"
+            c = FakeConnection()
+            ledger = UnifiedYouTubeLedger(lambda: c)
+            ledger.execute("insert", TABLE_BY_KIND[kind], str(payload[key]), payload)
+            with self.subTest(kind=kind), self.assertRaises(LedgerRPCError) as error:
+                ledger.execute("insert", TABLE_BY_KIND[kind], str(payload[key]), dict(payload, operator_user_id="cf1edggd"))
+            self.assertEqual(error.exception.code, "youtube_sync_identity_conflict")
+            self.assertEqual(c.inserts, 1)
+
+    def test_out_of_order_log_comment_video_allowed(self):
+        c = FakeConnection()
+        ledger = UnifiedYouTubeLedger(lambda: c)
+        ledger.execute("insert", "ads_youtube_publish_log", "1", unified_video_payload())
+        ledger.execute("insert", "ads_youtube_comments", "comment_1", unified_comment_payload())
+        ledger.execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
+        self.assertEqual(c.inserts, 3)
+        self.assertFalse(any(re.match(r"(?:UPDATE|DELETE|ALTER|DROP|REPLACE|CREATE)", sql) for sql in c.sql))
+        self.assertFalse(any("kunlunads_dev" in sql for sql in c.sql))
+
+    def test_unique_key_race_reuses_only_exact_payload(self):
+        for conflict in (False, True):
+            c = FakeConnection()
+            record = _video_record(unified_video_payload())
+            if conflict:
+                record["title"] = "race conflict"
+            c.race_record = record
+            ledger = UnifiedYouTubeLedger(lambda: c)
+            if conflict:
+                with self.assertRaises(LedgerRPCError):
+                    ledger.execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
+            else:
+                self.assertEqual(ledger.execute("insert", "ads_youtube_videos", "video_1", unified_video_payload()),
+                                 {"idempotent_success": True, "reused": True})
+            self.assertGreater(c.rollbacks, 0)
+
+    def test_health_rejects_identity_schema_indexes_and_indirect_writes(self):
+        changes = [
+            ("schema", "kunlunads_dev"), ("account", "ads_aius@43.166.187.96"), ("read_only", 1),
+            ("read_only", None), ("existing", set()), ("extra_column", True), ("missing_index", True),
+            ("table_override", {"TABLE_TYPE": "VIEW"}), ("table_override", {"ENGINE": "MyISAM"}),
+            ("table_override", {"TABLE_COMMENT": "unowned"}),
+            ("column_override", {"EXTRA": "STORED GENERATED"}),
+            ("index_override", {"SUB_PART": 5}), ("index_override", {"NON_UNIQUE": 1}),
+            ("foreign_keys", [{"TABLE_NAME": "ads_youtube_videos", "REFERENCED_TABLE_SCHEMA": "kunlunads_dev"}]),
+        ]
+        for attribute, value in changes:
+            c = FakeConnection()
+            setattr(c, attribute, value)
+            with self.subTest(attribute=attribute, value=value), self.assertRaises(LedgerRPCError):
+                UnifiedYouTubeLedger(lambda: c).health()
+
+    def test_health_rejects_every_wider_grant_shape(self):
+        extras = [
+            "GRANT ALL PRIVILEGES ON ads_ai.* TO 'drama_youtube_writer'@'43.166.187.96'",
+            "GRANT EXECUTE ON PROCEDURE ads_ai.p TO 'drama_youtube_writer'@'43.166.187.96'",
+            "GRANT PROXY ON ''@'' TO 'drama_youtube_writer'@'43.166.187.96'",
+            "GRANT SELECT ON kunlunads_dev.ads_youtube_videos TO 'drama_youtube_writer'@'43.166.187.96'",
+        ]
+        for grant in extras:
+            c = FakeConnection()
+            c.show_grants = exact_show_grants() + [{"grant": grant}]
+            with self.subTest(grant=grant), self.assertRaises(LedgerRPCError):
+                UnifiedYouTubeLedger(lambda: c).health()
+        for attribute, value in (
+            ("global_privileges", [{"PRIVILEGE_TYPE": "PROCESS", "IS_GRANTABLE": "NO"}]),
+            ("schema_privileges", [{"TABLE_SCHEMA": SCHEMA, "PRIVILEGE_TYPE": "SELECT"}]),
+            ("column_privileges", [{"COLUMN_NAME": "video_id", "PRIVILEGE_TYPE": "SELECT"}]),
+            ("table_privileges_extra", [{"TABLE_SCHEMA": SCHEMA, "TABLE_NAME": "ads_youtube_videos", "PRIVILEGE_TYPE": "DELETE", "IS_GRANTABLE": "NO"}]),
+        ):
+            c = FakeConnection()
+            setattr(c, attribute, value)
+            with self.subTest(attribute=attribute), self.assertRaises(LedgerRPCError):
+                UnifiedYouTubeLedger(lambda: c).health()
+        c = FakeConnection()
+        c.show_grants = exact_show_grants()
+        c.show_grants[-1]["grant"] += " WITH GRANT OPTION"
+        with self.assertRaises(LedgerRPCError):
+            UnifiedYouTubeLedger(lambda: c).health()
+
+    def test_runtime_does_not_claim_hidden_trigger_absence(self):
+        c = FakeConnection()
+        UnifiedYouTubeLedger(lambda: c).health()
+        self.assertFalse(any("information_schema.TRIGGERS" in sql for sql in c.sql))
+        c.triggers = [{"TRIGGER_NAME": "forbidden", "EVENT_OBJECT_TABLE": "ads_youtube_videos"}]
+        with self.assertRaises(LedgerRPCError):
+            inspect_owned_tables(c.cursor(), inspect_triggers=True)
+
+    def test_operation_preflight_rejects_drift_before_insert(self):
+        c = FakeConnection()
+        c.table_override = {"TABLE_COMMENT": "unowned"}
+        with self.assertRaises(LedgerRPCError):
+            UnifiedYouTubeLedger(lambda: c).execute("insert", "ads_youtube_videos", "video_1", unified_video_payload())
+        self.assertEqual(c.inserts, 0)
+
+    def test_exact_quoted_grant_accounts_remain_supported(self):
+        for quote in ("'", chr(96)):
+            c = FakeConnection()
+            c.show_grant_account_quote = quote
+            self.assertTrue(UnifiedYouTubeLedger(lambda: c).health()["ok"])
 
     def test_loopback_handler_health_auth_and_exact_envelope(self):
         server = HTTPServer(("127.0.0.1", 0), ControlledWriterHandler)
@@ -527,26 +459,15 @@ class UnifiedRPCRepositoryTests(unittest.TestCase):
             response.read()
             client.request("GET", HEALTH_PATH, headers={"Authorization": "Bearer " + "t" * 32})
             response = client.getresponse()
-            self.assertEqual((response.status, json.loads(response.read())["ok"]), (200, True))
-            body = json.dumps({
-                "action": "select",
-                "table": "ads_youtube_videos",
-                "external_id": "video_1",
-                "payload": {},
-            })
+            self.assertEqual(validate_writer_health(json.loads(response.read()))["contract"], WRITER_HEALTH_CONTRACT)
+            body = json.dumps({"action": "select", "table": "ads_youtube_videos", "external_id": "video_1", "payload": {}})
             client.request("POST", RPC_PATH, body=body, headers={"Content-Type": "application/json"})
             response = client.getresponse()
             self.assertEqual(response.status, 401)
             response.read()
-            client.request(
-                "POST",
-                RPC_PATH,
-                body=body,
-                headers={"Content-Type": "application/json", "Authorization": "Bearer " + "t" * 32},
-            )
+            client.request("POST", RPC_PATH, body=body, headers={"Content-Type": "application/json", "Authorization": "Bearer " + "t" * 32})
             response = client.getresponse()
             self.assertEqual((response.status, json.loads(response.read())), (200, {"found": False}))
-            self.assertEqual(server.ledger.calls, [("select", "ads_youtube_videos", "video_1", {})])
             client.close()
         finally:
             server.shutdown()

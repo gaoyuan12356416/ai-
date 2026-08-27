@@ -1,4 +1,4 @@
-"""Fail-closed adapter for the externally owned unified YouTube ledger."""
+"""Fail-closed adapter for the dedicated ads_ai YouTube ledger."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import stat
 import threading
 import json
 import os
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -45,7 +46,7 @@ ENTITY_PAYLOAD_KEYS = {
     "publish_log": VIDEO_PAYLOAD_KEYS,
 }
 TABLE_TO_KIND = {table: kind for kind, table in TABLE_BY_KIND.items()}
-WRITER_HEALTH_CONTRACT = "drama-youtube-writer-preflight-v1"
+WRITER_HEALTH_CONTRACT = "drama-youtube-writer-preflight-v2"
 
 
 def validate_writer_health(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -53,7 +54,7 @@ def validate_writer_health(value: Mapping[str, Any]) -> dict[str, Any]:
     if (
         not isinstance(value, Mapping) or set(value) != required
         or value.get("ok") is not True or value.get("contract") != WRITER_HEALTH_CONTRACT
-        or value.get("schema") != "kunlunads_dev"
+        or value.get("schema") != "ads_ai"
         or value.get("writer_identity") != "drama_youtube_writer@43.166.187.96"
         or any(value.get(key) is not True for key in ("writable", "schema_verified", "indexes_verified"))
         or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("grant_fingerprint") or ""))
@@ -108,8 +109,15 @@ def _valid_int(value: Any, *, low: int, high: int = 2_147_483_647) -> bool:
     return type(value) is int and low <= value <= high
 
 
+def _valid_operator_user_id(value: Any, *, canary: bool = False) -> bool:
+    if (type(value) is not str or len(value) > 128
+            or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value)):
+        return False
+    return not canary or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value) is not None
+
+
 def _valid_utc(value: Any) -> bool:
-    if type(value) is not str or not value.endswith("Z"):
+    if type(value) is not str or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z", value):
         return False
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
@@ -131,7 +139,7 @@ def _validate_video_payload(payload: Mapping[str, Any]) -> None:
     if not (
         _valid_int(payload.get("app_id"), low=1)
         and _valid_int(payload.get("channel_local_id"), low=1)
-        and _valid_int(payload.get("operator_user_id"), low=0)
+        and _valid_operator_user_id(payload.get("operator_user_id"), canary="canary_operation_id" in payload)
         and type(payload.get("job_id")) is str and JOB_ID_RE.fullmatch(payload["job_id"])
         and type(content_id) is str and 1 <= len(content_id) <= 256
         and payload.get("source_kind") in {"concat_video", "no_bgm_video", "random_template"}
@@ -154,7 +162,7 @@ def _validate_comment_payload(payload: Mapping[str, Any]) -> None:
     comment = payload.get("comment_text")
     if not (
         _valid_int(payload.get("channel_local_id"), low=1)
-        and _valid_int(payload.get("operator_user_id"), low=0)
+        and _valid_operator_user_id(payload.get("operator_user_id"), canary="canary_operation_id" in payload)
         and type(comment) is str and 1 <= len(comment) <= 1000
         and _valid_utc(payload.get("published_at_utc"))
         and (

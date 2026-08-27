@@ -1,5 +1,9 @@
 # SA 需求评审（2026-08-27 现行）
 
+## 最新增量：ads_ai 新表
+
+独立 SA 已确认新表合同可行，不再以旧库写权限或 c719 snapshot 阻断。必须先检查全部三表的 BASE TABLE/InnoDB/所有权/列索引/无 trigger/FK，再 CREATE 缺表；专用 writer 不持有 DDL，旧库只读。已有账号不得重置密码；runtime 不把无 TRIGGER 权限的空查询当证明，改由 admin bootstrap 与启用前检查证明。新表不会自动进入仅查询旧表的其他页面。见 [完整新表合同](ads-ai-new-tables-20260827.md)。以下是先前 CPU/GPU 增量历史。
+
 用户最新确认全部业务查询归 CPU。CPU 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 用本地固定 SHA manifest 替代 GPU 目录查询；独立 204/204 回归、CPU 3.9.6 实际文件/原函数验证 PASS。页面与任务协调端不依赖 GPU 查询目录，也无需媒体素材包；HK 仅完整参数制作、上传 COS 并回传。详见 [职责边界](cpu-gpu-boundary-20260827.md)。
 
 HK 独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 的 v3 auto/manual、重启复用和独立报告/8 PNG 验收仍有效，本次未重跑或改动 HK。此前 188 项及 c719 的 166 项为历史批次，不与新 204 项相加；旧三表演练只绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不能改绑新 CPU 候选。

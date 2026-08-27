@@ -1,5 +1,7 @@
 # 回滚运行手册
 
+最新范围按 [ads_ai 新表合同](ads-ai-new-tables-20260827.md)。原库完全只读；回滚保留新三表、已确认视频/评论、SQLite/outbox、短链/COS，不反向 DDL、不复制或恢复旧库。下文旧 additive-column 表述仅属停用方案；实际先停新 claim、关 live/sync、审查 in-flight/unknown 后再回退此次文件/env/drop-in 与 18788 切流。
+
 触发条件：六 API/权限异常、recipe 或 wrapper identity 漂移、migration 非零二次 dry-run、GPU manifest/render 偏差、tunnel/health 失败、YouTube processing/unknown 防重失效、统一 outbox 错误写成功。
 
 1. 立即令 `YOUTUBE_LIVE_ENABLED=0` 并隐藏/阻断发布入口；这不授权删除或修改任何外部视频/评论。

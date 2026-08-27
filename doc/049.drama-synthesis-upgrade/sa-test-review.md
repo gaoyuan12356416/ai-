@@ -1,5 +1,11 @@
 # SA 测试用例评审
 
+## 最新 ads_ai 增量（冻结代码验收通过）
+
+新增新三表为空时创建、兼容重复执行、冲突对象停止、完整 Unicode/长 URL/描述回写、乱序与幂等、异内容拒绝、额外权限/v1/旧库失败关闭、旧迁移入口拒绝且零网络。实机新建表演练与生产最小身份健康分别验收，演练不假称真实生产 writer 身份。独立 QA 在实现冻结后唯一执行完整回归；旧结果不叠加。见 [新合同](ads-ai-new-tables-20260827.md)。
+
+执行结论：262/262一次合并PASS，另15/15纯内存安全对抗、35文件语法/3.9AST和18文件冻结SHA一致均通过。针对direct store/遗留canary坏actor的检查在claim/OAuth前拒绝。真实CPU Python3.9/MySQL5.7及外部平台验收由部署阶段补齐。
+
 ## 2026-08-27 CPU 查询边界
 
 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 的目录用例覆盖 metadata-only、315/无 light、GPU 目录/配方 identity 等价、CPU 无 HTTP/DB/素材访问、缺配置/错 SHA 无 GPU fallback、GPU 本地诊断、文件类型/长度/竞态/坏 JSON。独立最终七套 204/204 PASS，15 项额外内存对抗单列 PASS；原 16 专项与 188/166 不叠加。

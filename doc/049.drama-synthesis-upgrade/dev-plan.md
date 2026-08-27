@@ -1,5 +1,9 @@
 # 开发与交付计划（2026-08-27 现行）
 
+## 最新范围与团队
+
+在 ads_ai 新建专用三表，原库只读，替代下文旧迁移/权限门禁。root 负责集成、SSH 部署与实机验收；一名实现工程师负责写入器/bootstrap/新表专项；独立 SA/QA 负责冻结后的最终完整回归。顺序：实现与专项→独立冻结回归→GitHub 候选→全新 MySQL5.7 演练→生产 CREATE-only/最小 writer→CPU/HK 切流→唯一授权 unlisted canary。现行 [新表合同](ads-ai-new-tables-20260827.md)；下文旧库状态仅作历史。
+
 HK 独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 已经 GitHub-first 部署，并完成 v3 双模式真实制作和重启后幂等复用验收。CPU 待部署候选及三表恢复演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不改绑 HK 增量 SHA。整体正式发布仍 HOLD，不能把 HK dark/canary 验收等同于 CPU 正式部署完成。
 
 用户当前授权为环境完成后继续部署，以及 Shahrul Ikmal 的一次内部 unlisted 视频与一条评论；正式 public 测试不在授权内。全部支持操作仅 SSH，禁止腾讯云管理后台，不触碰既有 X/ads_video_producer。现行总状态见 [部署状态页](deployment-status-20260827.md)。

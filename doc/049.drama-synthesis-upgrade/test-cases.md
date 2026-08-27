@@ -1,5 +1,9 @@
 # 测试用例
 
+## ads_ai 新表增量
+
+固定 SQL 仅三条 CREATE；同名视图/错误所有权/列索引/触发器/外键均拒绝；全缺、部分兼容、全兼容与并发创建失败均不改原表；高熵独立 writer、最小 grants、v2 health、旧 schema/v1 拒绝；完整 payload Unicode/长字段精确回读、乱序/幂等/冲突；所有旧迁移入口零网络拒绝。真实演练固定新隔离目录/端口和候选 SHA，生产 dry-run、apply、启用前 admin 无 trigger 及 runtime 健康分开取证。canary 继续要求恰好一个 unlisted 视频、一条评论、新三表各一条且原表不写。见 [新表合同](ads-ai-new-tables-20260827.md)。
+
 ## 2026-08-27 现行范围与结果边界
 
 最新 CPU 候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 将所有业务查询保留 CPU，其中模板目录只读固定 SHA 的本机 manifest；HK 只制作和上传 COS。新增 16 项已进入独立一次七套 **204/204 PASS（13.639 秒）**；另外 15 项纯内存对抗单列 PASS。CPU Python 3.9.6 真实 manifest/原函数隔离验证通过；生产应用未切换。下文 HK 188 与 c719 166 是历史批次，不与 204 叠加。

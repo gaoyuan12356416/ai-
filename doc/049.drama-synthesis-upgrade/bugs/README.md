@@ -2,6 +2,8 @@
 
 ## 2026-08-27 当前状态
 
+最新 ads_ai 新表增量发现并修复 [BUG-023](BUG-023.md)（镜像 digest 接口）、[BUG-024](BUG-024.md)（P1 datadir 隔离）和 [BUG-025](BUG-025.md)（真实飞书操作者字符串）；独立完整 10 模块 262/262 PASS，实机建表/部署证据另列，不复用下文旧库权限门禁。见 [新表合同](../ads-ai-new-tables-20260827.md)。
+
 CPU 查询边界增量 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 已提交推送：原模板目录向 GPU 查询的缺口（BUG-022）已修复，独立七套 204/204 PASS（13.639 秒）、另 15 项对抗单列 PASS，CPU 3.9.6 真实只读 manifest/原函数验证 PASS；生产 API 未替换/重启。详情见 [职责记录](../cpu-gpu-boundary-20260827.md)。
 
 HK 当前独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 已 GitHub-first 部署。v3 auto/manual 共 4 输出、两个随机 720×1280/High/5 秒/150 帧、完整下载解码/封面 callback，以及真实重启 worker+tunnel 后两 job 幂等复用均 PASS。报告及 8 PNG 经独立只读复核无新阻断；该复核不另算真机执行。c719 阶段重复 POST 失败已由 BUG-020 闭环，不再是当前 HK 阻塞。

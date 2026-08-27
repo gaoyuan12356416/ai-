@@ -17,6 +17,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
@@ -93,7 +94,7 @@ def _video_sync_payload(row: Mapping[str, Any], video_id: str, published_at_utc:
         "video_id": str(video_id),
         "app_id": _bounded_decimal(row.get("app_id"), low=1),
         "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
-        "operator_user_id": _bounded_decimal(row.get("operator_user_id")),
+        "operator_user_id": str(row.get("operator_user_id") or ""),
         "job_id": str(row.get("job_id") or ""),
         "content_id": str(row.get("content_id") or ""),
         "source_kind": str(row.get("source_kind") or ""),
@@ -114,7 +115,7 @@ def _comment_sync_payload(row: Mapping[str, Any], comment_id: str, published_at_
         "video_id": str(row.get("video_id") or ""),
         "comment_id": str(comment_id),
         "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
-        "operator_user_id": _bounded_decimal(row.get("operator_user_id")),
+        "operator_user_id": str(row.get("operator_user_id") or ""),
         "comment_text": str(row.get("comment_text") or ""),
         "published_at_utc": str(published_at_utc),
     }
@@ -715,10 +716,17 @@ class DramaSynthesisStore:
         _privacy_status: str = "public",
     ) -> Dict[str, Any]:
         app_id, channel_local_id, youtube_account_id = str(app_id), str(channel_local_id), str(youtube_account_id)
+        # Feishu user IDs are opaque strings, not numeric advertiser IDs.
+        # Preserve them exactly; empty remains the historical unknown actor.
+        if (type(operator_user_id) is not str or len(operator_user_id) > 128
+                or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in operator_user_id)):
+            raise DramaSynthesisError("youtube_operator_invalid", "发布操作者标识无效", 400)
         identity = dict(operation_id=operation_id, app_id=app_id, channel_local_id=channel_local_id,
                         channel_id=channel_id, youtube_account_id=youtube_account_id, privacy_status=_privacy_status)
         if (_privacy_status != "public" or operation_id == CANARY_OPERATION_ID) and not is_youtube_canary(identity):
             raise DramaSynthesisError("youtube_canary_identity_invalid", "内部测试频道身份不匹配", 403)
+        if is_youtube_canary(identity) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", operator_user_id):
+            raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 400)
         if not OPERATION_ID_RE.fullmatch(str(operation_id or "")) or not JOB_ID_RE.fullmatch(str(job_id or "")):
             raise DramaSynthesisError("invalid_request", "发布操作ID或任务ID无效")
         content_id = str(content_id or "").strip()
@@ -779,7 +787,7 @@ class DramaSynthesisStore:
                     (
                         operation_id, job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id,
                         source_kind, source_url, title, description_template, description_rendered, comment_text, int(bool(duplicate_confirmed)),
-                        str(operator_user_id)[:128], str(operator_name)[:128], _privacy_status, "queued", "queued", comment_status, "pending", now, now,
+                        operator_user_id, str(operator_name)[:128], _privacy_status, "queued", "queued", comment_status, "pending", now, now,
                     ),
                 )
                 task_id = int(cursor.lastrowid)
@@ -810,6 +818,8 @@ class DramaSynthesisStore:
                 row = conn.execute("SELECT * FROM drama_youtube_publish WHERE operation_id=?", (CANARY_OPERATION_ID,)).fetchone()
                 if row is not None and not is_youtube_canary(dict(row)):
                     raise DramaSynthesisError("youtube_canary_identity_invalid", "内部测试身份与持久记录不一致", 409)
+                if row is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(row["operator_user_id"] or "")):
+                    raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 409)
                 return dict(row) if row else None
             finally:
                 conn.close()
@@ -858,6 +868,8 @@ class DramaSynthesisStore:
                 if row is None:
                     conn.commit()
                     return None
+                if canary_task_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(row["operator_user_id"] or "")):
+                    raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 409)
                 if (canary_task_id is not None and int(row["video_attempt_count"] or 0)
                         and not row["resumable_session_uri"] and not row["video_id"]):
                     # A crash after persisted intent may have created a session.

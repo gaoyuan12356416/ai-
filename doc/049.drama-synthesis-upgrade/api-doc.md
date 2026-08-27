@@ -1,5 +1,7 @@
 # API 合同
 
+2026-08-27 最新增量不改变 HTTP/前端合同：仅将结果 ledger 改为 ads_ai 专用新表，原库继续只读频道/OAuth。受控 RPC health 升为 v2/ads_ai，旧版拒绝；见 [新表合同](ads-ai-new-tables-20260827.md)。
+
 全部 API 复用登录、模块权限、CSRF 和 operator audit；错误不返回 token、session URI 或内部 SQL。
 
 ## 任务合同

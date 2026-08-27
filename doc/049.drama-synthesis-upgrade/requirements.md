@@ -2,10 +2,12 @@
 
 ## 目标与边界
 
+2026-08-27 最新确认：YouTube 结果改为在 `ads_ai` 新建专用三表，不写、不改、不复制原表；原库仅保留频道/OAuth 只读查询。旧统一表写入、migrator、旧备份门禁被 [新表合同](ads-ai-new-tables-20260827.md) 取代；其他附件要求不变。
+
 - CPU `43.166.187.96` 负责全部业务查询与协调：剧集/分集/素材地址、模板目录与配方冻结、任务状态、频道/OAuth、短链、YouTube 发布/评论和统一表同步；页面、队列、SQLite 均留 CPU。香港 GPU `43.154.250.89` 只接收完整制作参数，下载素材、制作、上传 COS，再把结果返回 CPU；不持有业务数据库或 YouTube 凭据，不以缺参为由回查 CPU/数据库。
 - 保持现有视觉、侧栏、表单、卡片和表格。输出键精确为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；所有复选框新建时默认不勾选，服务端拒绝零输出。
 - 不改香港 GPU 现有 `ads_video_producer.service`；不静默双写或自动回退旧 GPU。
-- 已在现有 `gy.g2flow.com` 站点内完成隔离静态目录与 Nginx location 基础配置；未生成真实 YouTube 短链、未执行生产统一表写入或真实 YouTube 上传/评论。2026-08-27 用户已明确授权补齐环境后继续部署，并指定 Shahrul Ikmal 测试；按附件仅允许单次内部 unlisted 视频与一条评论，不含 public 测试或其他平台发布。所有支持操作仅通过 SSH，禁止腾讯云管理后台。HK 隔离环境与媒体验收已完成，CPU 正式发布仍被目标库合法授权阻塞；精确状态见 [部署记录](deployment-status-20260827.md)。
+- 已在现有 `gy.g2flow.com` 站点内完成隔离静态目录与 Nginx location 基础配置。用户已授权补齐环境后继续部署，并指定 Shahrul Ikmal 单次内部 unlisted 视频与一条评论，不含 public 测试或其他平台发布。所有支持操作仅通过 SSH，禁止腾讯云管理后台。HK 媒体验收已完成；新表部署实况见 [部署记录](deployment-status-20260827.md)，不能以准备或离线测试代替最终外部发布成功。
 
 ## 随机模板与兼容
 
@@ -39,7 +41,7 @@
 - `comment_status` 与 `sync_status` 独立。评论只在 confirmed published 后执行；评论失败只重试评论。同步使用 outbox，失败不改变视频已发布事实。
 - interrupted/5xx 查询 resumable session；无法证明未提交时 unknown 并禁止替代发布。processing/unknown 不重传。prior success 需二次确认。
 - 评论非空须 `youtube.force-ssl`；关闭评论、儿童内容或权限不足只影响评论子状态。凭据仅服务端，日志禁止 secret/session URI。
-- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。统一适配器只允许 `kunlunads_dev` 现有 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log` 必要 SELECT/INSERT/UPDATE，并发 1、外部 ID 幂等；运行期禁止 DELETE、DDL、任意 SQL。video/publish_log payload 精确冻结 `publish_id,video_id,app_id,channel_local_id,operator_user_id,job_id,content_id,source_kind,source_url,title,description_rendered,privacy_status,published_at_utc`；comment 精确冻结 `publish_id,video_id,comment_id,channel_local_id,operator_user_id,comment_text,published_at_utc`。禁止 extra/missing/错类型，external ID 必须分别等于 `video_id`、`comment_id`、十进制 `str(publish_id)`。worker 只访问 `127.0.0.1:18837` 受控 RPC；18836 保留给现有 FB 随机模板隧道。RPC token 与数据库凭据必须成对配置；同一 32+ 字符 token 以两份同值文件分别交给 root 客户端和 `drama-youtube` 服务端，每份均由其当前进程账号所有、非 symlink、精确 0600；writer DB JSON 只归 `drama-youtube`。运行 health 必须读回精确三表 schema fingerprint、唯一索引、账号身份和三表级 SELECT/INSERT/UPDATE grants；任何 schema wildcard、额外表/权限或 GRANT OPTION 均 fail closed。一次性 migrator 与长期 writer 必须为两个账号，writer 永不获得 DDL。缺配置/认证/表/响应均 fail closed；claimed outbox 的坏 JSON、非 object、合同错误也必须按原 lease fencing 标记 failed，不得记录原 payload。
+- SQLite 表固定 `drama_youtube_publish` 和 `drama_youtube_sync_outbox`。适配器仅写 `ads_ai` 的新 `ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`，运行账号只含三表 SELECT/INSERT/UPDATE，并发 1；原库只读、不双写。video/publish_log 完整冻结发布 payload，comment 完整冻结评论 payload，保留 payload_json/SHA256/canary marker，不截断、不构造旧队列 ID。外部 ID/发布 ID 唯一、同内容幂等、异内容冲突拒绝。CPU `127.0.0.1:18837` 受控 RPC 的 health 必须为 v2/ads_ai 且精确结构/索引/最小 grants 合格；18836 保留给 FB。token 分为 root 客户端及 drama-youtube 服务端两份同值 0600 文件，writer DB JSON 仅服务端所有。建表用独立 admin loader，仅 CREATE 缺表、不修改兼容表/原表；运行 writer 永不持有 DDL。所有坏配置、坏 payload 和权限/结构漂移 fail closed，outbox 依原 lease fencing 处理失败且不泄露内容。完整合同见 [ads_ai 新表发布合同](ads-ai-new-tables-20260827.md)。
 
 ## 香港 GPU 与验收
 
