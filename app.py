@@ -772,6 +772,7 @@ from features.drama_synthesis.core import (
     freeze_random_recipe,
 )
 from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
+from features.drama_synthesis.catalog import catalog_from_manifest
 from features.drama_synthesis import gpu_cache as drama_gpu_cache
 from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
@@ -1414,6 +1415,7 @@ DRAMA_SHORT_LINK_PUBLISHER = (
     else None
 )
 DRAMA_RANDOM_OVERLAY_ROOT = os.environ.get("DRAMA_RANDOM_OVERLAY_ROOT", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_FILE = os.environ.get("DRAMA_RANDOM_OVERLAY_MANIFEST_FILE", "").strip()
 DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256 = os.environ.get(
     "DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256", ""
 ).strip().lower()
@@ -14526,31 +14528,24 @@ def run_mysql(query):
 
 
 def drama_random_template_catalog():
-    if DRAMA_RANDOM_OVERLAY_ROOT and DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+    if DRAMA_RANDOM_OVERLAY_MANIFEST_FILE:
+        return catalog_from_manifest(
+            DRAMA_RANDOM_OVERLAY_MANIFEST_FILE,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    # This branch is the media-only worker's local asset diagnostic. CPU page
+    # and job queries must use their own pinned metadata file, even if the GPU
+    # is unavailable; never proxy a business catalog query to that worker.
+    if not GPU_VIDEO_WORKER_URL and DRAMA_RANDOM_OVERLAY_ROOT and DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
         return catalog_from_assets(
             DRAMA_RANDOM_OVERLAY_ROOT,
             DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
         )
-    if not GPU_VIDEO_WORKER_URL or not GPU_VIDEO_WORKER_TOKEN:
-        raise DramaSynthesisError(
-            "drama_template_catalog_unavailable",
-            "随机模板目录暂不可用",
-            503,
-        )
-    response = requests.get(
-        GPU_VIDEO_WORKER_URL + "/api/gpu-video/random-overlay/catalog",
-        headers={"Authorization": "Bearer " + GPU_VIDEO_WORKER_TOKEN},
-        timeout=min(60, GPU_VIDEO_WORKER_TIMEOUT),
-        allow_redirects=False,
+    raise DramaSynthesisError(
+        "drama_template_catalog_unavailable",
+        "CPU随机模板目录未配置或校验失败",
+        503,
     )
-    if response.status_code >= 400:
-        raise DramaSynthesisError(
-            "drama_template_catalog_unavailable",
-            "随机模板目录暂不可用",
-            503,
-        )
-    payload = response.json()
-    return payload.get("item", payload)
 
 
 def drama_youtube_repository():
