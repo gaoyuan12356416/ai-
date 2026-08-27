@@ -62,8 +62,15 @@ print(json.dumps({'path':str(path),'key_count':len(values),'sha256':hashlib.sha2
 '''
 
 UPLOAD_ASSETS = r'''
-import hashlib, json, os, pathlib, shutil, tarfile
+import hashlib, json, os, pathlib, re, shutil, sys, tarfile
+import requests
 from qcloud_cos import CosConfig, CosS3Client
+request = json.load(sys.stdin)
+if set(request) != {'resume_archive_sha256'}:
+    raise RuntimeError('unexpected upload request')
+resume_sha = request['resume_archive_sha256']
+if resume_sha is not None and not re.fullmatch(r'[0-9a-f]{64}', resume_sha):
+    raise RuntimeError('invalid reviewed resume archive hash')
 root = pathlib.Path('/data/fb-page-random-overlay/assets/v1')
 expected = '028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f'
 raw = (root / 'manifest.json').read_bytes()
@@ -91,17 +98,24 @@ staging.mkdir(mode=0o700, parents=True, exist_ok=True)
 if shutil.disk_usage(staging).free < 1024**3:
     raise RuntimeError('insufficient source staging capacity')
 archive = staging / 'fb-v3-028326ab2114.tar'
-if archive.exists():
+if archive.is_symlink():
+    raise RuntimeError('source archive is a symlink')
+if archive.exists() and resume_sha is None:
     raise RuntimeError('source archive already exists; verify it before any retry')
-with tarfile.open(archive, 'x') as bundle:
-    for name in ['manifest.json'] + sorted(r['name'] for r in rows):
-        bundle.add(root / name, arcname=name, recursive=False)
+if not archive.exists():
+    if resume_sha is not None:
+        raise RuntimeError('reviewed resume archive is missing')
+    with tarfile.open(archive, 'x') as bundle:
+        for name in ['manifest.json'] + sorted(r['name'] for r in rows):
+            bundle.add(root / name, arcname=name, recursive=False)
 os.chmod(archive, 0o600)
 digest = hashlib.sha256()
 with archive.open('rb') as stream:
     for chunk in iter(lambda: stream.read(1024*1024), b''):
         digest.update(chunk)
 archive_sha = digest.hexdigest()
+if resume_sha is not None and archive_sha != resume_sha:
+    raise RuntimeError('reviewed resume archive hash changed')
 values = {}
 for line in pathlib.Path('/root/drama_material_service/.env').read_text().splitlines():
     if '=' in line and not line.lstrip().startswith('#'):
@@ -110,12 +124,17 @@ for line in pathlib.Path('/root/drama_material_service/.env').read_text().splitl
             values[key.strip()] = value.strip().strip('"').strip("'")
 if values.get('COS_BUCKET') != 'advertising-1306474899' or values.get('COS_REGION') != 'ap-hongkong':
     raise RuntimeError('unexpected transfer COS target')
-client = CosS3Client(CosConfig(Region=values['COS_REGION'], SecretId=values['COS_SECRET_ID'], SecretKey=values['COS_SECRET_KEY']))
+client = CosS3Client(CosConfig(Region=values['COS_REGION'], SecretId=values['COS_SECRET_ID'], SecretKey=values['COS_SECRET_KEY'], Timeout=300))
 key = 'drama-synthesis-setup/20260827/' + archive_sha + '/fb-v3.tar'
+# The SDK validates existing multipart ETags against these same local bytes
+# before resuming. The reviewed hash guard above prevents a different archive.
 client.upload_file(Bucket=values['COS_BUCKET'], Key=key, LocalFilePath=str(archive), PartSize=8, MAXThread=2, ACL='private', EnableMD5=True)
 head = client.head_object(Bucket=values['COS_BUCKET'], Key=key)
 if int(head['Content-Length']) != archive.stat().st_size:
     raise RuntimeError('private transfer object size mismatch')
+anonymous_url = 'https://' + values['COS_BUCKET'] + '.cos.' + values['COS_REGION'] + '.myqcloud.com/' + key
+if requests.head(anonymous_url, timeout=(10, 30), allow_redirects=False).status_code != 403:
+    raise RuntimeError('private transfer anonymous access was not denied')
 print(json.dumps({'key':key,'sha256':archive_sha,'size':archive.stat().st_size,'source_archive':str(archive),'manifest_sha256':expected}))
 '''
 
@@ -193,10 +212,13 @@ def main():
     parser.add_argument("action", choices=("secrets", "assets"))
     parser.add_argument("--key", required=True, type=Path)
     parser.add_argument("--known-hosts", required=True, type=Path)
+    parser.add_argument("--resume-archive-sha256", help="Resume only an operator-verified existing archive hash")
     parser.add_argument("--apply", action="store_true", help="Explicitly perform the scoped staging operation")
     args = parser.parse_args()
     if not args.apply:
         parser.error("--apply is required; this command creates scoped bootstrap artifacts")
+    if args.resume_archive_sha256 and args.action != "assets":
+        parser.error("--resume-archive-sha256 only applies to assets")
     import paramiko
     clients = []
     try:
@@ -211,7 +233,8 @@ def main():
             values = remote_json(source, SOURCE_PYTHON, READ_SECRETS)
             result = remote_json(target, TARGET_PYTHON, WRITE_SECRETS, values)
         else:
-            result = remote_json(source, SOURCE_PYTHON, UPLOAD_ASSETS)
+            result = remote_json(source, SOURCE_PYTHON, UPLOAD_ASSETS,
+                                 {"resume_archive_sha256": args.resume_archive_sha256})
             print(json.dumps({"stage":"private_cos_uploaded", "size":result["size"], "sha256":result["sha256"]}), flush=True)
             result = remote_json(target, TARGET_PYTHON, DOWNLOAD_ASSETS, result)
         print(json.dumps(result, sort_keys=True))
