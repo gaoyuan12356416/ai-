@@ -1,5 +1,11 @@
 # 测试报告
 
+## 当前实机结论：新表已创建，账号权限门禁未通过（16:06）
+
+GitHub 精确候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f` 在 CPU clean checkout 完成：生产只读发现 PASS、全新隔离 MySQL 5.7.44 九项建表/载荷/幂等/隔离演练 PASS、生产仅 CREATE 三张 ads_ai 专用表 PASS。apply 后管理员验证无 trigger/FK；随后 63350 每表回读 0 行。原表未写入、未复制数据。报告及 SHA 见 [新表合同与证据](ads-ai-new-tables-20260827.md)。
+
+独立最小权限 writer 未能创建：生产 ads_aius 缺少 CREATE USER，16:04:58 精确 GRANT 返回 1410；隔离同权限账户也拒绝。该问题是部署权限前提缺漏，不是表级写入失败，不能用广权限业务账号替代或将代码 QA 冒充线上发布通过。CPU 原应用/服务/20 个已完成任务不变，SQLite quick_check=ok；新 ffprobe 版本和 SHA 实机 PASS。真实 YouTube refresh/upload/comment 均为0，UI/18788尚未切流。后续须取得合法管理员安全配置，继续账号/RPC、CPU 切换和唯一频道验收，不重跑未变代码的完整回归。
+
 ## 最新增量：MySQL 5.7 库名授权兼容（BUG-026）
 
 f3d754e2d4d0912d0cb7bf63b98d01c5f6f554bb 已经 GitHub push/readback，CPU 精确 clean checkout 的生产 dry-run 通过，三表均不存在。隔离 MySQL 5.7.44 授权显示为精确 `ads\_ai`，bootstrap 在身份预检处停止，0 张表、0 DDL；没有改动生产表。
@@ -12,7 +18,7 @@ f3d754e2d4d0912d0cb7bf63b98d01c5f6f554bb 已经 GitHub push/readback，CPU 精�
 
 BUG-023/024/025 已修复并独立复核。实现专项39、root专项（含1项Windows测试连接未关闭后定向修复）、旧迁移4项均不与262相加。可进入 GitHub 精确候选和 SSH fresh-rehearsal 门禁；生产新表/最小权限writer/CPU切流/真实YouTube结果另行验证。下方204/188/166为旧候选历史，不冒充本轮新表验收。现行 [新表合同](ads-ai-new-tables-20260827.md)。
 
-## 当前结论：CPU 查询边界（2026-08-27 14:47，北京时间）
+## 历史结论：CPU 查询边界（2026-08-27 14:47，北京时间）
 
 CPU 新候选 `40042f9692fbec58caa5abbf41af35e9aefb54bc` 已 GitHub push/readback；模板目录只读 CPU 原始 manifest，不请求 GPU 或媒体素材包。独立七套唯一一次合并 **204/204 PASS，13.639 秒**；另外 15 项纯内存对抗 PASS，不叠加 204。3 个 Python 文件 compile/3.9 AST、4 文件冻结 SHA、diff-check PASS，无新增 P0/P1。
 
@@ -72,7 +78,9 @@ python -B -m unittest scripts.test_drama_synthesis_gpu_runtime scripts.test_dram
 - 每条 canary outbox claim 之前重新读回 processed/succeeded/unlisted；包括已完成任务遗留的 pending 重试。读取失败或隐私漂移会持久化 hold，0 新 outbox claim，不重发已确认评论。
 - 三表快照/恢复脚本的端点、容器、schema、数据盘、凭据权限、候选及文件 SHA、数据/结构/索引不变量与证据时效均有离线回归。
 
-### 真实环境状态（截至本次文档更新）
+### 历史真实环境状态（c719 阶段；旧库迁移路线已退役）
+
+此表只记录旧候选的当时状态。后续用户已改为 ads_ai 新建专用表，现已建表成功，不再以 kunlunads_dev 无写权限或旧三表迁移/备份作为当前门禁；当前门禁为最上方实际 1410 账号创建权限。
 
 | 项目 | 已确认 | 尚未完成 |
 | --- | --- | --- |

@@ -1,6 +1,20 @@
 # 缺陷记录
 
-## 2026-08-27 当前状态
+## 2026-08-27 当前状态（16:06，北京时间）
+
+新三表已完成，原表零写，整体正式发布仍 HOLD。当前唯一已确认的部署权限阻断是**创建专用 DB writer 账号**，不是 `ads_ai` 无写权限。候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f` 已 GitHub/readback、CPU clean；16:00 fresh-table rehearsal 9 checks PASS，16:01:35 生产 63353 仅 CREATE `ads_ai.ads_youtube_videos`、`ads_ai.ads_youtube_comments`、`ads_ai.ads_youtube_publish_log` 成功且完整兼容，apply 后管理员验证无 trigger/FK；16:06 经 63350 核验三表各 0 行。
+
+| 当前缺陷 | 状态与验收边界 |
+| --- | --- |
+| [BUG-027](BUG-027.md) 专用 writer 建账号权限前提遗漏 | P1 / OPEN / BLOCKED，部署前提缺漏，非代码问题。16:04:58 实际 `ads_aius@43.166.187.96` 一次精确新 writer GRANT 返回 1410，`global CREATE_USER=false`；隔离 MySQL 5.7.44 schema ALL + GRANT OPTION 账号同样复现。文档已纠正，合法 DB admin 显式 CREATE USER、精确三表授权及 runtime 健康尚待执行 |
+
+只需合法 DB admin 提供 CPU 上 root-owned 0600 管理连接文件的绝对路径，不在聊天发送密码。必须先核实账号不存在，再 CREATE USER，然后只给 `drama_youtube_writer@43.166.187.96` 上述三表的 `SELECT, INSERT, UPDATE`；账号已有即停核实，不 ALTER/重置、不以 `ads_aius` 运行服务、不进云控制台。不再需要 `kunlunads_dev` 迁移、旧表备份或旧 migrator。
+
+新 writer/RPC 未安装或启动，未配置广权限 runtime 凭据；CPU app 仍 `a956fb...675a3`（缩写），API PID 3841722 / job worker PID 1212、20 done、SQLite `quick_check=ok`、无 YouTube 账本。真实上传 0、评论 0，HK 未改。现行结论见 [部署状态页](../deployment-status-20260827.md)、[数据库授权说明](../db-access-blocker-20260827.md) 和 [新表合同](../ads-ai-new-tables-20260827.md)。
+
+## 历史状态：新表建成前的代码与 HK 验证
+
+下文保留各阶段测试和旧阻断记录，不叠加测试数，不代表当前部署状态；其中旧库权限/备份/迁移要求已退休，当前权限门禁以上文及 BUG-027 为准。
 
 最新 ads_ai 新表增量发现并修复 [BUG-023](BUG-023.md)（镜像 digest 接口）、[BUG-024](BUG-024.md)（P1 datadir 隔离）和 [BUG-025](BUG-025.md)（真实飞书操作者字符串）；独立完整 10 模块 262/262 PASS，实机建表/部署证据另列，不复用下文旧库权限门禁。见 [新表合同](../ads-ai-new-tables-20260827.md)。
 
@@ -10,7 +24,7 @@ HK 当前独立 release `e1f5a1d04cfb510df9c2444ac592adec2827508b` 已 GitHub-fi
 
 历史 HK 六套代码 QA 共 188 项：首次 187 PASS + 1 项文档文本合同 FAIL（13.567 秒），文档补回后只复测该失败项 1/1 PASS（0.050 秒）；不是一次整套全绿。27 文件语法/Python 3.9 AST PASS；此批、旧 166/focused 22 和五项内存 mock 对抗均不与本轮 204 叠加。
 
-整体正式发布仍 HOLD：生产 ads_aius 对 kunlunads_dev 仅 SELECT/SHOW VIEW，无合法 admin/migrator/writer；CPU 主应用未部署/重启、仍为 18787，真实 YouTube 上传/评论为 0。HK COS 仍为 drama-synthesis-canary/20260827，正式激活需独立备份配置、切 production prefix 后验收。299309 行历史三表恢复演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不改绑新 CPU 40042f9 或 HK e1f5，不等同全集群灾备。
+旧范围当时 HOLD 的记录（已被新表范围取代）：生产 ads_aius 对 kunlunads_dev 仅 SELECT/SHOW VIEW，无合法 admin/migrator/writer；CPU 主应用未部署/重启、仍为 18787，真实 YouTube 上传/评论为 0。HK COS 仍为 drama-synthesis-canary/20260827，正式激活需独立备份配置、切 production prefix 后验收。299309 行历史三表恢复演练仍精确绑定 `c719bebf72be900ec3853858dc53b36b83beffd2`，不改绑新 CPU 40042f9 或 HK e1f5，不等同全集群灾备，也不作为当前继续门禁。
 
 用户已授权 SSH-only 的部署及指定 Shahrul Ikmal 一次 unlisted 视频、一条评论；待合法权限/凭据与健康/身份门禁，不是缺少这次测试授权，也不允许 public 测试。不进入云控制台、不动旧 X/ads 业务。统一现行结论见 [部署状态页](../deployment-status-20260827.md)、[测试报告](../test-report.md)、[迁移证据](../migration.md) 和 [HK 实测](../hk-gpu-setup-20260827.md)。
 

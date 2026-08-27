@@ -26,7 +26,7 @@ bootstrap 和启用前由现有 ads_aius 管理身份检查无 trigger；runtime
 3. 先运行 dry-run。先检查全部三个对象；仅允许创建缺失表，已存在表须完整兼容，任一不兼容立即停止，不 ALTER/DROP/DELETE/REPLACE、不清理失败现场。
 4. CPU 全新隔离 MySQL 5.7.44 演练：127.0.0.1:23358、context `2026082715040001`、目录 `/mnt/data-disk/drama-youtube-ads-ai-rehearsal-2026082715040001`，无原数据。固定 CREATE、重复执行、精确 payload/冲突和证据 SHA 必须通过。旧 23357/c719 恢复环境只保留为历史，不改绑。
 5. `--apply` 仅允许批准的 ads_ai 三表写入口 63353，绑定候选及新演练证据。63353 不能用于普通查询、扫描、联表或报表，也不改变通用 MYSQL/ADMIN_MAPPING 读端口。apply 先验证固定身份、目标、可写状态与全部对象，完成后再核对结构及无 trigger/FK。
-6. 一次性创建全新 writer 账号，第一条精确表 GRANT 使用 `IDENTIFIED WITH mysql_native_password AS <高熵密码散列>`，账号已存在则拒绝，不改密码或降级使用广权限账号；再补齐另外两张表权限并以新账号回读最小 grants。[MySQL 5.7 GRANT 官方合同](https://dev.mysql.com/doc/refman/5.7/en/grant.html)规定已有账号禁止 IDENTIFIED WITH。
+6. 一次性账号创建需要合法数据库管理员，不是仅有 ads_ai.* ALL/GRANT OPTION 就能完成。16:04:58 实际生产第一次精确新账号 GRANT 返回 1410 `You are not allowed to create a user with GRANT`，ads_aius 不具有全局 CREATE USER；隔离 MySQL 5.7.44 相同权限账户也拒绝。管理员应先 `CREATE USER` 全新 `drama_youtube_writer@43.166.187.96`（不使用 IF NOT EXISTS、不重置/修改既有账号），再授予三张新表必要 SELECT/INSERT/UPDATE。凭据只放 CPU 私有文件，以新账号回读精确最小 grants；不向常规业务账号增加全局权限，也不降级为广权限 runtime。[MySQL 5.7 账号管理合同](https://dev.mysql.com/doc/refman/5.7/en/grant.html)。
 7. 秘密只在 CPU 私有文件。客户端 token root:root 0600，服务端同值 token 和 writer DB JSON 为 drama-youtube:drama-youtube 0600；不打印原值、不通过命令行传密码。writer 在 `/opt/drama-youtube-unified-writer/releases/<candidate_git_sha>` 安装、current 指向精确候选，以实际用户预检后才启动服务。
 
 旧 `migrate_drama_youtube_unified_schema.py` 与 `drama_youtube_three_table_rehearsal.py` 已退出执行路线；保留历史证据不代表允许运行旧库写入。
@@ -42,6 +42,25 @@ bootstrap 和启用前由现有 ads_aius 管理身份检查无 trigger；runtime
 - 回滚先关 live/sync 并停止新 claim，确认没有 in-flight/unknown 后回退此次应用文件和专用 drop-in、切回旧 18787。新三表、SQLite/outbox、短链、COS、视频/评论全部保留；不 DROP、删行或反向 DDL，也不恢复旧库覆盖无关数据。
 
 ## 本轮证据状态
+
+16:06 当前检查点：生产三表已经在 16:01:35 创建成功，结构/唯一索引/所有权均兼容；apply 后由管理员验证无 trigger/FK，随后 63350 回读每表 0 行。生产 writer 账号创建被 1410 拒绝，未安装/启动 RPC、未配置广权限 runtime。已检查 CPU 标准 MySQL 管理配置（含 include 目录），未发现可用 CynosDB 管理凭据；不是 ads_ai 缺少建表或写入权限。下一步需要合法管理员将连接配置存为 CPU root:root 0600 文件并告知绝对路径，之后由代理继续 SSH 操作。
+
+当前 CPU app SHA `a956fb9952aa09d8d911cf3a5c54b58525cb81935d92d0ede698af9c681675a3` 未变；API PID 3841722、job worker PID 1212 均 active/NRestarts=0；20 done，SQLite quick_check=ok，尚无 YouTube 本地账本。未切 UI/18788、未改 HK 正式前缀，真实上传/评论仍为 0。CPU 已安装经版本/散列验证的 ffprobe，`/usr/bin/ffprobe` 指向数据盘独立版本，未覆盖既有二进制。
+
+本次所有实机发现/演练/建表报告绑定精确候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f`，私有证据目录 `/mnt/data-disk/drama-youtube-ads-ai-deploy-20260827/6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f`：
+
+| 证据 | SHA256 |
+| --- | --- |
+| discovery.json | c6ddd65481ba737d3df6ab52518f54ec04bddb823004c1594ed8e5e8b7c8ad69 |
+| fresh-rehearsal.json（9 项全部通过） | d3a5bbee26768b1c2a2cce266c713b9780bc40824c0375009f1f662d6c1b8db4 |
+| bootstrap-evidence.json | 786937167aae1d2f9bf1c9867866665ce433f66b7d7038b3a07b724c5bb7e2b5 |
+| production-create.json | f4d99218edd71f75c148d591db05d6a3967d41571978b6a7bf824d9d35fd36fb |
+| checkpoint-readback.json | 816114abbd3ebb5a88fd437a75884940b08de86d8a26ae43e551334e1f89a111 |
+| writer-account-provision.json | 95f1e45b2d8296eea450e257bf6c21c1cf57a78cefd5d196820cec553c9cc4c5 |
+
+writer-account-provision.json 记录真实 1410 和权限检查，密码不在证据或日志中。root 私有 writer-account-pending.json 只记录尚未成功建立的账号意图，不能当成有效 runtime 凭据。ffprobe n7.1-152-gd72536008a-20250113 SHA256 为 `bf7b813bb81f01695a38841e697d6fd858c194baf13017e78c2855af502e644a`，路径 `/mnt/data-disk/drama-synthesis-cpu/runtime/ffprobe-n7.1-20250113/ffprobe`。16:09 已核验容器 ID/标签/数据路径后停止此次隔离 MySQL 容器，数据和报告保留，不占用运行资源。生产新表保持保留，不 DROP 或写探针；不把建表完成当成全功能上线。
+
+### 较早检查点（保留，不覆盖上述当前事实）
 
 15:58 增量：f3d754e 已 GitHub push/readback 并在 CPU 精确 clean checkout；生产只读 dry-run PASS，三表均缺失。隔离 MySQL 5.7.44 的库名下划线转义使管理员预检拒绝，尚未创建任何表。BUG-026 两文件兼容修正已独立 23/23 定向测试和 6/6 内存对抗通过，固定 DDL/runtime parser 未变。新候选重新绑定实机发现与演练，原 262/262 仅作为未变代码基线，生产建表和外部发布仍未执行。
 
