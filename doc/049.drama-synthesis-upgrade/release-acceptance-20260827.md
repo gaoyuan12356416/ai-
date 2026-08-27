@@ -1,8 +1,8 @@
 # 剧集合成升级：上线与真实发布验收
 
-## 当前结论（2026-08-27 17:31，北京时间）
+## 最终结论（2026-08-27 17:50，北京时间）：已部署并放行
 
-CPU/HK 主体部署完成，Shahrul Ikmal 的唯一非公开测试已成功：一次上传、一条评论，ads_ai 三张新表各一条，三个本地同步事件全部 synced。外部新鲜读回确认 unlisted / processed / succeeded、标题描述、评论内容及作者均匹配。同任务完成后再次执行，4SQLite表/3MySQL新表行数及全行hash均未变。正式 live/sync 暂为 0，频道加载提示修正完成后再放行；此时尚不宣称全部发布工作结束。
+CPU/HK部署、指定频道真实测试和独立验收已完成。17:45:45正式live/sync已开启，17:49服务稳定且20个历史done保留，没有额外发布；最终线上弹窗加载/完成/指定频道评论状态核验通过，测试后已关闭弹窗、未点击public入队。Shahrul Ikmal唯一非公开测试为一次上传、一条评论，ads_ai三张新表各一条，三个本地同步事件全部synced。外部新鲜读回确认unlisted/processed/succeeded、标题描述、评论内容及作者均匹配；完成后同ID再次执行，4SQLite表/3MySQL新表行数及全行hash均未变。
 
 现行方案复用 CPU 现有 ads_aius 数据库凭据及已获取的 YouTube OAuth，不创建数据库账号、不执行 CREATE USER / GRANT / ALTER USER、不写原 MySQL 表。刷新得到的 access token 只在 CPU 进程内使用，不回写原授权表。专用账号/1410 阻断已按用户要求取消，不再要求管理员提供配置。
 
@@ -15,7 +15,7 @@ CPU/HK 主体部署完成，Shahrul Ikmal 的唯一非公开测试已成功：�
 | 计算职责 | CPU 业务查询、OAuth、发布、记录与短链；HK 只接受冻结制作输入、制作、上传 COS 并回传；正式制作地址18788，正式 COS 前缀drama-materials |
 | 任务列表操作 | 已完成行直接提供复制素材 URL、生成短链、发布到 YouTube；保留详情入口和既有按钮样式；多产物选择已实测 |
 | 短链 | 同一任务/合集视频只生成 id=1，线上列表再次生成复用该链接；HTTPS 200与wrapper SHA一致，未使用page.dramabuzzs.com |
-| YouTube | 频道弹窗列出实际可用频道；选择Shahrul后评论可编辑；未点击正式 public 入队按钮，真实测试走固定的受控 unlisted canary |
+| YouTube | 点击即显示原样式弹窗及加载提示，加载期间频道/提交禁用；完成后频道可选，选择Shahrul后评论可编辑；未点击正式public入队按钮，真实测试走固定的受控unlisted canary |
 | 发布记录 | ads_ai.ads_youtube_videos / ads_youtube_comments / ads_youtube_publish_log 各1，opaque用户892fd2e8，完整payload与SQLite outbox一致；原账号Token/client指纹前后不变 |
 
 ## 唯一真实测试
@@ -33,9 +33,11 @@ CPU/HK 主体部署完成，Shahrul Ikmal 的唯一非公开测试已成功：�
 
 ## 版本、测试和证据
 
-CPU基础代码为GitHub精确提交`59f95e6dc106a420fa2e326597c931ba712249f9`；OAuth HEX与列表入口修正部署为`ee6e00c000c31a538b9294a9da7f084dd9e5f9ac`。writer代码仍为未变59f95e6，HK为未变`e1f5a1d04cfb510df9c2444ac592adec2827508b`。组件版本不能改绑最终文档提交。
+CPU基础代码为GitHub精确提交`59f95e6dc106a420fa2e326597c931ba712249f9`；OAuth HEX修正为`ee6e00c000c31a538b9294a9da7f084dd9e5f9ac`；最终静态页面为`978746f9cf20a938754b93ce3ea94de4202aa5b3`，4个副本及公网HTTP200响应SHA均为`30292dd73cec09cce7dc1df4c517ebbf89d3ff2fd82867627221a7b4350448a0`。writer代码仍为未变59f95e6，HK为未变`e1f5a1d04cfb510df9c2444ac592adec2827508b`。最终文档提交不改变这些实测组件版本。
 
 一次完整272/272回归只属于59f95e6；ee6增量为独立119/119定向、Node16检查、独立内存6/6与10场景20处理器调用。未重复整套、未把不同阶段数字相加。HK真实媒体报告SHA为`40746316694eeb4d34fb4511713acb13b8de14cff382f6116fdd99f1351f2175`，本次DB/UI修正未重新制作或覆盖这些成片。
+
+最终弹窗补丁独立Node38/38、既有列表16/16及另12竞态场景通过，外部I/O为0；上线后再用真实浏览器验证加载态、完成态及Shahrul评论权限。独立QA复核生产冻结字段、完整payload、备份、幂等和正式激活报告，无剩余P0/P1。测试边界：已验证指定频道的unlisted/既有concat视频，不冒称public发布或“新HK随机成片→YouTube”的单任务全链路已实测。
 
 CPU私有机器证据根目录：`/mnt/data-disk/drama-youtube-ads-ai-deploy-20260827/ee6e00c000c31a538b9294a9da7f084dd9e5f9ac/`。
 
@@ -46,9 +48,15 @@ CPU私有机器证据根目录：`/mnt/data-disk/drama-youtube-ads-ai-deploy-202
 - `canary-idempotency-readback.json`：完成后同ID重放，外部身份/次数不变，4SQLite表与3MySQL新表计数及全行hash均不变。
 - `release-invariants.json`：17:36补充实际冻结字段、ads_ai/连接端63353/ads_aius身份、三个完整payload与对应outbox、15+5备份成员和两份SQLite逐SHA核验、组件文件与clean release比对；不修改前四份历史报告。SHA为`7c7a4dd126da1f26bbe4541efa2efa491a2c62df6896f6672496ca5c3d5eb3e4`。
 
+最终静态/开关证据在同级`978746f9cf20a938754b93ce3ea94de4202aa5b3/`：`checkout-preflight.json`、`pre-activation-readiness.json`、`formal-activation.json`、`post-activation-readback.json`。正式激活报告SHA为`d56a78809cf52897a27512c40249e37ca9a5cf8aea922b419bda947e4ad8df24`，经独立只读复核；最后一次读回另验证新备份5成员及SQLite哈希，并确认普通publisher启动后canary身份/次数不变。
+
+API/job/publisher PID为1116402/1116403/1116404，均active/running/NRestarts=0；三进程有效环境live=1、sync=1、业务库kunlunads_dev:63350、GPU地址18788；writer PID1077724未变。HK实际`drama-synthesis-gpu-worker.service`/tunnel PID1188891/1188892均active/NRestarts=0、health media-only，旧X PID91290/91292未变；不将历史失败的独立验收unit或既有ads_video_producer自重启宣称为本次已修复。
+
 ## 备份与停止/回滚边界
 
 升级前CPU备份：`/mnt/data-disk/drama-synthesis-cpu/backups/20260827T1630-pre-shared-account`；ee6前备份：`/mnt/data-disk/drama-synthesis-cpu/backups/20260827T091634Z-before-ee6-fix`，manifest SHA`180b137af3c08a101a3956d220fc7183f73c3279789e8e61e324f9942404cc36`。
+
+正式激活前的新备份：`/mnt/data-disk/drama-synthesis-cpu/backups/20260827T094537Z-before-final-activation`，manifest SHA`8ea220dee4532be84802c63e1f7eb48630b65db65b418643e2907ce230b3ade8`；此SQLite包含已完成的外部发布事实。17:49逐项验证5文件和SQLite均与清单一致。
 
 HK正式前缀配置备份：`/data/drama-synthesis-gpu/backups/20260827T1650-pre-formal-prefix`；1650仅目录标签，实际激活在16:42左右。旧X服务未被重启。所有操作通过SSH，未进入腾讯云管理后台。
 

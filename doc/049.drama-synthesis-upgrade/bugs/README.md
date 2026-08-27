@@ -1,15 +1,15 @@
 # 缺陷记录
 
-## 当前验收状态（2026-08-27 17:31）
+## 最终验收状态（2026-08-27 17:50）
 
-真实指定频道视频/评论/ads_ai新表记录与完成后幂等复验通过，详见[上线验收](../release-acceptance-20260827.md)。当前仅剩前端加载反馈修正及正式放行；下方旧权限要求是历史，不再执行。
+真实指定频道视频/评论/ads_ai新表记录与完成后幂等复验通过；最终加载反馈修正已实测，正式live/sync已开启，无剩余放行阻断，详见[上线验收](../release-acceptance-20260827.md)。下方旧权限要求是历史，不再执行。
 
 | 缺陷 | 当前状态 |
 | --- | --- |
 | [BUG-027](BUG-027.md) 专用账号门禁 | SUPERSEDED BY REQUIREMENT CHANGE，用户明确取消，不需要管理员配置 |
 | [BUG-028](BUG-028.md) OAuth JSON传输 | CLOSED / PRODUCTION VERIFIED，实际Token不变，同一canary成功 |
 | [BUG-029](BUG-029.md) 列表入口遗漏 | CLOSED / PRODUCTION VERIFIED，三项入口已从线上列表实测 |
-| [BUG-030](BUG-030.md) 频道加载无弹窗反馈 | 本地修正冻结，独立增量QA/部署中；不改变发布后端 |
+| [BUG-030](BUG-030.md) 频道加载无弹窗反馈 | CLOSED / PRODUCTION VERIFIED，独立增量及线上加载/完成态通过；不改变发布后端 |
 
 ## 最新覆盖决定（2026-08-27）：BUG-027 被需求变更取代
 
