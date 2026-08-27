@@ -31,6 +31,8 @@ The worker modules are byte-identical to the old GPU release after LF checkout.
    `/var/lib/fb-page-random-overlay` on its 197 GB root volume; it has no `/data`
    mount. Transfer secrets only through authenticated SFTP; mode 0400.
 5. Verify resource archive SHA256 and asset manifest; verify NVENC locally.
+   If HK already has the complete identical asset set, verify all manifest/file
+   fingerprints and copy locally into the isolated FB directory instead.
    Copy completed job manifests only after drain. Do not copy in-progress jobs.
 6. Back up CPU authorized_keys and add only loopback 18836 to the already
    HK-source-restricted tunnel identity. Do not change existing forwards or SSH
@@ -60,3 +62,36 @@ old Page targets requires a new explicit operator decision; it is not automatic.
 
 CPU API code and release symlink are unchanged. The reset script is an explicit
 operator utility, not a newly exposed endpoint or a background reset policy.
+
+## Verified production outcome (2026-08-27)
+
+- Code release: `59b42e24cd1e57b1209cb7addde3de7a8c98568b`, fetched from GitHub
+  on CPU; the same checked archive deployed to HK. Worker module SHA256
+  `87fc6a373a1ba6208c6bcfc745b62fa8f703a1a7be9577c3108af92d89a34f5d`
+  is identical to the old GPU worker.
+- Runs 29/30/31: all 36 old-Page tasks skipped, identities retained. Replacement
+  runs 37/38/39: ten current group-62 Pages each, no skips, three distinct
+  materials per Page. Original publication attempts/ledger and all unrelated
+  existing tasks/runs/Page snapshots have identical before/after fingerprints.
+- New Page credential identity GET /me: 10/10 returned the expected Page ID.
+  This is read authorization proof, not publication completion proof.
+- Full FB tests 149/149 locally; HK worker tests 15/15; HK NVENC smoke passed.
+- The existing HK asset set at
+  `/data/drama-synthesis-gpu/assets/fb-v3-028326ab2114` passed full manifest/file
+  validation and was copied into the isolated FB root. Source stayed unchanged.
+  Asset manifest SHA256:
+  `028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f`.
+- 284 completed manifests migrated. CPU authenticated prepare replay for task
+  388 returned exactly the original URL, 57,315,873 bytes and SHA256
+  `ad99c070a96c833601952aec2de9abeb3eb761d249f0026a289673d5627d191e`.
+- CPU 18836 sshd peer is HK `43.154.250.89`. Both HK FB units active/enabled;
+  both old FB units inactive/disabled. CPU plan/prepare/publish timers active.
+  Existing HK X and drama synthesis services/tunnels remain active.
+- Real replacement task 437 (run 37) is preparing on HK, job
+  `fb-page-156fefb0ce2b0dd3aaeba89788850a388545ef07c462e48c`; its ffmpeg
+  process uses `h264_nvenc` and the isolated FB work root. No test posts made.
+  The future scheduled publications have not been claimed complete.
+- CPU audit root:
+  `/mnt/data-disk/fb-auto-post-publisher/recovery/20260827-new-pages-hk`;
+  old GPU backup:
+  `/data/fb-page-random-overlay/backups/hk-cutover-20260827`.
