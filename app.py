@@ -772,6 +772,7 @@ from features.drama_synthesis.core import (
     freeze_random_recipe,
 )
 from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
+from features.drama_synthesis import gpu_cache as drama_gpu_cache
 from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
     build_browser_preview_html,
@@ -79329,6 +79330,11 @@ def gpu_video_result_path(job_id):
 def gpu_video_result_satisfies_outputs(result, outputs):
     if not result:
         return False
+    if drama_gpu_cache.versioned(result):
+        return drama_gpu_cache.verify_artifacts(
+            result, outputs, head=requests.head,
+            timeout=(5, max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT)),
+        )
     if bool(outputs.get("concat_video", False)):
         url = str(result.get("output_video_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
@@ -79354,10 +79360,15 @@ def read_gpu_video_result(job_id, outputs):
         try:
             with open(result_path, "r", encoding="utf-8") as fp:
                 result = json.load(fp)
+            if not isinstance(result, dict) or str(result.get("job_id") or "") != str(job_id):
+                raise drama_gpu_cache.cache_error()
             if gpu_video_result_satisfies_outputs(result, outputs):
-                return result
+                return drama_gpu_cache.public_result(result) if drama_gpu_cache.versioned(result) else result
+        except DramaSynthesisError:
+            raise
         except Exception as exc:
             logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
+            raise drama_gpu_cache.cache_error() from None
 
     result = {
         "job_id": job_id,
@@ -79377,15 +79388,19 @@ def read_gpu_video_result(job_id, outputs):
     return None
 
 
-def write_gpu_video_result(job_id, result):
+def write_gpu_video_result(job_id, result, *, artifact_paths=None):
     ensure_dir(GPU_VIDEO_RESULT_ROOT)
     result_path = gpu_video_result_path(job_id)
     tmp_path = result_path + ".tmp"
     payload = dict(result or {})
     payload["job_id"] = str(job_id or payload.get("job_id") or "")
     payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if artifact_paths is not None:
+        payload.update(drama_gpu_cache.artifact_metadata(payload, artifact_paths))
     with open(tmp_path, "w", encoding="utf-8") as fp:
         json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
+        fp.flush()
+        os.fsync(fp.fileno())
     os.replace(tmp_path, result_path)
 
 
@@ -79463,6 +79478,8 @@ def _handle_gpu_video_render_unlocked(payload):
 
     existing_result = read_gpu_video_result(job_id, outputs)
     if existing_result:
+        if render_random:
+            drama_gpu_cache.verify_cached_recipe(existing_result, random_recipe)
         logging.info("reuse GPU video result for job=%s", job_id)
         return existing_result
 
@@ -79633,7 +79650,12 @@ def _handle_gpu_video_render_unlocked(payload):
             "random_template_output_profile": random_result["profile"],
             "random_template_recipe_sha256": random_result["recipe_sha256"],
         })
-    write_gpu_video_result(job_id, result)
+    artifact_paths = {
+        field: os.path.join(public_dir, filename)
+        for field, filename in drama_gpu_cache.ARTIFACT_FILENAMES.items()
+        if result.get(field)
+    }
+    write_gpu_video_result(job_id, result, artifact_paths=artifact_paths)
     cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
 

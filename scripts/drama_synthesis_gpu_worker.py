@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app as drama_app  # noqa: E402
+from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
 
 
 def render_concurrency(environ=None):
@@ -122,6 +123,8 @@ class Handler(BaseHTTPRequestHandler):
                 # slot here, or max_concurrency=1 would deadlock that job.
                 result = drama_app.handle_gpu_video_cover(payload)
             self._reply(200, result)
+        except DramaSynthesisError as exc:
+            self._reply(exc.status, {"code": exc.code, "error": str(exc)})
         except Exception:
             self._reply(500, {"code": "gpu_render_failed", "error": "制作失败"})
         finally:

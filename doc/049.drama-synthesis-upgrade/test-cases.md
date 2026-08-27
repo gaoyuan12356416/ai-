@@ -1,10 +1,10 @@
 # 测试用例
 
-## 2026-08-27 香港 GPU 授权隔离验收补充
+## 2026-08-27 现行范围与结果边界
 
-此前 fake-only 边界用于离线测试。用户本次已授权独立 HK 运行搭建及真实媒体样本（不含真实平台发布）：验证固定 runtime、Demucs 离线四模型、manifest 逐文件 SHA、专用用户路径权限、无凭据输出、8787/18788 健康与鉴权、concat/no-BGM/cover-intro/random 真实编码、COS 独立 canary 文件以及 legacy18787/X 服务不变。仍禁止正式 CPU 任务、数据库迁移、YouTube 上传/评论及 OAuth 刷新。
+用户已授权通过 SSH 完成 HK 环境、部署、三表备份/隔离恢复演练，并在门禁通过后只用 Shahrul Ikmal 执行一次内部 unlisted 视频与一条评论；禁止腾讯云管理后台和 public 测试。正式 HTTP/UI 仍固定 public，内部 CLI 不打开正式 live/sync。CPU 未切流前继续保持 18787，HK 通过 18788 隔离验证，不触碰 X/ads_video_producer。
 
-全部外部 HTTP/文件发布/统一表为 fake 或 temp；禁止真实短链、YouTube、评论和服务器写入。
+下表是自动化 fake/temp suite 的测试范围，不声明其执行了真实外部发布。最新候选 c719bebf72be900ec3853858dc53b36b83beffd2 独立合并 166/166 PASS；另 25 文件语法/Python3.9 AST 与 5 项内存媒体对抗 PASS，后两类不叠加 unittest 数。实际 SSH 三表 snapshot/恢复已 PASS，HK auto 媒体基本检查通过但重复 POST 幂等 FAIL；生产 DDL/RPC/YouTube 仍被合法账号权限缺口阻塞，见 [测试报告](test-report.md)。
 
 | 组 | 核心用例 |
 |---|---|
@@ -16,11 +16,15 @@
 | OAuth | app/status/refresh/upload/identity；list 每候选实际 refresh+mine；失败隐藏且 mutation=0；upload-only 不列；测试频道隐藏；mine exact；empty/multiple/mismatch/401；pre-mutation transient |
 | 上传 | title/description；allowlist；download size/hash/ffprobe；session-before-PUT；308/5xx/404；submitted/processing/visibility/public |
 | 防重 | operation；published 二次确认；processing/unknown block；lease renew/generation；两 worker stale writes 全拒绝 |
-| 评论/同步 | published 后评论；force-ssl；comment-only retry/unknown；outbox；受控 RPC configured success/missing/auth/redirect/unknown；18837 固定且不碰 FB 18836；映射现有 legacy 三表全部必填字段；负数 synthetic queue 保持 video/publish-log join 且不碰现有正数队列；三实体 exact keys/types/required；extra/missing/type 与三 identity mismatch 拒绝；坏 JSON/非 object/contract error fenced finish failed；RPC token/DB credential 成对配置、当前账号 owner、精确 0600、>=32；无 DELETE/任意 SQL/runtime DDL/secrets |
-| 统一 MySQL 迁移 | 固定 cluster/host/schema；独立 migrator 与 runtime writer；精确三表 grants、无 wildcard/extra/grant option；全量 legacy column type/NULL/default/charset/collation/extra fingerprint；dry-run 不写；apply 必须 fresh API backup evidence + restore rehearsal PASS；三张表逐一添加 nullable ASCII external-id 列与唯一索引；`ALGORITHM=INPLACE, LOCK=NONE`；二次运行幂等；runtime verify 仅 SELECT/INSERT/UPDATE |
+| 评论/同步 | published 后评论；force-ssl；public/canary 都传冻结 channelId，仅接受 snippet.topLevelComment.id；2xx 缺失/身份不符为 unknown；comment-only retry/unknown；outbox；受控 RPC configured success/missing/auth/redirect/unknown；18837 不碰 FB18836；legacy 三表映射、负数 synthetic queue、三实体 exact keys/identity；坏 JSON/fencing；凭据 exact owner/0600；无 DELETE/任意 SQL/runtime DDL/secrets |
+| 内部 canary | app1479/channel263/account255/UCHJ1jFaYuW8g5EM7hM5pPpg；单 operation 与明确 CLI 授权、精确 task claim、真实 job/source；browser/普通 worker/outbox 隔离；session intent 先落盘；processing/succeeded/unlisted；无身份 unknown 与未知评论不盲重试；两操作员复跑不重传/重评 |
+| canary P1 门禁 | 任何 refresh/claim/upload 前做鉴权 RPC health/schema/index/exact writer grants；配置存在不等于可用；每个同步前 fresh unlisted readback，完成任务的 pending 重试同样适用；隐私漂移/状态未知 0 新 outbox claim；hold 恢复不重发评论 |
+| 统一 MySQL 迁移 | 固定生产 cluster/host/schema/migrator/writer 权限闭包；三表 READ ONLY 一致性快照、rows/schema/index/inventory SHA；CPU loopback23357、固定 digest MySQL5.7、独立空 schema/container/datadir；候选代码/manifest/report/evidence 精确绑定与时效；生产 apply 重验真实 table_snapshot_rehearsal 证据；nullable external-id/unique index、INPLACE/LOCK=NONE、二次 apply/dry-run 幂等、历史 NULL 和 legacy 数据不变 |
 | 文件权限 | app root/owner 必须成对；三层目录 exact owner 0750；Nginx access/default ACL；产物 0640；随机 temp 文件避免崩溃残留命名冲突；现有 X 200、YouTube 404/POST403 |
-| HK | release/current、unit、8787/18788/legacy18787、asset SHA、无 YT creds、ads unit untouched、health/render/drain/no fallback/rollback |
+| HK | release/current、unit、8787/18788/legacy18787、完整依赖/本地模型/asset SHA、无 YT creds、ads unit untouched、health/render/cover bypass、并发1；静音/反相/非有限输入；滤镜线程预算、保留源时间轴、容器与视频流固定0.15秒时长容差；重复POST实测门禁；drain/no fallback/rollback |
 
 门禁：focused Python、Python 3.9 parse/compile、JS syntax/browser-safe、相关 broad、MySQL migration/RPC、`git diff --check`、旧合同 rg、secret scan、scope。
 
 浏览器回归普通仓库命令：`npx --yes --package @playwright/test playwright test scripts/drama_synthesis_browser.spec.js --reporter=line --workers=1`。spec 内置 CLI-relative import resolver，不依赖手工 `NODE_PATH`，不 vendor `node_modules`。
+
+历史说明：2026-08-26 的 fake-only/未授权描述只约束当时的离线轮次，不能覆盖以上最新授权。此前浏览器与旧候选计数保留在 test-report 历史段，不计入本轮 166，也不假称本轮重新跑过浏览器。

@@ -1,5 +1,9 @@
 # 数据与所有权合同
 
+## 2026-08-27 现行状态
+
+代码合同对应 c719bebf72be900ec3853858dc53b36b83beffd2；真实三表 snapshot + CPU 本机隔离 MySQL5.7.44 恢复/迁移演练已 PASS。生产 ads_aius 仍只有 SELECT/SHOW VIEW，无合法 admin/migrator/writer，生产 additive DDL 未因演练通过而获准执行。现行证据/权限见 [migration.md](migration.md)；旧 API 备份路线不是当前必选项，禁止腾讯云管理后台，不声称全集群灾备通过。
+
 ## CPU SQLite
 
 - `drama_material_job.outputs_json` 继续使用既有列，仅把四个布尔键归一为 `concat_video`、`no_bgm_video`、`cover_16x9`、`random_template_video`；历史错误键 `random_template` 只读归一，不作为新存储合同；不删旧列。
@@ -7,14 +11,20 @@
 - `drama_material_short_link` 对 `(job_id, material_kind)` 唯一；自增 `id` 是 gy 数字 namespace；content_id、target、short URL、wrapper SHA 与发布状态不可变。
 - `drama_youtube_publish` 是发布、处理、评论与凭据身份的权威任务账本，含冻结模板/渲染描述、source identity、resumable 状态、独立 `comment_status`/`sync_status`、lease owner/generation 与 unknown 标志。
 - `drama_youtube_sync_outbox` 以 `(entity_kind, external_id)` 唯一，状态、attempt、lease generation 独立；同步失败不得改写已确认的视频/评论事实。
+- 内部 canary 复用既有 privacy_status/operation_id/attempt/event 字段，不另加 canary DDL。固定 operation `drama-hk-deploy-unlisted-20260827-shahrul-263`、app1479/channel263/account255/UCHJ1jFaYuW8g5EM7hM5pPpg、privacy_status=unlisted；只接受精确任务 claim。普通 HTTP/UI/worker/outbox 保持 public lane。
+- session intent 在创建上传会话前提交；未保存会话/视频身份的已尝试任务 hold，不另建会话。已确认评论 ID 在同步 hold/reconcile 中保留；unknown 评论不自动重试。canary outbox 只在视频/评论均 published、unknown=0 且远端 fresh processed/succeeded/unlisted 核验后处理。
 
-`ensure_storage()` 仅 `CREATE TABLE/INDEX IF NOT EXISTS` 和经 `PRAGMA table_info` 判定后的 additive `ALTER TABLE ... ADD COLUMN lease_generation ... DEFAULT 0`。禁止 DROP、DELETE、反向迁移和历史重解释。
+`ensure_storage()` 仅做幂等 additive 初始化/补列。内部 canary CLI 不调用它；先要求已准备好的真实 CPU ledger，status 使用 mode=ro。禁止 DROP、DELETE、反向迁移和历史重解释。
 
 ## 外部统一 MySQL
 
-2026-08-26 只读实查确认三张 legacy 表均位于 `kunlunads_dev`：`ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`，现有规模约 24.3 万、53、5.5 万行。运行前只做 additive migration：分别增加 nullable ASCII/binary `drama_external_video_id`、`drama_external_comment_id`、`drama_external_publish_id` 与唯一索引；历史行保持 NULL，禁止回填或重解释。迁移脚本固定集群 `cynosdbmysql-5kxxsre7`、主库 `101.32.56.53:63353`、schema 与账号名，要求 48 小时内成功备份、API 读回和恢复演练 PASS 的 0600 evidence 文件，支持 dry-run/幂等重跑。一次性 `drama_youtube_migrator@43.166.187.96` 仅在迁移窗口持有三表级 SELECT/INSERT/CREATE/ALTER，完成后二次 dry-run并销毁；长期 `drama_youtube_writer@43.166.187.96` 从未获得 DDL，最终仅留三表级 SELECT/INSERT/UPDATE。
+三张 legacy 表均位于 `kunlunads_dev`：`ads_youtube_videos`、`ads_youtube_comments`、`ads_youtube_publish_log`。2026-08-27 一致性 snapshot 的实际行数为 244151、53、55105，共299309；2026-08-26 的近似行数仅属历史。生产迁移只增加 nullable ASCII/binary `drama_external_video_id`、`drama_external_comment_id`、`drama_external_publish_id` 与唯一索引，历史行保持 NULL，不回填或重解释。
+
+生产目标仍固定集群 `cynosdbmysql-5kxxsre7`、主库 `101.32.56.53:63353`、schema 与账号名。当前受控路线在只读63350取得三表一致性快照，恢复到CPU127.0.0.1:23357独立MySQL5.7；数据/结构/索引守恒、首次/幂等迁移通过后机器生成 `table_snapshot_rehearsal` 的0600 evidence，绑定候选/五文件代码、manifest/inventory/report/契约SHA与48小时snapshot、4小时验证时效。此证据不等于集群灾备。一次性 migrator 仅三表 SELECT/INSERT/CREATE/ALTER，完成后销毁；长期 writer 仅三表 SELECT/INSERT/UPDATE，永不获得DDL。
 
 统一 writer 只接收受控 `select/insert/update`、精确表白名单和实体级 exact payload；将发布事实映射到 legacy 必填列，并用三个 external ID 列实现数据库级幂等。`publish_id` 是正的 32-bit 整数，publish_log external ID 是规范十进制字符串；video/comment external ID 分别冻结为对应字符串 ID，三类 identity mismatch 均拒绝。legacy `ads_youtube_videos.queue_id` 与 `ads_youtube_publish_log.created_queue` 都写成 `-publish_id`：负数 namespace 经线上只读审计为未使用，可保持两表关联，又不会伪装成现有正数 `ads_created_queue` ID。单进程并发 1，先 select 再 insert；同 ID 同内容复用，不同内容冲突。`127.0.0.1:18837` RPC health 精确校验三表全部现行列的 type/NULL/default/charset/collation/extra、external 唯一索引和最终最小 grants；额外列、类型漂移或额外权限均关闭同步。客户端 token copy 为 root:root 0600，服务端同值 copy 与 MySQL writer JSON 为 `drama-youtube:drama-youtube` 0600；缺 executor、缺表、schema/grant 不匹配或非白名单操作均 fail closed。
+
+canary 的 video/publish_log 允许且必须保持 unlisted，只在精确 app/channel 与固定 canary_operation_id marker 下通过验证；评论也校验同一固定 marker/channel。writer 从已验证 payload 读取 privacy_status，不硬编码 public；safe_log 带固定 marker/unlisted。鉴权 health 返回 `drama-youtube-writer-preflight-v1`、exact writer_identity、writable/schema_verified/indexes_verified 与 grant_fingerprint；CLI 在第一次 OAuth/上传前验证，不扩展 RPC 操作权限。
 
 ## 文件所有权
 

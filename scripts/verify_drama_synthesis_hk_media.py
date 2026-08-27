@@ -22,10 +22,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from features.drama_synthesis.core import freeze_random_recipe
+from features.drama_synthesis.gpu_cache import public_result
 
 BASE = Path('/data/drama-synthesis-gpu')
 WORK = BASE / 'work/acceptance'
-REPORT = WORK / 'http-media-20260827-v2.json'
+REPORT = WORK / 'http-media-20260827-v3.json'
 API = 'http://127.0.0.1:8787'
 PREFIX = 'drama-synthesis-canary/20260827'
 
@@ -37,9 +38,34 @@ def command(args, timeout=180):
     return proc.stdout
 
 
+def job_identity(mode):
+    return hashlib.sha256(('hk-synthetic-20260827-v3-' + mode).encode()).hexdigest()[:32]
+
+
+def manifest_snapshot(job_id):
+    path = Path(os.environ['GPU_VIDEO_RESULT_ROOT']) / (job_id + '.json')
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_bytes()
+    assert len(raw) <= 1024 * 1024
+    value = json.loads(raw)
+    assert value['job_id'] == job_id and value['gpu_result_manifest_version'] == 2
+    return {'sha256': hashlib.sha256(raw).hexdigest(), 'mtime_ns': path.stat().st_mtime_ns}
+
+
+def verify_replay(api, row):
+    before = manifest_snapshot(row['job_id'])
+    assert not (BASE / 'work/jobs' / row['job_id']).exists()
+    status, repeated = api('/api/gpu-video/render', row['payload'])
+    assert status == 200 and public_result(repeated) == public_result(row['output'])
+    assert manifest_snapshot(row['job_id']) == before
+    assert not (BASE / 'work/jobs' / row['job_id']).exists()
+    return before
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--replay-only', action='store_true', help='Recheck completed v3 jobs without a fixture server or rendering')
     args = parser.parse_args()
     if not args.apply:
         parser.error('--apply is required for synthetic media and COS writes')
@@ -70,6 +96,25 @@ def main():
     assert {k: len(v) for k, v in catalog['categories'].items()} == {
         'border': 3, 'opacity_video': 5, 'corners': 3, 'tint': 7}
     assert 'light' not in catalog['categories']
+
+    if args.replay_only:
+        evidence = json.loads(REPORT.read_text(encoding='utf-8'))
+        assert evidence['ok'] and evidence['release_sha'] == ROOT.name
+        assert len(evidence['results']) == 2
+        for row in evidence['results']:
+            assert row['job_id'] == job_identity(row['mode'])
+            assert verify_replay(api, row) == row['manifest_after_render']
+        evidence['restart_replay_verified'] = True
+        REPORT.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
+        print(json.dumps({'ok': True, 'replay_only': True, 'jobs': 2, 'report': str(REPORT), 'publications': 0}), flush=True)
+        return
+
+    # Fresh-work acceptance and persisted replay are distinct phases. Refuse to
+    # overwrite earlier fixtures/jobs when this whole suite is invoked again.
+    for mode in ('auto', 'manual'):
+        job_id = job_identity(mode)
+        assert not (Path(os.environ['GPU_VIDEO_RESULT_ROOT']) / (job_id + '.json')).exists()
+        assert not (BASE / 'work/jobs' / job_id).exists()
 
     fixtures = {'/episode1.mp4': WORK / 'episode1.mp4',
                 '/episode2.mp4': WORK / 'episode2.mp4',
@@ -105,12 +150,12 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     fixture_base = f'http://127.0.0.1:{server.server_port}'
-    evidence = {'suite': 'hk-synthetic-http-media-20260827', 'results': [],
+    evidence = {'suite': 'hk-synthetic-http-media-20260827-v3', 'results': [], 'release_sha': ROOT.name,
                 'manifest_sha256': catalog['manifest_sha256'], 'publications': 0}
     started = time.monotonic()
     try:
         for mode in ('auto', 'manual'):
-            job_id = hashlib.sha256(('hk-synthetic-20260827-v2-' + mode).encode()).hexdigest()[:32]
+            job_id = job_identity(mode)
             selection = {'mode': mode, 'source': 'concat_video' if mode == 'auto' else 'no_bgm_video'}
             if mode == 'manual':
                 selection['layers'] = {k: rows[0]['name'] for k, rows in catalog['categories'].items()}
@@ -147,7 +192,7 @@ def main():
             if status != 200:
                 raise RuntimeError('render_failed:' + mode + ':' + str(status) + ':' + str(output.get('code')))
             assert output['random_template_recipe_sha256'] == recipe['recipe_sha256']
-            row = {'job_id': job_id, 'mode': mode, 'recipe': recipe, 'output': output, 'media': {}}
+            row = {'job_id': job_id, 'mode': mode, 'recipe': recipe, 'payload': payload, 'output': output, 'media': {}}
             for key in ('output_video_url', 'output_video_no_bgm_url', 'output_random_template_url'):
                 url = output.get(key, '')
                 if not url:
@@ -188,7 +233,7 @@ def main():
                                  '-ss', str(position), '-i', str(path), '-frames:v', '1', str(frame)])
                         frame_paths.append(str(frame))
                     row['media'][key]['inspection_frames'] = frame_paths
-            assert api('/api/gpu-video/render', payload) == (200, output)
+            row['manifest_after_render'] = verify_replay(api, row)
             row['idempotent_readback'] = True
             evidence['results'].append(row)
             REPORT.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
