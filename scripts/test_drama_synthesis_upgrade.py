@@ -114,7 +114,8 @@ class FakePublishClient:
         self.identity_checks += 1
         if expected != CHANNEL: raise AssertionError("wrong channel")
     def video_status(self, _token, _video_id): return {"state": self.video_states.pop(0), "visibility": "public"}
-    def publish_comment(self, _token, *, video_id, comment_text):
+    def publish_comment(self, _token, *, video_id, comment_text, channel_id):
+        if channel_id != CHANNEL: raise AssertionError("wrong comment channel")
         self.comments += 1
         self.last_comment = (video_id, comment_text)
         return "comment_123"

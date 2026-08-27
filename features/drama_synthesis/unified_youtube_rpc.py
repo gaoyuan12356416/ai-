@@ -19,6 +19,7 @@ from .unified_youtube import (
     ALLOWED_ACTIONS,
     TABLE_BY_KIND,
     TABLE_TO_KIND,
+    WRITER_HEALTH_CONTRACT,
     validate_controlled_operation,
     validate_entity_payload,
     validate_external_id,
@@ -380,7 +381,7 @@ def _video_record(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "video_description": description[:3000],
         "published_at": _mysql_timestamp(str(payload["published_at_utc"])),
         "filenames": source_url[:255],
-        "privacy_status": "public",
+        "privacy_status": str(payload["privacy_status"]),
         "is_made_for_kids": 0,
         "is_allow_like": 1,
         "user_id": int(payload["operator_user_id"]),
@@ -414,6 +415,10 @@ def _publish_log_record(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "source_url_sha256": hashlib.sha256(source_url.encode("utf-8")).hexdigest(),
         "source_url_legacy_truncated": len(source_url) > 255,
     }
+    if payload.get("canary_operation_id"):
+        # The ingress validator permits only the one bound unlisted canary.
+        safe_log["canary_operation_id"] = str(payload["canary_operation_id"])
+        safe_log["privacy_status"] = str(payload["privacy_status"])
     return {
         "type_id": 3,
         "user_id": int(payload["operator_user_id"]),
@@ -514,7 +519,12 @@ class UnifiedYouTubeLedger:
                         raise LedgerRPCError("youtube_sync_schema_mismatch", 503)
                 return {
                     "ok": True,
+                    "contract": WRITER_HEALTH_CONTRACT,
                     "schema": self.schema,
+                    "writer_identity": current_user,
+                    "writable": True,
+                    "schema_verified": True,
+                    "indexes_verified": True,
                     "grant_fingerprint": grant_fingerprint,
                 }
         finally:

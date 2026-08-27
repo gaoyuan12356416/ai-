@@ -25,7 +25,7 @@ from features.drama_synthesis.core import freeze_random_recipe
 
 BASE = Path('/data/drama-synthesis-gpu')
 WORK = BASE / 'work/acceptance'
-REPORT = WORK / 'http-media-20260827.json'
+REPORT = WORK / 'http-media-20260827-v2.json'
 API = 'http://127.0.0.1:8787'
 PREFIX = 'drama-synthesis-canary/20260827'
 
@@ -78,6 +78,7 @@ def main():
         command([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
                  '-f', 'lavfi', '-i', 'testsrc2=size=360x640:rate=25:duration=2',
                  '-f', 'lavfi', '-i', f'sine=frequency={440 * index}:sample_rate=48000:duration=2',
+                 '-vf', f'hue=h={0 if index == 1 else 180}',
                  '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
                  '-c:a', 'aac', '-ac', '2', '-shortest', str(fixtures[f'/episode{index}.mp4'])])
     command([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
@@ -109,7 +110,7 @@ def main():
     started = time.monotonic()
     try:
         for mode in ('auto', 'manual'):
-            job_id = hashlib.sha256(('hk-synthetic-20260827-' + mode).encode()).hexdigest()[:32]
+            job_id = hashlib.sha256(('hk-synthetic-20260827-v2-' + mode).encode()).hexdigest()[:32]
             selection = {'mode': mode, 'source': 'concat_video' if mode == 'auto' else 'no_bgm_video'}
             if mode == 'manual':
                 selection['layers'] = {k: rows[0]['name'] for k, rows in catalog['categories'].items()}
@@ -172,10 +173,21 @@ def main():
                 assert 4.75 <= duration <= 5.5 and video['codec_name'] == 'h264' and audio['codec_name'] == 'aac'
                 if key == 'output_random_template_url':
                     assert (video['width'], video['height'], video['profile']) == (720, 1280, 'High')
+                    assert 4.85 <= float(video['duration']) <= 5.15
+                    assert 146 <= int(video['nb_frames']) <= 155
                     assert digest.hexdigest() == output['random_template_output_sha256']
                 command([ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror', '-nostdin', '-i', str(path), '-f', 'null', '-'])
                 row['media'][key] = {'sha256': digest.hexdigest(), 'bytes': length, 'duration': duration,
                                      'width': video['width'], 'height': video['height'], 'decoded': True}
+                if key == 'output_random_template_url':
+                    row['media'][key].update(video_duration=video['duration'], video_frames=video['nb_frames'])
+                    frame_paths = []
+                    for position in (0.5, 1.1, 3.1, 4.8):
+                        frame = WORK / (job_id + '-frame-' + str(position) + '.png')
+                        command([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                                 '-ss', str(position), '-i', str(path), '-frames:v', '1', str(frame)])
+                        frame_paths.append(str(frame))
+                    row['media'][key]['inspection_frames'] = frame_paths
             assert api('/api/gpu-video/render', payload) == (200, output)
             row['idempotent_readback'] = True
             evidence['results'].append(row)

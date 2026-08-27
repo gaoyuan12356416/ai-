@@ -14,7 +14,9 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .core import DramaSynthesisError
+from .core import (
+    CANARY_APP_ID, CANARY_CHANNEL_LOCAL_ID, CANARY_OPERATION_ID, DramaSynthesisError,
+)
 
 TABLE_BY_KIND = {
     "video": "ads_youtube_videos",
@@ -43,6 +45,21 @@ ENTITY_PAYLOAD_KEYS = {
     "publish_log": VIDEO_PAYLOAD_KEYS,
 }
 TABLE_TO_KIND = {table: kind for kind, table in TABLE_BY_KIND.items()}
+WRITER_HEALTH_CONTRACT = "drama-youtube-writer-preflight-v1"
+
+
+def validate_writer_health(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {"ok", "contract", "schema", "writer_identity", "writable", "schema_verified", "indexes_verified", "grant_fingerprint"}
+    if (
+        not isinstance(value, Mapping) or set(value) != required
+        or value.get("ok") is not True or value.get("contract") != WRITER_HEALTH_CONTRACT
+        or value.get("schema") != "kunlunads_dev"
+        or value.get("writer_identity") != "drama_youtube_writer@43.166.187.96"
+        or any(value.get(key) is not True for key in ("writable", "schema_verified", "indexes_verified"))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("grant_fingerprint") or ""))
+    ):
+        raise DramaSynthesisError("youtube_sync_health_invalid", "YouTube统一记录服务身份、表结构或权限未通过预检", 503)
+    return dict(value)
 
 
 def read_secure_owned_file(path_text: str, *, max_bytes: int) -> bytes:
@@ -121,7 +138,13 @@ def _validate_video_payload(payload: Mapping[str, Any]) -> None:
         and valid_url
         and type(title) is str and 1 <= len(title) <= 100
         and type(description) is str and bool(description) and len(description.encode("utf-8")) <= 5000
-        and payload.get("privacy_status") == "public"
+        and (
+            payload.get("privacy_status") == "public" and "canary_operation_id" not in payload
+            or payload.get("privacy_status") == "unlisted"
+            and payload.get("canary_operation_id") == CANARY_OPERATION_ID
+            and payload.get("app_id") == int(CANARY_APP_ID)
+            and payload.get("channel_local_id") == int(CANARY_CHANNEL_LOCAL_ID)
+        )
         and _valid_utc(payload.get("published_at_utc"))
     ):
         raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
@@ -134,6 +157,11 @@ def _validate_comment_payload(payload: Mapping[str, Any]) -> None:
         and _valid_int(payload.get("operator_user_id"), low=0)
         and type(comment) is str and 1 <= len(comment) <= 1000
         and _valid_utc(payload.get("published_at_utc"))
+        and (
+            "canary_operation_id" not in payload
+            or payload.get("canary_operation_id") == CANARY_OPERATION_ID
+            and payload.get("channel_local_id") == int(CANARY_CHANNEL_LOCAL_ID)
+        )
     ):
         raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
 
@@ -156,6 +184,10 @@ def _expected_external_id(entity_kind: str, payload: Mapping[str, Any]) -> str:
 
 def validate_entity_payload(entity_kind: str, external_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     required = ENTITY_PAYLOAD_KEYS.get(entity_kind)
+    if required is not None and isinstance(payload, Mapping) and "canary_operation_id" in payload:
+        required = required | {"canary_operation_id"}
+        if payload.get("canary_operation_id") != CANARY_OPERATION_ID:
+            raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
     if (
         required is None or type(external_id) is not str
         or not isinstance(payload, Mapping) or set(payload.keys()) != required
@@ -212,6 +244,26 @@ class ControlledRPCExecutor:
         self.token = token
         self.timeout = max(3, min(int(timeout), 60))
         self.session_factory = session_factory
+
+    def health(self) -> Mapping[str, Any]:
+        session = self.session_factory()
+        session.trust_env = False
+        try:
+            response = session.get(
+                "http://127.0.0.1:18837/health", headers={"Authorization": "Bearer " + self.token},
+                timeout=self.timeout, allow_redirects=False,
+            )
+        except requests.RequestException:
+            raise DramaSynthesisError("youtube_sync_health_unavailable", "YouTube统一记录服务只读预检不可用", 503) from None
+        finally:
+            session.close()
+        if response.status_code != 200:
+            raise DramaSynthesisError("youtube_sync_health_unavailable", "YouTube统一记录服务只读预检未通过", 503)
+        try:
+            value = response.json()
+        except ValueError:
+            value = None
+        return validate_writer_health(value)
 
     def __call__(self, action: str, table: str, external_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         validate_controlled_operation(action, table)
@@ -282,6 +334,12 @@ class UnifiedYouTubeWriter:
     def __init__(self, executor: Callable[[str, str, str, Mapping[str, Any]], Mapping[str, Any]] | None):
         self.executor = executor
 
+    def preflight(self) -> Mapping[str, Any]:
+        health = getattr(self.executor, "health", None)
+        if not callable(health):
+            raise DramaSynthesisError("youtube_sync_health_unavailable", "YouTube统一记录服务未配置只读预检", 503)
+        return validate_writer_health(health())
+
     def sync(self, entity_kind: str, external_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         table = TABLE_BY_KIND.get(str(entity_kind))
         if table is None:
@@ -305,9 +363,12 @@ def validate_controlled_operation(action: str, table: str) -> None:
         raise DramaSynthesisError("youtube_sync_operation_forbidden", "YouTube统一记录操作被拒绝", 403)
 
 
-def run_sync_outbox_once(store, writer: UnifiedYouTubeWriter, worker_id: str):
+def run_sync_outbox_once(store, writer: UnifiedYouTubeWriter, worker_id: str, *, canary_task_id: int | None = None):
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    item = store.claim_youtube_sync(worker_id, expiry)
+    if canary_task_id is None:
+        item = store.claim_youtube_sync(worker_id, expiry)
+    else:
+        item = store.claim_youtube_sync(worker_id, expiry, canary_task_id=canary_task_id)
     if item is None:
         return {"status": "no_pending", "claimed": False}
     try:

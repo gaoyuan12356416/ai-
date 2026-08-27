@@ -102,6 +102,11 @@ def load_backup_evidence_file(path_text: str, *, candidate_git_sha: str = "") ->
         value = json.loads(raw.decode("utf-8"))
     except (RuntimeError, UnicodeDecodeError, ValueError):
         raise RuntimeError("verified backup evidence file is invalid") from None
+    if isinstance(value, Mapping) and value.get("verification_source") == "table_snapshot_rehearsal":
+        from scripts.drama_youtube_three_table_rehearsal import validate_table_snapshot_evidence
+
+        validate_table_snapshot_evidence(path_text, value, candidate_git_sha=candidate_git_sha)
+        return dict(value, evidence_sha256=hashlib.sha256(raw).hexdigest())
     if not isinstance(value, Mapping) or set(value) != BACKUP_EVIDENCE_KEYS:
         raise RuntimeError("verified backup evidence file is invalid")
     if (
@@ -110,7 +115,7 @@ def load_backup_evidence_file(path_text: str, *, candidate_git_sha: str = "") ->
         or value.get("backup_status") != "SUCCESS"
         or value.get("verification_source") != "tencent_cynosdb_api"
         or value.get("rehearsal_status") != "PASS"
-        or not re.fullmatch(r"[A-Za-z0-9_.:/+-]{8,200}", str(value.get("backup_id") or ""))
+        or not re.fullmatch(r"(?:[0-9]{6,200}|[A-Za-z0-9_.:/+-]{8,200})", str(value.get("backup_id") or ""))
         or not re.fullmatch(r"cynosdbmysql-[a-z0-9]{4,64}", str(value.get("restore_instance_id") or ""))
         or value.get("restore_instance_id") == CLUSTER_ID
         or value.get("migration_contract_sha256") != MIGRATION_CONTRACT_SHA256
@@ -155,14 +160,16 @@ def _connect(config: Mapping[str, Any], *, expected_user: str = USER):
     )
 
 
-def _inspect(cursor: Any) -> Dict[str, Dict[str, Any]]:
+def _inspect(cursor: Any, *, schema: str = SCHEMA) -> Dict[str, Dict[str, Any]]:
+    if schema != SCHEMA and not re.fullmatch(r"drama_youtube_rehearsal_[0-9a-f]{16}", schema):
+        raise RuntimeError("migration inspection schema is invalid")
     result: Dict[str, Dict[str, Any]] = {}
     for table, spec in MIGRATIONS.items():
         cursor.execute(
             "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,"
             "CHARACTER_SET_NAME,COLLATION_NAME,EXTRA "
             "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s",
-            (SCHEMA, table),
+            (schema, table),
         )
         column_rows = list(cursor.fetchall())
         columns = {str(row["COLUMN_NAME"]): row for row in column_rows}
@@ -173,7 +180,7 @@ def _inspect(cursor: Any) -> Dict[str, Dict[str, Any]]:
             "SELECT INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX,COLUMN_NAME "
             "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND INDEX_NAME=%s "
             "ORDER BY SEQ_IN_INDEX",
-            (SCHEMA, table, spec["index"]),
+            (schema, table, spec["index"]),
         )
         index_rows = list(cursor.fetchall())
         if column is not None:
@@ -181,7 +188,7 @@ def _inspect(cursor: Any) -> Dict[str, Dict[str, Any]]:
                 "SELECT COUNT(*) AS duplicate_groups FROM ("
                 "SELECT 1 FROM `%s`.`%s` WHERE `%s` IS NOT NULL "
                 "GROUP BY `%s` HAVING COUNT(*)>1 LIMIT 1) duplicate_probe"
-                % (SCHEMA, table, spec["column"], spec["column"])
+                % (schema, table, spec["column"], spec["column"])
             )
             duplicate_groups = int(cursor.fetchone()["duplicate_groups"])
         else:
@@ -214,6 +221,46 @@ def _validate_existing(state: Mapping[str, Mapping[str, Any]], *, require_extern
             raise RuntimeError("external-id duplicates block the unique index")
 
 
+def _run_migration(cursor: Any, *, apply: bool, schema: str = SCHEMA) -> Mapping[str, Any]:
+    """Shared exact DDL, invoked only after the caller's target/identity gate."""
+    before = _inspect(cursor, schema=schema)
+    _validate_existing(before, require_external=False)
+    plan = []
+    applied = []
+    for table, spec in MIGRATIONS.items():
+        if before[table]["column"] is None:
+            plan.append({"table": table, "action": "add_column_and_unique_index"})
+        elif not before[table]["index"]:
+            plan.append({"table": table, "action": "add_unique_index"})
+    if apply:
+        for item in plan:
+            table = item["table"]
+            spec = MIGRATIONS[table]
+            if item["action"] == "add_column_and_unique_index":
+                sql = (
+                    "ALTER TABLE `%s`.`%s` ADD COLUMN `%s` %s, "
+                    "ADD UNIQUE KEY `%s` (`%s`), ALGORITHM=INPLACE, LOCK=NONE"
+                    % (schema, table, spec["column"], spec["column_sql"], spec["index"], spec["column"])
+                )
+            else:
+                sql = (
+                    "ALTER TABLE `%s`.`%s` ADD UNIQUE KEY `%s` (`%s`), "
+                    "ALGORITHM=INPLACE, LOCK=NONE"
+                    % (schema, table, spec["index"], spec["column"])
+                )
+            cursor.execute(sql)
+            applied.append(dict(item))
+    after = _inspect(cursor, schema=schema)
+    complete = not any(
+        after[table]["column"] is None or not after[table]["index"]
+        for table in MIGRATIONS
+    )
+    _validate_existing(after, require_external=complete)
+    if apply and not complete:
+        raise RuntimeError("unified schema migration verification failed")
+    return {"plan": plan, "applied": applied, "complete": complete}
+
+
 def migrate(
     credential_file: str,
     *,
@@ -235,7 +282,6 @@ def migrate(
     )
     config = load_database_credential_file(credential_file, expected_user=MIGRATOR_USER)
     connection = _connect(config, expected_user=MIGRATOR_USER)
-    applied = []
     try:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -255,48 +301,13 @@ def migrate(
                 expected_user=MIGRATOR_USER,
                 expected_table_privileges=MIGRATOR_TABLE_PRIVILEGES,
             )
-            before = _inspect(cursor)
-            _validate_existing(before, require_external=False)
-            plan = []
-            for table, spec in MIGRATIONS.items():
-                if before[table]["column"] is None:
-                    plan.append({"table": table, "action": "add_column_and_unique_index"})
-                elif not before[table]["index"]:
-                    plan.append({"table": table, "action": "add_unique_index"})
-            if apply:
-                for item in plan:
-                    table = item["table"]
-                    spec = MIGRATIONS[table]
-                    if item["action"] == "add_column_and_unique_index":
-                        sql = (
-                            "ALTER TABLE `%s`.`%s` ADD COLUMN `%s` %s, "
-                            "ADD UNIQUE KEY `%s` (`%s`), ALGORITHM=INPLACE, LOCK=NONE"
-                            % (SCHEMA, table, spec["column"], spec["column_sql"], spec["index"], spec["column"])
-                        )
-                    else:
-                        sql = (
-                            "ALTER TABLE `%s`.`%s` ADD UNIQUE KEY `%s` (`%s`), "
-                            "ALGORITHM=INPLACE, LOCK=NONE"
-                            % (SCHEMA, table, spec["index"], spec["column"])
-                        )
-                    cursor.execute(sql)
-                    applied.append(dict(item))
-            after = _inspect(cursor)
-            complete = not any(
-                after[table]["column"] is None or not after[table]["index"]
-                for table in MIGRATIONS
-            )
-            _validate_existing(after, require_external=complete)
-            if apply and not complete:
-                raise RuntimeError("unified schema migration verification failed")
+            result = _run_migration(cursor, apply=apply)
             return {
                 "ok": True,
                 "mode": "apply" if apply else "dry-run",
                 "cluster_id": CLUSTER_ID,
                 "schema": SCHEMA,
-                "plan": plan,
-                "applied": applied,
-                "complete": complete,
+                **result,
                 "grant_fingerprint": grant_fingerprint,
                 "backup_evidence_sha256": str((backup_evidence or {}).get("evidence_sha256") or ""),
                 "candidate_git_sha": candidate_git_sha,
@@ -323,12 +334,32 @@ def main() -> int:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--verify-runtime-writer", action="store_true")
+    mode.add_argument("--rehearse-loopback", action="store_true")
     parser.add_argument("--backup-evidence-file", default="")
     parser.add_argument("--candidate-git-sha", default="")
+    parser.add_argument("--snapshot-dir", default="")
+    parser.add_argument("--snapshot-manifest-sha256", default="")
+    parser.add_argument("--rehearsal-context", default="")
+    parser.add_argument("--rehearsal-port", type=int, default=0)
     args = parser.parse_args()
     if args.cluster_id != CLUSTER_ID:
         raise RuntimeError("migration cluster confirmation is invalid")
-    if args.verify_runtime_writer:
+    if args.rehearse_loopback:
+        if args.backup_evidence_file:
+            raise RuntimeError("loopback rehearsal creates its own evidence")
+        from scripts.drama_youtube_three_table_rehearsal import rehearse_loopback
+
+        result = rehearse_loopback(
+            args.credential_file,
+            snapshot_dir=args.snapshot_dir,
+            snapshot_manifest_sha256=args.snapshot_manifest_sha256,
+            candidate_git_sha=args.candidate_git_sha,
+            context=args.rehearsal_context,
+            port=args.rehearsal_port,
+        )
+    elif any((args.snapshot_dir, args.snapshot_manifest_sha256, args.rehearsal_context, args.rehearsal_port)):
+        raise RuntimeError("rehearsal arguments are valid only for loopback rehearsal")
+    elif args.verify_runtime_writer:
         if args.backup_evidence_file or args.candidate_git_sha:
             raise RuntimeError("backup evidence and candidate git sha are valid only for apply")
         result = verify_runtime_writer(args.credential_file)
@@ -345,4 +376,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        # Restore/driver exceptions can contain private row values. Never emit
+        # their text or traceback; our exact RuntimeError guards are static.
+        result = {"ok": False, "error": "unified_schema_migration_failed"}
+        if type(exc) is RuntimeError:
+            result["reason"] = str(exc)
+        elif exc.args and type(exc.args[0]) is int:
+            result["database_error_code"] = exc.args[0]
+        print(json.dumps(result, sort_keys=True), file=sys.stderr)
+        raise SystemExit(1) from None

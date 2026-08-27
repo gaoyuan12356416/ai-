@@ -66,6 +66,35 @@ def _probe(ffprobe: str, path: Path) -> Dict[str, Any]:
     return {"duration": duration, "has_audio": audio is not None, "video": video, "audio": audio}
 
 
+def build_drama_random_command(config, source, output, info, recipe, assets):
+    command = list(build_command(config, source, output, info, recipe, assets))
+    prefix = "[0:v]setpts=PTS-STARTPTS,"
+    if command.count("-filter_complex") != 1 or "-copyts" in command:
+        raise DramaSynthesisError("drama_random_graph_contract_invalid", "随机模板处理配置不兼容", 503)
+    graph_index = command.index("-filter_complex") + 1
+    if graph_index >= len(command) or not command[graph_index].startswith(prefix) or command[graph_index].count(prefix) != 1:
+        raise DramaSynthesisError("drama_random_graph_contract_invalid", "随机模板处理配置不兼容", 503)
+    # A 16:9 intro followed by portrait episodes reinitializes the filter graph.
+    # Demuxer timestamps are already rebased by FFmpeg's default input handling;
+    # resetting them again at every reinit silently drops earlier seconds.
+    command[graph_index] = command[graph_index].replace(prefix, "[0:v]setpts=PTS,", 1)
+    # Match the dedicated worker's two-core budget. The inherited FB graph's
+    # automatic per-filter thread pools exceed this service's TasksMax=128.
+    # This is a drama-only invocation override, not a change to the FB worker.
+    return [command[0], "-filter_complex_threads", "2", *command[1:]]
+
+
+def random_output_duration_matches(source_seconds, output_seconds, video_seconds):
+    try:
+        values = [float(value) for value in (source_seconds, output_seconds, video_seconds)]
+    except (ValueError, TypeError, OverflowError):
+        return False
+    # Fixed tolerance covers 30fps/AAC rounding, never a whole missing intro.
+    return all(math.isfinite(value) and value > 0 for value in values) and all(
+        abs(values[0] - value) <= 0.15 for value in values[1:]
+    )
+
+
 def render_random_output(
     *,
     source: Union[str, os.PathLike],
@@ -105,7 +134,7 @@ def render_random_output(
     output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     output_path.unlink(missing_ok=True)
     config = SimpleNamespace(ffmpeg=ffmpeg)
-    command = build_command(config, source_path, output_path, source_info, fb_recipe, selected_asset_paths(fb_recipe, assets))
+    command = build_drama_random_command(config, source_path, output_path, source_info, fb_recipe, selected_asset_paths(fb_recipe, assets))
     try:
         runner(command, check=True, capture_output=True, text=True, timeout=max(60, min(int(timeout), 10800)))
     except Exception:
@@ -113,6 +142,9 @@ def render_random_output(
         raise DramaSynthesisError("drama_random_render_failed", "随机模板视频制作失败", 502) from None
     result_info = _probe(ffprobe, output_path)
     video = result_info["video"]
+    if not random_output_duration_matches(source_info["duration"], result_info["duration"], video.get("duration")):
+        output_path.unlink(missing_ok=True)
+        raise DramaSynthesisError("drama_random_duration_mismatch", "随机模板成片时长与源视频不一致，已阻止上传", 502)
     if (
         video.get("codec_name") != "h264"
         or str(video.get("profile") or "").lower() != "high"

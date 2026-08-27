@@ -111,6 +111,48 @@ class DemucsAdapterTests(unittest.TestCase):
 
 
 class RuntimePackageTests(unittest.TestCase):
+    def fake_gpu_module(self, original):
+        fake_builder = mock.Mock(return_value=original)
+        spec = importlib.util.spec_from_file_location(
+            "features.drama_synthesis._thread_budget_test", ROOT / "features/drama_synthesis/gpu.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {
+            "features.fb_gpu.prepare_worker": SimpleNamespace(build_command=fake_builder),
+        }):
+            spec.loader.exec_module(module)
+        return module, fake_builder
+
+    def test_drama_random_graph_bounds_threads_without_changing_fb_command(self):
+        graph = "[0:v]setpts=PTS-STARTPTS,fps=30[v];[2:v]setpts=PTS-STARTPTS[a]"
+        original = ["ffmpeg", "-y", "-i", "source.mp4", "-filter_complex", graph, "output.mp4"]
+        module, fake_builder = self.fake_gpu_module(original)
+        args = (object(), "source", "output", {}, {}, {})
+        actual = module.build_drama_random_command(*args)
+        fake_builder.assert_called_once_with(*args)
+        expected = list(original)
+        expected[5] = graph.replace("[0:v]setpts=PTS-STARTPTS,", "[0:v]setpts=PTS,", 1)
+        self.assertEqual(actual, ["ffmpeg", "-filter_complex_threads", "2", *expected[1:]])
+        self.assertEqual(original[5], graph)
+        self.assertIn("[2:v]setpts=PTS-STARTPTS", actual[7])
+        self.assertNotIn("-copyts", actual)
+        self.assertNotIn("-start_at_zero", actual)
+
+    def test_drama_random_graph_drift_or_duplicate_source_reset_fails_closed(self):
+        for graph in ("[0:v]fps=30[v]", "[0:v]setpts=PTS-STARTPTS,[0:v]setpts=PTS-STARTPTS,"):
+            module, _ = self.fake_gpu_module(["ffmpeg", "-filter_complex", graph])
+            with self.subTest(graph=graph), self.assertRaisesRegex(Exception, "配置不兼容"):
+                module.build_drama_random_command(None, None, None, None, None, None)
+
+    def test_random_duration_allows_rounding_but_rejects_lost_intro_and_audio_padding(self):
+        module, _ = self.fake_gpu_module([])
+        self.assertTrue(module.random_output_duration_matches(5.021016, 5.0, "5.000000"))
+        self.assertFalse(module.random_output_duration_matches(5.021016, 3.966667, "3.966667"))
+        self.assertFalse(module.random_output_duration_matches(5.021016, 5.021016, "3.966667"))
+        self.assertFalse(module.random_output_duration_matches(7200, 7199, "7199"))
+        for value in (None, 0, float("nan"), float("inf")):
+            self.assertFalse(module.random_output_duration_matches(5, 5, value))
+
     def test_direct_dependencies_are_exact_not_a_transitive_lock_claim(self):
         deps = runtime.direct_requirements()
         self.assertEqual(deps["torch"], "2.5.1+cu124")

@@ -27,6 +27,7 @@ from .core import (
     COMMENT_SCOPE,
     DramaSynthesisError,
     DramaSynthesisStore,
+    is_youtube_canary,
     normalize_channel_scopes,
     scope_capabilities,
 )
@@ -339,9 +340,14 @@ class YouTubeHTTPClient:
             raise YouTubeHTTPError("youtube_source_empty", "视频文件为空", status=400)
         return total
 
-    def begin_resumable(self, token: str, *, title: str, description: str, size: int) -> str:
-        params = urlencode({"uploadType": "resumable", "part": "snippet,status"})
-        body = {"snippet": {"title": title, "description": description}, "status": {"privacyStatus": "public"}}
+    def begin_resumable(self, token: str, *, title: str, description: str, size: int, privacy_status: str = "public") -> str:
+        if privacy_status not in {"public", "unlisted"}:
+            raise YouTubeHTTPError("youtube_privacy_invalid", "YouTube视频隐私设置无效", status=400)
+        query = {"uploadType": "resumable", "part": "snippet,status"}
+        if privacy_status == "unlisted":
+            query["notifySubscribers"] = "false"
+        params = urlencode(query)
+        body = {"snippet": {"title": title, "description": description}, "status": {"privacyStatus": privacy_status}}
         session = self.session_factory()
         session.trust_env = False
         try:
@@ -435,9 +441,12 @@ class YouTubeHTTPClient:
             session.close()
         return self._upload_response(response, size)
 
-    def publish_comment(self, token: str, *, video_id: str, comment_text: str) -> str:
+    def publish_comment(self, token: str, *, video_id: str, comment_text: str, channel_id: str) -> str:
+        if not re.fullmatch(r"UC[A-Za-z0-9_-]{20,30}", str(channel_id or "")):
+            raise YouTubeHTTPError("youtube_comment_channel_invalid", "YouTube评论频道身份无效", status=400)
         body = {
             "snippet": {
+                "channelId": channel_id,
                 "videoId": video_id,
                 "topLevelComment": {"snippet": {"textOriginal": comment_text}},
             }
@@ -458,21 +467,32 @@ class YouTubeHTTPClient:
             session.close()
         if response.status_code >= 500:
             raise YouTubeHTTPError("youtube_comment_unknown", "YouTube评论发布结果未知", status=response.status_code, unknown=True)
+        if response.status_code not in (200, 201):
+            if 200 <= response.status_code < 300:
+                raise YouTubeHTTPError("youtube_comment_unknown", "YouTube评论发布结果未知", status=response.status_code, unknown=True)
+            raise YouTubeHTTPError("youtube_comment_failed", "YouTube评论发布失败", status=response.status_code)
         try:
             payload = response.json()
         except ValueError:
             payload = {}
-        comment_id = str(payload.get("id") or "")
-        if response.status_code not in (200, 201) or not comment_id:
-            raise YouTubeHTTPError("youtube_comment_failed", "YouTube评论发布失败", status=response.status_code)
+        snippet = payload.get("snippet") if isinstance(payload, Mapping) else None
+        comment = snippet.get("topLevelComment") if isinstance(snippet, Mapping) else None
+        comment_id = str(comment.get("id") or "") if isinstance(comment, Mapping) else ""
+        if (not isinstance(snippet, Mapping) or snippet.get("channelId") != channel_id
+                or snippet.get("videoId") != video_id
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", comment_id)):
+            raise YouTubeHTTPError("youtube_comment_identity_unknown", "YouTube评论身份无法确认，禁止自动重发", unknown=True)
         return comment_id
 
-    def video_status(self, token: str, video_id: str) -> Dict[str, str]:
+    def video_status(self, token: str, video_id: str, *, expected_privacy_status: str = "public") -> Dict[str, str]:
+        if expected_privacy_status not in {"public", "unlisted"}:
+            raise YouTubeHTTPError("youtube_privacy_invalid", "YouTube视频隐私设置无效", status=400)
+        canary = expected_privacy_status == "unlisted"
         session = self.session_factory()
         session.trust_env = False
         try:
             response = session.get(
-                VIDEOS_URL + "?" + urlencode((("part", "status"), ("id", video_id))),
+                VIDEOS_URL + "?" + urlencode((("part", "status,processingDetails" if canary else "status"), ("id", video_id))),
                 headers={"Authorization": "Bearer " + token}, timeout=self.timeout,
                 allow_redirects=False,
             )
@@ -494,6 +514,21 @@ class YouTubeHTTPClient:
             raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认", unknown=True)
         upload = str(status.get("uploadStatus") or "")
         visibility = str(status.get("privacyStatus") or "")
+        if canary:
+            if items[0].get("id") != video_id:
+                raise YouTubeHTTPError("youtube_video_identity_conflict", "内部测试视频身份无法核验", unknown=True)
+            if visibility != "unlisted":
+                # Never promote a forced-private or otherwise changed canary.
+                raise YouTubeHTTPError("youtube_canary_privacy_mismatch", "内部测试视频未保持不公开状态，已阻断后续操作", unknown=True)
+            details = items[0].get("processingDetails")
+            processing = str(details.get("processingStatus") or "") if isinstance(details, Mapping) else ""
+            if upload in {"failed", "rejected", "deleted"} or processing in {"failed", "terminated"}:
+                return {"state": "failed", "visibility": visibility, "processing_status": processing}
+            if upload == "processed" and processing == "succeeded":
+                return {"state": "published", "visibility": visibility, "processing_status": processing}
+            if upload in {"uploaded", "processing", "processed"} and processing in {"processing", "succeeded"}:
+                return {"state": "processing", "visibility": visibility, "processing_status": processing}
+            return {"state": "unknown", "visibility": visibility, "processing_status": processing}
         if upload == "processed" and visibility == "public":
             return {"state": "published", "visibility": visibility}
         if upload in {"uploaded", "processing"}:
@@ -523,17 +558,25 @@ class YouTubePublishEngine:
         self.work_root = root
         self.allowed_source_hosts = tuple(dict.fromkeys(str(item).strip().lower() for item in allowed_source_hosts if str(item).strip()))
         self.ffprobe = str(ffprobe)
+        self._canary_tick_token: Optional[tuple[int, str]] = None
         if not self.allowed_source_hosts:
             raise ValueError("YouTube source allowlist is required")
 
-    def run_once(self, worker_id: str) -> Dict[str, Any]:
+    def run_once(self, worker_id: str, *, canary_task_id: Optional[int] = None) -> Dict[str, Any]:
         worker_id = str(worker_id)
-        task = self.store.claim_youtube(worker_id, self._lease_expiry())
+        self._canary_tick_token = None
+        if canary_task_id is None:
+            task = self.store.claim_youtube(worker_id, self._lease_expiry())
+        else:
+            task = self.store.claim_youtube_canary(worker_id, self._lease_expiry(), int(canary_task_id))
         if task is None:
             return {"ok": True, "status": "no_pending", "claimed": False}
+        canary = canary_task_id is not None and is_youtube_canary(task)
         task_id = int(task["id"])
         lease_generation = int(task["lease_generation"])
         try:
+            if canary_task_id is not None and not canary:
+                raise YouTubeHTTPError("youtube_canary_identity_invalid", "内部测试任务身份不匹配", status=409)
             task = self._renew(task, worker_id)
             credential = self.credentials.credential(
                 app_id=task["app_id"],
@@ -547,9 +590,20 @@ class YouTubePublishEngine:
             token = self.client.refresh_access_token(credential)
             task = self._renew(task, worker_id)
             self.client.verify_channel_identity(token, task["channel_id"])
-            if task["video_state"] in {"submitted", "processing"}:
+            if canary:
+                self._canary_tick_token = (task_id, token)
+            if canary and int(task.get("unknown_outcome") or 0) and not task.get("video_id"):
+                # Unknown upload outcomes only query the original session.  A
+                # 308/404 is not permission to send bytes or create a new one.
                 task = self._renew(task, worker_id)
-                state = self.client.video_status(token, task["video_id"])
+                state = self.client.query_upload(task["resumable_session_uri"], int(task["source_size"]))
+                if state.get("state") == "submitted":
+                    task = self.store.video_submitted(task_id, state["video_id"], worker_id=worker_id, lease_generation=lease_generation)
+                    return {"ok": True, "status": task["status"], "task_id": task_id, "claimed": True}
+                raise YouTubeHTTPError("youtube_canary_reconcile_inconclusive", "内部测试原上传会话尚无法确认，禁止重传", unknown=True)
+            if task["video_state"] in {"submitted", "processing"} or (canary and task.get("video_id") and int(task.get("unknown_outcome") or 0)):
+                task = self._renew(task, worker_id)
+                state = self._video_status(task, token)
                 if state["state"] == "published":
                     task = self.store.video_published(task_id, task["video_id"], worker_id=worker_id, lease_generation=lease_generation)
                 elif state["state"] == "processing":
@@ -563,6 +617,14 @@ class YouTubePublishEngine:
                 task = self._publish_video(task, token, worker_id)
                 return {"ok": True, "status": task["status"], "task_id": task_id, "claimed": True}
             if task["comment_status"] in {"queued", "retry", "publishing"}:
+                if canary:
+                    # Comment retries/restarts must also re-read privacy before
+                    # any new external side effect on the confirmed video.
+                    state = self._video_status(task, token)
+                    if state.get("state") != "published":
+                        raise YouTubeHTTPError("youtube_canary_comment_preflight_unknown", "内部测试视频处理或隐私状态无法确认，禁止评论", unknown=True)
+                    if int(task.get("comment_attempt_count") or 0):
+                        raise YouTubeHTTPError("youtube_canary_comment_already_attempted", "内部测试已尝试评论，禁止自动重发", unknown=True)
                 task = self._renew(task, worker_id)
                 self.client.verify_channel_identity(token, task["channel_id"])
                 task = self._renew(task, worker_id)
@@ -572,7 +634,7 @@ class YouTubePublishEngine:
                     lease_generation=lease_generation,
                 )
                 task = self._renew(task, worker_id)
-                comment_id = self.client.publish_comment(token, video_id=task["video_id"], comment_text=task["comment_text"])
+                comment_id = self.client.publish_comment(token, video_id=task["video_id"], comment_text=task["comment_text"], channel_id=task["channel_id"])
                 task = self.store.comment_published(
                     task_id,
                     comment_id,
@@ -602,6 +664,10 @@ class YouTubePublishEngine:
             if exc.code == "youtube_stale_claim":
                 return {"ok": False, "status": "stale_claim", "task_id": task_id, "claimed": True}
             phase = "comment" if task.get("video_state") == "published" else "video"
+            persisted = self.store.youtube_task(task_id) if canary else task
+            attempted = canary and bool(
+                int((persisted or {}).get("comment_attempt_count" if phase == "comment" else "video_attempt_count") or 0)
+            )
             failed = self._fail_claim(
                 task_id,
                 worker_id,
@@ -609,7 +675,7 @@ class YouTubePublishEngine:
                 phase=phase,
                 code=exc.code,
                 message=str(exc),
-                unknown=False,
+                unknown=attempted,
                 retryable=False,
             )
             if failed is None:
@@ -621,6 +687,10 @@ class YouTubePublishEngine:
             # A programming/runtime failure after an upload or comment attempt
             # cannot be converted into a replacement publish automatically.
             phase = "comment" if task.get("video_state") == "published" else "video"
+            if canary:
+                # _publish_video may fail after persisting intent, before it
+                # returns its local task object to this caller.
+                task = self.store.youtube_task(task_id) or task
             external_attempted = bool(
                 task.get("resumable_session_uri")
                 or int(task.get("video_attempt_count") or 0)
@@ -641,6 +711,39 @@ class YouTubePublishEngine:
             if failed["status"] in {"failed", "unknown"}:
                 self._cleanup_terminal(task_id)
             return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
+
+    def _video_status(self, task: Mapping[str, Any], token: str) -> Dict[str, str]:
+        if not is_youtube_canary(task):
+            return self.client.video_status(token, task["video_id"])
+        state = self.client.video_status(token, task["video_id"], expected_privacy_status="unlisted")
+        if state.get("visibility") != "unlisted":
+            raise YouTubeHTTPError("youtube_canary_privacy_mismatch", "内部测试视频未保持不公开状态，已阻断后续操作", unknown=True)
+        if state.get("state") == "published" and state.get("processing_status") != "succeeded":
+            raise YouTubeHTTPError("youtube_canary_processing_unknown", "内部测试视频处理成功状态无法确认", unknown=True)
+        return state
+
+    def verify_canary_sync(self, task_id: int, *, token: Optional[str] = None) -> str:
+        """Fresh readback before each outbox claim; reuse only this tick's OAuth."""
+        task = self.store.youtube_canary_task()
+        if (task is None or int(task["id"]) != int(task_id)
+                or task["status"] != "published" or task["video_state"] != "published"
+                or task["comment_status"] != "published" or int(task["unknown_outcome"])):
+            raise YouTubeHTTPError("youtube_canary_sync_state_unconfirmed", "内部测试视频和评论尚未同时确认，禁止同步", unknown=True)
+        if token is None:
+            cached, self._canary_tick_token = self._canary_tick_token, None
+            if cached is not None and cached[0] == int(task_id):
+                token = cached[1]
+            else:
+                credential = self.credentials.credential(
+                    app_id=task["app_id"], channel_local_id=task["channel_local_id"],
+                    account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"],
+                )
+                token = self.client.refresh_access_token(credential)
+                self.client.verify_channel_identity(token, task["channel_id"])
+        state = self._video_status(task, token)
+        if state.get("state") != "published":
+            raise YouTubeHTTPError("youtube_canary_sync_state_unconfirmed", "内部测试同步前处理成功状态无法确认", unknown=True)
+        return token
 
     def _cleanup_terminal(self, task_id: int) -> None:
         shutil.rmtree(self.work_root / ("task-%d" % int(task_id)), ignore_errors=True)
@@ -679,6 +782,11 @@ class YouTubePublishEngine:
     def _publish_video(self, task: Mapping[str, Any], token: str, worker_id: str) -> Dict[str, Any]:
         task_id = int(task["id"])
         lease_generation = int(task["lease_generation"])
+        canary = is_youtube_canary(task)
+        if canary and int(task.get("video_attempt_count") or 0) and not task.get("resumable_session_uri"):
+            raise YouTubeHTTPError("youtube_canary_session_intent_unknown", "内部测试已有上传意图但缺少会话身份，禁止重建", unknown=True)
+        frozen_sha256 = str(task.get("source_sha256") or "")
+        frozen_size = int(task.get("source_size") or 0)
         root = self.work_root / ("task-%d" % task_id)
         source = root / "source.mp4"
         if not source.is_file():
@@ -705,6 +813,10 @@ class YouTubePublishEngine:
             raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败") from None
         if duration_ms <= 0:
             raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败")
+        if canary and task.get("resumable_session_uri") and (
+            frozen_sha256 != digest.hexdigest() or frozen_size != source.stat().st_size
+        ):
+            raise YouTubeHTTPError("youtube_canary_source_changed", "内部测试素材与原上传会话指纹不一致，禁止继续上传", unknown=True)
         task = self.store.advance_youtube(task_id, "uploading", worker_id=worker_id, lease_generation=lease_generation, source_sha256=digest.hexdigest(), source_duration_ms=duration_ms)
         size = source.stat().st_size
         session_uri = str(task.get("resumable_session_uri") or "")
@@ -740,7 +852,11 @@ class YouTubePublishEngine:
             task = self._renew(task, worker_id)
             self.client.verify_channel_identity(token, task["channel_id"])
             task = self._renew(task, worker_id)
-            session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size)
+            if canary:
+                task = self.store.mark_canary_upload_intent(task_id, worker_id=worker_id, lease_generation=lease_generation)
+                session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size, privacy_status="unlisted")
+            else:
+                session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size)
             self.store.set_upload_session(
                 task_id,
                 session_uri,
@@ -751,7 +867,7 @@ class YouTubePublishEngine:
             task = dict(task)
             task["resumable_session_uri"] = session_uri
             task["source_size"] = size
-            task["video_attempt_count"] = int(task.get("video_attempt_count") or 0) + 1
+            task["video_attempt_count"] = 1 if canary else int(task.get("video_attempt_count") or 0) + 1
         task = self._renew(task, worker_id)
         try:
             result = self.client.upload(session_uri, source, offset)
@@ -760,6 +876,8 @@ class YouTubePublishEngine:
                 raise
             task = self._renew(task, worker_id)
             result = self.client.query_upload(session_uri, size)
+            if canary and result.get("state") != "submitted":
+                raise YouTubeHTTPError("youtube_canary_reconcile_inconclusive", "内部测试原上传会话尚无法确认，禁止重传", unknown=True)
         if result["state"] == "submitted":
             return self.store.video_submitted(
                 task_id,
