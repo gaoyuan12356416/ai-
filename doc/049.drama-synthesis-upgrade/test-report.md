@@ -1,5 +1,15 @@
 # 测试报告
 
+## 弹窗加载反馈增量独立QA：PASS（BUG-030）
+
+两份同源HTML与新增Node测试共3文件冻结。独立一次新专项38/38+既有列表16/16通过；另12场景覆盖A→B→A、关闭/重开/等待旧请求、旧POST成功或失败到达已ready的新弹窗、拒绝重复确认、失败后同产品fresh重读，均PASS。Node语法、两页4段inline脚本、diff/新增文件尾空白及3文件前后hash一致通过。外部I/O为0、不是浏览器/生产测试；app/features/DB/RPC/CLI/deploy源码相对ee6不变。下一步精确GitHub静态部署与线上加载态核验，不重跑272/119整套、不合并累加历史批次。
+
+## 真实集成验收：指定频道单次发布闭环 PASS（17:31）
+
+ee6e00c CPU实机读取/上线与任务列表三入口通过，原样式/四项未选/移除下拉/CPU模板自动手动目录已在郜远会话核验；短链HTTP200、wrapper哈希及参数一致，列表再生成复用id1。指定Shahrul Ikmal发布任务1已完成：视频HGgjhhRXS-I、评论Ugwktiv9_nnXb1TN_c54AaABAg，attempt各1、unknown=false、视频/评论published、sync=synced。
+
+17:26:50独立于发布执行的YouTube新鲜读回确认unlisted/processed/succeeded、标题/描述/评论文本/作者匹配、仅一条comment thread。ads_ai三表各1、完整载荷与对应outbox一致、3outbox各attempt1，原账号Token/client指纹前后不变。17:28:47同operation/task完成后重放成功，17:31:02验证4SQLite表和3MySQL新表计数及全行hash完全不变。此批是真实集成证据，不计入离线用例数量；完整报告见[上线验收](release-acceptance-20260827.md)。正式放行及BUG-030加载态增量另记，不提前宣称完成。
+
 ## 实机兼容修正定向 QA：PASS（BUG-028/029）
 
 冻结的 HEX 读取与列表入口增量已独立复核，无新增 P0/P1。一次 `encoding + upgrade + canary` 定向 Python **119/119 PASS，6.717 秒**；两页 Node 行渲染 **16 checks PASS**。另独立纯内存读取/拒绝对抗 **6/6 PASS，0.222 秒**（包含实际 app.run_mysql AST 与 fake batch），Node **10 场景/20 次 handler 调用 PASS**；6 类外部 I/O 拦截均 0，非浏览器、非生产验收。3 Python compile/3.9 AST（实际 Python3.14.3）、Node --check/两页共4段 inline JS、diff 与新增文件尾空白、6 文件前后冻结 SHA 均通过。
@@ -16,7 +26,7 @@
 
 按用户新决定与 [现行合同](ads-ai-new-tables-20260827.md)，不再创建专用数据库账号。CPU 使用现有 ads_aius 与已有频道授权，应用 SQL 仅限 ads_ai 新三表；原 MySQL 表只读。健康合同为 drama-youtube-writer-preflight-v3，shared-existing-account / application-table-allowlist / db_least_privilege=false；仅核验必要能力，不宣称全量 grant 审计。每次写前验证 TRIGGER 可见性和无 trigger/FK，旧健康合同拒绝。既有 DDL/v2 payload 与 UI 合同不变；下文专用账号/旧 v2 health 是历史。本轮专项 108/108，独立唯一完整回归及实机发布验收另记，不叠加历史批次。
 
-## 当前实机结论：新表已创建，账号权限门禁未通过（16:06）
+## 历史实机结论：新表已创建，当时账号门禁未通过（16:06；已退休）
 
 GitHub 精确候选 `6e29ba8c07c75dea98caff4d1d2b4fba0ac9df1f` 在 CPU clean checkout 完成：生产只读发现 PASS、全新隔离 MySQL 5.7.44 九项建表/载荷/幂等/隔离演练 PASS、生产仅 CREATE 三张 ads_ai 专用表 PASS。apply 后管理员验证无 trigger/FK；随后 63350 每表回读 0 行。原表未写入、未复制数据。报告及 SHA 见 [新表合同与证据](ads-ai-new-tables-20260827.md)。
 

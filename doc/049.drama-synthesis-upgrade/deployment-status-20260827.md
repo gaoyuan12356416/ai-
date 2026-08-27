@@ -1,6 +1,12 @@
 # 剧集合成升级部署状态（2026-08-27）
 
-## 实机进展：CPU 已切换、v3 真实健康通过，验收修正中
+## 当前结论：真实发布、评论、新表记录与幂等通过（17:31）
+
+CPU已部署ee6e00c修正，HK正式制作前缀已激活；Shahrul Ikmal唯一canary已完成，视频`HGgjhhRXS-I`、评论`Ugwktiv9_nnXb1TN_c54AaABAg`，上传/评论各1次。17:26新鲜外部读回unlisted/processed/succeeded及全部文案/作者匹配，ads_ai三表各1、3outbox synced，原Token/client指纹不变；17:31完成后同ID重放的4SQLite表/3MySQL表计数与全行hash均不变。无专用数据库账号要求、未写原MySQL表。
+
+正式live/sync暂为0，仅余频道读取期间的弹窗加载反馈修正（BUG-030）及最终放行。详情、证据、版本和回滚边界以[上线验收记录](release-acceptance-20260827.md)为准。以下为分阶段历史，不得用旧HOLD/管理员账号要求覆盖最新决定或重复执行旧部署。
+
+## 历史实机进展：CPU 首次切换与兼容问题发现
 
 已从 GitHub 精确部署 CPU `59f95e6dc106a420fa2e326597c931ba712249f9`；API、原制作 worker、新 YouTube worker、新 writer 均 active/NRestarts=0，正式 live/sync 仍为 0。使用实际 drama-youtube OS 用户的 ads_aius/ads_ai v3 预检与鉴权 RPC 均通过，未鉴权 401；没有新增数据库账号。CPU 业务查询仍 63350/kunlunads_dev，制作明确指向 18788。20 个历史 done 保留，SQLite quick_check=ok；历史输出单事务归一后第二次 dry-run changes=0，新增本地账本为空。
 
@@ -14,7 +20,7 @@ HK 继续 e1f5a1d，已备份并在 16:42 左右将 COS_PREFIX/DRAMA_PUBLIC_BASE
 
 用户明确取消专用数据库账号隔离要求。按 [现行发布合同](ads-ai-new-tables-20260827.md) 使用 CPU 现有 ads_aius 和已有 YouTube OAuth，发布结果只写 ads_ai 三张新表；不创建/修改账号、不动原 MySQL 表。RPC v3 如实声明共享账号与应用表白名单，保留秘密保护、无 trigger/FK 检查、幂等与未知结果停止。无需再提供管理员凭据。以下专用账号/1410/旧库迁移内容均是历史，不再作为上线门禁；当前部署及真实测试尚待完成，最终实机状态另行记录。
 
-## 当前状态（2026-08-27 16:06，北京时间）：新表完成，建账号权限阻断
+## 历史快照（16:06）：新表完成，当时建账号权限阻断
 
 整体正式发布仍 HOLD。`ads_ai` 专用三表已创建、原表零写；当前阻断是合法管理员创建专用 DB writer 账号，不是 `ads_ai` 无写权限。以下实机证据由根代理执行并交接；本次文档更新未访问服务器或重新执行部署。
 
@@ -30,7 +36,7 @@ HK 继续 e1f5a1d，已备份并在 16:42 左右将 COS_PREFIX/DRAMA_PUBLIC_BASE
 | ffprobe | 已新装，SHA256 `bf7b813bb81f01695a38841e697d6fd858c194baf13017e78c2855af502e644a`；`/usr/bin/ffprobe` 指向 `/mnt/data-disk/drama-synthesis-cpu/runtime/ffprobe-n7.1-20250113/ffprobe` |
 | 16:09 演练资源 | 本次 23358 隔离 MySQL 容器已核验 ID/标签/数据目录后停止，演练数据与报告保留；未停止生产服务 |
 
-### 当前解除阻断条件
+### 已退休的账号阻断条件（不得继续执行）
 
 `ads_ai.* ALL PRIVILEGES WITH GRANT OPTION` 不等于有全局建账号权限；此前遗漏此部署前提，见 [BUG-027](bugs/BUG-027.md)。由合法 DB admin 提供 CPU 上 root-owned 0600 管理连接文件的**绝对路径**即可，不在聊天发密码。通过 SSH 先核实精确账号不存在，再显式 CREATE USER，最后仅向 `drama_youtube_writer@43.166.187.96` 授予上述三表的 `SELECT, INSERT, UPDATE`。账号若已存在即停并核实，不 ALTER/重置/覆盖，不用 `ads_aius` 运行服务，不进云控制台。
 
