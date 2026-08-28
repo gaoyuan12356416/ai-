@@ -61,6 +61,10 @@ def atomic_write(path, data, mode=0o600):
 
 def gate_text(groups):
     lines = ['map "$request_method:$uri" $gpu_service_migration_block {', '    default 0;']
+    if "materials" in groups:
+        # The deployed legacy handler accepts a JSON-body GET at this exact
+        # batch path and submits jobs. Ordinary GET job/list queries stay open.
+        lines.append('    "~^[A-Z]+:/api/drama-screenshot-material/jobs/batch$" 1;')
     for group in sorted(groups):
         lines.append('    "~^(POST|PUT|PATCH|DELETE):%s" 1;' % PATTERNS[group])
     lines.append("}\n")

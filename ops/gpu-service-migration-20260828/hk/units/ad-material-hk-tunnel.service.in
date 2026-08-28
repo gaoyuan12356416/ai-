@@ -1,0 +1,20 @@
+[Unit]
+Description=Dedicated Hong Kong ad material reverse tunnel
+After=network-online.target ad-material-generation.service ad-material-vision.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/ssh -i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel -N -T -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts -R 127.0.0.1:18796:127.0.0.1:8796 -R 127.0.0.1:18797:127.0.0.1:8797 root@43.166.187.96
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/x-post-media-repair-tunnel
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,7 @@ def load(name):
 maintenance = load("maintenance")
 fence = load("source_fence")
 permissions = load("hk_tunnel_permissions")
+receiver = load("receive_archive")
 
 
 class ControlTests(unittest.TestCase):
@@ -41,6 +42,7 @@ class ControlTests(unittest.TestCase):
         self.assertIn("drama-screenshot-material", text)
         self.assertNotIn("x-posts", text)
         self.assertIn("503", gate)
+        self.assertIn('~^[A-Z]+:/api/drama-screenshot-material/jobs/batch$', text)
 
     def test_no_main_api_oauth_or_metrics_trigger_stop(self):
         units = maintenance.TRIGGERS["tt"] + maintenance.TRIGGERS["x"]
@@ -74,6 +76,17 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(permissions.rewrite(updated, rollback=True, expected_fingerprint=fp), original)
         with self.assertRaises(RuntimeError):
             permissions.rewrite(original.replace("restrict,", ""), expected_fingerprint=fp)
+
+    def test_temporary_receiver_refuses_shell_and_arbitrary_paths(self):
+        sha = "a" * 64
+        self.assertEqual(receiver.parse_request("receive tt-state-final.tgz 128 " + sha),
+                         ("tt-state-final.tgz", 128, sha))
+        for request in ["sh", "receive ../../etc/passwd 128 " + sha,
+                        "receive a.tgz 0 " + sha, "receive a.tgz 128 nope",
+                        "receive a.tgz 128 " + sha + "; id",
+                        "receive a.tgz 999999999999999 " + sha]:
+            with self.assertRaises(ValueError):
+                receiver.parse_request(request)
 
 
 if __name__ == "__main__":

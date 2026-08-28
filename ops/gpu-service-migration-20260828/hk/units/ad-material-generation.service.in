@@ -1,0 +1,31 @@
+[Unit]
+Description=Ad material generation (Hong Kong /data)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data/ad-material
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/data/ad-material/current
+EnvironmentFile=/data/ad-material/config/generation.env
+ExecStartPre=/usr/bin/python3.9 @CONTROL@/check_storage.py --root /data/ad-material
+ExecStartPre=/usr/bin/test -s /data/ad-material/auth-source/auth.json
+ExecStart=/data/ad-material/runtime/python/bin/python /data/ad-material/current/ad_material_generation_service.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=2500
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/data/ad-material/releases /data/ad-material/runtime /data/ad-material/config @CONTROL@
+ReadWritePaths=/data/ad-material/generation /data/ad-material/auth-source
+BindPaths=/data/ad-material/generation/tmp:/tmp
+BindPaths=/data/ad-material/generation/var-tmp:/var/tmp
+
+[Install]
+WantedBy=multi-user.target

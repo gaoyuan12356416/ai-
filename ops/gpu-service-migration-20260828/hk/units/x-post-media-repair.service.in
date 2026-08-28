@@ -1,0 +1,34 @@
+[Unit]
+Description=X Post GPU media repair worker (Hong Kong /data isolated runtime)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data/x-post-media-repair
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/data/x-post-media-repair/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/data/x-post-media-repair/config/cos.env
+EnvironmentFile=/data/x-post-media-repair/config/worker.env
+EnvironmentFile=/data/x-post-media-repair/config/token.env
+ExecStartPre=/usr/bin/python3.9 @CONTROL@/check_storage.py --root /data/x-post-media-repair
+ExecStart=/data/x-post-media-repair/runtime/python/bin/python /data/x-post-media-repair/current/scripts/x_post_media_repair_worker.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=1900
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/data/x-post-media-repair/releases /data/x-post-media-repair/runtime /data/x-post-media-repair/config @CONTROL@
+ReadWritePaths=/data/x-post-media-repair/state
+BindPaths=/data/x-post-media-repair/state/tmp:/tmp
+BindPaths=/data/x-post-media-repair/state/var-tmp:/var/tmp
+
+[Install]
+WantedBy=multi-user.target

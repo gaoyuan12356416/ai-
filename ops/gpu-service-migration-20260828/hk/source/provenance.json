@@ -1,0 +1,21 @@
+{
+  "host": "43.166.178.132",
+  "files": [
+    {
+      "path": "/root/drama_material_service/ad_material_generation_service.py",
+      "name": "ad_material_generation_service.py",
+      "sha256": "e8d27a49d26e37a2bafd91877ae901acc08adeb259fec428216937c0ed199c44",
+      "bytes": 16630,
+      "mtime": 1779268557,
+      "mode": "0o644"
+    },
+    {
+      "path": "/root/drama_material_service/ad_material_vision_service.py",
+      "name": "ad_material_vision_service.py",
+      "sha256": "5acd9c488a7134660ad0f9fb023a5efb1cdbf88fe0ef8c8eb8a026fc2eedc270",
+      "bytes": 8510,
+      "mtime": 1778752425,
+      "mode": "0o644"
+    }
+  ]
+}
