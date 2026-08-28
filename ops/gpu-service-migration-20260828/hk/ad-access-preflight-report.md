@@ -41,7 +41,9 @@
 
 官方[App Server外部token协议](https://learn.chatgpt.com/docs/app-server#3c-log-in-with-externally-managed-chatgpt-tokens-chatgptauthtokens)提供实验性的chatgptAuthTokens模式：宿主传accessToken/account ID，401时由RPC向宿主请求刷新。0.147.0实际原生二进制静态检查发现对应模式、字段及刷新RPC；它不等于Enterprise PAT，也不能把现有OAuth access token改当PAT。此时尚未运行原生客户端。
 
-协调者后续仅授权准备一次独立临时HOME/CODEX_HOME中的原生只读诊断代码，先GitHub审核部署，再明确批准执行。只允许initialize、外部token登录和model/list；拒绝任何刷新请求并立即结束，不发thread/turn、不生成、不登录managed auth、不使用代理、不复制旧缓存。即便模型列表含gpt-5.5，也须区分内置/缓存回退与真实上游成功；不能证明真实请求成功时仍保持阻塞。
+协调者随后只授权准备独立临时HOME/CODEX_HOME中的原生只读诊断，不代表允许直接运行。合同调查发现0.147.0固定SQLite日志层不受RUST_LOG控制，模型解码错误会记录完整响应正文；未找到标准关闭开关。因此无法满足本次不保留原始正文的约束，不执行原生预检。只完成的RPC驱动草稿已移除，没有复制新凭据或启动Codex。详细精确版本证据见 [原生预检约束报告](native-preflight-contract.md)。
+
+若后续另获批准采用安全可行的客户端，仍只能使用external tokens、拒绝刷新请求，不发thread/turn、不生成、不managed login、不代理、不复制旧cache；还须用本次新生远端cache等证据区分内置模型回退。目录成功依然不能替代生成验收。
 
 以上诊断不需启停HK现有FB、剧集或X，不需改变它们的运行时、驱动、环境或网络设置。实际客户端执行和素材生成仍不可从已完成的GET授权中推定。
 

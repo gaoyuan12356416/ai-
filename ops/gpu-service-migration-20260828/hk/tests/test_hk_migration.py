@@ -343,6 +343,20 @@ class HkSafetyTests(unittest.TestCase):
             offline_pipeline.write_once(path, {"attempt": 2})
         self.assertEqual(path.read_bytes(), original)
 
+    def test_offline_gpu_proof_accepts_original_default_decode_nvenc_contract(self):
+        command = {"argv": ["ffmpeg", "-i", "source.media", "-c:v", "h264_nvenc", "output.mp4"],
+                   "return_code": 0}
+        facts = offline_pipeline.gpu_command_facts([command])
+        self.assertEqual(facts["video_encoder"], "h264_nvenc")
+        self.assertIsNone(facts["explicit_hwaccel"])
+        self.assertFalse(facts["cuda_decode_requested"])
+        cuda = dict(command, argv=["ffmpeg", "-hwaccel", "cuda"] + command["argv"][1:])
+        self.assertTrue(offline_pipeline.gpu_command_facts([cuda])["cuda_decode_requested"])
+        for invalid in ([], [dict(command, return_code=1)], [command, command],
+                        [{"argv": ["ffmpeg", "-c:v", "libx264", "output.mp4"], "return_code": 0}]):
+            with self.assertRaises(ValueError):
+                offline_pipeline.gpu_command_facts(invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

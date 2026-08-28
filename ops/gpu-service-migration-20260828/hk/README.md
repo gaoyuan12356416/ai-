@@ -42,6 +42,8 @@ ad_models_probe.py须先经协调者统一push，再在本地执行：
 
 2026-08-28 实际预检未通过：使用已推送版本 de54ca2a4577d3edb05d47aae583bb7f5c464504，每端仅一次GET。US返回200且gpt-5.5可见；HK返回403/non_json_response，无法确认模型可用。两端临时片段已删除并复核，HK正式auth与current仍不存在。响应headers、content-type、页面title和body未保留，因此现有证据不能把403定性为地区、账号或WAF限制。广告生成/视觉分析保持美国现行入口；香港只完成隔离stage，不得继续最终auth接管或activate。正式素材生成未验证。完整安全结果、证据位置和待授权诊断见 [广告访问预检报告](ad-access-preflight-report.md)。
 
+随后增强GET仍返回HK403，停止重复原请求。原生app-server方案仅做合同调查，未执行：0.147.0标准SQLite日志层存在写入原始响应正文的错误路径，不能满足本次日志约束。未擅自改用RAM日志、升级客户端、修改二进制或复制旧cache。详见 [原生预检约束报告](native-preflight-contract.md)。
+
 ### 服务切换
 
 切换必须由根协调者停上游派发并确认在途为零。X脚本还检查旧work目录为空；不能绕过这个检查强停。
@@ -92,7 +94,9 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
 
 脚本在任何媒体处理前验证独立network namespace、生产state及系统路径只读、/tmp和/var/tmp绑定验收盘、无继承token/secret/proxy环境，以及精确Git版本和冻结fba8ff6源码哈希。读写只允许验收目录，生产config不可访问。不读取生产凭据，不启动HTTP服务，不请求真实COS或平台。
 
-验收使用2秒本地合成H264/AAC视频与明确的operator_forced_repair测试请求，FakeDownloader只复制此文件，FakeCOS仅在验收目录模拟HEAD/上传，RejectHTTP拒绝网络使用。原MediaRepairProcessor实际执行请求/完整性校验、私有FFprobe、原CUDA/NVENC命令、完整输出校验、模拟COS验证和独立测试manifest。第二次相同请求须命中reuse，且不再次下载、编码或上传。保留输入、模拟COS中的真实输出、测试manifest及命令/摘要证据；不在生产state或CPU队列创建修复记录。attempt.json/result.json拒绝覆盖，失败后不得自行重跑。
+验收使用2秒本地合成H264/AAC视频与明确的operator_forced_repair测试请求，FakeDownloader只复制此文件，FakeCOS仅在验收目录模拟HEAD/上传，RejectHTTP拒绝网络使用。原MediaRepairProcessor实际执行请求/完整性校验、私有FFprobe、原NVENC命令、完整输出校验、模拟COS验证和独立测试manifest。冻结业务使用默认解码和CPU滤镜，不要求显式CUDA解码；报告如实记录是否有-hwaccel参数，不改变业务命令。第二次相同请求须命中reuse，且不再次下载、编码或上传。保留输入、模拟COS中的真实输出、测试manifest及命令/摘要证据；不在生产state或CPU队列创建修复记录。attempt.json/result.json拒绝覆盖，失败后不得自行重跑。
+
+c10fd5c首轮独立验收的四个媒体子命令均退出0，已产生合格测试manifest与输出，但验收器错误地额外要求CUDA解码参数，最终退出1；该记录不能改成PASS。修正版只核对冻结业务原有的h264_nvenc编码契约，补充默认解码回归及processor-results.json中间证据。重新验收必须使用新SHA、新目录和协调者新的单次授权，保留首轮失败unit、记录和产物。
 
 ## 本地验证
 

@@ -163,6 +163,22 @@ class RecordingRunner:
         return result
 
 
+def gpu_command_facts(commands):
+    encoded = []
+    for item in commands:
+        argv = item["argv"]
+        if "-c:v" in argv and argv[argv.index("-c:v") + 1] == "h264_nvenc":
+            encoded.append(item)
+    if len(encoded) != 1 or encoded[0]["return_code"] != 0:
+        raise ValueError("exactly one successful original NVENC pipeline command is required")
+    argv = encoded[0]["argv"]
+    hwaccel = argv[argv.index("-hwaccel") + 1] if "-hwaccel" in argv else None
+    # The frozen production command uses default decoding and CPU filters.
+    # Do not impose a new CUDA-decode requirement on an unchanged business path.
+    return {"video_encoder": "h264_nvenc", "explicit_hwaccel": hwaccel,
+            "cuda_decode_requested": hwaccel == "cuda"}
+
+
 def frozen_processor_module():
     if (X_ROOT / "current").resolve() != SOURCE_ROOT or SOURCE_ROOT.resolve() != SOURCE_ROOT:
         raise ValueError("X current is not the approved frozen release")
@@ -212,6 +228,12 @@ def exercise(evidence, module, runner):
     manifest = config.work_root / "manifests" / (payload["job_key"] + ".json")
     manifest_hash = digest(manifest)
     second = processor.repair(payload)
+    write_once(evidence / "processor-results.json", {
+        "first": first, "second": second, "fake_downloads": downloader.calls,
+        "fake_cos_uploads": fake_cos.uploads, "fake_cos_heads": fake_cos.heads,
+        "commands_before_reuse": command_count, "commands_after_reuse": len(runner.commands),
+        "manifest_before_reuse_sha256": manifest_hash, "manifest_after_reuse_sha256": digest(manifest),
+    })
     if (first["status"] != "ready" or first["reused"] or second["status"] != "ready"
             or not second["reused"] or downloader.calls != 1 or fake_cos.uploads != 1
             or len(runner.commands) != command_count or digest(manifest) != manifest_hash):
@@ -219,8 +241,7 @@ def exercise(evidence, module, runner):
     if {k: v for k, v in first.items() if k != "reused"} != {
             k: v for k, v in second.items() if k != "reused"}:
         raise ValueError("reused result differs from the repaired result")
-    if not any("h264_nvenc" in item["argv"] and "cuda" in item["argv"] for item in runner.commands):
-        raise ValueError("the real processor did not exercise CUDA decode and NVENC")
+    gpu = gpu_command_facts(runner.commands)
     stored = next(iter(fake_cos.objects.values()))
     if (digest(stored["path"]) != first["output_sha256"]
             or pathlib.Path(stored["path"]).stat().st_size != first["output_size"]):
@@ -231,6 +252,7 @@ def exercise(evidence, module, runner):
             "manifest": str(manifest), "manifest_sha256": manifest_hash,
             "fixture_sha256": digest(fixture), "fake_downloads": downloader.calls,
             "fake_cos_uploads": fake_cos.uploads, "fake_cos_heads": fake_cos.heads,
+            "gpu_command": gpu,
             "production_state_readonly": True, "private_network_verified": True,
             "real_cos_or_platform_calls": 0}
 
