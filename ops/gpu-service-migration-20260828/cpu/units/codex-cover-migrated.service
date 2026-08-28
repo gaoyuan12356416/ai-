@@ -1,0 +1,36 @@
+[Unit]
+Description=US migrated cover generator on CPU
+After=network-online.target mnt-data\x2ddisk.mount
+BindsTo=mnt-data\x2ddisk.mount
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data-disk/codex-workers/us-migrated/cover/workspace
+Environment=HOME=/root
+Environment=TMPDIR=/mnt/data-disk/codex-workers/us-migrated/cover/tmp
+Environment=XDG_CACHE_HOME=/mnt/data-disk/codex-workers/us-migrated/cover/xdg-cache
+Environment=CODEX_HOME=/mnt/data-disk/codex-workers/us-migrated/cover/codex-home
+Environment=CODEX_COVER_HOST=127.0.0.1
+Environment=CODEX_COVER_PORT=18790
+Environment=CODEX_COVER_WORK_ROOT=/mnt/data-disk/codex-workers/us-migrated/cover/jobs
+Environment=CODEX_COVER_PROMPT_WORKSPACE=/mnt/data-disk/codex-workers/us-migrated/cover/workspace
+Environment=CODEX_COVER_PUBLIC_ROOT=/usr/share/nginx/html/drama-materials
+Environment=CODEX_COVER_PUBLIC_BASE_URL=http://127.0.0.1:18790/files
+Environment=CODEX_COVER_CODEX_BIN=/usr/bin/codex
+Environment=CODEX_COVER_CODEX_TIMEOUT=1200
+Environment=CODEX_COVER_MAX_CONCURRENCY=1
+Environment=CODEX_COVER_STRATEGY=codex_imagegen
+Environment=CODEX_SCREENSHOT_SOURCE_CODEX_HOME=/root/.codex
+Environment=CODEX_SCREENSHOT_AUTH_SYNC_LOCK_PATH=/tmp/codex_screenshot_auth_sync.lock
+ExecStartPre=/usr/bin/python3 @RELEASE@/mount_guard.py --path /usr/share/nginx/html/drama-materials --path /root/drama_material_jobs
+ExecStart=/bin/bash @RELEASE@/run.sh cover @RELEASE@/cover_entrypoint.py
+UMask=0022
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

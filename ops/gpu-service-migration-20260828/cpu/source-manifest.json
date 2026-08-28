@@ -1,0 +1,20 @@
+{
+  "captured_at": "2026-08-28T07:07:05.401386+00:00",
+  "files": [
+    {
+      "file": "runtime/codex_screenshot_service.py",
+      "source_host": "43.166.178.132",
+      "source_path": "/root/drama_material_service/codex_screenshot_service.py",
+      "sha256": "9d410bc9e33dccd765a5b0ead95c8277c3b1c3937305a40b88a9a4313118aa93",
+      "bytes": 58593
+    },
+    {
+      "file": "runtime/codex_cover_service.py",
+      "source_host": "43.166.178.132",
+      "source_path": "/root/drama_material_service/codex_cover_service.py",
+      "sha256": "1cda9ae1a1a4f98d6e5868f07d9ee6d6c4a5ba69376b07cff433c62c0c85b4a8",
+      "bytes": 10371
+    }
+  ],
+  "note": "Exact deployed sidecar sources. No environment or credential files included."
+}

@@ -1,0 +1,46 @@
+[Unit]
+Description=US migrated screenshot primary on CPU
+After=network-online.target mnt-data\x2ddisk.mount
+BindsTo=mnt-data\x2ddisk.mount
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/workspace
+Environment=HOME=/root
+Environment=TMPDIR=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/tmp
+Environment=XDG_CACHE_HOME=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/xdg-cache
+Environment=CODEX_SCREENSHOT_HOST=127.0.0.1
+Environment=CODEX_SCREENSHOT_PORT=18795
+Environment=CODEX_SCREENSHOT_WORK_ROOT=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/jobs
+Environment=CODEX_SCREENSHOT_CACHE_ROOT=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/cache
+Environment=CODEX_SCREENSHOT_PROMPT_WORKSPACE=/mnt/data-disk/codex-workers/us-migrated/screenshot-primary/workspace
+Environment=CODEX_SCREENSHOT_PUBLIC_ROOT=/usr/share/nginx/html/drama-screenshot-materials
+Environment=CODEX_SCREENSHOT_PUBLIC_BASE_URL=http://127.0.0.1:18795/files
+Environment=CODEX_SCREENSHOT_MAX_CONCURRENCY=1
+Environment=CODEX_SCREENSHOT_ITEM_PARALLELISM=1
+Environment=CODEX_SCREENSHOT_AI_ATTEMPTS=2
+Environment=CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE=0.08
+Environment=CODEX_SCREENSHOT_PROMPT_VERSION=v7
+Environment=CODEX_SCREENSHOT_SOURCE_CONSISTENCY_CHECK=1
+Environment=CODEX_SCREENSHOT_SOURCE_CONSISTENCY_STRICT=0
+Environment=CODEX_SCREENSHOT_CONSISTENCY_TIMEOUT=600
+Environment=CODEX_SCREENSHOT_ISOLATE_CODEX_HOME=1
+Environment=CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH=1
+Environment=CODEX_SCREENSHOT_SOURCE_CODEX_HOME=/root/.codex
+Environment=CODEX_SCREENSHOT_AUTH_SYNC_LOCK_PATH=/tmp/codex_screenshot_auth_sync.lock
+Environment=CODEX_SCREENSHOT_CODEX_MODEL=gpt-5.5
+Environment=CODEX_SCREENSHOT_CODEX_REASONING=low
+Environment=CODEX_SCREENSHOT_CODEX_TIMEOUT=900
+Environment="CODEX_SCREENSHOT_CODEX_EXTRA_ARGS=--ignore-user-config --ignore-rules --ephemeral --disable plugins --disable apps --disable browser_use"
+ExecStartPre=/usr/bin/python3 @RELEASE@/mount_guard.py --path /usr/share/nginx/html/drama-screenshot-materials --path /root/drama_screenshot_jobs
+ExecStart=/bin/bash @RELEASE@/run.sh screenshot-primary @RELEASE@/runtime/codex_screenshot_service.py
+UMask=0022
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
