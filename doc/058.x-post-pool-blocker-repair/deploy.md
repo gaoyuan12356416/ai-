@@ -53,6 +53,8 @@
 
 ## 回滚
 
+本批恢复已于18:49:55全部实际发布，18:52完成只读核验。Run348为13/13、350为3/3、11条转发全部成功；q533/719/726保持原样。CPU/HK版本分别固定e300542/170e3，独立operator为386d447。最终证据见CPU备份目录final-natural-verification.json与HK final-hk-verification.json。以下回滚不得恢复整库或Token快照。
+
 1. 停止三个timer，等待schedule/claim/manual服务退出，并查publish log无media_uploading/post_creating/repost_creating；不得强杀在途写。
 2. 原子切回旧release，例如先建`/opt/x-post-automation/current.rollback`指向上述旧release，再用`mv -Tf`替换current。
 3. 恢复备份中的`main-api-before-service.py`到主API的features/x_posts/service.py；两个新helper可保留为未使用文件，避免删除后续工作。

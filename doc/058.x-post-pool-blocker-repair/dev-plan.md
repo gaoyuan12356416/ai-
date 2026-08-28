@@ -5,6 +5,8 @@
 3. 为逐队列deferred短剧接入受控GPU媒体准备，准备后重验账号；修复错误反馈契约。
 4. 加固历史恢复CLI对源resource/URL的冻结一致性，扩展现有测试。
 5. 运行py_compile、聚焦及Linux全X回归、diff检查；GitHub推送后从exact commit发布。
-6. 对348/350做live validate-only→备份副本apply→live apply，且全部证据一致后允许自然timer消费。
+6. 对348/350完整副本媒体prepare并固定16条证据，先副本validate/apply与逐字段核验，再live validate/apply，保持原锁、绑定和一次性审计，最后由原timer自然消费。
+
+上述实施与自然发布核验已于2026-08-28 18:52完成；16/16队列成功、11/11转发完成，新增失败/unknown均0。账号8外部锁定和账号19既有unknown保留人工处理，详见operator-result.md。
 
 多代理责任：主代理负责账号隔离、源身份恢复保护、文档与生产；媒体worker只改媒体准备/发布函数及对应测试；QA只改三个排期测试文件。共享文件按函数边界分工，不覆盖彼此改动。

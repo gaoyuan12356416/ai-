@@ -1,0 +1,158 @@
+{
+  "checkpoint_index_sha256": "a9f056b91faca4557107d590fbe9a74f6fa9d3a50c005d4c1b4d871e1aa07561",
+  "confirmed_reposts": 11,
+  "cpu_commit": "e300542887fb89314bef145b752c3ad8aa6c5c9c",
+  "cpu_release": "/mnt/data-disk/x-post-automation/releases/e300542887fb89314bef145b752c3ad8aa6c5c9c",
+  "direct_posts": 5,
+  "distinct_source_post_ids": 16,
+  "drama_bindings_and_generations_unchanged": true,
+  "drama_pools_advanced_exactly_once": 16,
+  "each_repost_attempt_count": 1,
+  "each_x_source_attempt_count": 1,
+  "evidence": {
+    "cpu_base": "/mnt/data-disk/x-post-automation/backups/20260828-pool-blockers-155312",
+    "cpu_file": "final-natural-verification.json",
+    "cpu_sha256": "681c099c9e88dc81f972f2c1a6832e9ac5e92c0a56ea48ab874e73960c46868f",
+    "hk_file": "/data/x-post-media-repair/backups/20260828-pool-blockers-download/final-hk-verification.json",
+    "hk_sha256": "6e490ef958754afe9602c5677130d9170149d843aaa0a4eef96475b06e7a45a8"
+  },
+  "foreign_key_violations": 0,
+  "global_x_inflight": 0,
+  "health": {
+    "gpu_tunnel": 200,
+    "main_auth": 200,
+    "main_x_unauthorized": 401,
+    "sidecar": 200
+  },
+  "historical_runs": [
+    {
+      "error_code": "x_post_schedule_drama_shortage",
+      "failed_count": 0,
+      "id": 356,
+      "published_count": 0,
+      "queued_count": 0,
+      "status": "failed_preflight",
+      "unknown_count": 0
+    },
+    {
+      "error_code": "",
+      "failed_count": 1,
+      "id": 360,
+      "published_count": 17,
+      "queued_count": 19,
+      "status": "needs_review",
+      "unknown_count": 1
+    },
+    {
+      "error_code": "x_post_schedule_plan_unknown",
+      "failed_count": 0,
+      "id": 363,
+      "published_count": 0,
+      "queued_count": 0,
+      "status": "failed_preflight",
+      "unknown_count": 0
+    }
+  ],
+  "hk": {
+    "active_work_directories": 0,
+    "current": "/data/x-post-media-repair/releases/170e3b1325b71a72fcd6de913982ce92bb77fa40",
+    "service_sha256": "e63a4e04b622b95b0a61489e90984b03317183726ac8420ceb9f5e0e427356e5",
+    "timestamp": "2026-08-28T10:51:58.932141Z",
+    "units": {
+      "x-post-media-repair-tunnel.service": {
+        "ActiveState": "active",
+        "MainPID": "1780297",
+        "SubState": "running"
+      },
+      "x-post-media-repair.service": {
+        "ActiveState": "active",
+        "MainPID": "1780296",
+        "SubState": "running"
+      }
+    },
+    "us_node_not_operated": true
+  },
+  "manual_followups": [
+    {
+      "account_id": 8,
+      "queues": [
+        533,
+        719
+      ],
+      "reason": "X temporarily locked; source Posts already succeeded; unlock then reconcile repost-only recovery"
+    },
+    {
+      "account_id": 19,
+      "queues": [
+        726
+      ],
+      "reason": "X create Post HTTP503 unknown; reconcile actual outcome before any retry"
+    }
+  ],
+  "new_failed": 0,
+  "new_unknown": 0,
+  "no_new_plans_or_test_posts": true,
+  "operator_commit": "386d4473e72fd9ffc6a935948df24e46fe45c25c",
+  "original_queue_identity_and_repaired_media_unchanged": true,
+  "original_queues_published": 16,
+  "protected_533_719_726_unchanged": true,
+  "recovery_audits_unchanged": 16,
+  "regression": {
+    "cpu_linux": {
+      "seconds": 38.484,
+      "skipped": 0,
+      "status": "passed",
+      "tests": 856
+    },
+    "hk_download_patch": {
+      "seconds": 4.234,
+      "status": "passed",
+      "tests": 138
+    },
+    "operator_offline_review": "passed; full audit identity, tamper rejection, timer failure branches, lossless bounded snapshot evidence",
+    "windows": {
+      "seconds": 62.517,
+      "skipped": 2,
+      "status": "passed",
+      "tests": 856
+    }
+  },
+  "rollback_boundary": "Code rollback only after stopping and draining consumers; never restore the pre-publication whole database or token snapshot.",
+  "runs": [
+    {
+      "expected_count": 13,
+      "failed_count": 0,
+      "finished_at": "2026-08-28T10:46:58Z",
+      "id": 348,
+      "published_count": 13,
+      "queued_count": 13,
+      "run_date": "2026-08-27",
+      "status": "completed",
+      "unknown_count": 0
+    },
+    {
+      "expected_count": 3,
+      "failed_count": 0,
+      "finished_at": "2026-08-28T10:49:55Z",
+      "id": 350,
+      "published_count": 3,
+      "queued_count": 3,
+      "run_date": "2026-08-27",
+      "status": "completed",
+      "unknown_count": 0
+    }
+  ],
+  "service_sha256": "87c42536dac4a1a9b8eb906c973ef056f7b5dfaaddc7b391d327448184fde7cf",
+  "sidecar_pid": 1840134,
+  "sqlite_quick_check": "ok",
+  "status": "verified",
+  "units": {
+    "drama-material-api.service": "active",
+    "x-post-automation.service": "active",
+    "x-post-manual.timer": "active",
+    "x-post-schedule-claim.timer": "active",
+    "x-post-schedule.timer": "active"
+  },
+  "verified_at": "2026-08-28T10:52:01.026079Z",
+  "verified_at_beijing": "2026-08-28T18:52:01.026098+08:00"
+}
