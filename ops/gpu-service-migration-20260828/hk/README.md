@@ -28,6 +28,20 @@ X和广告均采用自己unit的/tmp与/var/tmp bind到/data，因为X子进程�
 
 ## 统一批准后的切换
 
+### 广告上游只读授权预检
+
+ad_models_probe.py须先经协调者统一push，再在本地执行：
+
+    python ops/gpu-service-migration-20260828/hk/ad_models_probe.py compare --sha <pushed-sha>
+
+脚本校验自身与已推送Git对象一致，使用已保存known_hosts及显式本地SSH key。先在US仅提取access_token/account_id，在US发一次只读GET模型列表作为对照；US成功且目录包含gpt-5.5后，最小片段才经内存SFTP到HK本批次私有probe目录并做同请求。目录700、片段从写入起600；两端片段在finally移除，保留不含凭证的结果。不会改正式auth-source/CODEX_HOME，不复制refresh_token/id_token，不启动Codex，不登录/刷新、不生成、不允许重定向、不使用代理。每个SHA最多一次请求/主机，US对照失败则不向HK传凭证。
+
+请求固定为当前0.147.0客户端的backend-api/codex/models与client_version参数，使用Codex exec originator、Bearer和ChatGPT-Account-Id。端点/版本/头名称依据已迁入的原生二进制核对；它是此次客户端兼容诊断，不是另建公开API服务。官方[认证说明](https://learn.chatgpt.com/docs/auth)要求把auth缓存按密码保护，且正常Codex使用可能自动刷新；因此本预检不用Codex进程。
+
+输出只有两地HTTP码、白名单错误码和目标模型目录可见性；不输出accountID、token或响应body。模型列表成功不能替代真实素材生成验收；任何地区/账号限制须报告，不加代理绕过。最终生产auth仍须停US服务后接管。
+
+### 服务切换
+
 切换必须由根协调者停上游派发并确认在途为零。X脚本还检查旧work目录为空；不能绕过这个检查强停。
 
 X activate会停止香港旧runtime，最终复制香港权威manifest，再对归档美国manifest做保守筛选和只读COS HEAD，只导入香港缺失且契约完整的v5文件。碰撞始终保留香港；不改历史profile/status；2个无status及旧profile仅归档。随后安装新unit和current并启动，记录HTTP/进程路径/临时目录真实bind证据。

@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 import check_storage
 import deploy
 import merge_x_manifests as manifests
+import ad_models_probe as models_probe
 
 
 class HkSafetyTests(unittest.TestCase):
@@ -189,6 +190,44 @@ class HkSafetyTests(unittest.TestCase):
         for name in ("generation.env", "vision.env"):
             values = deploy.parse_env(ROOT / "env" / name)
             self.assertTrue(all("\n" not in value for value in values.values()))
+
+    def test_catalog_probe_extracts_only_access_and_account_fields(self):
+        fragment = models_probe.extract_fragment({"auth_mode": "chatgpt", "tokens": {
+            "access_token": "test-access", "account_id": "test-account",
+            "refresh_token": "must-not-transfer", "id_token": "must-not-transfer-either"}})
+        self.assertEqual(set(fragment), {"access_token", "account_id"})
+        with self.assertRaises(ValueError):
+            models_probe.validate_fragment(dict(fragment, refresh_token="extra"))
+        with self.assertRaises(ValueError):
+            models_probe.validate_fragment(dict(fragment, access_token="bad\r\nheader"))
+        self.assertTrue(str(models_probe.PROBE_BASE).startswith("/data/migrations/"))
+
+    def test_catalog_probe_never_emits_response_body_or_identity(self):
+        body = json.dumps({"error": {"code": "unsupported_country_region_territory",
+                                    "message": "sensitive-account test-access"}}).encode()
+        result = models_probe.safe_result(403, body)
+        self.assertEqual(result["safe_error_code"], "unsupported_country_region_territory")
+        self.assertNotIn("sensitive-account", json.dumps(result))
+        self.assertNotIn("test-access", json.dumps(result))
+        unknown = models_probe.safe_result(403, b'{"error":{"code":"private-value"}}')
+        self.assertEqual(unknown["safe_error_code"], "unclassified_http_error")
+
+    def test_catalog_probe_is_fixed_get_without_redirect_or_model_call(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.read.return_value = b'{"models":[{"slug":"gpt-5.5"}]}'
+        opener = mock.Mock()
+        opener.open.return_value = response
+        result = models_probe.catalog_request({"access_token": "test-access",
+                                               "account_id": "test-account"}, opener)
+        request = opener.open.call_args[0][0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.full_url, models_probe.URL)
+        self.assertIsNone(request.data)
+        self.assertTrue(result["target_model_visible"])
+        self.assertIsNone(models_probe.RefuseRedirect().redirect_request(
+            request, None, 302, "redirect", {}, "https://example.test/collect"))
 
 
 if __name__ == "__main__":
