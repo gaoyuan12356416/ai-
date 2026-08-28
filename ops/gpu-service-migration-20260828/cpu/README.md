@@ -45,6 +45,11 @@ Run as root on CPU from the exact clean GitHub checkout of this package. Set
 4. The coordinator fences public module writes, the direct screenshot cron and
    both test services; waits for ad/screenshot work and all drama work to finish
    before moving shared directories; then supplies fresh maintenance evidence.
+   The fence must also block **all methods on the exact path**
+   `/api/drama-screenshot-material/jobs/batch`: the live application's GET
+   handler accepts a JSON body and creates screenshot batches. Normal GET
+   `/jobs` and `/jobs/{id}` must remain readable. Wait for the drama worker
+   lease to be released, not only for the job row to become terminal.
    Run `python3 migrate_cpu.py cutover-storage --run-id "$RUN" --authorization
    "$MAINTENANCE_JSON"`. Atomic `RENAME_EXCHANGE` preserves the public lookup
    path, retaining the original directory as `.pre-$RUN` for rollback.
@@ -63,11 +68,29 @@ and `children=0`. The coordinator must populate these from fresh live evidence,
 not assumptions. No password or token belongs in these files.
 
 US job/cache/public data must be copied to a private data-disk import directory
-before source retirement. Exclude `.codex`, `codex_home` and `auth.json`; never
+before complete source-host retirement. Exclude `.codex`, `codex_home` and `auth.json`; never
 replace CPU authorization or its live SQLite. Preserve differing source artifacts
 in the private archive rather than overwriting CPU's published content. Initial
 data copies must be repeated/checked after source quiescence. Do not delete source
 history or root rollback directories as part of this package.
+
+For this run, the coordinator explicitly retained the US host and its verified
+archive on `/data/migrations/$RUN/cpu`. Full cold-history transfer was paused
+because US outbound bandwidth is shared with required HK deployment resources.
+This does not authorize deletion of the archive or US history. Copy only missing
+public images into inactive CPU staging; preserve existing CPU files on conflicts.
+The three missing old MP4s (2.260 GB) are not the current CPU public artifacts:
+the two corresponding live job URLs use COS and returned HTTP 200, with different
+byte sizes; the third has no current CPU job row. They remain in the US archive.
+
+The live GPU render and cover calls are synchronous requests to
+`18788/api/gpu-video/render` and `/api/gpu-video/cover`. The GPU reads
+`GET /api/gpu-video/random-overlay/catalog` on CPU. None is under the three
+material module prefixes, and the screenshot completion callback is outbound
+from CPU. Keep these GPU paths outside material admission fences. The normal
+new/retry/review endpoints for the three affected modules are under their
+expected module prefixes; the screenshot GET batch route is the extra admission
+path described above.
 
 ## Verification and rollback
 

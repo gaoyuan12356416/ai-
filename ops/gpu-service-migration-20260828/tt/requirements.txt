@@ -1,0 +1,4 @@
+# Preserve the verified US TT runtime's direct dependencies.
+pycryptodome==3.23.0
+cos-python-sdk-v5==1.9.42
+requests==2.33.1

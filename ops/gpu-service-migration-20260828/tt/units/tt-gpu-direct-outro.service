@@ -1,0 +1,45 @@
+[Unit]
+Description=DramaWave TikTok direct-outro GPU worker (Hong Kong)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/data/tt-post-gpu/current
+EnvironmentFile=/data/tt-post-gpu/config/base.env
+EnvironmentFile=/data/tt-post-gpu/config/secrets.env
+EnvironmentFile=/data/tt-post-gpu/config/direct-outro.env
+ExecStartPre=/data/tt-post-gpu/runtime/bin/python /data/tt-post-gpu/ops/tt_migration.py preflight
+ExecStart=/data/tt-post-gpu/runtime/bin/python /data/tt-post-gpu/current/scripts/tt_gpu_worker.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=tt-post-gpu-direct-outro
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/root/.ssh -/root/drama_material_service/.env -/etc/x-post-media-repair.env /etc/ssh
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/data/tt-post-gpu/current /data/tt-post-gpu/runtime /data/tt-post-gpu/python-base /data/tt-post-gpu/ffmpeg /data/tt-post-gpu/assets /data/tt-post-gpu/ops
+ReadWritePaths=/data/tt-post-publisher/direct-outro-work /data/tt-post-gpu/tmp /data/tt-post-gpu/cache /data/tt-post-gpu/logs
+UMask=0077
+TimeoutStopSec=120
+StandardOutput=append:/data/tt-post-gpu/logs/direct-outro.log
+StandardError=append:/data/tt-post-gpu/logs/direct-outro.log
+
+[Install]
+WantedBy=multi-user.target
