@@ -905,6 +905,321 @@ class ProcessProgressTests(unittest.TestCase):
         self.assertEqual(events, ["kill", "wait", "clear"])
 
 
+class ResourceGuardTests(unittest.TestCase):
+    def setUp(self):
+        from scripts import check_drama_media_resource_guard as guard
+        self.guard = guard
+        self.fixture()
+
+    def fixture(self):
+        guard = self.guard
+        self.unit, self.pid = "drama-resource-guard-test-0123456789abcdef.service", 321
+        unit_path = "/system.slice/" + self.unit
+        self.paths = {name: "/sys/fs/cgroup/" + name for name in ("cpu", "memory", "pids")}
+        values = {
+            "/proc/321/cgroup": "2:cpu,cpuacct:%s\n3:memory:%s\n4:pids:%s\n1:name=systemd:%s" % ((unit_path,) * 4),
+            "/proc/321/mountinfo": "\n".join(
+                "%s 10 0:%s / %s rw - cgroup cgroup rw,%s" % (20 + index, 30 + index, path, name)
+                for index, (name, path) in enumerate(self.paths.items())),
+        }
+        directories = {}
+        for index, (controller, root) in enumerate(self.paths.items()):
+            for offset, suffix in enumerate(("", "/system.slice", unit_path)):
+                directories[root + suffix] = [0, 30 + index, 100 + index * 10 + offset]
+            values[root + unit_path + "/cgroup.procs"] = str(self.pid)
+            values[root + unit_path + "/tasks"] = str(self.pid)
+            for suffix in ("/system.slice", unit_path):
+                directory = root + suffix
+                parent = suffix == "/system.slice"
+                if controller == "cpu":
+                    values[directory + "/cpu.cfs_quota_us"] = "-1" if parent else "200000"
+                    values[directory + "/cpu.cfs_period_us"] = "100000"
+                elif controller == "pids":
+                    values[directory + "/pids.max"] = "max" if parent else "128"
+                    values[directory + "/pids.current"] = "10" if parent else "1"
+                else:
+                    values.update({directory + "/" + key: value for key, value in {
+                        "memory.limit_in_bytes": str(8 * guard.MEMORY_BYTES if parent else guard.MEMORY_BYTES),
+                        "memory.memsw.limit_in_bytes": str(8 * guard.MEMORY_BYTES),
+                        "memory.usage_in_bytes": str(2 * guard.PROBE_BYTES if parent else guard.PROBE_BYTES),
+                        "memory.memsw.usage_in_bytes": str(2 * guard.PROBE_BYTES if parent else guard.PROBE_BYTES),
+                        "memory.use_hierarchy": "1", "memory.swappiness": "60", "memory.failcnt": "0",
+                        "memory.memsw.failcnt": "0", "memory.oom_control": "oom_kill_disable 0\nunder_oom 0",
+                        "memory.stat": "hierarchical_memory_limit %s\nhierarchical_memsw_limit %s\ntotal_swap 0" %
+                                       (guard.MEMORY_BYTES, 8 * guard.MEMORY_BYTES),
+                    }.items()})
+        values[self.paths["memory"] + "/memory.use_hierarchy"] = "1"
+        self.events = []
+        events = self.events
+
+        class Files:
+            def __init__(self):
+                self.values, self.directories, self.child_groups = values, directories, set()
+                self.writes, self.ignore_writes, self.after_write = [], False, None
+            def read(self, path):
+                if path not in self.values:
+                    raise FileNotFoundError("private control path must not become public")
+                return self.values[path]
+            def write(self, path, value, *, expected_directory):
+                guard.require(self.directory(path.rsplit("/", 1)[0]) == expected_directory, "cgroup_identity_changed")
+                events.append("write:" + path.rsplit("/", 1)[-1])
+                self.writes.append((path, value))
+                if not self.ignore_writes:
+                    self.values[path] = str(value)
+                    if path.endswith("/memory.memsw.limit_in_bytes"):
+                        stats = path.rsplit("/", 1)[0] + "/memory.stat"
+                        self.values[stats] = self.values[stats].replace(
+                            "hierarchical_memsw_limit " + str(8 * guard.MEMORY_BYTES),
+                            "hierarchical_memsw_limit " + str(value))
+                if self.after_write:
+                    self.after_write()
+            def directory(self, path):
+                return list(self.directories[path])
+            def has_child_groups(self, path):
+                return path in self.child_groups
+
+        self.files = Files()
+        files = self.files
+
+        class Process:
+            def __init__(self):
+                self.actual = {"uids": [0, 0, 0], "gids": [0, 0, 0], "groups": [0], "nice": 10, "affinity": list(range(8))}
+                self.caps, self.ambient, self.no_new_privs, self.after_drop = "c0", "0", "1", None
+                self.publish_status()
+            def publish_status(self):
+                files.values["/proc/321/status"] = "\n".join([
+                    "Pid:\t321", "Uid:\t" + " ".join(map(str, self.actual["uids"] + [self.actual["uids"][-1]])),
+                    "Gid:\t" + " ".join(map(str, self.actual["gids"] + [self.actual["gids"][-1]])),
+                    "Groups:\t" + " ".join(map(str, self.actual["groups"])), "NoNewPrivs:\t" + self.no_new_privs,
+                    "CapEff:\t" + self.caps, "CapPrm:\t" + self.caps, "CapAmb:\t" + self.ambient,
+                    "CapInh:\t0", "CapBnd:\tc0"])
+            def pid(self):
+                return 321
+            def identity(self):
+                return self.actual
+            def target_identity(self):
+                return 1009, 1010
+            def drop_identity(self, uid, gid):
+                events.append("drop")
+                self.actual.update(uids=[uid] * 3, gids=[gid] * 3, groups=[])
+                self.caps = "0"
+                self.publish_status()
+                if self.after_drop:
+                    self.after_drop()
+
+        self.process = Process()
+        self.launch = mock.Mock(side_effect=lambda proof: self.events.append("exec"))
+        self.report = mock.Mock()
+        self.leaf = {name: path + unit_path for name, path in self.paths.items()}
+
+    def run_guard(self, **kwargs):
+        return self.guard.run_guard(kwargs.pop("unit", self.unit), kwargs.pop("cpu_cores", 2),
+                                    files=self.files, process=self.process, launch_probe=self.launch,
+                                    report=self.report, **kwargs)
+
+    def rejected(self, **kwargs):
+        with self.assertRaises((self.guard.GuardFailure, OSError, KeyError, ValueError)):
+            self.run_guard(**kwargs)
+        self.launch.assert_not_called()
+        self.report.assert_not_called()
+
+    def test_guard_reads_back_drops_privileges_then_launches_only_fixed_probe(self):
+        self.run_guard()
+        self.assertEqual(self.files.writes, [
+            (self.leaf["memory"] + "/memory.memsw.limit_in_bytes", self.guard.MEMORY_BYTES),
+            (self.leaf["memory"] + "/memory.swappiness", 0)])
+        self.assertEqual(self.events, ["write:memory.memsw.limit_in_bytes", "write:memory.swappiness", "drop", "exec"])
+        proof = self.launch.call_args.args[0]
+        self.assertEqual((proof["unit"], proof["cpu_cores"], proof["pid"]), (self.unit, 2, self.pid))
+        self.assertEqual(len(proof["resources_sha256"]), 64)
+        evidence = self.report.call_args.args[0]
+        self.assertTrue(evidence["resources"]["ancestor_limits_checked"])
+        self.assertEqual(evidence["identity"]["groups"], [])
+        self.assertEqual(evidence["identity"]["cap_eff"], "0")
+
+    def test_wrong_unit_or_cpu_expectation_never_writes_or_launches(self):
+        for kwargs in ({"unit": "drama-synthesis-gpu.service"}, {"unit": "../system.slice"},
+                       {"cpu_cores": 4}, {"cpu_cores": True}, {"cpu_cores": 8}):
+            with self.subTest(kwargs=kwargs):
+                self.fixture()
+                self.rejected(**kwargs)
+                self.assertEqual(self.files.writes, [])
+
+    def test_missing_hidden_ambiguous_or_foreign_cgroups_fail_closed(self):
+        for kind in ("v2", "foreign_member", "duplicate", "hidden_root", "duplicate_mount", "wrong_device", "extra_pid", "thread", "child"):
+            with self.subTest(kind=kind):
+                self.fixture()
+                membership = "/proc/321/cgroup"
+                mounts = "/proc/321/mountinfo"
+                if kind == "v2":
+                    self.files.values[membership] = "0::/system.slice/" + self.unit
+                elif kind == "foreign_member":
+                    self.files.values[membership] = self.files.values[membership].replace(self.unit, "production.service", 1)
+                elif kind == "duplicate":
+                    self.files.values[membership] += "\n5:memory:/system.slice/" + self.unit
+                elif kind == "hidden_root":
+                    self.files.values[mounts] = self.files.values[mounts].replace(" / /sys/", " /hidden /sys/", 1)
+                elif kind == "duplicate_mount":
+                    self.files.values[mounts] += "\n" + self.files.values[mounts].splitlines()[0]
+                elif kind == "wrong_device":
+                    self.files.directories[self.leaf["memory"]][1] = 99
+                elif kind in ("extra_pid", "thread"):
+                    self.files.values[self.leaf["memory"] + ("/tasks" if kind == "thread" else "/cgroup.procs")] = "321\n322"
+                else:
+                    self.files.child_groups.add(self.leaf["memory"])
+                self.rejected()
+                self.assertEqual(self.files.writes, [])
+
+    def test_tighter_or_disabled_parent_limits_and_headroom_block_execution(self):
+        cases = [("cpu", "cpu.cfs_quota_us", "100000"), ("memory", "memory.limit_in_bytes", "134217728"),
+                 ("memory", "memory.memsw.limit_in_bytes", "134217728"), ("pids", "pids.max", "127"),
+                 ("memory", "memory.use_hierarchy", "0"), ("pids", "pids.max", "128"),
+                 ("memory", "memory.usage_in_bytes", str(8 * self.guard.MEMORY_BYTES))]
+        for controller, name, value in cases:
+            with self.subTest(controller=controller, name=name, value=value):
+                self.fixture()
+                self.files.values[self.paths[controller] + "/system.slice/" + name] = value
+                self.rejected()
+                self.assertEqual(self.files.writes, [])
+
+    def test_missing_memsw_unsafe_oom_and_swap_pressure_do_not_launch(self):
+        for name, value in (("memory.memsw.limit_in_bytes", None), ("memory.swappiness", "101"),
+                            ("memory.oom_control", "oom_kill_disable 1\nunder_oom 0"),
+                            ("memory.oom_control", "oom_kill_disable 0\nunder_oom 1"),
+                            ("memory.failcnt", "1")):
+            with self.subTest(name=name, value=value):
+                self.fixture()
+                path = self.leaf["memory"] + "/" + name
+                if value is None:
+                    del self.files.values[path]
+                else:
+                    self.files.values[path] = value
+                self.rejected()
+                self.assertEqual(self.files.writes, [])
+
+    def test_unapplied_writes_or_changed_membership_fail_before_dropping_identity(self):
+        for kind in ("unapplied", "moved", "replaced_directory"):
+            with self.subTest(kind=kind):
+                self.fixture()
+                if kind == "unapplied":
+                    self.files.ignore_writes = True
+                elif kind == "moved":
+                    self.files.after_write = lambda: self.files.values.update({"/proc/321/cgroup": "0::/"})
+                else:
+                    self.files.after_write = lambda: self.files.directories[self.leaf["memory"]].__setitem__(2, 999)
+                self.rejected()
+                self.assertNotIn("drop", self.events)
+
+    def test_failed_privilege_drop_or_retained_authority_never_launches(self):
+        for kind in ("exception", "groups", "uid", "cap_eff", "cap_amb", "no_new_privs", "nice"):
+            with self.subTest(kind=kind):
+                self.fixture()
+                def corrupt_drop():
+                    if kind == "exception":
+                        raise PermissionError("private failure")
+                    if kind == "groups":
+                        self.process.actual["groups"] = [0]
+                    elif kind == "uid":
+                        self.process.actual["uids"][1] = 0
+                    elif kind == "cap_eff":
+                        self.process.caps = "c0"
+                    elif kind == "cap_amb":
+                        self.process.ambient = "1"
+                    elif kind == "no_new_privs":
+                        self.process.no_new_privs = "0"
+                    elif kind == "nice":
+                        self.process.actual["nice"] = 0
+                    self.process.publish_status()
+                self.process.after_drop = corrupt_drop
+                self.rejected()
+
+    def test_inode_or_limit_change_after_drop_blocks_exec(self):
+        for kind in ("inode", "limit"):
+            with self.subTest(kind=kind):
+                self.fixture()
+                if kind == "inode":
+                    self.process.after_drop = lambda: self.files.directories[self.leaf["memory"]].__setitem__(2, 999)
+                else:
+                    self.process.after_drop = lambda: self.files.values.update({self.leaf["memory"] + "/memory.swappiness": "60"})
+                self.rejected()
+
+    def test_native_drop_clears_groups_before_gid_and_uid(self):
+        calls = []
+        with mock.patch.object(self.guard.os, "setgroups", side_effect=lambda value: calls.append(("groups", value)), create=True), \
+             mock.patch.object(self.guard.os, "setgid", side_effect=lambda value: calls.append(("gid", value)), create=True), \
+             mock.patch.object(self.guard.os, "setuid", side_effect=lambda value: calls.append(("uid", value)), create=True):
+            self.guard.LinuxProcess.drop_identity(1009, 1010)
+        self.assertEqual(calls, [("groups", []), ("gid", 1010), ("uid", 1009)])
+
+    def test_cli_rejects_arbitrary_commands_and_public_errors_are_redacted(self):
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as caught:
+            self.guard.main(["--unit", self.unit, "--cpu-cores", "2", "--command", "ffmpeg"])
+        self.assertEqual(caught.exception.code, 2)
+        output = io.StringIO()
+        with mock.patch.object(self.guard.sys, "platform", "linux"), \
+             mock.patch.object(self.guard, "run_guard", side_effect=OSError(URL)), mock.patch("sys.stdout", new=output):
+            self.assertEqual(self.guard.main(["--unit", self.unit, "--cpu-cores", "2"]), 78)
+        self.assertNotIn("never-print-this", output.getvalue())
+        self.assertFalse(json.loads(output.getvalue())["child_executed"])
+
+    def test_exec_only_uses_same_probe_script_and_clean_environment(self):
+        self.run_guard()
+        proof = self.launch.call_args.args[0]
+        captured = {}
+        def capture_exec(executable, arguments, environment):
+            captured.update(executable=executable, arguments=arguments, environment=environment)
+            fd = int(arguments[-1])
+            captured["fd"] = fd
+            captured["proof"] = json.loads(os.read(fd, 1025))
+            raise OSError("simulated exec failure")
+        with mock.patch.object(self.guard.os, "execve", side_effect=capture_exec), \
+             mock.patch.dict(os.environ, {"SECRET_TOKEN": "never-print-this"}), self.assertRaises(OSError):
+            self.guard.exec_fixed_probe(proof)
+        self.assertEqual(captured["arguments"][4], os.path.realpath(self.guard.__file__))
+        self.assertEqual(captured["proof"], proof)
+        self.assertEqual(set(captured["environment"]), {"PATH", "LANG", "PYTHONDONTWRITEBYTECODE"})
+        with self.assertRaises(OSError):
+            os.fstat(captured["fd"])
+
+    def test_fixed_probe_revalidates_inherited_limits_without_media_or_waiting(self):
+        self.run_guard()
+        proof = self.launch.call_args.args[0]
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, json.dumps(proof).encode())
+        os.close(write_fd)
+        with mock.patch.object(self.guard, "LinuxFiles", return_value=self.files), \
+             mock.patch.object(self.guard, "LinuxProcess", return_value=self.process), \
+             mock.patch.object(self.guard.os, "getpid", return_value=self.pid), \
+             mock.patch.object(self.guard.time, "sleep") as sleep, mock.patch.object(self.guard, "emit") as output:
+            self.guard.run_probe(self.unit, 2, read_fd)
+        self.assertEqual(sleep.call_args_list, [mock.call(1)] * 3)
+        final = output.call_args.args[0]
+        self.assertEqual(final["allocated_bytes"], 8 * 1024 * 1024)
+        self.assertEqual(final["media_tools_started"], 0)
+        self.assertFalse(final["media_acceptance"])
+
+    def test_invalid_or_mismatched_probe_proof_never_reaches_allocation_wait(self):
+        self.run_guard()
+        for kind in ("pid", "fingerprint", "unapplied"):
+            with self.subTest(kind=kind):
+                proof = dict(self.launch.call_args.args[0])
+                if kind == "pid":
+                    proof["pid"] += 1
+                elif kind == "fingerprint":
+                    proof["resources_sha256"] = "0" * 64
+                else:
+                    self.files.values[self.leaf["memory"] + "/memory.swappiness"] = "60"
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, json.dumps(proof).encode())
+                os.close(write_fd)
+                with mock.patch.object(self.guard, "LinuxFiles", return_value=self.files), \
+                     mock.patch.object(self.guard, "LinuxProcess", return_value=self.process), \
+                     mock.patch.object(self.guard.os, "getpid", return_value=self.pid), \
+                     mock.patch.object(self.guard.time, "sleep") as sleep, self.assertRaises(self.guard.GuardFailure):
+                    self.guard.run_probe(self.unit, 2, read_fd)
+                sleep.assert_not_called()
+
+
 class BenchmarkCgroupTests(unittest.TestCase):
     def read_fixture(self, membership, mountinfo, files):
         from scripts import benchmark_drama_synthesis_media as benchmark

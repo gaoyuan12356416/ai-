@@ -1,0 +1,60 @@
+{
+  "candidate": "570c1bdaba7eddb9cf881a5df7efee976c2d6fb0",
+  "source": "Exact candidate fetched from GitHub into isolated checkouts on both hosts",
+  "command": "python -m unittest scripts.test_drama_synthesis_upgrade scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline -q",
+  "runs": [
+    {
+      "host": "CPU 43.166.187.96",
+      "recorded_at_server_local": "2026-08-28T18:02:21.244674",
+      "python": "3.9.6",
+      "cos_sdk": "1.9.44",
+      "tests": 287,
+      "passed": 287,
+      "skipped": 0,
+      "failed": 0,
+      "elapsed_seconds": 14.403,
+      "returncode": 0,
+      "checkout": "/mnt/data-disk/drama-synthesis-acceptance/code/570c1bdaba7eddb9cf881a5df7efee976c2d6fb0",
+      "raw_evidence_directory": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/570c1bdaba7eddb9cf881a5df7efee976c2d6fb0"
+    },
+    {
+      "host": "HK 43.154.250.89",
+      "recorded_at_server_local": "2026-08-28T18:02:19.601116",
+      "python": "3.10.20",
+      "cos_sdk": "1.9.44",
+      "tests": 287,
+      "passed": 287,
+      "skipped": 0,
+      "failed": 0,
+      "elapsed_seconds": 16.047,
+      "returncode": 0,
+      "checkout": "/data/drama-synthesis-gpu/acceptance/code/570c1bdaba7eddb9cf881a5df7efee976c2d6fb0",
+      "raw_evidence_directory": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/570c1bdaba7eddb9cf881a5df7efee976c2d6fb0"
+    }
+  ],
+  "actual_sdk_transport_tests": {
+    "conditional_no_overwrite_header": "PASS; exact true wire value accepted as str or bytes",
+    "lost_multipart_create_response": "PASS; retry=0 sends one POST, replay does not send another POST",
+    "uses_actual_cos_network": false,
+    "expected_fault_logs": "Corrupt manifest, NoSuchResource and lost-create ConnectionError are deliberate test fixtures"
+  },
+  "earlier_candidate": {
+    "sha": "cc50140b46a8d126e08a322364336722ac74fec1",
+    "per_host_tests": 285,
+    "per_host_passed": 284,
+    "per_host_failed": 1,
+    "per_host_skipped": 0,
+    "failure": "Test assertion compared SDK bytes header to string; condition header was transmitted correctly",
+    "failed_logs_preserved": true
+  },
+  "production_changed": false,
+  "gpu_render_started": false,
+  "actual_media_or_cos_integration_accepted": false,
+  "remaining_gates": [
+    "TT migration media-window handoff and shared CPU directory/port coordination",
+    "Real isolated async API/COS fault and recovery tests",
+    "Download concurrency and CPU/filter comparison",
+    "Approximately 90-minute real source, full decode, audio/video and resource validation",
+    "Production release, rollback evidence and user acceptance"
+  ]
+}

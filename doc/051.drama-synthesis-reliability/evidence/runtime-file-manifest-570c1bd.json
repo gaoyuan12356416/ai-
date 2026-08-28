@@ -1,0 +1,100 @@
+{
+  "source_candidate": "570c1bdaba7eddb9cf881a5df7efee976c2d6fb0",
+  "scope": "Changed runtime files only; derived from committed Git blobs, not a record of production deployment",
+  "hash_encoding": "Git blob bytes; copy from GitHub checkout/archive without CRLF conversion",
+  "files": [
+    {
+      "path": "app.py",
+      "git_blob": "a07ffad07d7dbd57f27fdebcf3ac58e5023ef61b",
+      "sha256_git_bytes": "93d7c3ca86ac3ba9e4e18381f2907a9024669f8f49275b32b6f7a4d6caa1f227",
+      "size_git_bytes": 1015201
+    },
+    {
+      "path": "features/drama_synthesis/app_support.py",
+      "git_blob": "a79f91ff3aded7fd9b13ef35b31c1290a0b968c0",
+      "sha256_git_bytes": "f3dd02c9c9030283bbe2dd9bbbec98e30a97fa4d113b035d2f354a49e44c16be",
+      "size_git_bytes": 4908
+    },
+    {
+      "path": "features/drama_synthesis/async_runtime.py",
+      "git_blob": "9ec2b77be60ca5ab1beb6bf4ab0a3d829b96dbde",
+      "sha256_git_bytes": "5fea9fd0081fb5eb292a4e1adfd839754cf05af7d6b1bc1d2b5b5980604b0b27",
+      "size_git_bytes": 43231
+    },
+    {
+      "path": "features/drama_synthesis/core.py",
+      "git_blob": "c748fb3aeeb681def2fe746103528e6e92622fb2",
+      "sha256_git_bytes": "bb19fa2b8a730de7d7fb814a7e2f8addaa24736a5bbfce4ef92b27686c8d468c",
+      "size_git_bytes": 76613
+    },
+    {
+      "path": "features/drama_synthesis/cos_upload.py",
+      "git_blob": "0d5221d2df480eaa91866831eb4842c637051b87",
+      "sha256_git_bytes": "0eb9a588a4ab08533330ac5994d356079117c6bc2828d366cbc166a51c0e68bb",
+      "size_git_bytes": 18580
+    },
+    {
+      "path": "features/drama_synthesis/cpu_runtime.py",
+      "git_blob": "caab80f9d5a49986df9e60ec5c3c73d0f341fe7c",
+      "sha256_git_bytes": "8f08ec151ad4f893b7944450fea3eae1220e791090ff5f68eae53605e2f1e631",
+      "size_git_bytes": 17302
+    },
+    {
+      "path": "features/drama_synthesis/gpu.py",
+      "git_blob": "f5b45f02e2dd0f39fcf17232afdb1333de1303ee",
+      "sha256_git_bytes": "0d04b34cffbd625d5e8b23c24f7a01deac1379f8a9f0e23e42de64030cd1a288",
+      "size_git_bytes": 20446
+    },
+    {
+      "path": "features/drama_synthesis/local_checkpoint.py",
+      "git_blob": "4cf902101fe50b2f4ebb3509574e1b95dd9a0b8d",
+      "sha256_git_bytes": "97e212f5a0403e3520868c174bc68b26655cbb651a8cc1b466e71d69ce1fd269",
+      "size_git_bytes": 5272
+    },
+    {
+      "path": "features/drama_synthesis/media_pipeline.py",
+      "git_blob": "5ae006c1aaa22d563d78e14d3acbfe1029f1ec47",
+      "sha256_git_bytes": "fd4bdddfb57fffd4c13f8ab7886f5de5683b4ce4ff2eb4452ddb57071d6eb388",
+      "size_git_bytes": 32314
+    },
+    {
+      "path": "features/drama_synthesis/remote_client.py",
+      "git_blob": "5530c255cb1b0e0f021fcd669571fcdd564f5e2d",
+      "sha256_git_bytes": "9cd5af10981a8f0797cdd406c6ded82af5cb7d9b5cd3e682c53c63c50c7835d4",
+      "size_git_bytes": 13485
+    },
+    {
+      "path": "scripts/drama_job_worker.py",
+      "git_blob": "c1ab2edf4ff069e04cb979c6d730505c4c6e4771",
+      "sha256_git_bytes": "b8f1e2a9a2f0ecbcc2e50c09af6a033af0ff8c9ce681492a1174674f2db0a462",
+      "size_git_bytes": 16898
+    },
+    {
+      "path": "scripts/drama_synthesis_gpu_worker.py",
+      "git_blob": "d7be69d9a750b71fd6eae0537125532e3d143f15",
+      "sha256_git_bytes": "a67752f2903f9fdbf42a98223b9b228a652825b6cce134ca2d0514ad563b7e34",
+      "size_git_bytes": 8107
+    },
+    {
+      "path": "static/drama-job-runtime.js",
+      "git_blob": "85721ea03c571fe410161c397aa570778e162554",
+      "sha256_git_bytes": "b2723e89478e30159800799cc186b0fb406828bff18df6ac342a6787e88cbf99",
+      "size_git_bytes": 4118
+    },
+    {
+      "path": "static/drama-synthesis.html",
+      "git_blob": "80676487b49a6179799e224513b6258abfcb1b24",
+      "sha256_git_bytes": "fed6ee8630f833b4e9fb85025ded3f1b00067e78a8d2450200c984ec6c75653d",
+      "size_git_bytes": 282072
+    },
+    {
+      "path": "static/index.html",
+      "git_blob": "80676487b49a6179799e224513b6258abfcb1b24",
+      "sha256_git_bytes": "fed6ee8630f833b4e9fb85025ded3f1b00067e78a8d2450200c984ec6c75653d",
+      "size_git_bytes": 282072
+    }
+  ],
+  "production_deployed": false,
+  "excluded": "Tests, benchmark/probe scripts, documentation and example environment files are not production settings; private output inputs and databases never enter release payload",
+  "deployment_gate": "Re-read production drift and back up before any change; coordinate CPU shared paths and HK ports with migration task; verify final candidate contains these hashes or regenerate and revalidate"
+}

@@ -1,0 +1,429 @@
+{
+  "validation": "cpu-sqlite-copy-validation-20260828",
+  "candidate_sha": "570c1bdaba7eddb9cf881a5df7efee976c2d6fb0",
+  "host": "43.166.187.96",
+  "started_at_utc": "2026-08-28T10:13:13.320035+00:00",
+  "status": "passed",
+  "python": "3.9.6",
+  "python_executable": "/usr/bin/python3",
+  "sqlite_version": "3.26.0",
+  "data_disk_mount": "/mnt/data-disk /dev/vdb1 ext4   3e8ac4e8-7770-456d-9e89-2ec5dd405fa8",
+  "candidate_files": {
+    "features/drama_synthesis/cpu_runtime.py": {
+      "git_blob": "caab80f9d5a49986df9e60ec5c3c73d0f341fe7c",
+      "sha256": "8f08ec151ad4f893b7944450fea3eae1220e791090ff5f68eae53605e2f1e631"
+    },
+    "features/drama_synthesis/core.py": {
+      "git_blob": "c748fb3aeeb681def2fe746103528e6e92622fb2",
+      "sha256": "bb19fa2b8a730de7d7fb814a7e2f8addaa24736a5bbfce4ef92b27686c8d468c"
+    },
+    "features/drama_synthesis/__init__.py": {
+      "git_blob": "c5d6222dbce806b838d222370b37c3f59cf9f2da",
+      "sha256": "0fa3aa39b3e085ce49fdac5da87e2324fa5d680b098e5f382e92b078b2412cda"
+    }
+  },
+  "free_bytes_before": 74714177536,
+  "private_directory": "/mnt/data-disk/drama-synthesis-acceptance/sqlite-copy-validation-20260828-570c1bd-a3408b3591",
+  "copy_path": "/mnt/data-disk/drama-synthesis-acceptance/sqlite-copy-validation-20260828-570c1bd-a3408b3591/production-snapshot.sqlite3",
+  "source_before": {
+    "path": "/root/drama_material_service/data/drama_material_jobs.sqlite3",
+    "size_bytes": 48431104,
+    "mode": "0o644",
+    "uid": 0,
+    "gid": 0,
+    "inode": 786517,
+    "mtime_ns": 1787911832191420951,
+    "sha256": "303ccf7e1ea4a59477679f8964e42c1e51b1bd3f75a5694285a066ad77124006"
+  },
+  "source_query_only": 1,
+  "source_journal_mode": "wal",
+  "source_schema_sha256_before": "79c4d98b770671e3e812ca63b005edb09092962874ffb546335645cc48fa1f7a",
+  "source_runtime_table_present_before": false,
+  "backup": {
+    "method": "sqlite3.Connection.backup from file URI mode=ro plus query_only and deny-write authorizer",
+    "duration_seconds": 0.076,
+    "steps": 47,
+    "status": 101,
+    "remaining_pages": 0,
+    "total_pages": 11824
+  },
+  "copy_integrity_before": [
+    "ok"
+  ],
+  "business_tables_before": {
+    "ad_control_account_group": {
+      "rows": 4,
+      "sha256": "df5365e00d54e9ed11308de78100083865232d59d4c1491d6cc8957b24a2e600"
+    },
+    "ad_control_action": {
+      "rows": 23,
+      "sha256": "7f9d8da82cb7e9c161f296d4405b47bf552bea02969c0e098ea1fa4dd0af513d"
+    },
+    "ad_control_object_state": {
+      "rows": 1923,
+      "sha256": "c2c89e91fd4e075d90bdccb9dc669fae9715959e3a57f4cf4634dcdd6d9a5823"
+    },
+    "ad_control_preview": {
+      "rows": 1710,
+      "sha256": "03d893f55e1319d37e1825c069968dceb4720b7714fb41e4d88ef36bbf9caf4b"
+    },
+    "ad_control_rule": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ad_control_rule_group": {
+      "rows": 4,
+      "sha256": "986e9541b3e10478b6bb89136bc243ca30a4d07dc63db909b13b85df5b6c5017"
+    },
+    "ad_control_rule_set": {
+      "rows": 5,
+      "sha256": "34e5ac8112802e541ea1df19335de8bf835098d957294527faf77287c34cef35"
+    },
+    "ad_control_token_config": {
+      "rows": 5,
+      "sha256": "278c9feb47bd83d68674ccca93101cf8d5ef44ef019b748b62841a9d90d3ff8f"
+    },
+    "ad_material_asset": {
+      "rows": 65,
+      "sha256": "ac279209fa5c328b8f5d32dae6a9111c42538c6f8a21cad47f65f92f81e05aa1"
+    },
+    "ad_material_competitor_source": {
+      "rows": 3,
+      "sha256": "bee6cf41aa583b8cdb78b1e9b8f31cbb3d9de84ec3c42c254a6b07dea7f6e99e"
+    },
+    "ad_material_task": {
+      "rows": 34,
+      "sha256": "b06381f29d340bd6cfd19deb5125211664aebc3376199362fad3509ef8558434"
+    },
+    "drama_admin_audit_log": {
+      "rows": 12533,
+      "sha256": "9bb2651bc55b55cff92176088ba7d767d7d87c16858a4844d82596715d676329"
+    },
+    "drama_admin_session": {
+      "rows": 13,
+      "sha256": "dd99cc84b76c33e7c72e7a58add3e309c1d1d6f6b14b45a19e4770e392520a55"
+    },
+    "drama_admin_user": {
+      "rows": 71,
+      "sha256": "622df8f6ede676d448efce06c24e12cc0799c60ee24098e005bb104e9d1de103"
+    },
+    "drama_material_job": {
+      "rows": 23,
+      "sha256": "a1462bea14aff70d2e4f7e24ac1dc997c6ff7d3ea75b9ed7c160f090b9f68d7f"
+    },
+    "drama_material_job_worker_event": {
+      "rows": 12,
+      "sha256": "881c9b2b646a79d80f48e17cac6c15776ad0df15d51c35cadf6442a7b759a653"
+    },
+    "drama_material_job_worker_lease": {
+      "rows": 4,
+      "sha256": "36fa665a0f1e63cfaafaf75e8613a42e5dfec97f7310b1698a5017a657201c98"
+    },
+    "drama_material_short_link": {
+      "rows": 2,
+      "sha256": "f9216b87ea89e22ec5efbcfce31799053294397e348606a1635ae8b85bc1f571"
+    },
+    "drama_screenshot_job": {
+      "rows": 1207,
+      "sha256": "bdf2ad66964cc59ba3deb891c7e17acce96bc9a22ac22cb6a52d9ea72c983b34"
+    },
+    "drama_synthesis_recipe": {
+      "rows": 1,
+      "sha256": "db2e284a725a5807f4fe05c1d64b9b8e9c19f4b5bcd429fc52441a5e6469e6d1"
+    },
+    "drama_youtube_publish": {
+      "rows": 1,
+      "sha256": "ca6516b62e24a689e13de8edb9b742beaf7f7c35850c3661f38f1d087806f4cd"
+    },
+    "drama_youtube_publish_event": {
+      "rows": 4,
+      "sha256": "a7adade175fe33ea3753fb4bd36ba132ffe5b7ffd8ec65a3c18e641baa499b87"
+    },
+    "drama_youtube_sync_outbox": {
+      "rows": 3,
+      "sha256": "9d37a12f38fc4ab8ce0f029c97b4f4ea6eadd2c12596c70860e7ed7ccb541e2c"
+    },
+    "material_replication_broadcast_outbox": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "material_status_broadcast_outbox": {
+      "rows": 6745,
+      "sha256": "7f201f1516278f140c239fe7e6fdaa67b2ff387b504cd24ca99f644549c58e87"
+    },
+    "material_status_optimizer_cache": {
+      "rows": 262,
+      "sha256": "d1c872bda8bfced02502c827dbcd91db2000b04dc18f70c7705b7d7ec2c177c4"
+    },
+    "sqlite_sequence": {
+      "rows": 13,
+      "sha256": "b3f709671a94767e0d9fbbed5f57d1495670f18b38cb8c0a8736042546594564"
+    }
+  },
+  "copy_schema_sha256_before": "79c4d98b770671e3e812ca63b005edb09092962874ffb546335645cc48fa1f7a",
+  "loaded_module_path": "/mnt/data-disk/drama-synthesis-acceptance/code/570c1bdaba7eddb9cf881a5df7efee976c2d6fb0/features/drama_synthesis/cpu_runtime.py",
+  "migration_invocations": [
+    {
+      "invocation": 1,
+      "elapsed_seconds": 0.002374,
+      "schema_sha256": "055b650d31d37c382b6c51a38d0e51c0fe64a66f65aac9a62a3bfb8bf0fff96a",
+      "total_changes_delta": 0,
+      "runtime_rows": 0
+    },
+    {
+      "invocation": 2,
+      "elapsed_seconds": 0.000163,
+      "schema_sha256": "055b650d31d37c382b6c51a38d0e51c0fe64a66f65aac9a62a3bfb8bf0fff96a",
+      "total_changes_delta": 0,
+      "runtime_rows": 0,
+      "identical_to_first": true
+    },
+    {
+      "invocation": 3,
+      "elapsed_seconds": 0.000162,
+      "schema_sha256": "055b650d31d37c382b6c51a38d0e51c0fe64a66f65aac9a62a3bfb8bf0fff96a",
+      "total_changes_delta": 0,
+      "runtime_rows": 0,
+      "identical_to_first": true
+    }
+  ],
+  "business_tables_after": {
+    "ad_control_account_group": {
+      "rows": 4,
+      "sha256": "df5365e00d54e9ed11308de78100083865232d59d4c1491d6cc8957b24a2e600"
+    },
+    "ad_control_action": {
+      "rows": 23,
+      "sha256": "7f9d8da82cb7e9c161f296d4405b47bf552bea02969c0e098ea1fa4dd0af513d"
+    },
+    "ad_control_object_state": {
+      "rows": 1923,
+      "sha256": "c2c89e91fd4e075d90bdccb9dc669fae9715959e3a57f4cf4634dcdd6d9a5823"
+    },
+    "ad_control_preview": {
+      "rows": 1710,
+      "sha256": "03d893f55e1319d37e1825c069968dceb4720b7714fb41e4d88ef36bbf9caf4b"
+    },
+    "ad_control_rule": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ad_control_rule_group": {
+      "rows": 4,
+      "sha256": "986e9541b3e10478b6bb89136bc243ca30a4d07dc63db909b13b85df5b6c5017"
+    },
+    "ad_control_rule_set": {
+      "rows": 5,
+      "sha256": "34e5ac8112802e541ea1df19335de8bf835098d957294527faf77287c34cef35"
+    },
+    "ad_control_token_config": {
+      "rows": 5,
+      "sha256": "278c9feb47bd83d68674ccca93101cf8d5ef44ef019b748b62841a9d90d3ff8f"
+    },
+    "ad_material_asset": {
+      "rows": 65,
+      "sha256": "ac279209fa5c328b8f5d32dae6a9111c42538c6f8a21cad47f65f92f81e05aa1"
+    },
+    "ad_material_competitor_source": {
+      "rows": 3,
+      "sha256": "bee6cf41aa583b8cdb78b1e9b8f31cbb3d9de84ec3c42c254a6b07dea7f6e99e"
+    },
+    "ad_material_task": {
+      "rows": 34,
+      "sha256": "b06381f29d340bd6cfd19deb5125211664aebc3376199362fad3509ef8558434"
+    },
+    "drama_admin_audit_log": {
+      "rows": 12533,
+      "sha256": "9bb2651bc55b55cff92176088ba7d767d7d87c16858a4844d82596715d676329"
+    },
+    "drama_admin_session": {
+      "rows": 13,
+      "sha256": "dd99cc84b76c33e7c72e7a58add3e309c1d1d6f6b14b45a19e4770e392520a55"
+    },
+    "drama_admin_user": {
+      "rows": 71,
+      "sha256": "622df8f6ede676d448efce06c24e12cc0799c60ee24098e005bb104e9d1de103"
+    },
+    "drama_material_job": {
+      "rows": 23,
+      "sha256": "a1462bea14aff70d2e4f7e24ac1dc997c6ff7d3ea75b9ed7c160f090b9f68d7f"
+    },
+    "drama_material_job_worker_event": {
+      "rows": 12,
+      "sha256": "881c9b2b646a79d80f48e17cac6c15776ad0df15d51c35cadf6442a7b759a653"
+    },
+    "drama_material_job_worker_lease": {
+      "rows": 4,
+      "sha256": "36fa665a0f1e63cfaafaf75e8613a42e5dfec97f7310b1698a5017a657201c98"
+    },
+    "drama_material_short_link": {
+      "rows": 2,
+      "sha256": "f9216b87ea89e22ec5efbcfce31799053294397e348606a1635ae8b85bc1f571"
+    },
+    "drama_screenshot_job": {
+      "rows": 1207,
+      "sha256": "bdf2ad66964cc59ba3deb891c7e17acce96bc9a22ac22cb6a52d9ea72c983b34"
+    },
+    "drama_synthesis_recipe": {
+      "rows": 1,
+      "sha256": "db2e284a725a5807f4fe05c1d64b9b8e9c19f4b5bcd429fc52441a5e6469e6d1"
+    },
+    "drama_youtube_publish": {
+      "rows": 1,
+      "sha256": "ca6516b62e24a689e13de8edb9b742beaf7f7c35850c3661f38f1d087806f4cd"
+    },
+    "drama_youtube_publish_event": {
+      "rows": 4,
+      "sha256": "a7adade175fe33ea3753fb4bd36ba132ffe5b7ffd8ec65a3c18e641baa499b87"
+    },
+    "drama_youtube_sync_outbox": {
+      "rows": 3,
+      "sha256": "9d37a12f38fc4ab8ce0f029c97b4f4ea6eadd2c12596c70860e7ed7ccb541e2c"
+    },
+    "material_replication_broadcast_outbox": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "material_status_broadcast_outbox": {
+      "rows": 6745,
+      "sha256": "7f201f1516278f140c239fe7e6fdaa67b2ff387b504cd24ca99f644549c58e87"
+    },
+    "material_status_optimizer_cache": {
+      "rows": 262,
+      "sha256": "d1c872bda8bfced02502c827dbcd91db2000b04dc18f70c7705b7d7ec2c177c4"
+    },
+    "sqlite_sequence": {
+      "rows": 13,
+      "sha256": "b3f709671a94767e0d9fbbed5f57d1495670f18b38cb8c0a8736042546594564"
+    }
+  },
+  "all_business_rows_and_hashes_unchanged": true,
+  "original_schema_unchanged": true,
+  "added_schema_objects": [
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_drama_material_job_remote_runtime_1"
+    },
+    {
+      "type": "table",
+      "name": "drama_material_job_remote_runtime"
+    }
+  ],
+  "only_expected_schema_objects_added": true,
+  "runtime_columns": [
+    {
+      "name": "job_id",
+      "type": "TEXT",
+      "not_null": 0,
+      "default": null,
+      "primary_key": 1
+    },
+    {
+      "name": "fingerprint",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": null,
+      "primary_key": 0
+    },
+    {
+      "name": "payload_json",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": null,
+      "primary_key": 0
+    },
+    {
+      "name": "snapshot_json",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": "'{}'",
+      "primary_key": 0
+    },
+    {
+      "name": "generation",
+      "type": "INTEGER",
+      "not_null": 1,
+      "default": "0",
+      "primary_key": 0
+    },
+    {
+      "name": "resume_requested_generation",
+      "type": "INTEGER",
+      "not_null": 1,
+      "default": "0",
+      "primary_key": 0
+    },
+    {
+      "name": "first_started_at",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": "''",
+      "primary_key": 0
+    },
+    {
+      "name": "created_at_utc",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": null,
+      "primary_key": 0
+    },
+    {
+      "name": "updated_at_utc",
+      "type": "TEXT",
+      "not_null": 1,
+      "default": null,
+      "primary_key": 0
+    }
+  ],
+  "copy_integrity_after": [
+    "ok"
+  ],
+  "app_module_imported": false,
+  "source_schema_sha256_after": "79c4d98b770671e3e812ca63b005edb09092962874ffb546335645cc48fa1f7a",
+  "source_schema_unchanged": true,
+  "source_runtime_table_present_after": false,
+  "source_after": {
+    "path": "/root/drama_material_service/data/drama_material_jobs.sqlite3",
+    "size_bytes": 48431104,
+    "mode": "0o644",
+    "uid": 0,
+    "gid": 0,
+    "inode": 786517,
+    "mtime_ns": 1787911832191420951,
+    "sha256": "303ccf7e1ea4a59477679f8964e42c1e51b1bd3f75a5694285a066ad77124006"
+  },
+  "source_database_bytes_unchanged": true,
+  "source_inode_size_mtime_unchanged": true,
+  "source_denied_write_attempts": 0,
+  "network_attempts": [],
+  "copy_final": {
+    "path": "/mnt/data-disk/drama-synthesis-acceptance/sqlite-copy-validation-20260828-570c1bd-a3408b3591/production-snapshot.sqlite3",
+    "size_bytes": 48439296,
+    "mode": "0o600",
+    "uid": 0,
+    "gid": 0,
+    "inode": 6949741,
+    "mtime_ns": 1787911994138822699,
+    "sha256": "e4a0be718d52699c0fa6791b7d10cdce8eebc097e4d286adc55456f511f912da"
+  },
+  "private_directory_mode": "0o700",
+  "private_sidecars": [],
+  "privacy": {
+    "raw_rows_exported": false,
+    "credentials_exported": false,
+    "backup_exported_off_host": false,
+    "directory_mode": "0700",
+    "file_mode": "0600",
+    "owner": "root",
+    "publicly_served": false
+  },
+  "cleanup_plan": {
+    "action": "retain private copy for acceptance review, then root removes this exact private directory after approval; never restore over production",
+    "retention_review_date": "2026-09-04",
+    "automatic_deletion_scheduled": false,
+    "raw_copy_must_not_be_committed_or_uploaded": true
+  },
+  "elapsed_seconds": 0.902,
+  "finished_at_utc": "2026-08-28T10:13:14.222151+00:00",
+  "remote_evidence_path": "/mnt/data-disk/drama-synthesis-acceptance/sqlite-copy-validation-20260828-570c1bd-a3408b3591/cpu-sqlite-copy-validation-20260828.json"
+}
