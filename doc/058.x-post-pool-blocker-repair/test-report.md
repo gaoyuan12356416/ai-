@@ -15,8 +15,16 @@
 - SQLite online backup：quick_check=ok、foreign_key_check=0。
 - Run348原13条+Run350原3条：failed、attempt=0、unknown=0、无媒体/帖子ID、未开始发布，relay源/转发尝试均0。
 - q533/719/726完整queue/log/relay快照受保护，后续不得清除或重发。
-- 15:47:47三个X timer被暂停，原因待确认；目前保持其停止状态，未自动启动发布。
+- 15:47:47外部暂停、15:59:58恢复timer；重新门禁后按当前active状态维护部署，16:13:44恢复原状态。
+
+## 生产代码验证
+
+- 最终提交814e168在服务器Python3.9.6：832/832，38.593s，无跳过。
+- 备份副本初始化完整性ok/FK0，业务表数量不变。
+- 16:13:44代码部署检查完成，Sidecar/Main auth/GPU均200，主API X admin未鉴权401；三个timer恢复active。
+- 真实内部只读预检：账号8返回x_post_account_locked，账号19返回x_post_account_needs_review，均409，中文原因指向正确历史日志。
+- 保护533/719/726的queue/log/relay逐字段不变；此阶段没有历史队列重置或新增Post/Repost。
 
 ## 待完成
 
-Linux全量测试、备份副本初始化/恢复演练、exact commit部署、live恢复与自然发布结果尚未完成，不能把本地测试或入队视为实际发布成功。
+16条历史媒体仍在备份副本校验，副本apply/live validate/live apply与自然发布账本验收尚未完成。不能把代码上线或恢复入队视为实际发帖成功。

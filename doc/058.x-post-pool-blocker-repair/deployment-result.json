@@ -1,0 +1,71 @@
+{
+  "commit": "814e168a48bbacae00384c0950576c5b253e21eb",
+  "previous_release": "/mnt/data-disk/x-post-automation/releases/18d9cfb68ee330db633b769112f0a50e38bc3e7c",
+  "backup_path": "/mnt/data-disk/x-post-automation/backups/20260828-pool-blockers-155312",
+  "started_at": "2026-08-28T16:10:59.805286",
+  "timers_before": {
+    "x-post-schedule.timer": "active",
+    "x-post-schedule-claim.timer": "active",
+    "x-post-manual.timer": "active"
+  },
+  "main_files": [
+    {
+      "name": "account_blockers.py",
+      "existed_before": false,
+      "sha256": "2d108ea8d56e8321df312b22b285da6fc7d54a6fd096f1127581ba8d32c79d0c"
+    },
+    {
+      "name": "publish_media_repair.py",
+      "existed_before": false,
+      "sha256": "7dce029c11fc2c4dd5cbfc5bf6fb5af0635deffda97ec2c6c39fdf69c2f0a8fe"
+    },
+    {
+      "name": "service.py",
+      "existed_before": true,
+      "sha256": "604ab204ed3fce15847929566450268e05a4470a41f862f1c4d6d9fdc744704e"
+    }
+  ],
+  "phase": "healthy",
+  "completed_at": "2026-08-28T16:13:44.174822",
+  "health": {
+    "sidecar": {
+      "http_status": 200,
+      "nonempty": true
+    },
+    "main_auth_status": {
+      "http_status": 200,
+      "nonempty": true
+    },
+    "gpu": {
+      "http_status": 200,
+      "nonempty": true
+    },
+    "main_x_admin_auth_gate": {
+      "http_status": 401
+    }
+  },
+  "account_hold_responses": {
+    "8": {
+      "error": "x_post_account_locked",
+      "message": "账号@NaughtyLovm57c：X账号临时锁定，请先登录X解锁；不自动重试"
+    },
+    "19": {
+      "error": "x_post_account_needs_review",
+      "message": "账号@timothyjames455：批次360/日志726有未完成或待核对的发布结果"
+    }
+  },
+  "sidecar_pid": 1777039,
+  "repair_enabled": true,
+  "repair_timeout": 3600,
+  "schedule_internal_timeout": 7200,
+  "timers_after": {
+    "x-post-schedule.timer": "active",
+    "x-post-schedule-claim.timer": "active",
+    "x-post-manual.timer": "active"
+  },
+  "sqlite_quick_check": "ok",
+  "foreign_key_errors": 0,
+  "protected_ledger_unchanged": true,
+  "historical_queues_rearmed": false,
+  "probe_note": "Main API has no /health endpoint; checked /api/auth/status and X admin authorization gate."
+}

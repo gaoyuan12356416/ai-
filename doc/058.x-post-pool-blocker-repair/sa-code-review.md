@@ -13,4 +13,4 @@
 
 ## 生产兼容性
 
-Sidecar为18d9cfb；主API共享service.py较旧，差异仅为尚未同步的恢复审计、租约、容量证明等代码，未发现独立新功能。发布前保留其备份，仅同步共享service.py和新增两个helper，不改主API selector/OAuth/app或其他功能。备份副本执行初始化及恢复后再切换。
+Sidecar为18d9cfb；主API共享service.py较旧，差异仅为尚未同步的恢复审计、租约、容量证明等代码，未发现独立新功能。发布前保留其备份，仅同步共享service.py和新增两个helper，不改主API selector/OAuth/app或其他功能。备份副本先执行初始化并确认业务数量不变，再切换代码；历史媒体恢复独立进行，live apply之前必须先在副本演练通过。
