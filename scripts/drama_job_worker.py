@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app as drama_app  # noqa: E402
+from features.drama_synthesis.cpu_runtime import LeaseIdentity, LeaseLostError, get_remote_status  # noqa: E402
+from features.drama_synthesis.remote_client import RemoteJobError, RemotePollingInterrupted  # noqa: E402
 
 
 RUNNING_JOB_STATUSES = ("queued", "validating", "downloading", "processing_cover", "rendering")
@@ -137,6 +139,8 @@ def row_can_be_claimed(row):
         return False
     if status == "queued":
         return True
+    if row["lease_status"] == "interrupted":
+        return True
     if row["lease_job_id"] and is_stale(row["heartbeat_at"]):
         return True
     if RECOVER_LEGACY and is_stale(row["updated_at"]):
@@ -206,43 +210,61 @@ def claim_next_job():
         conn.close()
 
 
-def update_heartbeat(job_id):
+def owned_lease(job_id):
     conn = connect_db()
     try:
-        conn.execute(
-            """
-            UPDATE drama_material_job_worker_lease
-            SET heartbeat_at = ?, pid = ?
-            WHERE job_id = ? AND worker_id = ? AND status = 'running'
-            """,
-            (now_text(), os.getpid(), job_id, WORKER_ID),
-        )
-        conn.commit()
+        row = conn.execute(
+            "SELECT worker_id,attempt FROM drama_material_job_worker_lease WHERE job_id=? AND worker_id=? AND status='running'",
+            (job_id, WORKER_ID),
+        ).fetchone()
+        if row is None:
+            raise LeaseLostError()
+        return LeaseIdentity(str(row["worker_id"]), int(row["attempt"]))
     finally:
         conn.close()
 
 
-def heartbeat_loop(job_id, stop_event):
+def update_heartbeat(job_id, attempt):
+    conn = connect_db()
+    try:
+        changed = conn.execute(
+            """
+            UPDATE drama_material_job_worker_lease
+            SET heartbeat_at = ?, pid = ?
+            WHERE job_id = ? AND worker_id = ? AND attempt = ? AND status = 'running'
+            """,
+            (now_text(), os.getpid(), job_id, WORKER_ID, attempt),
+        )
+        conn.commit()
+        return changed.rowcount == 1
+    finally:
+        conn.close()
+
+
+def heartbeat_loop(job_id, stop_event, attempt, observer_stop):
     while not stop_event.wait(HEARTBEAT_SECONDS):
         try:
-            update_heartbeat(job_id)
+            if not update_heartbeat(job_id, attempt):
+                observer_stop.set()
+                return
         except Exception:
             logging.exception("heartbeat failed: %s", job_id)
 
 
-def release_lease(job_id, status, error=""):
+def release_lease(job_id, status, error="", *, attempt):
     conn = connect_db()
     try:
         ensure_worker_tables(conn)
-        conn.execute(
+        changed = conn.execute(
             """
             UPDATE drama_material_job_worker_lease
             SET status = ?, released_at = ?, heartbeat_at = ?, last_error = ?
-            WHERE job_id = ? AND worker_id = ?
+            WHERE job_id = ? AND worker_id = ? AND attempt = ? AND status = 'running'
             """,
-            (status, now_text(), now_text(), error[:2000], job_id, WORKER_ID),
+            (status, now_text(), now_text(), error[:2000], job_id, WORKER_ID, attempt),
         )
-        event(conn, job_id, "released", "%s %s" % (status, error[:500]))
+        if changed.rowcount:
+            event(conn, job_id, "released", "%s %s" % (status, error[:500]))
         conn.commit()
     finally:
         conn.close()
@@ -251,15 +273,25 @@ def release_lease(job_id, status, error=""):
 def prepare_job_for_run(job):
     drama_app.clear_job_deleted_marker(job["job_id"])
     job["error_message"] = ""
+    job["progress_detail"] = "\u540e\u53f0 worker \u4ece\u65ad\u70b9\u7ee7\u7eed\u6267\u884c"
+    if get_remote_status(DB_PATH, job["job_id"]):
+        # Remote jobs finish only through the verified GPU result plus atomic
+        # consumption.  URL presence must not bypass a failed cache check.
+        job["status"] = "queued"
+        job["progress"] = max(2, drama_app.clamp_progress(job.get("progress", 0)))
+        job["progress_detail"] = "继续跟踪原制作任务"
+        drama_app.upsert_job_record(job)
+        return True
+    # Legacy jobs do not use atomic_complete_job to replace a failure notice.
+    # Preserve their original retry contract so success can be notified again.
     job["completion_notified_at"] = ""
     job["completion_notification_error"] = ""
-    job["progress_detail"] = "\u540e\u53f0 worker \u4ece\u65ad\u70b9\u7ee7\u7eed\u6267\u884c"
     if drama_app.selected_job_outputs_ready(job):
         job["status"] = "done"
         job["progress"] = 100
         job["progress_detail"] = "\u5168\u90e8\u4ea7\u7269\u5df2\u751f\u6210"
         drama_app.upsert_job_record(job)
-        drama_app.notify_job_creator_on_completion(job)
+        notify_without_restarting_media(job)
         return False
     if job.get("output_video_url") and not job.get("output_video_no_bgm_url"):
         job["status"] = "rendering"
@@ -274,27 +306,62 @@ def prepare_job_for_run(job):
     return True
 
 
+def notify_without_restarting_media(job):
+    try:
+        drama_app.notify_job_creator_on_completion(job)
+    except Exception:
+        logging.exception("job notification failed; media state retained: %s", job["job_id"])
+
+
 def mark_job_failed(job, exc):
     message = str(exc).strip() or exc.__class__.__name__
     trace = traceback.format_exc(limit=8)
     job["status"] = "failed"
     job["progress"] = drama_app.clamp_progress(job.get("progress", 0))
-    job["error_message"] = "%s\n%s" % (message, trace)
+    job["error_message"] = message if isinstance(exc, RemoteJobError) else "%s\n%s" % (message, trace)
     drama_app.upsert_job_record(job)
-    drama_app.notify_job_creator_on_completion(job)
+    notify_without_restarting_media(job)
     return message
 
 
 def should_auto_retry(exc):
+    if isinstance(exc, (RemoteJobError, RemotePollingInterrupted, LeaseLostError)):
+        return False
     checker = getattr(drama_app, "should_auto_retry_job", None)
     return bool(checker and checker(exc))
 
 
+class ObserverStop:
+    """Observe service shutdown and lease loss without cancelling GPU work."""
+
+    def __init__(self, lost):
+        self.lost = lost
+
+    def is_set(self):
+        return STOP_EVENT.is_set() or self.lost.is_set()
+
+    def wait(self, seconds):
+        deadline = time.monotonic() + max(0, float(seconds))
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self.lost.wait(min(remaining, 0.25))
+        return True
+
+
 def run_claimed_job(job_id):
-    release_status = "done"
+    try:
+        identity = owned_lease(job_id)
+    except LeaseLostError:
+        logging.info("job lease no longer owned: %s", job_id)
+        return
+    release_status = "interrupted"
     release_error = ""
     heartbeat_stop = threading.Event()
-    heartbeat = threading.Thread(target=heartbeat_loop, args=(job_id, heartbeat_stop), daemon=True)
+    observer_lost = threading.Event()
+    observer_stop = ObserverStop(observer_lost)
+    heartbeat = threading.Thread(target=heartbeat_loop, args=(job_id, heartbeat_stop, identity.attempt, observer_lost), daemon=True)
     heartbeat.start()
     try:
         attempts = max(1, int(getattr(drama_app, "JOB_AUTO_RETRY_ATTEMPTS", 1)) + 1)
@@ -303,7 +370,11 @@ def run_claimed_job(job_id):
             if not job:
                 release_status = "missing"
                 return
+            job["_fenced_lease"] = identity.as_dict()
+            job["_remote_stop_event"] = observer_stop
             try:
+                if observer_stop.is_set():
+                    raise RemotePollingInterrupted()
                 if attempt > 1:
                     drama_app.set_job_progress(
                         job,
@@ -319,22 +390,36 @@ def run_claimed_job(job_id):
                 final_job = drama_app.fetch_job_row(job_id) or job
                 release_status = final_job.get("status") or "done"
                 if release_status not in TERMINAL_LEASE_STATUSES:
-                    release_status = "done"
+                    release_status = "interrupted"
+                return
+            except (RemotePollingInterrupted, LeaseLostError) as exc:
+                logging.info("observer stopped without changing media result: %s %s", job_id, exc)
+                release_status = "interrupted"
+                release_error = str(exc)
                 return
             except Exception as exc:
                 logging.exception("job failed: %s", job_id)
                 if drama_app.is_job_deleted(job_id) and str(exc).strip() == "job deleted":
                     release_status = "deleted"
                     return
+                # Completion has already committed; a later notification error
+                # must not turn it into a failed job or start another renderer.
+                persisted = drama_app.fetch_job_row(job_id)
+                if persisted and persisted.get("status") == "done":
+                    release_status = "done"
+                    return
                 if attempt < attempts and should_auto_retry(exc):
                     continue
                 release_status = "failed"
-                release_error = mark_job_failed(job, exc)
+                try:
+                    release_error = mark_job_failed(job, exc)
+                except LeaseLostError:
+                    release_status = "interrupted"
                 return
     finally:
         heartbeat_stop.set()
         heartbeat.join(timeout=HEARTBEAT_SECONDS + 2)
-        release_lease(job_id, release_status, release_error)
+        release_lease(job_id, release_status, release_error, attempt=identity.attempt)
 
 
 def handle_signal(signum, _frame):

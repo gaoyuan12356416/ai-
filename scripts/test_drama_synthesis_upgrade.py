@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -761,6 +762,8 @@ class UpgradeTests(unittest.TestCase):
 
     def test_gpu_worker_fake_http_contract_is_media_only(self):
         fake_app = SimpleNamespace(
+            WORK_ROOT=str(self.root / "gpu-work"),
+            cached_gpu_video_result=lambda _payload: None,
             drama_random_template_catalog=lambda: {"version": 1, "count": 315},
             handle_gpu_video_render=lambda payload: {"ok": True, "recipe": payload["recipe"]},
             handle_gpu_video_cover=lambda payload: {"ok": True, "cover": payload["source_url"]},
@@ -795,6 +798,8 @@ class UpgradeTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+            if module.RUNTIME is not None:
+                self.assertTrue(module.RUNTIME.close(timeout=3))
 
     def test_gpu_uses_frozen_source_and_hides_internal_intermediate(self):
         text = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -811,6 +816,276 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn('"naming_rule": "default"', text)
         self.assertIn('item["output_random_template_url"]', text)
         self.assertIn('item["random_template_recipe"]', text)
+
+
+class AsyncAppIntegrationTests(unittest.TestCase):
+    """Exercise the real app glue without importing its production side effects."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app_tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+
+    def load(self, *names, **values):
+        from features.drama_synthesis import remote_client
+        from features.drama_synthesis.app_support import ObservationStop, remote_display
+        import logging
+        import requests
+        env = dict(threading=threading, os=os, json=json, logging=logging,
+                   DramaObservationStop=ObservationStop, drama_remote_display=remote_display,
+                   drama_remote_client=remote_client, requests=requests,
+                   DRAMA_GPU_ASYNC_ENABLED=True, JOB_DB_PATH="unused.sqlite3",
+                   GPU_VIDEO_WORKER_URL="http://127.0.0.1:8787", GPU_VIDEO_WORKER_TOKEN="test-only",
+                   gpu_video_worker_enabled=lambda: True, normalize_outputs=lambda value: value)
+        env.update(values)
+        nodes = [n for n in self.app_tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual(len(nodes), len(names))
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "app.py", "exec"), env)
+        return env
+
+    def test_native_render_stage_has_media_time_ratio_and_no_global_weight(self):
+        from features.drama_synthesis.app_support import remote_display
+        actual = remote_display({"status": "running", "stage": "rendering_random",
+                                 "metrics": {"out_time_seconds": 60, "duration_seconds": 120}})
+        self.assertEqual(actual["stage_percent"], 50.0)
+        self.assertIn("1.0/2.0", actual["detail"])
+        self.assertEqual(remote_display({"stage": "concatenating"})["stage_percent"], None)
+
+    def test_bad_metrics_and_reconnection_never_create_fake_progress(self):
+        from features.drama_synthesis.app_support import remote_display
+        view = remote_display({"status": "running", "stage": "rendering",
+                               "metrics": {"out_time_seconds": float("nan"), "duration_seconds": 120},
+                               "connection_state": "reconnecting"})
+        self.assertIsNone(view["stage_percent"])
+        self.assertEqual(view["stage_label"], "连接恢复中")
+
+    def test_observer_parent_stop_is_not_lost(self):
+        from features.drama_synthesis.app_support import ObservationStop
+        parent = threading.Event()
+        observer = ObservationStop(parent)
+        self.assertFalse(observer.wait(0))
+        parent.set()
+        self.assertTrue(observer.wait(0))
+
+    def test_cover_failure_joins_old_observer_before_retry_can_start(self):
+        job = {"job_id": JOB_ID}
+        stopped = []
+        executor = mock.Mock()
+        def run(current):
+            current["_gpu_observer_executor"] = executor
+            executor.shutdown.side_effect = lambda **kw: stopped.append(current["_remote_stop_event"].is_set())
+            raise ValueError("cover service unavailable")
+        env = self.load("process_job", _process_job_observed=run)
+        with self.assertRaisesRegex(ValueError, "cover service"):
+            env["process_job"](job)
+        self.assertEqual(stopped, [True])
+        executor.shutdown.assert_called_once_with(wait=True)
+        self.assertNotIn("_remote_stop_event", job)
+        self.assertNotIn("_gpu_observer_executor", job)
+
+    def gpu_env(self, *, completed=False):
+        payload = {"job_id": JOB_ID, "await_cover_16x9": True, "outputs": {"concat_video": True},
+                   "episodes": [{"episode_number": 1, "episode_url": "https://example.test/one.mp4"}]}
+        runtime = SimpleNamespace(
+            get_remote_payload=mock.Mock(return_value=payload),
+            remember_remote_submission=mock.Mock(side_effect=lambda db, job, saved, lease: saved),
+            get_remote_status=mock.Mock(return_value={"job_id": JOB_ID, "generation": 1}),
+            get_remote_resume_intent=mock.Mock(return_value=None), record_remote_status=mock.Mock())
+        env = self.load("call_gpu_video_worker", drama_cpu_runtime=runtime,
+                        submit_gpu_video_cover=mock.Mock(), set_job_progress=mock.Mock())
+        job = {"job_id": JOB_ID, "cover_16x9_url": "https://example.test/cover.jpg"}
+        return env, job, runtime
+
+    def test_lost_cover_callback_retries_without_failing_or_resubmitting_media(self):
+        import requests
+        env, job, runtime = self.gpu_env()
+        env["submit_gpu_video_cover"].side_effect = [requests.Timeout(), {"ok": True}]
+        snapshots = []
+        runtime.record_remote_status.side_effect = lambda db, jid, status, lease: snapshots.append(status)
+        remote = env["drama_remote_client"]
+        def wait(*args, **kwargs):
+            kwargs["on_status"]({"status": "running", "stage": "waiting_cover", "connection_state": "connected"})
+            kwargs["on_status"]({"status": "running", "stage": "waiting_cover", "connection_state": "connected"})
+            return {"job_id": JOB_ID}
+        with mock.patch.object(remote, "wait_for_gpu_job", side_effect=wait) as poll:
+            self.assertEqual(env["call_gpu_video_worker"](job, [], {}), {"job_id": JOB_ID})
+        self.assertEqual(poll.call_count, 1)
+        self.assertEqual(env["submit_gpu_video_cover"].call_count, 2)
+        self.assertEqual(snapshots[0]["connection_state"], "reconnecting")
+        self.assertEqual(snapshots[1]["connection_state"], "connected")
+
+    def test_completed_result_does_not_depend_on_cover_callback_availability(self):
+        env, job, _ = self.gpu_env()
+        def wait(*args, **kwargs):
+            kwargs["on_status"]({"status": "completed", "stage": "completed", "connection_state": "connected"})
+            return {"job_id": JOB_ID}
+        with mock.patch.object(env["drama_remote_client"], "wait_for_gpu_job", side_effect=wait):
+            env["call_gpu_video_worker"](job, [], {})
+        env["submit_gpu_video_cover"].assert_not_called()
+
+    def test_new_submission_freezes_cdn_route_before_persisting_payload(self):
+        from features.drama_synthesis.media_pipeline import freeze_episode_download_route
+        env, job, runtime = self.gpu_env()
+        runtime.get_remote_payload.return_value = None
+        env["freeze_episode_download_route"] = freeze_episode_download_route
+        source = "https://img.tianmai.cn/resource/13218/19_example.mp4"
+        with mock.patch.dict(os.environ, {"DRAMA_GPU_TIANMAI_CDN": "international"}), \
+                mock.patch.object(env["drama_remote_client"], "wait_for_gpu_job", return_value={"job_id": JOB_ID}):
+            env["call_gpu_video_worker"](job, [{"episode_number": 19, "episode_url": source}], {"concat_video": True})
+        frozen = runtime.remember_remote_submission.call_args.args[2]["episodes"][0]
+        self.assertEqual(frozen["episode_url"], source)
+        self.assertEqual(frozen["download_route"]["primary_url"], source.replace("img.tianmai.cn", "accelerate.tianmai.cn"))
+        self.assertEqual(frozen["download_route"]["fallback_url"], source)
+
+    def test_saved_submission_does_not_change_when_cdn_configuration_changes(self):
+        env, job, runtime = self.gpu_env()
+        old_payload = runtime.get_remote_payload.return_value
+        env["freeze_episode_download_route"] = mock.Mock(side_effect=AssertionError("must use frozen payload"))
+        with mock.patch.dict(os.environ, {"DRAMA_GPU_TIANMAI_CDN": "international"}), \
+                mock.patch.object(env["drama_remote_client"], "wait_for_gpu_job", return_value={"job_id": JOB_ID}) as wait:
+            env["call_gpu_video_worker"](job, [{"episode_number": 99, "episode_url": "https://img.tianmai.cn/resource/1/other.mp4"}], {})
+        self.assertIs(wait.call_args.args[2], old_payload)
+        self.assertNotIn("download_route", old_payload["episodes"][0])
+        env["freeze_episode_download_route"].assert_not_called()
+
+    def test_async_upload_uses_durable_checkpoint_before_public_head(self):
+        import contextlib
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "video.mp4"
+            path.write_bytes(b"complete media fixture")
+            runtime = SimpleNamespace(capture_context=lambda: SimpleNamespace(job_id=JOB_ID),
+                                      use_context=lambda context: contextlib.nullcontext(), emit_progress=mock.Mock())
+            http = SimpleNamespace(head=mock.Mock(side_effect=AssertionError("unverified public HEAD must not bypass ledger")))
+            client = object()
+            client_factory = mock.Mock(return_value=client)
+            env = self.load("upload_file_to_cos", cos_enabled=lambda: True, file_ready=lambda _: True,
+                            build_cos_object_key=lambda _: "isolated/video.mp4", build_cos_url=lambda _: "https://example.test/video.mp4",
+                            drama_async_runtime=runtime, requests=http, hashlib=hashlib, WORK_ROOT=root,
+                            get_cos_client=client_factory, COS_UPLOAD_TIMEOUT=120, COS_MULTIPART_TIMEOUT=900,
+                            COS_BUCKET="test-bucket", guess_content_type=lambda _: "video/mp4")
+            with mock.patch("features.drama_synthesis.cos_upload.resume_upload") as upload:
+                self.assertEqual(env["upload_file_to_cos"](str(path)), "https://example.test/video.mp4")
+            call = upload.call_args
+            self.assertIs(call.args[0], client)
+            self.assertEqual(call.kwargs["path"], str(path))
+            self.assertEqual(Path(call.kwargs["checkpoint_path"]).parent, Path(root) / ".runtime" / "uploads" / JOB_ID)
+            self.assertEqual(call.kwargs["key"], "isolated/video.mp4")
+            self.assertEqual(call.kwargs["acl"], "public-read")
+            client_factory.assert_called_once_with(timeout=900, retry=0)
+            http.head.assert_not_called()
+
+    def test_only_explicit_async_client_disables_sdk_internal_post_retries(self):
+        config = object()
+        constructor = mock.Mock()
+        env = self.load("get_cos_client", cos_enabled=lambda: True, COS_UPLOAD_TIMEOUT=120,
+                        COS_REGION="test", COS_SECRET_ID="fixture", COS_SECRET_KEY="fixture",
+                        CosConfig=mock.Mock(return_value=config), CosS3Client=constructor)
+        env["get_cos_client"]()
+        constructor.assert_called_once_with(config)
+        constructor.reset_mock()
+        env["get_cos_client"](timeout=900, retry=0)
+        constructor.assert_called_once_with(config, retry=0)
+
+    def test_other_upload_callers_keep_existing_object_reuse(self):
+        response = SimpleNamespace(status_code=200, headers={"Content-Length": "12"})
+        http = SimpleNamespace(head=mock.Mock(return_value=response))
+        env = self.load("upload_file_to_cos", cos_enabled=lambda: True, file_ready=lambda _: True,
+                        build_cos_object_key=lambda _: "legacy.mp4", build_cos_url=lambda _: "https://example.test/legacy.mp4",
+                        drama_async_runtime=SimpleNamespace(capture_context=lambda: None), requests=http)
+        with mock.patch.object(os.path, "getsize", return_value=12), \
+                mock.patch("features.drama_synthesis.cos_upload.resume_upload") as upload:
+            self.assertEqual(env["upload_file_to_cos"]("legacy.mp4"), "https://example.test/legacy.mp4")
+        upload.assert_not_called()
+        http.head.assert_called_once()
+
+    def test_stopped_observer_cannot_write_a_late_status(self):
+        env, job, runtime = self.gpu_env()
+        stop = threading.Event(); stop.set(); job["_remote_stop_event"] = stop
+        def wait(*args, **kwargs):
+            kwargs["on_status"]({"status": "running", "connection_state": "connected"})
+        with mock.patch.object(env["drama_remote_client"], "wait_for_gpu_job", side_effect=wait):
+            with self.assertRaises(env["drama_remote_client"].RemotePollingInterrupted):
+                env["call_gpu_video_worker"](job, [], {})
+        runtime.record_remote_status.assert_not_called()
+
+    def test_async_retry_is_immediately_queued_without_url_based_completion(self):
+        job = {"job_id": JOB_ID, "cover_16x9_url": "https://example.test/cover.jpg", "status": "failed"}
+        env = self.load("resume_job_from_checkpoint",
+                        drama_cpu_runtime=SimpleNamespace(get_remote_payload=lambda *a: {"job_id": JOB_ID}),
+                        clear_job_deleted_marker=mock.Mock(), upsert_job_record=mock.Mock(), run_job_async=mock.Mock(),
+                        reconcile_job_outputs_from_public_artifacts=mock.Mock(side_effect=AssertionError("unsafe reconciliation")),
+                        selected_job_outputs_ready=mock.Mock(side_effect=AssertionError("unsafe URL shortcut")))
+        env["resume_job_from_checkpoint"](job)
+        self.assertEqual(job["status"], "queued")
+        env["run_job_async"].assert_called_once_with(job)
+
+    def test_async_records_cannot_bypass_manifest_verification_via_legacy_reconcile(self):
+        env = self.load("reconcile_job_outputs_from_public_artifacts",
+                        drama_cpu_runtime=SimpleNamespace(get_remote_payload=lambda *a: {"job_id": JOB_ID}),
+                        public_artifact_ready=mock.Mock(side_effect=AssertionError("must not HEAD")))
+        self.assertFalse(env["reconcile_job_outputs_from_public_artifacts"]({"job_id": JOB_ID}))
+
+    def test_master_failure_is_not_hidden_by_last_known_gpu_stage(self):
+        store = SimpleNamespace(recipe=lambda *a: None, short_links_for_job=lambda *a: [], youtube_tasks_for_job=lambda *a, **kw: [])
+        env = self.load("decorate_drama_synthesis_job", DRAMA_SYNTHESIS_STORE=store,
+                        drama_cpu_runtime=SimpleNamespace(get_remote_status=lambda *a: {"status": "running", "stage": "rendering"}))
+        row = env["decorate_drama_synthesis_job"]({"job_id": JOB_ID, "status": "failed", "error_message": "记录消失，需要核对"})
+        self.assertEqual(row["status_label"], "执行状态待核查")
+        self.assertEqual(row["remote_progress"]["detail"], "记录消失，需要核对")
+        self.assertIsNone(row["remote_progress"]["stage_percent"])
+
+    def test_child_is_killed_and_reaped_if_pid_record_write_fails(self):
+        import contextlib
+        import subprocess
+        import signal
+        child = mock.Mock(pid=123456, returncode=None)
+        child.poll.side_effect = lambda: child.returncode
+        child.kill.side_effect = lambda: setattr(child, "returncode", -9)
+        child.wait.side_effect = lambda: setattr(child, "returncode", -9)
+        runtime = SimpleNamespace(capture_context=lambda: object(), process_launch=contextlib.nullcontext,
+                                  record_process=mock.Mock(side_effect=OSError("ledger write failed")), clear_process=mock.Mock())
+        fake_os = SimpleNamespace(name="nt", environ={})
+        env = self.load("run_cmd", drama_async_runtime=runtime, subprocess=subprocess, signal=signal, os=fake_os)
+        with mock.patch.object(subprocess, "Popen", return_value=child):
+            with self.assertRaisesRegex(OSError, "ledger write"):
+                env["run_cmd"](["fake", "argument"])
+        child.kill.assert_called_once()
+        child.wait.assert_called_once()
+        runtime.clear_process.assert_called_once_with(child.pid)
+
+    def test_notification_exception_does_not_undo_atomic_done(self):
+        job = {"job_id": JOB_ID, "outputs": {"concat_video": True}}
+        runtime = SimpleNamespace(atomic_complete_job=mock.Mock(return_value={"status": "done", "active_finished_at": "first"}))
+        env = self.load("complete_async_gpu_job", drama_cpu_runtime=runtime,
+                        notify_job_creator_on_completion=mock.Mock(side_effect=RuntimeError("notification unavailable")))
+        with self.assertLogs(level="ERROR"):
+            env["complete_async_gpu_job"](job, {"job_id": JOB_ID})
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["active_finished_at"], "first")
+
+    def test_cover_callback_is_idempotent_and_cannot_replace_frozen_intro(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "cover.url"
+            env = self.load("write_gpu_cover_url", tempfile=tempfile, DramaSynthesisError=DramaSynthesisError,
+                            ensure_dir=lambda path: Path(path).mkdir(parents=True, exist_ok=True),
+                            gpu_cover_url_marker_path=lambda path: str(Path(path) / "cover.url"))
+            write = env["write_gpu_cover_url"]
+            write(root, "https://example.test/first.jpg")
+            initial = marker.stat().st_mtime_ns
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: write(root, "https://example.test/first.jpg"), range(8)))
+            self.assertEqual(marker.stat().st_mtime_ns, initial)
+            with self.assertRaises(DramaSynthesisError):
+                write(root, "https://example.test/different.jpg")
+            self.assertEqual(marker.read_text(), "https://example.test/first.jpg")
+            self.assertEqual(list(Path(root).glob(".cover-binding-*")), [])
+
+    def test_legacy_retry_keeps_its_existing_success_notification_contract(self):
+        job = {"job_id": JOB_ID, "status": "failed", "completion_notified_at": "prior_failure", "completion_notification_error": "prior error"}
+        env = self.load("resume_job_from_checkpoint", drama_cpu_runtime=SimpleNamespace(get_remote_payload=lambda *a: None),
+                        clear_job_deleted_marker=mock.Mock(), reconcile_job_outputs_from_public_artifacts=lambda *a, **kw: True)
+        env["resume_job_from_checkpoint"](job)
+        self.assertEqual(job["completion_notified_at"], "")
+        self.assertEqual(job["completion_notification_error"], "")
 
 
 if __name__ == "__main__":

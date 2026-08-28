@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const DramaJobRuntime = require("../static/drama-job-runtime.js");
 
 const root = path.resolve(__dirname, "..");
 let checks = 0;
@@ -15,6 +16,7 @@ for (const name of ["index.html", "drama-synthesis.html"]) {
   const materials = text.match(/function selectableMaterials\(job, includeCover\) \{[\s\S]*?\n    \}/)[0];
   assert.ok(row.includes("</tr>"));
   const context = vm.createContext({
+    DramaJobRuntime,
     state: { selectedJobIds: new Set() },
     formatJobElapsed: () => "1秒", formatRange: () => "1-3",
     statusClass: () => "done", previewCell: () => "",
@@ -52,4 +54,43 @@ for (const name of ["index.html", "drama-synthesis.html"]) {
   assert.ok(text.includes("els.jobDetailActions.innerHTML = job.status ==="));
   checks++;
 }
-console.log(JSON.stringify({ ok: true, checks, pages: 2, browser_calls: 0, network_calls: 0 }));
+async function checkRuntime() {
+  const now = Date.parse("2026-08-28T08:05:00Z");
+  const job = {job_id:"test", status:"rendering", created_at:"2026-08-28 04:00:00", elapsed_seconds:1};
+  assert.equal(DramaJobRuntime.elapsed(job, now), "4小时5分0秒");
+  assert.equal(DramaJobRuntime.elapsed({...job, remote_runtime:{first_started_at:"2026-08-28T03:00:00Z"}, active_started_at:"2026-08-28 08:00:00"}, now), "5小时5分0秒");
+  checks += 2;
+  const done = {...job, status:"done", active_finished_at:"2026-08-28 08:00:00", updated_at:"2026-08-28 09:00:00"};
+  assert.equal(DramaJobRuntime.elapsed(done, now + 86400000), "4小时0分0秒");
+  assert.equal(DramaJobRuntime.date("2026-08-28T12:00:00+08:00").getTime(), DramaJobRuntime.date(job.created_at).getTime());
+  checks += 2;
+  const unknown = DramaJobRuntime.progressHtml({...job, remote_progress:{stage_label:"拼接全集", stage_percent:null, detail:"正在拼接"}, cover_16x9_url:"https://example.test/cover"});
+  assert.ok(!unknown.includes('class="progress"'));
+  assert.ok(unknown.includes("封面已完成"));
+  const escaped = DramaJobRuntime.progressHtml({...job, remote_progress:{stage_label:"<script>", stage_percent:30, detail:'<img src=x onerror="bad()">'}});
+  assert.ok(!escaped.includes("<script>"));
+  assert.ok(!escaped.includes("<img"));
+  checks += 2;
+
+  let tick, clock=now, reads=0, allowed=true;
+  class FakeDate extends Date {static now(){return clock;}}
+  const context = vm.createContext({module:{exports:{}}, Date:FakeDate,
+    setInterval:fn=>{tick=fn;return 1;}, clearInterval:()=>{}});
+  vm.runInContext(fs.readFileSync(path.join(root,"static/drama-job-runtime.js"),"utf8"),context);
+  const elapsedCell = {textContent:"", getAttribute:()=>job.job_id};
+  const doc = {visibilityState:"visible", querySelectorAll:()=>[elapsedCell]};
+  const runtime = context.module.exports;
+  const dispose = runtime.install({getJobs:()=>[job],refresh:async()=>{reads++;},canRead:()=>allowed,document:doc});
+  await tick();
+  assert.equal(reads,1);
+  assert.equal(elapsedCell.textContent,"4小时5分0秒");
+  clock+=1000; await tick(); assert.equal(reads,1);
+  clock+=10000; await tick(); assert.equal(reads,2);
+  checks += 2;
+  doc.visibilityState="hidden";clock+=10000;await tick();assert.equal(reads,2);
+  doc.visibilityState="visible";allowed=false;await tick();assert.equal(reads,2);
+  checks++;
+  dispose();
+}
+checkRuntime().then(()=>console.log(JSON.stringify({ ok: true, checks, pages: 2, browser_calls: 0, network_calls: 0 })))
+  .catch(error=>{console.error(error);process.exitCode=1;});

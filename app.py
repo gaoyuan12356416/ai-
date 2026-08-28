@@ -327,6 +327,7 @@ import sqlite3
 
 
 
+import signal
 import subprocess
 
 
@@ -776,6 +777,12 @@ from features.drama_synthesis.core import (
 from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
 from features.drama_synthesis.catalog import catalog_from_manifest
 from features.drama_synthesis import gpu_cache as drama_gpu_cache
+from features.drama_synthesis import async_runtime as drama_async_runtime
+from features.drama_synthesis import cpu_runtime as drama_cpu_runtime
+from features.drama_synthesis import remote_client as drama_remote_client
+from features.drama_synthesis.app_support import ObservationStop as DramaObservationStop
+from features.drama_synthesis.app_support import remote_display as drama_remote_display
+from features.drama_synthesis.media_pipeline import download_and_prepare_segments, freeze_episode_download_route
 from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
     build_browser_preview_html,
@@ -2573,6 +2580,7 @@ DEMUCS_TIMEOUT = int(os.environ.get("DEMUCS_TIMEOUT", "3600"))
 GPU_VIDEO_WORKER_URL = os.environ.get("GPU_VIDEO_WORKER_URL", "").strip().rstrip("/")
 GPU_VIDEO_WORKER_TOKEN = os.environ.get("GPU_VIDEO_WORKER_TOKEN", "").strip()
 GPU_VIDEO_WORKER_TIMEOUT = int(os.environ.get("GPU_VIDEO_WORKER_TIMEOUT", "14400"))
+DRAMA_GPU_ASYNC_ENABLED = os.environ.get("DRAMA_GPU_ASYNC_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 
 
 
@@ -14596,6 +14604,20 @@ def decorate_drama_synthesis_job(job):
     result_preview = dict(item.get("result_preview") or {})
     result_preview["random_template"] = item["output_random_template_url"]
     item["result_preview"] = result_preview
+    runtime = globals().get("drama_cpu_runtime")
+    snapshot = runtime.get_remote_status(JOB_DB_PATH, item.get("job_id", "")) if runtime else None
+    if snapshot:
+        item["remote_runtime"] = snapshot
+        item["remote_progress"] = drama_remote_display(snapshot)
+        if item.get("status") == "failed":
+            view = item["remote_progress"]
+            view["stage_label"] = "制作失败" if snapshot.get("status") == "failed" else "执行状态待核查"
+            view["stage_percent"] = None
+            view["detail"] = item.get("error_message") or view["stage_label"]
+            item["status_label"] = view["stage_label"]
+        elif item.get("status") != "done":
+            item["status_label"] = item["remote_progress"]["stage_label"]
+        item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
     return item
 
 
@@ -22108,6 +22130,10 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
     job_id = str(job.get("job_id") or "").strip()
     if not job_id:
         return False
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job_id):
+        # Async jobs may only finish from a verified GPU result and atomic commit.
+        return False
     outputs = normalize_outputs(job.get("outputs", {}))
     candidates = {}
     if outputs["cover_16x9"]:
@@ -22543,7 +22569,7 @@ def guess_content_type(path):
 
 
 
-def get_cos_client(timeout=None):
+def get_cos_client(timeout=None, *, retry=None):
 
     if not cos_enabled():
 
@@ -22558,7 +22584,9 @@ def get_cos_client(timeout=None):
         KeepAlive=False,
     )
 
-    return CosS3Client(config)
+    if retry is None:
+        return CosS3Client(config)
+    return CosS3Client(config, retry=retry)
 
 
 
@@ -22577,12 +22605,40 @@ def upload_file_to_cos(path):
     object_key = build_cos_object_key(path)
     object_url = build_cos_url(object_key)
     expected_size = os.path.getsize(path)
+    runtime = globals().get("drama_async_runtime")
+    media_context = runtime.capture_context() if runtime else None
+    def media_upload_progress(consumed, total):
+        if media_context:
+            with runtime.use_context(media_context):
+                runtime.emit_progress("uploading", uploaded_bytes=consumed, total_bytes=total)
+    if media_context:
+        media_upload_progress(0, expected_size)
+        from features.drama_synthesis.cos_upload import resume_upload
+
+        # Keep multipart identity outside the disposable job working directory.
+        # Only the drama execution context uses this path; other upload callers
+        # retain their existing contract and concurrency settings.
+        checkpoint_path = os.path.join(
+            WORK_ROOT, ".runtime", "uploads", media_context.job_id,
+            hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
+        )
+        resume_upload(
+            # The SDK otherwise retries POST internally, outside the durable
+            # create/complete fences. Retry only via the verified checkpoint.
+            get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
+            bucket=COS_BUCKET, key=object_key, path=path,
+            checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
+            content_type=guess_content_type(path), acl="public-read",
+        )
+        return object_url
+
     try:
         response = requests.head(object_url, timeout=(5, 15))
         if response.status_code == 200:
             remote_size = int(response.headers.get("Content-Length") or "-1")
             if remote_size == expected_size:
                 logging.info("reuse existing COS object: %s", object_url)
+                media_upload_progress(expected_size, expected_size)
                 return object_url
     except Exception as exc:
         logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
@@ -22597,6 +22653,7 @@ def upload_file_to_cos(path):
             PartSize=max(1, COS_MULTIPART_PART_SIZE_MB),
             MAXThread=max(1, COS_MULTIPART_THREADS),
             EnableMD5=False,
+            progress_callback=media_upload_progress if media_context else None,
             ACL="public-read",
             ContentType=guess_content_type(path),
         )
@@ -22621,6 +22678,7 @@ def upload_file_to_cos(path):
 
             )
 
+    media_upload_progress(expected_size, expected_size)
     return object_url
 
 
@@ -25721,389 +25779,25 @@ def row_to_job(row):
 def set_job_progress(job, status=None, progress=None, detail=None, persist=True):
     if job.get("_gpu_worker"):
         persist = False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if status is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["status"] = status
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if progress is None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        progress = job.get("progress", progress_for_status(job.get("status", "queued")))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    job["progress"] = clamp_progress(progress)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if detail is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = str(detail or "").strip()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    elif "progress_detail" not in job:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = ""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if persist:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        upsert_job_record(job)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    lock = job.setdefault("_state_lock", threading.RLock())
+    with lock:
+        if status is not None:
+            job["status"] = status
+        if progress is None:
+            progress = job.get("progress", progress_for_status(job.get("status", "queued")))
+        job["progress"] = clamp_progress(progress)
+        if detail is not None:
+            job["progress_detail"] = str(detail or "").strip()
+        elif "progress_detail" not in job:
+            job["progress_detail"] = ""
+        snapshot = job.get("_remote_snapshot")
+        if snapshot and job.get("status") != "done":
+            view = drama_remote_display(snapshot)
+            job["status"] = view["status"]
+            job["progress"] = clamp_progress(view["stage_percent"] or 0)
+            job["progress_detail"] = view["detail"]
+        if persist:
+            upsert_job_record(job)
     return job
 
 
@@ -26595,6 +26289,12 @@ def upsert_job_record(job):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(
+                    conn, job["job_id"], job["_fenced_lease"],
+                    allow_done=(status_text == "done"),
+                )
             conn.execute(
 
 
@@ -49067,6 +48767,9 @@ def mark_job_notification(job, notified_at="", error=""):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(conn, job["job_id"], job["_fenced_lease"], allow_done=True)
             conn.execute(
 
 
@@ -66953,419 +66656,40 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
 
 
 def run_cmd(cmd, timeout=None):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     logging.info("running: %s", " ".join(cmd))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    proc = subprocess.run(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        cmd,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stdout=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stderr=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        universal_newlines=True,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        timeout=timeout,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    runtime = globals().get("drama_async_runtime")
+    context = runtime.capture_context() if runtime else None
+    if not context:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=timeout)
+    else:
+        # Process tracking is scoped to drama synthesis; other callers are unchanged.
+        limit = timeout if timeout is not None else int(os.environ.get("DRAMA_GPU_SUBPROCESS_TIMEOUT", "43200"))
+        child = None
+        try:
+            with runtime.process_launch():
+                child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         universal_newlines=True, start_new_session=True)
+                runtime.record_process(child.pid)
+            out, err = child.communicate(timeout=limit)
+        except BaseException:
+            if child is not None:
+                if child.poll() is None:
+                    try:
+                        if os.name == "posix":
+                            os.killpg(child.pid, signal.SIGKILL)
+                        else:
+                            child.kill()
+                    except ProcessLookupError:
+                        pass
+                child.wait()
+            raise
+        finally:
+            if child is not None and child.poll() is not None:
+                runtime.clear_process(child.pid)
+        proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     if proc.returncode != 0:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        raise RuntimeError(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            "command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        raise RuntimeError("command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip()))
     return proc
 
 
@@ -79290,31 +78614,76 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         return None
     if not GPU_VIDEO_WORKER_TOKEN:
         raise ValueError("GPU_VIDEO_WORKER_TOKEN is required when GPU_VIDEO_WORKER_URL is set")
-    payload = {
-        "job_id": job["job_id"],
-        "content_id": job.get("content_id", ""),
-        "episode_start": job.get("episode_start", 0),
-        "episode_end": job.get("episode_end", 0),
-        "outputs": {
-            "concat_video": bool(outputs.get("concat_video", False)),
-            "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
-            "random_template_video": bool(outputs.get("random_template_video", False)),
-        },
-        "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
-        "await_cover_16x9": bool(await_cover_16x9),
-        "episodes": [
-            {
-                "episode_number": int(item["episode_number"]),
-                "episode_url": item["episode_url"],
-            }
-            for item in requested
-        ],
-    }
-    if outputs.get("random_template_video"):
-        stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
-        if not stored_recipe:
-            raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
-        payload["random_template_recipe"] = stored_recipe["recipe"]
+    async_enabled = globals().get("DRAMA_GPU_ASYNC_ENABLED", False)
+    payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]) if async_enabled else None
+    if payload is None:
+        payload = {
+            "job_id": job["job_id"],
+            "content_id": job.get("content_id", ""),
+            "episode_start": job.get("episode_start", 0),
+            "episode_end": job.get("episode_end", 0),
+            "outputs": {
+                "concat_video": bool(outputs.get("concat_video", False)),
+                "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
+                "random_template_video": bool(outputs.get("random_template_video", False)),
+            },
+            "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
+            "await_cover_16x9": bool(await_cover_16x9),
+            "episodes": [
+                {
+                    "episode_number": int(item["episode_number"]),
+                    "episode_url": item["episode_url"],
+                }
+                for item in requested
+            ],
+        }
+        if async_enabled:
+            for episode in payload["episodes"]:
+                episode["download_route"] = freeze_episode_download_route(episode["episode_url"])
+        if outputs.get("random_template_video"):
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            if not stored_recipe:
+                raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+            payload["random_template_recipe"] = stored_recipe["recipe"]
+    if async_enabled:
+        payload = drama_cpu_runtime.remember_remote_submission(
+            JOB_DB_PATH, job["job_id"], payload, job.get("_fenced_lease"))
+        previous = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job["job_id"]) or {}
+        expected = drama_cpu_runtime.get_remote_resume_intent(JOB_DB_PATH, job["job_id"])
+        lock = job.setdefault("_state_lock", threading.RLock())
+        cover_acknowledged = False
+        def on_status(snapshot):
+            nonlocal cover_acknowledged
+            stop = job.get("_remote_stop_event")
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            if (not cover_acknowledged and payload.get("await_cover_16x9")
+                    and snapshot.get("status") in {"queued", "running"}
+                    and snapshot.get("connection_state") == "connected"):
+                cover_url = str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or "")
+                if cover_url:
+                    try:
+                        submit_gpu_video_cover(job, cover_url)
+                    except requests.RequestException:
+                        # A lost cover callback is retried on the next GET, never
+                        # interpreted as failed media or a new render submission.
+                        snapshot = dict(snapshot, connection_state="reconnecting", error_code="cover_connection_unavailable")
+                    else:
+                        cover_acknowledged = True
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            with lock:
+                drama_cpu_runtime.record_remote_status(
+                    JOB_DB_PATH, job["job_id"], snapshot, job.get("_fenced_lease"))
+                job["_remote_snapshot"] = snapshot
+                if snapshot.get("status") != "completed":
+                    set_job_progress(job)
+        return drama_remote_client.wait_for_gpu_job(
+            GPU_VIDEO_WORKER_URL, GPU_VIDEO_WORKER_TOKEN, payload,
+            on_status=on_status, stop_event=job.get("_remote_stop_event"),
+            previous_status=previous, known_remote=bool(previous.get("generation")),
+            explicit_resume=(expected is not None), expected_generation=expected,
+        )
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer %s" % GPU_VIDEO_WORKER_TOKEN,
@@ -79350,13 +78719,21 @@ def submit_gpu_video_cover(job, cover_16x9_url):
         GPU_VIDEO_WORKER_URL + "/api/gpu-video/cover",
         data=json.dumps(payload).encode("utf-8"),
         headers=headers,
-        timeout=60,
+        timeout=(3, 15) if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else 60,
+        allow_redirects=False,
     )
-    response.raise_for_status()
-    result = response.json()
-    if result.get("error"):
-        raise RuntimeError(result.get("error"))
-    return result
+    try:
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and response.status_code in {400, 401, 403, 409}:
+            raise drama_remote_client.RemoteRecoveryRequired()
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or result.get("error"):
+            if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+                raise drama_remote_client.RemoteRecoveryRequired()
+            raise RuntimeError("GPU cover callback failed")
+        return result
+    finally:
+        response.close()
 
 
 def gpu_cover_url_marker_path(workdir):
@@ -79366,10 +78743,33 @@ def gpu_cover_url_marker_path(workdir):
 def write_gpu_cover_url(workdir, cover_16x9_url):
     ensure_dir(workdir)
     marker_path = gpu_cover_url_marker_path(workdir)
-    tmp_path = marker_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        fp.write(str(cover_16x9_url or "").strip())
-    os.replace(tmp_path, marker_path)
+    value = str(cover_16x9_url or "").strip()
+    # Publish a complete first binding atomically. A delayed callback must not
+    # replace the cover already consumed by this job's frozen intro.
+    fd, tmp_path = tempfile.mkstemp(prefix=".cover-binding-", dir=workdir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(value)
+            fp.flush()
+            os.fsync(fp.fileno())
+        try:
+            os.link(tmp_path, marker_path)
+        except FileExistsError:
+            if os.path.islink(marker_path):
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+            with open(marker_path, "r", encoding="utf-8") as fp:
+                previous = fp.read(32768).strip()
+            if previous != value:
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+        if os.name == "posix":
+            directory = os.open(workdir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def wait_for_gpu_cover_url(workdir, timeout_seconds):
@@ -79503,6 +78903,43 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
     remove_job_dir(PUBLIC_ROOT, public_dir, "public")
 
 
+def cached_gpu_video_result(payload):
+    job_id = str((payload or {}).get("job_id") or "")
+    path = gpu_video_result_path(job_id)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+        if not isinstance(result, dict) or str(result.get("job_id") or "") != job_id:
+            raise drama_gpu_cache.cache_error()
+        expected_fingerprint = result.get("input_fingerprint")
+        if expected_fingerprint and not secrets.compare_digest(str(expected_fingerprint), drama_async_runtime.render_fingerprint(payload)):
+            raise drama_gpu_cache.cache_error()
+        if not gpu_video_result_satisfies_outputs(result, payload.get("outputs") or {}):
+            raise drama_gpu_cache.cache_error()
+        public = drama_gpu_cache.public_result(result) if drama_gpu_cache.versioned(result) else result
+        if (payload.get("outputs") or {}).get("random_template_video"):
+            drama_gpu_cache.verify_cached_recipe(public, payload.get("random_template_recipe"))
+        return public
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise drama_gpu_cache.cache_error() from None
+
+
+def gpu_video_resume_ready(payload):
+    # The runtime additionally proves the prior process generation has stopped.
+    if cached_gpu_video_result(payload):
+        return True
+    job_id = str((payload or {}).get("job_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
+        return False
+    workdir = os.path.join(WORK_ROOT, job_id)
+    return (os.path.isdir(workdir) and not os.path.islink(workdir)
+            and os.path.dirname(os.path.realpath(workdir)) == os.path.realpath(WORK_ROOT))
+
+
 def handle_gpu_video_render(payload):
     job_id = str((payload or {}).get("job_id", "") or "").strip()
     if not job_id:
@@ -79594,51 +79031,29 @@ def _handle_gpu_video_render_unlocked(payload):
             "episode_url": episode_url,
             "source_path": os.path.join(download_dir, "%03d.mp4" % episode_number),
             "normalized_path": os.path.join(segment_dir, "%03d.mp4" % episode_number),
+            **({"download_route": item["download_route"]} if "download_route" in item else {}),
         })
 
-    max_download_workers = max(1, min(4, len(episode_work_items)))
-    download_futures = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_download_workers) as download_executor:
-        for item in episode_work_items:
-            if file_ready(item["source_path"]):
-                continue
-            download_futures[item["episode_number"]] = download_executor.submit(
-                download_file,
-                item["episode_url"],
-                item["source_path"],
-            )
-        if download_futures:
-            logging.info(
-                "GPU prefetch queued %d episode downloads with %d workers for job=%s",
-                len(download_futures),
-                max_download_workers,
-                job_id,
-            )
-
-        for item in episode_work_items:
-            future = download_futures.get(item["episode_number"])
-            if future is not None:
-                future.result()
-            segment_paths.append(item["source_path"])
-            completed_steps += 1
-            update_render_stage(job, completed_steps, total_steps, "GPU episode %d downloaded" % item["episode_number"])
-
-    if cover_16x9_url or await_cover_16x9:
-        if not cover_16x9_url:
-            cover_16x9_url = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
+    def intro_factory(first_source_path):
+        selected_cover = cover_16x9_url
+        if not selected_cover:
+            drama_async_runtime.emit_progress("waiting_cover")
+            selected_cover = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
         remove_invalid_video_file(intro_path, "GPU intro")
         if not file_ready(cover_path):
-            download_file(cover_16x9_url, cover_path)
+            download_file(selected_cover, cover_path)
         if not file_ready(intro_path):
-            reference_path = episode_work_items[0]["source_path"] if episode_work_items else None
-            render_intro(cover_path, intro_path, reference_path=reference_path)
-        segment_paths.insert(0, intro_path)
-        completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
+            render_intro(cover_path, intro_path, reference_path=first_source_path)
+        return intro_path
 
-    segment_paths = prepare_concat_segments(segment_paths, concat_segment_dir)
+    segment_paths = download_and_prepare_segments(
+        episode_work_items, output_dir=concat_segment_dir,
+        probe=probe_media_stream_info, normalize=normalize_concat_segment,
+        intro_factory=intro_factory if (cover_16x9_url or await_cover_16x9) else None,
+    )
+    drama_async_runtime.emit_progress("concatenating")
 
     output_name = "%s_%s_eps_%s_%s.mp4" % (
         job["content_id"] or "material",
@@ -79658,9 +79073,9 @@ def _handle_gpu_video_render_unlocked(payload):
         shutil.copy2(output_path, public_video_path)
     if publish_concat and not valid_video_file(public_video_path):
         raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
-    update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
 
     if render_no_bgm:
+        drama_async_runtime.emit_progress("removing_bgm")
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
         remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
@@ -79670,15 +79085,14 @@ def _handle_gpu_video_render_unlocked(payload):
         else:
             run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU no-BGM video uploaded")
 
     if publish_concat:
         job["output_video_url"] = publish_asset(public_video_path)
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
 
     random_result = None
     if render_random:
+        drama_async_runtime.emit_progress("rendering")
         if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
             raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
         public_random_path = os.path.join(public_dir, "material_random_template.mp4")
@@ -79693,7 +79107,6 @@ def _handle_gpu_video_render_unlocked(payload):
         )
         job["output_random_template_url"] = publish_asset(public_random_path)
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU 随机模板视频上传完成")
 
     result = {
         "job_id": job_id,
@@ -79718,6 +79131,7 @@ def _handle_gpu_video_render_unlocked(payload):
         for field, filename in drama_gpu_cache.ARTIFACT_FILENAMES.items()
         if result.get(field)
     }
+    result["input_fingerprint"] = drama_async_runtime.render_fingerprint(payload)
     write_gpu_video_result(job_id, result, artifact_paths=artifact_paths)
     cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
@@ -81684,7 +81098,49 @@ def submit_job(payload, actor_session=None):
 
 
 
+def complete_async_gpu_job(job, gpu_result):
+    result = dict(gpu_result or {})
+    outputs = normalize_outputs(job.get("outputs", {}))
+    if outputs.get("cover_16x9"):
+        result["cover_16x9_url"] = str(job.get("cover_16x9_url") or "")
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"]) if outputs.get("random_template_video") else None
+    expected = str((recipe or {}).get("recipe_sha256") or "")
+    if outputs.get("random_template_video") and not expected:
+        raise DramaSynthesisError("drama_recipe_missing", "冻结配方不存在，已停止回填", 409)
+    with job.setdefault("_state_lock", threading.RLock()):
+        completed = drama_cpu_runtime.atomic_complete_job(
+            JOB_DB_PATH, job["job_id"], result, job.get("_fenced_lease"),
+            expected_recipe_sha256=expected,
+        )
+        job.update(completed)
+    try:
+        notify_job_creator_on_completion(job)
+    except Exception:
+        logging.exception("completion notification failed after atomic media completion: job=%s", job.get("job_id"))
+
+
 def process_job(job):
+    if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+        return _process_job_observed(job)
+    parent_stop = job.get("_remote_stop_event")
+    observer_stop = DramaObservationStop(parent_stop)
+    job["_remote_stop_event"] = observer_stop
+    try:
+        return _process_job_observed(job)
+    finally:
+        # Stop and join this attempt's observer before a retry reuses the lease.
+        # This never cancels the durable GPU execution.
+        observer_stop.set()
+        executor = job.pop("_gpu_observer_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if parent_stop is None:
+            job.pop("_remote_stop_event", None)
+        else:
+            job["_remote_stop_event"] = parent_stop
+
+
+def _process_job_observed(job):
 
 
 
@@ -81716,6 +81172,13 @@ def process_job(job):
 
 
 
+    job.setdefault("_state_lock", threading.RLock())
+    if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and gpu_video_worker_enabled():
+        saved_payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"])
+        if saved_payload and (not saved_payload.get("await_cover_16x9") or job.get("cover_16x9_url")):
+            result = call_gpu_video_worker(job, [], normalize_outputs(job.get("outputs", {})))
+            complete_async_gpu_job(job, result)
+            return
     clear_job_deleted_marker(job["job_id"])
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
@@ -84196,6 +83659,8 @@ def process_job(job):
         set_job_progress(job, status="rendering", progress=20, detail="GPU 服已开始处理素材，等待封面后合并")
         ensure_job_not_deleted(job["job_id"])
         gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            job["_gpu_observer_executor"] = gpu_executor
         gpu_future = gpu_executor.submit(call_gpu_video_worker, job, requested, outputs, need_cover)
 
 
@@ -84772,7 +84237,8 @@ def process_job(job):
         job["_gpu_cover_16x9_url"] = job.get("cover_16x9_url") or publish_asset(public_cover_path)
         if outputs["cover_16x9"] and not job.get("cover_16x9_url"):
             job["cover_16x9_url"] = job["_gpu_cover_16x9_url"]
-        submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
+        if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
 
     if need_video_pipeline and gpu_video_worker_enabled():
         set_job_progress(job, status="rendering", progress=46, detail="已提交 GPU 服制作合集视频")
@@ -84780,9 +84246,12 @@ def process_job(job):
         if gpu_future is None:
             gpu_result = call_gpu_video_worker(job, requested, outputs)
         else:
-            gpu_result = gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
+            gpu_result = gpu_future.result() if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
             gpu_executor.shutdown(wait=False)
             gpu_executor = None
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            complete_async_gpu_job(job, gpu_result)
+            return
         if outputs["concat_video"]:
             job["output_video_url"] = gpu_result.get("output_video_url", "")
         if outputs["no_bgm_video"]:
@@ -90679,7 +90148,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notified_at"] = ""
+    # Notification and media retries are independent.
 
 
 
@@ -90711,7 +90180,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notification_error"] = ""
+    # Preserve the last delivery outcome while reconnecting.
 
 
 
@@ -90740,6 +90209,17 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]):
+        # Claim immediately; the worker reconnects to the frozen remote execution.
+        job["status"] = "queued"
+        job["progress_detail"] = "等待恢复原制作任务的跟踪"
+        upsert_job_record(job)
+        run_job_async(job)
+        return
+    # Preserve the legacy retry notification contract outside async runtime.
+    job["completion_notified_at"] = ""
+    job["completion_notification_error"] = ""
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
     if selected_job_outputs_ready(job):
@@ -91394,6 +90874,10 @@ def retry_job(job_id):
 
         if job.get("status") != "failed":
             raise ValueError("任务正在处理中，无需重复提交")
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            remote = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job_id) or {}
+            if remote.get("status") in {"failed", "recovery_required"} and remote.get("generation"):
+                drama_cpu_runtime.request_remote_resume(JOB_DB_PATH, job_id, int(remote["generation"]))
         resume_job_from_checkpoint(job)
     finally:
         lock.release()

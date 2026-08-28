@@ -418,6 +418,36 @@ class ImmutableFilesystemPublisher:
         return {"reused": not created, "sha256": hashlib.sha256(body).hexdigest()}
 
 
+def complete_recipe_in_transaction(conn, job_id: str, *, output_url: str, output_sha256: str,
+                                   output_profile: str, recipe_sha256: str) -> Dict[str, Any]:
+    """Validate and consume a GPU result in the caller's existing transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("recipe completion requires an existing write transaction")
+    parsed = urlsplit(str(output_url or ""))
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片地址无效", 502)
+    digest = str(output_sha256 or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片指纹无效", 502)
+    cursor = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,))
+    raw = cursor.fetchone()
+    row = dict(zip((item[0] for item in cursor.description), raw)) if raw is not None else None
+    if row is None or row["recipe_sha256"] != recipe_sha256 or row["recipe_profile"] != output_profile:
+        raise DramaSynthesisError("drama_random_output_identity_mismatch", "随机模板成片身份不一致", 409)
+    if row["output_url"] and (row["output_url"] != output_url or row["output_sha256"] != digest):
+        raise DramaSynthesisError("drama_random_output_immutable_conflict", "随机模板成片已冻结且不一致", 409)
+    if row["completed_at_utc"] and row["output_url"] == output_url and row["output_sha256"] == digest and row["output_profile"] == output_profile:
+        return row
+    conn.execute(
+        """UPDATE drama_synthesis_recipe SET output_url=?,output_sha256=?,output_profile=?,
+               completed_at_utc=CASE WHEN completed_at_utc='' THEN ? ELSE completed_at_utc END
+               WHERE job_id=?""",
+        (output_url, digest, output_profile, utc_now(), job_id),
+    )
+    cursor = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,))
+    return dict(zip((item[0] for item in cursor.description), cursor.fetchone()))
+
+
 class DramaSynthesisStore:
     def __init__(self, db_path: Union[str, os.PathLike]):
         self.db_path = str(db_path)
@@ -558,26 +588,16 @@ class DramaSynthesisStore:
                 conn.close()
 
     def complete_recipe(self, job_id: str, *, output_url: str, output_sha256: str, output_profile: str, recipe_sha256: str) -> Dict[str, Any]:
-        parsed = urlsplit(str(output_url or ""))
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
-            raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片地址无效", 502)
-        if not re.fullmatch(r"[0-9a-f]{64}", str(output_sha256 or "").lower()):
-            raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片指纹无效", 502)
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,)).fetchone()
-                if row is None or row["recipe_sha256"] != recipe_sha256 or row["recipe_profile"] != output_profile:
-                    raise DramaSynthesisError("drama_random_output_identity_mismatch", "随机模板成片身份不一致", 409)
-                if row["output_url"] and (row["output_url"] != output_url or row["output_sha256"] != output_sha256):
-                    raise DramaSynthesisError("drama_random_output_immutable_conflict", "随机模板成片已冻结且不一致", 409)
-                conn.execute(
-                    "UPDATE drama_synthesis_recipe SET output_url=?,output_sha256=?,output_profile=?,completed_at_utc=? WHERE job_id=?",
-                    (output_url, output_sha256.lower(), output_profile, utc_now(), job_id),
+                result = complete_recipe_in_transaction(
+                    conn, job_id, output_url=output_url, output_sha256=output_sha256,
+                    output_profile=output_profile, recipe_sha256=recipe_sha256,
                 )
                 conn.commit()
-                return dict(conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,)).fetchone())
+                return result
             except Exception:
                 conn.rollback()
                 raise

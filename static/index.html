@@ -87,6 +87,7 @@
 
 
   <script src="/quick-nav.js?v=20260522-voiceover-tasks"></script>
+  <script src="/drama-job-runtime.js?v=20260828-async-v1"></script>
   <script>
 
 
@@ -8225,6 +8226,14 @@
 
 
 
+
+    /* Long async stage labels stay readable without changing other tables. */
+    .drama-jobs-table { min-width: 1840px; }
+    .drama-jobs-table th:nth-child(6), .drama-jobs-table td:nth-child(6) { min-width: 108px; }
+    .drama-jobs-table .status-pill { white-space: nowrap; }
+    .drama-jobs-table th:nth-child(7), .drama-jobs-table td:nth-child(7) { min-width: 210px; }
+    .drama-jobs-table th:nth-child(9), .drama-jobs-table td:nth-child(9) { min-width: 72px; }
+    .drama-jobs-table th:nth-child(12), .drama-jobs-table td:nth-child(12) { min-width: 290px; }
   </style>
   <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
@@ -10373,7 +10382,7 @@
 
 
 
-              <table>
+              <table class="drama-jobs-table">
 
 
 
@@ -13116,13 +13125,14 @@
         <button id="youtubePublishClose" class="btn btn-secondary" type="button">关闭</button>
       </div>
       <div class="panel-body stack">
-        <div class="field"><label>频道</label><select id="youtubeChannel"></select></div>
+        <div class="field"><label>频道</label><select id="youtubeChannel" disabled></select></div>
+        <div id="youtubeChannelLoading" class="hint hidden" role="status" aria-live="polite">正在读取任务并校验 YouTube 可用频道，请稍候…</div>
         <div class="field"><label>视频产物</label><select id="youtubeSourceKind"></select></div>
         <div class="field"><label>标题</label><input id="youtubeTitle" maxlength="100" /></div>
         <div class="field"><label>描述</label><textarea id="youtubeDescription" maxlength="5000"></textarea></div>
         <div class="field"><label>首条评论（可选）</label><textarea id="youtubeComment" maxlength="10000"></textarea><div id="youtubeCommentHint" class="hint">仅视频确认发布成功后才会评论。</div></div>
         <div id="youtubePublishError" class="error-box hidden"></div>
-        <div class="actions-inline"><button id="youtubePublishSubmit" class="btn btn-primary" type="button">加入异步发布队列</button></div>
+        <div class="actions-inline"><button id="youtubePublishSubmit" class="btn btn-primary" type="button" disabled>加入异步发布队列</button></div>
       </div>
     </div>
   </div>
@@ -13363,6 +13373,9 @@
       randomTemplateCatalog: null,
       youtubePublishJob: null,
       youtubeOperationId: "",
+      youtubePublishRequestId: 0,
+      youtubePublishLoading: false,
+      youtubeChannelsRequest: null,
       materialPickerResolve: null,
 
 
@@ -14200,6 +14213,7 @@
       youtubePublishClose: document.getElementById("youtubePublishClose"),
 
       youtubeChannel: document.getElementById("youtubeChannel"),
+      youtubeChannelLoading: document.getElementById("youtubeChannelLoading"),
 
       youtubeSourceKind: document.getElementById("youtubeSourceKind"),
 
@@ -18071,14 +18085,7 @@
     }
 
     function formatJobElapsed(job) {
-      const status = String(job.status || "");
-      if (["queued", "validating", "downloading", "failed"].includes(status)) return "--";
-      const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
-      if (persistedSeconds !== null) return formatSeconds(persistedSeconds);
-      const start = actualDurationStart(job);
-      if (!start) return "--";
-      const end = status === "done" ? (actualDurationEnd(job) || new Date()) : new Date();
-      return formatSeconds((end.getTime() - start.getTime()) / 1000);
+      return DramaJobRuntime.elapsed(job);
     }
 
     function formatScreenshotElapsed(job) {
@@ -18274,7 +18281,7 @@ function buildJobRow(job) {
 
 
 
-          <td><span class="status-pill ${statusClass(job.status)}">${job.status_label}</span></td>
+          <td><span class="status-pill ${statusClass(job.status)}">${job.remote_progress ? job.remote_progress.stage_label : job.status_label}</span></td>
 
 
 
@@ -18306,39 +18313,7 @@ function buildJobRow(job) {
 
 
 
-            <div>${job.progress}%</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <div class="progress"><span style="width:${job.progress}%"></span></div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <div class="muted" style="margin-top:6px;max-width:170px;">${job.progress_detail || "--"}</div>
+            ${DramaJobRuntime.progressHtml(job)}
 
 
 
@@ -18402,7 +18377,7 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_url, "video", "合集视频")}
+              ${(job.outputs || {}).concat_video ? previewCell(job.output_video_url, "video", "合集视频") : ""}
 
 
 
@@ -18418,11 +18393,9 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_no_bgm_url, "video", "去 BGM")}
+              ${(job.outputs || {}).no_bgm_video ? previewCell(job.output_video_no_bgm_url, "video", "去 BGM") : ""}
 
-              ${previewCell(job.output_random_template_url, "video", "随机模板")}
-
-
+              ${(job.outputs || {}).random_template_video ? previewCell(job.output_random_template_url, "video", "随机模板") : ""}
 
 
 
@@ -18436,7 +18409,9 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.cover_16x9_url, "image", "16:9 封面")}
+
+
+              ${(job.outputs || {}).cover_16x9 ? previewCell(job.cover_16x9_url, "image", "16:9 封面") : ""}
 
 
 
@@ -18485,7 +18460,7 @@ function buildJobRow(job) {
 
 
           <td>${creatorName}<div class="muted">${creatorMeta}</div></td>
-          <td class="time-cell">${elapsed}</td>
+          <td class="time-cell"><span data-drama-elapsed="${job.job_id}">${elapsed}</span></td>
           <td class="time-cell">${formatBeijingTime(job.created_at)}</td>
 
 
@@ -18953,7 +18928,7 @@ function buildJobRow(job) {
 
 
 
-            <div>进度：${job.progress}% / ${job.progress_detail || "--"}</div>
+            <div>${DramaJobRuntime.progressHtml(job)}</div>
 
 
 
@@ -19065,7 +19040,7 @@ function buildJobRow(job) {
 
 
 
-        resultCard("合集视频（含 BGM）", job.output_video_url, "video"),
+        (job.outputs || {}).concat_video ? resultCard("合集视频（含 BGM）", job.output_video_url, "video") : "",
 
 
 
@@ -19081,11 +19056,9 @@ function buildJobRow(job) {
 
 
 
-        resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video"),
+        (job.outputs || {}).no_bgm_video ? resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video") : "",
 
-        resultCard("随机模板视频", job.output_random_template_url, "video"),
-
-
+        (job.outputs || {}).random_template_video ? resultCard("随机模板视频", job.output_random_template_url, "video") : "",
 
 
 
@@ -19099,7 +19072,9 @@ function buildJobRow(job) {
 
 
 
-        resultCard("16:9 封面图", job.cover_16x9_url, "image")
+
+
+        (job.outputs || {}).cover_16x9 ? resultCard("16:9 封面图", job.cover_16x9_url, "image") : ""
 
 
 
@@ -22500,16 +22475,78 @@ function buildJobRow(job) {
         : "该频道授权不含 youtube.force-ssl，评论已禁用。";
     }
 
+    function isCurrentYoutubePublish(requestId) {
+      return requestId === state.youtubePublishRequestId && !els.youtubePublishModal.classList.contains("hidden");
+    }
+
+    async function loadYoutubeChannels(appId, requestId) {
+      const key = String(appId);
+      // Reuse this product's in-flight read, and never overlap OAuth-backed reads.
+      while (state.youtubeChannelsRequest && state.youtubeChannelsRequest.appId !== key) {
+        try { await state.youtubeChannelsRequest.promise; } catch (_) {}
+        if (!isCurrentYoutubePublish(requestId)) return null;
+      }
+      let request = state.youtubeChannelsRequest;
+      if (!request) {
+        request = { appId: key, promise: null };
+        state.youtubeChannelsRequest = request;
+        request.promise = Promise.resolve()
+          .then(() => api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(key)}`))
+          .finally(() => {
+            if (state.youtubeChannelsRequest === request) state.youtubeChannelsRequest = null;
+          });
+      }
+      return request.promise;
+    }
+
+    function closeYoutubePublish() {
+      state.youtubePublishRequestId++;
+      state.youtubePublishLoading = false;
+      state.youtubePublishJob = null;
+      state.youtubeOperationId = "";
+      els.youtubePublishModal.classList.add("hidden");
+      els.youtubePublishModal.setAttribute("aria-busy", "false");
+      els.youtubeChannelLoading.classList.add("hidden");
+      els.youtubeChannel.disabled = true;
+      els.youtubePublishSubmit.disabled = true;
+    }
+
     async function openYoutubePublish(jobId) {
+      const requestId = ++state.youtubePublishRequestId;
+      state.youtubePublishJob = null;
+      state.youtubeOperationId = "";
+      state.youtubePublishLoading = true;
+      els.youtubeChannel.replaceChildren();
+      els.youtubeChannel.disabled = true;
+      els.youtubeSourceKind.replaceChildren();
+      els.youtubeSourceKind.disabled = true;
+      els.youtubeTitle.value = "";
+      els.youtubeDescription.value = "";
+      els.youtubeComment.value = "";
+      els.youtubeComment.disabled = true;
+      els.youtubeCommentHint.textContent = "频道加载完成后将确认评论权限。";
+      els.youtubePublishError.textContent = "";
+      els.youtubePublishError.classList.add("hidden");
+      els.youtubeChannelLoading.classList.remove("hidden");
+      els.youtubePublishSubmit.disabled = true;
+      els.youtubePublishModal.setAttribute("aria-busy", "true");
+      els.youtubePublishModal.classList.remove("hidden");
       try {
         const job = await api(`/api/drama-material/jobs/${jobId}`);
+        if (!isCurrentYoutubePublish(requestId)) return;
         const videos = selectableMaterials(job, false);
         if (!videos.length) throw new Error("无可用视频产物");
-        const channels = await api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(job.app_id)}`);
+        videos.forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          els.youtubeSourceKind.appendChild(option);
+        });
+        els.youtubeSourceKind.disabled = false;
+        els.youtubeTitle.value = job.drama_name || job.content_id || "DramaWave";
+        const channels = await loadYoutubeChannels(job.app_id, requestId);
+        if (!isCurrentYoutubePublish(requestId)) return;
         if (!channels.items?.length) throw new Error("当前产品没有可用的 YouTube 上传频道");
-        state.youtubePublishJob = job;
-        state.youtubeOperationId = newYoutubeOperationId();
-        els.youtubeChannel.replaceChildren();
         channels.items.forEach(item => {
           const option = document.createElement("option");
           option.value = item.channel_id;
@@ -22517,25 +22554,31 @@ function buildJobRow(job) {
           option.dataset.item = JSON.stringify(item);
           els.youtubeChannel.appendChild(option);
         });
-        els.youtubeSourceKind.replaceChildren();
-        videos.forEach(([value, label]) => {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = label;
-          els.youtubeSourceKind.appendChild(option);
-        });
-        els.youtubeTitle.value = job.drama_name || job.content_id || "DramaWave";
-        els.youtubeDescription.value = "";
-        els.youtubeComment.value = "";
-        els.youtubePublishError.classList.add("hidden");
+        state.youtubePublishJob = job;
+        state.youtubeOperationId = newYoutubeOperationId();
         syncYoutubeCommentEligibility();
-        els.youtubePublishModal.classList.remove("hidden");
+        els.youtubeChannel.disabled = false;
+        els.youtubePublishSubmit.disabled = false;
       } catch (error) {
-        showError("YouTube 发布准备失败", error);
+        if (!isCurrentYoutubePublish(requestId)) return;
+        state.youtubePublishJob = null;
+        els.youtubeChannel.replaceChildren();
+        els.youtubeChannel.disabled = true;
+        els.youtubePublishSubmit.disabled = true;
+        els.youtubePublishError.textContent = "YouTube 发布准备失败：" + errorText(error);
+        els.youtubePublishError.classList.remove("hidden");
+      } finally {
+        if (isCurrentYoutubePublish(requestId)) {
+          state.youtubePublishLoading = false;
+          els.youtubeChannelLoading.classList.add("hidden");
+          els.youtubePublishModal.setAttribute("aria-busy", "false");
+        }
       }
     }
 
     async function submitYoutubePublish(duplicateConfirmed = false) {
+      const requestId = state.youtubePublishRequestId;
+      if (state.youtubePublishLoading || !isCurrentYoutubePublish(requestId)) return;
       const job = state.youtubePublishJob;
       const channel = selectedYoutubeChannel();
       if (!job || !channel) return;
@@ -22563,18 +22606,22 @@ function buildJobRow(job) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
-        els.youtubePublishModal.classList.add("hidden");
+        if (!isCurrentYoutubePublish(requestId)) return;
+        closeYoutubePublish();
         toast(`YouTube 异步任务已入队（视频：${data.video_state}，评论：${data.comment_status}）`);
         await viewJob(job.job_id);
       } catch (error) {
+        if (!isCurrentYoutubePublish(requestId)) return;
         if (error.code === "youtube_duplicate_confirmation_required" && !duplicateConfirmed) {
           const confirmed = window.confirm("该任务已在此频道成功发布过。再次发布会创建重复视频，是否继续？");
-          if (confirmed) return submitYoutubePublish(true);
+          if (confirmed) return await submitYoutubePublish(true);
         }
         els.youtubePublishError.textContent = errorText(error);
         els.youtubePublishError.classList.remove("hidden");
       } finally {
-        els.youtubePublishSubmit.disabled = false;
+        if (isCurrentYoutubePublish(requestId)) {
+          els.youtubePublishSubmit.disabled = state.youtubePublishLoading || !state.youtubePublishJob || !selectedYoutubeChannel();
+        }
       }
     }
 
@@ -24066,9 +24113,9 @@ function buildJobRow(job) {
       els.materialPickerModal.addEventListener("click", event => {
         if (event.target === els.materialPickerModal) closeMaterialPicker();
       });
-      els.youtubePublishClose.onclick = () => els.youtubePublishModal.classList.add("hidden");
+      els.youtubePublishClose.onclick = closeYoutubePublish;
       els.youtubePublishModal.addEventListener("click", event => {
-        if (event.target === els.youtubePublishModal) els.youtubePublishModal.classList.add("hidden");
+        if (event.target === els.youtubePublishModal) closeYoutubePublish();
       });
       els.youtubePublishSubmit.onclick = () => submitYoutubePublish(false);
       if (els.batchDeleteJobsBtn) els.batchDeleteJobsBtn.onclick = () => deleteSelectedJobs();
@@ -25611,6 +25658,12 @@ function buildJobRow(job) {
 
 
 
+
+    DramaJobRuntime.install({
+      getJobs: () => state.jobs,
+      refresh: () => loadJobs(),
+      canRead: () => userCan("drama_synthesis")
+    });
 
     init().catch(error => {
 

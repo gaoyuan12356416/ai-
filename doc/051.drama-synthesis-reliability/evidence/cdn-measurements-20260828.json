@@ -1,0 +1,238 @@
+{
+  "cdn-case-full.json": {
+    "measured_at": "2026-08-28T16:14:47.753222",
+    "measurements": [
+      {
+        "MB_per_second": 3.9242,
+        "bytes": 102110099,
+        "complete": true,
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"BC7A5AC489E06E5951F39C4DE5E6CA06-10\"",
+        "kind": "case_full",
+        "length": 102110099,
+        "resource_key_sha256": "7526c69efa92898cfdd7efdf4c9300cace89c3956fc661ffa7758eccc155bb35",
+        "seconds": 26.021,
+        "sha256": "242b22a3b356593ae4d643adfd3526224358c0b78759e3c580c152c19b4e10fc",
+        "status": 200,
+        "ttfb": 0.25
+      },
+      {
+        "MB_per_second": 13.42,
+        "bytes": 102110099,
+        "complete": true,
+        "domain": "img.tianmai.cn",
+        "etag": "\"BC7A5AC489E06E5951F39C4DE5E6CA06-10\"",
+        "kind": "case_full",
+        "length": 102110099,
+        "resource_key_sha256": "7526c69efa92898cfdd7efdf4c9300cace89c3956fc661ffa7758eccc155bb35",
+        "seconds": 7.609,
+        "sha256": "242b22a3b356593ae4d643adfd3526224358c0b78759e3c580c152c19b4e10fc",
+        "status": 200,
+        "ttfb": 0.029
+      }
+    ]
+  },
+  "cdn-full-and-case-samples.json": {
+    "measured_at": "2026-08-28T16:10:42.350011",
+    "measurements": [
+      {
+        "MB_per_second": 4.6993,
+        "bytes": 23176076,
+        "complete": true,
+        "content_length": "23176076",
+        "content_range": null,
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"B0E18B68C80A4E0EC814FE9C6A00CBA3-3\"",
+        "kind": "full",
+        "range_start": 0,
+        "seconds": 4.932,
+        "sha256": "c960b82f60be4c3bc3acd6c48fec132c1d39617ce17cbca3d0b1dbeec21f81a6",
+        "source_index": 0,
+        "status": 200,
+        "ttfb": 0.075
+      },
+      {
+        "MB_per_second": 0.4326,
+        "bytes": 23176076,
+        "complete": true,
+        "content_length": "23176076",
+        "content_range": null,
+        "domain": "img.tianmai.cn",
+        "etag": "\"B0E18B68C80A4E0EC814FE9C6A00CBA3-3\"",
+        "kind": "full",
+        "range_start": 0,
+        "seconds": 53.578,
+        "sha256": "c960b82f60be4c3bc3acd6c48fec132c1d39617ce17cbca3d0b1dbeec21f81a6",
+        "source_index": 0,
+        "status": 200,
+        "ttfb": 0.071
+      },
+      {
+        "MB_per_second": 16.5356,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 17825792-26214399/183335381",
+        "domain": "img.tianmai.cn",
+        "etag": "\"C2C2087F7494AB6340DC2C700EAF71C8-18\"",
+        "kind": "range",
+        "range_start": 17825792,
+        "seconds": 0.507,
+        "sha256": "02e745492ad95e0380b6b7ca8c5497c14d707b2abd485470a89dddcf5cc6161e",
+        "source_index": 1,
+        "status": 206,
+        "ttfb": 0.065
+      },
+      {
+        "MB_per_second": 3.5791,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 17825792-26214399/183335381",
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"C2C2087F7494AB6340DC2C700EAF71C8-18\"",
+        "kind": "range",
+        "range_start": 17825792,
+        "seconds": 2.344,
+        "sha256": "02e745492ad95e0380b6b7ca8c5497c14d707b2abd485470a89dddcf5cc6161e",
+        "source_index": 1,
+        "status": 206,
+        "ttfb": 1.558
+      },
+      {
+        "MB_per_second": 3.1554,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 35651584-44040191/102110099",
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"BC7A5AC489E06E5951F39C4DE5E6CA06-10\"",
+        "kind": "range",
+        "range_start": 35651584,
+        "seconds": 2.659,
+        "sha256": "a8dd859a05cd8941f85a6a39029cc17870413974f6ea085cf5b1fef693bfcfc6",
+        "source_index": 2,
+        "status": 206,
+        "ttfb": 0.359
+      },
+      {
+        "MB_per_second": 72.1578,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 35651584-44040191/102110099",
+        "domain": "img.tianmai.cn",
+        "etag": "\"BC7A5AC489E06E5951F39C4DE5E6CA06-10\"",
+        "kind": "range",
+        "range_start": 35651584,
+        "seconds": 0.116,
+        "sha256": "a8dd859a05cd8941f85a6a39029cc17870413974f6ea085cf5b1fef693bfcfc6",
+        "source_index": 2,
+        "status": 206,
+        "ttfb": 0.029
+      },
+      {
+        "MB_per_second": 62.2555,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 53477376-61865983/346191950",
+        "domain": "img.tianmai.cn",
+        "etag": "\"F5A3A9289BA029A27D20BD9D376989FB-34\"",
+        "kind": "range",
+        "range_start": 53477376,
+        "seconds": 0.135,
+        "sha256": "efaf5ff41b8637d7b64fb8e258fd5d2c9a8b05b23bd00552b9a43e71ab9f7b07",
+        "source_index": 3,
+        "status": 206,
+        "ttfb": 0.019
+      },
+      {
+        "MB_per_second": 2.9157,
+        "bytes": 8388608,
+        "complete": true,
+        "content_length": "8388608",
+        "content_range": "bytes 53477376-61865983/346191950",
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"F5A3A9289BA029A27D20BD9D376989FB-34\"",
+        "kind": "range",
+        "range_start": 53477376,
+        "seconds": 2.877,
+        "sha256": "efaf5ff41b8637d7b64fb8e258fd5d2c9a8b05b23bd00552b9a43e71ab9f7b07",
+        "source_index": 3,
+        "status": 206,
+        "ttfb": 0.155
+      }
+    ]
+  },
+  "cdn-small-sample.json": {
+    "measured_at": "2026-08-28T16:05:24.298634",
+    "measurements": [
+      {
+        "accept_ranges": "bytes",
+        "domain": "img.tianmai.cn",
+        "etag": "\"B0E18B68C80A4E0EC814FE9C6A00CBA3-3\"",
+        "kind": "HEAD",
+        "last_modified": "Tue, 25 Mar 2025 12:13:47 GMT",
+        "length": "23176076",
+        "seconds": 1.477,
+        "status": 200
+      },
+      {
+        "accept_ranges": "bytes",
+        "domain": "accelerate.tianmai.cn",
+        "etag": "\"B0E18B68C80A4E0EC814FE9C6A00CBA3-3\"",
+        "kind": "HEAD",
+        "last_modified": "Tue, 25 Mar 2025 12:13:47 GMT",
+        "length": "23176076",
+        "seconds": 2.168,
+        "status": 200
+      },
+      {
+        "MB_per_second": 0.2755,
+        "bytes": 8388608,
+        "content_range": "bytes 0-8388607/23176076",
+        "domain": "img.tianmai.cn",
+        "seconds": 30.444,
+        "sha256": "e5e76e915384b22f36b3b291d287855eaca94b4feb23bb8f93b771a291b326fc",
+        "status": 206,
+        "trial": 1,
+        "ttfb": 0.033
+      },
+      {
+        "MB_per_second": 4.8467,
+        "bytes": 8388608,
+        "content_range": "bytes 0-8388607/23176076",
+        "domain": "accelerate.tianmai.cn",
+        "seconds": 1.731,
+        "sha256": "e5e76e915384b22f36b3b291d287855eaca94b4feb23bb8f93b771a291b326fc",
+        "status": 206,
+        "trial": 2,
+        "ttfb": 0.026
+      },
+      {
+        "MB_per_second": 34.5398,
+        "bytes": 8388608,
+        "content_range": "bytes 0-8388607/23176076",
+        "domain": "accelerate.tianmai.cn",
+        "seconds": 0.243,
+        "sha256": "e5e76e915384b22f36b3b291d287855eaca94b4feb23bb8f93b771a291b326fc",
+        "status": 206,
+        "trial": 3,
+        "ttfb": 0.021
+      },
+      {
+        "MB_per_second": 69.8759,
+        "bytes": 8388608,
+        "content_range": "bytes 0-8388607/23176076",
+        "domain": "img.tianmai.cn",
+        "seconds": 0.12,
+        "sha256": "e5e76e915384b22f36b3b291d287855eaca94b4feb23bb8f93b771a291b326fc",
+        "status": 206,
+        "trial": 4,
+        "ttfb": 0.037
+      }
+    ],
+    "path": "/resource/13218/19_0bd1c44a-e63b-4e7e-8c17-64b364ecca3b.mp4"
+  }
+}

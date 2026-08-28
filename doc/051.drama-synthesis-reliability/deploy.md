@@ -1,0 +1,103 @@
+# 发布、验收和回滚合同
+
+更新：2026-08-28。**生产尚未切换；本文是受门禁约束的操作程序，不是执行记录。** 当前分支为 `codex/drama-synthesis-reliability-20260828`。发布候选最终SHA、备份位置、性能决定和生产读回证据由主任务写入 [test-report.md](test-report.md)，本文件不填未执行的PASS。
+
+## 1. 基线与不得变化的边界
+
+| 对象 | 已确认设计记录的基线 | 发布前必须重新取得的事实 |
+| --- | --- | --- |
+| CPU源码 | `420957be4c288308c38b97f773be330208887204`；app.py SHA256 `782ce12cf17890b1efd6d834e53a14debb5747fec7fe143794eaa34705f0278d` | `/root/drama_material_service` 实际代码/配置/静态文件漂移；不能推断全目录都等同该提交 |
+| HK GPU | `43.154.250.89:/data/drama-synthesis-gpu/current`，记录版本 `e1f5a1d04cfb510df9c2444ac592adec2827508b` | current实际链接目标、版本/文件哈希、服务环境及进程 |
+| CPU服务 | `43.166.187.96`，API与 `drama-material-job-worker.service` | 正式任务、租约和新任务来源，确认维护期间不再取新制作 |
+| GPU服务 | `drama-synthesis-gpu-worker.service`，loopback8787，CPU既有隧道18788 | 正式制作队列/子进程为空；既有FB等服务健康 |
+| 资源 | CPUQuota=200%、Nice=10、TasksMax=128、重制作并发1 | 实际值及磁盘/内存余量；未获长片证据前维持这些配置 |
+
+原case任务 `679e7c49acbf4af79f78bf60d76c5dd7` 必须自然结束并完成结果核对；或另经用户明确授权终止、保存证据、确认PID及进程组停止，并核查未完成状态与后续处理后，才允许制作验收和生产切换。16:45:37仍在渲染且内存压力增加，见 [BUG-002](bugs/BUG-002.md)；**终止询问尚未收到回复，当前不具备终止授权或排空证明**。不得将代码实施批准解释为可强制重启、清锁、删除或重新制作该任务。
+
+保留现网素材复制通知、输出预览过滤和YouTube弹窗等后续改动。只发布本期涉及代码，不重启或改写FB/X/TT/YouTube发布服务，不调整Token、机器时间、short-link及资源目录。
+
+## 2. 配置与存储
+
+| 配置/路径 | 默认或现有值 | 发布规则 |
+| --- | --- | --- |
+| `DRAMA_GPU_ASYNC_ENABLED` | `0`，代码默认OFF | CPU API和任务worker保持一致；隔离及媒体门禁通过后才改1 |
+| `GPU_VIDEO_WORKER_URL` | CPU既有 `http://127.0.0.1:18788`；GPU为空 | 不换隧道/端口，不让GPU转发回CPU渲染接口 |
+| `GPU_VIDEO_WORKER_TOKEN` | 既有私密值 | 沿用受限配置；不打印、不入Git、不放命令行参数 |
+| `DRAMA_GPU_MAX_CONCURRENCY` | `1`，实现只接受1 | 不提高重制作并发 |
+| `DRAMA_GPU_QUEUE_LIMIT` | `8`，允许1～64 | 首次发布维持8；计等待任务，完成查询不占名额 |
+| `DRAMA_GPU_DOWNLOAD_WORKERS` | `4`，允许1～8 | 首次维持4；8路须有相同样本4路基线及至少15%收益 |
+| `DRAMA_GPU_FILTER_THREADS` | `2`，允许1～4 | 对照只用2/4，未通过90分钟验收不调高 |
+| `DRAMA_GPU_SUBPROCESS_TIMEOUT` | `43200`秒 | scoped通用子进程保护；不是HTTP总等待截止 |
+| `DRAMA_GPU_RENDER_TIMEOUT` | `43200`秒（12小时），允许60～86400 | 专属模板渲染截止；显式timeout同样受控，不再截成10800秒，不绑定HTTP四小时等待；到期停止自己的子进程并wait确认 |
+| `GPU_VIDEO_WORKER_TIMEOUT` | 既有14400秒 | 保留旧同步/封面等兼容用途；异步观察不以此超时重制 |
+| CPU轮询 | 连接3秒/读取15秒、间隔10秒 | 当前客户端固定值；不引入另一层四小时future截止 |
+| COS SDK重试 | async专用client的retry=0 | 保留其他平台默认；目标1.9.44真实SDK无网络transport测试必须零skip通过 |
+| COS桶版本控制 | 2026-08-28只读查询Status缺省，未启用 | 不改桶设置。创建/完成前重查，状态不明或已启用/暂停均停止；条件禁止覆盖头不能用于已启用版本控制桶的保证 |
+| GPU工作根 | `/data/drama-synthesis-gpu/work/jobs` | `.runtime`就在此根下，必须持久保留 |
+| GPU上传检查点 | `/data/drama-synthesis-gpu/work/jobs/.runtime/uploads/<job_id>/<对象key哈希>.json` | 仅drama异步执行上下文使用，独立于可清理的单任务媒体目录；保留UploadId/阶段和锁文件，不删记录触发新create |
+| GPU完成manifest | `/data/drama-synthesis-gpu/results/manifests` | 保留既有记录；校验失败不能删记录重做 |
+| GPU公开本地产物 | `/data/drama-synthesis-gpu/results/public` | 仅沿用已成功上传后的清理合同；回滚不能额外删除现存产物 |
+| GPU本地模板提交记录 | 成片旁的 `.render.prepared.json`、`.render.json` | prepared先保存未完成start guard，验收后升级为绑定源/配方/产物的完整记录；只凭完整prepared恢复rename/final-save，只有guard或未登记旧输出不得自动重制/收编 |
+| CPU业务SQLite | `/root/drama_material_service/data/drama_material_jobs.sqlite3` | 先在线备份并校验；回滚保留新表与状态，不恢复旧快照覆盖新结果 |
+| `DRAMA_GPU_TIANMAI_CDN` | `original`；仅接受original/international | 只影响CPU新冻结任务；已有样本结果分化，首次保持original。international须另获同源/缓存条件对照收益，不得改旧任务身份 |
+
+环境文件分别沿用GPU `/etc/drama-synthesis-gpu/worker.env` 和CPU现有受限文件/覆盖层。通过systemd `EnvironmentFile` 加载，**不要在shell中source私密环境文件，也不要打印完整Environment或进程环境**。只读回本表中的非敏感配置项。
+
+CPU新增SQLite表 `drama_material_job_remote_runtime`，字段包括job_id、fingerprint、payload_json、snapshot_json、generation、resume_requested_generation、first_started_at及UTC审计时间。建表/补字段是增量且幂等；先在备份副本验证，不做破坏性迁移。GPU只使用私有JSON，不初始化业务DB。源URL所在冻结payload及其备份必须受限保存。
+
+异步COS上传由 `features/drama_synthesis/cos_upload.py` 实现单线程持久分片；其他业务调用保持旧合同。恢复须校验本地SHA/大小、目标及分片编号/长度/ETag与本地MD5；完成对象也要由认证HEAD匹配本次上传标识、SHA元数据、大小元数据、Content-Length及已保存完成记录，**不允许只凭公开HEAD长度复用**。无可信检查点但同key对象已存在时停止冲突处理；create结果未知时保留`creating`检查点等待人工核查，不另建UploadId、不自动abort、不删除本地成片。complete丢响应只能按绑定元数据对账，不能假定失败后重新上传覆盖。
+
+本地渲染先写start guard，再在输出通过原规格/时长校验、SHA/大小确定且fsync后提交完整prepared；rename或最终记录写入失败时保留并复原。若完整prepared自身未能落盘，保留临时成片和guard并停止自动恢复，不以删除它们换取重渲染。有效记录复用和这些保护都不等于长片内存缺陷已关闭。
+
+## 3. 候选推送与生产切换分级门禁
+
+1. 先完成本地代码审查、核心及最新媒体/COS边界回归、旧升级/目录回归和页面检查；记录真实命令与文件哈希。测试计数以主报告为准，旧计数不能替代修订后重跑。
+2. **本地通过后先提交并推送GitHub候选，记录完整40位SHA**；服务器从GitHub将该SHA取到新的隔离目录，保持生产current、unit及开关不变。这一步为隔离测试取得代码，不是生产发布，不要求长片先于候选推送完成。若修复改变代码，须重新本地验证、推送新SHA并绑定新的隔离证据。
+3. 在该SHA的Linux全新隔离目录跑同套测试和真实短子进程跟踪，验证owner/job锁、/proc PID/boot/进程组、Popen启动窗口、磁盘失败、停止接新和恢复。测试需满足资源/权限前提，不连接业务发布路由；拉取代码不等于已获GPU制作许可。
+4. 在维护排空后，用隔离任务ID、工作/结果目录和COS前缀演练提交丢响应、CPU接管、成片manifest读取、实际分片上传/丢响应恢复及事务回填；核对认证HEAD绑定元数据、creating未知结果保护、上传完成重放，不多一次渲染或create。通知故障不回到媒体制作。
+5. 固定配方先短样后5400～7200秒长样：完整解码、时长/音画/片头/集边界/模板动画和资源曲线合格。单测、5秒视频、成功返回码都不能代替长片验收，具体见 [媒体验收手册](media-acceptance-runbook.md)。
+6. 下载和CPU候选分开测量；任何性能结论只对记录的源、配方、配置与范围成立。没有合格证据则维持下载4、2核/滤镜2。
+7. `img.tianmai.cn` 与 `accelerate.tianmai.cn` 同资源、同并发、同样本对照，更快且校验无退化才启用。前缀SHA/总长度只证明抽样边界，完整对象一致须另有受控对照。启用策略仅作用于新冻结输入；不复用另一来源的`.part`身份，无换源收益证明时保持original。
+8. 全部适用门禁通过后，取得生产维护窗口并再次停止接新、核验排空。原任务自然完成时核对CPU任务/配方/manifest/COS产物；若另获明确授权终止，必须确认进程组停止并另行核查未完成状态，不能将终止写成done或借发布触发重做。无法确认即停止切换，不强制解锁。当前终止授权尚未取得。
+
+## 4. 隔离性能工具
+
+在候选代码目录使用目标运行时执行 `scripts/benchmark_drama_synthesis_media.py --help` 查看当前参数。工具要求显式 `--apply` 和全新的绝对输出目录，只写隔离证据，不提交生产任务或上传COS。
+
+```text
+python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <私有URL数组JSON> --output-dir <新的绝对证据目录> --workers 4 --bytes-per-source 16777216
+python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <同一私有URL数组JSON> --output-dir <另一新的绝对证据目录> --workers 8 --bytes-per-source 16777216 --four-worker-evidence <成功4路证据JSON>
+python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <候选域名URL数组JSON> --output-dir <新的候选证据目录> --workers 4 --bytes-per-source 16777216 --compare-evidence <同并发原域名证据JSON>
+python scripts/benchmark_drama_synthesis_media.py --apply render --source <固定本地源文件> --recipe <冻结配方JSON> --asset-root <只读素材根> --asset-manifest-sha256 <已核对SHA> --output-dir <新的绝对证据目录> --sample-kind long --filter-threads 2 --ffmpeg <隔离运行时ffmpeg> --ffprobe <隔离运行时ffprobe> --timeout 43200
+```
+
+尖括号是必须来自本次冻结记录的参数，以上不是已运行命令。渲染CPU配额由外层隔离systemd执行范围提供，分别200%/2线程、400%/2线程、400%/4线程；保持正式worker配置和同机FB优先级不变。脚本不占正式制作锁，也不自动完整解码；必须先排空，再按 [媒体验收手册](media-acceptance-runbook.md) 的独立unit、单实例锁和解码/资源门禁执行。每次记录 `evidence.json`、`process-samples.jsonl` 和媒体检查结果；`ok=true` 不代表整片解码或用户视觉验收通过。当前 `/data`仍在根文件系统，运行前用 `findmnt -T`、`df` 核验空间，不自动迁盘或无限缓存。
+
+## 5. 已验收GitHub候选的生产切换步骤
+
+1. 只提升第3节已推送GitHub、并通过全部适用隔离/长片门禁的精确SHA；核对受测SHA与拟发布SHA一致。候选推送已在隔离测试前完成，不能混淆为此时才首次推送，也不能测试A却部署B。
+2. 记录CPU实际变更文件哈希、GPU current实际链接目标、unit/drop-in与非敏感配置；保存只读源码/配置回滚包。SQLite采用在线backup API备份并做完整性检查，不直接复制运行中的WAL组合。
+3. 备份并校验GPU `.runtime`（含独立`uploads`）、完成manifest、render start guard/prepared/final记录和现存产物索引；受限保存含源URL的账本。大媒体对象不盲复制耗尽根盘，不删除COS对象或分片。
+4. 门禁确认正式制作排空且不再接新后，停止CPU材料任务worker取新；若发现GPU仍有活动或未知进程则等待并重新核查，不因发布而切代码/kill进程。另行授权终止需先按第3节处理并确认，本文不授予该权限。保留业务查询能力，记录窗口中入队任务。
+5. GPU从精确候选建立版本化源码目录，沿用已核验依赖、模型和素材。先以隔离根进行语法、导入及运行时预检，确保只读素材与可写work/results权限正确。预检失败不动current。
+6. 在GPU空闲后将current原子指向候选源码；只重启 `drama-synthesis-gpu-worker.service`。验证版本、health、认证查询和异步/兼容接口；新测试制作只能在已批准隔离环境，不对正式任务POST探测。
+7. CPU从同一GitHub精确候选发布，保留已核对的线上差异；API与worker初始均保持 `DRAMA_GPU_ASYNC_ENABLED=0`。验证业务查询、目录、旧输出预览及权限，不能把新接口上线等同开关开启。
+8. GPU兼容接口和隔离全链路通过后，在CPU两进程一致设置异步开关为1，按维护窗口只重启需要的API/材料worker，恢复取新。只观察自然到来的任务，不制造真实测试发布。
+9. 记录每次切换/重启时间、进程健康、首个自然任务的job/指纹/代次、阶段变化、最终产物对账和错误率；提交用户人工检查页面与成片。未获人工验收保持待验状态。
+
+## 6. 切换后检查与停止条件
+
+确认API/worker使用同一开关、同一冻结payload；同job重复查询不会出现第二个渲染进程；CPU更新频率约10秒，页面总耗时持续增长，封面单列完成；成片/配方与CPU done一致且完成通知不导致重做。上传重放必须使用相同检查点/UploadId并核对绑定对象元数据，不能只HEAD长度判成功；只有render start guard或未知creating时维持核查，不删记录恢复。回读不得泄露Token、源URL、COS凭据或完整数据库内容。
+
+出现未知存活进程、指纹/配方/检查点冲突、磁盘不足、连续网络错误、CPU状态倒退、其他平台资源显著恶化、长片效果不合格时停止接新并保留证据。先诊断，不能以删除账本、清租约、重复POST或放大并发“修复”。
+
+## 7. 回滚程序
+
+1. 暂停接新，先查询并保存所有新异步记录状态。GPU queued/running/recovery_required未对账完时，不把其业务任务交回不了解新账本的旧worker。
+2. 能自然完成的保留当前观察与结果回填直到完成；状态不明的保留账本/检查点并转人工核查。不得通过改CPU开关、恢复旧DB或删记录强制释放。
+3. 队列排空或已受控隔离后，将CPU异步开关恢复为0，回退到本次部署前的真实源码/配置快照。`420957b`只是源码比对基线，不能替代实际线上回滚包。
+4. GPU空闲后把current原子切回本文件第5节步骤2记录的实际旧目标（预期版本e1f5a1d，须以现场备份为准），还原本次确实改动的unit/drop-in，窄范围重启并做健康/缓存只读验证。
+5. **保留CPU数据库及新增表、GPU `.runtime/uploads`等账本、完成manifest、现存成片、render start guard/prepared/final记录、COS对象和已有分片。** 不降级或清空状态，不恢复旧快照覆盖已成功制作的结果；旧代码若不能理解残留未完成账本，保持材料worker停接新并核查，不abort或新建UploadId绕过旧记录。
+6. 记录回滚时间、源码/配置哈希、保留任务清单和产物一致性，再恢复正常入口。单独撤销未经证实的域名/并发/CPU配置，不影响已冻结执行身份。
+
+本次文档更新仅完成本地合同和检查，没有远端部署、生产重启、候选参数启用或人工代验收。

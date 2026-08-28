@@ -1,0 +1,31 @@
+{
+  "recorded_at": "2026-08-28T17:36:14",
+  "scope": "read-only runtime and source preflight, not a deployment",
+  "cpu": {
+    "host": "43.166.187.96",
+    "python": "3.9.6",
+    "source": "/root/drama_material_service",
+    "app_sha256": "782ce12cf17890b1efd6d834e53a14debb5747fec7fe143794eaa34705f0278d",
+    "static_lf_sha256": "2c2d84f569d612b8a6e119d9d4e79d5a28d82a5bb3606a3ccec2d0e6a0fd731d",
+    "baseline_core_worker_match": true,
+    "data_mount": "/mnt/data-disk",
+    "data_mount_uuid": "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"
+  },
+  "hk_gpu": {
+    "host": "43.154.250.89",
+    "release": "e1f5a1d04cfb510df9c2444ac592adec2827508b",
+    "worktree_clean": true,
+    "cos_sdk": "1.9.44",
+    "cos_sdk_default_retries": 3,
+    "cos_bucket_versioning": "not_enabled",
+    "cos_versioning_read_success": true,
+    "systemd": "239 (239-51.el8_5.2)",
+    "kernel": "4.18.0-348.7.1.el8_5.x86_64",
+    "cgroup_version": 1,
+    "CPUQuotaPerSecUSec": "2s",
+    "Nice": 10,
+    "TasksMax": 128,
+    "MemoryMax": "infinity"
+  },
+  "changes_to_production": []
+}
