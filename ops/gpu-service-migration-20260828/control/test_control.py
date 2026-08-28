@@ -20,6 +20,7 @@ maintenance = load("maintenance")
 fence = load("source_fence")
 permissions = load("hk_tunnel_permissions")
 receiver = load("receive_archive")
+finalize = load("finalize_config")
 
 
 class ControlTests(unittest.TestCase):
@@ -104,6 +105,16 @@ class ControlTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 fence.retire_local_unit(local, backup)
             self.assertTrue(local.exists())
+
+    def test_drama_pair_update_preserves_unrelated_configuration(self):
+        old = ('OTHER=keep-me\n# keep comment\nGPU_VIDEO_WORKER_URL=http://127.0.0.1:18787\n'
+               'GPU_VIDEO_WORKER_TOKEN=fixture-old\n')
+        new = {"GPU_VIDEO_WORKER_URL": "http://127.0.0.1:18788", "GPU_VIDEO_WORKER_TOKEN": "fixture-new#value"}
+        updated = finalize.replace_pair(old, new)
+        self.assertTrue(updated.startswith("OTHER=keep-me\n# keep comment\n"))
+        self.assertEqual(finalize.read_values(updated), new)
+        with self.assertRaises(RuntimeError):
+            finalize.replace_pair(old + "GPU_VIDEO_WORKER_TOKEN=duplicate\n", new)
 
 
 if __name__ == "__main__":

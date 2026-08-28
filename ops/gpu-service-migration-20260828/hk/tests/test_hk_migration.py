@@ -73,6 +73,36 @@ class HkSafetyTests(unittest.TestCase):
                 deploy.require_cutover(approval, paused)
         deploy.require_cutover(deploy.RUN_ID, True)
 
+    def test_dependency_tunnel_only_resumes_original_active_state(self):
+        for was_active in (True, False):
+            with self.subTest(was_active=was_active):
+                snapshot = {"fragment": "/etc/systemd/system/x-post-media-repair-tunnel.service",
+                            "sha256": "known-fragment", "enabled": "enabled", "active": was_active}
+                with mock.patch.object(deploy, "BACKUP", self.root / str(was_active)), \
+                     mock.patch.object(deploy, "tunnel_snapshot", side_effect=lambda: dict(snapshot)), \
+                     mock.patch.object(deploy, "active", return_value=True), \
+                     mock.patch.object(deploy, "run") as run:
+                    deploy.capture_x_tunnel_baseline()
+                    snapshot["active"] = False
+                    result = deploy.restore_x_tunnel_if_previously_active()
+                    self.assertEqual(result["restored"], was_active)
+                    if was_active:
+                        run.assert_called_once_with(["systemctl", "start", deploy.X_TUNNEL])
+                    else:
+                        run.assert_not_called()
+
+    def test_dependency_tunnel_configuration_drift_is_not_overwritten(self):
+        snapshot = {"fragment": "original-unit", "sha256": "original", "enabled": "enabled",
+                    "active": True}
+        with mock.patch.object(deploy, "BACKUP", self.root), \
+             mock.patch.object(deploy, "tunnel_snapshot", side_effect=lambda: dict(snapshot)), \
+             mock.patch.object(deploy, "run") as run:
+            deploy.capture_x_tunnel_baseline()
+            snapshot["sha256"] = "changed-by-another-operator"
+            with self.assertRaises(ValueError):
+                deploy.restore_x_tunnel_if_previously_active()
+            run.assert_not_called()
+
     def test_archive_rejects_path_and_symlink_escape(self):
         for name, link in [("../outside", None), ("link", "../../outside")]:
             archive = self.root / ("test-" + str(bool(link)) + ".tgz")

@@ -20,6 +20,7 @@ X_ROOT = pathlib.Path("/data/x-post-media-repair")
 AD_ROOT = pathlib.Path("/data/ad-material")
 X_SHA = "fba8ff603e979b443339108cb2ce45c975fbd39f"
 X_PROFILE = "x-h264-nvenc-720-duration-policy-v5"
+X_TUNNEL = "x-post-media-repair-tunnel.service"
 OWNED_REL = pathlib.Path("ops/gpu-service-migration-20260828/hk")
 UNITS = {
     "x": ["x-post-media-repair.service"],
@@ -116,6 +117,41 @@ def require_commit(repo, sha):
 
 def active(unit):
     return run(["systemctl", "is-active", unit], check=False) in {"active", "activating"}
+
+
+def tunnel_snapshot():
+    fragment = pathlib.Path(run(["systemctl", "show", X_TUNNEL,
+                                 "-p", "FragmentPath", "--value"]))
+    if not fragment.is_file():
+        raise ValueError("existing X tunnel unit is missing")
+    return {"fragment": str(fragment), "sha256": digest(fragment),
+            "active": active(X_TUNNEL),
+            "enabled": run(["systemctl", "is-enabled", X_TUNNEL], check=False)}
+
+
+def capture_x_tunnel_baseline():
+    path = BACKUP / "x-tunnel-dependency-baseline.json"
+    snapshot = tunnel_snapshot()
+    if not path.exists():
+        write_json(path, snapshot)
+        return snapshot
+    baseline = json.loads(path.read_text())
+    for key in ("fragment", "sha256", "enabled"):
+        if snapshot[key] != baseline[key]:
+            raise ValueError("existing X tunnel changed; review before worker stop")
+    return baseline
+
+
+def restore_x_tunnel_if_previously_active():
+    path = BACKUP / "x-tunnel-dependency-baseline.json"
+    if not path.exists():
+        return {"baseline_recorded": False, "restored": False}
+    baseline = capture_x_tunnel_baseline()
+    if baseline["active"]:
+        run(["systemctl", "start", X_TUNNEL])
+        if not active(X_TUNNEL):
+            raise ValueError("originally active X tunnel did not resume")
+    return {"baseline_recorded": True, "restored": baseline["active"]}
 
 
 def preserve_units(component):
@@ -343,6 +379,9 @@ def verify(component):
         result["health"] = health("http://127.0.0.1:8820/health")
         if result["health"].get("profile") != X_PROFILE:
             raise ValueError("X profile changed")
+        result["tunnel_active"] = active(X_TUNNEL)
+        if not result["tunnel_active"]:
+            raise ValueError("existing X reverse tunnel is not active")
     else:
         result["generation_health"] = health("http://127.0.0.1:8797/health")
         result["vision_health"] = health("http://127.0.0.1:8796/health")
@@ -366,6 +405,7 @@ def activate(component, source_ad_stopped):
             raise ValueError("US X history is not staged; wait for relay and restage")
         if any(pathlib.Path("/var/lib/x-post-media-repair/work").iterdir()):
             raise ValueError("old X worker has active or residual work; inspect before stopping")
+        capture_x_tunnel_baseline()
         run(["systemctl", "stop", UNITS["x"][0]], timeout=1950)
         source = pathlib.Path("/var/lib/x-post-media-repair/manifests")
         shutil.copytree(str(source), str(BACKUP / "hk-manifests-at-cutover"),
@@ -374,8 +414,10 @@ def activate(component, source_ad_stopped):
                         dirs_exist_ok=True)
         history = INPUTS / "x-us-history/data/x-post-media-repair/manifests"
         if history.is_dir():
-            from merge_x_manifests import merge
-            merge(history, X_ROOT / "state/manifests", apply=True, with_head=True)
+            run([str(X_ROOT / "runtime/python/bin/python"),
+                 str(pathlib.Path(__file__).with_name("merge_x_manifests.py")),
+                 "--source", str(history), "--destination", str(X_ROOT / "state/manifests"),
+                 "--apply", "--with-head"], timeout=600)
     elif (not source_ad_stopped or not (AD_ROOT / "auth-source/auth.json").is_file()
           or not (INPUTS / "auth-transfer.json").is_file()
           or not (INPUTS / "ad-final-sync.json").is_file()):
@@ -388,6 +430,8 @@ def activate(component, source_ad_stopped):
     for unit in UNITS[component]:
         run(["systemctl", "enable", unit])
         run(["systemctl", "start", unit])
+    if component == "x":
+        restore_x_tunnel_if_previously_active()
     result = verify(component)
     write_json(BACKUP / (component + "-activated.json"), result)
     return result
@@ -418,6 +462,8 @@ def rollback(component):
             run(["systemctl", "enable", unit])
         if old["active"]:
             run(["systemctl", "start", unit])
+    if component == "x":
+        restore_x_tunnel_if_previously_active()
     result = {"phase": "units_restored_data_preserved", "component": component,
               "note": "No US service starts automatically. Preserve /data manifests for reconciliation."}
     write_json(BACKUP / (component + "-rollback.json"), result)

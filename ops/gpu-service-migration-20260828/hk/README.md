@@ -34,7 +34,9 @@ X activate会停止香港旧runtime，最终复制香港权威manifest，再对�
 
     /data/x-post-media-repair/runtime/python/bin/python <control>/deploy.py activate --component x --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
 
-X activate内部依赖COS SDK，必须使用上述独立venv Python；系统Python仅适合stage/verify/rollback。执行前仍须协调者明确放行，不能因准备完成而自行切换。
+统一使用上述独立venv Python执行X activate。首版7c54在调用进程内导入COS SDK，不能用未安装SDK的系统Python。执行前仍须协调者明确放行，不能因准备完成而自行切换。
+
+香港原 x-post-media-repair-tunnel.service 有 Requires=x-post-media-repair.service，停止worker会连带停止隧道。必须在worker stop前记录隧道原active/enabled及fragment SHA；activate和rollback后只恢复原本active、且配置/enablement未变的隧道，不修改unit、key或SSH。新版控制器会自动做此恢复，缓存导入也显式调用新venv。首版7c54执行时须按以上步骤单独start既有隧道，不能把本机health当作CPU18820入口已恢复。完整验收还须在CPU检查18820 health及监听sshd对应的远端确为43.154.250.89。
 
 广告先由根协调者停美国generation、vision及其旧隧道，确认所有共享授权使用者的协调窗口。随后依次执行本地 relay_inputs.py final-ad-data-after-source-stop 和 relay_inputs.py copy-auth-after-source-stop，最后再启动香港。增量同步对四个业务目录逐文件SHA对账，保留香港额外文件；auth仅传必要auth.json且不刷新，不得复制整个/root/.codex或动CPU截图授权。auth目标700目录/600文件，绝不进Git。activate同时要求最终数据同步及授权传输证据存在。
 

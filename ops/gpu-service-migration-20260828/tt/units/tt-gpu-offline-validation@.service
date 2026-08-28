@@ -1,0 +1,38 @@
+[Unit]
+Description=TikTok isolated local video validation (%i; no publishing APIs)
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/data/tt-post-gpu/current
+EnvironmentFile=/data/tt-post-gpu/config/base.env
+Environment=PYTHONNOUSERSITE=1
+ExecStartPre=/data/tt-post-gpu/runtime/bin/python /data/tt-post-gpu/ops/tt_migration.py preflight
+ExecStartPre=/data/tt-post-gpu/runtime/bin/python /data/tt-post-gpu/ops/tt_migration.py verify-source
+ExecStart=/data/tt-post-gpu/runtime/bin/python /data/tt-post-gpu/ops/verify_offline.py --output-root /data/tt-post-gpu/validation/%i
+PrivateNetwork=true
+PrivateTmp=true
+PrivateDevices=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/root/.ssh -/root/drama_material_service/.env -/etc/x-post-media-repair.env /etc/ssh
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/data/tt-post-gpu/current /data/tt-post-gpu/runtime /data/tt-post-gpu/python-base /data/tt-post-gpu/ffmpeg /data/tt-post-gpu/assets /data/tt-post-gpu/ops /data/tt-post-gpu/config /data/tt-post-publisher
+ReadWritePaths=/data/tt-post-gpu/validation /data/tt-post-gpu/tmp /data/tt-post-gpu/cache /data/tt-post-gpu/logs
+UMask=0077
+TimeoutStartSec=720
+TimeoutStopSec=30
+StandardOutput=append:/data/tt-post-gpu/logs/offline-%i.log
+StandardError=append:/data/tt-post-gpu/logs/offline-%i.log

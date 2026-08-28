@@ -22,6 +22,27 @@
 - 美国约5GB历史 jobs/ttpreview-* 保留原地并记录路径、大小、mtime和SHA。
   不导入香港在线 jobs、不删除；只预拷稳定资源、manifest、ledger和必要artifact。
 
+### 已批准的 FFmpeg 运行时兼容适配
+
+美国 FFmpeg N-124254-g397c7c7524-20260429 要求 NVENC API 13.0／驱动至少570，
+香港565.57.01只支持API12.2，第一次隔离合成编码因此拒绝启动编码器。
+未升级共享驱动，也未改动FB、Drama或其他业务环境。
+
+经主任务批准，香港使用 /usr/bin/ffmpeg 与 ffprobe 的私有副本，版本
+n7.1-152-gd72536008a-20250113，仍放在 /data/tt-post-gpu/ffmpeg/。
+业务源码9425、媒体profile、素材规则、COS URL和已准备媒体均不改变。
+
+| 私有二进制 | SHA256 |
+| --- | --- |
+| ffmpeg | c34815e5271aecd549e2334a659eebee62de5c86f763d1f15026b11582f1184d |
+| ffprobe | bf7b813bb81f01695a38841e697d6fd858c194baf13017e78c2855af502e644a |
+
+美国原始二进制保留在 /data/migrations/RUN_ID/tt/us-ffmpeg-before-compatibility，
+归档仍保留在同批 direct-inputs/ffmpeg.tar.gz；版本与校验结果分别记录于
+tt/ffmpeg-installed.json、tt/ffmpeg-compatibility.json。失败验证证据不覆盖。
+兼容副本已通过2秒真实 HEVC_NVENC 合成：720×1280／30fps／hvc1／AAC48k双声道；
+源版本73项Fake回归重新通过。正式切线仍要求两lane完整本地渲染和媒体契约通过。
+
 ## 执行顺序
 
 1. 协调者验证 GitHub 业务源码和本目录运维提交，预复制固定资源及代码，
@@ -36,6 +57,18 @@
    离线脚本用本地合成视频、真实FFmpeg、假下载/假存储/假TikTok，并禁止Python网络连接。
 4. 主任务批准后才可启动目标关闭闸门的服务，GET /health验收。
    不做真实prepare/publish/canary/reconcile，不建生产隧道。
+
+完整验证使用独立静态模板 units/tt-gpu-offline-validation@.service。
+协调者从已发布运维提交安装模板并daemon-reload，核对资源与关闭闸门后才启动
+tt-gpu-offline-validation@UNIQUE_ID.service。模板无Install/timer，
+不会运行正式worker入口；PrivateNetwork隔离网络，采用生产unit相同权限限制，
+并额外将生产state和config设为只读，写入范围只有validation、缓存、临时目录和日志。
+每次使用新UNIQUE_ID保留失败证据。不要以systemd-run省略不支持的安全属性来代替：
+香港239客户端不支持部分transient属性，但静态unit支持。
+
+香港运行上述Python运维脚本请使用 /data/tt-post-gpu/runtime/bin/python；
+美国snapshot请用 /root/miniconda3/envs/drama-voice/bin/python。
+两台GPU主机的默认python3仍可能是3.6，不能运行带future annotations的运维脚本。
 
 ## 切线与账本
 
