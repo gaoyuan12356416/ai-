@@ -19,7 +19,7 @@
 
 ## 生产代码验证
 
-- 最终提交814e168在服务器Python3.9.6：832/832，38.593s，无跳过。
+- 首轮提交814e168在服务器Python3.9.6：832/832，38.593s，无跳过。
 - 备份副本初始化完整性ok/FK0，业务表数量不变。
 - 16:13:44代码部署检查完成，Sidecar/Main auth/GPU均200，主API X admin未鉴权401；三个timer恢复active。
 - 真实内部只读预检：账号8返回x_post_account_locked，账号19返回x_post_account_needs_review，均409，中文原因指向正确历史日志。
@@ -28,3 +28,13 @@
 ## 待完成
 
 16条历史媒体仍在备份副本校验，副本apply/live validate/live apply与自然发布账本验收尚未完成。不能把代码上线或恢复入队视为实际发帖成功。
+
+## 追加下载完整性与恢复证据验证
+
+- BUG-003真实复现GPU静默截断：声明83,863,962字节但实际6,291,709。CPU完整SHA对应首次失败job，排除原CPU源错误；GPU指纹门禁正确停止，0 X写入。
+- 下载补丁170e3b1：CPU Linux836/836（38.904s）；GPU138/138（4.234s）；17:35健康与timer恢复通过。17:40真实GPU单次GET完整83,863,962字节/SHA与CPU一致。
+- 新错误码素材重查分类先红后绿：补集合前4个subtest失败，补后183项相关回归通过；root独立116项store回归通过（14.306s）。dad987b最终功能提交Linux836/836（38.730s）通过，17:45上线健康及保护账本检查通过。
+- GPU复用helper：原6项CLI测试保持不变，新增12项；合并Daily/GPU100项通过。固定真实bundle与冻结行纯合同门禁7/7，仅代表证据结构可用，不代表CPU实际输出验证或发布。
+- 事故wrapper新增8项永久测试，恢复相关26/26通过；加入两份helper后的Windows全X回归856项/62.517s通过（2项POSIX用例skip）。完整日志为工作区output/x-pool-blockers-20260828/local-x-tests-with-recovery.log。
+- wrapper独立审查无可证实P1/P2；新factory推进1小时可复用完整item且媒体调用0，16条冻结身份跨时间不变，先恢复348后350自身数据库门禁仍通过。临时SQLite与固定证据的9项离线验证通过。
+- 逐项真实CPU checkpoint、copy/live apply及自然消费尚待后续实测；不得用计划步骤或上述离线验证代替实际结果。apply必须借用已持有的原process_lock、两run共用最终index SHA，且factory/store/execute_recovery指向同一目标DB。

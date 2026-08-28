@@ -1,6 +1,6 @@
 # 部署与回滚
 
-## 已发布代码
+## 首次发布代码（后续补充见下节）
 
 - CPU：43.166.187.96。
 - GitHub分支：`codex/x-pool-blockers-20260828`。
@@ -27,6 +27,22 @@
 - 不重建363、不清q533/719/726，不用真实测试帖验证。数据恢复只表示回到原队列待执行；真实发帖须以后续自然timer和ledger核对。
 - 当前媒体校验/恢复进度见test-report.md；不得把本节计划步骤当成已经完成。
 
+## 下载完整性与重查分类补充（2026-08-28 17:45）
+
+- GitHub下载补丁170e3b1325b71a72fcd6de913982ce92bb77fa40在CPU通过836/836、香港GPU通过138/138。GPU于17:34切到`/data/x-post-media-repair/releases/170e3b1325b71a72fcd6de913982ce92bb77fa40`，PID1780296；运行时与状态目录保留迁移后的/data，不触碰US worker/tunnel masks。
+- 17:35 CPU/MainAPI/CPU18820健康通过，原三个timer恢复active。GPU17:40对q642真实下载收全83,863,962字节，SHA与CPU相同，仅1次GET，没有X写入。
+- 17:42显式幂等start香港tunnel，随后CPU18820再次200/profile v5。17:41快照GPU active repair jobs=0，CPU无media_uploading/post_creating/repost_creating。此前下载诊断已结束，不做压力测试。
+- 素材池重查分类补丁dad987b430cfa4001b23c6517c2fdaa5c70f5f2a再次通过Linux836/836。17:45 CPU已切换该release，Sidecar PID1832335，main service SHA为87c42536dac4a1a9b8eb906c973ef056f7b5dfaaddc7b391d327448184fde7cf；GPU维持170e，不因CPU候选分类改变而重启GPU。
+- CPU补充证据：原备份目录的`download-fix-deployment-result.json`、`recheck-fix-deployment-result.json`、`linux-x-tests-download-fix.log`、`linux-x-tests-recheck-fix.log`及两份切换前在线SQLite。q533/719/726逐字段不变，16条历史仍failed、未rearm。
+- GPU补充证据：`/data/x-post-media-repair/backups/20260828-pool-blockers-download/deployment-result.json`、`gpu-tests-download-fix.log`、`backup-meta.json`；诊断证据在`/data/x-post-media-repair/diagnostics/20260828-pool-blockers/q642-postfix-download.json`。
+
+### 历史媒体证明复用
+
+- 首次run348整体CPU报告为failed，不能当作成功证明；7条旧GPU ready文件已通过SSH验证root属主、权限和精确资源范围，再固定bundle SHA为78e5830d4d6303b906d5402ee87285e54031846d1e5200e7198221d8f4fca08e。
+- 原冻结行快照frozen-inputs.json SHA为a5343590f87b5f0890e2e5e3ade68404c41b976e520926949f9652914468491f，包含16 queue/16 log/11 relay/16 pool及受保护三条记录。
+- 使用事故专用helper严格核对GPU完整ready版本、请求、job、COS路径，再真实下载并探测CPU输出；逐项成功后才写私有checkpoint。其余9条仍走既有预检/修复；不中断原绑定、不换源、不混入失败证据。
+- checkpoint有效期4小时，固定索引SHA、工具commit、源身份和完整CPU证明；缺失、过期、冲突立即停止。prepare入口只允许备份副本/apply=False。后续copy/live apply必须复用全部完整证明、实时源身份查询和原store事务guards，并持整个阶段的process_lock；每个run独立checkpoint，第二批失败不重复apply第一批。
+
 ## 回滚
 
 1. 停止三个timer，等待schedule/claim/manual服务退出，并查publish log无media_uploading/post_creating/repost_creating；不得强杀在途写。
@@ -35,3 +51,4 @@
 4. 恢复备份中x-post-automation.env和x-post-schedule.env至/etc，保留原属主权限；不要恢复Token或整库快照。
 5. 窄重启drama-material-api.service、x-post-automation.service；复查/api/auth/status、X鉴权、Sidecar /health、commit/hash与SQLite。
 6. 若历史恢复已apply或自然发布开始，不删除恢复审计、不回写旧URL、不整库回滚。保持timer暂停并核对真实ledger，再决定后续恢复。
+7. 若仅回滚下载补充：CPU保留各阶段before-image与相邻旧release；香港只在`/data/x-post-media-repair/releases`内切回fba8ff6并重启worker，随后显式start香港tunnel并复查CPU18820。不得恢复旧/var/lib或/opt运行路径，不得解mask/启动US备用节点。
