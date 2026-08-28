@@ -43,6 +43,32 @@ tt/ffmpeg-installed.json、tt/ffmpeg-compatibility.json。失败验证证据不�
 兼容副本已通过2秒真实 HEVC_NVENC 合成：720×1280／30fps／hvc1／AAC48k双声道；
 源版本73项Fake回归重新通过。正式切线仍要求两lane完整本地渲染和媒体契约通过。
 
+### Direct Outro 30fps 适配与失败证据
+
+完整离线验证发现：固定9425代码的 direct_outro 拼接图在上述FFmpeg7.1上，
+只有 -fps_mode cfr、没有显式输出帧率时，实际得到25fps。12秒合成源自身为30fps，
+有效源长7.666667秒，大于源码最低1秒；成片HEVC/hvc1、尺寸及音频均合格，
+失败仅在原验证器强制30±0.01fps。不能靠放宽profile或延长样本绕过。
+证据保留在 validation/direct-outro-probe-02，包含每条命令、完整ffprobe、
+清理前成片stage4/5及failure.json；无真实上传、TikTok调用或发布账本。
+
+经协调者批准的最小适配是 ffmpeg_adapter.py：私有原二进制保留为ffmpeg.bin，
+适配器只接受9425的direct-outro单输出布局、完整滤镜图、编码参数及输入输出目录，
+在末尾输出文件前补 -r 30。静音源和正常音轨均受同一验证，
+random_overlay、独立normalize、版本查询和其他调用保留原参数向量直接exec；
+模糊direct参数、额外输出、已有-r或变化的图/编码配置会明确拒绝。
+该适配不改业务源码、profile、既有ready媒体、全局FFmpeg或其他业务目录。
+
+仅从已发布并核对的运维提交执行：
+
+    bash install-ffmpeg-adapter.sh OPS_SHA RUN_ID
+
+安装要求4个目标生产unit均停止，核对私有原binary SHA，先保留备份和版本证据，
+不启动服务。再经协调者授权，用相同PrivateNetwork静态模板和新的instance执行一次
+direct-only离线准备＋reuse；仍由9425原validate_prepared_output验收。
+units/tt-gpu-offline-direct-outro.conf仅可安装为该离线instance的drop-in，不能用于生产。
+失败不得切线。当前安装脚本和参数测试不等于实际媒体验证通过。
+
 ## 执行顺序
 
 1. 协调者验证 GitHub 业务源码和本目录运维提交，预复制固定资源及代码，

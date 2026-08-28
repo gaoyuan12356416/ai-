@@ -11,6 +11,7 @@ spec = importlib.util.spec_from_file_location("tt_migration", HERE / "tt_migrati
 migration = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(migration)
 import cpu_state
+import ffmpeg_adapter
 
 
 class MigrationTests(unittest.TestCase):
@@ -85,6 +86,47 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(migration.run_backup_root("gpu-service-migration-20260828T1502").name, "tt")
         with self.assertRaises(ValueError):
             migration.run_backup_root("../../outside")
+
+
+class FFmpegAdapterTests(unittest.TestCase):
+    @staticmethod
+    def captured_arguments():
+        return json.loads((HERE / "fixtures/direct-outro-argv.json").read_text())["argv"]
+
+    def test_captured_9425_direct_command_only_adds_output_rate(self):
+        original = self.captured_arguments()
+        result = ffmpeg_adapter.adapt_arguments(original)
+        self.assertEqual(result, original[:-1] + ["-r", "30", original[-1]])
+        self.assertNotIn("-r", original)
+
+    def test_other_lane_normalization_and_opaque_args_are_unchanged(self):
+        direct = self.captured_arguments()
+        cases = [["-version"], ["-i", "bytes-\udcff-$HOME file.mp4", "-vf", "fps=30", "out.mp4"],
+                 ["-i", direct[8], "-vf", "fps=30", direct[-1]],
+                 [value.replace("/direct_outro/", "/random_overlay/") for value in direct]]
+        for args in cases:
+            with self.subTest(args=args[:2]):
+                self.assertIs(ffmpeg_adapter.adapt_arguments(args), args)
+
+    def test_ambiguous_direct_graph_rate_codec_and_multi_output_refused(self):
+        original = self.captured_arguments()
+        invalid = [original[:-1] + ["-r", "30", original[-1]], original + ["second.mp4"],
+                   [value.replace("concat=n=3:v=1:a=0[outv]", "concat=n=2:v=1:a=0[outv]") for value in original],
+                   ["h264_nvenc" if value == "hevc_nvenc" else value for value in original],
+                   [value.replace("/outro-normalized.mp4", "/different.mp4") for value in original],
+                   [value.replace("end=7.666667", "end=8.666667", 1) for value in original]]
+        for args in invalid:
+            with self.subTest(arguments=len(args)), self.assertRaises(ValueError):
+                ffmpeg_adapter.adapt_arguments(args)
+
+    def test_silent_source_and_production_direct_paths_keep_same_contract(self):
+        args = self.captured_arguments()
+        job = "/data/tt-post-publisher/direct-outro-work/jobs/synthetic-0001.fixture"
+        original_job = str(Path(args[-1]).parent).replace("\\", "/")
+        args = [value.replace(original_job, job) for value in args]
+        args[10] = args[10].replace("[0:a]aresample=48000:async=1:first_pts=0,apad,",
+                                    "anullsrc=channel_layout=stereo:sample_rate=48000,")
+        self.assertEqual(ffmpeg_adapter.adapt_arguments(args), args[:-1] + ["-r", "30", args[-1]])
 
 
 class CPUStateTests(unittest.TestCase):
