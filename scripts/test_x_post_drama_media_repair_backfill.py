@@ -106,6 +106,7 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
                 "daily.example.test,drama.example.test\n"
                 "X_POST_SCHEDULE_DRAMA_APP_ID=1015\n"
                 "X_POST_SCHEDULE_CANDIDATE_POOL_LIMIT=50\n"
+                "X_POST_SCHEDULE_INTERNAL_TIMEOUT=7200\n"
                 "X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN=17\n",
                 encoding="utf-8",
             )
@@ -130,6 +131,7 @@ class DramaMediaRepairBackfillTests(unittest.TestCase):
                 values["X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN"],
                 "17",
             )
+            self.assertEqual(values["X_POST_SCHEDULE_INTERNAL_TIMEOUT"], "7200")
             self.assertEqual(
                 values["X_POST_MEDIA_REPAIR_TOKEN"],
                 "repair-secret",
