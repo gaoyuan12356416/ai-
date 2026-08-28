@@ -1,6 +1,8 @@
 """Audited operator command invoking the GitHub-deployed recovery APIs only."""
 import contextlib
+import base64
 import datetime
+import gzip
 import hashlib
 import json
 import os
@@ -28,7 +30,7 @@ assert pathlib.Path("/opt/x-post-automation/current").resolve() == RELEASE
 os.umask(0o077)
 sys.path.insert(0, str(RELEASE))
 sys.path.insert(0, str(RELEASE / "deploy/recovery"))
-from x_post_incident_preflight_20260828 import IncidentPreflight, _write_private
+from x_post_incident_preflight_20260828 import IncidentPreflight, _encoded, _write_private
 from scripts.x_post_bound_drama_media_recovery import execute_recovery
 from scripts.x_post_daily_runner import process_lock
 from scripts.x_post_drama_media_repair_backfill import load_drama_environment_files
@@ -79,6 +81,14 @@ def snapshot(path):
         assert not conn.execute("PRAGMA foreign_key_check").fetchall()
         return {key: [dict(row) for row in conn.execute("SELECT * FROM %s ORDER BY id" % table)]
                 for key, table in TABLES.items()}
+
+
+def write_snapshot(path, document):
+    raw = _encoded(document)
+    payload = gzip.compress(raw, mtime=0)
+    _write_private(path, {"encoding": "gzip+base64", "uncompressed_sha256": hashlib.sha256(raw).hexdigest(),
+                         "uncompressed_bytes": len(raw), "row_counts": {key: len(rows) for key, rows in document.items()},
+                         "payload": base64.b64encode(payload).decode("ascii")})
 
 
 def backup(path, destination):
@@ -222,7 +232,7 @@ try:
             assert not any(row["status"] in {"media_uploading", "post_creating", "repost_creating"}
                            for row in before["logs"]), "X writes are in flight"
             backup(target, BASE / (PHASE + ".before-apply.sqlite3"))
-            _write_private(BASE / (PHASE + "-ledger-before.json"), before)
+            write_snapshot(BASE / (PHASE + "-ledger-before.json"), before)
             store = XPostStore(target)
 
             def execute(run_id, apply):
@@ -250,7 +260,7 @@ try:
                 print(json.dumps({"phase": PHASE, "run_id": run_id, "status": "applied",
                                   "updated_count": applied["updated_count"], "x_write_attempted": False}), flush=True)
             after = snapshot(target)
-            _write_private(BASE / (PHASE + "-ledger-after.json"), after)
+            write_snapshot(BASE / (PHASE + "-ledger-after.json"), after)
             result["verification"] = verify_changes(before, after, factories)
             result["status"] = "verified"
             completed = True

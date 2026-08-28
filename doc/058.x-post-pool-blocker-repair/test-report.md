@@ -45,3 +45,11 @@
 - Run348实际prepare完成13/13且status=validated：7条GPU历史缓存成品重新由CPU下载/探测、6条正常原源修复；X写入0，原队列未改。Run350的3条正在同一路径串行准备。
 - 独立审查运维apply命令：发现audit只验数量的P2后已补完整27个非id字段。16条正常audit通过，分别篡改27列均被拒绝；另补stop部分失败、timer恢复/查询异常的持久化，以及进入apply后失败不自动恢复timer的保护。
 - 运维脚本以独立operator commit从GitHub取出并从文件执行，保留`<commit>/deploy/recovery/`归档层级；不切换服务current，helper和审计证据仍绑定e300542。
+
+## 18:25副本演练门禁
+
+- 两批实际媒体prepare均完成（348为13/13，350为3/3），最终16条index SHA为a9f056b91faca4557107d590fbe9a74f6fa9d3a50c005d4c1b4d871e1aa07561；没有X写入。
+- 第一次copy命令在保存恢复前完整账本快照时被证据大小门禁拒绝：原始JSON为2,834,994字节，超过helper既有2MiB上限。两个run未进入validate/apply、恢复audit=0；只读核对完整业务快照与刚创建的副本备份完全一致。
+- 仅调整独立operator脚本的账本快照格式为gzip+base64封装，记录原始SHA、字节数和各表行数；既有2MiB门禁、checkpoint、helper、CPU/HK服务版本均不变。真实副本只读计算的封装为533,590字节，解码还原与原始JSON完全一致。
+- 第一次失败的命令日志/结果/副本备份需保留为attempt-1证据；确认没有恢复写入后才再次执行copy阶段，不重做16条媒体准备。
+- 已归档到attempt-1-e4dd990-evidence-size。压缩小改经独立离线复核：3,205,033字节模拟快照无损还原、SHA/长度/六表数量一致；超过2MiB的压缩封装仍由真实_write_private拒绝且不创建文件。此前16条正常audit、27列/4类篡改及6类timer测试全部保持通过，报告见工作区output/x-pool-blockers-20260828/recovery-apply-offline-review.json。
