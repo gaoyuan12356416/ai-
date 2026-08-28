@@ -363,6 +363,8 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
         # usable; identity, mapping, source-tag and unknown-result errors are
         # deliberately excluded from this list.
         "media_download_failed",
+        "media_download_incomplete",
+        "media_download_length_mismatch",
         "invalid_media_codec",
         "invalid_media_dimensions",
         "invalid_media_duration",

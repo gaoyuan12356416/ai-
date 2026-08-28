@@ -1736,14 +1736,17 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
 
     def test_media_only_historical_errors_are_rechecked_but_unsafe_is_not(self):
-        self.save_schedule("material", [2], ["09:00", "10:00", "11:00"])
+        publish_times = ["09:00", "10:00", "11:00", "12:00", "13:00"]
+        self.save_schedule("material", [2], publish_times)
         for index, (publish_time, error_code) in enumerate(
             zip(
-                ("09:00", "10:00", "11:00"),
+                publish_times,
                 (
                     "repaired_media_invalid",
                     "x_post_media_repair_unreachable",
                     "cos_upload_failed",
+                    "media_download_incomplete",
+                    "media_download_length_mismatch",
                 ),
             ),
             1,
@@ -1761,6 +1764,14 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                         }
                     ],
                 )["items"][0]
+                self.assertEqual(
+                    self.store.query_pool({"material_id": material_id})["items"][0]["availability"],
+                    "validation_failed",
+                )
+                self.assertIn(
+                    material_id,
+                    [item["material_id"] for item in self.store.available_pool_items()],
+                )
                 self.store.create_schedule_plan(
                     "material",
                     "2026-07-27",
@@ -1774,6 +1785,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                         (pool["id"],),
                     ).fetchone()[0]
                 self.assertEqual(cleared, "")
+                self.assertNotIn(
+                    material_id,
+                    [item["material_id"] for item in self.store.available_pool_items()],
+                )
         self.assertNotIn(
             "material_source_tag_unsafe",
             service.REVALIDATABLE_MATERIAL_VALIDATION_CODES,
@@ -2004,6 +2019,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "material_tag_unsafe",
             "x_long_video_requires_premium",
             "invalid_media_dimensions",
+            "media_download_incomplete",
+            "media_download_length_mismatch",
         )
         for offset, error_code in enumerate(historical_codes, 1):
             with self.subTest(error_code=error_code), tempfile.TemporaryDirectory() as root:
