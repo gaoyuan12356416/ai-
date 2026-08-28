@@ -16569,7 +16569,40 @@ def _allowed_host(hostname, allowed_hosts):
     return False
 
 
+class _IncompleteMediaDownload(XPostError):
+    """A clean EOF with fewer bytes than a valid Content-Length declared."""
+
+    def __init__(self, declared, actual):
+        super().__init__(
+            "media_download_incomplete",
+            "素材下载不完整（声明%s字节，实际%s字节）" % (declared, actual),
+            502,
+        )
+
+
 def download_media(
+    url, destination, allowed_hosts, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, http_client=None,
+):
+    """Download complete media; retry only explicit clean-EOF truncation.
+
+    Each of at most three attempts is a fresh full GET of the original URL.
+    The single-attempt helper retains all URL/type/size gates and only replaces
+    the destination after complete validation. No other HTTP call is retried.
+    """
+    for attempt in range(1, 4):
+        try:
+            return _download_media_once(
+                url, destination, allowed_hosts, max_bytes=max_bytes,
+                timeout=timeout, http_client=http_client,
+            )
+        except _IncompleteMediaDownload as exc:
+            if attempt == 3:
+                raise XPostError(
+                    exc.code, "%s，已尝试3次，停止下载" % exc, 502,
+                ) from None
+
+
+def _download_media_once(
     url, destination, allowed_hosts, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, http_client=None,
 ):
     """Download one HTTPS image/video after strict host/type/size checks."""
@@ -16635,6 +16668,7 @@ def download_media(
                 "invalid_media_type", "素材响应不是支持的图片或视频", 415
             )
         length = response.headers.get("content-length", "").strip()
+        declared = None
         if length:
             try:
                 declared = int(length)
@@ -16656,6 +16690,13 @@ def download_media(
                         size += len(chunk)
                         if size > effective_max_bytes:
                             raise XPostError("media_too_large", "素材大小超过限制", 413)
+                        if declared is not None and size > declared:
+                            raise XPostError(
+                                "media_download_length_mismatch",
+                                "素材响应超过声明长度（声明%s字节，实际至少%s字节）"
+                                % (declared, size),
+                                502,
+                            )
                         handle.write(chunk)
                         digest.update(chunk)
                 except XPostError:
@@ -16673,6 +16714,8 @@ def download_media(
                     ) from None
                 handle.flush()
                 os.fsync(handle.fileno())
+            if declared is not None and size < declared:
+                raise _IncompleteMediaDownload(declared, size)
             if size <= 0:
                 raise XPostError("invalid_media_response", "素材为空", 502)
             os.replace(temporary, destination)

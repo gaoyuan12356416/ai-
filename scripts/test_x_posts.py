@@ -652,12 +652,118 @@ class XPostsTests(unittest.TestCase):
         )
         self.assertEqual(result["size"], 5)
         self.assertEqual(target.read_bytes(), b"video")
+        self.assertEqual(len(client.requests), 1)
         with self.assertRaises(service.XPostError) as caught:
             service.download_media("http://media.example.com/a.mp4", target, ["media.example.com"], http_client=client)
         self.assertEqual(caught.exception.code, "invalid_media_url")
         with self.assertRaises(service.XPostError) as caught:
             service.download_media("https://evil.example/a.mp4", target, ["media.example.com"], http_client=client)
         self.assertEqual(caught.exception.code, "media_host_not_allowed")
+        self.assertEqual(len(client.requests), 1)
+
+    def test_download_retries_clean_eof_using_fresh_full_get_and_atomic_target(self):
+        target = self.root / "media-work" / "retry.mp4"
+        target.parent.mkdir()
+        target.write_bytes(b"existing-video")
+        temporary_names = []
+        observed_targets = []
+
+        class RecordingResponse(service.HttpResponse):
+            def iter_bytes(self, chunk_size=64 * 1024):
+                temporary_names.extend(
+                    path.name for path in target.parent.glob(".retry.mp4.*.part")
+                )
+                observed_targets.append(target.read_bytes())
+                yield from super().iter_bytes(chunk_size)
+
+        client = ScriptedHttpClient([
+            RecordingResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"bad"),
+            RecordingResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"video"),
+        ])
+        result = service.download_media(
+            "https://media.example.com/retry.mp4", target, ["media.example.com"],
+            max_bytes=32, timeout=5, http_client=client,
+        )
+        self.assertEqual(target.read_bytes(), b"video")
+        self.assertEqual(result["sha256"], hashlib.sha256(b"video").hexdigest())
+        self.assertEqual(result["size"], 5)
+        self.assertEqual(observed_targets, [b"existing-video", b"existing-video"])
+        self.assertEqual(len(temporary_names), 2)
+        self.assertEqual(len(set(temporary_names)), 2)
+        self.assertEqual(list(target.parent.glob("*.part")), [])
+        self.assertEqual(len(client.requests), 2)
+        for request in client.requests:
+            self.assertEqual((request["method"], request["url"]), ("GET", "https://media.example.com/retry.mp4"))
+            self.assertNotIn("range", {name.lower() for name in request["headers"]})
+            self.assertEqual(request["max_response_bytes"], 32)
+
+    def test_download_clean_eof_exhausts_three_attempts_without_replacing_target(self):
+        for index, partial in enumerate((b"", b"vi")):
+            with self.subTest(partial=partial):
+                target = self.root / ("exhausted-%s.mp4" % index)
+                target.write_bytes(b"existing-video")
+                client = ScriptedHttpClient([
+                    service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=partial)
+                    for _ in range(4)
+                ])
+                with self.assertRaises(service.XPostError) as caught:
+                    service.download_media(
+                        "https://media.example.com/truncated.mp4", target, ["media.example.com"],
+                        max_bytes=32, timeout=5, http_client=client,
+                    )
+                self.assertEqual(caught.exception.code, "media_download_incomplete")
+                self.assertEqual(caught.exception.status, 502)
+                self.assertFalse(caught.exception.unknown_outcome)
+                self.assertIn("已尝试3次", str(caught.exception))
+                self.assertEqual(len(client.requests), 3)
+                self.assertEqual(len(client.responses), 1)
+                self.assertEqual(target.read_bytes(), b"existing-video")
+                self.assertEqual(list(target.parent.glob("*.part")), [])
+
+    def test_download_rejects_surplus_bytes_without_retry_or_target_replacement(self):
+        target = self.root / "surplus.mp4"
+        target.write_bytes(b"existing-video")
+        client = ScriptedHttpClient([
+            service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"video-extra"),
+            service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"video"),
+        ])
+        with self.assertRaises(service.XPostError) as caught:
+            service.download_media(
+                "https://media.example.com/surplus.mp4", target, ["media.example.com"],
+                max_bytes=32, timeout=5, http_client=client,
+            )
+        self.assertEqual(caught.exception.code, "media_download_length_mismatch")
+        self.assertFalse(caught.exception.unknown_outcome)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(target.read_bytes(), b"existing-video")
+        self.assertEqual(list(target.parent.glob("*.part")), [])
+
+    def test_download_truncation_retry_does_not_retry_other_failures_or_relax_gates(self):
+        failures = [
+            (service.HttpResponse(302, {"content-type": "video/mp4", "location": "https://other.example/a.mp4"}, body=b"video"), "media_download_failed"),
+            (service.HttpResponse(200, {"content-type": "text/html"}, body=b"html"), "invalid_media_type"),
+            (service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "33"}, body=b"video"), "media_too_large"),
+            (service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "bad"}, body=b"video"), "invalid_media_response"),
+            (TimeoutError("network timeout"), "media_download_failed"),
+        ]
+        for index, (failure, code) in enumerate(failures):
+            with self.subTest(code=code, index=index):
+                target = self.root / ("other-failure-%s.mp4" % index)
+                target.write_bytes(b"existing-video")
+                client = ScriptedHttpClient([
+                    service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"vi"),
+                    failure,
+                    service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"video"),
+                ])
+                with self.assertRaises(service.XPostError) as caught:
+                    service.download_media(
+                        "https://media.example.com/failure.mp4", target, ["media.example.com"],
+                        max_bytes=32, timeout=5, http_client=client,
+                    )
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(len(client.requests), 2)
+                self.assertEqual(target.read_bytes(), b"existing-video")
+                self.assertEqual(list(target.parent.glob("*.part")), [])
 
     def test_download_accepts_image_and_enforces_x_image_size_cap(self):
         target = self.root / "media-work" / "image.bin"
@@ -742,6 +848,7 @@ class XPostsTests(unittest.TestCase):
         self.assertFalse(caught.exception.unknown_outcome)
         self.assertFalse(target.exists())
         self.assertEqual(list(target.parent.glob("*.part")), [])
+        self.assertEqual(len(client.requests), 1)
 
     def test_ffprobe_accepts_720x1280_and_rejects_bad_codec_or_fps(self):
         media = self.root / "video.mp4"

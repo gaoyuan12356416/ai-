@@ -322,6 +322,13 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 
 ## 代码来源
 
+### 2026-08-28 下载完整性补充
+
+| 错误码 | 中文含义 | 处理边界 |
+| --- | --- | --- |
+| `media_download_incomplete` | 素材下载不完整，连续三次读取仍被截断 | 仅重读同一素材URL；未进入X写入，不自动重发帖子 |
+| `media_download_length_mismatch` | 素材响应长度超过声明长度 | 拒绝该响应，不拼接、不换源、不覆盖已验证文件 |
+
 - `features/x_posts/selector.py`：素材/短剧映射与 `deploy_time`。
 - `features/x_posts/drama_selector.py`：短剧集数池。
 - `features/x_posts/service.py`：池/queue/log、媒体门禁、X 上传/Post/Repost。
