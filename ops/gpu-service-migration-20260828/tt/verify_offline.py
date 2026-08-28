@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -16,7 +17,7 @@ from unittest import mock
 from tt_migration import BASE, atomic_json, digest, read_env, verify_source
 
 
-def run(source: Path, output_root: Path) -> dict:
+def run(source: Path, output_root: Path, only_lane: str = "both") -> dict:
     verify_source(source)
     output_root = output_root.resolve()
     if not output_root.is_relative_to(BASE / "validation"):
@@ -42,6 +43,8 @@ def run(source: Path, output_root: Path) -> dict:
     source_size = source_file.stat().st_size
     results = []
     for mode, overrides in [("random_overlay", {}), ("direct_outro", direct)]:
+        if only_lane not in {"both", mode}:
+            continue
         env = {**base, **secret, **overrides}
         if env.get("TT_POST_LIVE_ENABLED") != "0" or env.get("TT_POST_MANUAL_CANARY_ENABLED") != "0":
             raise ValueError("offline verification refuses open production/canary gates")
@@ -75,8 +78,21 @@ def run(source: Path, output_root: Path) -> dict:
         commands = []
 
         def local_runner(command, **kwargs):
-            commands.append(list(command))
+            record = {"argv": [str(value) for value in command]}
+            commands.append(record)
             completed = subprocess.run(command, **kwargs)
+            record["returncode"] = completed.returncode
+            if Path(str(command[0])).name == "ffprobe" and completed.returncode == 0:
+                record["probe"] = json.loads(completed.stdout)
+            # Retain only local synthetic intermediate videos before the worker
+            # removes its temporary job directory. No URLs or auth are captured.
+            candidate = Path(str(command[-1]))
+            if candidate.is_file() and candidate.suffix == ".mp4" and candidate.is_relative_to(output_root):
+                retained = output_root / (mode + "-stage-" + str(len(commands)) + ".mp4")
+                shutil.copyfile(candidate, retained)
+                record["retained_file"] = str(retained)
+                record["retained_sha256"] = digest(retained)
+            atomic_json(output_root / (mode + "-commands.json"), {"commands": commands})
             if completed.returncode:
                 (output_root / (mode + "-ffmpeg-error.txt")).write_text(
                     str(completed.stderr or ""), encoding="utf-8"
@@ -96,9 +112,19 @@ def run(source: Path, output_root: Path) -> dict:
             "source_trim_tail_seconds": config.default_source_trim_tail_seconds,
         }
         # Guard against accidental future code changes escaping the fake adapters.
-        with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")):
-            result = processor.prepare(request)
-            reused = processor.prepare(request)
+        try:
+            with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")):
+                result = processor.prepare(request)
+                reused = processor.prepare(request)
+        except Exception as exc:
+            atomic_json(output_root / "failure.json", {
+                "lane": mode, "error_type": type(exc).__name__,
+                "error_code": str(getattr(exc, "code", "offline_validation_failed")),
+                "message": str(exc)[:500], "traceback": traceback.format_exc(),
+                "tiktok_calls": len(api.creator_calls) + len(api.init_calls) + len(api.status_calls),
+                "real_uploads": 0,
+            })
+            raise
         if api.creator_calls or api.init_calls or api.status_calls:
             raise AssertionError("offline test attempted a TikTok operation")
         if list(processor.publish_root.glob("*.json")):
@@ -113,6 +139,7 @@ def run(source: Path, output_root: Path) -> dict:
             "reused": reused["reused"], "ffmpeg_and_probe_commands": len(commands),
             "tiktok_calls": 0, "real_uploads": 0, "publish_ledgers": 0,
         })
+        atomic_json(output_root / "verification.partial.json", {"lanes": results})
     summary = {"ok": True, "source_sha256": source_sha, "lanes": results}
     atomic_json(output_root / "verification.json", summary)
     return summary
@@ -122,9 +149,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=BASE / "current")
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--lane", choices=("both", "random_overlay", "direct_outro"), default="both")
     args = parser.parse_args()
     try:
-        print(json.dumps(run(args.source, args.output_root), sort_keys=True))
+        print(json.dumps(run(args.source, args.output_root, args.lane), sort_keys=True))
         return 0
     except Exception as exc:
         print(json.dumps({"ok": False, "error_type": type(exc).__name__,
