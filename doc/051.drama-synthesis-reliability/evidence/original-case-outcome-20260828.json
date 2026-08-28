@@ -1,0 +1,28 @@
+{
+  "recorded_at": "2026-08-28T17:52:17",
+  "job_id": "679e7c49acbf4af79f78bf60d76c5dd7",
+  "status": "execution_ended_no_video_result",
+  "evidence": {
+    "source_concat_finished_local": "2026-08-28T14:36:47+08:00",
+    "public_job_directory_mtime_local": "2026-08-28T17:36:51.518455+08:00",
+    "public_job_directory_empty": true,
+    "completed_manifest_exists": false,
+    "cos_list_truncated": false,
+    "cos_objects": [
+      "cover_16x9.jpg"
+    ],
+    "random_template_cos_head_status": 404,
+    "old_service_main_pid": 1188891,
+    "old_service_restarts": 0,
+    "kernel_oom_events_found": false,
+    "cgroup_oom_kill": 0,
+    "preserved_concat_size_bytes": 5139047136
+  },
+  "cause_assessment": "Timing closely matches old 10800-second render timeout and exception cleanup; original exception and exit code were not retained, so timeout is an inference rather than a recovered exception.",
+  "actions": {
+    "terminated_process": false,
+    "restarted_service": false,
+    "submitted_new_render": false,
+    "changed_cpu_job": false
+  }
+}

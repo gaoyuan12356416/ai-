@@ -88,6 +88,7 @@ ERROR_MESSAGES = {
     "drama_recipe_profile_mismatch": "随机模板配方版本不一致",
     "drama_recipe_asset_mismatch": "随机模板配方与制作节点素材不一致",
     "drama_random_render_failed": "随机模板视频制作失败",
+    "drama_random_render_timeout": "随机模板渲染超过制作时限，已保留素材，请核查执行记录",
     "drama_random_duration_mismatch": "随机模板成片时长与源视频不一致，已阻止上传",
     "drama_random_output_contract_invalid": "随机模板成片规格不符合要求",
     "drama_upload_checkpoint_unverified": "上传记录暂时无法校验，已保留成片和分片",

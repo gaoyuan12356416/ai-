@@ -804,6 +804,27 @@ class RenderCheckpointTests(unittest.TestCase):
         self.runner.assert_not_called()
         self.assertEqual(list(self.root.glob(".random-render-*.mp4")), [])
 
+    def test_native_timeout_has_distinct_safe_public_error(self):
+        with mock.patch.object(gpu, "run_render_with_progress", side_effect=TimeoutError(URL)):
+            with self.assertRaises(DramaSynthesisError) as caught:
+                gpu.render_random_output(**self.kwargs)
+        self.assertEqual((caught.exception.code, caught.exception.status), ("drama_random_render_timeout", 504))
+        self.assertEqual(str(caught.exception), "随机模板视频制作超时")
+        self.assertEqual(caught.exception.details, {})
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertFalse(self.output.exists())
+
+    def test_subprocess_timeout_does_not_expose_command_or_captured_output(self):
+        self.runner.side_effect = subprocess.TimeoutExpired(
+            ["ffmpeg", "-i", URL], timeout=60, output="private stdout", stderr="private stderr")
+        with self.assertRaises(DramaSynthesisError) as caught:
+            self.render()
+        self.assertEqual((caught.exception.code, caught.exception.status), ("drama_random_render_timeout", 504))
+        self.assertEqual(str(caught.exception), "随机模板视频制作超时")
+        self.assertEqual(caught.exception.details, {})
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertFalse(self.output.exists())
+
     def test_thread_budget_changes_only_thread_flag_not_visual_or_encoding_flags(self):
         args = (None, self.source, self.output, {}, {}, {})
         with mock.patch.dict(os.environ, {"DRAMA_GPU_FILTER_THREADS": "2"}):

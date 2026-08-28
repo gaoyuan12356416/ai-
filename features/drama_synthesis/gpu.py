@@ -369,6 +369,8 @@ def render_random_output(
                 runner(command, check=True, capture_output=True, text=True, timeout=render_timeout)
         except DramaSynthesisError:
             raise
+        except (TimeoutError, subprocess.TimeoutExpired):
+            raise DramaSynthesisError("drama_random_render_timeout", "随机模板视频制作超时", 504) from None
         except Exception:
             raise DramaSynthesisError("drama_random_render_failed", "随机模板视频制作失败", 502) from None
         result_info = _probe(ffprobe, temporary_path)

@@ -823,7 +823,9 @@ class ResumableCosUploadTests(unittest.TestCase):
             Bucket="test-12345", Key="drama/fixture.mp4", UploadId="unit-upload",
             MultipartUpload={"Part": [{"PartNumber": 1, "ETag": '"' + "a" * 32 + '"'}]},
             Metadata={cos_upload.FORBID_OVERWRITE_HEADER: "true"})
-        self.assertEqual(transport.headers[cos_upload.FORBID_OVERWRITE_HEADER], "true")
+        # SDK 1.9.44 normalizes HTTP header values to bytes before passing
+        # them to requests; both forms encode the same exact wire value.
+        self.assertIn(transport.headers[cos_upload.FORBID_OVERWRITE_HEADER], ("true", b"true"))
 
 
 if __name__ == '__main__':
