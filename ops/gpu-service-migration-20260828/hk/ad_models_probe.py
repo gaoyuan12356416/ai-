@@ -2,6 +2,7 @@
 """One direct read-only Codex model-catalog comparison; never logs credentials."""
 import argparse
 import hashlib
+import html
 import json
 import os
 import pathlib
@@ -57,9 +58,50 @@ def validate_fragment(fragment):
     return extract_fragment({"auth_mode": "chatgpt", "tokens": fragment})
 
 
-def safe_result(status, body):
+def safe_metadata(body, headers=None):
+    """Reduce untrusted HTTP data to fixed categories; never retain raw values."""
+    def header(name):
+        value = headers.get(name, "") if headers is not None else ""
+        return value.strip().lower() if isinstance(value, str) else ""
+
+    media_type = header("Content-Type").split(";", 1)[0].strip()
+    if media_type == "application/json" or media_type.endswith("+json"):
+        content_type = "json"
+    elif media_type in ("text/html", "application/xhtml+xml"):
+        content_type = "html"
+    elif media_type.startswith("text/"):
+        content_type = "text"
+    else:
+        content_type = "other" if media_type else "missing"
+    server = header("Server").split("/", 1)[0].strip()
+    server_category = (server if server in {"cloudflare", "nginx", "envoy", "apache"}
+                       else "other" if server else "missing")
+    challenge = header("CF-Mitigated") == "challenge"
+    # A bounded in-memory sample may identify a known page. No title is emitted.
+    sample = body[:65536].decode("utf-8", errors="replace")
+    match = re.search(r"<title\b[^>]*>(.*?)</title\s*>", sample, re.I | re.S)
+    title = re.sub(r"\s+", " ", html.unescape(match.group(1))).strip().lower() if match else ""
+    is_html = content_type == "html" or bool(match)
+    if challenge or (is_html and title == "just a moment..."):
+        page = "cloudflare_challenge"
+    elif is_html and title in {"unsupported country, region, or territory",
+                               "unsupported country, region, or territory."}:
+        page = "region_restriction_notice"
+    elif is_html and title in {"account deactivated", "account disabled"}:
+        page = "account_restriction_notice"
+    elif is_html and server_category == "cloudflare" and title in {
+            "attention required! | cloudflare", "sorry, you have been blocked", "access denied"}:
+        page = "cloudflare_block"
+    else:
+        page = "unclassified_html" if is_html else "not_html"
+    return {"content_type_category": content_type, "server_category": server_category,
+            "cf_mitigated_challenge": challenge, "page_category": page}
+
+
+def safe_result(status, body, headers=None):
     result = {"http_status": status, "safe_error_code": None,
               "target_model_visible": False}
+    result.update(safe_metadata(body, headers))
     if len(body) > MAX_BODY:
         result["safe_error_code"] = "response_too_large"
         return result
@@ -103,10 +145,10 @@ def catalog_request(fragment, opener=None):
         )
     try:
         with opener.open(request, timeout=20) as response:
-            return safe_result(response.status, response.read(MAX_BODY + 1))
+            return safe_result(response.status, response.read(MAX_BODY + 1), response.headers)
     except urllib.error.HTTPError as error:
         try:
-            return safe_result(error.code, error.read(MAX_BODY + 1))
+            return safe_result(error.code, error.read(MAX_BODY + 1), error.headers)
         finally:
             error.close()
     except (OSError, urllib.error.URLError):

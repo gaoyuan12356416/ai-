@@ -205,10 +205,14 @@ class HkSafetyTests(unittest.TestCase):
     def test_catalog_probe_never_emits_response_body_or_identity(self):
         body = json.dumps({"error": {"code": "unsupported_country_region_territory",
                                     "message": "sensitive-account test-access"}}).encode()
-        result = models_probe.safe_result(403, body)
+        result = models_probe.safe_result(403, body, {
+            "Content-Type": "application/problem+json; charset=utf-8", "Server": "cloudflare",
+            "Set-Cookie": "sensitive-account test-access", "X-Request-Id": "private-identity"})
         self.assertEqual(result["safe_error_code"], "unsupported_country_region_territory")
+        self.assertEqual(result["content_type_category"], "json")
         self.assertNotIn("sensitive-account", json.dumps(result))
         self.assertNotIn("test-access", json.dumps(result))
+        self.assertNotIn("private-identity", json.dumps(result))
         unknown = models_probe.safe_result(403, b'{"error":{"code":"private-value"}}')
         self.assertEqual(unknown["safe_error_code"], "unclassified_http_error")
 
@@ -217,6 +221,7 @@ class HkSafetyTests(unittest.TestCase):
         response.__enter__.return_value = response
         response.status = 200
         response.read.return_value = b'{"models":[{"slug":"gpt-5.5"}]}'
+        response.headers = {"Content-Type": "application/json"}
         opener = mock.Mock()
         opener.open.return_value = response
         result = models_probe.catalog_request({"access_token": "test-access",
@@ -228,6 +233,55 @@ class HkSafetyTests(unittest.TestCase):
         self.assertTrue(result["target_model_visible"])
         self.assertIsNone(models_probe.RefuseRedirect().redirect_request(
             request, None, 302, "redirect", {}, "https://example.test/collect"))
+
+    def test_catalog_metadata_only_uses_whitelisted_page_categories(self):
+        cases = [
+            ("Just a moment...", "cloudflare", "cloudflare_challenge"),
+            ("Attention Required! | Cloudflare", "cloudflare", "cloudflare_block"),
+            ("Access denied", "nginx/1.0", "unclassified_html"),
+            ("Unsupported country, region, or territory", "cloudflare", "region_restriction_notice"),
+            ("Account deactivated", "cloudflare", "account_restriction_notice"),
+            ("private-account sensitive-token", "private-server-identity", "unclassified_html"),
+        ]
+        for title, server, category in cases:
+            with self.subTest(category=category, server=server):
+                body = ("<html><title>" + title + "</title><body>private-account sensitive-token"
+                        " unsupported_country_region_territory</body></html>").encode()
+                result = models_probe.safe_result(403, body, {
+                    "Content-Type": "text/html; charset=UTF-8", "Server": server})
+                self.assertEqual(result["page_category"], category)
+                serialized = json.dumps(result)
+                for private in ("private-account", "sensitive-token", "private-server-identity"):
+                    self.assertNotIn(private, serialized)
+
+    def test_catalog_http_error_preserves_only_safe_challenge_metadata(self):
+        body = io.BytesIO(b'<html><title>private-account</title>secret-token</html>')
+        error = models_probe.urllib.error.HTTPError(models_probe.URL, 403, "Forbidden", {
+            "Content-Type": "text/html", "Server": "cloudflare", "CF-Mitigated": "challenge",
+            "Set-Cookie": "secret-token"}, body)
+        opener = mock.Mock()
+        opener.open.side_effect = error
+        result = models_probe.catalog_request({"access_token": "test-access",
+                                               "account_id": "test-account"}, opener)
+        self.assertTrue(result["cf_mitigated_challenge"])
+        self.assertEqual(result["page_category"], "cloudflare_challenge")
+        self.assertEqual(result["safe_error_code"], "non_json_response")
+        self.assertTrue(body.closed)
+        self.assertNotIn("private-account", json.dumps(result))
+        self.assertNotIn("secret-token", json.dumps(result))
+        opener.open.assert_called_once()
+
+    def test_catalog_probe_cannot_overwrite_an_existing_result(self):
+        report = self.root / "result-HK.json"
+        report.write_text('{"http_status":403}')
+        original = report.read_bytes()
+        checksum = hashlib.sha256((ROOT / "ad_models_probe.py").read_bytes()).hexdigest()
+        with mock.patch.object(models_probe, "probe_directory", return_value=self.root), \
+             mock.patch.object(models_probe, "catalog_request") as request:
+            with self.assertRaises(ValueError):
+                models_probe.remote_probe("HK", "1" * 40, checksum)
+            request.assert_not_called()
+        self.assertEqual(report.read_bytes(), original)
 
 
 if __name__ == "__main__":

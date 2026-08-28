@@ -38,7 +38,9 @@ ad_models_probe.py须先经协调者统一push，再在本地执行：
 
 请求固定为当前0.147.0客户端的backend-api/codex/models与client_version参数，使用Codex exec originator、Bearer和ChatGPT-Account-Id。端点/版本/头名称依据已迁入的原生二进制核对；它是此次客户端兼容诊断，不是另建公开API服务。官方[认证说明](https://learn.chatgpt.com/docs/auth)要求把auth缓存按密码保护，且正常Codex使用可能自动刷新；因此本预检不用Codex进程。
 
-输出只有两地HTTP码、白名单错误码和目标模型目录可见性；不输出accountID、token或响应body。模型列表成功不能替代真实素材生成验收；任何地区/账号限制须报告，不加代理绕过。最终生产auth仍须停US服务后接管。
+输出只有两地HTTP码、白名单错误码、目标模型目录可见性，以及固定类别的content-type/server/page和cf-mitigated challenge布尔；不输出原始headers、title、accountID、token或响应body。HTML只在内存中做有限的标题白名单匹配；无法归类时明确保留unclassified_html，不能推断原因。模型列表成功不能替代真实素材生成验收；任何地区/账号限制须报告，不加代理绕过。最终生产auth仍须停US服务后接管。
+
+2026-08-28 实际预检未通过：使用已推送版本 de54ca2a4577d3edb05d47aae583bb7f5c464504，每端仅一次GET。US返回200且gpt-5.5可见；HK返回403/non_json_response，无法确认模型可用。两端临时片段已删除并复核，HK正式auth与current仍不存在。响应headers、content-type、页面title和body未保留，因此现有证据不能把403定性为地区、账号或WAF限制。广告生成/视觉分析保持美国现行入口；香港只完成隔离stage，不得继续最终auth接管或activate。正式素材生成未验证。完整安全结果、证据位置和待授权诊断见 [广告访问预检报告](ad-access-preflight-report.md)。
 
 ### 服务切换
 
