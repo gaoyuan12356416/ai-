@@ -56,11 +56,30 @@ def assert_idle(states):
                 raise RuntimeError("source not idle: " + state["unit"])
 
 
+def retire_local_unit(local, unit_backup):
+    """/etc and /data are different filesystems on US: verify copy before unlink."""
+    retired = unit_backup / "retired-local.service"
+    original = local.read_bytes()
+    if retired.exists():
+        if retired.read_bytes() != original:
+            raise RuntimeError("retired unit archive differs from current unit")
+    else:
+        with retired.open("xb") as output:
+            output.write(original)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(str(retired), 0o600)
+    if retired.read_bytes() != original or local.read_bytes() != original:
+        raise RuntimeError("unit changed during retirement archive")
+    local.unlink()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("group", choices=sorted(GROUPS))
     ap.add_argument("--checkpoint", type=pathlib.Path)
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--resume", action="store_true", help="resume a recorded partial fence with fresh drain proof")
     a = ap.parse_args()
     if socket.gethostname() != "VM-0-13-centos":
         raise RuntimeError("wrong host: US source only")
@@ -90,21 +109,39 @@ def main():
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(str(BASE), 0o700)
     snapshot = BASE / (a.group + "-before.json")
-    if snapshot.exists():
+    if snapshot.exists() and not a.resume:
         raise RuntimeError("fence snapshot already exists; inspect partial result before retry")
-    snapshot.write_text(json.dumps({"checkpoint_sha256": hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),
-                                    "states": states, "created_at_epoch": time.time()}, indent=2))
-    os.chmod(str(snapshot), 0o600)
+    if a.resume:
+        if not snapshot.is_file():
+            raise RuntimeError("resume requires an existing initial fence snapshot")
+        initial = json.loads(snapshot.read_text())
+        if [s["unit"] for s in initial["states"]] != GROUPS[a.group]:
+            raise RuntimeError("initial snapshot service scope changed")
+        states = initial["states"]
+    else:
+        snapshot.write_text(json.dumps({"checkpoint_sha256": hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),
+                                        "states": states, "created_at_epoch": time.time()}, indent=2))
+        os.chmod(str(snapshot), 0o600)
     for state in states:
         u = state["unit"]
         unit_backup = BASE / u
-        unit_backup.mkdir(mode=0o700)
+        if prop(u, "UnitFileState") == "masked":
+            if int(prop(u, "MainPID") or 0) or prop(u, "ActiveState") not in ("inactive", "failed"):
+                raise RuntimeError("masked source is still active: " + u)
+            print(json.dumps({"already_fenced": u}))
+            continue
+        unit_backup.mkdir(mode=0o700, exist_ok=a.resume)
         fragment = pathlib.Path(state["fragment"]) if state["fragment"] else None
         if fragment and fragment.is_file() and not fragment.is_symlink():
-            shutil.copy2(str(fragment), str(unit_backup / "original.service"))
-            os.chmod(str(unit_backup / "original.service"), 0o600)
+            original = unit_backup / "original.service"
+            if original.exists():
+                if original.read_bytes() != fragment.read_bytes():
+                    raise RuntimeError("original unit changed after partial fence: " + u)
+            else:
+                shutil.copy2(str(fragment), str(original))
+                os.chmod(str(original), 0o600)
         dropins = pathlib.Path("/etc/systemd/system") / (u + ".d")
-        if dropins.is_dir():
+        if dropins.is_dir() and not (unit_backup / "dropins").exists():
             shutil.copytree(str(dropins), str(unit_backup / "dropins"))
         run(["systemctl", "stop", u])
         run(["systemctl", "disable", u])
@@ -112,7 +149,7 @@ def main():
             raise RuntimeError("source still running: " + u)
         local = pathlib.Path("/etc/systemd/system") / u
         if local.exists() and not local.is_symlink():
-            os.replace(str(local), str(unit_backup / "retired-local.service"))
+            retire_local_unit(local, unit_backup)
         run(["systemctl", "mask", u])
         run(["systemctl", "daemon-reload"])
         if prop(u, "UnitFileState") != "masked":

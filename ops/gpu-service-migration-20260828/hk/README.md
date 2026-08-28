@@ -22,7 +22,7 @@
 
 stage验证Git HEAD/远程分支祖先关系、卷UUID、空间、路径边界及传输归档完整SHA；备份单位后生成隔离runtime/config和待安装unit。不会改current、安装unit、启停服务。每阶段写明staged_not_activated。不得把stage成功写成迁移完成。
 
-prepare-x-history 可独立先传X历史，不中断正在传输的广告大文件。X stage完成后，先用新X venv运行 merge_x_manifests.py --with-head，记录只读筛选数量与耗时；正式导入仍在排空并停止香港X后以现场manifest为准。
+prepare-x-history 可独立先传X历史，不中断正在传输的广告大文件。X stage完成后，先用 /data/x-post-media-repair/runtime/python/bin/python 运行 merge_x_manifests.py --with-head，记录只读筛选数量与耗时；正式导入仍在排空并停止香港X后以现场manifest为准。
 
 X和广告均采用自己unit的/tmp与/var/tmp bind到/data，因为X子进程环境有严格白名单，不能只依赖TMPDIR。保留ProtectSystem=strict/ProtectHome。
 
@@ -32,7 +32,9 @@ X和广告均采用自己unit的/tmp与/var/tmp bind到/data，因为X子进程�
 
 X activate会停止香港旧runtime，最终复制香港权威manifest，再对归档美国manifest做保守筛选和只读COS HEAD，只导入香港缺失且契约完整的v5文件。碰撞始终保留香港；不改历史profile/status；2个无status及旧profile仅归档。随后安装新unit和current并启动，记录HTTP/进程路径/临时目录真实bind证据。
 
-    python3.9 <control>/deploy.py activate --component x --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
+    /data/x-post-media-repair/runtime/python/bin/python <control>/deploy.py activate --component x --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
+
+X activate内部依赖COS SDK，必须使用上述独立venv Python；系统Python仅适合stage/verify/rollback。执行前仍须协调者明确放行，不能因准备完成而自行切换。
 
 广告先由根协调者停美国generation、vision及其旧隧道，确认所有共享授权使用者的协调窗口。随后依次执行本地 relay_inputs.py final-ad-data-after-source-stop 和 relay_inputs.py copy-auth-after-source-stop，最后再启动香港。增量同步对四个业务目录逐文件SHA对账，保留香港额外文件；auth仅传必要auth.json且不刷新，不得复制整个/root/.codex或动CPU截图授权。auth目标700目录/600文件，绝不进Git。activate同时要求最终数据同步及授权传输证据存在。
 

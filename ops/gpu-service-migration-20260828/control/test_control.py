@@ -3,6 +3,7 @@ import pathlib
 import re
 import unittest
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -87,6 +88,22 @@ class ControlTests(unittest.TestCase):
                         "receive a.tgz 999999999999999 " + sha]:
             with self.assertRaises(ValueError):
                 receiver.parse_request(request)
+
+    def test_unit_retirement_copies_across_disks_without_overwriting_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            local = root / "worker.service"
+            backup = root / "data-backup"
+            backup.mkdir()
+            local.write_bytes(b"[Service]\nExecStart=/worker\n")
+            original = local.read_bytes()
+            fence.retire_local_unit(local, backup)
+            self.assertFalse(local.exists())
+            self.assertEqual((backup / "retired-local.service").read_bytes(), original)
+            local.write_bytes(b"changed by another deploy")
+            with self.assertRaises(RuntimeError):
+                fence.retire_local_unit(local, backup)
+            self.assertTrue(local.exists())
 
 
 if __name__ == "__main__":
