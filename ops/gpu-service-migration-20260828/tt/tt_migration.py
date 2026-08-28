@@ -242,7 +242,7 @@ def snapshot(root: Path) -> dict:
 
 def restore_config(run_id: str) -> dict:
     preflight()
-    for unit in UNITS:
+    for unit in (*UNITS, "tt-gpu-reverse-tunnel.service", "tt-gpu-direct-outro-reverse-tunnel.service"):
         state = subprocess.check_output(
             ["systemctl", "show", unit, "--property=ActiveState", "--value"], text=True
         ).strip()

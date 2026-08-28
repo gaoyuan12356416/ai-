@@ -1,0 +1,31 @@
+[Unit]
+Description=Single offline acceptance of the frozen X repair processor
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=@REPO@
+Environment=HOME=@EVIDENCE@
+Environment=XDG_CACHE_HOME=@EVIDENCE@/cache
+Environment=TMPDIR=@EVIDENCE@/tmp
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/data/x-post-media-repair/runtime/python/bin/python @REPO@/ops/gpu-service-migration-20260828/hk/x_offline_pipeline.py --repo @REPO@ --sha @SHA@ --approved-run-id gpu-service-migration-20260828T1502
+TimeoutStartSec=90
+KillMode=control-group
+UMask=0077
+PrivateNetwork=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=true
+ReadOnlyPaths=/data/x-post-media-repair/state /data/x-post-media-repair/releases /data/x-post-media-repair/runtime @REPO@
+InaccessiblePaths=/data/x-post-media-repair/config
+ReadWritePaths=@EVIDENCE@
+BindPaths=@EVIDENCE@/tmp:/tmp @EVIDENCE@/var-tmp:/var/tmp
+CPUQuota=200%
+MemoryMax=2G
+TasksMax=128
+StandardOutput=journal
+StandardError=journal

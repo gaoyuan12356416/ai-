@@ -15,6 +15,7 @@ import check_storage
 import deploy
 import merge_x_manifests as manifests
 import ad_models_probe as models_probe
+import x_offline_pipeline as offline_pipeline
 
 
 class HkSafetyTests(unittest.TestCase):
@@ -282,6 +283,65 @@ class HkSafetyTests(unittest.TestCase):
                 models_probe.remote_probe("HK", "1" * 40, checksum)
             request.assert_not_called()
         self.assertEqual(report.read_bytes(), original)
+
+    def test_offline_adapters_only_copy_private_synthetic_files(self):
+        source = self.root / "synthetic.mp4"
+        source.write_bytes(b"isolated-fixture")
+        downloader = offline_pipeline.FakeDownloader(source, self.root)
+        download = downloader(offline_pipeline.SOURCE_URL, self.root / "download.mp4",
+                              ("offline.invalid",), max_bytes=1024,
+                              http_client=offline_pipeline.RejectHTTP())
+        self.assertEqual(download["sha256"], offline_pipeline.digest(source))
+        with self.assertRaises(ValueError):
+            downloader("https://production.invalid/file", self.root / "bad.mp4",
+                       ("offline.invalid",), max_bytes=1024,
+                       http_client=offline_pipeline.RejectHTTP())
+        store = offline_pipeline.FakeCOS(self.root)
+        with self.assertRaises(offline_pipeline.FakeNotFound):
+            store.head_object(Bucket=offline_pipeline.FAKE_BUCKET, Key="output/result.mp4")
+        arguments = dict(Bucket=offline_pipeline.FAKE_BUCKET, Key="output/result.mp4",
+                         LocalFilePath=str(source), Metadata={"x-cos-meta-sha256": download["sha256"]})
+        store.upload_file(**arguments)
+        head = store.head_object(Bucket=offline_pipeline.FAKE_BUCKET, Key=arguments["Key"])
+        self.assertEqual(head["x-cos-meta-sha256"], download["sha256"])
+        self.assertEqual(int(head["Content-Length"]), source.stat().st_size)
+        for key in ("../outside.mp4", "/absolute.mp4"):
+            with self.assertRaises(ValueError):
+                store.upload_file(**dict(arguments, Key=key))
+        with self.assertRaises(ValueError):
+            store.upload_file(**dict(arguments, Bucket="production"))
+        self.assertEqual(store.uploads, 1)
+
+    def test_offline_runner_rejects_other_binaries_network_and_outside_paths(self):
+        binary = self.root / "ffmpeg"
+        runner = offline_pipeline.RecordingRunner(self.root, binaries=[binary])
+        with mock.patch.object(offline_pipeline.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            runner([str(binary), "-i", str(self.root / "source.mp4")])
+            for command in ([str(self.root / "other")],
+                            [str(binary), "-i", "https://production.invalid/file"],
+                            [str(binary), "-i", str(self.root.parent / "outside.mp4")]):
+                with self.assertRaises(ValueError):
+                    runner(command)
+            run.assert_called_once()
+
+    def test_offline_execution_requires_private_network_and_readonly_production(self):
+        with mock.patch.object(offline_pipeline.os, "readlink", return_value="net:[1]"):
+            with self.assertRaises(ValueError):
+                offline_pipeline.verify_namespace(self.root)
+        with mock.patch.object(offline_pipeline.os, "readlink", side_effect=["net:[2]", "net:[1]"]), \
+             mock.patch.object(offline_pipeline.os, "statvfs", create=True,
+                               return_value=type("Filesystem", (), {"f_flag": 0})()):
+            with self.assertRaises(ValueError):
+                offline_pipeline.verify_namespace(self.root)
+
+    def test_offline_acceptance_evidence_is_never_overwritten(self):
+        path = self.root / "attempt.json"
+        offline_pipeline.write_once(path, {"attempt": 1})
+        original = path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            offline_pipeline.write_once(path, {"attempt": 2})
+        self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == "__main__":

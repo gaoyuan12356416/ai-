@@ -131,12 +131,83 @@ unknown_outcome、publish_id数量、执行服务和7个触发器、TT HTTP连�
 TT指标任务可继续写与发布无关的指标表；两库分别一致，发布事实必须前后完全不变。
 已有备份目录不会覆盖；失败保留partial/检查证据，需要协调者检查后决定下一步。
 
+### GPU 最终同步：精确集合，不覆盖式合并
+
+下面仅供主任务在正式维护窗口批准后执行。不能用预拷fingerprint作为最终证明。
+保持CPU公网TT写入口关闭、7个timer/path暂停，等待所有自然runner退出；
+ready未来任务允许保留，claim（含过期）、未知发布结果、GPU线程/子进程/HTTP均须排空。
+CPU的SQLite仍留CPU，不搬到GPU；TT GPU持久状态是两lane独立JSON manifest/ledger。
+
+1. 用上述cpu_state.py backup得到CPU
+   /mnt/data-disk/migrations/RUN_ID/tt/cpu-sqlite-final/manifest.json，
+   计算其CPU_MANIFEST_SHA；仅将该不含Token的元数据文件安全复制到美国
+   /data/migrations/RUN_ID/tt/cpu-backup-manifest.json，SQLite本身不外传。
+2. 协调者运行control/source_fence.py tt，持久mask美国2worker+2tunnel。
+   确认4unit inactive且MainPID=0；保持CPU维护门禁。记录该次5分钟内的新drain checkpoint。
+3. 在美国从已发布checkout执行，不能使用默认python3.6：
+
+       /root/miniconda3/envs/drama-voice/bin/python TT_CHECKOUT/final_state.py export \
+         --run-id RUN_ID --cpu-backup-manifest /data/migrations/RUN_ID/tt/cpu-backup-manifest.json \
+         --cpu-backup-manifest-sha256 CPU_MANIFEST_SHA --coordinator-checkpoint FRESH_TT_CHECKPOINT
+
+   脚本独立复核美国主机/数据盘/4unit持久mask、9425源码、CPU backup成功/quick_check，
+   再导出 /data/migrations/RUN_ID/tt/final-source/tt-final-state.tar.gz。
+   export-receipt.json输出archive、bytes、sha256、state_index_sha256、state_fingerprint、
+   file_count、cpu_backup_manifest_sha256、coordinator_checkpoint_sha256和source_fenced。
+   state-index.json绑定4个状态目录每个文件的SHA、全部素材/字体指纹、3个源env/secrets的SHA，
+   以及CPU备份元数据和源FFmpeg来源。归档不含env内容、Token、缓存或历史preview。
+4. 用本run受限通道复制该归档，按receipt核对size/SHA，再从香港已发布checkout执行：
+
+       /data/tt-post-gpu/runtime/bin/python TT_CHECKOUT/final_state.py import \
+         --run-id RUN_ID --archive RECEIVED_ARCHIVE --archive-sha256 EXPORT_ARCHIVE_SHA \
+         --cpu-backup-manifest-sha256 CPU_MANIFEST_SHA --state-fingerprint EXPORT_STATE_FINGERPRINT
+
+   新端4unit必须停止、LIVE/MANUAL均关闭；先验证归档成员集合、每文件SHA、CPU备份关联，
+   再核对源资产/config与预拷一致。若漂移即停下，不自动改素材、配置或冻结profile。
+   经验证的4个目录分别rename换入，整个旧目录移至tt/final-import-before/state，
+   因而precopy已删/已替换的旧JSON不会残留。任何中途失败保持全端隔离，保留partial供检查。
+   tt/final-target-receipt.json必须ok、state_file_set_exact、assets_exact均true，
+   fingerprint及CPU_MANIFEST_SHA与美国/CPU对应值一致；其中还记录目标adapter/bin/probe SHA。
+
+### 目标隧道、原开关与正式放行
+
+units中新增2条隧道复用 /etc/x-post-media-repair-tunnel 的既有专用key/known_hosts，
+不复制个人私钥、不改authorized_keys。CPU18830→HK8830，CPU18834→HK8832，
+固定root@43.166.187.96、StrictHostKeyChecking、ExitOnForwardFailure及keepalive。
+从核对的checkout执行 bash install-tunnels.sh OPS_SHA RUN_ID，仅安装与daemon-reload，
+不enable/start。该脚本保留target-tunnels-before，安装gate_handoff.py供后续明确批准。
+
+source-live-gates.json记录源两个实际PID的4个布尔及env比对，只含布尔/hash。
+本次已捕获两lane LIVE=true、MANUAL_CANARY=false、AUDIT=true、URL_PROPERTY=true。
+最终source config hash必须仍与该证据一致，否则重新只读调查，不能默认改为全1。
+已确认最终同步、两lane离线完整通过、旧源fence和CPU门禁后，由主任务执行：
+
+    /data/tt-post-gpu/runtime/bin/python TT_CHECKOUT/gate_handoff.py \
+      --run-id RUN_ID --source-gates-sha256 SOURCE_GATE_PROOF_SHA \
+      --final-fingerprint EXPORT_STATE_FINGERPRINT \
+      --coordinator-confirms-source-fenced --coordinator-confirms-cpu-drained \
+      --coordinator-confirms-ingress-gated --coordinator-confirms-offline-verified
+
+此入口只恢复每lane被捕获的4个布尔，保留MANUAL原值和所有路径/profile/COS配置，
+先备份到target-gates-before；不启动任何服务。4个coordinator参数是主任务明确确认，
+不是脚本已独立检查外部状态。脚本独立检查目标停止、源配置/凭据/证据SHA及最终JSON指纹。
+
+放行顺序由主任务逐项执行：先启动两个worker，GET本地8830/8832 health核对lane/profile，
+再显式启动各自tunnel，CPU核对18830/18834监听及GET health，最后恢复原触发器/写入口。
+禁止用POST或人工提前发布作测试。Requires+After不会保证worker显式restart后tunnel自动恢复；
+每次维护需记录原tunnel active状态，worker起来后**显式start原active的对应tunnel**并复核CPU端口。
+不能把worker active作为端到端恢复证明。enable/start恢复的是批准的原状态，不盲目全开。
+
 ## 回滚
 
-协调者先停止并排空香港，保留其新增发布事实，将新增/更新的manifest、
-publish ledger及必要媒体回传美国，再考虑恢复旧端入口。CPU SQLite保持最新；
+协调者先关闭CPU写入口和触发器，等待自然在途排空，然后先停香港两条tunnel，
+确认HTTP/线程/子进程/claim/未知结果均已排空后才停worker。紧急直接断隧道不会终止
+GPU线程，可能造成CPU看到失败而GPU仍在发布，不能以连接消失判定安全。
+保留香港新增/更新的manifest、所有publish ledger（含failed/init_rejected）、publish_id、
+unknown事实、必要媒体及最新CPU SQLite快照，完整回传/核对后再考虑恢复旧端入口。
+未知发布结果尚未解决时不能恢复旧端重试。CPU SQLite保持最新；
 禁止恢复旧数据库覆盖新发布。仅配置需要撤回时执行
-bash rollback-target.sh RUN_ID：要求目标服务inactive，仅恢复配置和unit，
+bash rollback-target.sh RUN_ID：要求目标2worker+2tunnel全部inactive，仅恢复配置和unit，
 不恢复账本、不删除媒体、不启动任一端。源码、环境、媒体均留存用于审计。
 
 ## 本地检查

@@ -29,11 +29,21 @@
 
 首轮脚本未持久化响应headers、content-type、页面title或body，执行进程已退出。当前只能确定“HK返回非JSON的HTTP403”，不能区分地区政策、账号授权、WAF挑战或其他服务端拒绝，也不能推断同一请求经实际Codex客户端一定会成功。不得用缺失的诊断字段补写原因。
 
-## 下一步诊断：已批准代码准备，等待推送后执行
+## 增强元数据预检结果
 
-协调者已批准一次增强元数据的只读诊断作为同一预检继续，尚待新版本审核、测试、推送后执行。保持同一固定端点、US先行对照、最小鉴权片段、独立0700/0600目录和finally清理；仅额外保留content-type类别、server类别、cf-mitigated是否为challenge，以及白名单JSON错误码或固定页面分类。不得输出原始headers、body、title、身份或凭据。使用新SHA独立结果目录，禁止覆盖本次报告。若确认地区或账号限制，停止并联系官方支持或选择受支持的部署方案，不加代理绕过；WAF分类也只报告正常客户端诊断需求，不尝试规避挑战。
+协调者审核推送fd664cf2914e1aa1f3eb9107809df6d5f9b3f42b后，按授权每端各执行一次GET。US仍为200，json、server类别cloudflare、gpt-5.5可见；HK仍为403，html、server类别cloudflare、cf_mitigated_challenge=false、page_category=unclassified_html、safe_error_code=non_json_response。没有保存原始headers/title/body。缺少challenge标记不能证明不存在WAF；现有分类仍不足以确定地区或账号原因。
 
-此诊断不需启停HK现有FB、剧集或X，不需改变它们的运行时、驱动、环境或网络设置。当前不启动实际Codex客户端；如果后续需要客户端验证，必须另行明确批准独立授权窗口及其可能发生的凭据刷新、会话写入，不可把这次只读GET授权扩展为客户端执行或素材生成授权。
+新结果保存于相同hk-access-probe根下的新SHA目录，旧结果保留。两端新旧SHA目录的access-fragment.json均经独立只读SFTP复核不存在；新目录0700、报告0600。HK正式auth/current仍不存在。此后停止重复原GET，不加代理、不复制缓存、不刷新授权。
+
+## 当前授权归属风险与后续诊断边界
+
+美国必须保留的交互Codex进程组470049/470056和3631458/3631490，与广告共享/root/.codex；vision还会从它复制auth到job私有home，未发现API key覆盖。因此停广告/视觉并不等于冻结managed auth，保留中的交互会话仍可能刷新它。不得停止这些用户会话或复制共享managed auth到香港。正式生产接管仍未授权，需要独立HK登录会话或用户明确批准的隔离方案。
+
+官方[App Server外部token协议](https://learn.chatgpt.com/docs/app-server#3c-log-in-with-externally-managed-chatgpt-tokens-chatgptauthtokens)提供实验性的chatgptAuthTokens模式：宿主传accessToken/account ID，401时由RPC向宿主请求刷新。0.147.0实际原生二进制静态检查发现对应模式、字段及刷新RPC；它不等于Enterprise PAT，也不能把现有OAuth access token改当PAT。此时尚未运行原生客户端。
+
+协调者后续仅授权准备一次独立临时HOME/CODEX_HOME中的原生只读诊断代码，先GitHub审核部署，再明确批准执行。只允许initialize、外部token登录和model/list；拒绝任何刷新请求并立即结束，不发thread/turn、不生成、不登录managed auth、不使用代理、不复制旧缓存。即便模型列表含gpt-5.5，也须区分内置/缓存回退与真实上游成功；不能证明真实请求成功时仍保持阻塞。
+
+以上诊断不需启停HK现有FB、剧集或X，不需改变它们的运行时、驱动、环境或网络设置。实际客户端执行和素材生成仍不可从已完成的GET授权中推定。
 
 ## 已完成但不构成上游验收的检查
 
@@ -43,3 +53,7 @@
 - 首轮本地HK迁移测试14/14通过，增强元数据版本17/17通过；首轮实际probe通过Git精确版本校验。
 
 以上检查不改变本报告的阻塞结论。重新批准广告生产切换前，必须取得有效的上游访问证据并由协调者处理美国停服、最终数据对账与正式授权接管窗口。
+
+## 关联X迁移的验证与回滚边界
+
+已有X离线JSON仅证明直接FFmpeg烟测，未证明原业务repair处理器整链；另行准备的纯离线processor验收须独立批准运行。X实际按7c54切换时尚无新版tunnel依赖baseline。将来回滚须使用现有手动恢复证据和原始隧道状态，由协调者明确恢复原本active的tunnel，再验证CPU18820，不能假定新版自动恢复适用于首版记录。详见README。

@@ -54,7 +54,11 @@ X activate会停止香港旧runtime，最终复制香港权威manifest，再对�
 
 香港原 x-post-media-repair-tunnel.service 有 Requires=x-post-media-repair.service，停止worker会连带停止隧道。必须在worker stop前记录隧道原active/enabled及fragment SHA；activate和rollback后只恢复原本active、且配置/enablement未变的隧道，不修改unit、key或SSH。新版控制器会自动做此恢复，缓存导入也显式调用新venv。首版7c54执行时须按以上步骤单独start既有隧道，不能把本机health当作CPU18820入口已恢复。完整验收还须在CPU检查18820 health及监听sshd对应的远端确为43.154.250.89。
 
+本批次实际X切换发生在首版7c54，未生成新版x-tunnel-dependency-baseline.json。回滚时不能假定新版控制器会自动恢复原隧道；须结合既有x-tunnel-before-restart.json/x-tunnel-restored.json、原始运行状态及未变的unit SHA，由协调者明确恢复原本active的隧道，再验CPU18820。不得补写伪造的原始快照。
+
 广告先由根协调者停美国generation、vision及其旧隧道，确认所有共享授权使用者的协调窗口。随后依次执行本地 relay_inputs.py final-ad-data-after-source-stop 和 relay_inputs.py copy-auth-after-source-stop，最后再启动香港。增量同步对四个业务目录逐文件SHA对账，保留香港额外文件；auth仅传必要auth.json且不刷新，不得复制整个/root/.codex或动CPU截图授权。auth目标700目录/600文件，绝不进Git。activate同时要求最终数据同步及授权传输证据存在。
+
+当前上述生产授权接管被明确暂停：美国还存在必须保留的交互Codex会话共用/root/.codex；只停generation/vision不能冻结该managed auth，交互会话仍可能刷新它。不得停这些用户会话，也不得据此复制managed auth到香港。正式切换需要独立HK登录会话或用户明确批准的隔离方案，现有只读预检授权不包含这两者。
 
     python3.9 <control>/deploy.py activate --component ad --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused --source-ad-stopped
 
@@ -75,6 +79,20 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
     python3.9 <control>/deploy.py rollback --component ad --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
 
 所有新/data历史、生成结果和manifest保留。X回滚恢复旧unit时新运行期间新增manifest仍在/data，重新开放修复请求前做差异对账；不可直接覆盖旧manifest或删除新缓存。
+
+## X整条处理流程的独立离线验收
+
+已完成的x-offline-ffmpeg.json与x-offline-nvdec-nvenc.json是直接FFmpeg烟测，没有调用业务MediaRepairProcessor。x_offline_pipeline.py用于补齐这一覆盖，提交时尚未在香港运行。
+
+协调者推送并部署精确SHA后，准备且仅准备以下验收目录及tmp、var-tmp、cache子目录，全部0700：
+
+    /data/migrations/gpu-service-migration-20260828T1502/x-offline-pipeline/<pushed-sha>
+
+将units/x-offline-pipeline.service.in中的@REPO@、@SHA@、@EVIDENCE@替换为精确checkout、SHA和上述目录，审核后作为独立静态oneshot单位安装。该unit没有Install、timer、Restart或任何生产service依赖；不得enable。协调者再次授权后只start一次，读取Result/ExecMainStatus与result.json验收，不能以oneshot退出后的inactive状态判定失败。unit超时90秒、最多2GiB内存与200%CPU，脚本要求至少1024MiB空闲显存；选择协调者允许的短GPU窗口。
+
+脚本在任何媒体处理前验证独立network namespace、生产state及系统路径只读、/tmp和/var/tmp绑定验收盘、无继承token/secret/proxy环境，以及精确Git版本和冻结fba8ff6源码哈希。读写只允许验收目录，生产config不可访问。不读取生产凭据，不启动HTTP服务，不请求真实COS或平台。
+
+验收使用2秒本地合成H264/AAC视频与明确的operator_forced_repair测试请求，FakeDownloader只复制此文件，FakeCOS仅在验收目录模拟HEAD/上传，RejectHTTP拒绝网络使用。原MediaRepairProcessor实际执行请求/完整性校验、私有FFprobe、原CUDA/NVENC命令、完整输出校验、模拟COS验证和独立测试manifest。第二次相同请求须命中reuse，且不再次下载、编码或上传。保留输入、模拟COS中的真实输出、测试manifest及命令/摘要证据；不在生产state或CPU队列创建修复记录。attempt.json/result.json拒绝覆盖，失败后不得自行重跑。
 
 ## 本地验证
 

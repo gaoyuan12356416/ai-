@@ -1,0 +1,34 @@
+[Unit]
+Description=DramaWave TikTok random-overlay reverse tunnel (Hong Kong to CPU)
+Wants=network-online.target
+Requires=tt-gpu-publisher.service
+After=network-online.target tt-gpu-publisher.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/ssh -F /dev/null -NT -i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts -o UpdateHostKeys=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -R 127.0.0.1:18830:127.0.0.1:8830 root@43.166.187.96
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+ReadOnlyPaths=/etc/x-post-media-repair-tunnel
+ReadWritePaths=/data/tt-post-gpu/logs
+UMask=0077
+TimeoutStopSec=15
+StandardOutput=append:/data/tt-post-gpu/logs/random-overlay-tunnel.log
+StandardError=append:/data/tt-post-gpu/logs/random-overlay-tunnel.log
+
+[Install]
+WantedBy=multi-user.target

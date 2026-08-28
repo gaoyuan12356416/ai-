@@ -1,6 +1,9 @@
 import importlib.util
+import hashlib
+import io
 import json
 import sqlite3
+import tarfile
 import tempfile
 import unittest
 from contextlib import closing
@@ -12,6 +15,8 @@ migration = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(migration)
 import cpu_state
 import ffmpeg_adapter
+import final_state
+import gate_handoff
 
 
 class MigrationTests(unittest.TestCase):
@@ -127,6 +132,112 @@ class FFmpegAdapterTests(unittest.TestCase):
         args[10] = args[10].replace("[0:a]aresample=48000:async=1:first_pts=0,apad,",
                                     "anullsrc=channel_layout=stereo:sample_rate=48000,")
         self.assertEqual(ffmpeg_adapter.adapt_arguments(args), args[:-1] + ["-r", "30", args[-1]])
+
+
+class HandoffTests(unittest.TestCase):
+    RUN_ID = "gpu-service-migration-20260828T1502"
+
+    @staticmethod
+    def captured_gates(root):
+        common = {key: "1" for key in gate_handoff.GATES}
+        common["TT_POST_MANUAL_CANARY_ENABLED"] = "0"
+        configs = {"tt-post-gpu.env": common, "tt-post-gpu-direct-outro.env": {"TT_POST_LIVE_ENABLED": "0"},
+                   "tt-post-gpu.secrets": {"TT_POST_GPU_CREDENTIAL_SEAL_KEY": "synthetic"}}
+        for name, values in configs.items():
+            (root / name).write_bytes(migration.env_bytes(values))
+        lanes = {}
+        for lane, direct in (("random_overlay", {}), ("direct_outro", configs["tt-post-gpu-direct-outro.env"])):
+            values = {key: value == "1" for key, value in {**common, **direct}.items()}
+            lanes[lane] = {"match": True, "proc_gates": values, "config_gates": dict(values)}
+        return {"source_host": "43.166.178.132", "source_commit": migration.SOURCE_COMMIT,
+                "source_config_sha256": {name: migration.digest(root / name) for name in configs}, "lanes": lanes}
+
+    def test_source_gates_preserve_lane_values_and_manual_canary_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gates = gate_handoff.checked_source_gates(self.captured_gates(root), root)
+            self.assertEqual(gates["random_overlay"]["TT_POST_LIVE_ENABLED"], "1")
+            self.assertEqual(gates["direct_outro"]["TT_POST_LIVE_ENABLED"], "0")
+            self.assertTrue(all(gate["TT_POST_MANUAL_CANARY_ENABLED"] == "0" for gate in gates.values()))
+
+    def test_gate_process_config_or_hash_drift_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proof = self.captured_gates(root)
+            proof["lanes"]["random_overlay"]["proc_gates"]["TT_POST_MANUAL_CANARY_ENABLED"] = True
+            with self.assertRaises(ValueError):
+                gate_handoff.checked_source_gates(proof, root)
+            proof = self.captured_gates(root)
+            (root / "tt-post-gpu.env").write_text("TT_POST_LIVE_ENABLED=0\n")
+            with self.assertRaises(ValueError):
+                gate_handoff.checked_source_gates(proof, root)
+
+    @classmethod
+    def package(cls, directory, extra_member=None):
+        root = directory / "source"
+        for name in final_state.FOLDERS:
+            (root / name).mkdir(parents=True)
+        (root / "manifests/job-000001.json").write_text(json.dumps({"job_id": "job-000001", "status": "ready"}))
+        (root / "publishes/job-000001.json").write_text(json.dumps({"job_id": "job-000001", "state": "init_rejected"}))
+        frozen = final_state.stable_snapshot(root)
+        cpu = json.dumps({"run_id": cls.RUN_ID, "ok": True, "publication_facts_stable": True,
+                          "ingress_gate_confirmed": True, "databases": {
+                              "old": {"sha256": "1" * 64, "quick_check": "ok"},
+                              "auto": {"sha256": "2" * 64, "quick_check": "ok"}}})
+        cpu_sha = hashlib.sha256(cpu.encode()).hexdigest()
+        index = {"schema_version": 1, "run_id": cls.RUN_ID, "source_host": "43.166.178.132",
+                 "source_commit": migration.SOURCE_COMMIT, "state": frozen,
+                 "cpu_backup_manifest_json": cpu, "cpu_backup_manifest_sha256": cpu_sha}
+        archive = directory / "state.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            files = {name: (root / name).read_bytes() for name in frozen["files"]}
+            files["state-index.json"] = json.dumps(index).encode()
+            for name, raw in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+            if extra_member:
+                tar.addfile(extra_member, io.BytesIO(b""))
+        return archive, cpu_sha, frozen
+
+    def test_final_state_exact_replace_keeps_rejected_ledger_and_backs_up_stale_precopy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, cpu_sha, frozen = self.package(root)
+            staging, target, backup = root / "staging", root / "target", root / "backup"
+            final_state.unpack_verified(archive, staging, self.RUN_ID, migration.digest(archive), cpu_sha, frozen["fingerprint"])
+            for name in final_state.FOLDERS:
+                (target / name).mkdir(parents=True)
+            stale = "manifests/obsolete-0001.json"
+            (target / stale).write_text(json.dumps({"status": "ready"}))
+            final_state.replace_directories(staging, target, backup)
+            self.assertFalse((target / stale).exists())
+            self.assertTrue((backup / stale).is_file())
+            self.assertEqual(final_state.stable_snapshot(target)["files"], frozen["files"])
+            self.assertEqual(json.loads((target / "publishes/job-000001.json").read_text())["state"], "init_rejected")
+
+    def test_archive_extra_traversal_duplicate_and_symlink_members_refused(self):
+        for name, type_ in (("../../outside.json", tarfile.REGTYPE), ("state-index.json", tarfile.REGTYPE),
+                            ("manifests/redirect.json", tarfile.SYMTYPE)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                member = tarfile.TarInfo(name)
+                member.type = type_
+                member.linkname = "/outside" if type_ == tarfile.SYMTYPE else ""
+                archive, cpu_sha, frozen = self.package(root, member)
+                with self.assertRaises(ValueError):
+                    final_state.unpack_verified(archive, root / "stage", self.RUN_ID, migration.digest(archive),
+                                                cpu_sha, frozen["fingerprint"])
+                self.assertFalse((root / "stage").exists())
+
+    def test_cpu_backup_or_archive_sha_drift_refused_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, cpu_sha, frozen = self.package(root)
+            for archive_sha, cpu in (("0" * 64, cpu_sha), (migration.digest(archive), "0" * 64)):
+                with self.assertRaises(ValueError):
+                    final_state.unpack_verified(archive, root / "stage", self.RUN_ID, archive_sha, cpu, frozen["fingerprint"])
+            self.assertFalse((root / "stage").exists())
 
 
 class CPUStateTests(unittest.TestCase):
