@@ -148,7 +148,8 @@ def status_counts(db_path):
     uri = 'file:%s?mode=ro' % db_path
     with sqlite3.connect(uri, uri=True, timeout=5) as connection:
         connection.execute('PRAGMA query_only=ON')
-        for table in ('drama_screenshot_job', 'drama_material_job', 'ad_material_task', 'ad_material_asset'):
+        for table in ('drama_screenshot_job', 'drama_material_job', 'drama_material_job_worker_lease',
+                      'ad_material_task', 'ad_material_asset'):
             exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
             if exists:
                 result[table] = dict(connection.execute('SELECT status,COUNT(*) FROM ' + table + ' GROUP BY status'))
@@ -168,10 +169,13 @@ def assert_drained(include_drama=False):
             raise RuntimeError('ad material regeneration has not drained')
         if include_drama and any(n for s, n in counts.get('drama_material_job', {}).items() if s not in ('done', 'failed', 'cancelled')):
             raise RuntimeError('drama jobs must finish before moving their public/work directories')
+        if include_drama and counts.get('drama_material_job_worker_lease', {}).get('running', 0):
+            raise RuntimeError('drama worker lease must be released before moving its files')
     connections = command(['ss', '-Hntp'])
     if re.search(r':(?:8790|8795|8798|18790|18795|18796|18797|18798)\b', connections):
         raise RuntimeError('affected worker TCP connections have not drained')
-    for unit in OLD_CPU_UNITS:
+    for unit in OLD_CPU_UNITS + tuple(value[1] for value in SLOTS.values()
+                                      if Path('/etc/systemd/system/' + value[1]).exists()):
         pid = system_property(unit, 'MainPID')
         if pid and pid != '0':
             process_status = Path('/proc/' + pid + '/status').read_text()
@@ -460,6 +464,7 @@ def main():
         elif args.phase == 'start':
             result = start_units()
         elif args.phase == 'stop':
+            assert_drained()
             for _, unit in SLOTS.values():
                 command(['systemctl', 'disable', '--now', unit])
             result = {'stopped': [v[1] for v in SLOTS.values()]}

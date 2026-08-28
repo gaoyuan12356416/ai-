@@ -117,6 +117,13 @@ class CpuMigrationTests(unittest.TestCase):
                 migration.start_units()
             execute.assert_not_called()
 
+    def test_storage_switch_waits_for_lease_after_job_reports_done(self):
+        counts = {'drama_material_job': {'done': 1}, 'drama_material_job_worker_lease': {'running': 1}}
+        with mock.patch.object(migration, 'status_counts', return_value=counts), \
+             mock.patch.object(migration.os.path, 'isfile', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'lease must be released'):
+                migration.assert_drained(include_drama=True)
+
 
 if __name__ == '__main__':
     unittest.main()

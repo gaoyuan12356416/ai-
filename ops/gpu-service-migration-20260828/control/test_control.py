@@ -2,6 +2,9 @@ import importlib.util
 import pathlib
 import re
 import unittest
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 
 def load(name):
@@ -14,6 +17,7 @@ def load(name):
 
 maintenance = load("maintenance")
 fence = load("source_fence")
+permissions = load("hk_tunnel_permissions")
 
 
 class ControlTests(unittest.TestCase):
@@ -54,6 +58,22 @@ class ControlTests(unittest.TestCase):
             fence.assert_idle([dict(idle, threads=2)])
         with self.assertRaises(RuntimeError):
             fence.assert_idle([dict(idle, children=["234"])])
+
+    def test_tunnel_permissions_remain_host_and_loopback_restricted(self):
+        key = "dGVzdC1wdWJsaWMta2V5"
+        fp = permissions.fingerprint(key)
+        line = ('command="/usr/bin/sleep infinity",from="43.154.250.89",restrict,port-forwarding,'
+                'permitlisten="127.0.0.1:18820",permitlisten="127.0.0.1:18788",'
+                'permitlisten="127.0.0.1:18836" ssh-ed25519 ' + key + ' fixture\n')
+        original = "ssh-rsa dW5yZWxhdGVk unrelated\n" + line
+        updated = permissions.rewrite(original, expected_fingerprint=fp)
+        self.assertEqual(updated.splitlines()[0], original.splitlines()[0])
+        self.assertIn('from="43.154.250.89",restrict,port-forwarding', updated)
+        self.assertEqual(updated.count("permitlisten="), 7)
+        self.assertEqual(permissions.rewrite(updated, expected_fingerprint=fp), updated)
+        self.assertEqual(permissions.rewrite(updated, rollback=True, expected_fingerprint=fp), original)
+        with self.assertRaises(RuntimeError):
+            permissions.rewrite(original.replace("restrict,", ""), expected_fingerprint=fp)
 
 
 if __name__ == "__main__":

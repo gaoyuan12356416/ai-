@@ -78,9 +78,15 @@ def main():
         raise RuntimeError("checkpoint scope mismatch")
     if not 0 <= time.time() - float(proof.get("checked_at_epoch", 0)) <= 300:
         raise RuntimeError("checkpoint stale")
-    for field in ("new_admission_closed", "triggers_paused", "cpu_drained", "no_unknown"):
+    for field in ("new_admission_closed", "triggers_paused", "cpu_drained"):
         if proof.get(field) is not True:
             raise RuntimeError("checkpoint not ready: " + field)
+    # X publication ledgers remain on CPU and may contain a pre-existing
+    # needs-review outcome. This media-only handoff must preserve that record,
+    # not falsify a global no-unknown assertion or attempt a publication retry.
+    outcome_field = "no_unknown_repairs" if a.group == "x" else "no_unknown"
+    if proof.get(outcome_field) is not True:
+        raise RuntimeError("checkpoint not ready: " + outcome_field)
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(str(BASE), 0o700)
     snapshot = BASE / (a.group + "-before.json")
