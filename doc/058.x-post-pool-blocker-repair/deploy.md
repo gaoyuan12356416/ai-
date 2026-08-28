@@ -43,6 +43,14 @@
 - 使用事故专用helper严格核对GPU完整ready版本、请求、job、COS路径，再真实下载并探测CPU输出；逐项成功后才写私有checkpoint。其余9条仍走既有预检/修复；不中断原绑定、不换源、不混入失败证据。
 - checkpoint有效期4小时，固定索引SHA、工具commit、源身份和完整CPU证明；缺失、过期、冲突立即停止。prepare入口只允许备份副本/apply=False。后续copy/live apply必须复用全部完整证明、实时源身份查询和原store事务guards，并持整个阶段的process_lock；每个run独立checkpoint，第二批失败不重复apply第一批。
 
+## 恢复工具版本固定（2026-08-28 17:59）
+
+- CPU通过GitHub fetch取得e300542887fb89314bef145b752c3ad8aa6c5c9c并归档，Linux856/856（38.484s）通过。发布service.py SHA与dad987b相同，只有恢复工具/测试/文档变化。
+- 全程原process_lock、暂停并恢复三个原timer、无在途写、在线备份与冻结行比对后，只重启Sidecar，PID1840134。主API未再重启，HK维持170e3/PID1780296。
+- 健康8810/8787 auth/18820均200、X未鉴权401；16条失败队列及q533/719/726仍逐字段不变。证据为recovery-ops-stage-result.json、recovery-ops-deployment-result.json、linux-x-tests-recovery-ops.log、accounts.before-recovery-ops.sqlite3。
+- 后续apply命令为deploy/recovery/x_post_incident_apply_20260828.py，独立GitHub归档目录取其精确提交名，报告operator_commit/operator_sha256；它明确导入CPU e300542的helper与store，checkpoint/audit继续绑定e300542。该步骤不切换current、不重启CPU/HK服务。
+- 两个run全prepare完成后固定最终index SHA。先copy phase，逐字段核对所有业务行和16条完整audit，再live phase。两个run先全部validate-only，随后逐批apply并持久化进度；一旦进入apply，失败时不自动恢复timer或重复整批。
+
 ## 回滚
 
 1. 停止三个timer，等待schedule/claim/manual服务退出，并查publish log无media_uploading/post_creating/repost_creating；不得强杀在途写。

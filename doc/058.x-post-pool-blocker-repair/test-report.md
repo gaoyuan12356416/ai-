@@ -38,3 +38,10 @@
 - 事故wrapper新增8项永久测试，恢复相关26/26通过；加入两份helper后的Windows全X回归856项/62.517s通过（2项POSIX用例skip）。完整日志为工作区output/x-pool-blockers-20260828/local-x-tests-with-recovery.log。
 - wrapper独立审查无可证实P1/P2；新factory推进1小时可复用完整item且媒体调用0，16条冻结身份跨时间不变，先恢复348后350自身数据库门禁仍通过。临时SQLite与固定证据的9项离线验证通过。
 - 逐项真实CPU checkpoint、copy/live apply及自然消费尚待后续实测；不得用计划步骤或上述离线验证代替实际结果。apply必须借用已持有的原process_lock、两run共用最终index SHA，且factory/store/execute_recovery指向同一目标DB。
+
+## 18:15恢复准备进度
+
+- CPU e300542最终Linux856/856（38.484s）通过，17:59恢复工具切换后健康/保护行/三个timer均通过，见recovery-ops-deployment-result.json。
+- Run348实际prepare完成13/13且status=validated：7条GPU历史缓存成品重新由CPU下载/探测、6条正常原源修复；X写入0，原队列未改。Run350的3条正在同一路径串行准备。
+- 独立审查运维apply命令：发现audit只验数量的P2后已补完整27个非id字段。16条正常audit通过，分别篡改27列均被拒绝；另补stop部分失败、timer恢复/查询异常的持久化，以及进入apply后失败不自动恢复timer的保护。
+- 运维脚本以独立operator commit从GitHub取出并从文件执行，保留`<commit>/deploy/recovery/`归档层级；不切换服务current，helper和审计证据仍绑定e300542。
