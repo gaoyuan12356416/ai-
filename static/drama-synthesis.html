@@ -18407,7 +18407,7 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_url, "video", "合集视频")}
+              ${(job.outputs || {}).concat_video ? previewCell(job.output_video_url, "video", "合集视频") : ""}
 
 
 
@@ -18423,11 +18423,9 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_no_bgm_url, "video", "去 BGM")}
+              ${(job.outputs || {}).no_bgm_video ? previewCell(job.output_video_no_bgm_url, "video", "去 BGM") : ""}
 
-              ${previewCell(job.output_random_template_url, "video", "随机模板")}
-
-
+              ${(job.outputs || {}).random_template_video ? previewCell(job.output_random_template_url, "video", "随机模板") : ""}
 
 
 
@@ -18441,7 +18439,9 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.cover_16x9_url, "image", "16:9 封面")}
+
+
+              ${(job.outputs || {}).cover_16x9 ? previewCell(job.cover_16x9_url, "image", "16:9 封面") : ""}
 
 
 
@@ -19070,7 +19070,7 @@ function buildJobRow(job) {
 
 
 
-        resultCard("合集视频（含 BGM）", job.output_video_url, "video"),
+        (job.outputs || {}).concat_video ? resultCard("合集视频（含 BGM）", job.output_video_url, "video") : "",
 
 
 
@@ -19086,11 +19086,9 @@ function buildJobRow(job) {
 
 
 
-        resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video"),
+        (job.outputs || {}).no_bgm_video ? resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video") : "",
 
-        resultCard("随机模板视频", job.output_random_template_url, "video"),
-
-
+        (job.outputs || {}).random_template_video ? resultCard("随机模板视频", job.output_random_template_url, "video") : "",
 
 
 
@@ -19104,7 +19102,9 @@ function buildJobRow(job) {
 
 
 
-        resultCard("16:9 封面图", job.cover_16x9_url, "image")
+
+
+        (job.outputs || {}).cover_16x9 ? resultCard("16:9 封面图", job.cover_16x9_url, "image") : ""
 
 
 

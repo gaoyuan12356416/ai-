@@ -21,8 +21,44 @@ for (const name of ["index.html", "drama-synthesis.html"]) {
     formatBeijingTime: () => "2026-08-27",
   });
   vm.runInContext(materials + "\n" + row, context);
+  const preview = text.match(/function previewCell\(url, type, label\) \{[\s\S]*?\n    \}/)[0];
+  vm.runInContext(preview, context);
   const base = { job_id: "a".repeat(32), app_id: "1479", status: "done", progress: 100 };
   const render = extra => context.buildJobRow({ ...base, ...extra });
+  const outputFields = [
+    ["concat_video", "output_video_url"],
+    ["no_bgm_video", "output_video_no_bgm_url"],
+    ["random_template_video", "output_random_template_url"],
+    ["cover_16x9", "cover_16x9_url"],
+  ];
+  const detailResults = text.match(/const detailResultCards = (\[[\s\S]*?\]);/)[1] + '.join("")';
+  const resultCard = text.match(/function resultCard\(title, url, type\) \{[\s\S]*?\n    \}/)[0];
+  vm.runInContext(resultCard, context);
+  for (let mask = 0; mask < 16; mask++) {
+    for (const ready of [false, true]) {
+      const outputs = Object.fromEntries(outputFields.map(([key], i) => [key, !!(mask & (1 << i))]));
+      const urls = Object.fromEntries(outputFields.map(([, field]) => [field, ready ? `https://example.test/${field}` : ""]));
+      const job = { ...base, ...urls, outputs };
+      const html = render(job).match(/<div class="preview-grid">([\s\S]*?)<\/td>/)[1];
+      const count = Object.values(outputs).filter(Boolean).length;
+      assert.equal((html.match(/class="preview-card/g) || []).length, count);
+      assert.equal((html.match(/待生成/g) || []).length, ready ? 0 : count);
+      context.job = job;
+      const detail = vm.runInContext(detailResults, context);
+      assert.equal((detail.match(/class="card"/g) || []).length, count);
+      for (const [key, field] of outputFields) {
+        if (ready) {
+          assert.equal(html.includes(urls[field]), outputs[key]);
+          assert.equal(detail.includes(urls[field]), outputs[key]);
+        }
+      }
+      checks++;
+    }
+  }
+  for (const outputs of [undefined, null, {}]) {
+    assert.ok(!render({ outputs }).includes('class="preview-card'));
+    checks++;
+  }
   const actions = ["copyMaterialUrl", "createShortLink", "openYoutubePublish"];
   for (const field of ["output_video_url", "output_video_no_bgm_url", "output_random_template_url"]) {
     const html = render({ [field]: "https://example.test/video.mp4" });
