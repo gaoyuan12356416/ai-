@@ -212,5 +212,28 @@ bash rollback-target.sh RUN_ID：要求目标2worker+2tunnel全部inactive，仅
 
 ## 本地检查
 
+### 私有 Python CA 路径修正（2026-08-28）
+
+香港迁入 Python 的 OpenSSL 默认 CA 仍指向美国绝对路径，导致 Creator Info TLS 失败。
+仅复用美国原 CA：226168 bytes、145 个证书、SHA256
+`b6e66569cc3d438dd5abe514d0df50005d570bfc96c14dca8f768d020cb96171`。
+不修改业务9425、FFmpeg、manifest、发布门闩或三个现行env文件；不关闭TLS校验。
+
+协调者先关闭CPU TT写入口/7触发器并自然排空，然后停香港2 tunnel和2 worker。
+GitHub提交、精确部署完成后，只从对应checkout执行：
+
+    /data/tt-post-gpu/runtime/bin/python TT_CHECKOUT/install-trust-store.py \
+      --run-id gpu-service-migration-20260828T1502 --ops-commit FULL_COMMIT \
+      --ca-file /data/migrations/gpu-service-migration-20260828T1502/tt/source-trust-ca-bundle.pem
+
+安装器硬校验HK hostname、数据UUID/容量及四unit停止，拒绝任何env内SSL_CERT_*覆盖。
+原文件私有备份到tt/target-trust-before；原子安装trust/ca-bundle.pem、空trust/certs、
+verify_trust.py和两worker的40-tt-private-trust.conf；daemon-reload但不enable/start。
+ExecStartPre校验无symlink、精确CA SHA、正确环境，以及默认SSL context仍为
+CERT_REQUIRED/check_hostname=True。校验无网络调用。协调者须另作不带Token的TLS探测，
+再启动worker并显式启动原active tunnel、检查CPU端口后恢复原触发器及写入口。
+回滚同样须先停四unit，按target-trust-before/manifest.json逐项恢复原文件或撤下原不存在的
+drop-in后daemon-reload；原env和业务账本保持不变。旧CA配置本来不可用，不能仅撤回修正就放行业务。
+
 python -m unittest discover -s ops/gpu-service-migration-20260828/tt -p 'test_*.py' -v
 以及 Python 语法检查、shell语法检查、git diff --check。

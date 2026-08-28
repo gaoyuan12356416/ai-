@@ -6,6 +6,7 @@ import sqlite3
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import closing
 from pathlib import Path
 
@@ -17,6 +18,90 @@ import cpu_state
 import ffmpeg_adapter
 import final_state
 import gate_handoff
+import verify_trust
+
+trust_spec = importlib.util.spec_from_file_location("install_trust_store", HERE / "install-trust-store.py")
+trust_install = importlib.util.module_from_spec(trust_spec)
+trust_spec.loader.exec_module(trust_install)
+
+
+class TrustStoreTests(unittest.TestCase):
+    def test_bundle_refuses_wrong_sha_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wrong.pem"
+            path.write_bytes(b"not the approved CA")
+            with self.assertRaises(ValueError):
+                verify_trust.check_bundle(path)
+            with mock.patch.object(Path, "is_symlink", return_value=True), self.assertRaises(ValueError):
+                verify_trust.check_bundle(path)
+
+    def test_verifier_enforces_environment_empty_directory_and_secure_context(self):
+        import ssl
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca = root / "ca.pem"
+            ca.write_bytes(b"synthetic; check_bundle is separately tested")
+            certs = root / "certs"
+            certs.mkdir()
+            context = mock.Mock(verify_mode=ssl.CERT_REQUIRED, check_hostname=True)
+            context.cert_store_stats.return_value = {"x509_ca": 145}
+            with mock.patch.object(verify_trust, "CA_FILE", ca), mock.patch.object(verify_trust, "CA_DIR", certs), \
+                    mock.patch.object(verify_trust, "check_bundle", return_value={"sha256": verify_trust.CA_SHA256}), \
+                    mock.patch.object(verify_trust.ssl, "create_default_context", return_value=context) as create, \
+                    mock.patch.dict(verify_trust.os.environ, {"SSL_CERT_FILE": str(ca), "SSL_CERT_DIR": str(certs)}):
+                self.assertTrue(verify_trust.verify()["ok"])
+                create.assert_called_once_with()
+                context.verify_mode = ssl.CERT_NONE
+                with self.assertRaises(ValueError):
+                    verify_trust.verify()
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = False
+                with self.assertRaises(ValueError):
+                    verify_trust.verify()
+                context.check_hostname = True
+                with mock.patch.dict(verify_trust.os.environ, {"SSL_CERT_FILE": "/other.pem"}), self.assertRaises(ValueError):
+                    verify_trust.verify()
+                (certs / "unapproved").write_text("unexpected")
+                with self.assertRaises(ValueError):
+                    verify_trust.verify()
+
+    def test_installer_rejects_ssl_overrides_in_every_environment_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("base.env", "direct-outro.env", "secrets.env")
+            for name in names:
+                (root / name).write_text("UNRELATED=synthetic\n")
+            self.assertEqual(len(trust_install.reject_environment_overrides(root)), 3)
+            for name in names:
+                for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "SSL_CERT_OTHER"):
+                    (root / name).write_text(key + "=/unapproved\n")
+                    with self.assertRaises(ValueError):
+                        trust_install.reject_environment_overrides(root)
+                (root / name).write_text("UNRELATED=synthetic\n")
+
+    def test_installer_requires_all_four_units_stopped(self):
+        stopped = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n"
+        with mock.patch.object(trust_install.subprocess, "check_output", return_value=stopped) as call:
+            self.assertEqual(set(trust_install.require_stopped()), set(trust_install.UNITS))
+            self.assertEqual(call.call_count, 4)
+        for invalid in (stopped.replace("inactive", "active"), stopped.replace("MainPID=0", "MainPID=1"),
+                        stopped.replace("dead", "auto-restart"), stopped.replace("loaded", "not-found")):
+            with mock.patch.object(trust_install.subprocess, "check_output", return_value=invalid), self.assertRaises(ValueError):
+                trust_install.require_stopped()
+
+    def test_installer_refuses_wrong_host_before_any_write(self):
+        with mock.patch.object(trust_install.socket, "gethostname", return_value="wrong-host"), \
+                mock.patch.object(trust_install, "atomic_bytes") as write, self.assertRaises(ValueError):
+            trust_install.install("gpu-service-migration-20260828T1502", "a" * 40, Path("/unapproved.pem"))
+        write.assert_not_called()
+
+    def test_two_dropins_append_verification_without_resetting_existing_preflight(self):
+        for worker in trust_install.WORKERS:
+            text = (HERE / "units" / (worker.removesuffix(".service") + "-trust.conf")).read_text()
+            self.assertEqual(text, trust_install.DROPIN)
+            self.assertNotIn("ExecStartPre=\n", text)
+            self.assertNotIn("[Install]", text)
+            self.assertNotIn("SSL_CERT_FILE=\"\"", text)
 
 
 class MigrationTests(unittest.TestCase):
