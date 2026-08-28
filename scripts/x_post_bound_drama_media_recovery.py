@@ -224,6 +224,18 @@ def execute_recovery(
                 dir=str(work_root),
             ) as temporary:
                 for rank, expected in enumerate(requested, 1):
+                    frozen_queue = store.get_queue(expected["queue_id"])
+                    if (
+                        int(frozen_queue.get("schedule_run_id") or 0) != manifest["run_id"]
+                        or frozen_queue.get("source_type") != "drama"
+                        or int(frozen_queue.get("drama_pool_item_id") or 0) != expected["pool_item_id"]
+                        or str(frozen_queue.get("content_id") or "") != expected["content_id"]
+                        or int(frozen_queue.get("episode_number") or 0) != expected["episode_number"]
+                    ):
+                        raise BackfillError(
+                            "清单与已冻结短剧队列身份不一致，未执行媒体修复",
+                            code="x_post_bound_drama_source_changed",
+                        )
                     pool = {
                         "id": expected["pool_item_id"],
                         "content_id": expected["content_id"],
@@ -253,6 +265,16 @@ def execute_recovery(
                             code="x_post_bound_drama_episode_unavailable",
                         )
                     candidate = dict(candidates[0])
+                    if (
+                        not str(candidate.get("material_id") or "")
+                        or str(candidate.get("material_id")) != str(frozen_queue.get("material_id") or "")
+                        or not str(candidate.get("material_url") or "")
+                        or str(candidate.get("material_url")) != str(frozen_queue.get("material_url") or "")
+                    ):
+                        raise BackfillError(
+                            "当前源剧集资源或URL与冻结队列不一致，禁止换源恢复",
+                            code="x_post_bound_drama_source_changed",
+                        )
                     candidate["pool_item_id"] = expected["pool_item_id"]
                     candidate["pool_created_at"] = pool["created_at"]
                     candidate["source_date"] = source_date

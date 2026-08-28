@@ -32,6 +32,7 @@ from features.x_accounts.language import (
     canonical_drama_language,
     same_drama_language,
 )
+from features.x_posts.account_blockers import read_account_publish_blockers
 
 
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
@@ -6715,6 +6716,12 @@ class XPostStore:
             ),
         }
 
+    def schedule_account_blockers(self, account_ids):
+        """Read scheduling holds without reconciling or modifying any ledger."""
+        account_ids = _schedule_account_ids(account_ids, allow_empty=True)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            return read_account_publish_blockers(conn, account_ids)
+
     @staticmethod
     def _drama_assignment_candidates(
         conn,
@@ -6722,8 +6729,14 @@ class XPostStore:
         limit,
         account_languages=None,
         premium_account_ids=None,
+        configured_account_ids=None,
     ):
         account_ids = _schedule_account_ids(account_ids)
+        configured_account_ids = _schedule_account_ids(
+            configured_account_ids if configured_account_ids is not None else account_ids
+        )
+        if not _is_ordered_account_subset(account_ids, configured_account_ids):
+            raise XPostError("invalid_request", "短剧候选账号不属于冻结配置范围", 400)
         raw_account_languages = (
             account_languages if isinstance(account_languages, dict) else {}
         )
@@ -6760,7 +6773,12 @@ class XPostStore:
                 "短剧池扫描上限不能小于发布账号数量",
                 400,
             )
+        blocked_accounts = read_account_publish_blockers(conn, account_ids)
+        account_ids = [value for value in account_ids if value not in blocked_accounts]
+        if not account_ids:
+            return []
         placeholders = ",".join("?" for _item in account_ids)
+        configured_placeholders = ",".join("?" for _item in configured_account_ids)
         foreign_owner = conn.execute(
             "SELECT content_id,assigned_account_id "
             "FROM x_post_drama_pool "
@@ -6769,8 +6787,8 @@ class XPostStore:
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id>0 "
             "AND assigned_account_id NOT IN (%s) "
-            "ORDER BY created_at,id LIMIT 1" % placeholders,
-            tuple(account_ids),
+            "ORDER BY created_at,id LIMIT 1" % configured_placeholders,
+            tuple(configured_account_ids),
         ).fetchone()
         if foreign_owner:
             raise XPostError(
@@ -6875,6 +6893,7 @@ class XPostStore:
         account_ids=None,
         account_languages=None,
         premium_account_ids=None,
+        configured_account_ids=None,
     ):
         try:
             limit = int(limit)
@@ -6898,7 +6917,6 @@ class XPostStore:
                     "短剧%s存在待人工确认的发布结果，已暂停后续短剧发布"
                     % blocked["content_id"],
                     409,
-                    True,
                 )
             if account_ids is not None:
                 return self._drama_assignment_candidates(
@@ -6907,6 +6925,7 @@ class XPostStore:
                     limit,
                     account_languages=account_languages,
                     premium_account_ids=premium_account_ids,
+                    configured_account_ids=configured_account_ids,
                 )
             rows = conn.execute(
                 "SELECT id,content_id,next_sub_number,created_at,"
@@ -6981,6 +7000,7 @@ class XPostStore:
                 % (placeholders, placeholders),
                 tuple(account_ids) + tuple(account_ids),
             ).fetchall()
+            account_blockers = read_account_publish_blockers(conn, account_ids)
         unresolved = set()
         for row in unresolved_rows:
             unresolved.add(int(row["account_id"] or 0))
@@ -6992,7 +7012,7 @@ class XPostStore:
         account_ids = [
             account_id
             for account_id in account_ids
-            if account_id not in unresolved
+            if account_id not in unresolved and account_id not in account_blockers
         ]
         return [
             {
@@ -11401,6 +11421,8 @@ class XPostStore:
                 409,
             )
 
+        account_blockers = self.schedule_account_blockers(account_ids)
+        eligible_account_ids = [value for value in account_ids if value not in account_blockers]
         normalized_capacity_skips = []
         seen_capacity_pool_ids = set()
         for raw_skip in fifo_capacity_skips:
@@ -11460,11 +11482,11 @@ class XPostStore:
         if normalized_capacity_skips:
             if (
                 not frozen["found"]
-                or sum(normalized_capacities.values()) != len(account_ids)
+                or sum(normalized_capacities.values()) != len(eligible_account_ids)
             ):
                 raise XPostError(
                     "x_post_pool_fifo_conflict",
-                    "素材语言容量证据必须绑定已冻结账号范围",
+                    "素材语言容量证据必须绑定冻结配置中的当前可用账号范围",
                     409,
                 )
             selected_language_counts = {}
@@ -11665,23 +11687,21 @@ class XPostStore:
                     )
                 schedule_run_id = None
 
-            placeholders_accounts = ",".join("?" for _item in account_ids)
-            unresolved = conn.execute(
-                "SELECT 1 FROM x_post_publish_log l "
-                "JOIN x_post_queue q ON q.id=l.queue_id "
-                "WHERE q.account_id IN (%s) "
-                "AND (COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
-                % placeholders_accounts,
-                tuple(account_ids),
-            ).fetchone()
-            if unresolved:
+            # The full configured scope is retained for audit. Only the actual
+            # new plan's accounts must pass the write fence. A hold on an omitted
+            # account must not poison healthy accounts in every later batch.
+            account_blockers = read_account_publish_blockers(conn, account_ids)
+            current_eligible_ids = [value for value in account_ids if value not in account_blockers]
+            for account_id in prepared_account_ids:
+                if account_id in account_blockers:
+                    blocker = account_blockers[account_id]
+                    conn.rollback()
+                    raise XPostError(blocker["code"], blocker["message"], 409)
+            if normalized_capacity_skips and current_eligible_ids != eligible_account_ids:
                 conn.rollback()
                 raise XPostError(
-                    "x_post_unknown_outcome",
-                    "所选账号存在待核对发布结果，已暂停后续自动发布",
-                    409,
-                    True,
+                    "x_post_schedule_account_state_changed",
+                    "账号暂停状态在预检期间变化，未创建发布队列", 409,
                 )
 
             if source_type == "material":
@@ -11704,7 +11724,7 @@ class XPostStore:
                 if not _material_fifo_selection_matches(
                     expected_pools,
                     prepared,
-                    account_ids,
+                    current_eligible_ids,
                     premium_account_ids,
                     validation_cutoff=(
                         str(existing["updated_at"] or "")
@@ -11776,23 +11796,21 @@ class XPostStore:
             else:
                 blocked = conn.execute(
                     "SELECT id,content_id FROM x_post_drama_pool "
-                    "WHERE status='needs_review' "
-                    "ORDER BY created_at,id LIMIT 1"
+                    "WHERE status='needs_review' ORDER BY created_at,id LIMIT 1"
                 ).fetchone()
                 if blocked:
                     conn.rollback()
                     raise XPostError(
                         "x_post_drama_pool_needs_review",
                         "短剧%s存在待人工确认的发布结果，已暂停后续短剧发布"
-                        % blocked["content_id"],
-                        409,
-                        True,
+                        % blocked["content_id"], 409,
                     )
                 assignments = self._drama_assignment_candidates(
                     conn,
-                    account_ids,
+                    current_eligible_ids,
                     1000,
                     premium_account_ids=premium_account_ids,
+                    configured_account_ids=account_ids,
                 )
                 expected_by_pool = {
                     int(item["id"]): item for item in assignments
@@ -11894,6 +11912,16 @@ class XPostStore:
                         "No currently eligible Premium relay account is available",
                         409,
                     )
+                relay_blockers = read_account_publish_blockers(
+                    conn, [option[0] for option in relay_options]
+                )
+                relay_options = [option for option in relay_options if option[0] not in relay_blockers]
+                if not relay_options:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_premium_relay_unavailable",
+                        "同语言Premium转发源均被暂停，未创建发布队列", 409,
+                    )
                 relay_placeholders = ",".join("?" for _ in relay_options)
                 relay_counts = {
                     account_id: 0
@@ -11973,6 +12001,10 @@ class XPostStore:
                     "素材" if source_type == "material" else "短剧",
                 )
             )
+            if account_blockers:
+                reasons = [value["message"] for value in account_blockers.values()]
+                partial_capacity_message += "；" + "；".join(reasons)
+                partial_capacity_message = partial_capacity_message[:240]
             if schedule_run_id is None:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
@@ -13221,13 +13253,14 @@ class XPostStore:
                     "发布队列关联的定时批次不存在",
                     500,
                 )
+            # A partial plan may intentionally omit held accounts. Preserve the
+            # frozen queue set's batch-wide fence, not the larger configured set.
             publishing_account_ids.update(
-                _schedule_account_ids(
-                    _json_array(
-                        schedule_run["account_ids_json"],
-                        "account_ids",
-                    )
-                )
+                int(item["account_id"])
+                for item in conn.execute(
+                    "SELECT DISTINCT account_id FROM x_post_queue WHERE schedule_run_id=?",
+                    (int(queue["schedule_run_id"]),),
+                ).fetchall()
             )
             publishing_account_ids.update(
                 int(item["relay_account_id"])
@@ -17204,7 +17237,7 @@ def publish_canary(
     *, db_path, queue_id, account, access_token, public_root, short_base_url,
     allowed_media_hosts, http_client=None, sleeper=None, timeout=30,
     max_media_bytes=DEFAULT_MAX_MEDIA_BYTES,
-    storage_guard=None, durable_storage=None,
+    storage_guard=None, durable_storage=None, prepared_media=None,
 ):
     """Publish one queued canary. Must run inside the sidecar account lock."""
     if not isinstance(account, dict):
@@ -17303,27 +17336,43 @@ def publish_canary(
                 long_url,
                 durable_storage=durable_storage,
             )
-        if durable_storage is not None:
-            layout = _validate_post_storage_layout(
-                public_root,
-                mount_root=durable_storage.get("mount_root", DEFAULT_STORAGE_MOUNT_ROOT),
-                storage_root=durable_storage.get("storage_root", DEFAULT_STORAGE_ROOT),
-            )
-            work_root = layout["media_work"]
-            if (
-                work_root.resolve(strict=True).parent != layout["storage"]
-                or work_root.stat().st_dev != layout["storage"].stat().st_dev
-            ):
-                raise XPostError("x_post_storage_unavailable", "X Post媒体工作目录无效", 503)
-        else:
-            work_root = Path(public_root).resolve().parent / "media-work"
-            work_root.mkdir(parents=True, exist_ok=True)
-        work_dir = Path(tempfile.mkdtemp(prefix="log-%s-" % log["id"], dir=str(work_root)))
+        if prepared_media is not None:
+            from features.x_posts.publish_media_repair import PreparedDeferredDramaMedia
 
-        media = download_media(
-            queue["material_url"], work_dir / "material.bin", allowed_media_hosts,
-            max_bytes=max_media_bytes, timeout=timeout, http_client=http_client,
-        )
+            if (
+                not deferred_media_validation
+                or queue.get("source_type") != "drama"
+                or not isinstance(prepared_media, PreparedDeferredDramaMedia)
+            ):
+                raise XPostError(
+                    "media_preflight_changed", "已准备媒体只能用于原冻结短剧队列", 409,
+                )
+            # Preparation ran without holding credentials. Recheck the bytes,
+            # then probe below against this newly verified token's entitlement.
+            # The context manager in the caller owns and cleans up the file.
+            media = prepared_media.for_queue(queue, max_media_bytes)
+        else:
+            if durable_storage is not None:
+                layout = _validate_post_storage_layout(
+                    public_root,
+                    mount_root=durable_storage.get("mount_root", DEFAULT_STORAGE_MOUNT_ROOT),
+                    storage_root=durable_storage.get("storage_root", DEFAULT_STORAGE_ROOT),
+                )
+                work_root = layout["media_work"]
+                if (
+                    work_root.resolve(strict=True).parent != layout["storage"]
+                    or work_root.stat().st_dev != layout["storage"].stat().st_dev
+                ):
+                    raise XPostError("x_post_storage_unavailable", "X Post媒体工作目录无效", 503)
+            else:
+                work_root = Path(public_root).resolve().parent / "media-work"
+                work_root.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(prefix="log-%s-" % log["id"], dir=str(work_root)))
+
+            media = download_media(
+                queue["material_url"], work_dir / "material.bin", allowed_media_hosts,
+                max_bytes=max_media_bytes, timeout=timeout, http_client=http_client,
+            )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
         expected_size = int(queue.get("preflight_size", 0) or 0)
         if not deferred_media_validation and (

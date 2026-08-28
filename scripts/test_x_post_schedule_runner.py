@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.x_post_daily_runner import (  # noqa: E402
     CandidatePreflightError,
+    DailyConfig,
     SidecarError,
 )
 from features.x_posts.service import (  # noqa: E402
@@ -97,6 +98,24 @@ class ScheduleConfigTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("X_POST_SCHEDULE_MAX_REPAIRS_PER_RUN=17", example)
+
+    def test_schedule_repair_timeout_extension_preserves_daily_default_and_cap(self):
+        base_env = {
+            "X_POST_DAILY_ACCOUNT_IDS": "11,12",
+            "X_POST_DAILY_MEDIA_ALLOWED_HOSTS": "media.example.test",
+        }
+        for overrides, schedule_timeout, daily_timeout in (
+            ({}, 900, 900),
+            ({"X_POST_SCHEDULE_INTERNAL_TIMEOUT": "7200"}, 7200, 900),
+            ({"X_POST_SCHEDULE_INTERNAL_TIMEOUT": "9000"}, 7200, 900),
+            ({"X_POST_SCHEDULE_INTERNAL_TIMEOUT": "7200", "X_POST_DAILY_INTERNAL_TIMEOUT": "7200"}, 7200, 900),
+            ({"X_POST_DAILY_INTERNAL_TIMEOUT": "120"}, 120, 120),
+        ):
+            with self.subTest(overrides=overrides), mock.patch.dict(
+                "os.environ", {**base_env, **overrides}, clear=True,
+            ):
+                self.assertEqual(ScheduleConfig.from_env().internal_timeout, schedule_timeout)
+                self.assertEqual(DailyConfig.from_env().internal_timeout, daily_timeout)
 
 
 def due_item(
@@ -2189,6 +2208,99 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["batches"][0]["planned_count"], 2)
+
+    def test_schedule_verify_requests_account_hold_preflight(self):
+        account = FakeSidecar().verify_account(11)
+        client = StubScheduleClient([{"item": account}])
+        self.assertEqual(client.verify_account(11), account)
+        path, payload, may_write = client.requests[0]
+        self.assertEqual(path, "/internal/posts/accounts/11/verify")
+        self.assertTrue(payload["schedule_preflight"])
+        self.assertTrue(payload["require_publish_approved"])
+        self.assertFalse(may_write)
+
+    def test_first_verification_skips_only_held_accounts_and_publishes_healthy_subset(self):
+        for source_type in ("material", "drama"):
+            with self.subTest(source_type=source_type):
+                sidecar = FakeSidecar([due_item(source_type=source_type, accounts=[11, 12, 13])])
+                original_verify = sidecar.verify_account
+
+                def verify(account_id):
+                    account = original_verify(account_id)
+                    if account_id in (11, 12):
+                        raise SidecarError(
+                            "x_post_account_needs_review" if account_id == 11 else "x_post_account_locked",
+                            "账号需要人工处理", 409,
+                        )
+                    return account
+
+                with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+                    result = self.execute(sidecar)
+                self.assertEqual(result["status"], "published")
+                batch = result["batches"][0]
+                self.assertEqual(batch["planned_count"], 1)
+                self.assertEqual(
+                    [(item["account_id"], item["error_code"]) for item in batch["skipped_accounts"]],
+                    [(11, "x_post_account_needs_review"), (12, "x_post_account_locked")],
+                )
+                self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 13, 13])
+                payload = next(call[2] for call in sidecar.calls if call[0] == "create")
+                self.assertEqual(payload["account_ids"], [13])
+                self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
+
+    def test_second_verification_new_hold_aborts_without_dropping_candidate(self):
+        sidecar = FakeSidecar([due_item()])
+        original_verify = sidecar.verify_account
+        counts = {}
+
+        def verify(account_id):
+            account = original_verify(account_id)
+            counts[account_id] = counts.get(account_id, 0) + 1
+            if account_id == 12 and counts[account_id] == 2:
+                raise SidecarError("x_post_account_locked", "账号在预检期间被锁定", 409)
+            return account
+
+        with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+            result = self.execute(sidecar)
+        self.assertEqual(result["batches"][0]["error_code"], "x_post_account_locked")
+        self.assertTrue(result["batches"][0]["failure_recorded"])
+        self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
+        failure = next(call for call in sidecar.calls if call[0] == "failure")
+        self.assertEqual(failure[5]["account_ids"], [11, 12])
+
+    def test_all_held_accounts_record_failure_without_sources_or_plan_write(self):
+        sidecar = FakeSidecar([due_item()])
+        loader = mock.Mock(side_effect=AssertionError("no healthy account may reach sources"))
+        with mock.patch.object(sidecar, "verify_account", side_effect=SidecarError(
+            "x_post_account_needs_review", "历史发布结果待核对", 409,
+        )):
+            result = self.execute(sidecar, material_candidate_loader=loader)
+        loader.assert_not_called()
+        self.assertEqual(result["batches"][0]["status"], "failed_preflight")
+        self.assertEqual(result["batches"][0]["error_code"], "x_post_account_needs_review")
+        self.assertIn("本批账号均被暂停", result["batches"][0]["error_message"])
+        self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
+        failure = next(call for call in sidecar.calls if call[0] == "failure")
+        self.assertEqual(failure[5]["account_ids"], [11, 12])
+
+    def test_account_identity_token_and_noncanonical_hold_errors_are_not_skipped(self):
+        for code, status in (
+            ("x_identity_mismatch", 409),
+            ("x_account_not_publishable", 409),
+            ("x_token_invalid", 401),
+            ("x_post_account_locked", 503),
+        ):
+            with self.subTest(code=code, status=status):
+                sidecar = FakeSidecar([due_item()])
+                loader = mock.Mock(side_effect=AssertionError("account failure must stop preflight"))
+                with mock.patch.object(sidecar, "verify_account", side_effect=SidecarError(
+                    code, "preflight rejected", status,
+                )) as verify:
+                    result = self.execute(sidecar, material_candidate_loader=loader)
+                verify.assert_called_once_with(11)
+                loader.assert_not_called()
+                self.assertEqual(result["batches"][0]["error_code"], code)
+                self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
 
     def test_drama_known_failure_continues_later_episode_queue(self):
         sidecar = FakeSidecar([due_item(source_type="drama")])

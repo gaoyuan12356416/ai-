@@ -270,6 +270,12 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 
 | 错误码 | 中文含义 | 动作/是否重试 |
 | --- | --- | --- |
+| `x_post_account_needs_review` | 该账号有未完成或结果待核对的发布；也可能是冻结转发源被占用 | 新批次跳过该账号；原未知记录不变，不可通过清状态或重发确认 |
+| `x_post_account_locked` | X 明确返回账号临时锁定 | 新批次跳过该账号；先登录 X 解锁并人工核对。资料接口成功不代表解除发布锁定 |
+| `x_post_schedule_account_state_changed` | 素材容量预检后账号可用范围发生变化 | 本次建计划为已知拒绝、零队列；不得用过期容量证据继续建计划 |
+| `x_post_media_repair_config_invalid` | 短剧逐条修复配置缺失、不安全或不符合现行协议 | 尚未尝试发帖；修正服务配置，不能放宽媒体校验 |
+| `x_post_media_preparation_failed` | 短剧上传前的媒体准备出现未分类异常 | 保留原队列并记零次发帖尝试；排查后按精确恢复流程处理 |
+| `x_post_bound_drama_source_changed` | 历史短剧恢复时权威素材 ID 或 URL 与原冻结队列不一致 | 阻断恢复，不修复替代源、不改绑定，不自动重发 |
 | `x_sidecar_unreachable` / `x_accounts_unavailable` / `x_posts_unavailable` | loopback sidecar 不可达或服务不可用 | 零 X 写入时可在服务恢复后自然再试 |
 | `x_sidecar_invalid_response` / `x_account_invalid_response` / `x_material_keys_invalid_response` | sidecar 返回结构不符合合同 | 工程错误，失败关闭 |
 | `x_post_pool_invalid_response` / `x_post_pool_check_invalid_response` | 素材池查询/校验响应无效 | 本轮零发布 |

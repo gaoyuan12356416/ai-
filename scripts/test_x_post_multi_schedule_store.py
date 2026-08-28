@@ -2245,6 +2245,276 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertIn("本次已为1个", frozen["run"]["error_message"])
         self.assertEqual(due["items"][0]["account_ids"], [2, 3])
 
+    def _historical_account_failure(self, account_id, *, locked=False):
+        candidate = base_candidate(
+            account_id, "HeldAccount%s" % account_id,
+            str(9900 + account_id), "HeldContent%s" % account_id,
+        )
+        candidate.update({
+            "run_date": "2026-07-26",
+            "source_date": "2026-07-25",
+            "idempotency_key": "xpost:test:account-hold:%s" % account_id,
+        })
+        with mock.patch.object(service, "utc_now", return_value="2026-07-26T01:00:00Z"):
+            queued = self.store.enqueue(candidate)
+            log = self._prepare_account_test_log(queued)
+            self.store.mark_publishing(log["id"])
+            self.store.mark_failed(
+                log["id"], "x_upstream_error",
+                "HTTP 403: Your account is temporarily locked."
+                if locked else "HTTP 503: response did not confirm the Post",
+                unknown_outcome=not locked,
+            )
+        return queued
+
+    def _prepare_account_test_log(self, queued):
+        log = self.store.reserve_log(queued["id"])
+        self.store.prepare_log(
+            log["id"],
+            "https://www.dramawavew2a.com/ads/101/2116/view?test=1",
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "Account isolation regression fixture",
+        )
+        return log
+
+    def test_held_accounts_do_not_block_healthy_material_subset_or_rewrite_history(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        historical = [
+            self._historical_account_failure(2),
+            self._historical_account_failure(3, locked=True),
+        ]
+        history_ids = [item["id"] for item in historical]
+        before = self._queue_log_snapshot(history_ids)
+        blockers = self.store.schedule_account_blockers([2, 3, 4])
+        self.assertEqual(
+            {key: item["code"] for key, item in blockers.items()},
+            {2: "x_post_account_needs_review", 3: "x_post_account_locked"},
+        )
+        pool = self.store.add_pool_materials(
+            ["251"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "251", "error_code": ""}],
+        )["items"][0]
+
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2,
+            [self.material_candidate(pool, 4)],
+        )
+        frozen = self.store.query_schedule_plan("material", "2026-07-27", "09:00")
+        self.assertEqual(frozen["run"]["account_ids"], [2, 3, 4])
+        self.assertEqual(frozen["run"]["expected_count"], 1)
+        self.assertEqual(frozen["run"]["error_code"], "")
+        self.assertIn("HeldAccount2", frozen["run"]["error_message"])
+        self.assertIn("HeldAccount3", frozen["run"]["error_message"])
+        self.assertEqual([item["account_id"] for item in plan["queues"]], [4])
+        log = self._prepare_account_test_log(plan["queues"][0])
+        started = self.store.mark_publishing(log["id"])
+        self.assertEqual(started["attempt_count"], 1)
+        self.assertEqual(self._queue_log_snapshot(history_ids), before)
+
+    def test_direct_submission_of_held_account_rolls_back_before_new_queue(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        history_ids = [
+            self._historical_account_failure(2)["id"],
+            self._historical_account_failure(3, locked=True)["id"],
+        ]
+        before = self._queue_log_snapshot(history_ids)
+        pool = self.store.add_pool_materials(
+            ["252"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "252", "error_code": ""}],
+        )["items"][0]
+        for account_id, code in (
+            (2, "x_post_account_needs_review"),
+            (3, "x_post_account_locked"),
+        ):
+            with self.subTest(account_id=account_id), self.assertRaises(service.XPostError) as rejected:
+                self.store.create_schedule_plan(
+                    "material", "2026-07-27", "09:00", 2,
+                    [self.material_candidate(pool, account_id)],
+                )
+            self.assertEqual(rejected.exception.code, code)
+        self.assertFalse(
+            self.store.query_schedule_plan("material", "2026-07-27", "09:00")["found"]
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 2)
+        self.assertEqual(self._queue_log_snapshot(history_ids), before)
+
+    def test_unknown_inside_actual_frozen_subset_still_blocks_sibling_publish(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        self._historical_account_failure(3)
+        older, newer = self.store.add_pool_materials(
+            ["253", "254"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": value, "error_code": ""} for value in ("253", "254")],
+        )["items"]
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2,
+            [self.material_candidate(newer, 2), self.material_candidate(older, 4)],
+        )
+        first = self._prepare_account_test_log(plan["queues"][0])
+        self.store.mark_publishing(first["id"])
+        self.store.mark_failed(first["id"], "x_upstream_error", "HTTP 503", unknown_outcome=True)
+        second = self._prepare_account_test_log(plan["queues"][1])
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.mark_publishing(second["id"])
+        self.assertEqual(rejected.exception.code, "x_post_unknown_outcome")
+        self.assertEqual(self.store.get_log(second["id"])["attempt_count"], 0)
+
+    def test_material_fifo_capacity_uses_eligible_scope_without_skipping_unproven_row(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        self._historical_account_failure(3)
+        selected_en, skipped_ja, selected_ja = self.store.add_pool_materials(
+            ["255", "256", "257"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": value, "error_code": ""} for value in ("255", "256", "257")],
+        )["items"]
+        candidates = [self.material_candidate(selected_en, 2), self.material_candidate(selected_ja, 4)]
+        candidates[1]["material_language"] = "ja"
+        self.store.due_schedule_slots(datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ))
+        with self.assertRaises(service.XPostError) as unproven:
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2, candidates)
+        self.assertEqual(unproven.exception.code, "x_post_pool_fifo_conflict")
+        self.store.record_pool_checks([{
+            "pool_item_id": skipped_ja["id"], "material_id": skipped_ja["material_id"],
+            "material_language": "ja", "proof_reason": "language_capacity_full", "error_code": "",
+        }])
+        proof = [{
+            "pool_item_id": skipped_ja["id"], "material_id": skipped_ja["material_id"],
+            "material_language": "ja", "reason": "language_capacity_full",
+        }]
+        with self.assertRaises(service.XPostError) as full_scope_capacity:
+            self.store.create_schedule_plan(
+                "material", "2026-07-27", "09:00", 2, candidates,
+                fifo_capacity_skips=proof, material_language_capacities={"en": 1, "ja": 2},
+            )
+        self.assertEqual(full_scope_capacity.exception.code, "x_post_pool_fifo_conflict")
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2, candidates,
+            fifo_capacity_skips=proof, material_language_capacities={"en": 1, "ja": 1},
+        )
+        self.assertEqual(plan["account_ids"], [2, 3, 4])
+        self.assertEqual([item["pool_item_id"] for item in plan["queues"]], [selected_en["id"], selected_ja["id"]])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertIsNone(conn.execute("SELECT id FROM x_post_queue WHERE pool_item_id=?", (skipped_ja["id"],)).fetchone())
+
+    def test_held_material_account_keeps_unfinished_drama_owner_in_configured_scope(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        unbound = self.add_drama(content_id="AVAILABLE", free_episode_count=1)
+        bound = self.add_drama(content_id="OWNED", free_episode_count=2)
+        first = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [self.drama_candidate(bound, 2, 1)],
+        )
+        self.publish_queue(first["queues"][0], 1, "owned-first")
+        self._historical_account_failure(2)
+        owned_before = next(item for item in self.store.query_drama_pool()["items"] if item["id"] == bound["id"])
+        with self.assertRaises(service.XPostError) as foreign_owner:
+            self.store.available_drama_pool_items(account_ids=[3])
+        self.assertEqual(foreign_owner.exception.code, "x_post_drama_owner_not_configured")
+        available = self.store.available_drama_pool_items(
+            account_ids=[3], configured_account_ids=[2, 3],
+        )
+        self.assertEqual([(item["id"], item["candidate_account_id"]) for item in available], [(unbound["id"], 3)])
+        second = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "10:00", 2, [self.drama_candidate(unbound, 3, 1)],
+        )
+        self.publish_queue(second["queues"][0], 1, "available-first")
+        owned_after = next(item for item in self.store.query_drama_pool()["items"] if item["id"] == bound["id"])
+        self.assertEqual(owned_after, owned_before)
+        self.assertEqual(self.store.get_schedule_run(second["id"])["status"], "completed")
+
+    def test_blocked_relay_cannot_be_selected_or_silently_replace_frozen_material_relay(self):
+        self.save_schedule("material", [2], ["09:00"])
+        self._historical_account_failure(9, locked=True)
+        pool = self.store.add_pool_materials(
+            ["258"], actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "258", "error_code": ""}],
+        )["items"][0]
+        candidate = self.material_candidate(pool, 2)
+        candidate.update({
+            "preflight_duration": 180.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+            "relay_account_id": 9, "relay_account_username": "premium9",
+        })
+        relays = [{"id": value, "username": "premium%s" % value, "drama_language": "en"} for value in (9, 10)]
+        for options in (relays[:1], relays):
+            with self.subTest(options=options), self.assertRaises(service.XPostError) as rejected:
+                self.store.create_schedule_plan(
+                    "material", "2026-07-27", "09:00", 2, [candidate],
+                    premium_account_ids=[], premium_relay_accounts=options,
+                )
+            self.assertEqual(rejected.exception.code, "x_post_premium_relay_unavailable")
+        self.assertFalse(self.store.query_schedule_plan("material", "2026-07-27", "09:00")["found"])
+        candidate.update({"relay_account_id": 10, "relay_account_username": "premium10"})
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2, [candidate],
+            premium_account_ids=[], premium_relay_accounts=relays,
+        )
+        self.assertEqual(plan["queues"][0]["relay_account_id"], 10)
+
+    def _relay_account_lock(self, *, source_published):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["259"], actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "259", "error_code": ""}],
+        )["items"][0]
+        candidate = self.material_candidate(pool, 2)
+        candidate.update({
+            "preflight_duration": 180.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+            "relay_account_id": 9, "relay_account_username": "premium9",
+        })
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2, [candidate],
+            premium_account_ids=[],
+            premium_relay_accounts=[{"id": 9, "username": "premium9", "drama_language": "en"}],
+        )
+        queued = plan["queues"][0]
+        log = self._prepare_account_test_log(queued)
+        self.store.mark_publishing(log["id"])
+        self.store.mark_media_uploaded(log["id"], "relay-media")
+        message = "HTTP 403: Your account is temporarily locked."
+        if source_published:
+            self.store.mark_relay_source_published(
+                log["id"], "relay-media", "source-post", "https://x.com/premium9/status/source-post",
+            )
+            self.store.mark_reposting(queued["id"])
+            self.store.mark_repost_failed(queued["id"], "x_upstream_error", message)
+        else:
+            self.store.mark_failed(log["id"], "x_upstream_error", message)
+        return queued
+
+    def test_confirmed_source_post_and_locked_repost_hold_target_only(self):
+        queued = self._relay_account_lock(source_published=True)
+        blockers = self.store.schedule_account_blockers([2, 9])
+        self.assertEqual({key: item["code"] for key, item in blockers.items()}, {2: "x_post_account_locked"})
+        self.assertEqual(self.store.get_repost_ledger(queued["id"])["source_post_id"], "source-post")
+        self.assertEqual(
+            [item["account_id"] for item in self.store.premium_relay_account_loads("2026-07-27", [2, 9])],
+            [9],
+        )
+
+    def test_locked_source_post_holds_relay_only(self):
+        self._relay_account_lock(source_published=False)
+        blockers = self.store.schedule_account_blockers([2, 9])
+        self.assertEqual({key: item["code"] for key, item in blockers.items()}, {9: "x_post_account_locked"})
+        self.assertEqual(
+            [item["account_id"] for item in self.store.premium_relay_account_loads("2026-07-27", [2, 9])],
+            [2],
+        )
+
+    def test_profile_active_does_not_clear_lock_but_later_confirmed_post_does(self):
+        held = self._historical_account_failure(2, locked=True)
+        before = self._queue_log_snapshot([held["id"]])
+        self._add_recovery_account(2, status="active")
+        self.assertEqual(self.store.schedule_account_blockers([2])[2]["code"], "x_post_account_locked")
+        candidate = base_candidate(2, "HeldAccount2", "9992", "ConfirmedContent2")
+        candidate.update({"idempotency_key": "xpost:test:confirmed-after-lock", "run_date": "2026-07-27"})
+        confirmed = self.store.enqueue(candidate)
+        with mock.patch.object(service, "utc_now", return_value="2026-07-27T01:00:00Z"):
+            self.publish_queue(confirmed, 1, "confirmed-after-lock")
+        self.assertEqual(self.store.schedule_account_blockers([2]), {})
+        self.assertEqual(self._queue_log_snapshot([held["id"]]), before)
+
     def test_material_fifo_replay_rejects_stale_skip_evidence(self):
         self.assertFalse(
             service._material_fifo_selection_matches(
@@ -3206,7 +3476,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 2,
                 [self.drama_candidate(later_pool, 3, 1)],
             )
-        self.assertEqual(rejected.exception.code, "x_post_unknown_outcome")
+        self.assertEqual(rejected.exception.code, "x_post_drama_pool_needs_review")
 
     def test_drama_pool_batch_delete_is_atomic_and_returns_compact_items(self):
         first = self.add_drama(content_id="DELETE1")

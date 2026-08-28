@@ -16,6 +16,8 @@ SOURCES = (
     ROOT / "features" / "x_posts" / "drama_selector.py",
     ROOT / "features" / "x_posts" / "service.py",
     ROOT / "features" / "x_posts" / "media_repair.py",
+    ROOT / "features" / "x_posts" / "publish_media_repair.py",
+    ROOT / "features" / "x_posts" / "account_blockers.py",
     ROOT / "features" / "x_accounts" / "oauth_service.py",
     ROOT / "scripts" / "x_post_daily_runner.py",
     ROOT / "scripts" / "x_post_schedule_runner.py",

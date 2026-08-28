@@ -331,7 +331,7 @@ class ScheduleConfig:
                 "X_POST_DAILY_INTERNAL_TIMEOUT",
                 900,
                 5,
-                900,
+                7200,
             ),
             lock_path=_env_value(
                 "X_POST_SCHEDULE_LOCK_PATH",
@@ -565,6 +565,9 @@ def _scheduled_at(item):
 
 class ScheduleSidecarClient(SidecarClient):
     """Strict parser for the schedule-only internal API surface."""
+
+    def verify_account(self, account_id):
+        return super().verify_account(account_id, schedule_preflight=True)
 
     def due_schedules(
         self,
@@ -868,14 +871,14 @@ class ScheduleSidecarClient(SidecarClient):
             )
         return dict(item)
 
-    def available_drama_pool(self, path, limit, account_ids):
+    def available_drama_pool(self, path, limit, account_ids, *, configured_account_ids=None):
         normalized_accounts = [int(value) for value in account_ids]
+        payload = {"limit": int(limit), "account_ids": normalized_accounts}
+        if configured_account_ids is not None:
+            payload["configured_account_ids"] = list(configured_account_ids)
         result = self.post(
             path,
-            {
-                "limit": int(limit),
-                "account_ids": normalized_accounts,
-            },
+            payload,
         )
         items = result.get("items") if isinstance(result, dict) else None
         if (
@@ -1119,14 +1122,30 @@ def _repair_client(config):
     )
 
 
-def _verify_accounts(sidecar, account_ids):
+def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accounts=None):
     verified = []
+    skipped = []
     for account_id in account_ids:
-        verified.append(_safe_account(sidecar.verify_account(account_id)))
-    if [item["id"] for item in verified] != list(account_ids):
+        try:
+            verified.append(_safe_account(sidecar.verify_account(account_id)))
+        except SidecarError as exc:
+            if not skip_blocked or exc.status != 409 or exc.code not in {
+                "x_post_account_needs_review", "x_post_account_locked",
+            }:
+                raise
+            skipped.append({"account_id": int(account_id), "error_code": exc.code, "message": str(exc)})
+    skipped_ids = {item["account_id"] for item in skipped}
+    if [item["id"] for item in verified] != [value for value in account_ids if value not in skipped_ids]:
         raise ScheduleRunError(
             "verified account order does not match frozen schedule",
             "x_post_schedule_account_mismatch",
+        )
+    if skipped_accounts is not None:
+        skipped_accounts.extend(skipped)
+    if not verified and skipped:
+        raise ScheduleRunError(
+            ("本批账号均被暂停；" + "；".join(item["message"] for item in skipped))[:240],
+            skipped[0]["error_code"],
         )
     return verified
 
@@ -1606,6 +1625,7 @@ def _drama_candidates(
     prober,
     repair_client,
     timestamp,
+    configured_account_ids=None,
 ):
     del downloader, prober, repair_client
     account_ids = [int(account["id"]) for account in accounts]
@@ -1641,14 +1661,18 @@ def _drama_candidates(
             if refresh_accounts:
                 accounts = _verify_accounts(sidecar, account_ids)
                 refresh_accounts = False
+            scope_options = {}
+            if configured_account_ids is not None and list(configured_account_ids) != account_ids:
+                scope_options["configured_account_ids"] = list(configured_account_ids)
             pool_items = sidecar.available_drama_pool(
                 config.drama_pool_path,
                 config.scan_limit,
                 account_ids,
+                **scope_options,
             )
             if not pool_items:
                 raise ScheduleRunError(
-                    "short-drama pool has no free episode for this schedule",
+                    "当前账号没有可续播的空闲剧集，请检查已绑定剧集的失败记录或同语言库存",
                     "x_post_schedule_drama_shortage",
                 )
             candidates = []
@@ -2071,7 +2095,11 @@ def execute_schedule_tick(
         try:
             _heartbeat_best_effort(sidecar, identity)
             sidecar.preflight_storage(config.storage_preflight_path)
-            accounts = _verify_accounts(sidecar, identity["account_ids"])
+            skipped_accounts = []
+            accounts = _verify_accounts(
+                sidecar, identity["account_ids"], skip_blocked=True,
+                skipped_accounts=skipped_accounts,
+            )
             source_date = previous_source_date(current)
             timestamp = max(1, int(current.timestamp()))
             if identity["source_type"] == "material":
@@ -2095,6 +2123,9 @@ def execute_schedule_tick(
                     **material_loader_options,
                 )
             else:
+                drama_scope_options = {}
+                if drama_candidate_loader is _drama_candidates:
+                    drama_scope_options["configured_account_ids"] = identity["account_ids"]
                 candidates = drama_candidate_loader(
                     config,
                     sidecar,
@@ -2105,6 +2136,7 @@ def execute_schedule_tick(
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,
+                    **drama_scope_options,
                 )
             candidate_account_ids = [
                 int(item["account_id"]) for item in candidates
@@ -2192,6 +2224,8 @@ def execute_schedule_tick(
         result = _publish_frozen_queues(
             config, sidecar, identity, queues, resumed=False
         )
+        if skipped_accounts:
+            result["skipped_accounts"] = skipped_accounts
         batches.append(result)
 
     return {

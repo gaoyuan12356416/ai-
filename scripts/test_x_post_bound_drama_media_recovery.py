@@ -49,6 +49,15 @@ class FakeStore:
     def __init__(self):
         self.calls = []
 
+    def get_queue(self, queue_id):
+        index = queue_id - 530
+        return {
+            "schedule_run_id": 274, "source_type": "drama",
+            "drama_pool_item_id": 151 - index, "content_id": "CONTENT%s" % index,
+            "episode_number": 5, "material_id": str(151 - index),
+            "material_url": "https://media.example.test/%s.mp4" % (151 - index),
+        }
+
     def recover_failed_drama_schedule_queues(
         self, run_id, prepared, **kwargs
     ):
@@ -198,6 +207,24 @@ class BoundDramaRecoveryTests(unittest.TestCase):
         raw["queues"][1]["queue_id"] = raw["queues"][0]["queue_id"]
         with self.assertRaises(BackfillError):
             normalize_manifest(raw)
+
+    def test_source_resource_or_url_drift_stops_before_repair(self):
+        loader = self.candidate_loader
+        for field, replacement in (
+            ("material_id", "changed-resource"),
+            ("material_url", "https://media.example.test/changed.mp4"),
+        ):
+            with self.subTest(field=field):
+                def changed(*args, **kwargs):
+                    items = loader(*args, **kwargs)
+                    items[0][field] = replacement
+                    return items
+                preflight = mock.Mock()
+                with mock.patch.object(self, "candidate_loader", changed):
+                    with self.assertRaises(BackfillError) as rejected:
+                        self.execute(manifest(), apply=True, preflight=preflight)
+                self.assertEqual(rejected.exception.code, "x_post_bound_drama_source_changed")
+                preflight.assert_not_called()
 
     def test_main_redacts_sqlite_failure_and_records_zero_x_report(self):
         report_path = self.work_dir / "store-failed.json"

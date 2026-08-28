@@ -2,7 +2,9 @@
 """Offline unit tests for the X Post canary module."""
 
 import contextlib
+import hashlib
 import http.client
+import io
 import json
 import os
 import sqlite3
@@ -13,6 +15,7 @@ import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -87,6 +90,51 @@ def valid_probe_payload(width=720, height=1280, fps="30000/1001", duration="45.2
         ],
         "format": {"duration": duration},
     }
+
+
+def deferred_drama_queue(store, account_id=2, username="ShortsDramhx", relay=False):
+    """Build a real frozen deferred episode; shared with Sidecar integration tests."""
+    config = store.save_schedule_config(
+        "drama",
+        {
+            "enabled": True, "timezone": "Asia/Shanghai", "account_ids": [account_id],
+            "publish_times": ["09:00"], "version": 1,
+        },
+        actor={"user_id": "admin-1", "name": "Admin"},
+        eligible_account_ids=[account_id],
+        now=datetime(2026, 8, 12, 8, 0, tzinfo=service.BEIJING_TZ),
+    )
+    pool = store.add_drama_pool_items(
+        ["32001"],
+        [{
+            "content_id": "32001", "drama_name": "The Contract Bride",
+            "description": "A contract marriage becomes an unexpected romance.",
+            "language": "en", "labels": "romance", "name_tag": "#Contract_Bride",
+            "free_episode_count": 2,
+        }],
+        actor={"user_id": "admin-1", "name": "Admin"},
+    )["items"][0]
+    item = candidate(account_id, username)
+    item.update({
+        "source_date": "2026-08-11", "source_type": "drama", "material_id": "a" * 32,
+        "candidate_rank": 1, "drama_pool_item_id": pool["id"],
+        "drama_pool_created_at": pool["created_at"], "episode_number": 1,
+        "episode_key": "32001:1", "drama_replay_generation": 1,
+        "name_tag": "#Contract_Bride", "account_drama_language": "en",
+        "media_validation_mode": "deferred", "preflight_sha256": "", "preflight_size": 0,
+        "preflight_duration": 141.0 if relay else 0.0,
+        "delivery_mode": "premium_relay_repost" if relay else "direct",
+        "relay_account_id": account_id + 10 if relay else 0,
+        "relay_account_username": "premium10" if relay else "",
+        "facebook_violation_count": 0, "tiktok_violation_count": 0,
+        "twitter_violation_count": 0, "resource_audit_count": 0, "dangerous_tag_count": 0,
+    })
+    return store.create_schedule_plan(
+        "drama", "2026-08-12", "09:00", config["version"], [item],
+        premium_account_ids=[] if relay else [account_id],
+        premium_relay_accounts=[{"id": account_id + 10, "username": "premium10", "drama_language": "en"}]
+        if relay else [],
+    )["queues"][0]
 
 
 class XPostsTests(unittest.TestCase):
@@ -1348,6 +1396,293 @@ class XPostsTests(unittest.TestCase):
             json.loads(initialize["body"].decode("utf-8"))["media_category"],
             "tweet_video",
         )
+
+    @staticmethod
+    def _deferred_repair_result(payload, duration=45.25):
+        return {
+            "status": "ready", "job_key": payload["job_key"], "profile": payload["profile"],
+            "reused": False, "output_url": "https://media.example.com/repaired.mp4",
+            "output_sha256": hashlib.sha256(b"fixed").hexdigest(), "output_size": 5,
+            "probe": {
+                "codec": "h264", "pixel_format": "yuv420p", "audio_codec": "aac",
+                "width": 720, "height": 1280, "frame_rate": 30.0, "duration": duration, "size": 5,
+            },
+        }
+
+    def test_deferred_drama_repair_reuses_download_and_measured_duration_direct_and_relay(self):
+        from features.x_posts import publish_media_repair as repair
+        from scripts.x_post_daily_runner import DEFAULT_REPAIR_PROFILE
+
+        for relay in (False, True):
+            for duration in (45.25, 763.938):
+                with self.subTest(relay=relay, duration=duration):
+                    db_path = self.root / ("repair-%s-%s.sqlite3" % (relay, duration))
+                    store = service.XPostStore(db_path)
+                    queue = deferred_drama_queue(store, relay=relay)
+                    log = store.reserve_log(queue["id"])
+                    account = {
+                        "id": queue["relay_account_id"] if relay else queue["account_id"],
+                        "username": queue["relay_account_username"] if relay else queue["account_username"],
+                        "subscription_type": "none" if not relay and duration <= 140 else "premium",
+                    }
+                    client = ScriptedHttpClient([
+                        service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video"),
+                        service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"fixed"),
+                        response(200, {"data": {"id": "repaired-media"}}),
+                        response(200, {"data": {"expires_at": 1}}),
+                        response(200, {"data": {"id": "repaired-media"}}),
+                        response(201, {"data": {"id": "190008281", "text": "ok"}}),
+                    ])
+                    repairer = SimpleNamespace(repair=mock.Mock(
+                        side_effect=lambda payload: self._deferred_repair_result(payload, duration),
+                    ))
+                    probes = [
+                        valid_probe_payload(width=1920, height=1080, duration=str(duration), fps="30/1"),
+                        valid_probe_payload(duration=str(duration), fps="30/1"),
+                        valid_probe_payload(duration=str(duration), fps="30/1"),
+                    ]
+                    public_root = self.root / ("repaired-%s-%s" % (relay, duration)) / "s2l"
+                    audit = io.StringIO()
+                    with mock.patch.object(repair, "_repair_client_from_env", return_value=(repairer, DEFAULT_REPAIR_PROFILE)), mock.patch.object(
+                        service.subprocess, "run", side_effect=[SimpleNamespace(returncode=0, stdout=json.dumps(item)) for item in probes],
+                    ), contextlib.redirect_stdout(audit):
+                        with repair.prepare_deferred_drama_media(
+                            queue=queue, log=log, account=account, public_root=public_root,
+                            allowed_media_hosts=["media.example.com"], http_client=client,
+                        ) as prepared:
+                            prepared_path = prepared.media["path"]
+                            result = service.publish_canary(
+                                db_path=db_path, queue_id=queue["id"], account=account, access_token="offline-test-token",
+                                public_root=public_root, short_base_url="https://gy.g2flow.com/s2l",
+                                allowed_media_hosts=["media.example.com"], http_client=client,
+                                sleeper=lambda _seconds: None, prepared_media=prepared,
+                            )
+                    self.assertEqual(result["status"], "source_published" if relay else "published")
+                    self.assertFalse(prepared_path.exists())
+                    self.assertEqual([item["url"] for item in client.requests if item["method"] == "GET"], [queue["material_url"], "https://media.example.com/repaired.mp4"])
+                    repairer.repair.assert_called_once()
+                    self.assertEqual(repairer.repair.call_args.args[0]["duration_policy"], "standard" if account["subscription_type"] == "none" else "premium")
+                    self.assertEqual(repairer.repair.call_args.args[0]["source_sha256"], hashlib.sha256(b"video").hexdigest())
+                    frozen = store.get_queue(queue["id"])
+                    for field in repair._QUEUE_IDENTITY_FIELDS + ("preflight_duration", "preflight_sha256", "preflight_size"):
+                        self.assertEqual(frozen[field], queue[field], field)
+                    final_log = store.get_log(log["id"])
+                    self.assertEqual(final_log["attempt_count"], 1)
+                    self.assertFalse(final_log["unknown_outcome"])
+                    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(final_log["long_url"]).query))
+                    self.assertEqual(query["af_channel"], "long" if duration > 140 else "short")
+                    initialize = next(item for item in client.requests if item["url"].endswith("/2/media/upload/initialize"))
+                    self.assertEqual(json.loads(initialize["body"])["media_category"], "amplify_video" if duration > 140 else "tweet_video")
+                    event = json.loads(audit.getvalue())
+                    self.assertEqual(event["queue_id"], queue["id"])
+                    self.assertEqual(event["duration"], duration)
+                    self.assertNotIn("url", audit.getvalue())
+                    self.assertNotIn("offline-test-token", audit.getvalue())
+
+    def test_deferred_drama_healthy_media_does_not_call_repair_or_download_twice(self):
+        from features.x_posts import publish_media_repair as repair
+
+        store = service.XPostStore(self.db_path)
+        queue = deferred_drama_queue(store)
+        log = store.reserve_log(queue["id"])
+        account = {"id": 2, "username": "ShortsDramhx", "subscription_type": "none"}
+        client = ScriptedHttpClient([
+            service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video"),
+            response(200, {"data": {"id": "original-media"}}),
+            response(200, {"data": {"expires_at": 1}}),
+            response(200, {"data": {"id": "original-media"}}),
+            response(201, {"data": {"id": "190008282"}}),
+        ])
+        with mock.patch.object(repair, "_repair_client_from_env", side_effect=AssertionError("healthy media must not repair")), mock.patch.object(
+            service, "probe_media", return_value={"duration": 45.25},
+        ) as probe:
+            with repair.prepare_deferred_drama_media(
+                queue=queue, log=log, account=account, public_root=self.root / "s2l",
+                allowed_media_hosts=["media.example.com"], http_client=client,
+            ) as prepared:
+                result = service.publish_canary(
+                    db_path=self.db_path, queue_id=queue["id"], account=account, access_token="offline-test-token",
+                    public_root=self.root / "s2l", short_base_url="https://gy.g2flow.com/s2l",
+                    allowed_media_hosts=["media.example.com"], http_client=client,
+                    prepared_media=prepared, sleeper=lambda _seconds: None,
+                )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(sum(item["method"] == "GET" for item in client.requests), 1)
+
+    def test_deferred_repair_rejects_gpu_errors_and_mismatched_evidence_before_x(self):
+        from features.x_posts import publish_media_repair as repair
+        from scripts.x_post_daily_runner import DEFAULT_REPAIR_PROFILE, MediaRepairError
+
+        cases = [
+            ({"profile": "wrong"}, "x_post_media_repair_invalid_response"),
+            ({"job_key": "0" * 64}, "x_post_media_repair_invalid_response"),
+            ({"duration_policy": "standard"}, "x_post_media_repair_invalid_response"),
+            ({"output_sha256": "0" * 64}, "x_post_media_repair_fingerprint_mismatch"),
+            ({"output_size": 6}, "x_post_media_repair_fingerprint_mismatch"),
+            ({"probe": {**self._deferred_repair_result({"job_key": "", "profile": ""})["probe"], "width": 640}}, "x_post_media_repair_probe_mismatch"),
+            (MediaRepairError("x_post_media_repair_unreachable", "private token=do-not-expose"), "x_post_media_repair_unreachable"),
+        ]
+        for index, (change, expected_code) in enumerate(cases):
+            with self.subTest(code=expected_code, change=index):
+                store = service.XPostStore(self.root / ("repair-failure-%s.sqlite3" % index))
+                queue = deferred_drama_queue(store)
+                log = store.reserve_log(queue["id"])
+                account = {"id": 2, "username": "ShortsDramhx", "subscription_type": "premium"}
+                client = ScriptedHttpClient([
+                    service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video"),
+                    service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"fixed"),
+                ])
+                def rejected(payload):
+                    if isinstance(change, Exception):
+                        raise change
+                    return {**self._deferred_repair_result(payload), **change}
+                repairer = SimpleNamespace(repair=mock.Mock(side_effect=rejected))
+                with mock.patch.object(repair, "_repair_client_from_env", return_value=(repairer, DEFAULT_REPAIR_PROFILE)), mock.patch.object(
+                    service, "probe_media", side_effect=[service.XPostError("invalid_media_dimensions", "invalid dimensions", 422), self._deferred_repair_result({"job_key": "", "profile": ""})["probe"]],
+                ), self.assertRaises(service.XPostError) as caught:
+                    with repair.prepare_deferred_drama_media(
+                        queue=queue, log=log, account=account, public_root=self.root / ("failure-%s" % index) / "s2l",
+                        allowed_media_hosts=["media.example.com"], http_client=client,
+                    ):
+                        self.fail("invalid repair must not reach publication")
+                self.assertEqual(caught.exception.code, expected_code)
+                self.assertNotIn("do-not-expose", str(caught.exception))
+                self.assertEqual(store.get_log(log["id"])["attempt_count"], 0)
+                self.assertFalse(store.get_log(log["id"])["unknown_outcome"])
+                self.assertTrue(all(item["method"] == "GET" for item in client.requests))
+                repairer.repair.assert_called_once()
+
+    def test_deferred_repair_disabled_or_nonrepairable_errors_never_call_gpu(self):
+        from features.x_posts import publish_media_repair as repair
+
+        for index, code in enumerate(("invalid_media_dimensions", "invalid_media_frame_rate", "x_long_video_requires_premium")):
+            with self.subTest(code=code):
+                store = service.XPostStore(self.root / ("repair-disabled-%s.sqlite3" % index))
+                queue = deferred_drama_queue(store)
+                log = store.reserve_log(queue["id"])
+                client = ScriptedHttpClient([service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video")])
+                with mock.patch.object(repair, "_repair_client_from_env", return_value=(None, "")) as factory, mock.patch.object(
+                    service, "probe_media", side_effect=service.XPostError(code, "source validation failed", 422),
+                ), self.assertRaises(service.XPostError) as caught:
+                    with repair.prepare_deferred_drama_media(
+                        queue=queue, log=log, account={"id": 2, "username": "ShortsDramhx", "subscription_type": "none"},
+                        public_root=self.root / ("disabled-%s" % index) / "s2l",
+                        allowed_media_hosts=["media.example.com"], http_client=client,
+                    ):
+                        self.fail("unrepaired source must not publish")
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(factory.call_count, 1 if code == "invalid_media_dimensions" else 0)
+                self.assertEqual(len(client.requests), 1)
+                self.assertEqual(store.get_log(log["id"])["attempt_count"], 0)
+
+    def test_deferred_repair_output_is_not_repaired_recursively(self):
+        from features.x_posts import publish_media_repair as repair
+        from scripts.x_post_daily_runner import DEFAULT_REPAIR_PROFILE
+
+        store = service.XPostStore(self.db_path)
+        queue = deferred_drama_queue(store)
+        log = store.reserve_log(queue["id"])
+        client = ScriptedHttpClient([
+            service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video"),
+            service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"fixed"),
+        ])
+        repairer = SimpleNamespace(repair=mock.Mock(side_effect=self._deferred_repair_result))
+        with mock.patch.object(repair, "_repair_client_from_env", return_value=(repairer, DEFAULT_REPAIR_PROFILE)), mock.patch.object(
+            service, "probe_media", side_effect=service.XPostError("invalid_media_dimensions", "still invalid", 422),
+        ), self.assertRaises(service.XPostError) as caught:
+            with repair.prepare_deferred_drama_media(
+                queue=queue, log=log, account={"id": 2, "username": "ShortsDramhx", "subscription_type": "premium"},
+                public_root=self.root / "s2l", allowed_media_hosts=["media.example.com"], http_client=client,
+            ):
+                self.fail("invalid repaired output must not publish")
+        self.assertEqual(caught.exception.code, "invalid_media_dimensions")
+        repairer.repair.assert_called_once()
+        self.assertEqual(len(client.requests), 2)
+        self.assertTrue(all(item["method"] == "GET" for item in client.requests))
+        self.assertEqual(store.get_log(log["id"])["attempt_count"], 0)
+
+    def test_deferred_prepared_media_rechecks_fingerprint_and_current_entitlement(self):
+        from features.x_posts import publish_media_repair as repair
+
+        for change_bytes in (False, True):
+            with self.subTest(change_bytes=change_bytes):
+                db_path = self.root / ("prepared-recheck-%s.sqlite3" % change_bytes)
+                store = service.XPostStore(db_path)
+                queue = deferred_drama_queue(store)
+                log = store.reserve_log(queue["id"])
+                account = {"id": 2, "username": "ShortsDramhx", "subscription_type": "premium"}
+                client = ScriptedHttpClient([service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video")])
+                with mock.patch.object(service.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout=json.dumps(valid_probe_payload(duration="763.938")),
+                )), mock.patch.object(repair, "_repair_client_from_env", side_effect=AssertionError("valid source must not repair")):
+                    with repair.prepare_deferred_drama_media(
+                        queue=queue, log=log, account=account, public_root=self.root / ("recheck-%s" % change_bytes) / "s2l",
+                        allowed_media_hosts=["media.example.com"], http_client=client,
+                    ) as prepared:
+                        if change_bytes:
+                            prepared.media["path"].write_bytes(b"other")
+                        with self.assertRaises(service.XPostError) as caught:
+                            service.publish_canary(
+                                db_path=db_path, queue_id=queue["id"], account={**account, "subscription_type": "none"},
+                                access_token="offline-test-token", public_root=self.root / ("recheck-%s" % change_bytes) / "s2l",
+                                short_base_url="https://gy.g2flow.com/s2l", allowed_media_hosts=["media.example.com"],
+                                http_client=client, prepared_media=prepared,
+                            )
+                self.assertEqual(caught.exception.code, "media_preflight_changed" if change_bytes else "x_long_video_requires_premium")
+                final_log = store.get_log(log["id"])
+                self.assertEqual(final_log["status"], "failed")
+                self.assertEqual(final_log["attempt_count"], 0)
+                self.assertFalse(final_log["unknown_outcome"])
+                self.assertEqual(len(client.requests), 1)
+
+    def test_deferred_preparation_refuses_any_attempt_or_unknown_and_material_is_unchanged(self):
+        from features.x_posts import publish_media_repair as repair
+
+        store = service.XPostStore(self.db_path)
+        queue = deferred_drama_queue(store)
+        log = store.reserve_log(queue["id"])
+        account = {"id": 2, "username": "ShortsDramhx", "subscription_type": "premium"}
+        with mock.patch.object(service, "download_media", side_effect=AssertionError("must not download")), mock.patch.object(
+            repair, "_repair_client_from_env", side_effect=AssertionError("must not repair"),
+        ):
+            for changed in ({"status": "published"}, {"unknown_outcome": True}, {"attempt_count": 1}):
+                with self.subTest(changed=changed), self.assertRaises(service.XPostError):
+                    with repair.prepare_deferred_drama_media(
+                        queue=queue, log={**log, **changed}, account=account,
+                        public_root=self.root / "s2l", allowed_media_hosts=["media.example.com"],
+                    ):
+                        self.fail("attempted log must be fenced")
+            for changed in ({"source_type": "material"}, {"media_validation_mode": "preflight"}):
+                with self.subTest(unchanged_path=changed):
+                    with repair.prepare_deferred_drama_media(
+                        queue={**queue, **changed}, log=log, account=account,
+                        public_root=self.root / "s2l", allowed_media_hosts=["media.example.com"],
+                    ) as prepared:
+                        self.assertIsNone(prepared)
+
+    def test_deferred_repair_config_is_disabled_by_default_and_fails_closed(self):
+        from features.x_posts import publish_media_repair as repair
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(repair._repair_client_from_env(512 * 1024 * 1024), (None, ""))
+        base = {
+            "X_POST_DEFERRED_DRAMA_REPAIR_ENABLED": "true",
+            "X_POST_DEFERRED_DRAMA_REPAIR_URL": "http://127.0.0.1:18820/internal/x-post-media-repair",
+            "X_POST_DEFERRED_DRAMA_REPAIR_TOKEN": "private-repair-token",
+        }
+        for change in (
+            {"X_POST_DEFERRED_DRAMA_REPAIR_URL": ""},
+            {"X_POST_DEFERRED_DRAMA_REPAIR_URL": "http://external.example.com:18820/internal/x-post-media-repair"},
+            {"X_POST_DEFERRED_DRAMA_REPAIR_TOKEN": ""},
+            {"X_POST_DEFERRED_DRAMA_REPAIR_PROFILE": "old-profile"},
+            {"X_POST_DEFERRED_DRAMA_REPAIR_TIMEOUT": "4000"},
+            {"X_INTERNAL_TOKEN": "private-repair-token"},
+        ):
+            with self.subTest(change=tuple(change)), mock.patch.dict(os.environ, {**base, **change}, clear=True), self.assertRaises(service.XPostError) as caught:
+                repair._repair_client_from_env(512 * 1024 * 1024)
+            self.assertEqual(caught.exception.code, "x_post_media_repair_config_invalid")
+            self.assertNotIn("private-repair-token", str(caught.exception))
 
     def test_publish_fails_if_final_probe_crosses_140_second_channel_boundary(self):
         queue = self.enqueue(preflight_duration=140.0)

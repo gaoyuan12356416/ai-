@@ -2665,9 +2665,74 @@ def publish_queue_request(
                     preserve_transient_status=True,
                     require_publish_approved=True,
                 )
-            with publish_credentials(
-                source_account_id, actor, "all"
-            ) as (account, access_token):
+            with contextlib.ExitStack() as publish_contexts:
+                prepared_media = None
+                if deferred_media_validation and queue.get("source_type") == "drama":
+                    from features.x_posts.publish_media_repair import prepare_deferred_drama_media
+
+                    # GPU repair may outlive the current Access Token. Keep
+                    # downloading/repair outside publish_credentials, then
+                    # refresh and recheck the exact frozen source afterwards.
+                    prepared_media = publish_contexts.enter_context(
+                        prepare_deferred_drama_media(
+                            queue=queue,
+                            log=log,
+                            account=verified_source,
+                            public_root=POST_PUBLIC_ROOT,
+                            allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                            timeout=POST_HTTP_TIMEOUT_SECONDS,
+                            max_media_bytes=POST_MAX_MEDIA_BYTES,
+                            storage_guard=preflight_post_storage_request,
+                            durable_storage={
+                                "mount_root": POST_STORAGE_MOUNT_ROOT,
+                                "storage_root": POST_STORAGE_ROOT,
+                            },
+                        )
+                    )
+                    if relay_delivery:
+                        verified_target = verify_account(
+                            int(queue["account_id"]),
+                            actor,
+                            "all",
+                            only_refresh_required=True,
+                            preserve_transient_status=True,
+                            require_publish_approved=True,
+                        )
+                        if frozen_drama_language and not same_drama_language(
+                            verified_target.get("drama_language"), frozen_drama_language,
+                        ):
+                            raise ServiceError(
+                                "x_post_account_language_mismatch",
+                                "X target account drama language no longer matches the frozen queue",
+                                409,
+                            )
+                    verified_source = verify_account(
+                        source_account_id,
+                        actor,
+                        "all",
+                        preserve_transient_status=True,
+                        require_publish_approved=True,
+                    )
+                    if frozen_drama_language and not same_drama_language(
+                        verified_source.get("drama_language"), frozen_drama_language,
+                    ):
+                        raise ServiceError(
+                            "x_post_account_language_mismatch",
+                            "X account drama language no longer matches the frozen queue",
+                            409,
+                        )
+                    if (relay_delivery or duration > 140.0) and (
+                        not verified_source.get("long_video_publish_eligible")
+                        or verified_source.get("protected") is not False
+                    ):
+                        raise ServiceError(
+                            "x_post_premium_relay_unavailable",
+                            "Long-video account is no longer eligible",
+                            409,
+                        )
+                account, access_token = publish_contexts.enter_context(
+                    publish_credentials(source_account_id, actor, "all")
+                )
                 try:
                     if frozen_drama_language and not same_drama_language(
                         account.get("drama_language"),
@@ -2707,9 +2772,18 @@ def publish_queue_request(
                             "mount_root": POST_STORAGE_MOUNT_ROOT,
                             "storage_root": POST_STORAGE_ROOT,
                         },
+                        **({"prepared_media": prepared_media} if prepared_media is not None else {}),
                     )
                 except XPostError as exc:
                     _raise_x_post_error(exc, (access_token,))
+        except XPostError as exc:
+            # Preparation is still before every X attempt. Persist a known
+            # failure so this episode cannot be silently replayed on re-entry.
+            try:
+                store.mark_failed_if_reserved(log["id"], exc.code, str(exc))
+            except XPostError as storage_exc:
+                _raise_x_post_error(storage_exc)
+            _raise_x_post_error(exc)
         except ServiceError as exc:
             try:
                 store.mark_failed_if_reserved(
@@ -3751,6 +3825,7 @@ def available_post_drama_pool_request(payload):
                     for account in accounts
                     if account.get("long_video_eligible")
                 ],
+                configured_account_ids=payload.get("configured_account_ids"),
             )
         }
     except XPostError as exc:
@@ -4091,7 +4166,10 @@ def create_post_schedule_plan_request(payload):
                 "素材容量证据必须绑定已冻结批次",
                 409,
             )
+        frozen_blockers = store.schedule_account_blockers(frozen["run"]["account_ids"])
         for frozen_account_id in frozen["run"]["account_ids"]:
+            if frozen_account_id in frozen_blockers:
+                continue
             account = find_account(int(frozen_account_id))
             try:
                 language = canonical_drama_language(
@@ -5205,6 +5283,13 @@ class Handler(BaseHTTPRequestHandler):
                         "X自动发布只能校验当前配置的账号",
                         403,
                     )
+                if "schedule_preflight" in payload and not isinstance(payload["schedule_preflight"], bool):
+                    raise ServiceError("invalid_request", "schedule_preflight必须是布尔值", 400)
+                if payload.get("schedule_preflight") is True:
+                    XPostError, XPostStore, _publish_canary = _x_posts_api()
+                    blocker = XPostStore(POST_DB_PATH).schedule_account_blockers([account_id]).get(account_id)
+                    if blocker:
+                        raise ServiceError(blocker["code"], blocker["message"], 409)
                 actor = {
                     "tenant_key": "internal",
                     "user_id": "x-post-daily",
@@ -5322,6 +5407,7 @@ class Handler(BaseHTTPRequestHandler):
                     or auto_publish_match
                     or parsed.path == "/internal/posts/daily-plan"
                     or parsed.path == "/internal/posts/catchup-plan"
+                    or parsed.path == "/internal/posts/schedule-plan"
                     or parsed.path == "/internal/posts/manual-plan"
                     or parsed.path == "/internal/posts/auto-template/plan"
                     or auto_run_recover_match

@@ -1,0 +1,26 @@
+{
+  "run_id": 350,
+  "queues": [
+    {
+      "queue_id": 667,
+      "pool_item_id": 178,
+      "content_id": "4jaHz4ilTl",
+      "episode_number": 1,
+      "expected_error_code": "invalid_media_dimensions"
+    },
+    {
+      "queue_id": 668,
+      "pool_item_id": 177,
+      "content_id": "Q2BRSdNM6r",
+      "episode_number": 1,
+      "expected_error_code": "invalid_media_dimensions"
+    },
+    {
+      "queue_id": 669,
+      "pool_item_id": 176,
+      "content_id": "ITWJz5kGua",
+      "episode_number": 1,
+      "expected_error_code": "invalid_media_dimensions"
+    }
+  ]
+}

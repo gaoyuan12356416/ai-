@@ -3,15 +3,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import sqlite3
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 from features.x_accounts import oauth_service as service
-from features.x_posts import XPostError
+from features.x_posts import XPostError, XPostStore
+from scripts.x_post_daily_runner import SidecarError
+from scripts.x_post_schedule_runner import ScheduleSidecarClient
 
 
 def parent_plan(account_ids=(101, 102, 103)):
@@ -88,6 +94,10 @@ class FakeStore:
         self.failure_args = None
         self.queue = None
         self.reserve_calls = []
+        self.account_blockers = {}
+
+    def schedule_account_blockers(self, account_ids):
+        return {key: self.account_blockers[key] for key in account_ids if key in self.account_blockers}
 
     def query_daily_plan(self, run_date):
         self.queried_run_date = run_date
@@ -161,6 +171,132 @@ class CatchupSidecarTest(unittest.TestCase):
             "status": "active",
             "publish_eligible": True,
         }
+
+    @contextlib.contextmanager
+    def http_server(self):
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield "http://127.0.0.1:%s" % server.server_address[1]
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_schedule_plan_http_business_rejection_is_known_but_unexpected_failure_is_not(self):
+        payload = {"account_ids": [101], "candidates": [self.candidate(101)]}
+        with self.http_server() as base_url:
+            client = ScheduleSidecarClient(base_url, service.DAILY_INTERNAL_TOKEN, timeout=5)
+            for code in (
+                "x_post_account_needs_review", "x_post_account_locked",
+                "x_post_drama_pool_needs_review", "x_post_pool_fifo_conflict",
+            ):
+                with self.subTest(code=code), mock.patch.object(
+                    service, "create_post_schedule_plan_request",
+                    side_effect=service.ServiceError(code, "计划在写队列前被拒绝", 409),
+                ):
+                    request = urllib.request.Request(
+                        base_url + "/internal/posts/schedule-plan",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Authorization": "Bearer " + service.DAILY_INTERNAL_TOKEN, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as response:
+                        urllib.request.urlopen(request, timeout=5)
+                    body = json.loads(response.exception.read().decode("utf-8"))
+                    response.exception.close()
+                    self.assertEqual(body["error"], code)
+                    self.assertIs(body["outcome_known"], True)
+                    self.assertIs(body["unknown_outcome"], False)
+                    with self.assertRaises(SidecarError) as rejected:
+                        client.create_schedule_plan("/internal/posts/schedule-plan", payload)
+                    self.assertEqual(rejected.exception.code, code)
+                    self.assertFalse(rejected.exception.unknown_outcome)
+            with mock.patch.object(
+                service, "create_post_schedule_plan_request", side_effect=RuntimeError("unexpected failure"),
+            ), self.assertRaises(SidecarError) as unexpected:
+                client.create_schedule_plan("/internal/posts/schedule-plan", payload)
+            self.assertEqual(unexpected.exception.code, "x_accounts_unavailable")
+            self.assertTrue(unexpected.exception.unknown_outcome)
+            with mock.patch.object(
+                client.opener, "open", side_effect=urllib.error.URLError("response lost"),
+            ), self.assertRaises(SidecarError) as lost:
+                client.create_schedule_plan("/internal/posts/schedule-plan", payload)
+            self.assertEqual(lost.exception.code, "x_sidecar_unreachable")
+            self.assertTrue(lost.exception.unknown_outcome)
+        self.assertIsNone(self.store.created_args)
+
+    def test_schedule_preflight_holds_account_even_after_successful_profile_verify(self):
+        blocker = {"code": "x_post_account_locked", "message": "账号临时锁定，请登录X处理"}
+        self.store.account_blockers[101] = blocker
+        with self.http_server() as base_url, mock.patch.object(
+            service, "_active_schedule_account_scope", return_value=(),
+        ), mock.patch.object(
+            service, "_active_manual_account_scope", return_value=(),
+        ), mock.patch.object(
+            service, "verify_account", return_value=self.account(101),
+        ) as verify:
+            client = ScheduleSidecarClient(base_url, service.DAILY_INTERNAL_TOKEN, timeout=5)
+            path = "/internal/posts/accounts/101/verify"
+            with self.assertRaises(SidecarError) as first:
+                client.verify_account(101)
+            self.assertEqual(first.exception.code, "x_post_account_locked")
+            verify.assert_not_called()
+            profile = client.post(path, {})
+            self.assertEqual(profile["item"]["status"], "active")
+            with self.assertRaises(SidecarError) as after_profile:
+                client.post(path, {"schedule_preflight": True, "snapshot_only": True})
+            self.assertEqual(after_profile.exception.code, "x_post_account_locked")
+            self.assertEqual(verify.call_count, 1)
+            self.assertEqual(self.store.account_blockers, {101: blocker})
+
+    def test_drama_pool_readonly_http_hold_keeps_precise_business_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = XPostStore(Path(temporary) / "drama-hold.sqlite3")
+            pool = store.add_drama_pool_items(
+                ["HTTP-HOLD"],
+                [{
+                    "content_id": "HTTP-HOLD", "drama_name": "HTTP Hold Drama",
+                    "description": "An episode waiting for review.", "language": "en",
+                    "labels": "", "name_tag": "#HTTP_Hold_Drama", "free_episode_count": 2,
+                }],
+                actor={"user_id": "admin-1", "name": "Admin"},
+            )["items"][0]
+            with contextlib.closing(sqlite3.connect(store.db_path)) as conn:
+                conn.execute("UPDATE x_post_drama_pool SET status='needs_review' WHERE id=?", (pool["id"],))
+                conn.commit()
+            with mock.patch.object(
+                service, "_x_posts_api", return_value=(XPostError, mock.Mock(return_value=store), None),
+            ), self.http_server() as base_url:
+                client = ScheduleSidecarClient(base_url, service.DAILY_INTERNAL_TOKEN, timeout=5)
+                with self.assertRaises(SidecarError) as held:
+                    client.post("/internal/posts/drama-pool/available", {"limit": 10})
+                self.assertEqual(held.exception.code, "x_post_drama_pool_needs_review")
+                self.assertEqual(held.exception.status, 409)
+                self.assertFalse(held.exception.unknown_outcome)
+                self.assertIn("HTTP-HOLD", str(held.exception))
+            with contextlib.closing(sqlite3.connect(store.db_path)) as conn:
+                self.assertEqual(conn.execute("SELECT status FROM x_post_drama_pool WHERE id=?", (pool["id"],)).fetchone()[0], "needs_review")
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
+
+    def test_schedule_preflight_rejects_non_boolean_flag_before_account_verification(self):
+        with self.http_server() as base_url, mock.patch.object(
+            service, "_active_schedule_account_scope", return_value=(),
+        ), mock.patch.object(
+            service, "_active_manual_account_scope", return_value=(),
+        ), mock.patch.object(
+            service, "verify_account", return_value=self.account(101),
+        ) as verify, mock.patch.object(self.store, "schedule_account_blockers") as blockers:
+            client = ScheduleSidecarClient(base_url, service.DAILY_INTERNAL_TOKEN, timeout=5)
+            for value in (None, 0, 1, "false", "true", [], {}):
+                with self.subTest(value=value), self.assertRaises(SidecarError) as rejected:
+                    client.post("/internal/posts/accounts/101/verify", {"schedule_preflight": value})
+                self.assertEqual(rejected.exception.code, "invalid_request")
+                self.assertEqual(rejected.exception.status, 400)
+            verify.assert_not_called()
+            blockers.assert_not_called()
 
     def test_query_calculates_missing_scope_only_from_configured_ids(self):
         result = service.query_catchup_plan_request(

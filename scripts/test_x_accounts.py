@@ -2749,6 +2749,176 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual(verify.call_count, 1)
         self.assertNotIn("only_refresh_required", verify.call_args.kwargs)
 
+    def test_deferred_drama_refreshes_expired_token_after_preparation_before_credentials(self):
+        from features.x_posts import XPostError, XPostStore
+        from features.x_posts import publish_media_repair as repair
+        from scripts.test_x_posts import deferred_drama_queue
+
+        account = self.complete("3021", "prepared_owner", actor=self.owner, account_fields={
+            "subscription_type": "Premium", "protected": False,
+        })
+        store = XPostStore(service.POST_DB_PATH)
+        queue = deferred_drama_queue(store, account["id"], account["username"])
+        prepared = object()
+        events = []
+        original_credentials = service.publish_credentials
+
+        @contextlib.contextmanager
+        def prepare(**kwargs):
+            self.assertNotIn("access_token", kwargs)
+            events.append("prepare")
+            with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+                conn.execute("UPDATE x_authorized_account SET access_expires_at=? WHERE id=?", ("2000-01-01T00:00:00Z", account["id"]))
+                conn.commit()
+            try:
+                yield prepared
+            finally:
+                events.append("cleanup")
+
+        @contextlib.contextmanager
+        def credentials(*args, **kwargs):
+            events.append("credentials_enter")
+            try:
+                with original_credentials(*args, **kwargs) as pair:
+                    yield pair
+            finally:
+                events.append("credentials_exit")
+
+        def refresh(*_args, **_kwargs):
+            events.append("refresh")
+            return {
+                "access_token": "after-preparation-access", "refresh_token": "after-preparation-refresh",
+                "expires_in": 7200, "scope": " ".join(service.SCOPES), "token_type": "bearer",
+            }
+
+        def profile(token):
+            events.append("profile_initial" if token == "access-secret" else "profile_refreshed")
+            return {"data": {
+                "id": account["x_user_id"], "username": account["username"],
+                "name": "Prepared Owner", "subscription_type": "Premium", "protected": False,
+            }}
+
+        def publish(**kwargs):
+            events.append("publish")
+            self.assertIs(kwargs["prepared_media"], prepared)
+            self.assertEqual(kwargs["access_token"], "after-preparation-access")
+            return {"status": "published", "log_id": 3021, "short_url": "https://gy.g2flow.com/s2l/3021.html", "post_id": "93021", "preview_url": "https://x.com/prepared_owner/status/93021"}
+
+        with mock.patch.object(repair, "prepare_deferred_drama_media", prepare), mock.patch.object(
+            service, "publish_credentials", credentials,
+        ), mock.patch.object(service, "user_request", side_effect=profile), mock.patch.object(
+            service, "token_request", side_effect=refresh,
+        ) as refresh_mock, mock.patch.object(service, "_x_posts_api", return_value=(XPostError, XPostStore, publish)):
+            result = service.publish_queue_request(queue["id"])
+        self.assertEqual(result["status"], "published")
+        refresh_mock.assert_called_once()
+        self.assertEqual(events, ["profile_initial", "prepare", "refresh", "profile_refreshed", "credentials_enter", "publish", "credentials_exit", "cleanup"])
+
+    def test_deferred_drama_prepare_failure_persists_zero_attempt_and_blocks_reentry(self):
+        from features.x_posts import XPostError, XPostStore
+        from features.x_posts import publish_media_repair as repair
+        from scripts.test_x_posts import deferred_drama_queue
+
+        account = self.complete("3022", "prepare_failure", actor=self.owner)
+        store = XPostStore(service.POST_DB_PATH)
+        queue = deferred_drama_queue(store, account["id"], account["username"])
+        calls = []
+
+        @contextlib.contextmanager
+        def prepare(**_kwargs):
+            calls.append("prepare")
+            raise XPostError("x_post_media_repair_fingerprint_mismatch", "修复指纹不一致", 502)
+            yield  # pragma: no cover - make the failing preparation a context manager
+
+        with mock.patch.object(repair, "prepare_deferred_drama_media", prepare), mock.patch.object(
+            service, "verify_account", return_value=account,
+        ) as verify, mock.patch.object(service, "publish_credentials", side_effect=AssertionError("preparation failure must not acquire token")):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_queue_request(queue["id"])
+            self.assertEqual(caught.exception.code, "x_post_media_repair_fingerprint_mismatch")
+            with self.assertRaises(service.ServiceError) as replay:
+                service.publish_queue_request(queue["id"])
+        self.assertEqual(replay.exception.code, "x_post_retry_requires_review")
+        self.assertEqual(calls, ["prepare"])
+        verify.assert_called_once()
+        log = store.reserve_log(queue["id"])
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["attempt_count"], 0)
+        self.assertFalse(log["unknown_outcome"])
+        self.assertEqual(log["error_code"], "x_post_media_repair_fingerprint_mismatch")
+
+    def test_deferred_relay_rechecks_target_after_prepare_before_source_upload(self):
+        from features.x_posts import XPostError, XPostStore
+        from features.x_posts import publish_media_repair as repair
+        from scripts.test_x_posts import deferred_drama_queue
+
+        account = self.complete("3023", "relay_target", actor=self.owner)
+        store = XPostStore(service.POST_DB_PATH)
+        queue = deferred_drama_queue(store, account["id"], account["username"], relay=True)
+        source = {
+            "id": queue["relay_account_id"], "username": queue["relay_account_username"],
+            "drama_language": "en", "subscription_type": "premium", "protected": False,
+            "long_video_publish_eligible": True,
+        }
+        events = []
+
+        @contextlib.contextmanager
+        def prepare(**kwargs):
+            self.assertEqual(kwargs["account"]["id"], source["id"])
+            events.append("prepare")
+            try:
+                yield object()
+            finally:
+                events.append("cleanup")
+
+        def verify(account_id, *_args, **_kwargs):
+            if account_id == source["id"]:
+                events.append("verify_source")
+                return source
+            events.append("verify_target")
+            return {**account, "drama_language": "ja"}
+
+        with mock.patch.object(repair, "prepare_deferred_drama_media", prepare), mock.patch.object(
+            service, "verify_account", side_effect=verify,
+        ), mock.patch.object(service, "publish_credentials", side_effect=AssertionError("target drift must prevent source upload")):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_queue_request(queue["id"])
+        self.assertEqual(caught.exception.code, "x_post_account_language_mismatch")
+        self.assertEqual(events, ["verify_source", "prepare", "verify_target", "cleanup"])
+        log = store.reserve_log(queue["id"])
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["attempt_count"], 0)
+        self.assertFalse(log["unknown_outcome"])
+
+    def test_deferred_drama_published_and_unknown_short_circuit_before_preparation(self):
+        from features.x_posts import XPostStore
+        from features.x_posts import publish_media_repair as repair
+        from scripts.test_x_posts import deferred_drama_queue
+
+        account = self.complete("3024", "deferred_history", actor=self.owner)
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                service.POST_DB_PATH = self.root / ("deferred-history-%s.sqlite3" % unknown)
+                store = XPostStore(service.POST_DB_PATH)
+                queue = deferred_drama_queue(store, account["id"], account["username"])
+                log = store.reserve_log(queue["id"])
+                store.prepare_log(log["id"], "https://example.invalid/frozen", "https://gy.g2flow.com/s2l/1.html", "Frozen episode")
+                store.mark_publishing(log["id"])
+                store.mark_media_uploaded(log["id"], "media3024")
+                if unknown:
+                    store.mark_failed(log["id"], "x_post_outcome_unknown", "No confirmed response", True)
+                else:
+                    store.mark_published(log["id"], "media3024", "93024", "https://x.com/deferred_history/status/93024")
+                with mock.patch.object(repair, "prepare_deferred_drama_media", side_effect=AssertionError("history must not prepare")), mock.patch.object(
+                    service, "verify_account", side_effect=AssertionError("history must not verify"),
+                ), mock.patch.object(service, "publish_credentials", side_effect=AssertionError("history must not acquire token")):
+                    if unknown:
+                        with self.assertRaises(service.ServiceError) as caught:
+                            service.publish_queue_request(queue["id"])
+                        self.assertEqual(caught.exception.code, "x_publish_unknown")
+                    else:
+                        self.assertEqual(service.publish_queue_request(queue["id"])["post_id"], "93024")
+
     def test_daily_publish_scope_rejects_non_daily_queue_before_log_reservation(self):
         account = self.complete("3000", "not_a_daily_queue", actor=self.owner)
         payload = self.canary_payload(account)

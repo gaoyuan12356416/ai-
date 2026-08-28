@@ -779,22 +779,21 @@ class SidecarClient:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def verify_account(self, account_id):
+    def verify_account(self, account_id, *, schedule_preflight=False):
         """Verify identity and refresh the account token before reservation."""
+        payload = {
+            "actor": {
+                "tenant_key": "internal", "user_id": "x-post-daily",
+                "name": "X Post Daily", "email": "", "role": "admin",
+            },
+            "scope": "all", "preserve_transient_status": True,
+            "require_publish_approved": True,
+        }
+        if schedule_preflight:
+            payload["schedule_preflight"] = True
         result = self.post(
             "/internal/posts/accounts/%s/verify" % int(account_id),
-            {
-                "actor": {
-                    "tenant_key": "internal",
-                    "user_id": "x-post-daily",
-                    "name": "X Post Daily",
-                    "email": "",
-                    "role": "admin",
-                },
-                "scope": "all",
-                "preserve_transient_status": True,
-                "require_publish_approved": True,
-            },
+            payload,
         )
         item = result.get("item")
         if not isinstance(item, dict):
