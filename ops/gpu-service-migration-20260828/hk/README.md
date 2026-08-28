@@ -4,7 +4,7 @@
 
 - 香港使用既有、已扩容的卷，业务统一进入 /data。卷 UUID 为 659e6f89-71fa-463d-842e-ccdf2c06e0fe；不要求 /data 是独立挂载点。
 - X 原 /opt/x-post-media-repair/venv 是 FB 的间接 Python 入口，原目录与所有 FB 单位保持不变。
-- 新 X：/data/x-post-media-repair。代码仍为 fba8ff603e979b443339108cb2ce45c975fbd39f，profile 仍为 v5，8820 和现有18820隧道保持。
+- 新 X：/data/x-post-media-repair。本次迁移上线时为 fba8ff603e979b443339108cb2ce45c975fbd39f、profile v5，8820 和现有18820隧道保持。2026-08-28 17:34:38，另一项获授权任务已升级现行版本至170e3b1325b71a72fcd6de913982ce92bb77fa40；本迁移不覆盖或回滚该升级，详见下方离线验收记录。
 - 广告：/data/ad-material；127.0.0.1:8796/8797，新专用隧道在 CPU 暴露18796/18797。广告源码来自美国真实在用文件，provenance.json记录哈希，未改业务逻辑。
 - 运行时采用美国 Node22.22.2/Codex0.147.0，完整npm包含其原生依赖；新 Python3.9 venv，Pillow8.4.0与美国一致。
 - 不迁移或操作 FB、Kronos。没有实际发帖、广告生成或 OAuth 刷新作为本阶段验证。
@@ -77,6 +77,8 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
 
 先停上游并排空。运行相同显式门禁的rollback，恢复本批次备份unit；如果unit被他人更新，拒绝覆盖。广告回滚只停新香港服务，不会自动恢复美国服务，根协调者确认香港已停后再按源端备份恢复单一生产入口。
 
+现行X已由另一项获授权任务推进至170e3b，unit文件本身未变。因此不能只凭unit SHA相同就重放本批次旧版X activate/rollback；必须先与该任务协调新的代码基线和回滚范围。此次不恢复fba8、不修改现行current，不放宽离线脚本的冻结版本守卫。
+
     python3.9 <control>/deploy.py rollback --component x --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
     python3.9 <control>/deploy.py rollback --component ad --cutover-approved gpu-service-migration-20260828T1502 --upstream-paused
 
@@ -84,7 +86,7 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
 
 ## X整条处理流程的独立离线验收
 
-已完成的x-offline-ffmpeg.json与x-offline-nvdec-nvenc.json是直接FFmpeg烟测，没有调用业务MediaRepairProcessor。x_offline_pipeline.py用于补齐这一覆盖，提交时尚未在香港运行。
+已完成的x-offline-ffmpeg.json与x-offline-nvdec-nvenc.json是直接FFmpeg烟测，没有调用业务MediaRepairProcessor。x_offline_pipeline.py用于补齐这一覆盖；现已获单次授权运行两轮，均未取得整体验收PASS，结果与证据见 [X离线处理验收记录](x-offline-pipeline-test-report.md)。
 
 协调者推送并部署精确SHA后，准备且仅准备以下验收目录及tmp、var-tmp、cache子目录，全部0700：
 
@@ -92,11 +94,15 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
 
 将units/x-offline-pipeline.service.in中的@REPO@、@SHA@、@EVIDENCE@替换为精确checkout、SHA和上述目录，审核后作为独立静态oneshot单位安装。该unit没有Install、timer、Restart或任何生产service依赖；不得enable。协调者再次授权后只start一次，读取Result/ExecMainStatus与result.json验收，不能以oneshot退出后的inactive状态判定失败。unit超时90秒、最多2GiB内存与200%CPU，脚本要求至少1024MiB空闲显存；选择协调者允许的短GPU窗口。
 
-脚本在任何媒体处理前验证独立network namespace、生产state及系统路径只读、/tmp和/var/tmp绑定验收盘、无继承token/secret/proxy环境，以及精确Git版本和冻结fba8ff6源码哈希。读写只允许验收目录，生产config不可访问。不读取生产凭据，不启动HTTP服务，不请求真实COS或平台。
+脚本在任何媒体处理前验证独立network namespace、生产state及系统路径只读、/tmp和/var/tmp绑定验收盘、无继承token/secret/proxy环境，以及精确Git版本和明确批准的生产源码哈希。最新验收基线仅为170e3b1325b71a72fcd6de913982ce92bb77fa40：current必须精确指向该release，四份源码哈希和导入来源必须匹配；不允许任意current。报告同时记录验收脚本SHA与source_release_sha。读写只允许验收目录，生产config不可访问。不读取生产凭据，不启动HTTP服务，不请求真实COS或平台。
 
 验收使用2秒本地合成H264/AAC视频与明确的operator_forced_repair测试请求，FakeDownloader只复制此文件，FakeCOS仅在验收目录模拟HEAD/上传，RejectHTTP拒绝网络使用。原MediaRepairProcessor实际执行请求/完整性校验、私有FFprobe、原NVENC命令、完整输出校验、模拟COS验证和独立测试manifest。冻结业务使用默认解码和CPU滤镜，不要求显式CUDA解码；报告如实记录是否有-hwaccel参数，不改变业务命令。第二次相同请求须命中reuse，且不再次下载、编码或上传。保留输入、模拟COS中的真实输出、测试manifest及命令/摘要证据；不在生产state或CPU队列创建修复记录。attempt.json/result.json拒绝覆盖，失败后不得自行重跑。
 
 c10fd5c首轮独立验收的四个媒体子命令均退出0，已产生合格测试manifest与输出，但验收器错误地额外要求CUDA解码参数，最终退出1；该记录不能改成PASS。修正版只核对冻结业务原有的h264_nvenc编码契约，补充默认解码回归及processor-results.json中间证据。重新验收必须使用新SHA、新目录和协调者新的单次授权，保留首轮失败unit、记录和产物。
+
+56517311第二轮只启动一次，在媒体处理前因现行current已被上述并行任务升级至170e3b而被冻结版本守卫拒绝，ExecMainStatus=1、commands=[]，未生成processor-results或媒体产物。验收期间生产X/FB/剧集PID与NRestarts不变，170份生产manifest哈希不变，c10关键证据哈希不变。协调者确认这是获授权的外部升级，要求停止额外X测试；不放宽守卫、不再重跑、不改现行版本。第二轮失败unit和完整证据同样保留。
+
+后续协调者与该版本所有者确认170e3b为现行稳定基线，明确授权仅更新离线验收来源。已将本地Git远程跟踪对象中的四份源码SHA与香港只读证据逐项核对；仅更新验收脚本、回归和文档，deploy.py迁移旧基线、线上代码/current/unit全部不动。第三轮尚未执行，仍须先统一push部署，再获得新的单次启动授权，使用新证据目录与独立静态unit；不得重用或覆盖c10/565记录。
 
 ## 本地验证
 

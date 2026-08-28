@@ -16,7 +16,8 @@ from deploy import require_commit
 
 RUN_ID = "gpu-service-migration-20260828T1502"
 X_ROOT = pathlib.Path("/data/x-post-media-repair")
-SOURCE_ROOT = X_ROOT / "releases/fba8ff603e979b443339108cb2ce45c975fbd39f"
+SOURCE_RELEASE_SHA = "170e3b1325b71a72fcd6de913982ce92bb77fa40"
+SOURCE_ROOT = X_ROOT / "releases" / SOURCE_RELEASE_SHA
 EVIDENCE_BASE = pathlib.Path("/data/migrations") / RUN_ID / "x-offline-pipeline"
 PYTHON_ROOT = X_ROOT / "runtime/python"
 FFMPEG = X_ROOT / "runtime/bin/ffmpeg"
@@ -25,7 +26,7 @@ SOURCE_URL = "https://offline.invalid/synthetic.mp4"
 FAKE_BUCKET = "offline-test-only"
 SOURCE_HASHES = {
     "features/x_posts/media_repair.py": "09dfeba82598a3cce0dd483cb5b091434deb9f5f814d37099b118d0666310f3c",
-    "features/x_posts/service.py": "cb9ff9fa11781ce4f3c22c7cccca6e3e6c4c4175c03dfa4d30b0fe6c24d13943",
+    "features/x_posts/service.py": "e63a4e04b622b95b0a61489e90984b03317183726ac8420ceb9f5e0e427356e5",
     "features/x_posts/__init__.py": "b8c8436310bd08e710f62b0d6ce0623b6c282a562a5fe0112f4f69dd10cefbc3",
     "features/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 }
@@ -275,7 +276,8 @@ def main():
     os.umask(0o077)
     write_once(evidence / "attempt.json", {"sha": args.sha, "run_id": RUN_ID})
     runner = RecordingRunner(evidence)
-    report = {"ok": False, "sha": args.sha, "run_id": RUN_ID}
+    report = {"ok": False, "sha": args.sha, "run_id": RUN_ID,
+              "source_release_sha": SOURCE_RELEASE_SHA, "source_root": str(SOURCE_ROOT)}
     try:
         memory = subprocess.check_output([
             "/usr/bin/nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],

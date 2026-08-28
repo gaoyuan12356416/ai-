@@ -2,6 +2,9 @@
 
 Run ID: `gpu-service-migration-20260828T1502`.
 
+Live execution evidence and outstanding conditions: [执行记录](execution-report.md).
+Operator rollback sequence and safety limits: [回滚步骤](rollback.md).
+
 Approved destinations: US GPU 43.166.178.132 -> HK GPU 43.154.250.89 for
 TT random/direct-outro, ad generation/vision, drama GPU API and X repair;
 screenshots/covers -> CPU 43.166.187.96. Keep Kronos and HK FB unchanged.

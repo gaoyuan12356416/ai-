@@ -343,6 +343,49 @@ class HkSafetyTests(unittest.TestCase):
             offline_pipeline.write_once(path, {"attempt": 2})
         self.assertEqual(path.read_bytes(), original)
 
+    def test_offline_processor_rejects_current_hash_and_import_origin_drift(self):
+        xroot = self.root / "x"
+        source = xroot / "releases" / offline_pipeline.SOURCE_RELEASE_SHA
+        hashes = {}
+        for relative in offline_pipeline.SOURCE_HASHES:
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("frozen fixture " + relative).encode())
+            hashes[relative] = offline_pipeline.digest(path)
+        resolved_current = [source]
+        original_resolve = pathlib.Path.resolve
+
+        def resolve_current(path, strict=False):
+            if path == xroot / "current":
+                return resolved_current[0]
+            return original_resolve(path, strict=strict)
+
+        module = mock.Mock(__file__=str(source / "features/x_posts/media_repair.py"))
+        with mock.patch.object(offline_pipeline, "X_ROOT", xroot), \
+             mock.patch.object(offline_pipeline, "SOURCE_ROOT", source), \
+             mock.patch.object(offline_pipeline, "SOURCE_HASHES", hashes), \
+             mock.patch.object(pathlib.Path, "resolve", new=resolve_current), \
+             mock.patch.object(offline_pipeline.sys, "path", list(sys.path)), \
+             mock.patch.object(offline_pipeline.importlib, "import_module", return_value=module) as load:
+            self.assertIs(offline_pipeline.frozen_processor_module(), module)
+            load.assert_called_once_with("features.x_posts.media_repair")
+            load.reset_mock()
+            resolved_current[0] = source.parent / "different-release"
+            with self.assertRaisesRegex(ValueError, "approved frozen release"):
+                offline_pipeline.frozen_processor_module()
+            load.assert_not_called()
+            resolved_current[0] = source
+            changed = source / "features/x_posts/service.py"
+            original = changed.read_bytes()
+            changed.write_bytes(b"changed after source freeze")
+            with self.assertRaisesRegex(ValueError, "source checksum mismatch"):
+                offline_pipeline.frozen_processor_module()
+            load.assert_not_called()
+            changed.write_bytes(original)
+            module.__file__ = str(source.parent / "different-release/features/x_posts/media_repair.py")
+            with self.assertRaisesRegex(ValueError, "unexpected X processor import origin"):
+                offline_pipeline.frozen_processor_module()
+
     def test_offline_gpu_proof_accepts_original_default_decode_nvenc_contract(self):
         command = {"argv": ["ffmpeg", "-i", "source.media", "-c:v", "h264_nvenc", "output.mp4"],
                    "return_code": 0}
