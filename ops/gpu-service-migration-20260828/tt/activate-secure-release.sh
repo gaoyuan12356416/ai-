@@ -16,7 +16,7 @@ EXPECTED_TRUSTED_HOST=advertising-1306474899.cos.ap-hongkong.myqcloud.com
 EXPECTED_TRUSTED_ADDRESS=169.254.0.47
 EXPECTED_TRUSTED_MAPPING_SHA256=1f8a7208fe97db3a84f6343f30a673dc6f319e9b5c2edab2629e74a59dd51430
 EXPECTED_CA_SHA256=b6e66569cc3d438dd5abe514d0df50005d570bfc96c14dca8f768d020cb96171
-EXPECTED_CPU_CHECKPOINT_SHA256=c4baf7c1457b9e2a42e2c017041c32aedd1bcd4d6107a3e569661d09bf656ca1
+EXPECTED_CPU_CHECKPOINT_SHA256=8d317754fbe86a89b3f2e564a70aec5402f89fb73ec9a57a1d58cde31b36cb72
 EXPECTED_FINAL_IMPORT_RECEIPT_SHA256=89b5967c76af3d1a062a24477da5966ff640794fcba3f33cd251d280c79a8a77
 EXPECTED_CURRENT_STATE_FILE_COUNT=1798
 EXPECTED_CURRENT_STATE_FINGERPRINT=48454e40e6fe73bf1c6805b71ddf88a6206956b6922cb392a2f89bec0727c8f8
@@ -65,9 +65,20 @@ validate_cpu_checkpoint() {
   python3 - "$CPU_CHECKPOINT" <<'PY'
 import datetime, json, sys
 doc = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+
+def parse_utc(value):
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise SystemExit("CPU coordinator timestamp is not UTC")
+    for pattern in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.datetime.strptime(value, pattern).replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            pass
+    raise SystemExit("CPU coordinator timestamp is invalid")
+
 if doc.get("schema") != 1 or doc.get("run_id") != "gpu-service-migration-20260828T1502" or doc.get("host") != "VM-0-108-centos":
     raise SystemExit("invalid CPU coordinator checkpoint identity")
-at = datetime.datetime.fromisoformat(doc["at_utc"].replace("Z", "+00:00"))
+at = parse_utc(doc.get("at_utc"))
 age = (datetime.datetime.now(datetime.timezone.utc) - at).total_seconds()
 if age < -60 or age > 300:
     raise SystemExit("CPU coordinator checkpoint is not fresh")
@@ -112,7 +123,7 @@ if any(state.get(key) is not True for key in required_true):
     raise SystemExit("CPU drain state is not safe")
 if state.get("sample_count") != 3 or state.get("http_connections") != []:
     raise SystemExit("CPU drain samples or HTTP state are invalid")
-state_at = datetime.datetime.fromisoformat(state["at_utc"].replace("Z", "+00:00"))
+state_at = parse_utc(state.get("at_utc"))
 state_age = (datetime.datetime.now(datetime.timezone.utc) - state_at).total_seconds()
 if state_age < -60 or state_age > 300:
     raise SystemExit("CPU drain snapshot is not fresh")
@@ -342,7 +353,9 @@ PY
 read_only_preflight() {
   local unit
   [[ "$EUID" -eq 0 && "$(hostname)" == "VM-0-125-centos" ]]
-  for command in findmnt sha256sum systemctl python3 curl ss flock ssh-keygen; do command -v "$command" >/dev/null; done
+  for command in findmnt sha256sum systemctl python3 curl ss flock ssh-keygen locale; do command -v "$command" >/dev/null; done
+  [[ "$(locale charmap)" == "UTF-8" ]]
+  [[ "$(python3 -c 'import sys; print(sys.getfilesystemencoding())')" == "utf-8" ]]
   [[ "$PACKAGE_DIR" == "$EXPECTED_PACKAGE_DIR" ]]
   [[ "$(readlink -f "$0")" == "$PACKAGE_DIR/activate-secure-release.sh" && ! -L "$0" ]]
   [[ -f "$PACKAGE_DIR/.source-commit" && ! -L "$PACKAGE_DIR/.source-commit" ]]
@@ -599,7 +612,7 @@ target, expected_mapping, expected_ca_sha, units = sys.argv[1], f"{sys.argv[2]}=
 expected = {"tt-gpu-publisher.service": {"TT_POST_GPU_PORT": "8830", "TT_POST_GPU_WORK_ROOT": "/data/tt-post-publisher", "TT_POST_GPU_MEDIA_MODE": "random_overlay"},
             "tt-gpu-direct-outro.service": {"TT_POST_GPU_PORT": "8832", "TT_POST_GPU_WORK_ROOT": "/data/tt-post-publisher/direct-outro-work", "TT_POST_GPU_MEDIA_MODE": "direct_outro"}}
 for unit in units:
-    pid = int(subprocess.check_output(["systemctl", "show", "-p", "MainPID", "--value", unit], text=True).strip())
+    pid = int(subprocess.check_output(["systemctl", "show", "-p", "MainPID", "--value", unit], universal_newlines=True).strip())
     if pid <= 0 or os.readlink(f"/proc/{pid}/cwd") != target: raise SystemExit(f"{unit}: process cwd mismatch")
     env = {}
     for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
