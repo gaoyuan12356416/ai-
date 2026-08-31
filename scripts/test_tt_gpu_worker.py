@@ -4315,6 +4315,79 @@ class TTGPUWorkerTests(unittest.TestCase):
             "https://pull.example.com/video.mp4",
         )
 
+    def test_tiktok_api_default_constructor_uses_no_proxy_no_redirect_opener(self):
+        api = worker.TikTokContentPostingAPI()
+        self.assertIs(api.opener, worker._TIKTOK_NO_REDIRECT_OPENER)
+        proxy_handlers = [
+            handler
+            for handler in api.opener.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        redirect_handlers = [
+            handler
+            for handler in api.opener.handlers
+            if isinstance(handler, worker._TikTokNoRedirect)
+        ]
+        # build_opener omits an empty ProxyHandler after it suppresses the
+        # environment-derived default, so no proxy-capable handler remains.
+        self.assertEqual(proxy_handlers, [])
+        self.assertEqual(len(redirect_handlers), 1)
+        self.assertIsNone(
+            redirect_handlers[0].redirect_request(
+                None,
+                None,
+                302,
+                "Found",
+                {},
+                "https://redirect.example.com/",
+            )
+        )
+
+    def test_worker_serve_initializes_default_tiktok_client_without_network(self):
+        config = make_config(self.root)
+        servers = []
+
+        class FakeControlServer:
+            def __init__(self, address, processor, internal_token):
+                self.address = address
+                self.processor = processor
+                self.internal_token = internal_token
+                self.closed = False
+                self.served = False
+                servers.append(self)
+
+            def serve_forever(self, poll_interval):
+                self.poll_interval = poll_interval
+                self.served = True
+
+            def server_close(self):
+                self.closed = True
+
+        with mock.patch.object(
+            worker.WorkerConfig,
+            "from_env",
+            return_value=config,
+        ), mock.patch.object(
+            worker,
+            "TTPostGPUHTTPServer",
+            FakeControlServer,
+        ):
+            worker.serve()
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertEqual(server.address, (config.host, config.port))
+        self.assertEqual(server.internal_token, config.internal_token)
+        self.assertTrue(server.served)
+        self.assertTrue(server.closed)
+        self.assertIsInstance(
+            server.processor.tiktok_api,
+            worker.TikTokContentPostingAPI,
+        )
+        self.assertIs(
+            server.processor.tiktok_api.opener,
+            worker._TIKTOK_NO_REDIRECT_OPENER,
+        )
+
     def test_manifests_ledgers_and_config_repr_never_contain_token(self):
         config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()

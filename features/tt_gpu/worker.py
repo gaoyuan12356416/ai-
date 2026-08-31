@@ -3237,11 +3237,24 @@ class LocalMediaStore:
         return False
 
 
+class _TikTokNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+
+
+_TIKTOK_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _TikTokNoRedirect(),
+)
+
+
 class TikTokContentPostingAPI:
     """Minimal no-redirect client for TikTok Content Posting API v2."""
 
     def __init__(self, opener=None, timeout=30):
-        self.opener = opener or _NO_REDIRECT_OPENER
+        self.opener = (
+            opener if opener is not None else _TIKTOK_NO_REDIRECT_OPENER
+        )
         self.timeout = max(1, min(int(timeout or 30), 120))
 
     def _request(self, path, token, payload):
