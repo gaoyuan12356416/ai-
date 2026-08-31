@@ -116,3 +116,27 @@ path described above.
   requires all drama/image work drained. It refuses rollback if new data exists.
 - All evidence is under `/mnt/data-disk/migrations/$RUN/cpu`; configuration
   archives and databases remain private to root. Do not commit them.
+
+### Actual missing-disk guard verification
+
+At 17:58 on 2026-08-28, the coordinator ran exactly one explicitly enabled
+Linux integration test from published commit
+`aabeb973084ad0eb1a6e34d892969e155677db79`. It passed with no skip.
+The test used `unshare --mount --propagation private` and an empty read-only
+1 MiB tmpfs visible only to its child. The actual guard rejected all four
+media paths used by the migrated units when the approved data disk was absent
+from that private namespace. No host unmount or service restart occurred;
+the parent mount namespace, UUID/options and original three worker states/PIDs
+were equal before and after. The child audit hook recorded no file writes.
+
+Private evidence on CPU:
+
+    /mnt/data-disk/migrations/gpu-service-migration-20260828T1502/cpu/mount-namespace-aabeb973084ad0eb1a6e34d892969e155677db79.json
+    /mnt/data-disk/migrations/gpu-service-migration-20260828T1502/cpu/mount-namespace-aabeb973084ad0eb1a6e34d892969e155677db79.log
+
+Log SHA256: `26da0a6ef28c61d2bd144fd4d11799f6185741ecb3fe75eb3bcd2168ceb49893`.
+Normal test runs intentionally skip this case. Running it again requires
+explicit coordinator authorization and
+`CPU_MIGRATION_MOUNT_NAMESPACE_TEST=1`; unsupported isolation reports blocked,
+with no fallback. This verifies the missing-disk refusal, not successful
+production cutover or actual image generation.
