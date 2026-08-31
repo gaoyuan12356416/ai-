@@ -43,8 +43,13 @@ def remote_display(snapshot):
             return a, b
         return None
 
-    if stage == "downloading":
-        counts = ratio(metrics.get("completed_episodes"), metrics.get("total_episodes"))
+    if stage in {"downloading", "normalizing"}:
+        if stage == "downloading":
+            counts = ratio(metrics.get("completed_episodes"), metrics.get("total_episodes"))
+        else:
+            downloaded = number(metrics.get("completed_episodes"))
+            episodes = number(metrics.get("total_episodes"))
+            counts = (downloaded, episodes) if downloaded is not None and episodes else None
         if counts:
             detail.append("已下载 %d/%d 集" % counts)
         size = number(metrics.get("downloaded_bytes"))
@@ -55,12 +60,12 @@ def remote_display(snapshot):
         if speed is not None:
             detail.append("%.2f MB/s" % (speed / 1e6))
         normalized, segments = number(metrics.get("normalized_episodes")), number(metrics.get("total_segments"))
-        if normalized is not None and normalized > 0 and segments:
+        if stage == "downloading" and normalized is not None and normalized > 0 and segments:
             detail.append("并行转码 %d/%d 段" % (normalized, segments))
-    elif stage == "normalizing":
-        counts = ratio(metrics.get("normalized_episodes"), metrics.get("total_segments"))
-        if counts:
-            detail.append("已处理 %d/%d 段" % counts)
+        elif stage == "normalizing":
+            counts = ratio(normalized, segments)
+            if counts:
+                detail.append("已处理 %d/%d 段" % counts)
     elif stage in {"rendering", "rendering_random", "concatenating", "removing_bgm"}:
         times = ratio(metrics.get("out_time_seconds"), metrics.get("duration_seconds"))
         if times:

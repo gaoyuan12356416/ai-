@@ -2,16 +2,23 @@
 """Offline HTTP/process doubles; no remote downloads, render jobs or COS writes."""
 from __future__ import annotations
 
+import ast
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -401,12 +408,168 @@ class DownloadRouteTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
 
 
-def stream_info(width=360, audio=True):
-    streams = [{"codec_type": "video", "codec_name": "h264", "width": width, "height": 640,
-                "avg_frame_rate": "25/1", "time_base": "1/12800"}]
+def stream_info(width=360, height=640, audio=True, sample_aspect_ratio="1:1",
+                video_updates=None, audio_updates=None):
+    sar_numerator, sar_denominator = (int(value) for value in sample_aspect_ratio.split(":"))
+    display_numerator, display_denominator = width * sar_numerator, height * sar_denominator
+    divisor = math.gcd(display_numerator, display_denominator)
+    video = {
+        "codec_type": "video", "codec_name": "h264", "profile": "High", "level": 40,
+        "pix_fmt": "yuv420p", "codec_tag_string": "avc1", "codec_tag": "0x31637661",
+        "is_avc": "true", "nal_length_size": "4",
+        "width": width, "height": height, "coded_width": width, "coded_height": height,
+        "sample_aspect_ratio": sample_aspect_ratio,
+        "display_aspect_ratio": "%d:%d" % (display_numerator // divisor, display_denominator // divisor),
+        "field_order": "progressive",
+        "color_range": "tv", "color_space": "bt709", "color_transfer": "bt709",
+        "color_primaries": "bt709", "chroma_location": "left", "r_frame_rate": "25/1",
+        "avg_frame_rate": "25/1", "time_base": "1/12800",
+        "extradata": "00000000: 0164 0028", "extradata_size": 4,
+    }
+    video.update(video_updates or {})
+    streams = [video]
     if audio:
-        streams.append({"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 2, "time_base": "1/48000"})
+        audio_stream = {
+            "codec_type": "audio", "codec_name": "aac", "profile": "LC", "sample_fmt": "fltp",
+            "sample_rate": "48000", "channels": 2, "channel_layout": "stereo",
+            "codec_tag_string": "mp4a", "codec_tag": "0x6134706d", "bits_per_sample": 0,
+            "time_base": "1/48000", "extradata": "00000000: 1190", "extradata_size": 2,
+        }
+        audio_stream.update(audio_updates or {})
+        streams.append(audio_stream)
     return {"streams": streams}
+
+
+def normalized_stream_info(plan, video_updates=None, audio_updates=None):
+    target = plan["target"]
+    updates = {
+        "profile": target["video_profile"], "level": target["video_level"],
+        "codec_tag_string": target["video_tag"], "codec_tag": target["video_tag_hex"],
+        "width": target["width"], "height": target["height"],
+        "coded_width": target["width"], "coded_height": target["height"],
+        "sample_aspect_ratio": target["sample_aspect_ratio"],
+        "display_aspect_ratio": target["display_aspect_ratio"],
+        "field_order": target["field_order"], "pix_fmt": target["pix_fmt"],
+        "color_range": target["color_range"], "color_space": target["color_space"],
+        "color_transfer": target["color_transfer"], "color_primaries": target["color_primaries"],
+        "chroma_location": target["chroma_location"], "r_frame_rate": target["frame_rate"],
+        "avg_frame_rate": target["frame_rate"], "time_base": target["time_base"],
+    }
+    updates.update(video_updates or {})
+    normalized_audio_updates = {
+        "profile": plan["audio"]["profile"], "sample_fmt": plan["audio"]["sample_fmt"],
+        "sample_rate": str(plan["audio"]["sample_rate"]), "channels": plan["audio"]["channels"],
+        "channel_layout": plan["audio"]["channel_layout"], "codec_tag_string": plan["audio"]["tag"],
+        "codec_tag": plan["audio"]["tag_hex"],
+    }
+    normalized_audio_updates.update(audio_updates or {})
+    return stream_info(
+        width=target["width"], height=target["height"], audio=True,
+        sample_aspect_ratio=target["sample_aspect_ratio"], video_updates=updates,
+        audio_updates=normalized_audio_updates,
+    )
+
+
+def jpeg_segment(marker, payload):
+    return b"\xff" + bytes([marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def jfif_jpeg(*extra_segments, include_jfif=True, comment_payload=b""):
+    parts = [b"\xff\xd8"]
+    if include_jfif:
+        parts.append(jpeg_segment(0xE0, b"JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00"))
+    if comment_payload:
+        parts.append(jpeg_segment(0xFE, comment_payload))
+    parts.extend(extra_segments)
+    parts.append(jpeg_segment(0xDA, b"\x01\x01\x00\x00\x3f\x00"))
+    parts.append(b"\x00\xff\xd9")
+    return b"".join(parts)
+
+
+class ConcatSignatureTests(unittest.TestCase):
+    def test_ffprobe_contract_requests_show_data_and_all_codec_configuration_fields(self):
+        self.assertEqual(media.CONCAT_STREAM_PROBE_ARGS[:2], ("-show_data", "-show_entries"))
+        required = {
+            "profile", "level", "pix_fmt", "codec_tag_string", "codec_tag", "field_order",
+            "is_avc", "nal_length_size",
+            "color_range", "color_space", "color_transfer", "color_primaries", "chroma_location",
+            "r_frame_rate", "avg_frame_rate", "time_base", "sample_fmt", "sample_rate", "channels",
+            "channel_layout", "extradata", "extradata_size",
+        }
+        self.assertTrue(required.issubset(set(media.CONCAT_STREAM_PROBE_FIELDS)))
+        self.assertEqual(media.CONCAT_STREAM_PROBE_ARGS[2], media.CONCAT_STREAM_SHOW_ENTRIES)
+
+    def test_signature_hashes_extradata_and_any_required_field_missing_fails_closed(self):
+        info = stream_info()
+        signature = media.concat_signature(info)
+        self.assertIsNotNone(signature)
+        expected = hashlib.sha256(info["streams"][0]["extradata"].encode()).hexdigest()
+        self.assertIn(expected, repr(signature))
+        self.assertNotIn(info["streams"][0]["extradata"], repr(signature))
+        required = (
+            (0, "codec_name"), (0, "profile"), (0, "level"), (0, "pix_fmt"),
+            (0, "codec_tag_string"), (0, "codec_tag"), (0, "width"), (0, "height"),
+            (0, "is_avc"), (0, "nal_length_size"),
+            (0, "coded_width"), (0, "coded_height"), (0, "sample_aspect_ratio"),
+            (0, "display_aspect_ratio"), (0, "field_order"), (0, "color_range"),
+            (0, "color_space"), (0, "color_transfer"), (0, "color_primaries"),
+            (0, "chroma_location"), (0, "r_frame_rate"), (0, "avg_frame_rate"),
+            (0, "time_base"), (0, "extradata"), (0, "extradata_size"),
+            (1, "codec_name"), (1, "profile"), (1, "sample_fmt"), (1, "sample_rate"),
+            (1, "channels"), (1, "channel_layout"), (1, "codec_tag_string"),
+            (1, "codec_tag"), (1, "bits_per_sample"), (1, "time_base"),
+            (1, "extradata"), (1, "extradata_size"),
+        )
+        for stream_index, field in required:
+            with self.subTest(stream=stream_index, field=field):
+                changed = json.loads(json.dumps(info))
+                del changed["streams"][stream_index][field]
+                self.assertIsNone(media.concat_signature(changed))
+
+    def test_frozen_normalization_plan_uses_even_episode0_geometry_and_rejects_missing_color(self):
+        reference = stream_info(width=361, height=641)
+        source = stream_info(width=720, height=1280, audio=False, sample_aspect_ratio="2:1")
+        plan = media.freeze_concat_normalization_plan(reference, source, 1)
+        self.assertEqual((plan["target"]["width"], plan["target"]["height"]), (362, 642))
+        self.assertEqual(plan["target"]["display_aspect_ratio"], "181:321")
+        self.assertEqual(plan["audio"]["mode"], "silence")
+        self.assertEqual(plan["source"]["sample_aspect_ratio"], "2:1")
+        self.assertEqual(plan["source"]["field_order"], "progressive")
+        self.assertEqual(plan["source"]["scan_mode"], "progressive")
+        self.assertIn("bwdif", plan["profile"])
+        self.assertIn("apad", plan["profile"])
+        self.assertIsNotNone(media.validate_normalized_concat_info(normalized_stream_info(plan), plan))
+        wrong = normalized_stream_info(plan, video_updates={"width": 360, "coded_width": 360})
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.validate_normalized_concat_info(wrong, plan)
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_invalid")
+
+        missing = stream_info()
+        del missing["streams"][0]["color_transfer"]
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.freeze_concat_normalization_plan(reference, missing, 1)
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+
+    def test_scan_policy_preserves_progressive_deinterlaces_known_orders_and_rejects_unknown(self):
+        reference = stream_info()
+        for field_order in ("tt", "bb", "tb", "bt"):
+            with self.subTest(field_order=field_order):
+                plan = media.freeze_concat_normalization_plan(
+                    reference, stream_info(video_updates={"field_order": field_order}), 1,
+                )
+                self.assertEqual(plan["source"]["field_order"], field_order)
+                self.assertEqual(plan["source"]["scan_mode"], "interlaced")
+                self.assertEqual(
+                    plan["source"]["deinterlace_parity"],
+                    "tff" if field_order in ("tt", "bt") else "bff",
+                )
+                self.assertEqual(plan["target"]["field_order"], "progressive")
+        for field_order in ("unknown", "", "N/A", "mixed"):
+            with self.subTest(rejected=field_order), self.assertRaises(DramaSynthesisError) as caught:
+                media.freeze_concat_normalization_plan(
+                    reference, stream_info(video_updates={"field_order": field_order}), 1,
+                )
+            self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
 
 
 class PipelineTests(unittest.TestCase):
@@ -416,6 +579,7 @@ class PipelineTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.items = [{"episode_url": str(index), "source_path": str(self.root / (str(index) + ".mp4"))} for index in range(3)]
         self.normalized = []
+        self.plans = {}
 
     def downloader(self, url, path, callback, **kwargs):
         Path(path).write_bytes(("source-" + url).encode())
@@ -423,8 +587,9 @@ class PipelineTests(unittest.TestCase):
         callback(value["size_bytes"], value["size_bytes"])
         return value
 
-    def normalize(self, source, target):
+    def normalize(self, source, target, plan):
         self.normalized.append(Path(source).name)
+        self.plans[str(target)] = plan
         Path(target).write_bytes(b"normalized-" + Path(source).read_bytes())
 
     def run_pipeline(self, **kwargs):
@@ -439,6 +604,185 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.normalized, [])
         self.assertEqual(metrics[0]["total_bytes"], 0)
         self.assertEqual(metrics[-1]["total_bytes"], 24)
+
+    def test_same_dimensions_and_rates_but_codec_configuration_difference_each_normalizes(self):
+        cases = {
+            "video-profile": stream_info(video_updates={"profile": "Main"}),
+            "pixel-format": stream_info(video_updates={"pix_fmt": "yuv422p"}),
+            "channel-layout": stream_info(audio_updates={"channel_layout": "2.0"}),
+            "video-extradata": stream_info(video_updates={"extradata": "00000000: 0164 0029"}),
+            "audio-extradata": stream_info(audio_updates={"extradata": "00000000: 1188"}),
+        }
+        for name, incompatible_info in cases.items():
+            with self.subTest(name=name):
+                case_root = self.root / name
+                case_root.mkdir()
+                output_dir = case_root / "normalized"
+                items = [
+                    {"episode_url": str(index), "source_path": str(case_root / (str(index) + ".mp4"))}
+                    for index in range(2)
+                ]
+                normalized = []
+                plans = {}
+
+                def normalize(source, target, plan):
+                    normalized.append(Path(source).name)
+                    plans[str(target)] = plan
+                    Path(target).write_bytes(b"normalized-" + Path(source).read_bytes())
+
+                def probe(path):
+                    if Path(path).parent == output_dir:
+                        return normalized_stream_info(plans[str(path)])
+                    return incompatible_info if Path(path).stem == "1" else stream_info()
+
+                outputs = media.download_and_prepare_segments(
+                    items, output_dir=output_dir, probe=probe, normalize=normalize, downloader=self.downloader,
+                )
+                self.assertCountEqual(normalized, ["0.mp4", "1.mp4"])
+                self.assertTrue(all(Path(path).parent == output_dir for path in outputs))
+
+    def test_missing_source_color_fails_closed_instead_of_relabeling_pixels(self):
+        output_dir = self.root / "missing-color"
+        bad = stream_info(video_updates={"profile": "Main"})
+        del bad["streams"][0]["color_space"]
+
+        def probe(path):
+            target = Path(path)
+            if target.parent == output_dir:
+                return normalized_stream_info(self.plans[str(path)])
+            return bad if target.stem == "1" else stream_info()
+
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.download_and_prepare_segments(
+                self.items[:2], output_dir=output_dir, probe=probe,
+                normalize=self.normalize, downloader=self.downloader,
+            )
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+
+    def test_normalizer_never_starts_before_episode_zero_has_been_probed(self):
+        release_zero = threading.Event()
+        one_done = threading.Event()
+        normalized = threading.Event()
+        output_dir = self.root / "reference-gate"
+
+        def download(url, path, callback, **kwargs):
+            if url == "0":
+                self.assertTrue(release_zero.wait(3))
+            value = self.downloader(url, path, callback, **kwargs)
+            if url == "1":
+                one_done.set()
+            return value
+
+        def normalize(source, target, plan):
+            normalized.set()
+            self.normalize(source, target, plan)
+
+        def probe(path):
+            target = Path(path)
+            if target.parent == output_dir:
+                return normalized_stream_info(self.plans[str(path)])
+            value = stream_info()
+            if target.stem == "1":
+                del value["streams"][0]["profile"]
+            return value
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                media.download_and_prepare_segments,
+                self.items[:2], output_dir=output_dir, probe=probe, normalize=normalize,
+                downloader=download, download_workers=2,
+            )
+            self.assertTrue(one_done.wait(3))
+            self.assertFalse(normalized.wait(0.1))
+            release_zero.set()
+            outputs = future.result(timeout=3)
+        self.assertTrue(normalized.is_set())
+        self.assertEqual(len(outputs), 2)
+
+    def test_no_audio_segments_receive_silence_without_replacing_existing_audio(self):
+        cases = (
+            ("all-silent", [stream_info(audio=False), stream_info(audio=False)], None,
+             ["silence", "silence"]),
+            ("partial-silent", [stream_info(), stream_info(audio=False)], None,
+             ["resample", "silence"]),
+            ("intro-and-silent", [stream_info(audio=False), stream_info(audio=False)], stream_info(audio=False),
+             ["silence", "silence", "silence"]),
+        )
+        for name, source_infos, intro_info, expected_modes in cases:
+            with self.subTest(name=name):
+                case_root = self.root / name
+                case_root.mkdir()
+                output_dir = case_root / "normalized"
+                items = [
+                    {"episode_url": str(index), "source_path": str(case_root / (str(index) + ".mp4"))}
+                    for index in range(2)
+                ]
+                plans = {}
+                modes = []
+                intro = case_root / "intro.mp4"
+                if intro_info is not None:
+                    intro.write_bytes(b"intro")
+
+                def normalize(source, target, plan):
+                    plans[str(target)] = plan
+                    modes.append((plan["segment_index"], plan["audio"]["mode"]))
+                    Path(target).write_bytes(b"normalized-" + Path(source).read_bytes())
+
+                def probe(path):
+                    target = Path(path)
+                    if target.parent == output_dir:
+                        return normalized_stream_info(plans[str(path)])
+                    if target == intro:
+                        return intro_info
+                    return source_infos[int(target.stem)]
+
+                outputs = media.download_and_prepare_segments(
+                    items, output_dir=output_dir, probe=probe, normalize=normalize,
+                    downloader=self.downloader,
+                    intro_factory=(lambda _: str(intro)) if intro_info is not None else None,
+                )
+                self.assertEqual([mode for _, mode in sorted(modes)], expected_modes)
+                self.assertEqual(len(outputs), len(expected_modes))
+
+    def test_inconsistent_or_incomplete_normalized_outputs_are_rejected(self):
+        incomplete = stream_info()
+        del incomplete["streams"][1]["channel_layout"]
+        cases = {
+            "inconsistent": stream_info(video_updates={"profile": "Main"}),
+            "incomplete": incomplete,
+        }
+        for name, invalid_target in cases.items():
+            with self.subTest(name=name):
+                case_root = self.root / ("normalized-" + name)
+                case_root.mkdir()
+                output_dir = case_root / "out"
+                items = [
+                    {"episode_url": str(index), "source_path": str(case_root / (str(index) + ".mp4"))}
+                    for index in range(2)
+                ]
+                plans = {}
+
+                def normalize(source, target, plan):
+                    plans[str(target)] = plan
+                    Path(target).write_bytes(b"normalized-" + Path(source).read_bytes())
+
+                def probe(path):
+                    target = Path(path)
+                    if target.parent == output_dir:
+                        if target.stem == "001":
+                            if name == "inconsistent":
+                                return normalized_stream_info(plans[str(path)], video_updates={"profile": "Main"})
+                            value = normalized_stream_info(plans[str(path)])
+                            del value["streams"][1]["channel_layout"]
+                            return value
+                        return normalized_stream_info(plans[str(path)])
+                    return stream_info(video_updates={"profile": "Main"}) if target.stem == "1" else stream_info()
+
+                with self.assertRaises(DramaSynthesisError) as caught:
+                    media.download_and_prepare_segments(
+                        items, output_dir=output_dir, probe=probe, normalize=normalize, downloader=self.downloader,
+                    )
+                self.assertEqual(caught.exception.code, "drama_concat_normalization_invalid")
 
     def test_pipeline_passes_frozen_route_to_isolated_downloader_and_returns_canonical_episode_path(self):
         source = "https://img.tianmai.cn/resource/code/001.mp4"
@@ -467,19 +811,24 @@ class PipelineTests(unittest.TestCase):
                 raise AssertionError("normalization waited for every download")
             return self.downloader(url, path, callback, **kwargs)
 
-        def normalize(source, target):
+        def normalize(source, target, plan):
             nonlocal active, peak
             with guard:
                 active += 1
                 peak = max(peak, active)
-            self.normalize(source, target)
+            self.normalize(source, target, plan)
             normalized_early.set()
             with guard:
                 active -= 1
 
+        def probe(path):
+            if Path(path).parent == self.root / "normalized":
+                return normalized_stream_info(self.plans[str(path)])
+            return stream_info(720 if Path(path).stem == "1" else 360)
+
         outputs = media.download_and_prepare_segments(
             self.items, output_dir=self.root / "normalized", download_workers=2,
-            probe=lambda path: stream_info(720 if Path(path).stem == "1" else 360),
+            probe=probe,
             normalize=normalize, downloader=download,
         )
         self.assertEqual(peak, 1)
@@ -489,13 +838,22 @@ class PipelineTests(unittest.TestCase):
         intro = self.root / "intro.mp4"
         intro.write_bytes(b"intro")
         factory = mock.Mock(return_value=str(intro))
+        def probe(path):
+            if Path(path).parent == self.root / "normalized":
+                return normalized_stream_info(self.plans[str(path)])
+            return stream_info(1280 if path == str(intro) else 360)
+
         outputs = media.download_and_prepare_segments(
-            self.items, output_dir=self.root / "normalized", probe=lambda path: stream_info(1280 if path == str(intro) else 360),
+            self.items, output_dir=self.root / "normalized", probe=probe,
             normalize=self.normalize, downloader=self.downloader, intro_factory=factory,
         )
         factory.assert_called_once_with(self.items[0]["source_path"])
         self.assertEqual([Path(path).name for path in outputs], ["000.mp4", "001.mp4", "002.mp4", "003.mp4"])
         self.assertEqual(Path(outputs[0]).read_bytes(), b"normalized-intro")
+        intro_plan = self.plans[outputs[0]]
+        self.assertEqual(intro_plan["segment_index"], -1)
+        self.assertEqual((intro_plan["target"]["width"], intro_plan["target"]["height"]), (360, 640))
+        self.assertEqual(self.plans[outputs[1]]["segment_index"], 0)
 
     def test_single_segment_preserves_existing_fast_path_even_without_audio(self):
         outputs = media.download_and_prepare_segments(
@@ -506,16 +864,70 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.normalized, [])
 
     def test_normalized_checkpoints_replay_without_reencoding_and_reject_corruption(self):
-        kwargs = dict(output_dir=self.root / "normalized", probe=lambda _: stream_info(audio=False),
+        probed = []
+
+        def probe(path):
+            probed.append(str(path))
+            if Path(path).parent == self.root / "normalized":
+                return normalized_stream_info(self.plans[str(path)])
+            return stream_info(720 if Path(path).stem == "0" else 360)
+
+        kwargs = dict(output_dir=self.root / "normalized", probe=probe,
                       normalize=self.normalize, downloader=self.downloader)
         original = media.download_and_prepare_segments(self.items, **kwargs)
         self.normalized.clear()
+        probed.clear()
         self.assertEqual(media.download_and_prepare_segments(self.items, **kwargs), original)
         self.assertEqual(self.normalized, [])
+        self.assertTrue(all(path in probed for path in original))
         Path(original[0]).write_bytes(b"corrupt")
         with self.assertRaises(DramaSynthesisError):
             media.download_and_prepare_segments(self.items, **kwargs)
         self.assertEqual(self.normalized, [])
+
+    def test_normalized_checkpoint_rejects_source_mutation_during_normalization(self):
+        source = self.root / "mutable.mp4"
+        target = self.root / "mutable-normalized.mp4"
+        source.write_bytes(b"before")
+        plan_holder = {}
+        source_info, source_anchor = media.probe_media_source_with_anchor(
+            source, lambda _: stream_info(),
+        )
+
+        def normalize(source_path, target_path, plan):
+            plan_holder[str(target_path)] = plan
+            Path(target_path).write_bytes(b"normalized")
+            Path(source_path).write_bytes(b"after-")
+
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.prepare_normalized_concat_segment(
+                source, target, source_info=source_info, source_anchor=source_anchor,
+                reference_info=source_info, reference_source=source,
+                reference_anchor=source_anchor, segment_index=0,
+                normalize=normalize, probe=lambda path: normalized_stream_info(plan_holder[str(path)]),
+            )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        self.assertFalse(target.with_name(target.name + ".normalized.json").exists())
+
+    def test_source_replaced_during_probe_fails_before_normalization_or_checkpoint(self):
+        output_dir = self.root / "probe-race-normalized"
+
+        def probe(path):
+            source = Path(path)
+            if source.parent == output_dir:
+                raise AssertionError("normalized output must not be probed")
+            if source.stem == "0":
+                source.write_bytes(b"mutate-0")
+            return stream_info(video_updates={"profile": "Main"})
+
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.download_and_prepare_segments(
+                self.items[:2], output_dir=output_dir, probe=probe,
+                normalize=self.normalize, downloader=self.downloader,
+            )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        self.assertEqual(self.normalized, [])
+        self.assertEqual(list(output_dir.glob("*.normalized.json")), [])
 
     def test_runtime_context_is_propagated_to_download_and_normalizer_threads(self):
         from features.drama_synthesis import async_runtime
@@ -531,13 +943,18 @@ class PipelineTests(unittest.TestCase):
             seen.append(("download", local.context))
             return self.downloader(url, path, callback, **kwargs)
 
-        def normalize(source, target):
+        def normalize(source, target, plan):
             seen.append(("normalize", local.context))
-            self.normalize(source, target)
+            self.normalize(source, target, plan)
+
+        def probe(path):
+            if Path(path).parent == self.root / "normalized":
+                return normalized_stream_info(self.plans[str(path)])
+            return stream_info(720 if Path(path).stem == "0" else 360)
 
         with mock.patch.object(async_runtime, "capture_context", return_value="frozen-context"), mock.patch.object(async_runtime, "use_context", use_context), mock.patch.object(async_runtime, "emit_progress"):
             media.download_and_prepare_segments(self.items, output_dir=self.root / "normalized",
-                                              probe=lambda _: stream_info(audio=False), normalize=normalize, downloader=download)
+                                              probe=probe, normalize=normalize, downloader=download)
         self.assertEqual(len(seen), 6)
         self.assertTrue(all(context == "frozen-context" for _, context in seen))
 
@@ -559,6 +976,314 @@ class PipelineTests(unittest.TestCase):
                                               probe=lambda _: stream_info(), normalize=self.normalize, downloader=download)
         self.assertTrue(cancelled.is_set())
         self.assertEqual(self.normalized, [])
+
+
+class AppConcatCompatibilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app_tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def load(self, *names, **values):
+        nodes = [node for node in self.app_tree.body
+                 if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual(len(nodes), len(names))
+        env = dict(os=os)
+        env.update(values)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "app.py", "exec"), env)
+        return env
+
+    def test_legacy_concat_helper_uses_shared_complete_signature(self):
+        sources = [self.root / "a.mp4", self.root / "b.mp4"]
+        for index, source in enumerate(sources):
+            source.write_bytes(("source-%d" % index).encode())
+        probe = mock.Mock(side_effect=[stream_info(), stream_info()])
+        shared = mock.Mock(wraps=media.concat_signature)
+        env = self.load(
+            "concat_segments_need_normalization",
+            probe_media_stream_info=probe,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            drama_concat_signature=shared,
+            concat_signatures_are_compatible=media.concat_signatures_are_compatible,
+        )
+        paths = [str(path) for path in sources]
+        self.assertFalse(env["concat_segments_need_normalization"](paths))
+        self.assertEqual(shared.call_count, 2)
+
+        probe.side_effect = [stream_info(), stream_info(video_updates={"profile": "Main"})]
+        self.assertTrue(env["concat_segments_need_normalization"](paths))
+
+    def test_app_probe_passes_the_shared_show_data_contract_to_ffprobe(self):
+        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout='{"streams": []}', stderr=""))
+        process = SimpleNamespace(run=run, PIPE=object())
+        env = self.load(
+            "probe_media_stream_info",
+            file_ready=lambda _: True,
+            subprocess=process,
+            ffprobe_path=lambda: "/fixed/ffprobe",
+            CONCAT_STREAM_PROBE_ARGS=media.CONCAT_STREAM_PROBE_ARGS,
+            json=json,
+            logging=SimpleNamespace(warning=mock.Mock()),
+        )
+        self.assertEqual(env["probe_media_stream_info"]("segment.mp4"), {"streams": []})
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["/fixed/ffprobe", "-v"])
+        self.assertEqual(command[2:5], ["error", *media.CONCAT_STREAM_PROBE_ARGS[:2]])
+        self.assertIn(media.CONCAT_STREAM_SHOW_ENTRIES, command)
+
+    def test_legacy_prepare_uses_durable_identity_reprobes_and_rejects_source_profile_or_order_change(self):
+        sources = [self.root / "a.mp4", self.root / "b.mp4"]
+        sources[0].write_bytes(b"source-a")
+        sources[1].write_bytes(b"source-b")
+        output_dir = self.root / "normalized"
+        plans = {}
+        normalized = []
+        probed = []
+
+        def normalize(source, target, plan):
+            normalized.append(Path(source).name)
+            plans[str(target)] = plan
+            Path(target).write_bytes(b"normalized-" + Path(source).read_bytes())
+
+        def probe(path):
+            probed.append(str(path))
+            target = Path(path)
+            if target.parent == output_dir:
+                return normalized_stream_info(plans[str(path)])
+            return stream_info(video_updates={"profile": "Main"}) if target == sources[1] else stream_info()
+
+        env = self.load(
+            "prepare_concat_segments",
+            ensure_dir=lambda path: Path(path).mkdir(parents=True, exist_ok=True),
+            normalize_concat_segment=normalize,
+            probe_media_stream_info=probe,
+            drama_concat_signature=media.concat_signature,
+            concat_signatures_are_compatible=media.concat_signatures_are_compatible,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            prepare_normalized_concat_segment=media.prepare_normalized_concat_segment,
+            validate_normalized_concat_signatures=media.validate_normalized_concat_signatures,
+            NORMALIZATION_PROFILE=media.NORMALIZATION_PROFILE,
+        )
+        outputs = env["prepare_concat_segments"]([str(path) for path in sources], str(output_dir))
+        self.assertCountEqual(normalized, ["a.mp4", "b.mp4"])
+        self.assertEqual(outputs, [str(output_dir / "000.mp4"), str(output_dir / "001.mp4")])
+        normalized.clear()
+        probed.clear()
+        self.assertEqual(env["prepare_concat_segments"]([str(path) for path in sources], str(output_dir)), outputs)
+        self.assertEqual(normalized, [])
+        self.assertTrue(all(path in probed for path in outputs))
+
+        changes = []
+        sources[0].write_bytes(b"changed-source-a")
+        changes.append(("source", [str(path) for path in sources], media.NORMALIZATION_PROFILE))
+        sources[0].write_bytes(b"source-a")
+        changes.append(("profile", [str(path) for path in sources], media.NORMALIZATION_PROFILE + "-next"))
+        changes.append(("order", [str(sources[1]), str(sources[0])], media.NORMALIZATION_PROFILE))
+        for name, ordered, profile in changes:
+            with self.subTest(name=name):
+                if name == "source":
+                    sources[0].write_bytes(b"changed-source-a")
+                else:
+                    sources[0].write_bytes(b"source-a")
+                env["NORMALIZATION_PROFILE"] = profile
+                with self.assertRaises(DramaSynthesisError) as caught:
+                    env["prepare_concat_segments"](ordered, str(output_dir))
+                self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+
+    def test_legacy_prepare_rejects_probe_race_without_normalizing_or_persisting(self):
+        sources = [self.root / "race-a.mp4", self.root / "race-b.mp4"]
+        sources[0].write_bytes(b"source-a")
+        sources[1].write_bytes(b"source-b")
+        output_dir = self.root / "race-normalized"
+        normalize = mock.Mock()
+
+        def probe(path):
+            source = Path(path)
+            if source == sources[0]:
+                source.write_bytes(b"mutate-a")
+            return stream_info(video_updates={"profile": "Main"})
+
+        env = self.load(
+            "prepare_concat_segments",
+            ensure_dir=lambda path: Path(path).mkdir(parents=True, exist_ok=True),
+            normalize_concat_segment=normalize,
+            probe_media_stream_info=probe,
+            drama_concat_signature=media.concat_signature,
+            concat_signatures_are_compatible=media.concat_signatures_are_compatible,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            prepare_normalized_concat_segment=media.prepare_normalized_concat_segment,
+            validate_normalized_concat_signatures=media.validate_normalized_concat_signatures,
+            NORMALIZATION_PROFILE=media.NORMALIZATION_PROFILE,
+        )
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["prepare_concat_segments"]([str(path) for path in sources], str(output_dir))
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        normalize.assert_not_called()
+        self.assertFalse(output_dir.exists())
+
+    def test_normalizer_command_converts_colors_scales_pads_and_selects_real_or_silent_audio(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        output = Path(directory.name) / "normalized.mp4"
+        runner = mock.Mock(side_effect=lambda command: Path(command[-1]).write_bytes(b"fake-media"))
+        env = self.load(
+            "normalize_concat_segment",
+            FFMPEG="ffmpeg",
+            ensure_dir=lambda path: Path(path).mkdir(parents=True, exist_ok=True),
+            run_cmd=runner,
+            video_encode_args=lambda: ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
+            valid_video_file=lambda _: True,
+            valid_av_duration_alignment=lambda _: True,
+            validate_concat_normalization_plan=media.validate_concat_normalization_plan,
+        )
+        reference = stream_info(width=361, height=641)
+        plan = media.freeze_concat_normalization_plan(reference, stream_info(), 0)
+        env["normalize_concat_segment"]("source.mp4", str(output), plan)
+        command = runner.call_args.args[0]
+        joined = " ".join(command)
+        self.assertIn("colorspace=ispace=bt709:itrc=bt709:iprimaries=bt709:irange=tv", joined)
+        self.assertIn("space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p", joined)
+        self.assertNotIn("setparams", joined)
+        self.assertIn("scale=w=", joined)
+        self.assertIn("pad=362:642:(ow-iw)/2:(oh-ih)/2:color=black", joined)
+        self.assertIn("setsar=1", joined)
+        video_filter = command[command.index("-vf") + 1]
+        self.assertLess(video_filter.index("scale="), video_filter.index("colorspace="))
+        self.assertLess(video_filter.index("colorspace="), video_filter.index("pad="))
+        self.assertNotIn("bwdif=", joined)
+        self.assertNotIn("setfield", joined)
+        self.assertEqual(command[command.index("-map", command.index("-map") + 1) + 1], "0:a:0")
+        self.assertNotIn("anullsrc", joined)
+        self.assertEqual(command[command.index("-af") + 1], "aresample=async=1:first_pts=0,apad")
+        self.assertIn("-shortest", command)
+        for option, value in (
+            ("-color_range", "tv"), ("-colorspace", "bt709"), ("-color_trc", "bt709"),
+            ("-color_primaries", "bt709"), ("-chroma_sample_location", "left"),
+            ("-profile:v", "high"), ("-level:v", "4.1"), ("-pix_fmt", "yuv420p"),
+            ("-tag:v", "avc1"), ("-video_track_timescale", "12800"),
+            ("-profile:a", "aac_low"), ("-sample_fmt", "fltp"), ("-tag:a", "mp4a"),
+        ):
+            index = command.index(option)
+            self.assertEqual(command[index + 1], value)
+
+        runner.reset_mock()
+        silent_output = self.root / "silent.mp4"
+        silent_plan = media.freeze_concat_normalization_plan(reference, stream_info(audio=False), 1)
+        env["normalize_concat_segment"]("silent-source.mp4", str(silent_output), silent_plan)
+        silent_command = runner.call_args.args[0]
+        self.assertIn("anullsrc=r=48000:cl=stereo", silent_command)
+        maps = [silent_command[index + 1] for index, value in enumerate(silent_command[:-1]) if value == "-map"]
+        self.assertEqual(maps, ["0:v:0", "1:a:0"])
+        self.assertEqual(silent_command[silent_command.index("-af") + 1], "aresample=async=1:first_pts=0")
+        self.assertIn("-shortest", silent_command)
+
+        for field_order, parity in (("tt", "tff"), ("bt", "tff"), ("bb", "bff"), ("tb", "bff")):
+            with self.subTest(field_order=field_order):
+                runner.reset_mock()
+                interlaced_output = self.root / ("interlaced-%s.mp4" % field_order)
+                interlaced_plan = media.freeze_concat_normalization_plan(
+                    reference, stream_info(video_updates={"field_order": field_order}), 2,
+                )
+                env["normalize_concat_segment"](
+                    "interlaced-source.mp4", str(interlaced_output), interlaced_plan,
+                )
+                interlaced_command = runner.call_args.args[0]
+                interlaced_filter = interlaced_command[interlaced_command.index("-vf") + 1]
+                self.assertTrue(interlaced_filter.startswith(
+                    "bwdif=mode=send_frame:parity=%s:deint=all," % parity,
+                ))
+                self.assertNotIn("setfield", interlaced_filter)
+
+    def test_intro_command_converts_image_pixels_and_writes_canonical_bt709_streams(self):
+        output = self.root / "intro.mp4"
+        cover = self.root / "cover.jpg"
+        original_cover = jfif_jpeg()
+        cover.write_bytes(original_cover)
+        frozen_sources = []
+
+        def run(command):
+            frozen_path = Path(command[command.index("-i") + 1])
+            self.assertNotEqual(frozen_path, cover)
+            self.assertTrue(frozen_path.is_file())
+            frozen_sources.append((frozen_path, frozen_path.read_bytes()))
+            cover.write_bytes(jfif_jpeg(comment_payload=b"replacement-after-validation"))
+            Path(command[-1]).write_bytes(b"fake-intro")
+
+        runner = mock.Mock(side_effect=run)
+        env = self.load(
+            "validate_intro_cover_color_contract", "freeze_intro_cover_source", "render_intro",
+            FFMPEG="ffmpeg",
+            INTRO_SECONDS=5,
+            probe_intro_reference_timing=lambda _: {"fps": "25", "audio_rate": "48000"},
+            ensure_dir=lambda path: Path(path).mkdir(parents=True, exist_ok=True),
+            run_cmd=runner,
+            video_encode_args=lambda: ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
+            valid_video_file=lambda _: True,
+            valid_av_duration_alignment=lambda _: True,
+            logging=SimpleNamespace(info=mock.Mock()),
+            tempfile=tempfile,
+            shutil=shutil,
+            file_fingerprint=file_fingerprint,
+        )
+        env["render_intro"](str(cover), str(output), reference_path="episode0.mp4")
+        command = runner.call_args.args[0]
+        self.assertEqual(len(frozen_sources), 1)
+        self.assertEqual(frozen_sources[0][1], original_cover)
+        self.assertFalse(frozen_sources[0][0].exists())
+        self.assertEqual(list(self.root.glob(".intro-cover-*.jpg")), [])
+        video_filter = command[command.index("-vf") + 1]
+        self.assertIn("in_range=pc:out_range=tv", video_filter)
+        self.assertIn("in_color_matrix=bt470:out_color_matrix=bt709", video_filter)
+        self.assertIn("force_divisible_by=2", video_filter)
+        self.assertIn("colorspace=ispace=bt709:itrc=iec61966-2-1:iprimaries=bt709:irange=tv", video_filter)
+        self.assertNotIn("auto", video_filter)
+        self.assertIn("pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black", video_filter)
+        self.assertIn("format=yuv420p:fast=0", video_filter)
+        self.assertTrue(video_filter.endswith("setsar=1"))
+        self.assertNotIn("setparams", video_filter)
+        for option, value in (
+            ("-profile:v", "high"), ("-level:v", "4.1"), ("-pix_fmt", "yuv420p"),
+            ("-tag:v", "avc1"), ("-video_track_timescale", "12800"),
+            ("-color_range", "tv"), ("-colorspace", "bt709"), ("-color_trc", "bt709"),
+            ("-color_primaries", "bt709"), ("-chroma_sample_location", "left"),
+            ("-profile:a", "aac_low"), ("-sample_fmt", "fltp"), ("-tag:a", "mp4a"),
+        ):
+            index = command.index(option)
+            self.assertEqual(command[index + 1], value)
+
+        unsupported = self.root / "cover.png"
+        unsupported.write_bytes(b"\x89PNG\r\n\x1a\n")
+        runner.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
+            env["render_intro"](str(unsupported), str(self.root / "unsupported.mp4"))
+        runner.assert_not_called()
+
+    def test_intro_jpeg_parser_rejects_fake_comment_icc_and_adobe_markers(self):
+        env = self.load("validate_intro_cover_color_contract")
+        valid = self.root / "valid.jpg"
+        valid.write_bytes(jfif_jpeg())
+        self.assertEqual(env["validate_intro_cover_color_contract"](str(valid))["matrix"], "bt470")
+
+        cases = {
+            "fake-jfif-comment": jfif_jpeg(
+                include_jfif=False, comment_payload=b"JFIF\x00not-an-app0-marker",
+            ),
+            "icc-profile": jfif_jpeg(jpeg_segment(0xE2, b"ICC_PROFILE\x00\x01\x01fake")),
+            "adobe-app14": jfif_jpeg(jpeg_segment(0xEE, b"Adobe\x00d840000000")),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                path = self.root / (name + ".jpg")
+                path.write_bytes(payload)
+                with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
+                    env["validate_intro_cover_color_contract"](str(path))
 
 
 def recipe():
@@ -911,9 +1636,14 @@ class ResourceGuardTests(unittest.TestCase):
         self.guard = guard
         self.fixture()
 
-    def fixture(self):
+    def fixture(self, profile=None):
         guard = self.guard
-        self.unit, self.pid = "drama-resource-guard-test-0123456789abcdef.service", 321
+        profile = profile or guard.SELF_TEST_PROFILE
+        self.profile = profile
+        self.unit = ("drama-resource-guard-test-0123456789abcdef.service"
+                     if profile is guard.SELF_TEST_PROFILE else
+                     "drama-media-accept-0123456789ab-accept01-short-2c2t-r1.service")
+        self.pid = 321
         unit_path = "/system.slice/" + self.unit
         self.paths = {name: "/sys/fs/cgroup/" + name for name in ("cpu", "memory", "pids")}
         values = {
@@ -939,14 +1669,15 @@ class ResourceGuardTests(unittest.TestCase):
                     values[directory + "/pids.current"] = "10" if parent else "1"
                 else:
                     values.update({directory + "/" + key: value for key, value in {
-                        "memory.limit_in_bytes": str(8 * guard.MEMORY_BYTES if parent else guard.MEMORY_BYTES),
-                        "memory.memsw.limit_in_bytes": str(8 * guard.MEMORY_BYTES),
+                        "memory.limit_in_bytes": str(8 * profile.memory_bytes if parent else profile.memory_bytes),
+                        "memory.memsw.limit_in_bytes": str(8 * profile.memory_bytes),
                         "memory.usage_in_bytes": str(2 * guard.PROBE_BYTES if parent else guard.PROBE_BYTES),
                         "memory.memsw.usage_in_bytes": str(2 * guard.PROBE_BYTES if parent else guard.PROBE_BYTES),
                         "memory.use_hierarchy": "1", "memory.swappiness": "60", "memory.failcnt": "0",
-                        "memory.memsw.failcnt": "0", "memory.oom_control": "oom_kill_disable 0\nunder_oom 0",
+                        "memory.memsw.failcnt": "0",
+                        "memory.oom_control": "oom_kill_disable 0\nunder_oom 0\noom_kill 0",
                         "memory.stat": "hierarchical_memory_limit %s\nhierarchical_memsw_limit %s\ntotal_swap 0" %
-                                       (guard.MEMORY_BYTES, 8 * guard.MEMORY_BYTES),
+                                       (profile.memory_bytes, 8 * profile.memory_bytes),
                     }.items()})
         values[self.paths["memory"] + "/memory.use_hierarchy"] = "1"
         self.events = []
@@ -969,7 +1700,7 @@ class ResourceGuardTests(unittest.TestCase):
                     if path.endswith("/memory.memsw.limit_in_bytes"):
                         stats = path.rsplit("/", 1)[0] + "/memory.stat"
                         self.values[stats] = self.values[stats].replace(
-                            "hierarchical_memsw_limit " + str(8 * guard.MEMORY_BYTES),
+                            "hierarchical_memsw_limit " + str(8 * profile.memory_bytes),
                             "hierarchical_memsw_limit " + str(value))
                 if self.after_write:
                     self.after_write()
@@ -1014,6 +1745,7 @@ class ResourceGuardTests(unittest.TestCase):
 
     def run_guard(self, **kwargs):
         return self.guard.run_guard(kwargs.pop("unit", self.unit), kwargs.pop("cpu_cores", 2),
+                                    profile=kwargs.pop("profile", self.guard.SELF_TEST_PROFILE),
                                     files=self.files, process=self.process, launch_probe=self.launch,
                                     report=self.report, **kwargs)
 
@@ -1036,6 +1768,65 @@ class ResourceGuardTests(unittest.TestCase):
         self.assertTrue(evidence["resources"]["ancestor_limits_checked"])
         self.assertEqual(evidence["identity"]["groups"], [])
         self.assertEqual(evidence["identity"]["cap_eff"], "0")
+
+    def test_frozen_media_profile_writes_and_reads_exactly_16_gib(self):
+        profile = self.guard.MEDIA_16_GIB_PROFILE
+        self.fixture(profile)
+        self.run_guard(profile=profile)
+        self.assertEqual(self.files.writes, [
+            (self.leaf["memory"] + "/memory.memsw.limit_in_bytes", 16 * 1024 ** 3),
+            (self.leaf["memory"] + "/memory.swappiness", 0),
+        ])
+        proof = self.launch.call_args.args[0]
+        self.assertEqual(proof["profile"], "media-acceptance-16gib-v1")
+        self.assertEqual(self.report.call_args.args[0]["resources"]["profile"], proof["profile"])
+
+    def test_media_profile_only_accepts_fixed_action_units_and_trial_names(self):
+        pattern = self.guard.MEDIA_16_GIB_PROFILE.unit_pattern
+        accepted = (
+            "drama-media-accept-0123456789ab-accept01-short-2c2t-r1.service",
+            "drama-media-accept-0123456789ab-accept01-long-4c4t-r2.service",
+            "drama-media-prepare-0123456789ab-accept01.service",
+            "drama-media-decode-0123456789ab-accept01-short-4c2t-r2.service",
+            "drama-media-guard-0123456789ab-accept01.service",
+        )
+        rejected = (
+            "drama-media-accept-0123456789ab-accept01-short-2c2t.service",
+            "drama-media-accept-0123456789ab-accept01-short-2c2t-r3.service",
+            "drama-media-decode-0123456789ab-accept01-short-2c2t.service",
+        )
+        for unit in accepted:
+            with self.subTest(unit=unit):
+                self.assertIsNotNone(re.fullmatch(pattern, unit))
+        for unit in rejected:
+            with self.subTest(unit=unit):
+                self.assertIsNone(re.fullmatch(pattern, unit))
+
+    def test_media_proof_revalidates_same_pid_without_running_self_probe(self):
+        profile = self.guard.MEDIA_16_GIB_PROFILE
+        self.fixture(profile)
+        self.run_guard(profile=profile)
+        proof = self.launch.call_args.args[0]
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, json.dumps(proof).encode())
+        os.close(write_fd)
+        with mock.patch.object(self.guard, "LinuxFiles", return_value=self.files), \
+             mock.patch.object(self.guard, "LinuxProcess", return_value=self.process), \
+             mock.patch.object(self.guard.os, "getpid", return_value=self.pid):
+            verified = self.guard.verify_inherited_guard(
+                self.unit, 2, read_fd, profile=profile
+            )
+        self.assertEqual(verified["proof"], proof)
+        self.assertEqual(verified["identity"]["nice"], 10)
+
+    def test_equal_but_unreviewed_profile_object_is_rejected_before_cgroup_reads(self):
+        source = self.guard.SELF_TEST_PROFILE
+        clone = self.guard.GuardProfile(
+            source.name, source.memory_bytes, source.tasks_max,
+            source.unit_pattern, source.media_acceptance
+        )
+        self.rejected(profile=clone)
+        self.assertEqual(self.files.writes, [])
 
     def test_wrong_unit_or_cpu_expectation_never_writes_or_launches(self):
         for kwargs in ({"unit": "drama-synthesis-gpu.service"}, {"unit": "../system.slice"},
@@ -1191,7 +1982,8 @@ class ResourceGuardTests(unittest.TestCase):
              mock.patch.object(self.guard, "LinuxProcess", return_value=self.process), \
              mock.patch.object(self.guard.os, "getpid", return_value=self.pid), \
              mock.patch.object(self.guard.time, "sleep") as sleep, mock.patch.object(self.guard, "emit") as output:
-            self.guard.run_probe(self.unit, 2, read_fd)
+            self.guard.run_probe(self.unit, 2, read_fd,
+                                 profile=self.guard.SELF_TEST_PROFILE)
         self.assertEqual(sleep.call_args_list, [mock.call(1)] * 3)
         final = output.call_args.args[0]
         self.assertEqual(final["allocated_bytes"], 8 * 1024 * 1024)
@@ -1216,8 +2008,947 @@ class ResourceGuardTests(unittest.TestCase):
                      mock.patch.object(self.guard, "LinuxProcess", return_value=self.process), \
                      mock.patch.object(self.guard.os, "getpid", return_value=self.pid), \
                      mock.patch.object(self.guard.time, "sleep") as sleep, self.assertRaises(self.guard.GuardFailure):
-                    self.guard.run_probe(self.unit, 2, read_fd)
+                    self.guard.run_probe(self.unit, 2, read_fd,
+                                         profile=self.guard.SELF_TEST_PROFILE)
                 sleep.assert_not_called()
+
+
+class MediaLauncherTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def setUp(self):
+        from scripts import run_drama_media_acceptance as launcher
+        self.launcher = launcher
+        self.spec = launcher.build_spec(self.SHA, "accept01", "short", "2c2t")
+
+    def test_default_command_only_previews_fixed_paths_and_never_starts_media(self):
+        output = io.StringIO()
+        with mock.patch("sys.stdout", new=output):
+            code = self.launcher.main([
+                "--candidate-sha", self.SHA, "--run-id", "accept01",
+                "--sample-kind", "short", "--config", "2c2t", "--trial", "r1",
+            ])
+        value = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertFalse(value["apply"])
+        self.assertFalse(value["media_started"])
+        self.assertEqual(value["memory_bytes"], 16 * 1024 ** 3)
+        self.assertEqual(value["source"], self.launcher.path_text(self.spec.prepared_short_path))
+        self.assertEqual(value["output_dir"], self.launcher.path_text(self.spec.output_dir))
+        self.assertEqual(value["trial_configuration_order"], ["2c2t", "4c2t", "4c4t"])
+        self.assertEqual(value["trial_position"], 1)
+        self.assertEqual(value["cos_uploads"], 0)
+        self.assertEqual(value["production_requests"], 0)
+
+    def test_public_cli_rejects_paths_commands_environment_and_raw_lock_fd(self):
+        base = ["--candidate-sha", self.SHA, "--run-id", "accept01",
+                "--sample-kind", "short", "--config", "2c2t", "--trial", "r1"]
+        for extra in (["--source", URL], ["--command", "ffmpeg"],
+                      ["--env-file", "secret.env"]):
+            with self.subTest(extra=extra), mock.patch("sys.stderr", new=io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                self.launcher.main(base + extra)
+        output = io.StringIO()
+        with mock.patch("sys.stdout", new=output):
+            self.assertEqual(self.launcher.main(base + ["--lock-fd", "9"]), 78)
+        self.assertEqual(json.loads(output.getvalue())["error_code"],
+                         "invalid_internal_arguments")
+
+    def test_systemd_command_is_root_guarded_actual_nice_and_gpu_visible(self):
+        with mock.patch.object(self.launcher, "fixed_runtime_python",
+                               return_value=Path("/fixed/python")), \
+             mock.patch.object(self.launcher, "require_regular_file"):
+            command = self.launcher.build_systemd_command(self.spec)
+        joined = "\n".join(map(str, command))
+        self.assertIn("--property=KillMode=control-group", command)
+        self.assertIn("--property=RemainAfterExit=no", command)
+        self.assertIn("--property=TimeoutStopSec=90", command)
+        self.assertIn("--property=RuntimeMaxSec=43200", command)
+        self.assertIn("--property=PrivateDevices=no", command)
+        self.assertIn("--property=ReadOnlyPaths=" + " ".join(
+            self.launcher.path_text(path) for path in (
+                self.spec.candidate_root, self.launcher.INPUT_ROOT,
+                self.launcher.ASSET_ROOT, self.launcher.RUNTIME_ROOT,
+            )), command)
+        self.assertIn("--property=MemoryLimit=17179869184", command)
+        self.assertIn("--property=TasksMax=128", command)
+        self.assertNotIn("--property=Nice=10", command)
+        nice = command.index(self.launcher.path_text(self.launcher.NICE_PATH))
+        self.assertEqual(command[nice:nice + 5],
+                         [self.launcher.path_text(self.launcher.NICE_PATH), "-n", "10",
+                          "/fixed/python", "-I"])
+        self.assertEqual(command[nice + 5:nice + 8],
+                         ["-S", "-B", self.launcher.path_text(self.spec.script_path)])
+        self.assertNotIn("flock", joined)
+        self.assertNotIn("EnvironmentFile", joined)
+
+    def test_unit_contract_is_read_back_before_guard_and_timeout_is_bounded(self):
+        text = "\n".join([
+            "Id=" + self.spec.unit,
+            "MainPID=321",
+            "KillMode=control-group",
+            "RemainAfterExit=no",
+            "TimeoutStopUSec=1min 30s",
+            "RuntimeMaxUSec=12h",
+            "PrivateDevices=no",
+            "ReadOnlyPaths=" + " ".join(self.launcher.path_text(path) for path in (
+                self.spec.candidate_root, self.launcher.INPUT_ROOT,
+                self.launcher.ASSET_ROOT, self.launcher.RUNTIME_ROOT,
+            )),
+        ]) + "\n"
+        result = SimpleNamespace(returncode=0, stdout=text)
+        with mock.patch.object(self.launcher, "require_regular_file"), \
+             mock.patch.object(self.launcher.subprocess, "run", return_value=result) as run, \
+             mock.patch.object(self.launcher.os, "getpid", return_value=321):
+            value = self.launcher.verify_media_unit_contract(self.spec)
+        self.assertEqual(value["KillMode"], "control-group")
+        self.assertIn(self.launcher.path_text(self.launcher.SYSTEMCTL_PATH),
+                      run.call_args.args[0])
+        for raw in ("0", "91s", "infinity", "1min bad"):
+            with self.subTest(raw=raw), self.assertRaises(self.launcher.LaunchFailure):
+                self.launcher.parse_systemd_duration(raw)
+        self.assertEqual(self.launcher.parse_systemd_duration(
+            "12h", maximum_seconds=43200, exact_seconds=43200), 43200)
+        with self.assertRaises(self.launcher.LaunchFailure):
+            self.launcher.parse_systemd_duration(
+                "12h 1s", maximum_seconds=43200, exact_seconds=43200)
+        result.stdout = text.replace(
+            self.launcher.path_text(self.launcher.RUNTIME_ROOT), "/tmp/unreviewed-runtime"
+        )
+        with mock.patch.object(self.launcher, "require_regular_file"), \
+             mock.patch.object(self.launcher.subprocess, "run", return_value=result), \
+             mock.patch.object(self.launcher.os, "getpid", return_value=321), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.verify_media_unit_contract(self.spec)
+        self.assertEqual(str(caught.exception), "media_unit_contract_invalid")
+
+    def test_start_memory_gate_requires_real_24_gib_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "meminfo"
+            path.write_text("MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n")
+            self.assertEqual(self.launcher.read_host_memory(path)["MemAvailable"],
+                             24 * 1024 ** 3)
+            path.write_text("MemTotal: 33554432 kB\nMemAvailable: 25165823 kB\n")
+            with self.assertRaises(self.launcher.LaunchFailure):
+                self.launcher.read_host_memory(path)
+
+    def test_explicit_preflight_checks_launcher_only_without_media_processes(self):
+        parent_read, parent_write = os.pipe()
+        lock_read, lock_write = os.pipe()
+        directory_stat = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+        try:
+            with mock.patch.object(self.launcher, "ensure_public_apply_preflight") as base, \
+                 mock.patch.object(self.launcher, "read_host_memory") as memory, \
+                 mock.patch.object(self.launcher, "fixed_runtime_python"), \
+                 mock.patch.object(self.launcher, "require_regular_file"), \
+                 mock.patch.object(self.launcher.os, "O_DIRECTORY", 0, create=True), \
+                 mock.patch.object(self.launcher.os, "O_CLOEXEC", 0, create=True), \
+                 mock.patch.object(self.launcher.os, "open", return_value=parent_read), \
+                 mock.patch.object(self.launcher.os, "fstat", return_value=directory_stat), \
+                 mock.patch.object(self.launcher, "acquire_media_lock",
+                                   return_value=(lock_read, (1, 2))), \
+                 mock.patch.object(self.launcher.subprocess, "Popen") as popen:
+                value = self.launcher.run_public_preflight(self.spec)
+            base.assert_called_once_with(self.spec)
+            memory.assert_called_once_with()
+            popen.assert_not_called()
+            self.assertTrue(value["preflight_passed"])
+            self.assertFalse(value["unit_submitted"])
+            self.assertEqual((value["ffprobe_processes"], value["ffmpeg_processes"]), (0, 0))
+        finally:
+            for descriptor in (parent_read, parent_write, lock_read, lock_write):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def test_second_stage_exec_is_same_script_isolated_with_site_suppression(self):
+        proof = {"version": 2, "profile": "media-acceptance-16gib-v1",
+                 "unit": self.spec.unit, "cpu_cores": 2, "pid": os.getpid(),
+                 "resources_sha256": "b" * 64}
+        lock_read, lock_write = os.pipe()
+        captured = {}
+
+        def capture(executable, arguments, environment):
+            captured.update(executable=str(executable), arguments=list(map(str, arguments)),
+                            environment=dict(environment))
+            proof_fd = int(arguments[-3])
+            captured["proof"] = json.loads(os.read(proof_fd, 1025))
+            raise OSError("simulated exec")
+
+        try:
+            with mock.patch.object(self.launcher.os, "execve", side_effect=capture), \
+                 mock.patch.dict(os.environ, {"SECRET_TOKEN": "never-print-this"}), \
+                 self.assertRaises(OSError):
+                self.launcher.exec_verified_stage(self.spec, proof, lock_read)
+        finally:
+            os.close(lock_read)
+            os.close(lock_write)
+        arguments = captured["arguments"]
+        self.assertEqual(arguments[1:4], ["-I", "-S", "-B"])
+        self.assertEqual(arguments[4], self.launcher.path_text(self.spec.script_path))
+        self.assertEqual(captured["proof"], proof)
+        self.assertNotIn("SECRET_TOKEN", captured["environment"])
+        self.assertEqual(set(captured["environment"]), {
+            "PATH", "LANG", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED",
+            "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        })
+
+    def test_renderer_lock_fd_is_only_added_for_guarded_launcher(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+
+        class Process:
+            pid = 444
+            stdout = None
+            def poll(self): return 0
+
+        ordinary_popen = mock.Mock(return_value=Process())
+        benchmark.launch_renderer_process(["ffmpeg"], popen=ordinary_popen, text=True)
+        self.assertNotIn("pass_fds", ordinary_popen.call_args.kwargs)
+        guarded_popen = mock.Mock(return_value=Process())
+        with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                               return_value=(1, 2)), \
+             mock.patch.object(benchmark, "verify_child_media_lock_fd") as verify:
+            benchmark.launch_renderer_process(
+                ["ffmpeg"], inherited_lock_fd=9, popen=guarded_popen, text=True
+            )
+        self.assertEqual(guarded_popen.call_args.kwargs["pass_fds"], (9,))
+        verify.assert_called_once_with(444, 9, (1, 2))
+
+    def test_failed_child_lock_readback_kills_waits_and_confirms_exit(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        events = []
+
+        class Process:
+            pid = 445
+            stdout = io.StringIO()
+            returncode = None
+            def poll(self): return self.returncode
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+                return self.returncode
+
+        with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                               return_value=(1, 2)), \
+             mock.patch.object(benchmark, "verify_child_media_lock_fd",
+                               side_effect=benchmark.BenchmarkGuardError(
+                                   "benchmark_media_lock_inheritance_failed")), \
+             self.assertRaises(benchmark.BenchmarkGuardError) as caught:
+            benchmark.launch_renderer_process(
+                ["ffmpeg"], inherited_lock_fd=9, popen=mock.Mock(return_value=Process())
+            )
+        self.assertEqual(caught.exception.code, "benchmark_media_lock_inheritance_failed")
+        self.assertEqual(events, ["kill", ("wait", 30)])
+
+    def test_child_lock_keyboard_interrupt_kills_waits_and_reraises(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        events = []
+
+        class Output:
+            def close(self):
+                events.append("close")
+
+        class Process:
+            pid = 447
+            stdout = Output()
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+                return self.returncode
+
+        with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                               return_value=(1, 2)), \
+             mock.patch.object(benchmark, "verify_child_media_lock_fd",
+                               side_effect=KeyboardInterrupt()), \
+             self.assertRaises(KeyboardInterrupt):
+            benchmark.launch_renderer_process(
+                ["ffmpeg"], inherited_lock_fd=9,
+                popen=mock.Mock(return_value=Process()),
+            )
+        self.assertEqual(events, ["kill", ("wait", 30), "close"])
+
+    def test_failed_child_cleanup_has_distinct_error_and_is_not_claimed_reaped(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+
+        class Process:
+            pid = 446
+            stdout = io.StringIO()
+            def poll(self): return None
+            def kill(self): raise OSError("private")
+            def wait(self, timeout): raise subprocess.TimeoutExpired("ffmpeg", timeout)
+
+        with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                               return_value=(1, 2)), \
+             mock.patch.object(benchmark, "verify_child_media_lock_fd",
+                               side_effect=benchmark.BenchmarkGuardError("bad")), \
+             self.assertRaises(benchmark.BenchmarkGuardError) as caught:
+            benchmark.launch_renderer_process(
+                ["ffmpeg"], inherited_lock_fd=9, popen=mock.Mock(return_value=Process())
+            )
+        self.assertEqual(caught.exception.code, "benchmark_renderer_cleanup_failed")
+
+    def test_benchmark_evidence_only_labels_explicit_launcher_protocol_guarded(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, recipe = root / "source.mp4", root / "recipe.json"
+            source.write_bytes(b"source")
+            recipe.write_text(json.dumps({"recipe_sha256": "c" * 64}))
+
+            def arguments(name):
+                return SimpleNamespace(
+                    source=str(source), recipe=str(recipe), output_dir=str(root / name),
+                    sample_kind="short", filter_threads=2, ffmpeg="ffmpeg",
+                    ffprobe="ffprobe", timeout=60, asset_root=str(root / "assets"),
+                    asset_manifest_sha256="d" * 64,
+                )
+
+            original = Path.is_file
+            patches = [
+                mock.patch.object(Path, "is_file", autospec=True,
+                                  side_effect=lambda path: True if path == Path("/proc/self/stat")
+                                  else original(path)),
+                mock.patch.object(benchmark.gpu, "_probe", return_value={"duration": 5}),
+                mock.patch.object(benchmark, "cgroup_limits", return_value={"cgroup_version": 1}),
+                mock.patch.object(benchmark.gpu, "render_random_output", return_value={}),
+            ]
+            with patches[0], patches[1], patches[2], patches[3]:
+                ordinary = benchmark.benchmark_render(arguments("ordinary"))
+                with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                                       return_value=(1, 2)):
+                    guarded = benchmark.benchmark_render(
+                        arguments("guarded"), inherited_lock_fd=9
+                    )
+        self.assertFalse(ordinary["acceptance_launcher_lock_inherited"])
+        self.assertTrue(guarded["acceptance_launcher_lock_inherited"])
+        for value in (ordinary, guarded):
+            self.assertTrue(value["source_unchanged"])
+            self.assertEqual(value["source"], value["source_final"])
+            self.assertEqual(value["source_identity"], value["source_final_identity"])
+
+    def test_guarded_renderer_rechecks_24_gib_immediately_before_popen(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, recipe = root / "source.mp4", root / "recipe.json"
+            source.write_bytes(b"source")
+            recipe.write_text(json.dumps({"recipe_sha256": "e" * 64}))
+            args = SimpleNamespace(
+                source=str(source), recipe=str(recipe), output_dir=str(root / "result"),
+                sample_kind="short", filter_threads=2, ffmpeg="ffmpeg", ffprobe="ffprobe",
+                timeout=60, asset_root=str(root / "assets"), asset_manifest_sha256="f" * 64,
+            )
+            original = Path.is_file
+
+            def render(**kwargs):
+                kwargs["runner"](["ffmpeg", str(kwargs["output"])], timeout=60)
+
+            with mock.patch.object(Path, "is_file", autospec=True,
+                                   side_effect=lambda path: True if path == Path("/proc/self/stat")
+                                   else original(path)), \
+                 mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
+                                   return_value=(1, 2)), \
+                 mock.patch.object(benchmark.gpu, "_probe", return_value={"duration": 5}), \
+                 mock.patch.object(benchmark, "cgroup_limits", return_value={"cgroup_version": 1}), \
+                 mock.patch.object(benchmark, "host_memory_sample", return_value={
+                     "mem_available_bytes": 24 * 1024 ** 3 - 1,
+                     "mem_total_bytes": 32 * 1024 ** 3,
+                 }), \
+                 mock.patch.object(benchmark.gpu, "render_random_output", side_effect=render), \
+                 mock.patch.object(benchmark.subprocess, "Popen") as popen:
+                result = benchmark.benchmark_render(args, inherited_lock_fd=9)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "benchmark_launcher_start_memory_low")
+        self.assertEqual(result["resource_guard"]["phase"], "before_launch")
+        self.assertEqual(
+            result["resource_guard"]["thresholds"]["launcher_start_mem_available_below_bytes"],
+            24 * 1024 ** 3,
+        )
+        popen.assert_not_called()
+
+    def test_trial_names_isolate_units_outputs_and_evidence_but_share_one_short(self):
+        r1 = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                      "render", "r1")
+        r2 = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                      "render", "r2")
+        decode = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                          "decode", "r2")
+        self.assertEqual(r1.prepared_short_path, r2.prepared_short_path)
+        self.assertEqual(r1.prepare_evidence_path, r2.prepare_evidence_path)
+        self.assertNotEqual(r1.unit, r2.unit)
+        self.assertNotEqual(r1.output_dir, r2.output_dir)
+        self.assertNotEqual(r1.launcher_result_path, r2.launcher_result_path)
+        self.assertIn("-r2.service", decode.unit)
+        self.assertIn("-r2", decode.decode_evidence_path.name)
+        self.assertEqual(self.launcher.preview(r2)["trial_configuration_order"],
+                         ["4c4t", "4c2t", "2c2t"])
+        with self.assertRaises(self.launcher.LaunchFailure):
+            self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                     "prepare-short", "r2")
+        with self.assertRaises(self.launcher.LaunchFailure):
+            self.launcher.build_spec(self.SHA, "accept01", "short", "4c2t",
+                                     "guard-only", "r1")
+
+    def test_same_trial_replay_is_rejected_while_second_trial_remains_new(self):
+        r1 = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                      "render", "r1")
+        r2 = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t",
+                                      "render", "r2")
+
+        def exists(path):
+            return path == r1.output_dir
+
+        with mock.patch.object(self.launcher, "validate_prepared_short"), \
+             mock.patch.object(self.launcher, "validate_action_completion"), \
+             mock.patch.object(Path, "exists", autospec=True, side_effect=exists), \
+             mock.patch.object(Path, "is_symlink", autospec=True, return_value=False):
+            with self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.validate_existing_action_inputs(r1, 1009, 1010)
+            self.assertEqual(str(caught.exception), "render_output_must_be_new")
+            self.launcher.validate_existing_action_inputs(r2, 1009, 1010)
+
+    def test_current_guard_evidence_does_not_block_its_own_render(self):
+        spec = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t")
+
+        def exists(path):
+            return path == spec.launcher_guard_path
+
+        source = {"sha256": "9" * 64, "size_bytes": 111}
+        identity = {"device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1}
+        benchmark = SimpleNamespace(benchmark_render=mock.Mock(return_value={
+            "ok": False, "source": source, "source_final": source,
+            "source_unchanged": True, "source_identity": identity,
+            "source_final_identity": identity,
+            "minimum_mem_available_bytes": 16 * 1024 ** 3,
+        }))
+        with mock.patch.object(self.launcher, "validate_prepared_short", return_value={
+                 "prepared_sha256": source["sha256"], "prepared_size": source["size_bytes"]
+             }), \
+             mock.patch.object(Path, "exists", autospec=True, side_effect=exists), \
+             mock.patch.object(Path, "is_symlink", autospec=True, return_value=False), \
+             mock.patch.object(self.launcher, "fingerprint_regular",
+                               return_value={"sha256": "a" * 64, "size_bytes": 10}), \
+             mock.patch.object(self.launcher, "write_exclusive_json") as write:
+            result = self.launcher.run_render(spec, 1009, 1010, 9, benchmark)
+        self.assertFalse(result["ok"])
+        write.assert_called_once()
+
+    def test_short_render_rejects_benchmark_source_that_differs_from_prepare_sha(self):
+        spec = self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t")
+        identity = {"device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1}
+        source = {"sha256": "4" * 64, "size_bytes": 100}
+        benchmark = SimpleNamespace(benchmark_render=mock.Mock(return_value={
+            "ok": False, "source": source, "source_final": source,
+            "source_unchanged": True, "source_identity": identity,
+            "source_final_identity": identity,
+            "minimum_mem_available_bytes": 16 * 1024 ** 3,
+        }))
+        with mock.patch.object(self.launcher, "validate_prepared_short", return_value={
+                 "prepared_sha256": "5" * 64, "prepared_size": 100
+             }), \
+             mock.patch.object(Path, "exists", autospec=True, return_value=False), \
+             mock.patch.object(Path, "is_symlink", autospec=True, return_value=False), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.run_render(spec, 1009, 1010, 9, benchmark)
+        self.assertEqual(str(caught.exception), "render_source_fingerprint_mismatch")
+
+    def test_each_operation_defaults_to_preview_and_apply_only_submits(self):
+        base = ["--candidate-sha", self.SHA, "--run-id", "accept01",
+                "--sample-kind", "short", "--config", "2c2t", "--trial", "r1"]
+        for flag, operation in (("--prepare-short", "prepare-short"),
+                                ("--decode", "decode"),
+                                ("--guard-only", "guard-only")):
+            output = io.StringIO()
+            with self.subTest(operation=operation), mock.patch("sys.stdout", new=output), \
+                    mock.patch.object(self.launcher, "submit") as submit, \
+                    mock.patch.object(self.launcher.subprocess, "Popen") as popen:
+                self.assertEqual(self.launcher.main(base + [flag]), 0)
+                value = json.loads(output.getvalue())
+                self.assertEqual(value["operation"], operation)
+                self.assertFalse(value["apply"])
+                self.assertFalse(value["media_started"])
+                submit.assert_not_called()
+                popen.assert_not_called()
+        submitted = {"ok": True, "submitted": True}
+        with mock.patch.object(self.launcher, "submit", return_value=submitted) as submit, \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(self.launcher.main(base + ["--prepare-short", "--apply"]), 0)
+        self.assertEqual(submit.call_args.args[0].operation, "prepare-short")
+
+    def test_systemd_units_are_action_specific_but_share_the_hard_guard(self):
+        specs = {
+            "render": self.launcher.build_spec(self.SHA, "accept01", "short", "2c2t"),
+            "prepare-short": self.launcher.build_spec(
+                self.SHA, "accept01", "short", "2c2t", "prepare-short"),
+            "decode": self.launcher.build_spec(
+                self.SHA, "accept01", "short", "2c2t", "decode"),
+            "guard-only": self.launcher.build_spec(
+                self.SHA, "accept01", "short", "2c2t", "guard-only"),
+        }
+        units = set()
+        with mock.patch.object(self.launcher, "fixed_runtime_python",
+                               return_value=Path("/fixed/python")), \
+             mock.patch.object(self.launcher, "require_regular_file"):
+            for operation, spec in specs.items():
+                command = self.launcher.build_systemd_command(spec)
+                units.add(spec.unit)
+                self.assertIn("--property=MemoryLimit=17179869184", command)
+                self.assertIn("--property=TasksMax=128", command)
+                self.assertIn("--property=KillMode=control-group", command)
+                self.assertIn("--property=RemainAfterExit=no", command)
+                self.assertIn("--property=RuntimeMaxSec=43200", command)
+                self.assertIn("--property=PrivateDevices=no", command)
+                self.assertTrue(any(item.startswith("--property=ReadOnlyPaths=")
+                                    for item in command))
+                self.assertIn("--trial", command)
+                if operation != "render":
+                    self.assertIn("--" + operation, command)
+        self.assertEqual(len(units), 4)
+
+    def test_guard_only_preflight_does_not_touch_run_root_lock_or_media_inputs(self):
+        spec = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "2c2t", "guard-only")
+        with mock.patch.object(self.launcher, "ensure_public_apply_preflight") as base, \
+             mock.patch.object(self.launcher, "read_host_memory"), \
+             mock.patch.object(self.launcher, "fixed_runtime_python"), \
+             mock.patch.object(self.launcher, "require_regular_file"), \
+             mock.patch.object(self.launcher, "acquire_media_lock") as lock, \
+             mock.patch.object(self.launcher.os, "open") as opened:
+            value = self.launcher.run_public_preflight(spec)
+        base.assert_called_once_with(spec)
+        lock.assert_not_called()
+        opened.assert_not_called()
+        self.assertFalse(value["media_started"])
+        self.assertEqual((value["ffmpeg_processes"], value["ffprobe_processes"]), (0, 0))
+        with mock.patch.object(self.launcher, "require_regular_file") as regular:
+            self.launcher.validate_fixed_inputs(spec)
+        regular.assert_not_called()
+
+    def test_guard_only_verified_stage_runs_only_fixed_small_probe_and_cannot_claim_media(self):
+        spec = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "2c2t", "guard-only")
+
+        class GuardFailure(RuntimeError):
+            pass
+
+        guard = SimpleNamespace(
+            MEDIA_16_GIB_PROFILE=SimpleNamespace(name="media-acceptance-16gib-v1"),
+            PROBE_BYTES=8 * 1024 * 1024,
+            PROBE_SECONDS=3,
+            GuardFailure=GuardFailure,
+            run_probe=mock.Mock(),
+        )
+        output = io.StringIO()
+        with mock.patch.object(self.launcher, "require_linux"), \
+             mock.patch.object(self.launcher, "ensure_python_stage"), \
+             mock.patch.object(self.launcher, "target_identity", return_value=(1009, 1010)), \
+             mock.patch.object(self.launcher.os, "geteuid", return_value=1009, create=True), \
+             mock.patch.object(self.launcher.os, "getegid", return_value=1010, create=True), \
+             mock.patch.object(self.launcher.os, "getgroups", return_value=[], create=True), \
+             mock.patch.object(self.launcher, "verify_candidate"), \
+             mock.patch.object(self.launcher, "validate_fixed_inputs"), \
+             mock.patch.object(self.launcher, "read_host_memory"), \
+             mock.patch.object(self.launcher, "load_candidate_module", return_value=guard), \
+             mock.patch.object(self.launcher, "verify_private_run_root") as run_root, \
+             mock.patch.object(self.launcher, "verify_inherited_media_lock") as lock, \
+             mock.patch("sys.stdout", new=output):
+            self.assertEqual(self.launcher.internal_verified_stage(spec, 7), 0)
+        guard.run_probe.assert_called_once_with(
+            spec.unit, 2, 7, profile=guard.MEDIA_16_GIB_PROFILE
+        )
+        run_root.assert_not_called()
+        lock.assert_not_called()
+        value = json.loads(output.getvalue())
+        self.assertFalse(value["media_started"])
+        self.assertFalse(value["media_acceptance"])
+        self.assertEqual(value["guard_profile"], "media-acceptance-16gib-v1")
+        self.assertEqual(value["memory_bytes"], 16 * 1024 ** 3)
+        self.assertEqual((value["ffmpeg_processes"], value["ffprobe_processes"]), (0, 0))
+
+    def test_prepare_and_decode_commands_are_frozen_and_never_accept_paths(self):
+        prepare = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "2c2t", "prepare-short")
+        command = self.launcher.prepare_short_command(prepare)
+        self.assertEqual(command[0], self.launcher.path_text(self.launcher.FFMPEG_PATH))
+        self.assertEqual(command[command.index("-i") + 1],
+                         self.launcher.path_text(self.launcher.LONG_SOURCE))
+        self.assertEqual(command[command.index("-t") + 1], "120")
+        self.assertEqual(command[command.index("-c") + 1], "copy")
+        self.assertEqual(command[command.index("-f") + 1], "mp4")
+        self.assertEqual(command[-1], self.launcher.path_text(
+            prepare.run_root / self.launcher.PREPARED_SHORT_PART_NAME))
+        probe = self.launcher.prepare_short_probe_command(prepare)
+        self.assertEqual(probe[0], self.launcher.path_text(self.launcher.FFPROBE_PATH))
+        decode = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "4c4t", "decode", "r2")
+        command = self.launcher.decode_command(decode)
+        self.assertIn("-xerror", command)
+        self.assertEqual(command[command.index("-i") + 1],
+                         self.launcher.path_text(decode.output_dir / "result.mp4"))
+        self.assertEqual(command[-3:], ["-f", "null", "-"])
+        self.assertNotIn("http", " ".join(command).lower())
+        self.assertNotIn("cos", " ".join(command).lower())
+
+    def test_prepare_uses_exclusive_part_and_atomic_no_overwrite_commit(self):
+        spec = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "2c2t", "prepare-short")
+        initial = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_nlink=1,
+                                  st_uid=1009, st_gid=1010, st_dev=11, st_ino=22,
+                                  st_size=0)
+        completed = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_nlink=1,
+                                    st_uid=1009, st_gid=1010, st_dev=11, st_ino=22,
+                                    st_size=123)
+        probe = json.dumps({"format": {"duration": "120.0"}, "streams": [
+            {"codec_type": "video"}, {"codec_type": "audio"}
+        ]}).encode()
+        fingerprint = {"sha256": "b" * 64, "size_bytes": 123}
+        source_fingerprint = {"sha256": "8" * 64, "size_bytes": 5139047136,
+                              "device": 31, "inode": 32, "mtime_ns": 33, "nlink": 1}
+        with mock.patch.object(self.launcher, "validate_existing_action_inputs"), \
+             mock.patch.object(self.launcher.os, "O_DIRECTORY", 0, create=True), \
+             mock.patch.object(self.launcher.os, "O_CLOEXEC", 0, create=True), \
+             mock.patch.object(self.launcher.os, "open", side_effect=[50, 51, 52]) as opened, \
+             mock.patch.object(self.launcher.os, "fstat", side_effect=[initial, completed]), \
+             mock.patch.object(self.launcher.os, "close"), \
+             mock.patch.object(self.launcher.os, "fchmod"), \
+             mock.patch.object(self.launcher.os, "fsync"), \
+             mock.patch.object(self.launcher.os, "link") as link, \
+             mock.patch.object(self.launcher.os, "unlink") as unlink, \
+             mock.patch.object(self.launcher, "require_owned_regular", return_value=completed), \
+             mock.patch.object(self.launcher, "fingerprint_regular", return_value=fingerprint), \
+             mock.patch.object(self.launcher, "fingerprint_fixed_input",
+                               side_effect=[source_fingerprint, source_fingerprint]), \
+             mock.patch.object(self.launcher, "run_fixed_child", side_effect=[
+                 {"stdout": b"", "elapsed_seconds": 1,
+                  "minimum_mem_available_bytes": 30 * 1024 ** 3},
+                 {"stdout": probe, "elapsed_seconds": 1,
+                  "minimum_mem_available_bytes": 29 * 1024 ** 3},
+             ]) as child, \
+             mock.patch.object(self.launcher, "write_exclusive_json") as write, \
+             mock.patch.object(self.launcher, "validate_prepared_short"):
+            result = self.launcher.run_prepare_short(spec, 1009, 1010, 9, object())
+        self.assertTrue(result["ok"])
+        part_open = opened.call_args_list[1]
+        self.assertEqual(part_open.args[0], self.launcher.PREPARED_SHORT_PART_NAME)
+        self.assertTrue(part_open.args[1] & os.O_EXCL)
+        self.assertEqual(part_open.kwargs["dir_fd"], 50)
+        self.assertEqual(child.call_count, 2)
+        link.assert_called_once_with(
+            self.launcher.PREPARED_SHORT_PART_NAME, self.launcher.PREPARED_SHORT_NAME,
+            src_dir_fd=50, dst_dir_fd=50, follow_symlinks=False,
+        )
+        unlink.assert_called_once_with(self.launcher.PREPARED_SHORT_PART_NAME, dir_fd=50)
+        evidence = write.call_args.args[1]
+        self.assertEqual(evidence["prepared_sha256"], "b" * 64)
+        self.assertEqual(evidence["source_sha256"], "8" * 64)
+        self.assertEqual((evidence["source_device"], evidence["source_inode"]), (31, 32))
+        self.assertGreaterEqual(evidence["source_fingerprint_elapsed_seconds"], 0)
+        self.assertEqual((evidence["cos_uploads"], evidence["production_requests"]), (0, 0))
+
+    def test_prepare_rejects_long_source_changed_during_stream_copy(self):
+        before = {"sha256": "6" * 64, "size_bytes": self.launcher.LONG_SOURCE_SIZE,
+                  "device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1}
+        after = dict(before, sha256="7" * 64, mtime_ns=4)
+        with mock.patch.object(self.launcher, "fingerprint_fixed_input", return_value=after), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.verify_fixed_input_unchanged(
+                self.launcher.LONG_SOURCE, before,
+                "fixed_long_source_fingerprint_failed",
+                expected_size=self.launcher.LONG_SOURCE_SIZE,
+            )
+        self.assertEqual(str(caught.exception), "fixed_long_source_changed")
+
+    def test_benchmark_final_source_recheck_rejects_concurrent_mutation(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, recipe = root / "source.mp4", root / "recipe.json"
+            source.write_bytes(b"source")
+            recipe.write_text(json.dumps({"recipe_sha256": "8" * 64}))
+            args = SimpleNamespace(
+                source=str(source), recipe=str(recipe), output_dir=str(root / "result"),
+                sample_kind="short", filter_threads=2, ffmpeg="ffmpeg", ffprobe="ffprobe",
+                timeout=60, asset_root=str(root / "assets"),
+                asset_manifest_sha256="9" * 64,
+            )
+            before = {"sha256": "a" * 64, "size_bytes": 6,
+                      "device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1}
+            after = dict(before, sha256="b" * 64, mtime_ns=4)
+            original = Path.is_file
+            with mock.patch.object(Path, "is_file", autospec=True,
+                                   side_effect=lambda path: True if path == Path("/proc/self/stat")
+                                   else original(path)), \
+                 mock.patch.object(benchmark, "stable_source_fingerprint",
+                                   side_effect=[before, after]), \
+                 mock.patch.object(benchmark.gpu, "_probe", return_value={"duration": 5}), \
+                 mock.patch.object(benchmark, "cgroup_limits", return_value={}), \
+                 mock.patch.object(benchmark.gpu, "render_random_output", return_value={}), \
+                 mock.patch.object(benchmark.subprocess, "Popen") as popen:
+                result = benchmark.benchmark_render(args)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["source_unchanged"])
+        self.assertEqual(result["error_code"], "benchmark_source_changed")
+        self.assertEqual(result["resource_guard"]["phase"], "source_recheck")
+        popen.assert_not_called()
+
+    def test_all_short_trials_validate_the_same_prepare_evidence_and_sha(self):
+        evidence = {
+            "version": 1, "ok": True, "operation": "prepare-short",
+            "candidate_sha": self.SHA, "run_id": "accept01", "sample_kind": "short",
+            "configuration": "2c2t",
+            "unit": "drama-media-prepare-%s-accept01.service" % self.SHA[:12],
+            "source": self.launcher.path_text(self.launcher.LONG_SOURCE),
+            "source_size": self.launcher.LONG_SOURCE_SIZE,
+            "source_sha256": "7" * 64, "source_device": 41, "source_inode": 42,
+            "source_mtime_ns": 43, "source_nlink": 1,
+            "source_fingerprint_elapsed_seconds": 1.5,
+            "minimum_mem_available_bytes": 16 * 1024 ** 3,
+            "host_memory_stop_threshold_bytes": 8 * 1024 ** 3,
+            "host_memory_sampling_interval_seconds": 1,
+            "prepared_path": self.launcher.path_text(self.spec.prepared_short_path),
+            "prepared_sha256": "c" * 64, "prepared_size": 456,
+            "duration_seconds": 120.0, "cos_uploads": 0, "production_requests": 0,
+        }
+        with mock.patch.object(self.launcher, "read_owned_json", return_value=evidence), \
+             mock.patch.object(self.launcher, "fingerprint_regular",
+                               return_value={"sha256": "c" * 64, "size_bytes": 456}):
+            for trial in ("r1", "r2"):
+                spec = self.launcher.build_spec(
+                    self.SHA, "accept01", "short", "4c2t", "render", trial)
+                self.assertIs(self.launcher.validate_prepared_short(spec, 1009, 1010), evidence)
+        with mock.patch.object(self.launcher, "read_owned_json", return_value=evidence), \
+             mock.patch.object(self.launcher, "fingerprint_regular",
+                               return_value={"sha256": "d" * 64, "size_bytes": 456}), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.validate_prepared_short(self.spec, 1009, 1010)
+        self.assertEqual(str(caught.exception), "prepared_short_sha256_mismatch")
+
+    def test_action_child_timeout_and_cleanup_failure_are_distinct(self):
+        launcher = self.launcher
+
+        class Process:
+            def __init__(self, cleanup_fails=False):
+                self.returncode, self.cleanup_fails, self.waits = None, cleanup_fails, 0
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.cleanup_fails:
+                    raise OSError(URL)
+                self.returncode = -9
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits == 1 or self.cleanup_fails:
+                    raise subprocess.TimeoutExpired("fixed", timeout)
+                return self.returncode
+
+        safe_memory = {"MemTotal": 32 * 1024 ** 3,
+                       "MemAvailable": 32 * 1024 ** 3}
+        with mock.patch.object(launcher, "read_host_memory", return_value=safe_memory), \
+             mock.patch.object(launcher.time, "monotonic", side_effect=[0, 0, 2]), \
+             self.assertRaises(launcher.LaunchFailure) as caught:
+            launcher.run_fixed_child(
+                SimpleNamespace(launch_renderer_process=mock.Mock(return_value=Process())),
+                ["fixed"], 9, timeout=1, failure_code="fixed_failed",
+                timeout_code="fixed_timeout", cleanup_code="fixed_cleanup_failed",
+            )
+        self.assertEqual(str(caught.exception), "fixed_timeout")
+        with mock.patch.object(launcher, "read_host_memory", return_value=safe_memory), \
+             mock.patch.object(launcher.time, "monotonic", side_effect=[0, 0, 2]), \
+             self.assertRaises(launcher.LaunchFailure) as caught:
+            launcher.run_fixed_child(
+                SimpleNamespace(launch_renderer_process=mock.Mock(
+                    return_value=Process(cleanup_fails=True))),
+                ["fixed"], 9, timeout=1, failure_code="fixed_failed",
+                timeout_code="fixed_timeout", cleanup_code="fixed_cleanup_failed",
+            )
+        self.assertEqual(str(caught.exception), "fixed_cleanup_failed")
+
+    def test_action_child_memory_drop_is_sampled_within_one_second_and_reaped(self):
+        launcher = self.launcher
+        events = []
+
+        class Process:
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("fixed", timeout)
+                return self.returncode
+
+        gib = 1024 ** 3
+        memory = [
+            {"MemTotal": 32 * gib, "MemAvailable": 32 * gib},
+            {"MemTotal": 32 * gib, "MemAvailable": 16 * gib},
+            {"MemTotal": 32 * gib, "MemAvailable": 8 * gib - 1},
+        ]
+        with mock.patch.object(launcher, "read_host_memory", side_effect=memory) as sampled, \
+             self.assertRaises(launcher.LaunchFailure) as caught:
+            launcher.run_fixed_child(
+                SimpleNamespace(launch_renderer_process=mock.Mock(return_value=Process())),
+                ["fixed"], 9, timeout=30, failure_code="fixed_failed",
+                timeout_code="fixed_timeout", cleanup_code="fixed_cleanup_failed",
+            )
+        self.assertEqual(str(caught.exception), "host_memory_below_media_stop_gate")
+        self.assertEqual(caught.exception.minimum_mem_available_bytes, 8 * gib - 1)
+        self.assertEqual(caught.exception.host_memory_stop_threshold_bytes, 8 * gib)
+        self.assertEqual(sampled.call_count, 3)
+        self.assertEqual(events[-2:], ["kill", ("wait", 30)])
+        self.assertLessEqual(events[0][1], 1.0)
+
+    def test_action_child_success_returns_minimum_memory_observation(self):
+        launcher = self.launcher
+        waits = []
+
+        class Process:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout):
+                waits.append(timeout)
+                return self.returncode
+
+        gib = 1024 ** 3
+        memory = [
+            {"MemTotal": 32 * gib, "MemAvailable": 32 * gib},
+            {"MemTotal": 32 * gib, "MemAvailable": 16 * gib},
+            {"MemTotal": 32 * gib, "MemAvailable": 12 * gib},
+        ]
+        with mock.patch.object(launcher, "read_host_memory", side_effect=memory):
+            result = launcher.run_fixed_child(
+                SimpleNamespace(launch_renderer_process=mock.Mock(return_value=Process())),
+                ["fixed"], 9, timeout=30, failure_code="fixed_failed",
+                timeout_code="fixed_timeout", cleanup_code="fixed_cleanup_failed",
+            )
+        self.assertEqual(result["minimum_mem_available_bytes"], 12 * gib)
+        self.assertEqual(result["host_memory_stop_threshold_bytes"], 8 * gib)
+        self.assertEqual(result["host_memory_sampling_interval_seconds"], 1)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(len(waits), 1)
+        self.assertLessEqual(waits[0], 1.0)
+
+    def test_decode_consumes_only_matching_result_and_writes_exclusive_evidence(self):
+        spec = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "4c2t", "decode", "r2")
+        identity = {"device": 1, "inode": 2, "size_bytes": 999,
+                    "mtime_ns": 3, "nlink": 1}
+        frozen = {"artifact": {"sha256": "e" * 64, "size_bytes": 999},
+                  "artifact_identity": identity,
+                  "benchmark_evidence_sha256": "f" * 64}
+        with mock.patch.object(self.launcher, "validate_render_result", return_value=frozen), \
+             mock.patch.object(self.launcher, "run_fixed_child",
+                               return_value={"elapsed_seconds": 12.5, "exit_code": 0,
+                                             "minimum_mem_available_bytes":
+                                             16 * 1024 ** 3}) as child, \
+             mock.patch.object(self.launcher, "write_exclusive_json") as write:
+            result = self.launcher.run_decode(spec, 1009, 1010, 9, object())
+        self.assertTrue(result["ok"])
+        command = child.call_args.args[1]
+        self.assertEqual(command[command.index("-i") + 1],
+                         self.launcher.path_text(spec.output_dir / "result.mp4"))
+        self.assertEqual(command[-3:], ["-f", "null", "-"])
+        self.assertEqual(child.call_args.args[2], 9)
+        evidence = write.call_args.args[1]
+        self.assertEqual(evidence["trial"], "r2")
+        self.assertEqual(evidence["exit_code"], 0)
+        self.assertEqual(evidence["render_unit"], self.launcher.build_spec(
+            self.SHA, "accept01", "short", "4c2t", "render", "r2"
+        ).unit)
+        self.assertTrue(evidence["result_reverified_after_decode"])
+        self.assertEqual(evidence["result_identity_before"], identity)
+        self.assertEqual(evidence["result_identity_after"], identity)
+        self.assertEqual(evidence["minimum_mem_available_bytes"], 16 * 1024 ** 3)
+        self.assertEqual(evidence["generated_video_files"], 0)
+        self.assertEqual((evidence["cos_uploads"], evidence["production_requests"]), (0, 0))
+
+    def test_decode_result_validation_binds_candidate_run_config_trial_and_hashes(self):
+        spec = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "4c2t", "decode", "r2")
+        render = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "4c2t", "render", "r2")
+        artifact = {"sha256": "1" * 64, "size_bytes": 1234}
+        evidence_fp = {"sha256": "2" * 64, "size_bytes": 4321}
+        launcher = {
+            "version": 1, "ok": True, "operation": "render",
+            "candidate_sha": self.SHA, "run_id": "accept01", "sample_kind": "short",
+            "configuration": "4c2t", "trial": "r2", "unit": render.unit,
+            "benchmark_evidence": self.launcher.path_text(render.output_dir / "evidence.json"),
+            "benchmark_evidence_sha256": evidence_fp["sha256"],
+            "output_sha256": artifact["sha256"], "output_size": artifact["size_bytes"],
+            "source_sha256": "3" * 64, "source_size": 5678,
+            "minimum_mem_available_bytes": 16 * 1024 ** 3,
+            "host_memory_stop_threshold_bytes": 8 * 1024 ** 3,
+            "host_memory_sampling_interval_seconds": 1,
+            "cos_uploads": 0, "production_requests": 0,
+        }
+        benchmark = {
+            "version": 1, "kind": "render", "ok": True, "sample_kind": "short",
+            "filter_threads": 2, "recipe_sha256": self.launcher.RECIPE_SHA256,
+            "asset_manifest_sha256": self.launcher.ASSET_MANIFEST_SHA256,
+            "acceptance_launcher_lock_inherited": True,
+            "minimum_mem_available_bytes": 16 * 1024 ** 3,
+            "source": {"sha256": "3" * 64, "size_bytes": 5678},
+            "source_final": {"sha256": "3" * 64, "size_bytes": 5678},
+            "source_unchanged": True,
+            "source_identity": {"device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1},
+            "source_final_identity": {"device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1},
+            "cos_uploads": 0, "production_requests": 0,
+            "result": {"output_sha256": artifact["sha256"],
+                       "output_size": artifact["size_bytes"]},
+        }
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1009,
+                                    st_gid=1010)
+        artifact_identity = {"device": 7, "inode": 8, "size_bytes": 1234,
+                             "mtime_ns": 9, "nlink": 1}
+        with mock.patch.object(self.launcher.os, "lstat", return_value=directory), \
+             mock.patch.object(self.launcher, "validate_action_completion"), \
+             mock.patch.object(self.launcher, "read_owned_json",
+                               side_effect=[launcher, benchmark]), \
+             mock.patch.object(self.launcher, "fingerprint_regular",
+                               side_effect=[artifact, evidence_fp]), \
+             mock.patch.object(self.launcher, "owned_regular_identity",
+                               return_value=artifact_identity), \
+             mock.patch.object(self.launcher, "validate_prepared_short", return_value={
+                 "prepared_sha256": "3" * 64, "prepared_size": 5678
+             }):
+            frozen = self.launcher.validate_render_result(spec, 1009, 1010)
+        self.assertEqual(frozen["artifact"], artifact)
+        self.assertEqual(frozen["artifact_identity"], artifact_identity)
+        tampered = dict(launcher, trial="r1")
+        with mock.patch.object(self.launcher.os, "lstat", return_value=directory), \
+             mock.patch.object(self.launcher, "validate_action_completion"), \
+             mock.patch.object(self.launcher, "read_owned_json",
+                               side_effect=[tampered, benchmark]), \
+             mock.patch.object(self.launcher, "fingerprint_regular",
+                               side_effect=[artifact, evidence_fp]), \
+             mock.patch.object(self.launcher, "owned_regular_identity",
+                               return_value=artifact_identity), \
+             mock.patch.object(self.launcher, "validate_prepared_short", return_value={
+                 "prepared_sha256": "3" * 64, "prepared_size": 5678
+             }), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.validate_render_result(spec, 1009, 1010)
+        self.assertEqual(str(caught.exception), "render_launcher_evidence_invalid")
 
 
 class BenchmarkCgroupTests(unittest.TestCase):
@@ -1345,7 +3076,272 @@ class BenchmarkCgroupTests(unittest.TestCase):
                 self.assertIsNone(result["cpu_quota_cores"])
 
 
+class BenchmarkRenderGuardTests(unittest.TestCase):
+    def setUp(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        self.benchmark = benchmark
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        source, recipe = self.root / "source.mp4", self.root / "recipe.json"
+        source.write_bytes(b"local-test-source")
+        recipe.write_text(json.dumps({"recipe_sha256": "a" * 64}), encoding="utf-8")
+        self.args = SimpleNamespace(source=str(source), recipe=str(recipe), output_dir=str(self.root / "result"),
+                                    sample_kind="short", filter_threads=2, ffmpeg="fake-ffmpeg", ffprobe="fake-ffprobe",
+                                    timeout=60, asset_root=str(self.root / "assets"), asset_manifest_sha256="b" * 64)
+        self.events, self.ignore_runner_error = [], False
+        events = self.events
+
+        class Process:
+            pid = 87654321
+
+            def __init__(self):
+                self.stdout = io.StringIO("frame=1\nout_time_us=1000\nprogress=continue\n")
+                self.returncode, self.killed, self.pending_waits = None, False, 0
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+                if self.killed:
+                    self.returncode = -9
+                elif self.pending_waits:
+                    self.pending_waits -= 1
+                    raise subprocess.TimeoutExpired("fake-ffmpeg", timeout)
+                else:
+                    self.returncode = 0
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                events.append(("kill", self.pid))
+                self.killed = True
+
+        self.process = Process()
+
+        def patch(target, name, **kwargs):
+            value = mock.patch.object(target, name, **kwargs)
+            result = value.start()
+            self.addCleanup(value.stop)
+            return result
+
+        original_is_file = Path.is_file
+        patch(Path, "is_file", autospec=True, side_effect=lambda path:
+              True if path == Path("/proc/self/stat") else original_is_file(path))
+        patch(benchmark.gpu, "_probe", return_value={"duration": 5})
+        patch(benchmark, "cgroup_limits", return_value={"cgroup_version": 1})
+        self.host = patch(benchmark, "host_memory_sample", return_value={
+            "mem_available_bytes": 8 * 1024 ** 3, "mem_total_bytes": 32 * 1024 ** 3})
+        self.sample = patch(benchmark, "process_sample", return_value={
+            "rss_bytes": 14 * 1024 ** 3 - 1, "threads": 120, "cpu_seconds": 1.0})
+        self.popen = patch(benchmark.subprocess, "Popen", return_value=self.process)
+
+        def render(**kwargs):
+            try:
+                kwargs["runner"](["fake-ffmpeg", str(kwargs["output"])], timeout=kwargs["timeout"])
+            except benchmark.BenchmarkGuardError:
+                if not self.ignore_runner_error:
+                    raise
+            Path(kwargs["output"]).write_bytes(b"completed-test-output")
+            return {"output_sha256": "c" * 64}
+
+        patch(benchmark.gpu, "render_random_output", side_effect=render)
+
+    def run_benchmark(self):
+        result = self.benchmark.benchmark_render(self.args)
+        persisted = json.loads((Path(self.args.output_dir) / "evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted, result)
+        return result
+
+    def assert_stopped(self, result, reason):
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["resource_guard"]["triggered"])
+        self.assertEqual(result["error_code"], reason)
+        self.assertEqual(self.process.returncode, -9)
+        self.assertEqual([x for x in self.events if x[0] == "kill"], [("kill", self.process.pid)])
+        self.assertEqual(self.events[-1], ("wait", 30))
+        self.assertTrue(self.process.stdout.closed)
+        self.assertTrue(result["resource_guard"]["observed_at_utc"])
+        self.assertGreaterEqual(result["resource_guard"]["elapsed_seconds"], 0)
+
+    def test_exact_safe_boundaries_succeed_and_host_memory_is_recorded(self):
+        result = self.run_benchmark()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["resource_guard"]["triggered"])
+        self.assertTrue(result["resource_guard"]["outer_cgroup_hard_limits_required"])
+        self.assertEqual(self.host.call_count, 3)
+        self.assertEqual(self.events, [("wait", 1)])
+        rows = [json.loads(x) for x in (Path(self.args.output_dir) / "process-samples.jsonl").read_text().splitlines()]
+        self.assertTrue(all(row["mem_available_bytes"] == 8 * 1024 ** 3 for row in rows))
+
+    def test_low_memory_before_launch_never_starts_a_child(self):
+        self.host.return_value["mem_available_bytes"] -= 1
+        result = self.run_benchmark()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["resource_guard"]["phase"], "before_launch")
+        self.assertEqual(result["error_code"], "benchmark_host_memory_low")
+        self.popen.assert_not_called()
+
+    def test_host_read_failure_before_launch_never_starts_a_child(self):
+        self.host.side_effect = self.benchmark.BenchmarkGuardError("benchmark_host_memory_unavailable")
+        result = self.run_benchmark()
+        self.assertEqual(result["error_code"], "benchmark_host_memory_unavailable")
+        self.popen.assert_not_called()
+
+    def test_rss_at_limit_stops_only_our_child_and_cleanup_does_not_resample(self):
+        self.sample.return_value["rss_bytes"] = 14 * 1024 ** 3
+        result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_renderer_rss_limit")
+        self.assertEqual(result["resource_guard"]["metrics"]["rss_bytes"], 14 * 1024 ** 3)
+        self.assertEqual(result["peak_rss_bytes"], 14 * 1024 ** 3)
+        self.assertEqual(self.host.call_count, 2)
+        self.sample.assert_called_once_with(self.process.pid)
+
+    def test_threads_above_limit_stop_only_our_child(self):
+        self.sample.return_value["threads"] = 121
+        result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_renderer_thread_limit")
+        self.assertEqual(result["resource_guard"]["metrics"]["threads"], 121)
+
+    def test_running_host_pressure_is_checked_again_at_the_next_second(self):
+        safe = self.host.return_value
+        self.host.side_effect = [safe, safe, {**safe, "mem_available_bytes": 8 * 1024 ** 3 - 1}]
+        self.process.pending_waits = 1
+        result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_host_memory_low")
+        self.assertEqual(self.events[0], ("wait", 1))
+        self.assertEqual(self.host.call_count, 3)
+
+    def test_running_host_read_failure_still_reaps_without_another_read(self):
+        safe = self.host.return_value
+        self.host.side_effect = [safe, self.benchmark.BenchmarkGuardError("benchmark_host_memory_invalid")]
+        result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_host_memory_invalid")
+        self.assertEqual(self.host.call_count, 2)
+
+    def test_unreadable_live_child_metrics_are_not_silently_skipped(self):
+        self.sample.return_value = None
+        self.assert_stopped(self.run_benchmark(), "benchmark_process_sample_invalid")
+
+    def test_nonfinite_child_metrics_are_rejected(self):
+        self.sample.return_value["cpu_seconds"] = float("nan")
+        self.assert_stopped(self.run_benchmark(), "benchmark_process_sample_invalid")
+
+    def test_unexpected_sampling_exception_stops_child_without_leaking_details(self):
+        self.sample.side_effect = RuntimeError(URL)
+        result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_resource_sampling_failed")
+        self.assertNotIn(URL, json.dumps(result))
+
+    def test_final_host_read_rejects_even_an_already_successful_process(self):
+        safe = self.host.return_value
+        self.host.side_effect = [safe, safe, {**safe, "mem_available_bytes": 7 * 1024 ** 3}]
+        result = self.run_benchmark()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "benchmark_host_memory_low")
+        self.assertEqual(self.process.returncode, 0)
+        self.assertEqual(self.events, [("wait", 1)])
+
+    def test_a_returned_output_cannot_override_a_sticky_protection_trigger(self):
+        self.ignore_runner_error = True
+        self.sample.return_value["rss_bytes"] = 14 * 1024 ** 3
+        result = self.run_benchmark()
+        self.assertTrue((Path(self.args.output_dir) / "result.mp4").exists())
+        self.assert_stopped(result, "benchmark_renderer_rss_limit")
+        self.assertNotIn("result", result)
+
+    @contextmanager
+    def failing_sample_log(self, failure):
+        original_open = Path.open
+
+        class Log:
+            def write(self, value):
+                if failure == "write":
+                    raise OSError(URL)
+                return len(value)
+
+            def flush(self):
+                if failure == "flush":
+                    raise OSError(URL)
+
+            def close(self):
+                if failure == "close":
+                    raise OSError(URL)
+
+        def open_file(path, *args, **kwargs):
+            if path.name == "process-samples.jsonl":
+                if failure == "open":
+                    raise OSError(URL)
+                return Log()
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=open_file):
+            yield
+
+    def test_log_open_failure_prevents_renderer_start(self):
+        with self.failing_sample_log("open"):
+            result = self.run_benchmark()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "benchmark_sample_log_failed")
+        self.popen.assert_not_called()
+
+    def test_log_write_failure_stops_and_reaps_renderer(self):
+        with self.failing_sample_log("write"):
+            result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_sample_log_failed")
+        self.assertNotIn(URL, json.dumps(result))
+
+    def test_log_flush_failure_stops_and_reaps_renderer(self):
+        with self.failing_sample_log("flush"):
+            result = self.run_benchmark()
+        self.assert_stopped(result, "benchmark_sample_log_failed")
+
+    def test_log_close_failure_cannot_mark_completed_output_successful(self):
+        with self.failing_sample_log("close"):
+            result = self.run_benchmark()
+        self.assertTrue((Path(self.args.output_dir) / "result.mp4").exists())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["resource_guard"]["phase"], "closing_log")
+        self.assertEqual(self.process.returncode, 0)
+
+    def test_final_evidence_failure_returns_no_success_and_retains_safe_diagnostic(self):
+        real_write = self.benchmark.atomic_write_record
+        writes = []
+
+        def write(path, value):
+            writes.append(path)
+            if len(writes) == 2:
+                raise OSError(URL)
+            return real_write(path, value)
+
+        with mock.patch.object(self.benchmark, "atomic_write_record", side_effect=write), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as error:
+            with self.assertRaises(self.benchmark.BenchmarkGuardError):
+                self.benchmark.benchmark_render(self.args)
+        self.assertEqual(self.process.returncode, 0)
+        self.assertIn("benchmark_evidence_write_failed", error.getvalue())
+        self.assertNotIn(URL, error.getvalue())
+        persisted = json.loads((Path(self.args.output_dir) / "evidence.json").read_text())
+        self.assertFalse(persisted["ok"])
+
+
 class BenchmarkPolicyTests(unittest.TestCase):
+    def test_host_meminfo_requires_real_available_bytes_and_valid_units(self):
+        from scripts import benchmark_drama_synthesis_media as benchmark
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "meminfo"
+            with self.assertRaises(benchmark.BenchmarkGuardError):
+                benchmark.host_memory_sample(path)
+            path.write_text("MemTotal: 33554432 kB\nMemFree: 1 kB\nMemAvailable: 8388608 kB\n")
+            self.assertEqual(benchmark.host_memory_sample(path)["mem_available_bytes"], 8 * 1024 ** 3)
+            invalid = ("", "MemFree: 90 kB\n", "MemAvailable: 90 kB\n", "x" * 65537)
+            invalid += tuple("MemTotal: 100 kB\nMemAvailable: " + value + "\n"
+                             for value in ("-1 kB", "nan kB", "90 MB", "101 kB", "90 kB\nMemAvailable: 90 kB"))
+            for text in invalid:
+                with self.subTest(text=text[:80]), self.assertRaises(benchmark.BenchmarkGuardError):
+                    path.write_text(text)
+                    benchmark.host_memory_sample(path)
+
     def test_output_directory_is_new_absolute_and_never_overwritten(self):
         from scripts import benchmark_drama_synthesis_media as benchmark
         with tempfile.TemporaryDirectory() as directory:

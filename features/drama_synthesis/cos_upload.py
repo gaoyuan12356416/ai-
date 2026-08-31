@@ -23,7 +23,7 @@ import uuid
 
 from .async_runtime import _FileLock, runtime_error
 from .core import DramaSynthesisError
-from .local_checkpoint import atomic_write_record, file_fingerprint, read_record
+from .local_checkpoint import atomic_write_record, durable_ensure_directory, file_fingerprint, read_record
 
 
 MIB = 1024 * 1024
@@ -92,7 +92,10 @@ def _checkpoint_lock(path, source):
         lock_path = path.with_name(path.name + ".lock")
         if path.resolve() == source.resolve() or lock_path.resolve() == source.resolve():
             raise _error("drama_upload_checkpoint_conflict", 409)
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            durable_ensure_directory(path.parent)
+        except Exception:
+            raise _error() from None
         lock = _FileLock(lock_path)
         if not lock.acquire():
             raise _error("drama_upload_busy")
@@ -159,10 +162,11 @@ def _validate_record(record, target, artifact):
     if record["phase"] == "completed":
         result = record["result"]
         if (not isinstance(result, dict)
-                or set(result) != {"bucket", "key", "sha256", "size_bytes", "etag"}
+                or set(result) != {"bucket", "key", "sha256", "size_bytes", "etag", "binding"}
                 or result["bucket"] != target["bucket"] or result["key"] != target["key"]
                 or result["sha256"] != artifact["sha256"]
                 or type(result["size_bytes"]) is not int or result["size_bytes"] != artifact["size_bytes"]
+                or result["binding"] != record["binding"]
                 or not _safe_text(result["etag"], 512)):
             raise _error()
     elif record["result"] is not None:
@@ -221,7 +225,8 @@ def _verified_result(headers, record):
     if not matches:
         raise _error("drama_upload_object_conflict", 409)
     result = {"bucket": target["bucket"], "key": target["key"], "sha256": artifact["sha256"],
-              "size_bytes": artifact["size_bytes"], "etag": headers["etag"]}
+              "size_bytes": artifact["size_bytes"], "etag": headers["etag"],
+              "binding": record["binding"]}
     if record["phase"] == "completed" and result != record["result"]:
         raise _error("drama_upload_object_conflict", 409)
     return result

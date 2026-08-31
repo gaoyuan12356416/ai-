@@ -11,6 +11,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -29,7 +30,31 @@ from .local_checkpoint import (
 )
 
 
-NORMALIZATION_PROFILE = "concat-cfr25-yuv420p-sar1-aac128k-48k-stereo-v1"
+NORMALIZATION_PROFILE = (
+    "concat-ep0-even-display-scale-pad-black-explicit-colorspace-bt709-limited-"
+    "progressive-or-bwdif-explicit-parity-h264-high41-cfr25-aac-lc-128k-48k-"
+    "stereo-apad-silence-v5"
+)
+_NORMALIZATION_COLOR_SPACES = frozenset({"bt709", "fcc", "bt470bg", "smpte170m", "smpte240m"})
+_NORMALIZATION_COLOR_TRANSFERS = frozenset({
+    "bt709", "gamma22", "gamma28", "smpte170m", "smpte240m", "iec61966-2-1",
+})
+_NORMALIZATION_COLOR_PRIMARIES = frozenset({
+    "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "smpte431", "smpte432",
+})
+_NORMALIZATION_COLOR_RANGES = frozenset({"tv", "pc"})
+_NORMALIZATION_PROGRESSIVE_FIELD_ORDERS = frozenset({"progressive"})
+_NORMALIZATION_INTERLACED_FIELD_ORDERS = frozenset({"tt", "bb", "tb", "bt"})
+CONCAT_STREAM_PROBE_FIELDS = (
+    "codec_type", "codec_name", "profile", "level", "pix_fmt",
+    "codec_tag_string", "codec_tag", "is_avc", "nal_length_size", "width", "height", "coded_width", "coded_height",
+    "sample_aspect_ratio", "display_aspect_ratio", "field_order", "color_range", "color_space",
+    "color_transfer", "color_primaries", "chroma_location", "r_frame_rate", "avg_frame_rate",
+    "time_base", "sample_fmt", "sample_rate", "channels", "channel_layout", "bits_per_sample",
+    "extradata", "extradata_size", "duration",
+)
+CONCAT_STREAM_SHOW_ENTRIES = "stream=" + ",".join(CONCAT_STREAM_PROBE_FIELDS) + ":format=duration"
+CONCAT_STREAM_PROBE_ARGS = ("-show_data", "-show_entries", CONCAT_STREAM_SHOW_ENTRIES)
 _LOCKS_GUARD = threading.Lock()
 _DOWNLOAD_LOCKS = {}
 
@@ -431,17 +456,441 @@ def download_episode_with_route(source_url, path, route=None, progress_callback=
         return {**result, "reused": bool(value.get("reused", False))}
 
 
-def concat_signature(info):
-    """The exact compatibility test used by app.concat_segments_need_normalization."""
-    streams = (info or {}).get("streams") or []
-    video = next((row for row in streams if row.get("codec_type") == "video"), None)
-    audio = next((row for row in streams if row.get("codec_type") == "audio"), None)
-    if not video or not audio:
+def _signature_text(stream, field):
+    value = stream.get(field)
+    if not isinstance(value, str):
         return None
-    return (video.get("codec_name") or "", int(video.get("width") or 0), int(video.get("height") or 0),
-            video.get("avg_frame_rate") or video.get("r_frame_rate") or "", video.get("time_base") or "",
-            audio.get("codec_name") or "", audio.get("sample_rate") or "", int(audio.get("channels") or 0),
-            audio.get("time_base") or "")
+    value = value.strip()
+    if not value or value == "N/A":
+        return None
+    return value
+
+
+def _signature_integer(stream, field, minimum=0):
+    value = stream.get(field)
+    if value is None or isinstance(value, bool) or not re.fullmatch(r"-?[0-9]+", str(value)):
+        return None
+    value = int(value)
+    return value if value >= minimum else None
+
+
+def _signature_ratio(stream, field, separator="/"):
+    value = _signature_text(stream, field)
+    if value is None:
+        return None
+    parts = value.split(separator)
+    if len(parts) != 2 or not all(re.fullmatch(r"[0-9]+", part) for part in parts):
+        return None
+    if int(parts[0]) <= 0 or int(parts[1]) <= 0:
+        return None
+    return value
+
+
+def _extradata_signature(stream):
+    value = _signature_text(stream, "extradata")
+    size = _signature_integer(stream, "extradata_size", minimum=1)
+    if value is None or size is None:
+        return None
+    # ffprobe formats -show_data as a deterministic hex dump. Normalize only
+    # platform newlines; byte/config changes must change this digest.
+    value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return size, hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def concat_signature(info):
+    """Return a fail-closed MP4 stream-copy signature, or None if incomplete."""
+    if not isinstance(info, dict):
+        return None
+    streams = info.get("streams")
+    if not isinstance(streams, list):
+        return None
+    videos = [row for row in streams if isinstance(row, dict) and row.get("codec_type") == "video"]
+    audios = [row for row in streams if isinstance(row, dict) and row.get("codec_type") == "audio"]
+    if len(videos) != 1 or len(audios) != 1:
+        return None
+    video, audio = videos[0], audios[0]
+    video_values = (
+        _signature_text(video, "codec_name"), _signature_text(video, "profile"),
+        _signature_integer(video, "level"), _signature_text(video, "pix_fmt"),
+        _signature_text(video, "codec_tag_string"), _signature_text(video, "codec_tag"),
+        _signature_text(video, "is_avc"), _signature_integer(video, "nal_length_size", minimum=1),
+        _signature_integer(video, "width", minimum=1), _signature_integer(video, "height", minimum=1),
+        _signature_integer(video, "coded_width", minimum=1),
+        _signature_integer(video, "coded_height", minimum=1),
+        _signature_ratio(video, "sample_aspect_ratio", separator=":"),
+        _signature_ratio(video, "display_aspect_ratio", separator=":"),
+        _signature_text(video, "field_order"), _signature_text(video, "color_range"),
+        _signature_text(video, "color_space"), _signature_text(video, "color_transfer"),
+        _signature_text(video, "color_primaries"), _signature_text(video, "chroma_location"),
+        _signature_ratio(video, "r_frame_rate"), _signature_ratio(video, "avg_frame_rate"),
+        _signature_ratio(video, "time_base"), _extradata_signature(video),
+    )
+    audio_values = (
+        _signature_text(audio, "codec_name"), _signature_text(audio, "profile"),
+        _signature_text(audio, "sample_fmt"), _signature_integer(audio, "sample_rate", minimum=1),
+        _signature_integer(audio, "channels", minimum=1), _signature_text(audio, "channel_layout"),
+        _signature_text(audio, "codec_tag_string"), _signature_text(audio, "codec_tag"),
+        _signature_integer(audio, "bits_per_sample"), _signature_ratio(audio, "time_base"),
+        _extradata_signature(audio),
+    )
+    if any(value is None for value in video_values + audio_values):
+        return None
+    return ("mp4-stream-copy-v2", ("video",) + video_values, ("audio",) + audio_values)
+
+
+def _normalization_error():
+    return DramaSynthesisError(
+        "drama_concat_normalization_invalid",
+        "转码后的剧集片段仍不兼容，已停止拼接",
+        502,
+    )
+
+
+def _normalization_source_error():
+    return DramaSynthesisError(
+        "drama_concat_normalization_source_unsupported",
+        "源视频缺少可验证的色彩或流信息，已停止转码",
+        422,
+    )
+
+
+def concat_signatures_are_compatible(signatures):
+    signatures = list(signatures)
+    return bool(signatures) and all(signature is not None for signature in signatures) and len(set(signatures)) == 1
+
+
+def validate_normalized_concat_signatures(signatures):
+    """Require every normalized target to have one identical complete signature."""
+    signatures = list(signatures)
+    if not concat_signatures_are_compatible(signatures):
+        raise _normalization_error()
+    return signatures[0]
+
+
+def _one_stream(info, codec_type, *, required=True):
+    if not isinstance(info, dict) or not isinstance(info.get("streams"), list):
+        raise _normalization_source_error()
+    streams = [row for row in info["streams"]
+               if isinstance(row, dict) and row.get("codec_type") == codec_type]
+    if len(streams) > 1 or (required and len(streams) != 1):
+        raise _normalization_source_error()
+    return streams[0] if streams else None
+
+
+def freeze_concat_normalization_plan(reference_info, source_info, segment_index,
+                                     normalization_profile=NORMALIZATION_PROFILE):
+    """Freeze deterministic geometry, pixels, scan conversion and audio policy."""
+    if (isinstance(segment_index, bool) or type(segment_index) is not int or segment_index < -1 or
+            not isinstance(normalization_profile, str) or len(normalization_profile) > 512 or
+            not re.fullmatch(r"[a-z0-9.-]+", normalization_profile)):
+        raise _normalization_error()
+    reference_video = _one_stream(reference_info, "video")
+    source_video = _one_stream(source_info, "video")
+    source_audio = _one_stream(source_info, "audio", required=False)
+    reference_width = _signature_integer(reference_video, "width", minimum=2)
+    reference_height = _signature_integer(reference_video, "height", minimum=2)
+    source_width = _signature_integer(source_video, "width", minimum=2)
+    source_height = _signature_integer(source_video, "height", minimum=2)
+    source_sar = _signature_ratio(source_video, "sample_aspect_ratio", separator=":")
+    if None in (reference_width, reference_height, source_width, source_height, source_sar):
+        raise _normalization_source_error()
+    colors = {
+        "space": _signature_text(source_video, "color_space"),
+        "transfer": _signature_text(source_video, "color_transfer"),
+        "primaries": _signature_text(source_video, "color_primaries"),
+        "range": _signature_text(source_video, "color_range"),
+    }
+    field_order = _signature_text(source_video, "field_order")
+    if (colors["space"] not in _NORMALIZATION_COLOR_SPACES or
+            colors["transfer"] not in _NORMALIZATION_COLOR_TRANSFERS or
+            colors["primaries"] not in _NORMALIZATION_COLOR_PRIMARIES or
+            colors["range"] not in _NORMALIZATION_COLOR_RANGES or
+            field_order not in _NORMALIZATION_PROGRESSIVE_FIELD_ORDERS | _NORMALIZATION_INTERLACED_FIELD_ORDERS):
+        raise _normalization_source_error()
+    target_width = reference_width + reference_width % 2
+    target_height = reference_height + reference_height % 2
+    divisor = math.gcd(target_width, target_height)
+    sar_numerator, sar_denominator = (int(value) for value in source_sar.split(":"))
+    plan = {
+        "version": 3,
+        "profile": normalization_profile,
+        "segment_index": segment_index,
+        "geometry_policy": "episode0-even-display-aspect-scale-pad-black-v1",
+        "color_policy": "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1",
+        "scan_policy": "preserve-progressive-or-bwdif-explicit-display-parity-v2",
+        "audio_policy": "preserve-first-resample-apad-or-video-bounded-silence-v2",
+        "target": {
+            "width": target_width,
+            "height": target_height,
+            "display_aspect_ratio": "%d:%d" % (target_width // divisor, target_height // divisor),
+            "sample_aspect_ratio": "1:1",
+            "frame_rate": "25/1",
+            "time_base": "1/12800",
+            "pix_fmt": "yuv420p",
+            "color_space": "bt709",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709",
+            "color_range": "tv",
+            "field_order": "progressive",
+            "chroma_location": "left",
+            "video_codec": "h264",
+            "video_profile": "High",
+            "video_level": 41,
+            "video_tag": "avc1",
+            "video_tag_hex": "0x31637661",
+        },
+        "source": {
+            "width": source_width,
+            "height": source_height,
+            "sample_aspect_ratio": source_sar,
+            "sar_numerator": sar_numerator,
+            "sar_denominator": sar_denominator,
+            "color_space": colors["space"],
+            "color_transfer": colors["transfer"],
+            "color_primaries": colors["primaries"],
+            "color_range": colors["range"],
+            "field_order": field_order,
+            "scan_mode": "progressive" if field_order == "progressive" else "interlaced",
+            "deinterlace_parity": (
+                "none" if field_order == "progressive" else
+                "tff" if field_order in {"tt", "bt"} else "bff"
+            ),
+        },
+        "audio": {
+            "mode": "resample" if source_audio is not None else "silence",
+            "codec": "aac",
+            "profile": "LC",
+            "sample_fmt": "fltp",
+            "sample_rate": 48000,
+            "channels": 2,
+            "channel_layout": "stereo",
+            "bit_rate": 128000,
+            "tag": "mp4a",
+            "tag_hex": "0x6134706d",
+        },
+    }
+    return validate_concat_normalization_plan(plan)
+
+
+def validate_concat_normalization_plan(plan):
+    """Validate the closed plan before it can influence an FFmpeg command."""
+    if not isinstance(plan, dict) or set(plan) != {
+        "version", "profile", "segment_index", "geometry_policy", "color_policy", "scan_policy",
+        "audio_policy",
+        "target", "source", "audio",
+    }:
+        raise _normalization_error()
+    if (type(plan["version"]) is not int or plan["version"] != 3 or
+            isinstance(plan["segment_index"], bool) or type(plan["segment_index"]) is not int or
+            plan["segment_index"] < -1 or not isinstance(plan["profile"], str) or
+            not re.fullmatch(r"[a-z0-9.-]{1,512}", plan["profile"]) or
+            plan["geometry_policy"] != "episode0-even-display-aspect-scale-pad-black-v1" or
+            plan["color_policy"] != "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1" or
+            plan["scan_policy"] != "preserve-progressive-or-bwdif-explicit-display-parity-v2" or
+            plan["audio_policy"] != "preserve-first-resample-apad-or-video-bounded-silence-v2"):
+        raise _normalization_error()
+    target, source, audio = plan.get("target"), plan.get("source"), plan.get("audio")
+    if (not isinstance(target, dict) or set(target) != {
+            "width", "height", "display_aspect_ratio", "sample_aspect_ratio", "frame_rate", "time_base",
+            "pix_fmt", "color_space", "color_transfer", "color_primaries", "color_range", "field_order",
+            "chroma_location", "video_codec", "video_profile", "video_level", "video_tag",
+            "video_tag_hex",
+    } or not isinstance(source, dict) or set(source) != {
+            "width", "height", "sample_aspect_ratio", "sar_numerator", "sar_denominator", "color_space",
+            "color_transfer", "color_primaries", "color_range", "field_order", "scan_mode",
+            "deinterlace_parity",
+    } or not isinstance(audio, dict) or set(audio) != {
+            "mode", "codec", "profile", "sample_fmt", "sample_rate", "channels", "channel_layout",
+            "bit_rate", "tag", "tag_hex",
+    }):
+        raise _normalization_error()
+    integers = (target["width"], target["height"], target["video_level"], source["width"], source["height"],
+                source["sar_numerator"], source["sar_denominator"], audio["sample_rate"], audio["channels"],
+                audio["bit_rate"])
+    if any(type(value) is not int or value <= 0 for value in integers):
+        raise _normalization_error()
+    divisor = math.gcd(target["width"], target["height"])
+    if (target["width"] % 2 or target["height"] % 2 or
+            target != {
+                "width": target["width"], "height": target["height"],
+                "display_aspect_ratio": "%d:%d" % (target["width"] // divisor, target["height"] // divisor),
+                "sample_aspect_ratio": "1:1", "frame_rate": "25/1", "time_base": "1/12800",
+                "pix_fmt": "yuv420p", "color_space": "bt709", "color_transfer": "bt709",
+                "color_primaries": "bt709", "color_range": "tv", "field_order": "progressive",
+                "chroma_location": "left", "video_codec": "h264", "video_profile": "High",
+                "video_level": 41, "video_tag": "avc1", "video_tag_hex": "0x31637661",
+            } or source["sample_aspect_ratio"] != "%d:%d" % (
+                source["sar_numerator"], source["sar_denominator"]
+            ) or source["color_space"] not in _NORMALIZATION_COLOR_SPACES or
+            source["color_transfer"] not in _NORMALIZATION_COLOR_TRANSFERS or
+            source["color_primaries"] not in _NORMALIZATION_COLOR_PRIMARIES or
+            source["color_range"] not in _NORMALIZATION_COLOR_RANGES or
+            source["field_order"] not in _NORMALIZATION_PROGRESSIVE_FIELD_ORDERS | _NORMALIZATION_INTERLACED_FIELD_ORDERS or
+            source["scan_mode"] != ("progressive" if source["field_order"] == "progressive" else "interlaced") or
+            source["deinterlace_parity"] != (
+                "none" if source["field_order"] == "progressive" else
+                "tff" if source["field_order"] in {"tt", "bt"} else "bff"
+            ) or
+            audio != {
+                "mode": audio["mode"], "codec": "aac", "profile": "LC", "sample_fmt": "fltp",
+                "sample_rate": 48000, "channels": 2, "channel_layout": "stereo", "bit_rate": 128000,
+                "tag": "mp4a", "tag_hex": "0x6134706d",
+            } or audio["mode"] not in ("resample", "silence")):
+        raise _normalization_error()
+    return json.loads(json.dumps(plan, sort_keys=True, separators=(",", ":")))
+
+
+def validate_normalized_concat_info(info, plan):
+    """Require a normalized output to match its frozen target, not merely its peers."""
+    plan = validate_concat_normalization_plan(plan)
+    signature = concat_signature(info)
+    if signature is None:
+        raise _normalization_error()
+    video = _one_stream(info, "video")
+    audio = _one_stream(info, "audio")
+    target = plan["target"]
+    video_actual = {
+        "codec_name": _signature_text(video, "codec_name"),
+        "profile": _signature_text(video, "profile"),
+        "level": _signature_integer(video, "level"),
+        "pix_fmt": _signature_text(video, "pix_fmt"),
+        "codec_tag_string": _signature_text(video, "codec_tag_string"),
+        "codec_tag": _signature_text(video, "codec_tag"),
+        "is_avc": _signature_text(video, "is_avc"),
+        "nal_length_size": _signature_integer(video, "nal_length_size"),
+        "width": _signature_integer(video, "width"),
+        "height": _signature_integer(video, "height"),
+        "coded_width": _signature_integer(video, "coded_width"),
+        "coded_height": _signature_integer(video, "coded_height"),
+        "sample_aspect_ratio": _signature_text(video, "sample_aspect_ratio"),
+        "display_aspect_ratio": _signature_text(video, "display_aspect_ratio"),
+        "field_order": _signature_text(video, "field_order"),
+        "color_range": _signature_text(video, "color_range"),
+        "color_space": _signature_text(video, "color_space"),
+        "color_transfer": _signature_text(video, "color_transfer"),
+        "color_primaries": _signature_text(video, "color_primaries"),
+        "chroma_location": _signature_text(video, "chroma_location"),
+        "r_frame_rate": _signature_text(video, "r_frame_rate"),
+        "avg_frame_rate": _signature_text(video, "avg_frame_rate"),
+        "time_base": _signature_text(video, "time_base"),
+    }
+    video_expected = {
+        "codec_name": target["video_codec"], "profile": target["video_profile"],
+        "level": target["video_level"], "pix_fmt": target["pix_fmt"], "codec_tag_string": target["video_tag"],
+        "codec_tag": target["video_tag_hex"],
+        "is_avc": "true", "nal_length_size": 4, "width": target["width"], "height": target["height"],
+        "coded_width": target["width"], "coded_height": target["height"],
+        "sample_aspect_ratio": target["sample_aspect_ratio"],
+        "display_aspect_ratio": target["display_aspect_ratio"], "field_order": target["field_order"],
+        "color_range": target["color_range"], "color_space": target["color_space"],
+        "color_transfer": target["color_transfer"], "color_primaries": target["color_primaries"],
+        "chroma_location": target["chroma_location"], "r_frame_rate": target["frame_rate"],
+        "avg_frame_rate": target["frame_rate"], "time_base": target["time_base"],
+    }
+    audio_actual = {
+        "codec_name": _signature_text(audio, "codec_name"), "profile": _signature_text(audio, "profile"),
+        "sample_fmt": _signature_text(audio, "sample_fmt"),
+        "sample_rate": _signature_integer(audio, "sample_rate"),
+        "channels": _signature_integer(audio, "channels"),
+        "channel_layout": _signature_text(audio, "channel_layout"),
+        "codec_tag_string": _signature_text(audio, "codec_tag_string"),
+        "codec_tag": _signature_text(audio, "codec_tag"),
+        "bits_per_sample": _signature_integer(audio, "bits_per_sample"),
+        "time_base": _signature_text(audio, "time_base"),
+    }
+    audio_expected = {
+        "codec_name": "aac", "profile": "LC", "sample_fmt": "fltp", "sample_rate": 48000,
+        "channels": 2, "channel_layout": "stereo", "codec_tag_string": "mp4a",
+        "codec_tag": plan["audio"]["tag_hex"], "bits_per_sample": 0,
+        "time_base": "1/48000",
+    }
+    if video_actual != video_expected or audio_actual != audio_expected:
+        raise _normalization_error()
+    return signature
+
+
+def _probe_info_sha256(info):
+    try:
+        payload = json.dumps(
+            info, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise checkpoint_error() from None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def probe_media_source_with_anchor(source, probe, *, expected_fingerprint=None):
+    """Bind one full probe result to unchanged source bytes before and after it."""
+    source = Path(source)
+    before = file_fingerprint(source)
+    if expected_fingerprint is not None:
+        expected_fingerprint = dict(expected_fingerprint)
+        if (set(expected_fingerprint) != {"sha256", "size_bytes"} or
+                type(expected_fingerprint["size_bytes"]) is not int or
+                expected_fingerprint["size_bytes"] <= 0 or
+                not re.fullmatch(r"[0-9a-f]{64}", str(expected_fingerprint["sha256"])) or
+                before != expected_fingerprint):
+            raise checkpoint_error(conflict=True)
+    info = probe(str(source))
+    after = file_fingerprint(source)
+    if before != after:
+        raise checkpoint_error(conflict=True)
+    return info, {**before, "probe_sha256": _probe_info_sha256(info)}
+
+
+def verify_media_source_anchor(source, source_info, anchor):
+    """Recheck both the probe digest and current bytes against a frozen anchor."""
+    if (not isinstance(anchor, dict) or set(anchor) != {"sha256", "size_bytes", "probe_sha256"} or
+            type(anchor["size_bytes"]) is not int or anchor["size_bytes"] <= 0 or
+            not re.fullmatch(r"[0-9a-f]{64}", str(anchor["sha256"])) or
+            not re.fullmatch(r"[0-9a-f]{64}", str(anchor["probe_sha256"])) or
+            anchor["probe_sha256"] != _probe_info_sha256(source_info) or
+            file_fingerprint(source) != {"sha256": anchor["sha256"], "size_bytes": anchor["size_bytes"]}):
+        raise checkpoint_error(conflict=True)
+    return dict(anchor)
+
+
+def prepare_normalized_concat_segment(source, target, *, source_info, source_anchor,
+                                      reference_info, reference_source, reference_anchor, segment_index,
+                                      normalize, probe,
+                                      normalization_profile=NORMALIZATION_PROFILE):
+    """Create/replay one identity-bound normalized segment and re-probe it."""
+    source, target, reference_source = Path(source), Path(target), Path(reference_source)
+    source_anchor = verify_media_source_anchor(source, source_info, source_anchor)
+    reference_anchor = verify_media_source_anchor(reference_source, reference_info, reference_anchor)
+    plan = freeze_concat_normalization_plan(
+        reference_info, source_info, segment_index, normalization_profile=normalization_profile,
+    )
+    plan_sha256 = hashlib.sha256(json.dumps(
+        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    identity = {
+        "kind": "normalized_segment",
+        "source": source_anchor,
+        "reference_source": reference_anchor,
+        "segment_index": segment_index,
+        "normalization_profile": normalization_profile,
+        "normalization_plan_sha256": plan_sha256,
+        "normalization_plan": plan,
+    }
+    marker = target.with_name(target.name + ".normalized.json")
+    value = load_completed(marker, target, identity)
+    if value is None:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        normalize(str(source), str(target), plan)
+        fingerprint = file_fingerprint(target)
+        signature = validate_normalized_concat_info(probe(str(target)), plan)
+        verify_media_source_anchor(source, source_info, source_anchor)
+        verify_media_source_anchor(reference_source, reference_info, reference_anchor)
+        result = {**fingerprint, "normalization_plan_sha256": plan_sha256}
+        save_completed(marker, target, identity, result, fingerprint=fingerprint)
+    else:
+        if value.get("normalization_plan_sha256") != plan_sha256:
+            raise checkpoint_error()
+        signature = validate_normalized_concat_info(probe(str(target)), plan)
+        verify_media_source_anchor(source, source_info, source_anchor)
+        verify_media_source_anchor(reference_source, reference_info, reference_anchor)
+    return str(target), signature, plan
 
 
 def download_and_prepare_segments(items, *, output_dir, probe, normalize,
@@ -512,21 +961,20 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                                                row.get("download_route"), on_bytes, downloader=downloader,
                                                stop_event=stop, transfer_callback=on_transfer)
 
-    def normalize_one(index, source, metadata, offset):
+    def normalize_one(index, source, offset):
         with use_context(context):
-            source_fp = {"sha256": metadata["sha256"], "size_bytes": metadata["size_bytes"]}
-            identity = {"kind": "normalized_segment", "profile": normalization_profile, "source": source_fp}
             target = Path(output_dir) / ("%03d.mp4" % (index + offset))
-            marker = target.with_name(target.name + ".normalized.json")
-            value = load_completed(marker, target, identity)
-            if value is None:
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                normalize(str(source), str(target))
-                fingerprint = file_fingerprint(target)
-                save_completed(marker, target, identity, fingerprint, fingerprint=fingerprint)
-            return str(target)
+            target_path, signature, _ = prepare_normalized_concat_segment(
+                source, target, source_info=probe_infos[index], source_anchor=source_anchors[index],
+                reference_info=probe_infos[0], reference_source=sources[0],
+                reference_anchor=source_anchors[0], segment_index=index,
+                normalize=normalize, probe=probe,
+                normalization_profile=normalization_profile,
+            )
+            return target_path, signature
 
-    sources, metadata, signatures, normalized = {}, {}, {}, {}
+    sources, metadata, probe_infos, source_anchors, signatures = {}, {}, {}, {}, {}
+    normalized, normalized_signatures = {}, {}
     pending_normalization = deque()
     scheduled_normalization = set()
     intro_done = intro_factory is None
@@ -546,7 +994,7 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                 ):
                     downloads[download_pool.submit(download_one, next_download)] = next_download
                     next_download += 1
-                if incompatible and intro_done:
+                if incompatible and intro_done and 0 in probe_infos:
                     for index in sorted(sources):
                         if index not in scheduled_normalization:
                             pending_normalization.append(index)
@@ -554,8 +1002,9 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                     if normal_future is None and pending_normalization:
                         normal_index = pending_normalization.popleft()
                         normalizing = True
-                        normal_future = normalize_pool.submit(normalize_one, normal_index, sources[normal_index],
-                                                              metadata[normal_index], 1 if intro else 0)
+                        normal_future = normalize_pool.submit(
+                            normalize_one, normal_index, sources[normal_index], 1 if intro else 0,
+                        )
                 waiting = set(downloads)
                 if normal_future is not None:
                     waiting.add(normal_future)
@@ -563,7 +1012,7 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                     continue
                 done, _ = wait(waiting, return_when=FIRST_COMPLETED)
                 if normal_future in done:
-                    normalized[normal_index] = normal_future.result()
+                    normalized[normal_index], normalized_signatures[normal_index] = normal_future.result()
                     normal_future = None
                     with progress_lock:
                         normalized_count += 1
@@ -574,11 +1023,12 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                     index = downloads.pop(future)
                     value = future.result()
                     sources[index] = str(rows[index]["source_path"])
-                    actual = file_fingerprint(sources[index])
-                    if value.get("sha256") != actual["sha256"] or value.get("size_bytes") != actual["size_bytes"]:
-                        raise checkpoint_error()
+                    expected = {"sha256": value.get("sha256"), "size_bytes": value.get("size_bytes")}
+                    probe_infos[index], source_anchors[index] = probe_media_source_with_anchor(
+                        sources[index], probe, expected_fingerprint=expected,
+                    )
                     metadata[index] = value
-                    signatures[index] = concat_signature(probe(sources[index]))
+                    signatures[index] = concat_signature(probe_infos[index])
                     with progress_lock:
                         completed.add(index)
                         report(force=True)
@@ -587,15 +1037,27 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
                         intro_done = True
                         if intro:
                             sources[-1] = str(intro)
-                            metadata[-1] = file_fingerprint(intro)
-                            signatures[-1] = concat_signature(probe(str(intro)))
+                            probe_infos[-1], source_anchors[-1] = probe_media_source_with_anchor(intro, probe)
+                            metadata[-1] = {
+                                "sha256": source_anchors[-1]["sha256"],
+                                "size_bytes": source_anchors[-1]["size_bytes"],
+                            }
+                            signatures[-1] = concat_signature(probe_infos[-1])
                     expected_segments = len(rows) + (1 if intro else 0)
                     if expected_segments > 1 and (
                         None in signatures.values() or len(set(signatures.values())) > 1
                     ):
                         incompatible = True
             if incompatible:
-                return [normalized[index] for index in sorted(sources)]
+                ordered = sorted(sources)
+                if set(normalized_signatures) != set(ordered):
+                    raise _normalization_error()
+                validate_normalized_concat_signatures(normalized_signatures[index] for index in ordered)
+                for index in ordered:
+                    verify_media_source_anchor(sources[index], probe_infos[index], source_anchors[index])
+                return [normalized[index] for index in ordered]
+            for index in sorted(sources):
+                verify_media_source_anchor(sources[index], probe_infos[index], source_anchors[index])
             return [sources[index] for index in sorted(sources)]
         except BaseException:
             stop.set()
@@ -607,4 +1069,10 @@ def download_and_prepare_segments(items, *, output_dir, probe, normalize,
 
 
 __all__ = ["download_episode", "download_episode_with_route", "freeze_episode_download_route",
-           "validate_episode_download_route", "download_and_prepare_segments", "download_worker_count", "concat_signature"]
+           "validate_episode_download_route", "download_and_prepare_segments", "download_worker_count",
+           "CONCAT_STREAM_PROBE_ARGS", "CONCAT_STREAM_PROBE_FIELDS", "CONCAT_STREAM_SHOW_ENTRIES",
+           "NORMALIZATION_PROFILE", "concat_signature", "concat_signatures_are_compatible",
+           "freeze_concat_normalization_plan", "validate_concat_normalization_plan",
+           "validate_normalized_concat_info", "validate_normalized_concat_signatures",
+           "probe_media_source_with_anchor", "verify_media_source_anchor",
+           "prepare_normalized_concat_segment"]

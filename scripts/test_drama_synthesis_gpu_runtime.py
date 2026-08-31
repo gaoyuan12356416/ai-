@@ -287,9 +287,12 @@ class RuntimePackageTests(unittest.TestCase):
 class WorkerHTTPTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        self.strict_cache = mock.Mock(return_value=None)
+        self.legacy_cache = mock.Mock(return_value=None)
         self.fake_app = SimpleNamespace(
             WORK_ROOT=self.directory.name,
-            cached_gpu_video_result=mock.Mock(return_value=None),
+            cached_gpu_video_result=self.legacy_cache,
+            strict_cached_gpu_video_result=self.strict_cache,
             gpu_video_resume_ready=mock.Mock(return_value=True),
             drama_random_template_catalog=mock.Mock(return_value={"version": 1}),
             handle_gpu_video_render=mock.Mock(return_value={"ok": True}),
@@ -430,6 +433,11 @@ class WorkerHTTPTests(unittest.TestCase):
         wait_for(lambda: self.worker.RUNTIME.get(payload["job_id"])["status"] == "completed")
         status, completed = self.request("POST", "/api/gpu-video/jobs", payload)
         self.assertEqual((status, completed["status"]), (202, "completed"))
+
+    def test_worker_binds_strict_async_and_legacy_sync_cache_callbacks(self):
+        runtime = self.worker.get_runtime()
+        self.assertIs(runtime.cached_result, self.strict_cache)
+        self.assertIs(runtime.sync_cached_result, self.legacy_cache)
 
     def test_async_auth_validation_query_and_resume_routes(self):
         self.assertEqual(self.request("POST", "/api/gpu-video/jobs", render_payload(), "bad")[0], 401)
@@ -621,6 +629,20 @@ class AsyncRuntimeTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "gpu_queue_full")
         self.assertEqual(value.submit(render_payload("cached"))["status"], "completed")
         self.assertEqual(value.run_sync(render_payload("cached")), result_for(render_payload("cached")))
+        value.execute.assert_not_called()
+
+    def test_async_and_legacy_sync_use_separate_cache_contracts(self):
+        strict = mock.Mock(return_value=None)
+        legacy = mock.Mock(side_effect=result_for)
+        value = self.runtime(
+            cached=strict, sync_cached_result=legacy, autostart=False,
+        )
+        async_payload = render_payload("async-strict")
+        sync_payload = render_payload("legacy-compatible")
+        self.assertEqual(value.submit(async_payload)["status"], "queued")
+        self.assertEqual(value.run_sync(sync_payload), result_for(sync_payload))
+        strict.assert_called_once_with(async_payload)
+        legacy.assert_called_once_with(sync_payload)
         value.execute.assert_not_called()
 
     def test_invalid_completed_cache_is_never_a_render_miss(self):
@@ -834,6 +856,24 @@ class AsyncRuntimeTests(unittest.TestCase):
         self.assertEqual((caught.exception.code, caught.exception.status), ("gpu_runtime_unverified", 503))
         value.execute.assert_not_called()
 
+    def test_runtime_directories_use_durable_creation_and_fail_before_intake(self):
+        real = async_runtime.durable_ensure_directory
+        with mock.patch.object(async_runtime, "durable_ensure_directory", wraps=real) as durable:
+            value = self.runtime(autostart=False)
+        self.assertEqual(
+            [Path(call.args[0]) for call in durable.call_args_list],
+            [value.root.parent, value.root, value.root / "jobs", value.root / "locks"],
+        )
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            async_runtime, "durable_ensure_directory", side_effect=OSError("directory fsync fault"),
+        ):
+            with self.assertRaises(DramaSynthesisError) as caught:
+                async_runtime.AsyncRuntime(
+                    directory, mock.Mock(), mock.Mock(), autostart=False,
+                )
+        self.assertEqual(caught.exception.code, "gpu_runtime_unverified")
+
     def test_shutdown_keeps_owner_lock_while_active_job_drains(self):
         entered, finish = threading.Event(), threading.Event()
         execute = lambda payload: (entered.set(), finish.wait(3), result_for(payload))[-1]
@@ -899,13 +939,27 @@ class AsyncRuntimeTests(unittest.TestCase):
     def test_safe_media_error_code_survives_but_its_untrusted_message_does_not(self):
         value = self.runtime(execute=mock.Mock())
         for code, message in (("drama_episode_source_changed", "视频源版本发生变化，已停止续传"),
-                              ("drama_episode_download_route_invalid", "视频下载线路配置与冻结任务不一致")):
+                              ("drama_episode_download_route_invalid", "视频下载线路配置与冻结任务不一致"),
+                              ("drama_concat_normalization_invalid", "转码后的剧集片段仍不兼容，已停止拼接")):
             error = DramaSynthesisError(code, "private https://source.test/token", 409)
             value.execute.side_effect = error
             payload = render_payload(code)
             value.submit(payload)
             wait_for(lambda: value.get(code)["status"] == "failed")
             self.assertEqual(value.get(code)["error"], {"code": code, "message": message})
+
+    def test_checkpoint_and_upload_uncertainty_require_recovery_without_rerender_label(self):
+        value = self.runtime(execute=mock.Mock())
+        for code in sorted(async_runtime.RECOVERY_BLOCKING_CODES):
+            with self.subTest(code=code):
+                value.execute.side_effect = async_runtime.runtime_error(code)
+                value.submit(render_payload(code))
+                wait_for(lambda: value.get(code)["status"] == "recovery_required")
+                current = value.get(code)
+                self.assertEqual(current["stage"], "recovery_required")
+                self.assertEqual(current["error"]["code"], code)
+                record = json.loads((value.root / "jobs" / (code + ".json")).read_text(encoding="utf-8"))
+                self.assertTrue(record["_cache_blocked"])
 
     def test_malformed_async_request_rejects_before_cache_or_execute(self):
         value = self.runtime(autostart=False)

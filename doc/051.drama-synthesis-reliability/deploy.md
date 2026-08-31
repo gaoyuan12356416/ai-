@@ -14,7 +14,9 @@
 
 原case任务 `679e7c49acbf4af79f78bf60d76c5dd7` 已在约17:36:51自行退出，17:41结果核对确认仅封面、无视频及完成manifest；服务未重启、无OOM证据。旧10800秒渲染超时为时间证据支持的推断，未找回原异常，见 [原任务核对](evidence/original-case-outcome-20260828.json)。未执行终止操作，原CPU failed状态保持；不得盲目重制或写成完成。长片内存缺陷仍未关闭，见 [BUG-002](bugs/BUG-002.md)。
 
-迁移任务 `gpu-service-migration-20260828T1502` 尚在交接TT端口；收到HK媒体窗口确认前仅做无GPU隔离测试。CPU公共目录/主API及HK剧集上线必须在发布前协调目录、端口和窗口；测试窗口不等同生产切换许可。每次渲染或切换前仍须重新证明正式任务排空，旧PID退出不代表之后不会有新任务。
+迁移任务 `gpu-service-migration-20260828T1502` 仍在执行；截至本文件更新时，**新的HK媒体窗口尚未明确释放**。在迁移任务另行明确许可远端隔离代码测试前，只做本地、无网络、无媒体的代码测试；即使取得无GPU代码测试许可，仍不得在HK启动FFmpeg、下载压测或COS写入，也不沿用2026-08-28的旧窗口。CPU公共目录/主API及HK剧集上线必须在发布前再次协调目录、端口和窗口；测试窗口不等同生产切换许可。每次渲染或切换前仍须重新证明正式任务排空，旧PID退出不代表之后不会有新任务。
+
+现行轻量健康检查是CPU侧 `GET http://127.0.0.1:18788/healthz`（HK侧8787），无需鉴权，预期200及`ok=true, role=media-only`。`/health`不是有效路由。素材catalog `/api/gpu-video/random-overlay/catalog` 需要既有Bearer Token，不打印该值；轻量health通过只证明HTTP入口存活，不证明媒体或COS已验收。
 
 保留现网素材复制通知、输出预览过滤和YouTube弹窗等后续改动。只发布本期涉及代码，不重启或改写FB/X/TT/YouTube发布服务，不调整Token、机器时间、short-link及资源目录。
 
@@ -39,8 +41,9 @@
 | COS桶版本控制 | 2026-08-28只读查询Status缺省，未启用 | 不改桶设置。创建/完成前重查，状态不明或已启用/暂停均停止；条件禁止覆盖头不能用于已启用版本控制桶的保证 |
 | GPU工作根 | `/data/drama-synthesis-gpu/work/jobs` | `.runtime`就在此根下，必须持久保留 |
 | GPU上传检查点 | `/data/drama-synthesis-gpu/work/jobs/.runtime/uploads/<job_id>/<对象key哈希>.json` | 仅drama异步执行上下文使用，独立于可清理的单任务媒体目录；保留UploadId/阶段和锁文件，不删记录触发新create |
-| GPU完成manifest | `/data/drama-synthesis-gpu/results/manifests` | 保留既有记录；校验失败不能删记录重做 |
+| GPU完成manifest | `/data/drama-synthesis-gpu/results/manifests` | 新写v3必须绑定当前输入指纹及每个产物的bucket/key/SHA/大小/ETag/binding；认证HEAD或本地读回失败不能删记录重做 |
 | GPU公开本地产物 | `/data/drama-synthesis-gpu/results/public` | 仅沿用已成功上传后的清理合同；回滚不能额外删除现存产物 |
+| GPU concat/去BGM本地完成记录 | `/data/drama-synthesis-gpu/work/jobs/<job_id>/<成片名>.completed.json` | publish前原子持久化并readback，绑定冻结输入、有序片段或concat源、处理profile和成片SHA/大小；已有成片缺记录、记录冲突/损坏或写失败都保留并停止，不删除后重制 |
 | GPU本地模板提交记录 | 成片旁的 `.render.prepared.json`、`.render.json` | prepared先保存未完成start guard，验收后升级为绑定源/配方/产物的完整记录；只凭完整prepared恢复rename/final-save，只有guard或未登记旧输出不得自动重制/收编 |
 | CPU业务SQLite | `/root/drama_material_service/data/drama_material_jobs.sqlite3` | 先在线备份并校验；回滚保留新表与状态，不恢复旧快照覆盖新结果 |
 | `DRAMA_GPU_TIANMAI_CDN` | `original`；仅接受original/international | 只影响CPU新冻结任务；已有样本结果分化，首次保持original。international须另获同源/缓存条件对照收益，不得改旧任务身份 |
@@ -49,14 +52,16 @@
 
 CPU新增SQLite表 `drama_material_job_remote_runtime`，字段包括job_id、fingerprint、payload_json、snapshot_json、generation、resume_requested_generation、first_started_at及UTC审计时间。建表/补字段是增量且幂等；先在备份副本验证，不做破坏性迁移。GPU只使用私有JSON，不初始化业务DB。源URL所在冻结payload及其备份必须受限保存。
 
-异步COS上传由 `features/drama_synthesis/cos_upload.py` 实现单线程持久分片；其他业务调用保持旧合同。恢复须校验本地SHA/大小、目标及分片编号/长度/ETag与本地MD5；完成对象也要由认证HEAD匹配本次上传标识、SHA元数据、大小元数据、Content-Length及已保存完成记录，**不允许只凭公开HEAD长度复用**。无可信检查点但同key对象已存在时停止冲突处理；create结果未知时保留`creating`检查点等待人工核查，不另建UploadId、不自动abort、不删除本地成片。complete丢响应只能按绑定元数据对账，不能假定失败后重新上传覆盖。
+异步COS上传由 `features/drama_synthesis/cos_upload.py` 实现单线程持久分片；其他业务调用保持旧合同。恢复须校验本地SHA/大小、目标及分片编号/长度/ETag与本地MD5；完成对象也要由认证HEAD匹配本次上传标识、SHA元数据、大小元数据、Content-Length及已保存完成记录，**不允许只凭公开HEAD长度复用**。新v3 manifest逐产物保存bucket/key/SHA/大小/ETag/binding，且强制保存当前64位输入指纹；异步读取禁止从公共文件名推导URL。无可信检查点但同key对象已存在时停止冲突处理；create结果未知时保留`creating`检查点等待人工核查，不另建UploadId、不自动abort、不删除本地成片。complete丢响应只能按绑定元数据对账，不能假定失败后重新上传覆盖。
 
-本地渲染先写start guard，再在输出通过原规格/时长校验、SHA/大小确定且fsync后提交完整prepared；rename或最终记录写入失败时保留并复原。若完整prepared自身未能落盘，保留临时成片和guard并停止自动恢复，不以删除它们换取重渲染。有效记录复用和这些保护都不等于长片内存缺陷已关闭。
+发布前由目标服务账户预创建并核对工作根、`.runtime/jobs`、`.runtime/locks`、`.runtime/uploads`、results、manifests和public目录：不得是符号链接，属主/模式须与unit一致，工作及结果目录可写，素材目录只读。首次创建目录及新manifest的Linux持久顺序必须覆盖父目录fsync；预检应在同一文件系统写入、readback并删除一个非媒体探针文件。该探针只验证权限和持久写路径，不得清理既有账本、检查点或成片。
+
+concat和去BGM成片在任何publish前先写并readback各自的本地完成记录；恢复时严格校验工作区成片，公开副本缺失只从该成片原子恢复后续传。不得因公开副本/上传响应丢失再次concat或执行Demucs。模板渲染先写start guard，再在输出通过原规格/时长校验、SHA/大小确定且fsync后提交完整prepared；rename或最终记录写入失败时保留并复原。若任一完成记录自身未能落盘，保留临时成片和guard并停止自动恢复，不以删除它们换取重渲染。有效记录复用和这些保护都不等于长片内存缺陷已关闭。
 
 ## 3. 候选推送与生产切换分级门禁
 
 1. 先完成本地代码审查、核心及最新媒体/COS边界回归、旧升级/目录回归和页面检查；记录真实命令与文件哈希。测试计数以主报告为准，旧计数不能替代修订后重跑。
-2. **本地通过后先提交并推送GitHub候选，记录完整40位SHA**；服务器从GitHub将该SHA取到新的隔离目录，保持生产current、unit及开关不变。这一步为隔离测试取得代码，不是生产发布，不要求长片先于候选推送完成。若修复改变代码，须重新本地验证、推送新SHA并绑定新的隔离证据。
+2. **本地通过后先提交并推送GitHub候选，记录完整40位SHA**；只按评审后的路径清单精确stage，并用cached name/status逐项复核，禁止 `git add .` 或 `git add -A`。仓库根的 `output/` 含私有SDK、fixture、配方和页面快照，永不stage或commit，也不得为clean/候选门禁删除、移动或清空；服务器验收必须使用全新checkout。服务器从GitHub将该SHA取到新的隔离目录，保持生产current、unit及开关不变。这一步为隔离测试取得代码，不是生产发布，不要求长片先于候选推送完成。若修复改变代码，须重新本地验证、推送新SHA并绑定新的隔离证据。
 3. 在该SHA的Linux全新隔离目录跑同套测试和真实短子进程跟踪，验证owner/job锁、/proc PID/boot/进程组、Popen启动窗口、磁盘失败、停止接新和恢复。测试需满足资源/权限前提，不连接业务发布路由；拉取代码不等于已获GPU制作许可。
 4. 在维护排空后，用隔离任务ID、工作/结果目录和COS前缀演练提交丢响应、CPU接管、成片manifest读取、实际分片上传/丢响应恢复及事务回填；核对认证HEAD绑定元数据、creating未知结果保护、上传完成重放，不多一次渲染或create。通知故障不回到媒体制作。
 5. 固定配方先短样后5400～7200秒长样：完整解码、时长/音画/片头/集边界/模板动画和资源曲线合格。单测、5秒视频、成功返回码都不能代替长片验收，具体见 [媒体验收手册](media-acceptance-runbook.md)。
@@ -66,16 +71,18 @@ CPU新增SQLite表 `drama_material_job_remote_runtime`，字段包括job_id、fi
 
 ## 4. 隔离性能工具
 
-在候选代码目录使用目标运行时执行 `scripts/benchmark_drama_synthesis_media.py --help` 查看当前参数。工具要求显式 `--apply` 和全新的绝对输出目录，只写隔离证据，不提交生产任务或上传COS。
+在候选代码目录使用目标运行时执行 `scripts/benchmark_drama_synthesis_media.py --help` 查看当前参数。工具要求显式 `--apply` 和全新的绝对输出目录，只写隔离证据，不提交生产任务或上传COS。真实下载、prepare、render或decode的任何 `--apply` 都必须先取得迁移任务对该动作的新窗口许可；未获许可时下列命令仅供评审，不能执行。
 
 ```text
 python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <私有URL数组JSON> --output-dir <新的绝对证据目录> --workers 4 --bytes-per-source 16777216
 python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <同一私有URL数组JSON> --output-dir <另一新的绝对证据目录> --workers 8 --bytes-per-source 16777216 --four-worker-evidence <成功4路证据JSON>
 python scripts/benchmark_drama_synthesis_media.py --apply download --url-file <候选域名URL数组JSON> --output-dir <新的候选证据目录> --workers 4 --bytes-per-source 16777216 --compare-evidence <同并发原域名证据JSON>
-python scripts/benchmark_drama_synthesis_media.py --apply render --source <固定本地源文件> --recipe <冻结配方JSON> --asset-root <只读素材根> --asset-manifest-sha256 <已核对SHA> --output-dir <新的绝对证据目录> --sample-kind long --filter-threads 2 --ffmpeg <隔离运行时ffmpeg> --ffprobe <隔离运行时ffprobe> --timeout 43200
+python -I -S -B scripts/run_drama_media_acceptance.py --candidate-sha <精确40位SHA> --run-id <新批次> --sample-kind long --config 2c2t --trial r1
 ```
 
-尖括号是必须来自本次冻结记录的参数，以上不是已运行命令。渲染CPU配额由外层隔离systemd执行范围提供，分别200%/2线程、400%/2线程、400%/4线程；保持正式worker配置和同机FB优先级不变。脚本不占正式制作锁，也不自动完整解码；必须先排空，再按 [媒体验收手册](media-acceptance-runbook.md) 的独立unit、单实例锁和解码/资源门禁执行。每次记录 `evidence.json`、`process-samples.jsonl` 和媒体检查结果；`ok=true` 不代表整片解码或用户视觉验收通过。当前 `/data`仍在根文件系统，运行前用 `findmnt -T`、`df` 核验空间，不自动迁盘或无限缓存。
+尖括号是必须来自本次冻结记录的参数，以上不是已运行命令。下载工具保持普通显式CLI；渲染不得直接调用其 `render` 子命令，必须由固定媒体launcher创建并验证200%/2线程、400%/2线程或400%/4线程的隔离unit。launcher缺省只预览；prepare、render、decode的最终参数和调用顺序以同一候选SHA内的 `--help` 及 [媒体验收手册](media-acceptance-runbook.md) 为准。正式入口仍须先排空；固定锁只防验收批次互相并行。每次记录launcher、`evidence.json`、`process-samples.jsonl` 和解码结果；`ok=true` 不代表用户视觉验收通过。当前 `/data`仍在根文件系统，运行前用 `findmnt -T`、`df` 核验空间，不自动迁盘或无限缓存。
+
+真实COS恢复验收只使用 `scripts/verify_drama_cos_upload.py`，缺省为零网络预览。真实执行必须用固定运行时的 `python -I -S -B scripts/verify_drama_cos_upload.py --apply ...`，并绑定同一干净GitHub候选、全新 `cos-...` 批次、独立非敏感MP4（大于16MiB且不超过256MiB）、全新0700证据目录，以及只含 `COS_SECRET_ID`、`COS_SECRET_KEY`、`COS_BUCKET`、`COS_REGION` 四项的当前用户自有0400/0600专用文件；未知赋值、环境继承和生产COS前缀一律拒绝。clean门禁必须同时拒绝tracked工作树改动、staged改动、untracked、ignored及skip-worktree/assume-unchanged，Git以精确40位commit/tree运行并禁replace refs、全局/系统配置和local fsmonitor；Git二进制root-owned且不可组写/他写，关键候选文件逐字节匹配Git blob。COS SDK 1.9.44及requests/urllib3/certifi/idna/charset-normalizer等真实传输依赖须在任何package导入前证明来自root-owned只读单一依赖树；树内symlink、`.pth`、`.pyc/.pyo`、`.egg-link`或任意组/他写路径均拒绝。目标固定runtime若已有这些文件，验收应安全失败并另行准备受控依赖树，不能删除生产runtime文件来绕过。ffprobe的stdout/stderr在运行期间分别有硬上限，超限、KeyboardInterrupt或读线程异常均kill并wait，且仍未读取凭据。脚本内部固定总期限3600秒，外层独立unit固定 `RuntimeMaxSec=3660` 兜底，不提供CLI或环境变量放宽。创建和完成前各读取一次V2通知配置，必须严格为空；创建前和完成后匿名HEAD必须均为403，完成后还要读取对象ACL并拒绝公开/组授权。任一读回不明即保留证据、UploadId、对象或分片并停止，不abort、不删除、不换前缀自动重试。通过还须证明第一次分片成功响应丢失后复用同一UploadId、Complete成功响应丢失后由绑定HEAD对账、完成重放零写入，以及完整认证下载SHA等于源文件。该验收会真实写入一个新私有COS对象，必须另获COS写入窗口；不触发业务API、通知配置写入或媒体渲染。
 
 ## 5. 已验收GitHub候选的生产切换步骤
 

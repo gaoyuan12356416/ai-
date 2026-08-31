@@ -26,10 +26,9 @@ python -m unittest scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_s
 python -m unittest scripts.test_drama_synthesis_upgrade scripts.test_drama_synthesis_cpu_catalog
 node --check static/drama-job-runtime.js
 node scripts/test_drama_synthesis_list_actions.js
-git diff --check
 ```
 
-记录命令、代码版本、时间、退出码和数量；每次代码修订后重跑受影响的检查。核心四套的本次执行为 **162项通过，9.921秒**（GPU runtime62、cache22、CPU客户端30、media48）；静态列表回归为 **16项通过、2页、0次浏览器调用、0次网络调用**。上述其他命令及完整回归的最终记录由 [test-report.md](test-report.md) 汇总，不在本计划预填通过。
+记录命令、代码版本、时间、退出码和数量；每次代码修订后重跑受影响的检查。`git diff --check` 只允许在已信任且已检查repo-local attributes/filter配置的本地开发仓库运行，不属于服务器候选门禁；服务器候选必须走媒体验收launcher的无filter全树验证。冻结增量六模块合并回归为 **454/454通过、0跳过**，另有FB隔离 **16/16**；静态列表回归为 **25/25、2页、0次浏览器调用、0次网络调用**。完整回归的真实命令、时长和候选状态由 [test-report.md](test-report.md) 汇总。
 
 ## 验收工具与数据纪律
 
@@ -41,7 +40,7 @@ git diff --check
 
 ## 发布依赖与停止条件
 
-保留现网后续修复；先推送经审查的精确GitHub提交，部署时记录实际SHA。原任务尚在制作、源/配方/检查点冲突、进程状态不明、磁盘不足、资源影响同机服务或长片效果不合格时均停止切换。
+保留现网后续修复；先推送经审查的精确GitHub提交，部署时记录实际SHA。任一正式制作仍在进行、源/配方/检查点冲突、进程状态不明、磁盘不足、资源影响同机服务或长片效果不合格时均停止切换。
 
 `DRAMA_GPU_ASYNC_ENABLED` 默认OFF；候选域名、下载8路和CPU配额提升各自独立评估，任何一项没有证据就维持原配置。生产切换和回滚按 [deploy.md](deploy.md)；默认配置不能被“工具运行成功”自动修改。
 

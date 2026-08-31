@@ -764,6 +764,7 @@ class UpgradeTests(unittest.TestCase):
         fake_app = SimpleNamespace(
             WORK_ROOT=str(self.root / "gpu-work"),
             cached_gpu_video_result=lambda _payload: None,
+            strict_cached_gpu_video_result=lambda _payload: None,
             drama_random_template_catalog=lambda: {"version": 1, "count": 315},
             handle_gpu_video_render=lambda payload: {"ok": True, "recipe": payload["recipe"]},
             handle_gpu_video_cover=lambda payload: {"ok": True, "cover": payload["source_url"]},
@@ -849,6 +850,23 @@ class AsyncAppIntegrationTests(unittest.TestCase):
         self.assertEqual(actual["stage_percent"], 50.0)
         self.assertIn("1.0/2.0", actual["detail"])
         self.assertEqual(remote_display({"stage": "concatenating"})["stage_percent"], None)
+
+    def test_normalizing_stage_keeps_live_download_metrics_visible(self):
+        from features.drama_synthesis.app_support import remote_display
+        view = remote_display({
+            "status": "running", "stage": "normalizing",
+            "metrics": {
+                "completed_episodes": 3, "total_episodes": 8,
+                "downloaded_bytes": 12_000_000, "total_bytes": 40_000_000,
+                "bytes_per_second": 2_500_000,
+                "normalized_episodes": 2, "total_segments": 8,
+            },
+        })
+        self.assertEqual(view["stage_percent"], 25.0)
+        self.assertIn("已下载 3/8 集", view["detail"])
+        self.assertIn("12.0 MB / 40.0 MB", view["detail"])
+        self.assertIn("2.50 MB/s", view["detail"])
+        self.assertIn("已处理 2/8 段", view["detail"])
 
     def test_bad_metrics_and_reconnection_never_create_fake_progress(self):
         from features.drama_synthesis.app_support import remote_display
@@ -960,6 +978,8 @@ class AsyncAppIntegrationTests(unittest.TestCase):
             env = self.load("upload_file_to_cos", cos_enabled=lambda: True, file_ready=lambda _: True,
                             build_cos_object_key=lambda _: "isolated/video.mp4", build_cos_url=lambda _: "https://example.test/video.mp4",
                             drama_async_runtime=runtime, requests=http, hashlib=hashlib, WORK_ROOT=root,
+                            PUBLIC_ROOT=str(Path(root) / "public"), re=__import__("re"),
+                            drama_gpu_cache=SimpleNamespace(ARTIFACT_FILENAMES={}),
                             get_cos_client=client_factory, COS_UPLOAD_TIMEOUT=120, COS_MULTIPART_TIMEOUT=900,
                             COS_BUCKET="test-bucket", guess_content_type=lambda _: "video/mp4")
             with mock.patch("features.drama_synthesis.cos_upload.resume_upload") as upload:
@@ -972,6 +992,37 @@ class AsyncAppIntegrationTests(unittest.TestCase):
             self.assertEqual(call.kwargs["acl"], "public-read")
             client_factory.assert_called_once_with(timeout=900, retry=0)
             http.head.assert_not_called()
+
+    def test_async_upload_may_return_verified_receipt_without_changing_default_contract(self):
+        import contextlib
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "video.mp4"
+            path.write_bytes(b"complete media fixture")
+            runtime = SimpleNamespace(capture_context=lambda: SimpleNamespace(job_id=JOB_ID),
+                                      use_context=lambda context: contextlib.nullcontext(), emit_progress=mock.Mock())
+            receipt = {
+                "bucket": "test-bucket", "key": "isolated/video.mp4", "sha256": "a" * 64,
+                "size_bytes": path.stat().st_size, "etag": '"etag"', "binding": "b" * 32,
+            }
+            env = self.load(
+                "upload_file_to_cos", cos_enabled=lambda: True, file_ready=lambda _: True,
+                build_cos_object_key=lambda _: "isolated/video.mp4",
+                build_cos_url=lambda _: "https://example.test/video.mp4",
+                drama_async_runtime=runtime, requests=SimpleNamespace(head=mock.Mock()),
+                hashlib=hashlib, WORK_ROOT=root, PUBLIC_ROOT=str(Path(root) / "public"),
+                re=__import__("re"), drama_gpu_cache=SimpleNamespace(ARTIFACT_FILENAMES={}),
+                get_cos_client=mock.Mock(return_value=object()), COS_UPLOAD_TIMEOUT=120,
+                COS_MULTIPART_TIMEOUT=900, COS_BUCKET="test-bucket",
+                guess_content_type=lambda _: "video/mp4",
+            )
+            with mock.patch("features.drama_synthesis.cos_upload.resume_upload", return_value=receipt):
+                self.assertEqual(env["upload_file_to_cos"](str(path)), "https://example.test/video.mp4")
+                self.assertEqual(
+                    env["upload_file_to_cos"](
+                        str(path), return_receipt=True, checkpoint_job_id=JOB_ID,
+                    ),
+                    ("https://example.test/video.mp4", receipt),
+                )
 
     def test_only_explicit_async_client_disables_sdk_internal_post_retries(self):
         config = object()
@@ -989,12 +1040,22 @@ class AsyncAppIntegrationTests(unittest.TestCase):
         response = SimpleNamespace(status_code=200, headers={"Content-Length": "12"})
         http = SimpleNamespace(head=mock.Mock(return_value=response))
         env = self.load("upload_file_to_cos", cos_enabled=lambda: True, file_ready=lambda _: True,
-                        build_cos_object_key=lambda _: "legacy.mp4", build_cos_url=lambda _: "https://example.test/legacy.mp4",
-                        drama_async_runtime=SimpleNamespace(capture_context=lambda: None), requests=http)
+                         build_cos_object_key=lambda _: "legacy.mp4", build_cos_url=lambda _: "https://example.test/legacy.mp4",
+                         drama_async_runtime=SimpleNamespace(capture_context=lambda: None), requests=http,
+                         PUBLIC_ROOT=str(ROOT / "unused-public"), re=__import__("re"),
+                         drama_gpu_cache=SimpleNamespace(ARTIFACT_FILENAMES={}), hashlib=hashlib,
+                         WORK_ROOT=str(ROOT / "unused-work"), COS_UPLOAD_TIMEOUT=120,
+                         COS_MULTIPART_TIMEOUT=900, get_cos_client=mock.Mock(return_value=object()),
+                         COS_BUCKET="test-bucket", guess_content_type=lambda _: "video/mp4")
         with mock.patch.object(os.path, "getsize", return_value=12), \
-                mock.patch("features.drama_synthesis.cos_upload.resume_upload") as upload:
+                mock.patch("features.drama_synthesis.cos_upload.resume_upload", return_value={"verified": True}) as upload:
             self.assertEqual(env["upload_file_to_cos"]("legacy.mp4"), "https://example.test/legacy.mp4")
-        upload.assert_not_called()
+            upload.assert_not_called()
+            self.assertEqual(
+                env["upload_file_to_cos"]("legacy.mp4", checkpoint_job_id=JOB_ID),
+                "https://example.test/legacy.mp4",
+            )
+        upload.assert_called_once()
         http.head.assert_called_once()
 
     def test_stopped_observer_cannot_write_a_late_status(self):
@@ -1086,6 +1147,568 @@ class AsyncAppIntegrationTests(unittest.TestCase):
         env["resume_job_from_checkpoint"](job)
         self.assertEqual(job["completion_notified_at"], "")
         self.assertEqual(job["completion_notification_error"], "")
+
+
+class MediaAcceptanceHardeningTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def setUp(self):
+        from scripts import run_drama_media_acceptance as launcher
+        from scripts import check_drama_media_resource_guard as guard
+        self.launcher = launcher
+        self.guard = guard
+
+    def spec(self, operation="render", sample_kind="short", config="2c2t", trial="r1"):
+        return self.launcher.build_spec(
+            self.SHA, "accept01", sample_kind, config, operation, trial
+        )
+
+    def test_decode_rehashes_after_full_decode_before_writing_success(self):
+        spec = self.spec("decode", "short", "4c2t", "r2")
+        artifact = {"sha256": "e" * 64, "size_bytes": 999}
+        identity = {"device": 1, "inode": 2, "size_bytes": 999,
+                    "mtime_ns": 3, "nlink": 1}
+        frozen = {"artifact": artifact, "artifact_identity": identity,
+                  "benchmark_evidence_sha256": "f" * 64}
+        outcome = {"elapsed_seconds": 12.5, "exit_code": 0,
+                   "minimum_mem_available_bytes": 16 * 1024 ** 3}
+        with mock.patch.object(self.launcher, "validate_render_result",
+                               side_effect=[frozen, frozen]) as verify, \
+             mock.patch.object(self.launcher, "run_fixed_child", return_value=outcome), \
+             mock.patch.object(self.launcher, "write_exclusive_json") as write:
+            result = self.launcher.run_decode(spec, 1009, 1010, 9, object())
+        self.assertTrue(result["ok"])
+        self.assertEqual(verify.call_count, 2)
+        evidence = write.call_args.args[1]
+        self.assertTrue(evidence["result_reverified_after_decode"])
+        self.assertEqual(evidence["exit_code"], 0)
+        self.assertEqual(evidence["render_unit"], self.spec(
+            "render", "short", "4c2t", "r2").unit)
+        self.assertEqual(evidence["result_identity_before"], identity)
+        self.assertEqual(evidence["result_identity_after"], identity)
+
+    def test_decode_same_size_replacement_never_writes_ok_evidence(self):
+        spec = self.spec("decode", "short", "4c2t", "r2")
+        before = {
+            "artifact": {"sha256": "1" * 64, "size_bytes": 999},
+            "artifact_identity": {"device": 1, "inode": 2, "size_bytes": 999,
+                                  "mtime_ns": 3, "nlink": 1},
+            "benchmark_evidence_sha256": "f" * 64,
+        }
+        after = {
+            **before,
+            "artifact": {"sha256": "2" * 64, "size_bytes": 999},
+            "artifact_identity": {"device": 1, "inode": 4, "size_bytes": 999,
+                                  "mtime_ns": 5, "nlink": 1},
+        }
+        with mock.patch.object(self.launcher, "validate_render_result",
+                               side_effect=[before, after]), \
+             mock.patch.object(self.launcher, "run_fixed_child", return_value={
+                 "elapsed_seconds": 1, "exit_code": 0,
+                 "minimum_mem_available_bytes": 16 * 1024 ** 3,
+             }), mock.patch.object(self.launcher, "write_exclusive_json") as write, \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.run_decode(spec, 1009, 1010, 9, object())
+        self.assertEqual(str(caught.exception), "decode_result_changed_during_decode")
+        write.assert_not_called()
+
+    def test_run_source_manifest_is_shared_and_rejects_same_size_replacement(self):
+        first = self.spec("prepare-short")
+        other = self.spec("render", "long", "4c4t", "r2")
+        self.assertEqual(first.run_source_manifest_path, other.run_source_manifest_path)
+        before = {"sha256": "1" * 64, "size_bytes": self.launcher.LONG_SOURCE_SIZE,
+                  "device": 1, "inode": 2, "mtime_ns": 3, "nlink": 1}
+        after = dict(before, sha256="2" * 64, inode=4, mtime_ns=5)
+        frozen = self.launcher.run_source_record(first, before)
+        with mock.patch.object(self.launcher, "fingerprint_fixed_input", return_value=before), \
+             mock.patch.object(self.launcher.os, "lstat", side_effect=FileNotFoundError), \
+             mock.patch.object(self.launcher, "write_exclusive_json") as write, \
+             mock.patch.object(self.launcher, "read_run_source_record", return_value=frozen):
+            self.assertEqual(self.launcher.ensure_run_source_frozen(first, 1009, 1010), frozen)
+        write.assert_called_once_with(
+            first.run_source_manifest_path, frozen, code="run_source_manifest_write_failed"
+        )
+        renderer = mock.Mock()
+        with mock.patch.object(self.launcher, "fingerprint_fixed_input", return_value=after), \
+             mock.patch.object(self.launcher.os, "lstat", return_value=SimpleNamespace()), \
+             mock.patch.object(self.launcher, "read_run_source_record", return_value=frozen), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.ensure_run_source_frozen(other, 1009, 1010)
+            renderer()
+        self.assertEqual(str(caught.exception), "fixed_long_source_changed")
+        renderer.assert_not_called()
+
+    def test_submit_timeout_is_durable_unknown_and_same_action_cannot_replay(self):
+        import subprocess
+        spec = self.spec("render")
+        events = []
+        with mock.patch.object(self.launcher, "existing_submission_guard",
+                               side_effect=lambda _: events.append("replay-check")), \
+             mock.patch.object(self.launcher, "ensure_public_apply_preflight",
+                               side_effect=lambda _: events.append("preflight")), \
+             mock.patch.object(self.launcher, "build_systemd_command", return_value=["fixed"]), \
+             mock.patch.object(self.launcher, "write_submission_record",
+                               side_effect=lambda _spec, state: events.append(state)), \
+             mock.patch.object(self.launcher.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("fixed", 30)), \
+             self.assertRaises(self.launcher.SubmissionUncertain) as caught:
+            self.launcher.submit(spec)
+        self.assertEqual(str(caught.exception), "media_acceptance_submit_outcome_unknown")
+        self.assertEqual(events, ["replay-check", "preflight", "submitting"])
+        with mock.patch.object(self.launcher, "existing_submission_guard",
+                               side_effect=self.launcher.SubmissionUncertain(
+                                   "media_acceptance_submission_already_recorded")), \
+             mock.patch.object(self.launcher, "ensure_public_apply_preflight") as preflight, \
+             self.assertRaises(self.launcher.SubmissionUncertain):
+            self.launcher.submit(spec)
+        preflight.assert_not_called()
+
+    def test_successful_submit_output_binds_complete_action_identity(self):
+        spec = self.spec("render", "long", "4c4t", "r2")
+        completed = SimpleNamespace(returncode=0, stdout="Running as unit fixed.service.\n")
+        with mock.patch.object(self.launcher, "existing_submission_guard"), \
+             mock.patch.object(self.launcher, "ensure_public_apply_preflight"), \
+             mock.patch.object(self.launcher, "build_systemd_command", return_value=["fixed"]), \
+             mock.patch.object(self.launcher, "write_submission_record") as write, \
+             mock.patch.object(self.launcher.subprocess, "run", return_value=completed):
+            value = self.launcher.submit(spec)
+        self.assertEqual([call.args[1] for call in write.call_args_list],
+                         ["submitting", "accepted"])
+        self.assertEqual({key: value[key] for key in (
+            "candidate_sha", "run_id", "operation", "sample_kind",
+            "configuration", "trial", "unit",
+        )}, {
+            "candidate_sha": self.SHA, "run_id": "accept01",
+            "operation": "render", "sample_kind": "long",
+            "configuration": "4c4t", "trial": "r2", "unit": spec.unit,
+        })
+        self.assertTrue(value["submitted"])
+        self.assertFalse(value["completion_unknown"])
+        self.assertTrue(value["replay_forbidden"])
+
+    def test_public_unknown_submit_output_never_claims_media_not_started(self):
+        output = __import__("io").StringIO()
+        arguments = [
+            "--candidate-sha", self.SHA, "--run-id", "accept01",
+            "--sample-kind", "short", "--config", "2c2t", "--trial", "r1",
+            "--apply",
+        ]
+        with mock.patch.object(self.launcher, "submit", side_effect=
+                               self.launcher.SubmissionUncertain(
+                                   "media_acceptance_submit_outcome_unknown")), \
+             mock.patch("sys.stdout", new=output):
+            self.assertEqual(self.launcher.main(arguments), 78)
+        value = json.loads(output.getvalue())
+        self.assertIsNone(value["media_started"])
+        self.assertTrue(value["completion_unknown"])
+        self.assertTrue(value["replay_forbidden"])
+        self.assertEqual(value["unit"], self.spec().unit)
+        self.assertEqual({key: value[key] for key in (
+            "candidate_sha", "run_id", "operation", "sample_kind",
+            "configuration", "trial", "unit",
+        )}, {
+            "candidate_sha": self.SHA, "run_id": "accept01",
+            "operation": "render", "sample_kind": "short",
+            "configuration": "2c2t", "trial": "r1",
+            "unit": self.spec().unit,
+        })
+
+    def test_pressure_delta_rejects_recovered_burst_and_oom_kill(self):
+        pressure = {
+            "memory_failcnt": 0, "memsw_failcnt": 0, "swap_bytes": 0,
+            "oom_control": {"oom_kill_disable": 0, "under_oom": 0,
+                            "oom_kill": 0, "oom_kill_available": True},
+        }
+        before = {"resources_sha256": "a" * 64, "pressure": pressure}
+        for after_pressure in (
+                {**pressure, "memory_failcnt": 1},
+                {**pressure, "oom_control": {**pressure["oom_control"], "oom_kill": 1}},
+        ):
+            with self.subTest(after=after_pressure), self.assertRaises(self.guard.GuardFailure):
+                self.guard.verify_pressure_transition(before, {
+                    "resources_sha256": "a" * 64, "pressure": after_pressure
+                })
+
+    def test_base_exception_still_runs_post_pressure_audit_before_propagating(self):
+        spec = self.spec("render", "long", "2c2t", "r1")
+        pressure = {
+            "memory_failcnt": 0, "memsw_failcnt": 0, "swap_bytes": 0,
+            "oom_control": {"oom_kill_disable": 0, "under_oom": 0,
+                            "oom_kill": 0, "oom_kill_available": True},
+        }
+        snapshot = {"resources_sha256": "a" * 64, "pressure": pressure}
+        fake_guard = SimpleNamespace(
+            GuardFailure=self.guard.GuardFailure,
+            MEDIA_16_GIB_PROFILE=object(), LinuxFiles=mock.Mock(return_value=object()),
+            LinuxProcess=mock.Mock(return_value=object()),
+            capture_pressure=mock.Mock(return_value=snapshot),
+            verify_pressure_transition=mock.Mock(return_value={"verified": True}),
+        )
+        verified = {"proof": {"resources_sha256": "a" * 64}, "pressure": snapshot}
+        source = {"version": 1, "candidate_sha": self.SHA, "run_id": "accept01",
+                  "source": self.launcher.path_text(self.launcher.LONG_SOURCE),
+                  "source_sha256": "b" * 64, "source_size": self.launcher.LONG_SOURCE_SIZE,
+                  "source_device": 1, "source_inode": 2, "source_mtime_ns": 3,
+                  "source_nlink": 1}
+        with mock.patch.object(self.launcher, "write_exclusive_json") as write, \
+             self.assertRaises(KeyboardInterrupt):
+            self.launcher.finalize_resource_evidence(
+                spec, 1009, 1010, fake_guard, verified, None, source, source,
+                operation_error=KeyboardInterrupt(),
+            )
+        fake_guard.capture_pressure.assert_called_once()
+        self.assertEqual(write.call_count, 1)
+        self.assertFalse(write.call_args.args[1]["operation_succeeded"])
+
+    def test_candidate_gate_checks_ignored_flags_and_each_worktree_blob(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            critical = (
+                "scripts/run_drama_media_acceptance.py",
+                "scripts/benchmark_drama_synthesis_media.py",
+                "scripts/check_drama_media_resource_guard.py",
+            )
+            for name in critical:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name, encoding="utf-8")
+                path.chmod(0o444)
+            (root / ".git").mkdir()
+            (root / ".git" / "info").mkdir()
+            (root / ".git" / "info" / "attributes").write_text(
+                "*.py filter=hostile\n", encoding="utf-8"
+            )
+            (root / ".git" / "config").write_text(
+                "[filter \"hostile\"]\n\tprocess = never-run\n", encoding="utf-8"
+            )
+            spec = replace(self.spec(), candidate_root=root,
+                           script_path=root / critical[0])
+            blobs = {name: str(index + 1) * 40
+                     for index, name in enumerate(critical)}
+            calls = []
+
+            def git(args, _root, **_kwargs):
+                calls.append(tuple(args))
+                if args == ["rev-parse", "--show-toplevel"]:
+                    return self.launcher.path_text(root) + "\n"
+                if args == ["rev-parse", "--is-bare-repository"]:
+                    return "false\n"
+                if args == ["rev-parse", "--absolute-git-dir"]:
+                    return self.launcher.path_text(root / ".git") + "\n"
+                if args[:2] == ["rev-parse", "--verify"]:
+                    return self.SHA + "\n" if args[2] == "HEAD^{commit}" else "b" * 40 + "\n"
+                if args[0] == "for-each-ref":
+                    return ""
+                if args[:2] == ["ls-files", "-v"]:
+                    return "".join("H " + name + "\x00" for name in critical)
+                if args[:2] == ["ls-files", "--stage"]:
+                    return "".join("100644 %s 0\t%s\x00" % (blobs[name], name)
+                                   for name in critical)
+                if args[0] == "ls-tree":
+                    return "".join("100644 blob %s\t%s\x00" % (blobs[name], name)
+                                   for name in critical)
+                if args[:2] == ["hash-object", "--no-filters"]:
+                    paths = _kwargs["input_bytes"].decode().splitlines()
+                    return "".join(blobs[name] + "\n" for name in paths)
+                raise AssertionError(args)
+
+            def trusted_stat(path, _kind, _code):
+                return os.stat(path)
+
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git", side_effect=git):
+                result = self.launcher.verify_candidate(spec)
+            self.assertEqual(set(result["critical"]), set(critical))
+            self.assertEqual(set(result["tracked"]), set(critical))
+            self.assertEqual(len([call for call in calls if call[0] == "hash-object"]), 1)
+            self.assertFalse(any(call[0] == "status" for call in calls))
+
+            ignored = root / "scripts" / "__pycache__" / "unsafe.pyc"
+            ignored.parent.mkdir()
+            ignored.write_bytes(b"untrusted bytecode")
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git", side_effect=git), \
+                 self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_candidate(spec)
+            self.assertEqual(str(caught.exception), "candidate_checkout_not_clean_exact_sha")
+            ignored.unlink()
+            ignored.parent.rmdir()
+
+            def flagged_git(args, root, **kwargs):
+                if args[:2] == ["ls-files", "-v"]:
+                    return "h " + critical[0] + "\x00" + "".join(
+                        "H " + name + "\x00" for name in critical[1:]
+                    )
+                return git(args, root, **kwargs)
+
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git", side_effect=flagged_git), \
+                 self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_candidate(spec)
+            self.assertEqual(str(caught.exception), "candidate_index_flags_unsafe")
+
+            def changed_blob(args, root, **kwargs):
+                if args[:2] == ["hash-object", "--no-filters"]:
+                    values = git(args, root, **kwargs).splitlines()
+                    values[0] = "9" * 40
+                    return "\n".join(values) + "\n"
+                return git(args, root, **kwargs)
+
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git", side_effect=changed_blob), \
+                 self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_candidate(spec)
+            self.assertEqual(str(caught.exception), "candidate_worktree_blob_mismatch")
+
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git", side_effect=lambda args, base, **kw:
+                                   self.launcher.path_text(root.parent) + "\n"
+                                   if args == ["rev-parse", "--show-toplevel"]
+                                   else git(args, base, **kw)), \
+                 self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_candidate(spec)
+            self.assertEqual(str(caught.exception), "candidate_worktree_binding_invalid")
+
+    def test_bounded_git_uses_fixed_no_hook_no_replace_environment(self):
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured.update(command=command, kwargs=kwargs)
+            kwargs["stdout"].write(b"a" * 40 + b"\n")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.object(self.launcher.subprocess, "run", side_effect=fake_run):
+            result = self.launcher.bounded_git(
+                ["rev-parse", "--verify", "HEAD^{commit}"], Path("/fixed/candidate")
+            )
+        self.assertEqual(result, "a" * 40 + "\n")
+        command = captured["command"]
+        self.assertIn("--no-replace-objects", command)
+        self.assertIn("core.fsmonitor=false", command)
+        self.assertIn("core.untrackedCache=false", command)
+        self.assertIn("core.hooksPath=/dev/null", command)
+        self.assertIn("core.bare=false", command)
+        self.assertIn("--work-tree=/fixed/candidate", command)
+        environment = captured["kwargs"]["env"]
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertNotIn("HOME", environment)
+
+    def test_git_binary_must_be_fixed_root_owned_and_not_group_writable(self):
+        import stat
+        safe = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_dev=1, st_ino=2,
+                               st_uid=0)
+        with mock.patch.object(self.launcher.os, "lstat", return_value=safe), \
+             mock.patch.object(self.launcher.os, "stat", return_value=safe), \
+             mock.patch.object(self.launcher.os, "access", return_value=True):
+            self.launcher.require_secure_git_binary()
+        unsafe = SimpleNamespace(**{**safe.__dict__, "st_mode": stat.S_IFREG | 0o775})
+        with mock.patch.object(self.launcher.os, "lstat", return_value=unsafe), \
+             mock.patch.object(self.launcher.os, "stat", return_value=unsafe), \
+             mock.patch.object(self.launcher.os, "access", return_value=True), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.require_secure_git_binary()
+        self.assertEqual(str(caught.exception), "candidate_git_binary_unsafe")
+
+    def test_candidate_permission_primitives_require_root_no_external_write_and_git_mode(self):
+        import stat
+
+        def value(kind, permissions, uid=0):
+            return SimpleNamespace(
+                st_mode=kind | permissions, st_dev=1, st_ino=2, st_uid=uid,
+                st_size=10, st_mtime_ns=3, st_nlink=1,
+            )
+
+        safe_directory = value(stat.S_IFDIR, 0o755)
+        with mock.patch.object(self.launcher.os, "lstat", return_value=safe_directory), \
+             mock.patch.object(self.launcher.os, "stat", return_value=safe_directory):
+            self.assertIs(
+                self.launcher.require_root_owned_secure_path(
+                    Path("/candidate"), "directory", "unsafe"
+                ),
+                safe_directory,
+            )
+
+        writable_directory = value(stat.S_IFDIR, 0o775)
+        with mock.patch.object(self.launcher.os, "lstat", return_value=writable_directory), \
+             mock.patch.object(self.launcher.os, "stat", return_value=writable_directory), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.require_root_owned_secure_path(
+                Path("/candidate"), "directory", "unsafe"
+            )
+        self.assertEqual(str(caught.exception), "unsafe")
+
+        non_root_file = value(stat.S_IFREG, 0o644, uid=1009)
+        with mock.patch.object(self.launcher.os, "lstat", return_value=non_root_file), \
+             mock.patch.object(self.launcher.os, "stat", return_value=non_root_file), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.require_secure_tracked_file(Path("/candidate/file.py"), "100644")
+        self.assertEqual(str(caught.exception),
+                         "candidate_worktree_file_permissions_unsafe")
+
+        executable_file = value(stat.S_IFREG, 0o755)
+        with mock.patch.object(self.launcher.os, "lstat", return_value=executable_file), \
+             mock.patch.object(self.launcher.os, "stat", return_value=executable_file), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.require_secure_tracked_file(Path("/candidate/file.py"), "100644")
+        self.assertEqual(str(caught.exception), "candidate_worktree_file_mode_mismatch")
+
+    def test_internal_media_action_rechecks_long_source_at_start_and_end(self):
+        spec = self.spec("render", "long", "2c2t", "r1")
+        pressure = {
+            "memory_failcnt": 0, "memsw_failcnt": 0, "swap_bytes": 0,
+            "oom_control": {"oom_kill_disable": 0, "under_oom": 0,
+                            "oom_kill": 0, "oom_kill_available": True},
+        }
+        snapshot = {"resources_sha256": "a" * 64, "pressure": pressure}
+        source = {"version": 1, "candidate_sha": self.SHA, "run_id": "accept01",
+                  "source": self.launcher.path_text(self.launcher.LONG_SOURCE),
+                  "source_sha256": "b" * 64, "source_size": self.launcher.LONG_SOURCE_SIZE,
+                  "source_device": 1, "source_inode": 2, "source_mtime_ns": 3,
+                  "source_nlink": 1}
+        guard = SimpleNamespace(
+            GuardFailure=self.guard.GuardFailure,
+            MEDIA_16_GIB_PROFILE=self.guard.MEDIA_16_GIB_PROFILE,
+            verify_inherited_guard=mock.Mock(return_value={
+                "proof": {"pid": 123, "profile": self.guard.MEDIA_16_GIB_PROFILE.name,
+                          "resources_sha256": "a" * 64},
+                "pressure": snapshot,
+            }),
+            LinuxFiles=mock.Mock(return_value=object()),
+            LinuxProcess=mock.Mock(return_value=object()),
+            capture_pressure=mock.Mock(return_value=snapshot),
+            verify_pressure_transition=mock.Mock(return_value={"verified": True}),
+        )
+        events = []
+
+        class Process:
+            returncode = None
+
+            def poll(self):
+                events.append("poll")
+                return self.returncode
+
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+                if sum(isinstance(item, tuple) and item[0] == "wait"
+                       for item in events) == 1:
+                    raise KeyboardInterrupt()
+                return self.returncode
+
+        benchmark = SimpleNamespace(
+            MEDIA_ACCEPTANCE_LOCK_PATH=self.launcher.LOCK_PATH,
+            launch_renderer_process=mock.Mock(return_value=Process()),
+        )
+        candidate = {"head": self.SHA, "tree": "b" * 40,
+                     "snapshot_sha256": "c" * 64, "tracked": {}, "critical": {
+                         "scripts/check_drama_media_resource_guard.py": {},
+                         "scripts/benchmark_drama_synthesis_media.py": {},
+                     }}
+        def interrupted_render(_spec, _uid, _gid, inherited_lock_fd, loaded_benchmark):
+            self.launcher.run_fixed_child(
+                loaded_benchmark, ["fixed"], inherited_lock_fd, timeout=1,
+                failure_code="fixed_failed", timeout_code="fixed_timeout",
+                cleanup_code="fixed_cleanup_failed",
+            )
+
+        with mock.patch.object(self.launcher, "require_linux"), \
+             mock.patch.object(self.launcher, "ensure_python_stage"), \
+             mock.patch.object(self.launcher, "target_identity", return_value=(1009, 1010)), \
+             mock.patch.object(self.launcher.os, "geteuid", return_value=1009, create=True), \
+             mock.patch.object(self.launcher.os, "getegid", return_value=1010, create=True), \
+             mock.patch.object(self.launcher.os, "getgroups", return_value=[], create=True), \
+             mock.patch.object(self.launcher.os, "getpid", return_value=123), \
+             mock.patch.object(self.launcher, "verify_candidate", return_value=candidate), \
+             mock.patch.object(self.launcher, "validate_fixed_inputs"), \
+             mock.patch.object(self.launcher, "read_host_memory", return_value={
+                 "MemTotal": 32 * 1024 ** 3, "MemAvailable": 32 * 1024 ** 3,
+             }), \
+             mock.patch.object(self.launcher, "verify_private_run_root"), \
+             mock.patch.object(self.launcher, "validate_existing_action_inputs"), \
+             mock.patch.object(self.launcher, "verify_inherited_media_lock",
+                               return_value=(7, 8)), \
+             mock.patch.object(self.launcher, "load_candidate_module",
+                               side_effect=[guard, benchmark]), \
+              mock.patch.object(self.launcher, "ensure_run_source_frozen",
+                                side_effect=[source, source]) as freeze, \
+              mock.patch.object(self.launcher, "run_render",
+                                side_effect=interrupted_render), \
+              mock.patch.object(self.launcher, "write_exclusive_json") as write, \
+              mock.patch.object(self.launcher, "fingerprint_regular",
+                                return_value={"sha256": "c" * 64, "size_bytes": 100}), \
+              mock.patch.object(self.launcher, "validate_action_completion"), \
+              self.assertRaises(KeyboardInterrupt):
+            self.launcher.internal_verified_stage(spec, 6, 9)
+        self.assertEqual(freeze.call_count, 2)
+        self.assertIn("kill", events)
+        self.assertEqual(sum(isinstance(item, tuple) and item[0] == "wait"
+                             for item in events), 2)
+        guard.capture_pressure.assert_called_once()
+        guard.verify_pressure_transition.assert_called_once()
+        written_paths = [call.args[0] for call in write.call_args_list]
+        self.assertIn(spec.resource_evidence_path, written_paths)
+        self.assertNotIn(spec.completion_evidence_path, written_paths)
+        resource_value = next(
+            call.args[1] for call in write.call_args_list
+            if call.args[0] == spec.resource_evidence_path
+        )
+        self.assertEqual(resource_value["minimum_mem_available_bytes"], 32 * 1024 ** 3)
+        self.assertEqual(resource_value["host_memory_stop_threshold_bytes"],
+                         8 * 1024 ** 3)
+
+    def test_submission_intent_lstat_errors_are_unknown_except_definite_absence(self):
+        import errno
+
+        spec = self.spec("render", "long", "2c2t", "r1")
+        write_error = self.launcher.LaunchFailure("submission_guard_write_failed")
+        with mock.patch.object(self.launcher, "write_exclusive_json",
+                               side_effect=write_error), \
+             mock.patch.object(self.launcher.os, "lstat",
+                               side_effect=OSError(errno.EIO, "simulated")), \
+             self.assertRaises(self.launcher.SubmissionUncertain) as caught:
+            self.launcher.write_submission_record(spec, "submitting")
+        self.assertEqual(str(caught.exception),
+                         "media_acceptance_submission_state_unknown")
+
+        write_error = self.launcher.LaunchFailure("submission_guard_write_failed")
+        with mock.patch.object(self.launcher, "write_exclusive_json",
+                               side_effect=write_error), \
+             mock.patch.object(self.launcher.os, "lstat",
+                               side_effect=FileNotFoundError()), \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.write_submission_record(spec, "submitting")
+        self.assertIs(caught.exception, write_error)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,48 @@ def request(**changes):
     value={"job_id":"fb-page-"+"a"*48,"content_id":"d1","source_url":"https://cdn.example.com/a.mp4","source_trim_tail_seconds":0,"video_template":"random_overlay","expected_profile":PROFILE}; value.update(changes); return value
 
 class WorkerTests(unittest.TestCase):
+    def test_build_command_import_does_not_require_requests(self):
+        import builtins
+        import importlib.util
+        import sys
+
+        path = Path(__file__).parents[1] / "features" / "fb_gpu" / "prepare_worker.py"
+        name = "features.fb_gpu._prepare_worker_without_requests"
+        module_spec = importlib.util.spec_from_file_location(name, path)
+        self.assertIsNotNone(module_spec)
+        module = importlib.util.module_from_spec(module_spec)
+        original_import = builtins.__import__
+        blocked = []
+
+        def import_without_requests(import_name, *args, **kwargs):
+            if import_name == "requests" or import_name.startswith("requests."):
+                blocked.append(import_name)
+                raise AssertionError("requests imported while loading build_command")
+            return original_import(import_name, *args, **kwargs)
+
+        sys.modules[name] = module
+        try:
+            with patch("builtins.__import__", side_effect=import_without_requests):
+                module_spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop(name, None)
+        self.assertTrue(callable(module.build_command))
+        module.load_asset_set = lambda *_args: {"categories": {}}
+        module.cleanup_stale_failed_jobs = lambda *_args, **_kwargs: 0
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(Path(tmp))
+            store = object()
+            with patch("builtins.__import__", side_effect=import_without_requests):
+                default_processor = module.PrepareProcessor(cfg, object_store=store)
+            self.assertIs(default_processor.session_factory,
+                          module._default_session_factory)
+            explicit_factory = lambda: object()
+            explicit_processor = module.PrepareProcessor(
+                cfg, session_factory=explicit_factory, object_store=store
+            )
+            self.assertIs(explicit_processor.session_factory, explicit_factory)
+        self.assertEqual(blocked, [])
+
     def test_prepare_worker_has_no_tiktok_api_dependency(self):
         source = (Path(__file__).parents[1] / "features" / "fb_gpu" / "prepare_worker.py").read_text(encoding="utf-8").lower()
         tree = ast.parse(source)

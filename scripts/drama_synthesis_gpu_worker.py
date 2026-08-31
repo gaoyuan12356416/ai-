@@ -44,15 +44,16 @@ def get_runtime():
     with RUNTIME_LOCK:
         if RUNTIME is None:
             root = getattr(drama_app, "WORK_ROOT", None)
-            cache = getattr(drama_app, "cached_gpu_video_result", None)
-            if not root or not callable(cache):
+            cache = getattr(drama_app, "strict_cached_gpu_video_result", None)
+            sync_cache = getattr(drama_app, "cached_gpu_video_result", None)
+            if not root or not callable(cache) or not callable(sync_cache):
                 raise runtime_error("gpu_runtime_unavailable")
             try:
                 limit = int(os.environ.get("DRAMA_GPU_QUEUE_LIMIT", "8"))
             except ValueError:
                 raise runtime_error("gpu_runtime_unavailable") from None
             RUNTIME = AsyncRuntime(
-                root, drama_app.handle_gpu_video_render, cache,
+                root, drama_app.handle_gpu_video_render, cache, sync_cached_result=sync_cache,
                 can_resume=getattr(drama_app, "gpu_video_resume_ready", None),
                 render_slots=RENDER_SLOTS, queue_limit=limit,
             )

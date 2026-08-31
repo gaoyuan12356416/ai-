@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "purpose": "read-only baseline after the user resumed the paused drama-synthesis reliability work",
+  "production_changes": 0,
+  "media_processes_started": 0,
+  "cos_writes": 0,
+  "hk": {
+    "checked_at_utc": "2026-08-31T02:21:47.145642+00:00",
+    "drama_current": "/data/drama-synthesis-gpu/releases/e1f5a1d04cfb510df9c2444ac592adec2827508b",
+    "drama_worker": {
+      "active_state": "active",
+      "sub_state": "running",
+      "main_pid": 1188891,
+      "restart_count": 0
+    },
+    "fb_worker": {
+      "active_state": "active",
+      "sub_state": "running",
+      "main_pid": 1207342,
+      "restart_count": 0
+    },
+    "ffmpeg_or_ffprobe_processes": 0,
+    "gpu": {
+      "utilization_percent": 0,
+      "encoder_percent": 0,
+      "decoder_percent": 0,
+      "memory_total_mib": 15360,
+      "memory_used_mib": 1,
+      "compute_processes": 0
+    },
+    "memory": {
+      "mem_total_kib": 32726252,
+      "mem_available_kib": 31619684,
+      "swap_total_kib": 16777212,
+      "swap_free_kib": 16475268
+    },
+    "filesystem": {
+      "data_mount": "/dev/vda1 ext4 /",
+      "root_and_data_same_filesystem": true,
+      "size_bytes": 541059354624,
+      "used_bytes": 63785033728,
+      "available_bytes": 455182168064
+    }
+  },
+  "cpu": {
+    "checked_at_utc": "2026-08-31T02:21:49.769864+00:00",
+    "health": {
+      "url": "http://127.0.0.1:18788/healthz",
+      "http_status": 200,
+      "ok": true,
+      "role": "media-only"
+    },
+    "api": {
+      "active_state": "active",
+      "sub_state": "running",
+      "main_pid": 1832384,
+      "restart_count": 0,
+      "cwd": "/root/drama_material_service"
+    },
+    "worker": {
+      "active_state": "active",
+      "sub_state": "running",
+      "main_pid": 1116403,
+      "restart_count": 0,
+      "cwd": "/root/drama_material_service"
+    },
+    "runtime_table_present": false,
+    "job_status_counts": {
+      "done": 22,
+      "failed": 1
+    },
+    "original_case": {
+      "job_id": "679e7c49acbf4af79f78bf60d76c5dd7",
+      "status": "failed"
+    },
+    "production_file_sha256": {
+      "app.py": "782ce12cf17890b1efd6d834e53a14debb5747fec7fe143794eaa34705f0278d",
+      "features/drama_synthesis/core.py": "7e2cf9da97b90b64d16452494a46870c15c59bce57700e06ced526da99a52895",
+      "features/drama_synthesis/gpu.py": "90040d78ec7c76238a029dca325f0b801dafe32c8c6561315edf88c613442dd4",
+      "scripts/drama_job_worker.py": "5c99b2bf51cc705b15dca20fb2080c9fa140e1f92442e5b9c79300d03ea27575"
+    }
+  },
+  "conclusion": "The production services were healthy and unchanged from the recorded legacy baseline. No media process was running, but a new coordinated media window was still required because the independent migration task had also resumed."
+}

@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "date": "2026-08-28",
+  "scope": "Three sequential bounded non-GPU resource guard probes; no media acceptance or production switch",
+  "candidate_sha": "23a08e5f933fbbdbea3346b22c680a4180113380",
+  "candidate_directory": "/data/drama-synthesis-gpu/acceptance/code/23a08e5f933fbbdbea3346b22c680a4180113380",
+  "script_git_blob": "1363257544c04fed2725c289205cc1bbe85d7a4a",
+  "script_sha256": "0670dfed61397c2f95435045599e6d96089d8a45a8c8a95f31c9576ea3f97370",
+  "python": "/data/drama-synthesis-gpu/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10",
+  "python_version": "3.10.20",
+  "preflight": {
+    "systemd": "systemd 239 (239-51.el8_5.2)",
+    "kernel": "4.18.0-348.7.1.el8_5.x86_64",
+    "cgroup_version": 1,
+    "mem_available_kb": 31691652,
+    "production_main_pids": {
+      "drama-synthesis-gpu-worker.service": 1188891,
+      "drama-synthesis-gpu-tunnel.service": 1188892,
+      "fb-page-random-overlay-gpu.service": 1207342,
+      "fb-page-random-overlay-tunnel.service": 1207624
+    }
+  },
+  "policy": {
+    "memory_limit_bytes": 268435456,
+    "probe_allocation_bytes": 8388608,
+    "probe_seconds": 3,
+    "tasks_max": 128,
+    "nice": 10,
+    "runtime_max_seconds": 30,
+    "timeout_stop_seconds": 5
+  },
+  "cases": [
+    {
+      "case": 1,
+      "cgroup_samples": [
+        {
+          "cpu,cpuacct": {
+            "cgroup.procs": "1809783",
+            "cpu.cfs_period_us": "100000",
+            "cpu.cfs_quota_us": "200000",
+            "directory": "/sys/fs/cgroup/cpu,cpuacct/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "exists": true,
+            "tasks": "1809783"
+          },
+          "memory": {
+            "cgroup.procs": "1809783",
+            "directory": "/sys/fs/cgroup/memory/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "exists": true,
+            "memory.failcnt": "0",
+            "memory.limit_in_bytes": "268435456",
+            "memory.memsw.failcnt": "0",
+            "memory.memsw.limit_in_bytes": "9223372036854771712",
+            "memory.memsw.usage_in_bytes": "393216",
+            "memory.oom_control": "oom_kill_disable 0\nunder_oom 0\noom_kill 0",
+            "memory.swappiness": "60",
+            "memory.usage_in_bytes": "393216",
+            "memory.use_hierarchy": "1",
+            "tasks": "1809783"
+          },
+          "pids": {
+            "cgroup.procs": "1809783",
+            "directory": "/sys/fs/cgroup/pids/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "exists": true,
+            "pids.current": "1",
+            "pids.max": "128",
+            "tasks": "1809783"
+          }
+        }
+      ],
+      "cpu_quota_percent": 200,
+      "events": [
+        {
+          "child_executed": false,
+          "media_tools_started": 0,
+          "ok": false,
+          "phase": "guard",
+          "reason": "cpu_scheduling_mismatch"
+        }
+      ],
+      "expected_cpu_cores": 2,
+      "final_cgroups": {
+        "cpu,cpuacct": {
+          "cgroup.procs": null,
+          "cpu.cfs_period_us": null,
+          "cpu.cfs_quota_us": null,
+          "directory": "/sys/fs/cgroup/cpu,cpuacct/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+          "exists": false,
+          "tasks": null
+        },
+        "memory": {
+          "cgroup.procs": null,
+          "directory": "/sys/fs/cgroup/memory/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+          "exists": false,
+          "memory.failcnt": null,
+          "memory.limit_in_bytes": null,
+          "memory.memsw.failcnt": null,
+          "memory.memsw.limit_in_bytes": null,
+          "memory.memsw.usage_in_bytes": null,
+          "memory.oom_control": null,
+          "memory.swappiness": null,
+          "memory.usage_in_bytes": null,
+          "memory.use_hierarchy": null,
+          "tasks": null
+        },
+        "pids": {
+          "cgroup.procs": null,
+          "directory": "/sys/fs/cgroup/pids/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+          "exists": false,
+          "pids.current": null,
+          "pids.max": null,
+          "tasks": null
+        }
+      },
+      "final_properties": {
+        "ActiveState": "failed",
+        "CPUQuotaPerSecUSec": "2s",
+        "CapabilityBoundingSet": "cap_setgid cap_setuid",
+        "ControlGroup": "",
+        "ExecMainCode": "1",
+        "ExecMainStatus": "78",
+        "Id": "drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+        "InvocationID": "56f63a7e50434340b3c24d12ca0f1af5",
+        "KillMode": "control-group",
+        "LoadState": "loaded",
+        "MainPID": "0",
+        "MemoryCurrent": "[not set]",
+        "MemoryLimit": "268435456",
+        "Nice": "0",
+        "NoNewPrivileges": "yes",
+        "PrivateDevices": "yes",
+        "PrivateNetwork": "yes",
+        "Restart": "no",
+        "Result": "exit-code",
+        "RuntimeMaxUSec": "30s",
+        "SubState": "failed",
+        "TasksCurrent": "[not set]",
+        "TasksMax": "128",
+        "TimeoutStopUSec": "5s"
+      },
+      "finished_at": "2026-08-28T10:44:16.899110+00:00",
+      "host_media_processes_after": [],
+      "host_media_processes_before": [],
+      "journal_path": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/resource-guard/case-1-drama-resource-guard-test-2afcac5f5c0a3d5b.service.journal.txt",
+      "journal_sha256": "cc5de224ad19eed72f54837eed0e110f2bd7f9f2bc9a4236597304b460226fbd",
+      "launch": {
+        "argv": [
+          "systemd-run",
+          "--unit=drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+          "--service-type=simple",
+          "--uid=root",
+          "--gid=root",
+          "--property=WorkingDirectory=/data/drama-synthesis-gpu/acceptance/code/23a08e5f933fbbdbea3346b22c680a4180113380",
+          "--property=Restart=no",
+          "--property=RemainAfterExit=yes",
+          "--property=RuntimeMaxSec=30",
+          "--property=TimeoutStopSec=5",
+          "--property=KillMode=control-group",
+          "--property=Nice=10",
+          "--property=CPUQuota=200%",
+          "--property=MemoryLimit=256M",
+          "--property=TasksMax=128",
+          "--property=NoNewPrivileges=yes",
+          "--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+          "--property=PrivateDevices=yes",
+          "--property=PrivateNetwork=yes",
+          "--property=StandardInput=null",
+          "/data/drama-synthesis-gpu/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10",
+          "-I",
+          "-S",
+          "-B",
+          "/data/drama-synthesis-gpu/acceptance/code/23a08e5f933fbbdbea3346b22c680a4180113380/scripts/check_drama_media_resource_guard.py",
+          "--unit",
+          "drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+          "--cpu-cores",
+          "2"
+        ],
+        "returncode": 0,
+        "stderr": "Running as unit: drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+        "stdout": ""
+      },
+      "media_tools_started_by_this_test": 0,
+      "observed_unit_processes": [
+        {
+          "cgroup_membership": [
+            "12:rdma:/",
+            "11:net_cls,net_prio:/",
+            "10:hugetlb:/",
+            "9:pids:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "8:cpu,cpuacct:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "7:blkio:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "6:devices:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "5:freezer:/",
+            "4:cpuset:/",
+            "3:memory:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+            "2:perf_event:/",
+            "1:name=systemd:/system.slice/drama-resource-guard-test-2afcac5f5c0a3d5b.service"
+          ],
+          "comm": "(thon3.10)",
+          "nice": 0,
+          "pid": 1809783,
+          "start_ticks": 27371121,
+          "status": {
+            "CapAmb": "0000000000000000",
+            "CapBnd": "000001ffffffffff",
+            "CapEff": "000001ffffffffff",
+            "CapPrm": "000001ffffffffff",
+            "Gid": "0\t0\t0\t0",
+            "Groups": "",
+            "NoNewPrivs": "0",
+            "Uid": "0\t0\t0\t0"
+          }
+        }
+      ],
+      "own_cgroups_empty": true,
+      "own_unit_stop_performed": false,
+      "passed": false,
+      "production_switch": false,
+      "protected_services_after": {
+        "drama-synthesis-gpu-tunnel.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/drama-synthesis-gpu-tunnel.service",
+          "MainPID": "1188892",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 17998923
+        },
+        "drama-synthesis-gpu-worker.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/drama-synthesis-gpu-worker.service",
+          "MainPID": "1188891",
+          "Nice": "10",
+          "SubState": "running",
+          "start_ticks": 17998923
+        },
+        "fb-page-random-overlay-gpu.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/fb-page-random-overlay-gpu.service",
+          "MainPID": "1207342",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 18273904
+        },
+        "fb-page-random-overlay-tunnel.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/fb-page-random-overlay-tunnel.service",
+          "MainPID": "1207624",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 18276761
+        }
+      },
+      "protected_services_before": {
+        "drama-synthesis-gpu-tunnel.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/drama-synthesis-gpu-tunnel.service",
+          "MainPID": "1188892",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 17998923
+        },
+        "drama-synthesis-gpu-worker.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/drama-synthesis-gpu-worker.service",
+          "MainPID": "1188891",
+          "Nice": "10",
+          "SubState": "running",
+          "start_ticks": 17998923
+        },
+        "fb-page-random-overlay-gpu.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/fb-page-random-overlay-gpu.service",
+          "MainPID": "1207342",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 18273904
+        },
+        "fb-page-random-overlay-tunnel.service": {
+          "ActiveState": "active",
+          "ControlGroup": "/system.slice/fb-page-random-overlay-tunnel.service",
+          "MainPID": "1207624",
+          "Nice": "0",
+          "SubState": "running",
+          "start_ticks": 18276761
+        }
+      },
+      "protected_services_unchanged": true,
+      "remote_result_path": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/resource-guard/case-1-drama-resource-guard-test-2afcac5f5c0a3d5b.service.result.json",
+      "started_at": "2026-08-28T10:44:16.465299+00:00",
+      "unit": "drama-resource-guard-test-2afcac5f5c0a3d5b.service",
+      "observation_limitations": [
+        "The captured process record is an early startup snapshot with comm '(thon3.10)', before any successful guard event. Do not treat its capability/NoNewPrivs values as a post-exec guard or dropped-identity probe snapshot.",
+        "No successful guard/probe event exists. The final safe error is cpu_scheduling_mismatch; Nice=0 is also present in final systemd properties despite the command requesting Nice=10.",
+        "The guard rejects during identity checks before memsw/swappiness writes. No ordinary probe, allocation sample, FFmpeg or ffprobe was launched by this test.",
+        "Host media process lists are bounded before/after snapshots; zero test media tools is supported separately by the verified fixed probe source and the guard's child_executed=false event."
+      ]
+    }
+  ],
+  "archive_readback": [
+    {
+      "mode": "0o600",
+      "path": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/resource-guard/case-1-drama-resource-guard-test-2afcac5f5c0a3d5b.service.journal.txt",
+      "sha256": "cc5de224ad19eed72f54837eed0e110f2bd7f9f2bc9a4236597304b460226fbd",
+      "size_bytes": 605,
+      "uid": 0
+    },
+    {
+      "mode": "0o600",
+      "path": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/resource-guard/case-1-drama-resource-guard-test-2afcac5f5c0a3d5b.service.result.json",
+      "sha256": "0876d9faa211c2d2c9bb9728f18d54ea2f57bbe6bde75809ce4553623eebb720",
+      "size_bytes": 8786,
+      "uid": 0
+    }
+  ],
+  "status": "blocked_after_first_unexpected_rejection",
+  "media_acceptance": false,
+  "production_switch": false,
+  "preflight_notes": [
+    {
+      "code": "archive_parent_path_clarified",
+      "units_started": 0,
+      "message": "First driver stopped before any directory or unit creation; parent supplied the exact existing archive parent. Assertions unchanged."
+    }
+  ],
+  "archive_directory": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/resource-guard",
+  "summary": {
+    "planned_cases": 3,
+    "executed_cases": 1,
+    "passed_cases": 0,
+    "unexpected_failures": 1,
+    "skipped_cases": [
+      {
+        "case": 2,
+        "cpu_quota_percent": 400,
+        "expected_cpu_cores": 4,
+        "reason": "First case failed unexpectedly; no automatic retry or relaxed assertions."
+      },
+      {
+        "case": 3,
+        "cpu_quota_percent": 200,
+        "expected_cpu_cores": 4,
+        "reason": "First case failed unexpectedly; no automatic retry or relaxed assertions."
+      }
+    ],
+    "failure_reason": "cpu_scheduling_mismatch",
+    "requested_nice": 10,
+    "final_systemd_nice": 0,
+    "ordinary_probe_started": false,
+    "media_tools_started": 0,
+    "resource_guard_validated": false,
+    "fail_closed_rejection_observed": true,
+    "protected_drama_fb_main_pids_and_start_ticks_unchanged": true,
+    "own_test_cgroups_empty": true,
+    "any_production_unit_changed": false,
+    "automatic_code_or_launch_flag_change": false
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "candidate": "23a08e5f933fbbdbea3346b22c680a4180113380",
+  "runtime_files_identical_to_570c1bd": 15,
+  "runs": [
+    {
+      "host": "HK 43.154.250.89",
+      "recorded_at_server_local": "2026-08-28T18:32:53.565092",
+      "python": "3.10.20",
+      "cos_sdk": "1.9.44",
+      "tests": 300,
+      "passed": 300,
+      "skipped": 0,
+      "errors": 0,
+      "elapsed_seconds": 15.682,
+      "returncode": 0,
+      "raw_evidence_directory": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380"
+    },
+    {
+      "host": "CPU 43.166.187.96",
+      "recorded_at_server_local": "2026-08-28T18:37:16.517981",
+      "python": "3.9.6",
+      "cos_sdk": "1.9.44",
+      "tests": 300,
+      "passed": 300,
+      "skipped": 0,
+      "errors": 0,
+      "elapsed_seconds": 14.599,
+      "returncode": 0,
+      "python_no_user_site_override": false,
+      "matches_current_service_python_environment": true,
+      "raw_evidence_directory": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/actual-service-env"
+    }
+  ],
+  "earlier_cpu_harness_failure": {
+    "recorded_at_server_local": "2026-08-28T18:32:47.214633",
+    "returncode": 1,
+    "tests_loaded": 113,
+    "import_errors": 4,
+    "skipped": 2,
+    "reason": "Test harness added PYTHONNOUSERSITE=1, hiding the existing requests dependency path; production services do not set this flag",
+    "verified_default_requests": "2.32.5 at /usr/local/lib/python3.9/site-packages/requests/__init__.py",
+    "correction": "Removed the test-only environment override; did not install dependencies or change services",
+    "failed_evidence_preserved": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/result.json"
+  },
+  "hk_test_code_access": {
+    "original_readable_by_drama_user": false,
+    "cause": "Task acceptance parent was root-owned mode 0700",
+    "change": "Added only named drama-synthesis-gpu directory search ACL to /data/drama-synthesis-gpu/acceptance",
+    "code_readable_after": true,
+    "acceptance_parent_listable_after": false,
+    "input_or_database_permissions_changed": false,
+    "acl_backup": "/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/acceptance-root-acl.before",
+    "rollback": "setfacl --restore=/data/drama-synthesis-gpu/acceptance/20260828-reliability/code-tests/23a08e5f933fbbdbea3346b22c680a4180113380/acceptance-root-acl.before"
+  },
+  "live_drama_health": {
+    "checked_via": "CPU loopback tunnel",
+    "url": "http://127.0.0.1:18788/healthz",
+    "authentication_required": false,
+    "status": 200,
+    "body": {"ok": true, "role": "media-only"},
+    "note": "GET /health is not a valid route; a 404 there does not indicate service failure"
+  },
+  "production_changed": false,
+  "dependencies_installed_or_changed": false,
+  "gpu_render_started": false,
+  "actual_cos_requests_in_tests": false,
+  "resource_unit_or_media_acceptance_proven_by_these_tests": false
+}

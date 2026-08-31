@@ -780,9 +780,25 @@ from features.drama_synthesis import gpu_cache as drama_gpu_cache
 from features.drama_synthesis import async_runtime as drama_async_runtime
 from features.drama_synthesis import cpu_runtime as drama_cpu_runtime
 from features.drama_synthesis import remote_client as drama_remote_client
+from features.drama_synthesis.local_checkpoint import (
+    atomic_write_record, checkpoint_error, durable_ensure_directory,
+    file_fingerprint, load_completed, read_record, save_completed,
+)
 from features.drama_synthesis.app_support import ObservationStop as DramaObservationStop
 from features.drama_synthesis.app_support import remote_display as drama_remote_display
-from features.drama_synthesis.media_pipeline import download_and_prepare_segments, freeze_episode_download_route
+from features.drama_synthesis.media_pipeline import (
+    CONCAT_STREAM_PROBE_ARGS,
+    NORMALIZATION_PROFILE,
+    concat_signature as drama_concat_signature,
+    concat_signatures_are_compatible,
+    download_and_prepare_segments,
+    freeze_episode_download_route,
+    prepare_normalized_concat_segment,
+    probe_media_source_with_anchor,
+    validate_concat_normalization_plan,
+    validate_normalized_concat_signatures,
+    verify_media_source_anchor,
+)
 from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
     build_browser_preview_html,
@@ -9737,8 +9753,7 @@ def probe_media_stream_info(path):
         proc = subprocess.run(
             [
                 ffprobe_path(), "-v", "error",
-                "-show_entries",
-                "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,duration:format=duration",
+                *CONCAT_STREAM_PROBE_ARGS,
                 "-of", "json",
                 path,
             ],
@@ -22592,11 +22607,12 @@ def get_cos_client(timeout=None, *, retry=None):
 
 
 
-def upload_file_to_cos(path):
+def upload_file_to_cos(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not cos_enabled():
 
-        return build_public_url(path)
+        url = build_public_url(path)
+        return (url, None) if return_receipt else url
 
     if not file_ready(path):
 
@@ -22607,22 +22623,45 @@ def upload_file_to_cos(path):
     expected_size = os.path.getsize(path)
     runtime = globals().get("drama_async_runtime")
     media_context = runtime.capture_context() if runtime else None
+    # Legacy synchronous GPU calls have no AsyncRuntime context. Recognize only
+    # the three fixed renderer artifact paths so their internal publish calls
+    # still enter the same durable multipart checkpoint as the final receipt
+    # read. Ordinary publish callers keep the previous upload contract.
+    inferred_job_id = None
+    try:
+        relative = os.path.relpath(os.path.realpath(path), os.path.realpath(PUBLIC_ROOT))
+        parts = relative.split(os.sep)
+        if (len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", parts[0])
+                and parts[1] in set(drama_gpu_cache.ARTIFACT_FILENAMES.values())):
+            inferred_job_id = parts[0]
+    except (OSError, ValueError):
+        inferred_job_id = None
+    requested_job_id = str(checkpoint_job_id or "").strip() or None
+    context_job_id = str(media_context.job_id) if media_context else None
+    identities = {value for value in (requested_job_id, context_job_id, inferred_job_id) if value is not None}
+    if (len(identities) > 1 or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value)
+                                   for value in identities)):
+        raise DramaSynthesisError("drama_upload_checkpoint_conflict", "上传记录与当前成片或目标不一致，已停止上传", 409)
+    upload_job_id = next(iter(identities), None)
     def media_upload_progress(consumed, total):
         if media_context:
             with runtime.use_context(media_context):
                 runtime.emit_progress("uploading", uploaded_bytes=consumed, total_bytes=total)
     if media_context:
         media_upload_progress(0, expected_size)
+    if media_context or return_receipt or requested_job_id or inferred_job_id:
+        if not upload_job_id:
+            raise DramaSynthesisError("drama_upload_configuration_invalid", "上传参数无效", 400)
         from features.drama_synthesis.cos_upload import resume_upload
 
         # Keep multipart identity outside the disposable job working directory.
         # Only the drama execution context uses this path; other upload callers
         # retain their existing contract and concurrency settings.
         checkpoint_path = os.path.join(
-            WORK_ROOT, ".runtime", "uploads", media_context.job_id,
+            WORK_ROOT, ".runtime", "uploads", upload_job_id,
             hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
         )
-        resume_upload(
+        receipt = resume_upload(
             # The SDK otherwise retries POST internally, outside the durable
             # create/complete fences. Retry only via the verified checkpoint.
             get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
@@ -22630,7 +22669,7 @@ def upload_file_to_cos(path):
             checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
             content_type=guess_content_type(path), acl="public-read",
         )
-        return object_url
+        return (object_url, receipt) if return_receipt else object_url
 
     try:
         response = requests.head(object_url, timeout=(5, 15))
@@ -22685,7 +22724,7 @@ def upload_file_to_cos(path):
 
 
 
-def publish_asset(path):
+def publish_asset(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not file_ready(path):
 
@@ -22693,9 +22732,12 @@ def publish_asset(path):
 
     if cos_enabled():
 
-        return upload_file_to_cos(path)
+        return upload_file_to_cos(
+            path, return_receipt=return_receipt, checkpoint_job_id=checkpoint_job_id,
+        )
 
-    return build_public_url(path)
+    url = build_public_url(path)
+    return (url, None) if return_receipt else url
 
 
 def playable_preview_root():
@@ -68298,24 +68340,57 @@ def normalize_episode(source_path, output_path):
     ])
 
 
-def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="48000"):
+def normalize_concat_segment(source_path, output_path, plan):
+    plan = validate_concat_normalization_plan(plan)
+    target, source, audio = plan["target"], plan["source"], plan["audio"]
+    target_width, target_height = target["width"], target["height"]
+    sar_numerator, sar_denominator = source["sar_numerator"], source["sar_denominator"]
+    scale_factor = "min(%d/(iw*%d/%d),%d/ih)" % (
+        target_width, sar_numerator, sar_denominator, target_height,
+    )
+    deinterlace_filter = (
+        "bwdif=mode=send_frame:parity=%s:deint=all," % source["deinterlace_parity"]
+        if source["scan_mode"] == "interlaced" else ""
+    )
+    video_filter = deinterlace_filter + (
+        "fps=25,"
+        "scale=w='max(2,trunc(%s*(iw*%d/%d)/2)*2)':"
+        "h='max(2,trunc(%s*ih/2)*2)':eval=init,"
+        "setsar=1,"
+        "colorspace=ispace=%s:itrc=%s:iprimaries=%s:irange=%s:"
+        "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+        "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black"
+    ) % (
+        scale_factor, sar_numerator, sar_denominator, scale_factor,
+        source["color_space"], source["color_transfer"], source["color_primaries"], source["color_range"],
+        target_width, target_height,
+    )
     ensure_dir(os.path.dirname(output_path))
     tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
     if os.path.exists(tmp_output_path):
         os.remove(tmp_output_path)
     try:
-        run_cmd([
-            FFMPEG, "-y", "-i", source_path,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-vf", "fps=%s,format=yuv420p,setsar=1" % fps,
-            "-r", str(fps),
+        command = [FFMPEG, "-y", "-i", source_path]
+        if audio["mode"] == "silence":
+            command.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+        command.extend([
+            "-map", "0:v:0", "-map", "1:a:0" if audio["mode"] == "silence" else "0:a:0",
+            "-vf", video_filter,
+            "-r", "25",
             *video_encode_args(),
-            "-c:a", "aac", "-b:a", "128k", "-ar", str(audio_rate), "-ac", "2",
-            "-af", "aresample=async=1:first_pts=0",
+            "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+            "-video_track_timescale", "12800",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+            "-color_primaries", "bt709", "-chroma_sample_location", "left",
+            "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp", "-b:a", "128k",
+            "-ar", str(audio["sample_rate"]), "-ac", str(audio["channels"]), "-tag:a", "mp4a",
+            "-af", ("aresample=async=1:first_pts=0,apad"
+                    if audio["mode"] == "resample" else "aresample=async=1:first_pts=0"),
             "-movflags", "+faststart",
             "-shortest",
             tmp_output_path,
         ])
+        run_cmd(command)
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("normalized concat segment is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -68327,42 +68402,42 @@ def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="480
 
 
 def concat_segments_need_normalization(segment_paths):
-    signatures = []
-    for path in segment_paths:
-        data = probe_media_stream_info(path)
-        streams = data.get("streams") or []
-        video = next((item for item in streams if item.get("codec_type") == "video"), None)
-        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-        if not video or not audio:
-            return True
-        signatures.append((
-            video.get("codec_name") or "",
-            int(video.get("width") or 0),
-            int(video.get("height") or 0),
-            video.get("avg_frame_rate") or video.get("r_frame_rate") or "",
-            video.get("time_base") or "",
-            audio.get("codec_name") or "",
-            audio.get("sample_rate") or "",
-            int(audio.get("channels") or 0),
-            audio.get("time_base") or "",
-        ))
-    return len(set(signatures)) > 1
+    if len(segment_paths) <= 1:
+        return False
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    signatures = [drama_concat_signature(info) for info, _ in snapshots]
+    for path, (info, anchor) in zip(segment_paths, snapshots):
+        verify_media_source_anchor(path, info, anchor)
+    return not concat_signatures_are_compatible(signatures)
 
 
 def prepare_concat_segments(segment_paths, output_dir):
-    if len(segment_paths) <= 1 or not concat_segments_need_normalization(segment_paths):
+    if len(segment_paths) <= 1:
+        return segment_paths
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    source_infos = [info for info, _ in snapshots]
+    source_anchors = [anchor for _, anchor in snapshots]
+    if concat_signatures_are_compatible(drama_concat_signature(info) for info in source_infos):
+        for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+            verify_media_source_anchor(path, info, anchor)
         return segment_paths
     ensure_dir(output_dir)
     normalized_paths = []
-    for index, source_path in enumerate(segment_paths):
+    normalized_signatures = []
+    for index, (source_path, source_info) in enumerate(zip(segment_paths, source_infos)):
         normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
-        if (
-            not file_ready(normalized_path)
-            or not valid_video_file(normalized_path)
-            or not valid_av_duration_alignment(normalized_path)
-        ):
-            normalize_concat_segment(source_path, normalized_path)
+        normalized_path, signature, _ = prepare_normalized_concat_segment(
+            source_path, normalized_path, source_info=source_info, source_anchor=source_anchors[index],
+            reference_info=source_infos[0], reference_source=segment_paths[0],
+            reference_anchor=source_anchors[0], segment_index=index,
+            normalize=normalize_concat_segment, probe=probe_media_stream_info,
+            normalization_profile=NORMALIZATION_PROFILE,
+        )
         normalized_paths.append(normalized_path)
+        normalized_signatures.append(signature)
+    validate_normalized_concat_signatures(normalized_signatures)
+    for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+        verify_media_source_anchor(path, info, anchor)
     return normalized_paths
 
 
@@ -68449,16 +68524,108 @@ def probe_intro_reference_timing(reference_path):
     return timing
 
 
+def validate_intro_cover_color_contract(cover_path):
+    """Parse JPEG APP markers and accept only the fixed JFIF/sRGB contract."""
+    saw_jfif = False
+    saw_scan = False
+    header_bytes = 2
+    try:
+        if os.path.islink(cover_path) or not os.path.isfile(cover_path):
+            raise RuntimeError("intro cover color contract unsupported")
+        with open(cover_path, "rb") as handle:
+            if handle.read(2) != b"\xff\xd8":
+                raise RuntimeError("intro cover color contract unsupported")
+            for _ in range(1024):
+                prefix = handle.read(1)
+                if prefix != b"\xff":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker = handle.read(1)
+                while marker == b"\xff":
+                    marker = handle.read(1)
+                if len(marker) != 1 or marker == b"\x00":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker_value = marker[0]
+                header_bytes += 2
+                if marker_value == 0xD9:
+                    break
+                if marker_value in {0x01, *range(0xD0, 0xD8)}:
+                    continue
+                length_bytes = handle.read(2)
+                if len(length_bytes) != 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                segment_length = int.from_bytes(length_bytes, "big")
+                if segment_length < 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                payload = handle.read(segment_length - 2)
+                if len(payload) != segment_length - 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                header_bytes += segment_length
+                if header_bytes > 4 * 1024 * 1024:
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xE0 and payload.startswith(b"JFIF\x00") and len(payload) >= 14:
+                    saw_jfif = True
+                elif marker_value == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                elif marker_value == 0xEE and payload.startswith(b"Adobe"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xDA:
+                    saw_scan = True
+                    break
+            else:
+                raise RuntimeError("intro cover color contract unsupported")
+    except OSError:
+        raise RuntimeError("intro cover color contract unsupported") from None
+    if not saw_jfif or not saw_scan:
+        raise RuntimeError("intro cover color contract unsupported")
+    return {
+        "range": "pc", "matrix": "bt470", "transfer": "iec61966-2-1",
+        "primaries": "bt709",
+    }
+
+
+def freeze_intro_cover_source(cover_path, private_directory):
+    """Copy a stable cover into a private random file and bind its exact bytes."""
+    before = file_fingerprint(cover_path)
+    fd, frozen_path = tempfile.mkstemp(prefix=".intro-cover-", suffix=".jpg", dir=private_directory)
+    opened_fd = fd
+    try:
+        with open(cover_path, "rb") as source, os.fdopen(fd, "wb") as target:
+            opened_fd = -1
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        after = file_fingerprint(cover_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
+        if before != after or before != frozen_fingerprint:
+            raise RuntimeError("intro cover changed during freeze")
+        color = validate_intro_cover_color_contract(frozen_path)
+        return frozen_path, frozen_fingerprint, color
+    except BaseException:
+        if opened_fd >= 0:
+            os.close(opened_fd)
+        if os.path.exists(frozen_path):
+            os.remove(frozen_path)
+        raise
+
+
 def render_intro(cover_path, output_path, reference_path=None):
-    timing = probe_intro_reference_timing(reference_path)
-    intro_fps = timing["fps"]
-    intro_audio_rate = timing["audio_rate"]
-    if reference_path:
-        logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
     ensure_dir(os.path.dirname(output_path))
-    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
-    if os.path.exists(tmp_output_path):
-        os.remove(tmp_output_path)
+    frozen_cover_path, frozen_cover_fingerprint, cover_color = freeze_intro_cover_source(
+        cover_path, os.path.dirname(output_path),
+    )
+    try:
+        timing = probe_intro_reference_timing(reference_path)
+        intro_fps = timing["fps"]
+        intro_audio_rate = timing["audio_rate"]
+        if reference_path:
+            logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
+        tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+    except BaseException:
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
+        raise
 
 
 
@@ -68490,7 +68657,8 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    run_cmd([
+    try:
+        run_cmd([
 
 
 
@@ -68522,7 +68690,7 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        FFMPEG, "-y", "-loop", "1", "-i", cover_path,
+        FFMPEG, "-y", "-loop", "1", "-i", frozen_cover_path,
 
 
 
@@ -68618,7 +68786,16 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        "-vf", (
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
+            "in_range=%s:out_range=tv:in_color_matrix=%s:out_color_matrix=bt709,"
+            "colorspace=ispace=bt709:itrc=%s:iprimaries=%s:irange=tv:"
+            "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        ) % (
+            cover_color["range"], cover_color["matrix"], cover_color["transfer"],
+            cover_color["primaries"],
+        ),
 
 
 
@@ -68682,7 +68859,13 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", tmp_output_path,
+        "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-video_track_timescale", "12800",
+        "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+        "-color_primaries", "bt709", "-chroma_sample_location", "left",
+        "-movflags", "+faststart", "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp",
+        "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-tag:a", "mp4a",
+        "-shortest", tmp_output_path,
 
 
 
@@ -68714,8 +68897,9 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    ])
-    try:
+        ])
+        if file_fingerprint(frozen_cover_path) != frozen_cover_fingerprint:
+            raise RuntimeError("intro cover changed during render")
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("intro output is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -68724,6 +68908,8 @@ def render_intro(cover_path, output_path, reference_path=None):
     finally:
         if os.path.exists(tmp_output_path):
             os.remove(tmp_output_path)
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
 
 
 
@@ -72836,7 +73022,7 @@ def concat_wav_files(input_paths, output_path):
 
 
 
-def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path):
+def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path, *, publish_result=True):
 
 
 
@@ -75940,7 +76126,8 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                shutil.copy2(output_video_path, public_output_path)
+                if publish_result:
+                    shutil.copy2(output_video_path, public_output_path)
 
 
 
@@ -75972,7 +76159,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                job["output_video_no_bgm_url"] = publish_asset(public_output_path)
+                    job["output_video_no_bgm_url"] = publish_asset(public_output_path)
 
 
 
@@ -76002,7 +76189,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
+                    update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
 
 
 
@@ -78790,13 +78977,181 @@ def gpu_video_result_path(job_id):
     return os.path.join(GPU_VIDEO_RESULT_ROOT, safe_job_id + ".json")
 
 
+def gpu_video_local_artifact_identity(input_fingerprint, output_kind, source_paths, processing_profile):
+    """Freeze the sources and processing contract for one completed local output."""
+    try:
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                or output_kind not in {"concat", "no_bgm"}
+                or not isinstance(source_paths, (list, tuple)) or not source_paths
+                or not isinstance(processing_profile, dict)):
+            raise checkpoint_error()
+        # Round-trip through strict JSON so mutable/non-portable profile values
+        # cannot enter a durable identity record.
+        profile = json.loads(json.dumps(
+            processing_profile, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ))
+        sources = []
+        for index, path in enumerate(source_paths):
+            fingerprint = file_fingerprint(path)
+            sources.append({
+                "index": index,
+                "name": os.path.basename(os.fspath(path)),
+                "sha256": fingerprint["sha256"],
+                "size_bytes": fingerprint["size_bytes"],
+            })
+        return {
+            "version": 1,
+            "input_fingerprint": str(input_fingerprint),
+            "output_kind": output_kind,
+            "sources": sources,
+            "processing_profile": profile,
+        }
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def gpu_video_local_checkpoint_path(artifact_path):
+    return os.fspath(artifact_path) + ".completed.json"
+
+
+def load_gpu_video_local_artifact(artifact_path, identity, *, related_paths=()):
+    """Load an identity-bound final artifact; never adopt an untracked file."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        completed = load_completed(checkpoint_path, artifact_path, identity)
+        if completed is None:
+            if any(os.path.lexists(os.fspath(path)) for path in (artifact_path, *tuple(related_paths))):
+                raise checkpoint_error()
+            return None
+        if (set(completed) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(completed.get("sha256") or ""))
+                or type(completed.get("size_bytes")) is not int
+                or completed["size_bytes"] <= 0):
+            raise checkpoint_error()
+        return completed
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def save_gpu_video_local_artifact(artifact_path, identity):
+    """Persist and read back the completed artifact before any upload starts."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        fingerprint = file_fingerprint(artifact_path)
+        result = {
+            "sha256": fingerprint["sha256"],
+            "size_bytes": fingerprint["size_bytes"],
+        }
+        save_completed(
+            checkpoint_path, artifact_path, identity, result,
+            fingerprint=fingerprint,
+        )
+        if load_completed(checkpoint_path, artifact_path, identity) != result:
+            raise checkpoint_error()
+        return result
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def restore_gpu_video_public_artifact(source_path, target_path, *, expected_fingerprint):
+    """Restore a missing public copy from a verified workspace artifact."""
+    temporary = None
+    try:
+        source_path, target_path = os.fspath(source_path), os.fspath(target_path)
+        expected = dict(expected_fingerprint or {})
+        if (set(expected) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(expected.get("sha256") or ""))
+                or type(expected.get("size_bytes")) is not int
+                or expected["size_bytes"] <= 0):
+            raise checkpoint_error()
+        source = file_fingerprint(source_path)
+        if source != expected:
+            raise checkpoint_error()
+        parent = os.path.dirname(target_path)
+        if os.path.lexists(target_path):
+            if file_fingerprint(target_path) != source:
+                raise checkpoint_error(conflict=True)
+            with open(target_path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            if os.name == "posix":
+                directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            if file_fingerprint(target_path) != expected:
+                raise checkpoint_error()
+            return target_path
+        durable_ensure_directory(parent)
+        fd, temporary = tempfile.mkstemp(
+            prefix="." + os.path.basename(target_path) + ".restore.", dir=parent,
+        )
+        os.close(fd)
+        shutil.copy2(source_path, temporary)
+        # Windows rejects fsync on a read-only handle.  Reopen the completed
+        # temporary copy read/write so the same durability fence works on both
+        # worker platforms before the atomic replace.
+        with open(temporary, "r+b") as handle:
+            os.fsync(handle.fileno())
+        if file_fingerprint(temporary) != source:
+            raise checkpoint_error()
+        os.replace(temporary, target_path)
+        temporary = None
+        if os.name == "posix":
+            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        if file_fingerprint(target_path) != source:
+            raise checkpoint_error()
+        return target_path
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def gpu_video_no_bgm_profile():
+    """Version the configured Demucs/remux plan used by local checkpoints."""
+    return {
+        "version": 1,
+        "pipeline": "drama-demucs-v1",
+        "remux_profile": "copy-video-vocals-aac-v1",
+        "device": str(DEMUCS_DEVICE or ""),
+        "profiles": demucs_profiles(),
+        "chunk_seconds": [
+            max(int(DEMUCS_CHUNK_SECONDS), 30),
+            max(min(int(DEMUCS_CHUNK_SECONDS), 60), 24),
+            max(int(DEMUCS_FALLBACK_CHUNK_SECONDS), 20),
+            24,
+        ],
+    }
+
+
 def gpu_video_result_satisfies_outputs(result, outputs):
     if not result:
         return False
     if drama_gpu_cache.versioned(result):
+        client = get_cos_client(
+            timeout=max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT), retry=0,
+        )
         return drama_gpu_cache.verify_artifacts(
-            result, outputs, head=requests.head,
-            timeout=(5, max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT)),
+            result, outputs, client=client, bucket=COS_BUCKET,
+            url_for_key=build_cos_url,
         )
     if bool(outputs.get("concat_video", False)):
         url = str(result.get("output_video_url") or "").strip()
@@ -78817,7 +79172,7 @@ def gpu_video_result_satisfies_outputs(result, outputs):
     return True
 
 
-def read_gpu_video_result(job_id, outputs):
+def read_gpu_video_result(job_id, outputs, *, input_fingerprint=None):
     result_path = gpu_video_result_path(job_id)
     if os.path.isfile(result_path):
         try:
@@ -78825,13 +79180,29 @@ def read_gpu_video_result(job_id, outputs):
                 result = json.load(fp)
             if not isinstance(result, dict) or str(result.get("job_id") or "") != str(job_id):
                 raise drama_gpu_cache.cache_error()
+            if drama_async_runtime.capture_context() is not None and not drama_gpu_cache.versioned(result):
+                raise drama_gpu_cache.cache_error()
+            if drama_gpu_cache.versioned(result):
+                expected = str(result.get("input_fingerprint") or "")
+                if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                        or not secrets.compare_digest(expected, str(input_fingerprint))):
+                    raise drama_gpu_cache.cache_error()
             if gpu_video_result_satisfies_outputs(result, outputs):
-                return drama_gpu_cache.public_result(result) if drama_gpu_cache.versioned(result) else result
+                if drama_gpu_cache.versioned(result):
+                    return drama_gpu_cache.public_result(result)
+                return result
         except DramaSynthesisError:
             raise
         except Exception as exc:
             logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
             raise drama_gpu_cache.cache_error() from None
+
+    # A new AsyncRuntime execution must never adopt an object solely from a
+    # predictable public filename. Only an already persisted legacy manifest
+    # may use the compatibility path above; new work proceeds through its
+    # upload checkpoint and creates a verified v3 manifest.
+    if drama_async_runtime.capture_context() is not None:
+        return None
 
     result = {
         "job_id": job_id,
@@ -78851,20 +79222,63 @@ def read_gpu_video_result(job_id, outputs):
     return None
 
 
-def write_gpu_video_result(job_id, result, *, artifact_paths=None):
-    ensure_dir(GPU_VIDEO_RESULT_ROOT)
+def write_gpu_video_result(job_id, result, *, artifact_paths=None, artifact_receipts=None):
     result_path = gpu_video_result_path(job_id)
-    tmp_path = result_path + ".tmp"
-    payload = dict(result or {})
-    payload["job_id"] = str(job_id or payload.get("job_id") or "")
-    payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if artifact_paths is not None:
-        payload.update(drama_gpu_cache.artifact_metadata(payload, artifact_paths))
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
-        fp.flush()
-        os.fsync(fp.fileno())
-    os.replace(tmp_path, result_path)
+    # The completed manifest is the durable recovery boundary.  The shared
+    # writer fsyncs the file, atomically replaces it and then fsyncs its parent
+    # directory on POSIX.  Read it back before the caller may delete the local
+    # media, so any persistence or serialization failure keeps the artifacts.
+    try:
+        durable_ensure_directory(GPU_VIDEO_RESULT_ROOT)
+        payload = dict(result or {})
+        payload["job_id"] = str(job_id or payload.get("job_id") or "")
+        payload["updated_at"] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+        if artifact_paths is not None:
+            payload.update(drama_gpu_cache.artifact_metadata(payload, artifact_paths, artifact_receipts))
+        elif artifact_receipts is not None:
+            raise drama_gpu_cache.cache_error()
+        atomic_write_record(result_path, payload)
+        if read_record(result_path) != payload:
+            raise drama_gpu_cache.cache_error()
+    except Exception:
+        # A completed render whose manifest is not durably provable must remain
+        # recoverable and keep its local artifacts; never surface a generic
+        # render failure that could encourage a fresh render.
+        raise drama_gpu_cache.cache_error() from None
+
+
+def verify_gpu_artifact_uploads(job_id, result, artifact_paths):
+    """Re-read every selected upload through its durable checkpoint.
+
+    The second resumable call performs an authenticated SDK HEAD and validates
+    the checkpoint binding. It cannot create a replacement object because a
+    missing or conflicting checkpoint fails closed.
+    """
+    if not cos_enabled():
+        return None
+    selected = {field for field in drama_gpu_cache.ARTIFACT_FILENAMES if result.get(field)}
+    if not selected or set(artifact_paths) != selected:
+        raise drama_gpu_cache.cache_error()
+    receipts = {}
+    for field in sorted(selected):
+        try:
+            url, receipt = publish_asset(
+                artifact_paths[field], return_receipt=True, checkpoint_job_id=job_id,
+            )
+        except DramaSynthesisError:
+            raise
+        except Exception:
+            raise drama_gpu_cache.cache_error() from None
+        if url != result[field] or not isinstance(receipt, dict):
+            raise drama_gpu_cache.cache_error()
+        receipts[field] = receipt
+    # Recompute each local SHA here, before the manifest writer is allowed to
+    # persist or cleanup. The writer repeats the same validation as its own
+    # durable boundary.
+    drama_gpu_cache.artifact_metadata(result, artifact_paths, receipts)
+    return receipts
 
 
 def handle_gpu_video_cover(payload):
@@ -78896,14 +79310,21 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
             logging.warning("skip GPU cleanup unexpected %s basename: %s", label, target_dir)
             return
         if os.path.isdir(target_real):
-            shutil.rmtree(target_real, ignore_errors=True)
-            logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
+            try:
+                shutil.rmtree(target_real)
+            except OSError as exc:
+                logging.warning("GPU %s cleanup retained after verified result: %s (%s)", label, target_real, exc)
+                return
+            if os.path.exists(target_real):
+                logging.warning("GPU %s cleanup path still exists after verified result: %s", label, target_real)
+            else:
+                logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
 
     remove_job_dir(WORK_ROOT, workdir, "work")
     remove_job_dir(PUBLIC_ROOT, public_dir, "public")
 
 
-def cached_gpu_video_result(payload):
+def cached_gpu_video_result(payload, *, allow_legacy=True):
     job_id = str((payload or {}).get("job_id") or "")
     path = gpu_video_result_path(job_id)
     if not os.path.isfile(path):
@@ -78913,8 +79334,15 @@ def cached_gpu_video_result(payload):
             result = json.load(handle)
         if not isinstance(result, dict) or str(result.get("job_id") or "") != job_id:
             raise drama_gpu_cache.cache_error()
+        if not allow_legacy and not drama_gpu_cache.versioned(result):
+            raise drama_gpu_cache.cache_error()
         expected_fingerprint = result.get("input_fingerprint")
-        if expected_fingerprint and not secrets.compare_digest(str(expected_fingerprint), drama_async_runtime.render_fingerprint(payload)):
+        actual_fingerprint = drama_async_runtime.render_fingerprint(payload)
+        if drama_gpu_cache.versioned(result):
+            if (not re.fullmatch(r"[0-9a-f]{64}", str(expected_fingerprint or ""))
+                    or not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint)):
+                raise drama_gpu_cache.cache_error()
+        elif expected_fingerprint and not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint):
             raise drama_gpu_cache.cache_error()
         if not gpu_video_result_satisfies_outputs(result, payload.get("outputs") or {}):
             raise drama_gpu_cache.cache_error()
@@ -78928,9 +79356,13 @@ def cached_gpu_video_result(payload):
         raise drama_gpu_cache.cache_error() from None
 
 
+def strict_cached_gpu_video_result(payload):
+    return cached_gpu_video_result(payload, allow_legacy=False)
+
+
 def gpu_video_resume_ready(payload):
     # The runtime additionally proves the prior process generation has stopped.
-    if cached_gpu_video_result(payload):
+    if strict_cached_gpu_video_result(payload):
         return True
     job_id = str((payload or {}).get("job_id") or "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
@@ -78944,9 +79376,24 @@ def handle_gpu_video_render(payload):
     job_id = str((payload or {}).get("job_id", "") or "").strip()
     if not job_id:
         raise ValueError("missing job_id")
-    lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
-    with lock:
-        return _handle_gpu_video_render_unlocked(payload)
+    # The dedicated worker owns this lock for its full lifetime.  A legacy
+    # monolith route may render only while that worker is absent, which avoids
+    # cross-process duplicate jobs and preserves the global heavy concurrency
+    # of one.  Calls made by AsyncRuntime already run beneath the same owner and
+    # per-job file locks, so they must not reacquire it.
+    compatibility_owner = None
+    if drama_async_runtime.capture_context() is None:
+        runtime_root = durable_ensure_directory(os.path.join(WORK_ROOT, ".runtime"))
+        compatibility_owner = drama_async_runtime._FileLock(runtime_root / "owner.lock")
+        if not compatibility_owner.acquire():
+            raise drama_async_runtime.runtime_error("gpu_runtime_unavailable")
+    try:
+        lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
+        with lock:
+            return _handle_gpu_video_render_unlocked(payload)
+    finally:
+        if compatibility_owner is not None:
+            compatibility_owner.release()
 
 
 def _handle_gpu_video_render_unlocked(payload):
@@ -78976,7 +79423,10 @@ def _handle_gpu_video_render_unlocked(payload):
     if not render_concat:
         return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": "", "output_random_template_url": ""}
 
-    existing_result = read_gpu_video_result(job_id, outputs)
+    input_fingerprint = drama_async_runtime.render_fingerprint(payload)
+    existing_result = read_gpu_video_result(
+        job_id, outputs, input_fingerprint=input_fingerprint,
+    )
     if existing_result:
         if render_random:
             drama_gpu_cache.verify_cached_recipe(existing_result, random_recipe)
@@ -78988,6 +79438,10 @@ def _handle_gpu_video_render_unlocked(payload):
     segment_dir = os.path.join(workdir, "segments")
     concat_segment_dir = os.path.join(workdir, "concat_segments")
     public_dir = os.path.join(PUBLIC_ROOT, job_id)
+    # The completed artifact/checkpoint pair lives directly in workdir.  Make
+    # the first directory entry durable before a render can create either file.
+    durable_ensure_directory(workdir)
+    durable_ensure_directory(public_dir, mode=0o755)
     ensure_dir(download_dir)
     ensure_dir(segment_dir)
     ensure_dir(concat_segment_dir)
@@ -79063,30 +79517,74 @@ def _handle_gpu_video_render_unlocked(payload):
     )
     output_path = os.path.join(workdir, output_name)
     public_video_path = os.path.join(public_dir, "material.mp4")
-    remove_invalid_video_file(output_path, "GPU concat workspace")
-    remove_invalid_video_file(public_video_path, "GPU concat public")
-    if not file_ready(output_path):
+    concat_profile = {
+        "version": 1,
+        "pipeline": "drama-concat-copy-v1",
+        "normalization_profile": NORMALIZATION_PROFILE,
+    }
+    concat_identity = gpu_video_local_artifact_identity(
+        input_fingerprint, "concat", segment_paths, concat_profile,
+    )
+    concat_completed = load_gpu_video_local_artifact(
+        output_path, concat_identity,
+        related_paths=(public_video_path,),
+    )
+    if concat_completed is None:
         concat_segments(segment_paths, output_path)
+        if not valid_video_file(output_path):
+            raise checkpoint_error()
+        if gpu_video_local_artifact_identity(
+                input_fingerprint, "concat", segment_paths, concat_profile,
+        ) != concat_identity:
+            raise checkpoint_error(conflict=True)
+        concat_completed = save_gpu_video_local_artifact(output_path, concat_identity)
     if not valid_video_file(output_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % output_path)
-    if publish_concat and not file_ready(public_video_path):
-        shutil.copy2(output_path, public_video_path)
-    if publish_concat and not valid_video_file(public_video_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
+        raise checkpoint_error()
 
     if render_no_bgm:
         drama_async_runtime.emit_progress("removing_bgm")
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
-        remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
-        remove_invalid_video_file(public_no_bgm_path, "GPU no-BGM public")
-        if file_ready(public_no_bgm_path):
+        no_bgm_profile = gpu_video_no_bgm_profile()
+        no_bgm_identity = gpu_video_local_artifact_identity(
+            input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+        )
+        no_bgm_completed = load_gpu_video_local_artifact(
+            no_bgm_output_path, no_bgm_identity,
+            related_paths=(public_no_bgm_path,),
+        )
+        if no_bgm_completed is None:
+            run_no_bgm_pipeline(
+                job, output_path, no_bgm_output_path, public_no_bgm_path,
+                publish_result=False,
+            )
+            if (not valid_video_file(no_bgm_output_path)
+                    or not valid_av_duration_alignment(no_bgm_output_path)):
+                raise checkpoint_error()
+            if gpu_video_local_artifact_identity(
+                    input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+            ) != no_bgm_identity:
+                raise checkpoint_error(conflict=True)
+            no_bgm_completed = save_gpu_video_local_artifact(
+                no_bgm_output_path, no_bgm_identity,
+            )
+        if (not valid_video_file(no_bgm_output_path)
+                or not valid_av_duration_alignment(no_bgm_output_path)):
+            raise checkpoint_error()
+        if publish_no_bgm:
+            restore_gpu_video_public_artifact(
+                no_bgm_output_path, public_no_bgm_path,
+                expected_fingerprint=no_bgm_completed,
+            )
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
-        else:
-            run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
+            update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
         completed_steps += 1
 
     if publish_concat:
+        restore_gpu_video_public_artifact(
+            output_path, public_video_path,
+            expected_fingerprint=concat_completed,
+        )
         job["output_video_url"] = publish_asset(public_video_path)
         completed_steps += 1
 
@@ -79131,9 +79629,17 @@ def _handle_gpu_video_render_unlocked(payload):
         for field, filename in drama_gpu_cache.ARTIFACT_FILENAMES.items()
         if result.get(field)
     }
-    result["input_fingerprint"] = drama_async_runtime.render_fingerprint(payload)
-    write_gpu_video_result(job_id, result, artifact_paths=artifact_paths)
-    cleanup_gpu_video_job_files(job_id, workdir, public_dir)
+    result["input_fingerprint"] = input_fingerprint
+    artifact_receipts = verify_gpu_artifact_uploads(job_id, result, artifact_paths)
+    if artifact_receipts is None:
+        # Local serving has no authenticated remote identity. Preserve the old
+        # unversioned manifest and the media files; never fabricate v3.
+        write_gpu_video_result(job_id, result)
+    else:
+        write_gpu_video_result(
+            job_id, result, artifact_paths=artifact_paths, artifact_receipts=artifact_receipts,
+        )
+        cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
 
 

@@ -10,7 +10,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
-import requests
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
@@ -19,6 +18,15 @@ JOB_RE=re.compile(r"fb-page-[a-f0-9]{48}"); SHA_RE=re.compile(r"[a-f0-9]{64}")
 
 class PrepareWorkerError(RuntimeError):
     def __init__(self,code,message,status=400): self.code,self.status=code,status; super().__init__(message)
+
+_DEFAULT_SESSION_FACTORY=object()
+
+def _default_session_factory():
+    try:
+        import requests
+    except ImportError:
+        raise PrepareWorkerError("invalid_configuration","HTTP client unavailable",500) from None
+    return requests.Session()
 
 def _absolute(value,name):
     path=Path(str(value or ""))
@@ -142,8 +150,8 @@ class CosObjectStore:
         return {"url":url,"key":key,"reused":reused}
 
 class PrepareProcessor:
-    def __init__(self,config,*,session_factory=requests.Session,runner=subprocess.run,object_store=None):
-        self.config=config; self.assets=load_asset_set(config.asset_root,config.asset_manifest_sha256); self.session_factory=session_factory; self.runner=runner; self.object_store=object_store or CosObjectStore(config); self.lock=threading.Lock(); (config.work_root/"jobs").mkdir(parents=True,exist_ok=True); cleanup_stale_failed_jobs(config); self.last_cleanup_at=time.monotonic()
+    def __init__(self,config,*,session_factory=_DEFAULT_SESSION_FACTORY,runner=subprocess.run,object_store=None):
+        self.config=config; self.assets=load_asset_set(config.asset_root,config.asset_manifest_sha256); self.session_factory=_default_session_factory if session_factory is _DEFAULT_SESSION_FACTORY else session_factory; self.runner=runner; self.object_store=object_store or CosObjectStore(config); self.lock=threading.Lock(); (config.work_root/"jobs").mkdir(parents=True,exist_ok=True); cleanup_stale_failed_jobs(config); self.last_cleanup_at=time.monotonic()
     def _download(self,url,path):
         session=self.session_factory(); session.trust_env=False
         try:

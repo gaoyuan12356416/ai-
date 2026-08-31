@@ -1,232 +1,196 @@
 # 剧集合成媒体验收操作手册
 
-更新：2026-08-28。**本手册的短片、CPU参数对照、完整解码及90分钟长片验收均未执行；不是上线或性能通过证明。** 使用工具为候选提交内的 `scripts/benchmark_drama_synthesis_media.py`。发布顺序和备份规则见 [deploy.md](deploy.md)，结果写入 [test-report.md](test-report.md)。
+更新：2026-08-31。**短片、CPU参数对照、完整解码及约90分钟长片验收均未执行；本文不是上线或性能通过证明。** 所有媒体动作必须使用同一精确GitHub候选内的 `scripts/run_drama_media_acceptance.py`；不得直接运行benchmark的render子命令或复制旧systemd模板。发布、备份和回滚见 [deploy.md](deploy.md)，实际结果写入 [test-report.md](test-report.md)。
 
 ## 1. 执行前提与当前阻塞
 
-当前不能启动渲染验收。旧正式渲染已在约17:36:51自行退出，17:41核对没有视频成片；GPU服务未重启、没有OOM证据。时间与旧10800秒限时吻合，但原异常未保留，超时原因仍标为推断，见 [原任务证据](evidence/original-case-outcome-20260828.json)。没有执行终止操作，也没有收到终止授权。主机内存随后恢复不等于获得测试窗口：迁移任务 `gpu-service-migration-20260828T1502` 正在交接TT，须等其确认端口交接和HK媒体窗口后才可启动本手册中的任何媒体命令。
+当前不能启动媒体。旧正式渲染已在2026-08-28约17:36:51自行退出，17:41核对没有视频成片；GPU服务未重启、没有OOM证据。退出时间与旧10800秒限时吻合，但原异常未保留，超时原因仍是证据支持的推断，见 [原任务证据](evidence/original-case-outcome-20260828.json)。没有终止旧任务，也不把CPU的failed状态改成done。
+
+2026-08-31只读基线再次确认HK无ffmpeg/ffprobe、GPU空闲且剧集/FB服务未重启，见 [恢复基线](evidence/resume-baseline-20260831.json)；这是时间点快照，不是测试许可。迁移任务 `gpu-service-migration-20260828T1502` 仍在执行，且尚未明确释放**本轮新的HK媒体窗口**。旧排空记录和旧窗口均不能复用。
 
 启动验收必须同时满足：
 
-1. 旧任务自然结束并核对结果；或用户明确授权终止旧任务、已保存所需证据，并确认原PID及其进程组全部停止。**仅发出停止请求不满足前提。** 不提供针对旧任务的 `kill`、重启或清锁捷径。
-2. 通过已批准维护流程暂停新的正式drama制作入口，并确认队列、租约和制作进程排空。不能仅凭页面“空闲”判定，也不能靠删除账本排空。
-3. 同机FB服务保持原配置及优先级。基线记录为FB `Nice=0`、drama `Nice=10`；按现场实际unit复核，不停止FB服务、不降低其配额，不做真实FB发布来测影响。
-4. 候选已经审查并推送GitHub，记录完整40位提交SHA；从GitHub准备独立、干净的候选checkout。**源码基线 `420957be4c288308c38b97f773be330208887204` 不是本轮候选SHA。** 不修改生产 `current`、正式unit或正式环境文件来做对照。
-5. 维护窗口内一次只有一个隔离渲染；脚本本身**不占正式GPU制作锁**。下文 `flock` 只防止这些benchmark互相并行，不能替代第2项。
-6. 与“统计GPU服务器运行任务”确认TT已完成端口交接、HK媒体窗口可用；CPU公共目录/主API或HK剧集部署须再次协调，不能因隔离测试获准而自行切换生产。
+1. 候选已审查、提交并推送GitHub，记录完整40位SHA；HK使用从GitHub取得的全新干净checkout。生产 `current`、正式unit和环境文件保持不变。
+2. 与“统计GPU服务器运行任务”取得本轮书面窗口许可，并确认其共享目录、端口和GPU资源变更已停止。CPU公共目录/主API或HK剧集部署另行协调。
+3. 通过已批准流程停止新的正式drama制作入口，并复核队列、租约、ffmpeg/ffprobe和GPU制作进程排空。页面空闲、旧PID退出或删除账本都不能替代排空。
+4. 同机FB服务保持配置与优先级；不停止FB、不降低其配额，也不做真实FB发布测试。正式重制作并发仍为1。
+5. `/data`空间、根文件系统、主机内存和固定输入重新核对。开始每个unit时 `MemAvailable >= 24 GiB`；可用内存低于8 GiB、FB受影响、OOM、任务触顶或未知进程出现时，停止本次精确unit并判未通过。
+6. 一次只运行一个prepare/render/decode验收unit。固定锁只防这些验收动作互相并行；launcher**不占正式制作锁**，所以第3项不可省略。
 
-隔离保护预算在执行前由验收负责人确认并记录。已知本机为systemd `239-51.el8_5.2`、kernel `4.18.0-348.7.1.el8_5`、cgroup v1；执行前重新核对。建议开始时 `MemAvailable >= 24 GiB`；测试unit使用该版本支持的 `MemoryLimit=16G`、`TasksMax=128`。运行中主机可用内存低于8 GiB、FB开始受资源影响、出现OOM或任务数触顶，立即停止**本次隔离unit**并判本轮未通过。预算不足时延期，不通过放宽阈值掩盖持续增长。上述是验收保护值，不是生产配置变更。
+已知HK为systemd `239-51.el8_5.2`、kernel `4.18.0-348.7.1.el8_5`、cgroup v1；执行前重查。launcher固定创建16GiB memory和memsw上限、swappiness0、TasksMax128、Nice10、NoNewPrivileges及最小降权能力，并在同一PID内写入后再次以非特权身份读回。它使用 `/usr/bin/nice -n 10`；**禁止再用已被现场证明可能得到实际Nice0的 `--property=Nice=10` 旧模板。** 缺失memsw、父级余量不足、身份/能力/锁/进程回收不明均失败关闭，不能用手工确认变量或放宽限制继续。
 
-**交换保护尚未落实，是额外的执行门禁。** v1下不能把 `MemorySwapMax=0` 写进命令后当作禁用交换已生效；`MemoryLimit` 本身也不限制全部RAM加swap。必须由主任务在执行前确认并记录适用于本机、在测试进程启动前已生效的独立cgroup保护及真实 `memory.memsw.limit_in_bytes` 读回；如果该文件缺失或无法无竞态设置保护，保持阻塞，不运行下面模板。memsw是RAM与swap合计限制，即使与memory limit相等也不能声称绝不使用swap。不得用启动后补写限额、全机swapoff、变更FB限额等办法绕过门禁。下文确认变量只是操作员记录，不提供任何实际保护机制。
+## 2. 固定输入与不可变身份
 
-## 2. 已保留输入与冻结记录
-
-| 项目 | 已知记录 / 执行前动作 |
+| 项目 | 固定记录 / 执行前动作 |
 | --- | --- |
-| 长片硬链接 | `/data/drama-synthesis-gpu/acceptance/20260828-reliability/inputs/case-679e7c49-concat.mp4`；17:41原渲染结束后复核仍存在，大小 `5139047136` 字节；此前与原concat核对同一inode |
-| 原concat路径 | `/data/drama-synthesis-gpu/work/jobs/679e7c49acbf4af79f78bf60d76c5dd7/8HehaA3263_679e7c49_eps_1_70.mp4`；正常清理后可能消失，验收只读保留路径 |
-| 源SHA256 | **尚未计算**；排空后计算、记录，不能把文件大小或同inode当作SHA |
-| 长片时长 | 旧命令记录约 `5573.906333` 秒；验收前重新ffprobe，以实际源时长冻结；长样必须5400～7200秒 |
-| 已冻结配方 | 本地受限文件 `output/case-679e7c49-recipe.json`；经核对后将同一JSON放入GPU输入目录，不能重新随机生成 |
-| 配方内部指纹 | `recipe_sha256=56d60ff057e0da8eb08b0ef8063be0ef75d37d28a970c1c912ad915f8de9793f`；这是规范化配方指纹，**不是JSON文件字节SHA**，文件SHA另算 |
+| 长片硬链接 | `/data/drama-synthesis-gpu/acceptance/20260828-reliability/inputs/case-679e7c49-concat.mp4`；大小 `5139047136` 字节 |
+| 原concat路径 | `/data/drama-synthesis-gpu/work/jobs/679e7c49acbf4af79f78bf60d76c5dd7/8HehaA3263_679e7c49_eps_1_70.mp4`；可能已被正常清理，验收只使用保留硬链接 |
+| 源SHA256 | **尚未计算**；取得窗口后由launcher在受控unit内完整读取并写入本批次私有 `long-source.json`。同一批次所有prepare/long-render都必须逐字复核该SHA、大小、device、inode、mtime和nlink；不能只用大小或inode代替，也不能为另一配置或轮次重新接受新内容 |
+| 长片时长 | 旧记录约 `5573.906333` 秒；执行前重新ffprobe，必须在5400～7200秒 |
+| 配方 | 固定路径 `.../inputs/case-679e7c49-recipe.json`；规范化指纹 `56d60ff057e0da8eb08b0ef8063be0ef75d37d28a970c1c912ad915f8de9793f` |
 | profile | `drama-random-overlay-h264-720x1280-v1`，`source=concat_video` |
 | 素材根 | `/data/drama-synthesis-gpu/assets/fb-v3-028326ab2114` |
-| 素材manifest指纹 | `028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f` |
+| 素材manifest | `028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f` |
+| ffmpeg/ffprobe | 固定HK运行时路径 `/data/drama-synthesis-gpu/runtime/bin/ffmpeg` 与 `.../ffprobe`；执行前记录realpath、版本和SHA |
 
-**不得对硬链接执行chmod、chown、截断、重写或“修复”。** 它与原文件共享inode，修改会影响原文件。需要权限时只调整经审核的新证据目录或独立配方副本；不能递归修改输入目录。原路径被正常unlink后，保留链接仍可使用，不要求此时链接数仍大于1。
+**不得对长片硬链接执行chmod、chown、截断、重写或“修复”，也不得递归修改输入目录。** launcher只读全局长片、配方和素材。短源由受控prepare动作从固定长片stream-copy到本次0700私有run root，先写O_EXCL `.part`，fsync、ffprobe和SHA校验后同目录无覆盖原子提交；不会开放全局inputs写权限。
 
-所有短样使用同一配方、素材manifest、ffmpeg/ffprobe二进制和同一源SHA；长样使用原约93分钟源，不以循环短片凑够90分钟，不重新编码源来回避分辨率/集边界问题。保持原片头、集序、25fps标准化语义、30fps模板、NVENC/profile和滤镜顺序。
+所有短片配置和两轮试验必须读取同一个prepared短源及其证据。长片不裁剪、不循环短片、不重新编码源；保留片头、集序、25fps标准化语义、30fps模板、NVENC/profile和滤镜顺序。
 
-## 3. 候选目录、输入和证据准备
+`long-source.json` 是一次批次级身份记录，不是可编辑的操作参数。首次prepare或long-render会在完整哈希通过后以0400权限、无覆盖方式写入；已存在但损坏、字段不全或与当前长源不一致时必须停止。prepare完成、每次long-render完成后还要重新完整复核；不得删除该记录来接受变化后的同名文件。
 
-以下为**未来维护窗口中的Linux命令模板，本次未执行**。先填写候选SHA和新的批次标识；不存在的配方副本、用户目录或依赖不得靠临时改生产配置绕过。候选checkout按部署流程从GitHub取得，不能把本地未提交源码直接覆盖到服务器。
+## 3. 候选、16GiB无媒体门禁与短源准备
 
-```bash
-set -euo pipefail
-umask 077
-TASK_CANDIDATE_SHA='REPLACE_WITH_REVIEWED_40_HEX_SHA'
-TASK_RUN_TAG='REPLACE_WITH_NEW_LOWERCASE_TAG'
-TASK_SWAP_GUARD_CONFIRMED=no
-[[ "$TASK_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
-[[ "$TASK_RUN_TAG" =~ ^[a-z0-9-]{1,30}$ ]]
-test "$TASK_SWAP_GUARD_CONFIRMED" = yes
-
-TASK_ROOT=/data/drama-synthesis-gpu/acceptance/20260828-reliability
-TASK_INPUTS="$TASK_ROOT/inputs"
-TASK_CODE="/data/drama-synthesis-gpu/acceptance/code/$TASK_CANDIDATE_SHA"
-TASK_RUN_ROOT="$TASK_ROOT/runs/$TASK_CANDIDATE_SHA-$TASK_RUN_TAG"
-TASK_CONTROL=/data/drama-synthesis-gpu/acceptance/control
-TASK_LONG="$TASK_INPUTS/case-679e7c49-concat.mp4"
-TASK_SHORT="$TASK_INPUTS/case-679e7c49-intro-first120s.mp4"
-TASK_RECIPE="$TASK_INPUTS/case-679e7c49-recipe.json"
-TASK_ASSETS=/data/drama-synthesis-gpu/assets/fb-v3-028326ab2114
-TASK_MANIFEST=028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f
-TASK_PYTHON=$(readlink -f /data/drama-synthesis-gpu/runtime/current/bin/python)
-TASK_FFMPEG=$(readlink -f /data/drama-synthesis-gpu/runtime/bin/ffmpeg)
-TASK_FFPROBE=$(readlink -f /data/drama-synthesis-gpu/runtime/bin/ffprobe)
-
-test "$(git -C "$TASK_CODE" rev-parse HEAD)" = "$TASK_CANDIDATE_SHA"
-test -z "$(git -C "$TASK_CODE" status --porcelain)"
-test -r /proc/self/cgroup
-test -r /proc/self/mountinfo
-test -f "$TASK_LONG"
-test ! -L "$TASK_LONG"
-test -f "$TASK_RECIPE"
-test ! -e "$TASK_RUN_ROOT"
-test ! -L "$TASK_RUN_ROOT"
-install -d -m 0700 -o drama-synthesis-gpu -g drama-synthesis-gpu "$TASK_RUN_ROOT"
-```
-
-`TASK_CONTROL` 是所有批次共用的benchmark锁目录，由运维预先建立并确认 `drama-synthesis-gpu` 可写；**不要替换或删除已有锁文件**。候选代码、输入、素材和运行时须可由该用户读取；不得通过修改硬链接权限解决。预检须从 `/proc/self/cgroup` 和 `/proc/self/mountinfo` 确认v1的cpu（可与cpuacct合挂载）、memory、pids控制器及下文资源属性支持，不要求v2的 `cgroup.controllers` 文件。还须完成第1节交换保护门禁，并记录证据后才可将 `TASK_SWAP_GUARD_CONFIRMED` 改为yes；不能只改变量。缺失时暂停，不能无上限运行。
-
-在维护窗口只读记录候选SHA、源大小/inode、SHA和运行时版本，记录到本批次私有文件：
+以下命令只展示固定调用形状，当前未执行。尖括号必须换成本轮已推送候选和新的8～30位小写批次标识；同一轮短片、长片和解码使用同一个批次。先在候选目录执行 `--help`，并核对candidate SHA及工作区全清洁。
 
 ```bash
-git -C "$TASK_CODE" rev-parse HEAD > "$TASK_RUN_ROOT/candidate-sha.txt"
-stat -Lc 'size=%s dev=%d inode=%i links=%h' "$TASK_LONG" > "$TASK_RUN_ROOT/long-source-stat.txt"
-nice -n 10 ionice -c 2 -n 7 sha256sum "$TASK_LONG" "$TASK_RECIPE" "$TASK_ASSETS/manifest.json" "$TASK_FFMPEG" "$TASK_FFPROBE" > "$TASK_RUN_ROOT/frozen-inputs.sha256"
-"$TASK_PYTHON" --version > "$TASK_RUN_ROOT/python-version.txt"
-"$TASK_FFMPEG" -version > "$TASK_RUN_ROOT/ffmpeg-version.txt"
-"$TASK_FFPROBE" -v error -show_streams -show_format -of json "$TASK_LONG" > "$TASK_RUN_ROOT/long-source-probe.json"
-nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader > "$TASK_RUN_ROOT/gpu-version.txt"
+TASK_SHA='<REVIEWED_40_HEX_GITHUB_SHA>'
+TASK_RUN='<new-lowercase-run-id>'
+TASK_CODE="/data/drama-synthesis-gpu/acceptance/code/$TASK_SHA"
+TASK_PYTHON=/data/drama-synthesis-gpu/runtime/current/bin/python
+TASK_LAUNCHER="$TASK_CODE/scripts/run_drama_media_acceptance.py"
+TASK_LAUNCHER_SHA256='<REVIEWED_LAUNCHER_SHA256_FROM_MANIFEST>'
+
+TASK_ACTUAL_LAUNCHER_SHA256="$(/usr/bin/sha256sum -- "$TASK_LAUNCHER")" || exit 78
+test "${TASK_ACTUAL_LAUNCHER_SHA256%% *}" = "$TASK_LAUNCHER_SHA256" || exit 78
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --help || exit 78
 ```
 
-核对recipe内部指纹、profile、素材manifest为表中值，并另核对JSON文件字节SHA。脚本会校验配方规范化SHA和完整素材清单，但不能替代执行前冻结记录。不要输出私密环境文件、URL、Token、COS凭据或全量进程参数。若GitHub发布流程使用无 `.git` 的导出目录，应先按部署产物manifest完成同等SHA核对，不能删掉Git检查后无证据继续。
+上面的人工命令只核对已评审manifest中的launcher字节，不能代替launcher自身门禁；不要运行 `git status`，仓库内attributes/filter配置可能让它执行外部转换。launcher固定使用root拥有且不可组/其他写的 `/usr/bin/git`，显式绑定当前work-tree，设置 `GIT_NO_LAZY_FETCH=1`，屏蔽system/global config、replace refs、hooks、fsmonitor和untracked cache。它用HEAD tracked清单与实际常规文件集合、实际目录集合精确比较，因而拒绝未跟踪、已忽略文件（包括 `__pycache__/*.pyc`）、index隐藏标志、symlink/submodule及非精确HEAD；再逐个以 `hash-object --no-filters` 核对整个HEAD工作树。候选路径祖先、递归目录、全部tracked文件、`.git`入口和实际gitdir都必须root-owned且不可组/其他写；执行位须与Git mode一致。导入前后还会复核完整文件身份，不能被 `core.worktree`、clean filter或stat cache转向/隐藏。任一项失败均不得导入候选模块或提交unit。公开、guard与verified阶段统一以 `-I -S -B` 运行，不执行site、`.pth`或候选外sitecustomize；资源guard脚本的standalone CLI仅为launcher内部入口，操作员不得直接调用，它本身没有也不需要公开 `--apply`。
 
-短样只生成一次，保留开头片头和首次集边界，输出必须不存在。此命令只做本地stream copy；不改变源、不重编码、不按每个配置重复制作短样：
+先运行不读取媒体、不取媒体锁、不创建run root的16GiB guard-only。缺省命令只预览；核对JSON的 `operation=guard-only`、`media_started=false`、`ffmpeg_processes=0` 和 `ffprobe_processes=0` 后，取得迁移任务对该轻量unit的许可，再增加 `--apply`：
 
 ```bash
-test ! -e "$TASK_SHORT"
-test ! -L "$TASK_SHORT"
-nice -n 10 ionice -c 2 -n 7 "$TASK_FFMPEG" -nostdin -hide_banner -loglevel error -n -i "$TASK_LONG" -t 120 -map 0:v:0 -map 0:a:0 -c copy "$TASK_SHORT"
-chown drama-synthesis-gpu:drama-synthesis-gpu "$TASK_SHORT"
-chmod 0400 "$TASK_SHORT"
-"$TASK_FFPROBE" -v error -show_streams -show_format -of json "$TASK_SHORT" > "$TASK_RUN_ROOT/short-source-probe.json"
-sha256sum "$TASK_SHORT" >> "$TASK_RUN_ROOT/frozen-inputs.sha256"
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --guard-only \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind short --config 2c2t --trial r1
+
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --guard-only \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind short --config 2c2t --trial r1
 ```
 
-复制结果的实际时长可以有封装/关键帧舍入，必须仍在0.5～300秒范围。上面的chown/chmod只作用于刚由FFmpeg创建的独立短样，不得换成原硬链接或递归目录命令。若目录已有合格短样，先核对其冻结记录后复用，不能覆盖重建。
+提交成功只表示systemd接受unit。等待精确 `drama-media-guard-<sha12>-<run>.service` 结束，保存非敏感journal和unit状态，核对8MiB/3秒普通probe、16GiB memory/memsw、swappiness0、CPU2、Tasks128、实际Nice10、uid/gid、groups空、CapEff0、NoNewPrivileges1；媒体进程必须为0。先前256MiB自检是两次正向成功加一次预期负向拒绝，不能代替本轮16GiB读回。
 
-## 4. 隔离渲染命令与三组短样
+launcher在调用 `systemd-run` 前先持久化提交意图，确认systemd接受后再写accepted记录。若客户端超时、被中断或返回 `completion_unknown=true`，`media_started` 必须视为未知；**不得以同一批次重试，也不得删除intent记录**。先按返回的完整unit名只读执行 `systemctl show` 与 `journalctl -u`，区分正在运行、已结束、提交结果仍未知；在原unit、全部子进程、检查点和产物完成唯一对账前，任何新批次也不得重放该动作。网络或终端响应丢失不等于unit未创建。
 
-函数只提交一个独立临时unit，**返回不代表完成**。测试用户、Nice及IO优先级沿用drama配置；不加载正式 `EnvironmentFile`，无需数据库、HTTP或COS凭据。公共锁只约束benchmark；正式入口仍必须维持排空。
+媒体窗口释放、正式入口排空且固定配方到位后，prepare同样先预览，再用 `--preflight` 做只读检查，最后才 `--apply`：
 
 ```bash
-launch_media_case() {
-  local key="$1" quota="$2" threads="$3" kind="$4" source="$5"
-  test "${TASK_SWAP_GUARD_CONFIRMED:-no}" = yes
-  [[ "$key" =~ ^[a-z0-9-]{1,30}$ ]]
-  [[ "$quota:$threads" == '200%:2' || "$quota:$threads" == '400%:2' || "$quota:$threads" == '400%:4' ]]
-  [[ "$kind" == short || "$kind" == long ]]
-  local out="$TASK_RUN_ROOT/$key"
-  local unit="drama-media-accept-${TASK_CANDIDATE_SHA:0:12}-$TASK_RUN_TAG-$key"
-  test ! -e "$out"
-  test ! -L "$out"
-  systemd-run --unit="$unit" --service-type=simple \
-    --uid=drama-synthesis-gpu --gid=drama-synthesis-gpu \
-    --property="WorkingDirectory=$TASK_CODE" \
-    --property=RemainAfterExit=yes --property=KillMode=control-group --property=TimeoutStopSec=90 \
-    --property=Nice=10 --property=IOSchedulingClass=best-effort --property=IOSchedulingPriority=7 \
-    --property="CPUQuota=$quota" --property=TasksMax=128 \
-    --property=MemoryLimit=16G \
-    --property=CPUAccounting=yes --property=MemoryAccounting=yes --property=TasksAccounting=yes \
-    --property=UMask=0077 --property=NoNewPrivileges=yes \
-    --property="ReadOnlyPaths=$TASK_INPUTS $TASK_ASSETS $TASK_CODE" \
-    --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=PYTHONNOUSERSITE=1 --setenv=PYTHONUNBUFFERED=1 \
-    --setenv=OMP_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=NUMEXPR_NUM_THREADS=1 \
-    /usr/bin/flock -n "$TASK_CONTROL/media-benchmark.lock" \
-    "$TASK_PYTHON" "$TASK_CODE/scripts/benchmark_drama_synthesis_media.py" --apply render \
-    --source "$source" --recipe "$TASK_RECIPE" --asset-root "$TASK_ASSETS" \
-    --asset-manifest-sha256 "$TASK_MANIFEST" --output-dir "$out" \
-    --sample-kind "$kind" --filter-threads "$threads" \
-    --ffmpeg "$TASK_FFMPEG" --ffprobe "$TASK_FFPROBE" --timeout 43200
-}
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --preflight --prepare-short \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind short --config 2c2t --trial r1
+
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --prepare-short \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind short --config 2c2t --trial r1
 ```
 
-这里使用systemd239支持的 `Type=simple`；提交成功甚至不能证明程序已成功exec，必须读取后续状态和证据。命令只设置v1内存上限，不实现第1节的交换保护；该前提未落实时不得调用函数。
+等待精确prepare unit自然结束。核对 `prepared-short.json`、短源0400权限、115～125秒时长、音视频流、SHA/大小和全局长源身份。prepare使用一次受控ffmpeg stream-copy及一次ffprobe，`media_started=true`；它不是模板渲染，也不能被写成渲染性能样本。失败或响应丢失时保留私有run root和`.part`，不覆盖重跑同批次。
 
-代码默认 `DRAMA_GPU_RENDER_TIMEOUT=43200`，即12小时；显式 `--timeout` 优先，同样要求60～86400秒。这里固定43200保证各组相同。**这是FFmpeg渲染进程时限，不是HTTP的4小时等待上限，不是整套验收耗时上限。** 超时仍由渲染器停止自己的进程并wait；本次测试不能临时增加时限后把中断样本算作通过。
+## 4. 两轮三配置短片渲染
 
-依次运行下表每一行；前一轮确认退出、保存记录并完成第5节检查后，才运行下一行。不要并行粘贴执行。建议第二轮倒序，不能清系统page cache或重启FB来制造“公平”环境。
-
-| 顺序 | 命令 | 目的 |
-| --- | --- | --- |
-| 1 | `launch_media_case short-2c2t-r1 200% 2 short "$TASK_SHORT"` | 当前配额基线 |
-| 2 | `launch_media_case short-4c2t-r1 400% 2 short "$TASK_SHORT"` | 单独观察增加CPU配额 |
-| 3 | `launch_media_case short-4c4t-r1 400% 4 short "$TASK_SHORT"` | 再观察滤镜线程变化 |
-| 4～6 | 同三组使用新的 `r2` 名称，顺序4c4t→4c2t→2c2t | 识别缓存、温度和负载造成的波动 |
-
-每次 `--output-dir` 必须是全新绝对路径，不能预建该子目录、拷入成片或检查点，也不能覆盖失败目录重跑。输入和配方可以复用，**输出不能复用**。脚本要求 `rendered_processes=1` 且有真实采样，否则不是有效性能样本。
-
-## 5. 进程、资源、完整解码与视觉判定
-
-将 `TASK_UNIT` 设置为本轮完整unit名、`TASK_OUT` 设置为对应新输出目录。以非敏感字段查询进度；不能用一次启动成功、`active/running` 或`evidence.json`已经存在当成完成。由于设置了 `RemainAfterExit=yes`，最终应为 `SubState=exited`、`Result=success`、`ExecMainStatus=0`，并同时核对证据和文件。
+默认操作是render；每次缺省仍只预览，实际执行必须显式 `--apply`。第一轮按2c2t→4c2t→4c4t，第二轮倒序。前一unit结束、证据保存并完成第5节decode后，才能运行下一项。
 
 ```bash
-systemctl show "$TASK_UNIT" -p ActiveState -p SubState -p Result -p ExecMainCode -p ExecMainStatus -p ControlGroup -p Nice -p CPUQuotaPerSecUSec -p MemoryCurrent -p MemoryLimit -p TasksCurrent -p TasksMax
+# r1
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 2c2t --trial r1
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 4c2t --trial r1
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 4c4t --trial r1
+
+# r2，倒序
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 4c4t --trial r2
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 4c2t --trial r2
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" --sample-kind short --config 2c2t --trial r2
 ```
 
-保存本轮journal及上述读回；在启动、中段、结束前记录本机v1的 `cpu.cfs_quota_us`、`cpu.cfs_period_us`、`cpu.stat`、`memory.limit_in_bytes`、`memory.usage_in_bytes`、`memory.max_usage_in_bytes`、`memory.failcnt`、`memory.oom_control`、`memory.memsw.limit_in_bytes`、`memory.memsw.usage_in_bytes`、`memory.memsw.failcnt`、`pids.current`、`pids.max`。memsw缺失须明确记录，不能省略后当作有保护。须结合该unit的 `ControlGroup`、实际进程的cgroup成员路径和mountinfo定位各控制器目录，正确扣除mount root，不能假设控制器同目录或读成其他服务。记录主机MemAvailable和同机FB是否自然开始制作；用短时、有限次的 `nvidia-smi dmon -s u -d 1 -c 10` 记录GPU编码/解码占用。只读观察，不发测试发布。
+每个 `sample/config/trial` 绑定不同unit、输出目录、launcher guard/result和decode证据；同名重放必须拒绝，不能删除目录换取重跑。所有组合校验同一个prepare SHA。launcher持有固定锁并把同一FD传给新renderer，启动后立即用 `/proc/<pid>/fd` 验证继承；继承或清理/reap不明时必须显式失败，不能声称子进程已停止。
 
-脚本兼容v2时会读 `cpu.max`、`memory.max`、`memory.swap.max`、`pids.max`，但本机的验收不能使用v2字段替代v1证据。若今后换为v2，内存事件证据应改用 `memory.events` 等对应文件并重新审查门禁。
+## 5. 完整解码、资源和效果判定
 
-脚本自动提供：
-
-- `process-samples.jsonl`：每秒采FFmpeg子进程RSS、线程数、CPU时间/百分比，以及out_time/frame/speed；4核的CPU百分比可以超过100%。
-- `evidence.json`：源SHA/大小、配方与素材指纹、配额读回、渲染器数、采样峰值、耗时和输出SHA；`peak_values_are_sampled=true`，采样峰值不等于内核绝对峰值。`limits.controllers`记录实际控制器目录，`limit_read_status`为complete/partial/unavailable，缺失或无效项在`read_errors`中明示；不能以字段缺失证明配额生效。
-- CPU配额须同时有 `cpu_quota_read=true`、`cpu_quota_cores`为本轮预期2或4，以及对应v1 quota/period原始值；无上限时cores为null，不算通过。`ancestor_limits_checked=false`表明脚本没有检查上层限制：还需人工核对父cgroup是否有更紧限额，不能把该数值当作实际独占CPU或系统有效总配额。`limit_read_status=partial/unavailable`不得跳过缺失项验收，尤其不能忽略memsw。
-- `renderer_elapsed_seconds`仅计渲染阶段；`elapsed_seconds`也不含脚本最初的ffprobe和源文件SHA预检。两者都不能声称是“下载到上传”的全流程耗时。
-
-**脚本不会自动完整解码或视觉验收。** `full_decode_verified=false`、`visual_review_required=true`是工具的真实边界，不得手改成true冒充验收。渲染退出后，在没有其他benchmark运行时，用独立、同样低优先级的unit完整解码该成片；不产生新视频、不上传COS：
+每个render完成后，用相同sample/config/trial调用固定decode动作。它只读取已由launcher及benchmark证据绑定的 `result.mp4`，在新的16GiB受控unit内执行固定 `ffmpeg -xerror ... -f null -`，不生成新视频、不上传COS：
 
 ```bash
-test "${TASK_SWAP_GUARD_CONFIRMED:-no}" = yes
-systemd-run --unit="$TASK_UNIT-decode" --service-type=simple \
-  --uid=drama-synthesis-gpu --gid=drama-synthesis-gpu \
-  --property=RemainAfterExit=yes --property=KillMode=control-group --property=TimeoutStopSec=90 \
-  --property=Nice=10 --property=CPUQuota=200% --property=TasksMax=128 --property=MemoryLimit=4G \
-  --property=IOSchedulingClass=best-effort --property=IOSchedulingPriority=7 \
-  /usr/bin/flock -n "$TASK_CONTROL/media-benchmark.lock" \
-  "$TASK_FFMPEG" -nostdin -hide_banner -loglevel error -xerror -err_detect explode \
-  -hwaccel none -threads 2 -i "$TASK_OUT/result.mp4" \
-  -map 0:v:0 -map 0:a:0 -sn -dn -threads 2 -f null -
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --decode \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind short --config 2c2t --trial r1
 ```
 
-解码unit也必须在启动前落实独立交换保护，不能继承“渲染unit已保护”的假设。同样等待并读回decode unit最终状态与journal；`-xerror`非零、解码错误、缺少应有音频均失败。随后保存完整ffprobe JSON、重新计算输出SHA与证据对照。解码记录应另存 `decode-verification.json` 或验收报告，包含候选SHA、输出SHA、命令、开始/结束时间、退出码、错误数和证据路径，不篡改benchmark原始JSON。
+对其余组合只替换固定的config/trial枚举。decode证据必须为新文件并绑定render unit、decode unit、成片SHA/大小、显式退出码0和持续时间；完整解码前后都要重新读取并核对成片SHA及文件身份。非零、缺少应有音频、SHA/identity变化或cleanup不明均失败。不要用手写systemd-run、任意路径ffmpeg或已存在decode证据替代。
+
+保存每个精确unit的 `systemctl show` 非敏感字段和journal；结合launcher guard、benchmark `evidence.json`、`process-samples.jsonl`、decode证据、主机MemAvailable及FB自然负载判定。不得输出环境文件、Token、源URL、COS凭据或完整进程命令。
 
 | 检查 | 通过 / 停止规则 |
 | --- | --- |
-| 身份与编码 | 同一长/短样组内的源SHA、recipeSHA、素材manifest、二进制SHA一致；短源与长源各自冻结SHA，不要求二者相同。成片保持H.264 High、720×1280、yuv420p、30fps及原音频语义；不得删除模板、改变滤镜顺序或改编码质量来通过 |
-| 时长与完整性 | 视频流、容器时长与各自源时长差均不超过既有0.15秒；完整解码退出0，无错误；成片SHA/大小匹配原始证据；仅ffprobe成功不够 |
-| 真实渲染 | `ok=true`、`rendered_processes=1`、`sample_count>0`、实际子进程已退出；检查out_time/frame前进，不能因进度突然跳至尾部就认作所有帧正常 |
-| 线程 | FFmpeg采样峰值建议不超过112，unit TasksCurrent保持低于120，TasksMax=128；没有fork/thread创建错误、触顶或持续增长。需越过保护值时停止评审，不调大TasksMax掩盖问题 |
-| RSS保护 | 建议FFmpeg RSS峰值不超过12 GiB，v1 `memory.limit_in_bytes=17179869184`；独立memsw保护在进程启动前已核对。`memory.failcnt`与`memory.memsw.failcnt`无增长，`memory.oom_control`不处于OOM且journal无OOM/kill；同时核对usage/max_usage、交换占用和主机及FB余量。仅MemoryLimit或RSS低于16 GiB不能证明交换安全 |
-| 长片RSS曲线 | 去除最初预热，按输出媒体进度25～50%、50～75%、75～100%分窗，计算RSS中位数；最后窗口相对前一窗口增长超过 `max(512 MiB, 前一窗口中位数×5%)`，或多个后段窗口持续增长未形成平台，均标记待查，不以“还没OOM”放行。该数值是保守评审门槛，需结合原始曲线与cgroup证据判断 |
-| FB影响 | 不改变FB配置；FB自然负载出现时记录。发生资源争抢或明显延迟即停止本轮隔离unit并延期；不能用降低FB优先级换取drama提速 |
-| 人工视觉/音频 | 播放开头含片头、首个剧集切换、中段至少两个集边界、结尾；检查字幕、横竖画面适配、随机色罩/边框/角标/动画循环、黑帧、重复/缺帧和口型/对白同步。保留截图时间点与验收人，不能用输出文件存在代替 |
+| 身份与编码 | 候选SHA、长/短源SHA、recipeSHA、素材manifest和二进制SHA冻结；实际片头封面必须通过JFIF/sRGB合同并验证BT.709 limited输出，若为PNG/WebP/ICC/Adobe JPEG则停止而非跳过片头；标准化段须证明等比scale+pad、显式场序转换及短/缺音轨不截视频；最终成片保持H.264 High、720×1280、yuv420p、30fps及原音频语义，不删模板或改变滤镜/编码质量 |
+| 时长与完整性 | 视频流、容器时长与源时长差均不超过既有0.15秒；完整decode退出0且成片SHA/大小不变；ffprobe成功不能代替完整解码 |
+| 真实渲染 | `ok=true`、`rendered_processes=1`、`sample_count>0`、实际子进程已reap；out_time/frame持续前进，输出文件存在不等于通过 |
+| 线程 | FFmpeg采样峰值建议不超过112，保护阈值为大于120立即停止；TasksMax128，不用提高上限掩盖增长 |
+| RSS与cgroup | 建议FFmpeg RSS峰值不超过12GiB，采样达到14GiB立即停止；memory与memsw均为17179869184、swappiness0，主机可用内存不低于8GiB。每个prepare/render/decode必须在同一cgroup内记录动作前后 `memory.failcnt`、`memory.memsw.failcnt`、`total_swap`、`under_oom` 和 `oom_kill`；计数增长、swap非零、压力证据缺失或cgroup身份变化均失败 |
+| 长片RSS曲线 | 去除预热后按媒体进度25～50%、50～75%、75～100%分窗计算RSS中位数；最后窗相对前窗增长超过 `max(512MiB, 5%)` 或后段持续增长未形成平台，标记待查，不以“未OOM”放行 |
+| FB影响 | 不改FB配置；FB自然负载出现时记录。争抢或明显延迟即停止本次精确unit并延期，不降低FB优先级换取提速 |
+| 人工视觉/音频 | 播放片头、首个切集、中段至少两个集边界及结尾；检查字幕、画面适配、色罩/边框/角标/动画、黑帧、重复/缺帧和音画同步。记录时间点和验收人 |
 
-停止资源异常的隔离测试时，只操作本轮已记录的完整unit名：`systemctl stop "$TASK_UNIT"`（解码则使用其精确decode unit名），然后确认其cgroup及子进程停止。不要使用通配符、`pkill ffmpeg`、删除检查点或操作旧正式任务。保留失败输出、prepared/start guard和日志；新试验换新目录。
+停止异常试验只使用本轮完整unit名并确认其cgroup和子进程全部停止。不得用通配符、`pkill ffmpeg`、重启生产服务、删检查点或操作原正式任务。失败输出、提交意图、start/prepared记录和日志全部保留；修复后使用新批次。
 
-## 6. 90分钟长片与配置决定
-
-短样通过后，使用第2节同一保留长片，不裁剪、不循环短片，也不换配方。先为基线保留一轮长样记录，再对**实际拟采用**且短样通过的组合运行长样；每次先执行前述排空/资源门禁。发现明显持续内存增长时停止当前试验并查因，不盲目把所有组合跑完。
+下面是short/2c2t/r1 render的完整停止示例。`TASK_SUBMIT_JSON` 必须是该次apply返回并原样保存的单行JSON；从其中提取精确unit，禁止按SHA/run/config手拼：
 
 ```bash
-launch_media_case long-2c2t-r1 200% 2 long "$TASK_LONG"
+set -eu
+TASK_SUBMIT_JSON='<EXACT_SINGLE_LINE_JSON_RETURNED_BY_THE_APPLY_COMMAND>'
+TASK_UNIT="$(printf '%s\n' "$TASK_SUBMIT_JSON" | "$TASK_PYTHON" -I -S -B -c 'import json,sys; value=json.load(sys.stdin); sha,run=sys.argv[1:]; unit=value["unit"]; expected="drama-media-accept-%s-%s-short-2c2t-r1.service"%(sha[:12],run); identity=value.get("candidate_sha")==sha and value.get("run_id")==run and value.get("operation")=="render" and value.get("sample_kind")=="short" and value.get("configuration")=="2c2t" and value.get("trial")=="r1" and unit==expected; accepted=value.get("ok") is True and value.get("submitted") is True and value.get("completion_unknown") is False; unknown=value.get("ok") is False and value.get("completion_unknown") is True and value.get("replay_forbidden") is True; assert identity and (accepted or unknown); print(unit)' "$TASK_SHA" "$TASK_RUN")" || exit 78
+case "$TASK_UNIT" in drama-media-accept-*.service) ;; *) echo "unexpected unit" >&2; exit 78 ;; esac
+test "$(systemctl show "$TASK_UNIT" --property=Id --value)" = "$TASK_UNIT" || exit 78
+systemctl show "$TASK_UNIT" --property=LoadState,ActiveState,SubState,Result,ExecMainPID,ControlGroup || exit 78
+TASK_CGROUP="$(systemctl show "$TASK_UNIT" --property=ControlGroup --value)" || exit 78
+test "$TASK_CGROUP" = "/system.slice/$TASK_UNIT" || exit 78
+TASK_CGROUP_PATHS=""
+for TASK_CONTROLLER in /sys/fs/cgroup/memory /sys/fs/cgroup/pids /sys/fs/cgroup/cpu,cpuacct /sys/fs/cgroup; do
+  TASK_PATH="${TASK_CONTROLLER}${TASK_CGROUP}"
+  if test -d "$TASK_PATH"; then
+    TASK_CGROUP_PATHS="$TASK_CGROUP_PATHS $TASK_PATH"
+  fi
+done
+test -n "$TASK_CGROUP_PATHS" || exit 78
+systemctl stop -- "$TASK_UNIT" || exit 78
+case "$(systemctl is-active "$TASK_UNIT" 2>/dev/null || true)" in
+  inactive|failed) ;;
+  *) echo "exact unit is still active" >&2; exit 78 ;;
+esac
+for TASK_PATH in $TASK_CGROUP_PATHS; do
+  if test -d "$TASK_PATH"; then
+    TASK_PROCS="$(cat "$TASK_PATH/cgroup.procs")" || exit 78
+    test -z "$TASK_PROCS" || exit 78
+    if test -e "$TASK_PATH/tasks"; then
+      TASK_THREADS="$(cat "$TASK_PATH/tasks")" || exit 78
+      test -z "$TASK_THREADS" || exit 78
+    fi
+  fi
+done
 ```
 
-该轮结束、完整解码/视觉/资源判定完成后，若拟采用4核2线程才运行下面一项；只有确有必要评估4线程且前述门禁仍满足时，另开全新的 `long-4c4t-r1`，不能把短样通过直接当成长样通过。
+保留停止前后的 `systemctl show` 和journal；确认精确unit不活跃、cgroup没有成员后才能判定子进程已清理。若controller路径与本轮launcher证据不一致，停止并人工核查，不能据此操作相邻cgroup。
+
+## 6. 约90分钟长片与参数决定
+
+六个短片render和decode均通过后，先运行长片2c2t/r1基线，再只对短片通过且拟采用的配置运行长片。每轮仍先预览/`--preflight`、重查窗口和排空，再显式apply；示例：
 
 ```bash
-launch_media_case long-4c2t-r1 400% 2 long "$TASK_LONG"
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind long --config 2c2t --trial r1
+
+"$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --apply --decode \
+  --candidate-sha "$TASK_SHA" --run-id "$TASK_RUN" \
+  --sample-kind long --config 2c2t --trial r1
 ```
 
-采用4核4线程的命令形状为 `launch_media_case long-4c4t-r1 400% 4 long "$TASK_LONG"`。长样完成仍须执行第5节**整片完整解码**，并核对所有已知集边界时间点的异常；图层视觉抽查至少覆盖片头、早段、中段、后段和结尾。
+若拟采用4c2t，则运行并完整解码long/4c2t/r1；4c4t只有在短片证据显示必要时才运行。发现持续内存增长、FB影响、线程压力或效果问题立即停止当前精确unit，不盲目跑完全部配置。
 
-比较相同输入下各轮 `renderer_elapsed_seconds` 的中位数、波动和资源曲线；性能差落在自然波动范围内就不能宣称提速。短样速度与长片速度分别报告，旧任务的混合下载/编码耗时不能混作纯渲染基线。资源/效果任一项未过，保持默认下载4、CPUQuota200%、滤镜线程2、主渲染并发1；CPU4或线程4只能在独立证据与确认后成为生产配置。
+比较相同输入下两轮短片的中位数、波动及长片 `renderer_elapsed_seconds` 和资源曲线。CPU参数只采用通过长片完整解码、视觉/音频和资源门禁且耗时最短的组合；相对2c2t收益不足15%则保留2核/滤镜2。无论结果如何，重制作并发保持1。短片速度、长片速度和旧任务的下载/标准化耗时分开报告。
 
-## 7. 交付记录与未执行项
+## 7. 交付记录与当前未执行项
 
-每个样本的验收行须包含：候选GitHub SHA、批次和unit名、实际配额/Nice、源/配方/素材/运行时SHA、原始JSON与采样曲线、系统资源与FB观察、完整解码记录、人工视觉/音频结果、失败原因或配置决定。原始证据放在私有验收根；未经确认不上传到COS、不写正式任务完成状态、不自动接受用户验收。
+每个样本记录：候选GitHub SHA、批次、operation/unit、实际配额/Nice/memsw/Tasks/身份、源/配方/素材/运行时SHA、launcher与benchmark原始JSON、进程曲线、完整解码、FB观察、人工视觉/音频结果，以及失败原因或参数决定。原始证据保存在私有验收根；未经确认不上传COS、不回填正式任务、不代替用户接受。
 
-当前状态：输入硬链接已保留；源SHA待计算，GPU配方副本待核对；候选 `570c1bdaba7eddb9cf881a5df7efee976c2d6fb0` 已在CPU/HK实际运行时各通过287项回归。**三组短样、90分钟长片、完整解码、RSS/线程判定全部未执行；TT媒体窗口、正式任务排空及本机v1交换保护门禁仍须满足。** 本手册未覆盖真实异步API故障/重启、下载并发/CDN、COS恢复和页面验收，这些仍按主测试报告分别完成。
+当前状态：长片硬链接已保留，源SHA待计算，GPU固定配方副本待窗口内核对；新媒体launcher仍是未提交候选增量。**16GiB guard-only、短源prepare、六组短片render/decode、约90分钟长片、完整解码及人工效果验收均未执行；新的HK媒体窗口也未释放。** 本手册不替代异步API重启/故障、下载1/2/4/8、真实COS恢复或页面业务验收，最终状态以 [test-report.md](test-report.md) 为准。

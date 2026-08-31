@@ -66,11 +66,52 @@ def read_record(path):
         raise checkpoint_error() from None
 
 
+def durable_ensure_directory(path, mode=0o700):
+    """Create a private checkpoint directory and persist each new entry.
+
+    POSIX requires the parent directory to be fsynced after mkdir; fsyncing only
+    a file inside the new directory cannot make the directory entry durable.
+    The Windows branch retains logical atomicity but is not the production
+    power-loss durability contract.
+    """
+    path = Path(path)
+    missing = []
+    cursor = path
+    try:
+        while not cursor.exists():
+            missing.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                raise checkpoint_error()
+            cursor = parent
+        if cursor.is_symlink() or not cursor.is_dir():
+            raise checkpoint_error()
+        for directory in reversed(missing):
+            try:
+                directory.mkdir(mode=mode)
+            except FileExistsError:
+                pass
+            if directory.is_symlink() or not directory.is_dir():
+                raise checkpoint_error()
+            if os.name == "posix":
+                for durable in (directory, directory.parent):
+                    fd = os.open(str(durable), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+        return path
+    except DramaSynthesisError:
+        raise
+    except OSError:
+        raise checkpoint_error() from None
+
+
 def atomic_write_record(path, value):
     path = Path(path)
     if path.is_symlink():
         raise checkpoint_error()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    durable_ensure_directory(path.parent)
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode("utf-8")) > 65536:
         raise checkpoint_error()

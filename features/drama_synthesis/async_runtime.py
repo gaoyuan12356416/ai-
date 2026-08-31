@@ -26,6 +26,7 @@ import uuid
 
 from .core import DramaSynthesisError
 from . import gpu_cache
+from .local_checkpoint import durable_ensure_directory
 
 
 JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -78,6 +79,7 @@ ERROR_MESSAGES = {
     "drama_episode_download_failed": "视频下载失败，已保留可校验的下载进度",
     "drama_episode_download_route_invalid": "视频下载线路配置与冻结任务不一致",
     "drama_download_configuration_invalid": "下载并发配置无效",
+    "drama_concat_normalization_invalid": "转码后的剧集片段仍不兼容，已停止拼接",
     "drama_media_checkpoint_unverified": "本地制作记录暂时无法校验，已停止重制",
     "drama_media_checkpoint_conflict": "本地制作记录与当前任务不一致，已停止重制",
     "drama_random_probe_failed": "随机模板视频校验失败",
@@ -100,6 +102,23 @@ ERROR_MESSAGES = {
     "drama_upload_busy": "该成片正在上传，请继续查询原任务",
     "drama_upload_configuration_invalid": "上传参数无效",
     "drama_upload_bucket_state_unverified": "上传目标的版本控制状态未通过安全校验，已暂停上传",
+}
+
+# These failures mean that durable media or upload state exists but cannot be
+# proved safe to reuse yet.  They must never be presented as an ordinary render
+# failure because an operator retry could otherwise suggest starting over.
+RECOVERY_BLOCKING_CODES = {
+    "gpu_result_cache_unverified",
+    "drama_media_checkpoint_unverified",
+    "drama_media_checkpoint_conflict",
+    "drama_upload_checkpoint_unverified",
+    "drama_upload_checkpoint_conflict",
+    "drama_upload_source_changed",
+    "drama_upload_recovery_required",
+    "drama_upload_failed",
+    "drama_upload_object_conflict",
+    "drama_upload_busy",
+    "drama_upload_bucket_state_unverified",
 }
 
 
@@ -447,17 +466,24 @@ def clear_process(pid):
 
 
 class AsyncRuntime:
-    def __init__(self, root, execute, cached_result, *, can_resume=None,
+    def __init__(self, root, execute, cached_result, *, sync_cached_result=None, can_resume=None,
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
                  clock=time.time, process_probe=process_state, autostart=True):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
         self.root = Path(root).absolute() / ".runtime"
-        for path in (self.root.parent, self.root, self.root / "jobs", self.root / "locks"):
-            if path.is_symlink():
-                raise runtime_error("gpu_runtime_unverified")
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.execute, self.cached_result, self.can_resume = execute, cached_result, can_resume
+        try:
+            # The first accepted job is only durable if every newly-created
+            # ancestor (including .runtime/jobs) has also been fsynced into its
+            # parent. Creating these directories with plain mkdir first would
+            # hide that fact from the atomic record writer.
+            for path in (self.root.parent, self.root, self.root / "jobs", self.root / "locks"):
+                durable_ensure_directory(path)
+        except Exception:
+            raise runtime_error("gpu_runtime_unverified") from None
+        self.execute, self.cached_result = execute, cached_result
+        self.sync_cached_result = sync_cached_result or cached_result
+        self.can_resume = can_resume
         self.fingerprint, self.clock, self.process_probe = fingerprint, clock, process_probe
         self.render_slots = render_slots or threading.BoundedSemaphore(1)
         self.queue_limit, self.instance = queue_limit, uuid.uuid4().hex
@@ -697,7 +723,7 @@ class AsyncRuntime:
                     raise runtime_error("gpu_job_running")
                 if not self._accepting:
                     raise runtime_error("gpu_runtime_unavailable")
-            cached = self.cached_result(payload)
+            cached = self.sync_cached_result(payload)
             with self._mutex:
                 record = self._new_record(payload, fingerprint)
                 if cached is not None:
@@ -821,7 +847,7 @@ class AsyncRuntime:
                 current = self._active(context)
                 if current is not None:
                     risk = self._process_risk(current)
-                    cache_blocked = getattr(exc, "code", "") == "gpu_result_cache_unverified"
+                    cache_blocked = getattr(exc, "code", "") in RECOVERY_BLOCKING_CODES
                     current.update(status="recovery_required" if risk or cache_blocked else "failed",
                                    stage="recovery_required" if risk or cache_blocked else "failed",
                                    error=safe_error(runtime_error(risk) if risk else exc),

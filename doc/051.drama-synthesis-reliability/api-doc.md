@@ -116,4 +116,4 @@ HTTP错误采用 `{"code":"...","error":"安全中文"}`。GET返回HTTP200但 `
 
 既有用户重试在异步模式下持久化一次期望代次恢复意图，再由CPU调用resume。完成结果在CPU通过租约栅栏与配方事务对账，通知失败不得回到媒体重试。`DRAMA_GPU_ASYNC_ENABLED=0` 时不切换CPU调用协议；已有新账本的未完成任务不能直接交给不理解异步状态的旧代码处理。
 
-GPU私有账本和CPU冻结payload包含源URL，必须受限存储和备份；状态DTO不返回这些字段。新增完成manifest的 `input_fingerprint` 在存在时必须匹配；旧manifest只保留既有job/产物/配方兼容验证，不能据此删除新账本。
+GPU私有账本和CPU冻结payload包含源URL，必须受限存储和备份；状态DTO不返回这些字段。新完成manifest版本为v3，`input_fingerprint` 必须是当前冻结payload的64位十六进制指纹并精确匹配。每个选中产物必须带 `bucket`、`key`、`sha256`、`size_bytes`、`etag`、`binding` 和返回URL；读取时重新计算仍保留的本地文件并用认证HEAD核对远端对象。任何缺失、变化或不一致均返回恢复类错误，不把记录当成缓存未命中，也不从文件名推导URL。旧未版本化manifest只供旧同步兼容读取，不能据此完成新异步执行或删除新账本。
