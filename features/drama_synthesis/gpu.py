@@ -449,6 +449,10 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
         nonlocal deadline, final_deadline_offset, pending_deadline_plan
         if not pending_deadline_plan or started_at is None:
             return
+        # Deadline planning belongs to the progress batch that advanced native
+        # out_time.  Consume the signal before the eligibility checks so an
+        # early sample cannot be reused by a later frame-only or empty batch.
+        pending_deadline_plan = False
         elapsed = now - started_at
         if elapsed < 300 or maximum_out_time <= 0:
             return
@@ -463,7 +467,6 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
         # an already granted deadline or exceed the global 24 hour cap.
         deadline = max(deadline, min(absolute_deadline, candidate))
         final_deadline_offset = deadline - started_at
-        pending_deadline_plan = False
 
     def report_updates(now):
         nonlocal last_advance_at, maximum_out_time, maximum_frame, last_progress, pending_deadline_plan
@@ -494,14 +497,16 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
                 metrics["fps"] = latest_fps
             if latest_speed is not None:
                 metrics["speed"] = latest_speed
-            advanced = (folded_out_time > maximum_out_time or
-                        folded_frame > maximum_frame)
+            out_time_advanced = folded_out_time > maximum_out_time
+            frame_advanced = folded_frame > maximum_frame
+            advanced = out_time_advanced or frame_advanced
             maximum_out_time = folded_out_time
             maximum_frame = folded_frame
             last_progress = dict(metrics)
             emit(metrics)
             if advanced:
                 last_advance_at = now
+            if out_time_advanced:
                 pending_deadline_plan = True
                 extend_deadline(now)
 

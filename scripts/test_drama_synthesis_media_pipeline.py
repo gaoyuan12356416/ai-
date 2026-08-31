@@ -2273,7 +2273,7 @@ class ProcessProgressTests(unittest.TestCase):
                     )
                 self.assertEqual(process.returncode, 0)
 
-    def test_sub_millisecond_strict_progress_refreshes_stall_and_deadline_but_equal_metadata_does_not(self):
+    def test_strict_out_time_refreshes_stall_and_deadline_while_frame_only_refreshes_stall_only(self):
         from features.drama_synthesis import async_runtime
 
         class Clock:
@@ -2338,6 +2338,7 @@ class ProcessProgressTests(unittest.TestCase):
             "strict-0.5ms": "out_time_us=1000500\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
             "strict-1ms": "out_time_us=1001000\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
             "frame-only": "frame=11\nfps=31\nspeed=1.1x\nprogress=continue\n",
+            "out-time-then-frame-only": "frame=11\nfps=31\nspeed=1.1x\nprogress=continue\n",
             "equal": "out_time_us=1000000\nframe=10\nfps=32\nspeed=1.2x\nprogress=continue\n",
             "metadata-only": "fps=33\nspeed=1.3x\nprogress=continue\n",
         }
@@ -2381,12 +2382,43 @@ class ProcessProgressTests(unittest.TestCase):
                 elif name == "frame-only":
                     self.assertEqual(payload["last_progress"]["frame"], 11)
                     self.assertEqual(payload["last_progress"]["out_time_seconds"], 0.0)
+                elif name == "out-time-then-frame-only":
+                    self.assertEqual(payload["last_progress"]["frame"], 11)
+                    self.assertEqual(payload["last_progress"]["out_time_seconds"], 1.0)
                 else:
                     self.assertEqual(payload["last_progress"]["out_time_seconds"], 1.0)
         self.assertGreater(deadlines["strict-0.5ms"], deadlines["equal"])
         self.assertGreater(deadlines["strict-1ms"], deadlines["equal"])
         self.assertEqual(deadlines["frame-only"], 900)
+        self.assertEqual(deadlines["out-time-then-frame-only"], deadlines["metadata-only"])
         self.assertEqual(deadlines["equal"], deadlines["metadata-only"])
+
+        # An out_time sample received before the 300 second planning threshold
+        # is not a deferred permission to plan later.  A frame-only batch at
+        # t=350 refreshes stall, and the following empty batch must still leave
+        # the original deadline unchanged.
+        with self.subTest(deadline="early-out-time-then-frame-only"):
+            clock = Clock()
+            ControlledThread.progress_target = None
+            process = Process(clock, [
+                (100, first, "timeout"),
+                (250, variants["out-time-then-frame-only"], "timeout"),
+                (100, None, "timeout"),
+                (0, None, 1),
+            ])
+            diagnostic = Path(directory.name) / "early-out-time-then-frame-only.json"
+            contexts = patches(process, clock)
+            with contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+                    self.assertRaises(RuntimeError):
+                gpu.run_render_with_progress(
+                    ["ffmpeg", "output.mp4"], timeout=900, absolute_timeout=86400,
+                    configured_timeout=900, duration_seconds=100, stall_timeout=900,
+                    diagnostic_path=diagnostic, popen=lambda *_, **__: process, monotonic=clock,
+                )
+            payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+            self.assertEqual(payload["final_deadline_offset_seconds"], 900)
+            self.assertEqual(payload["last_progress"]["out_time_seconds"], 1.0)
+            self.assertEqual(payload["last_progress"]["frame"], 11)
 
         for name, second in variants.items():
             with self.subTest(stall=name):
@@ -2402,7 +2434,8 @@ class ProcessProgressTests(unittest.TestCase):
                 ])
                 contexts = patches(process, clock)
                 with contexts[0], contexts[1], contexts[2], contexts[3], contexts[4]:
-                    if name.startswith("strict-") or name == "frame-only":
+                    if (name.startswith("strict-") or
+                            name in {"frame-only", "out-time-then-frame-only"}):
                         gpu.run_render_with_progress(
                             ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=86400,
                             duration_seconds=100, stall_timeout=900,
