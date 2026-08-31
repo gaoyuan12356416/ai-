@@ -20,7 +20,7 @@
 
 保留现网素材复制通知、输出预览过滤和YouTube弹窗等后续改动。只发布本期涉及代码，不重启或改写FB/X/TT/YouTube发布服务，不调整Token、机器时间、short-link及资源目录。
 
-候选570c1bd的15个变更运行文件已按Git blob字节冻结 [文件清单及SHA256](evidence/runtime-file-manifest-570c1bd.json)，供CPU非Git部署目录及GPU版本目录逐文件核对。它不包含私有输入、数据库或生产配置，也不是部署完成证明。后续候选若改变运行文件，必须重新生成并验证；仅文档/测试工具改变时也要核对上述字节仍一致，不能盲用旧清单。
+运行候选 `1367dd4e508dc81f0fb7eb9c128ed47a22b67d06` 已按Git blob字节冻结 [17个生产运行文件和4个验收工具的文件清单及SHA256](evidence/runtime-file-manifest-1367dd4.json)；相对23a08e5实际改变9个生产运行文件。清单供CPU非Git部署目录、GPU版本目录和新鲜checkout逐文件核对，不包含私有输入、数据库或生产配置，也不是部署完成证明。旧 [570c1bd清单](evidence/runtime-file-manifest-570c1bd.json) 只保留历史证据，不能用于本候选。承载新清单的后续文档/证据提交不得改变清单内任何运行或验收工具blob；若改变，必须重新生成、回归并选择新的运行候选。
 
 ## 2. 配置与存储
 

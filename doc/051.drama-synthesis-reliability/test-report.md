@@ -1,10 +1,12 @@
 # 测试报告（持续更新）
 
-状态：已提交候选 `23a08e5f933fbbdbea3346b22c680a4180113380` 的本地及CPU/HK真实运行时回归通过；当前媒体launcher、COS验收驱动、运行代码和文档仍是**未提交增量**，尚未绑定新的候选SHA，也未部署生产。当前增量已改变运行文件，旧 `570c1bd` 的15文件manifest明确失效；必须在最终提交后重新生成并逐字节核对新清单。仓库根 `output/` 始终排除于stage/commit及交付清单，不得为clean门禁删除、移动或清空。以下阶段分别验收，不能互相代替。
+状态：运行候选 `1367dd4e508dc81f0fb7eb9c128ed47a22b67d06` 已提交并推送GitHub，本地完整回归及独立终审通过；**尚未进行该候选的CPU/HK目标Linux回归、真实媒体/COS验收或生产部署**。新的17文件生产运行清单及4个验收工具哈希已从该提交的Git blob生成；承载清单与本状态更新的后续提交只允许改变文档/证据，必须再证明候选运行blob不变。仓库根 `output/` 始终排除于stage/commit及交付清单，不得为clean门禁删除、移动或清空。以下阶段分别验收，不能互相代替。
 
 ## 已完成
 
 - 2026-08-31冻结增量本地合并Python回归：**454/454通过、0跳过，25.252秒**。命令：`python -m unittest scripts.test_drama_synthesis_upgrade scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline -q`；分项为83/110/16/30/66/149。使用受控COS SDK测试树，测试transport不访问COS。另跑FB prepare worker **16/16、1.606秒**；cache在 `socket.connect/connect_ex` 硬拒绝下仍 **110/110**。
+- GitHub分支与本地运行候选精确一致，均为 `1367dd4e508dc81f0fb7eb9c128ed47a22b67d06`。独立终审结论P0/P1/P2均为0；在socket硬拒绝下独立重跑media149/149，upgrade排除唯一loopback用例后82/82，FB排除3个loopback用例后13/13。launcher、benchmark、guard、COS verifier及核心检查点文件的冻结SHA与实现者/主任务复算一致。
+- [运行文件清单](evidence/runtime-file-manifest-1367dd4.json) 从候选Git blob生成：17个生产运行文件、4个验收工具；相对23a08e5改变9个生产运行文件。清单不包含 `output/`、私有SDK/配方/媒体、数据库、Token或生产配置，也不表示这些文件已经部署。
 - 两页面逻辑/JavaScript：25 项，OK；包括真实函数生成行、总耗时、UTC/北京时间、未知分母不造进度、XSS 转义、10 秒拉取与隐藏/权限门禁。
 - 已覆盖超过四小时模拟、丢响应、队列/幂等/冲突、CPU 旧租约、完成原子事务及回滚、通知失败不重制、下载/续传 200/206/416/源变化/半文件、转码集序及兼容直拼、成片检查点、真实短子进程身份。
 - 国内/国际 CDN：两组整文件 SHA 相同，三组 Range SHA 相同；性能方向随样本/缓存变化。见 [CDN 实测](cdn-evaluation.md)，不启用统一国际默认。
@@ -23,9 +25,9 @@
 
 | 验收 | 状态 |
 | --- | --- |
-| 最新增量的完整回归和候选 SHA 绑定 | 本地454/454、FB16/16、页面25/25已通过；独立终审及GitHub新SHA绑定待完成 |
+| 最新增量的完整回归和候选 SHA 绑定 | 运行候选1367dd4已绑定并推送；本地454/454、FB16/16、页面25/25及独立终审通过 |
 | 真浏览器组件检查 | 通过；真实应用认证/API 端到端仍待验证 |
-| CPU Python 3.9 / GPU Python 3.10 Linux 隔离回归 | 同一23a08e5各300/300通过、0跳过 |
+| CPU Python 3.9 / GPU Python 3.10 Linux 隔离回归 | 历史23a08e5各300/300；最新1367dd4须在新鲜checkout重验 |
 | 真实CPU数据库在线副本上的增量schema及幂等验证 | 通过；3次调用、原表数据/schema不变，未对生产库迁移 |
 | 新异步 API 真实短样故障/重启验证 | 待运行 |
 | 下载 1/2/4/8 严格门禁与 CPU 参数对照 | 待运行 |
