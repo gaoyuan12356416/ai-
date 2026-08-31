@@ -4,13 +4,15 @@
 
 ## 结论与范围
 
-两轮完整离线验收均未取得整体PASS。首轮是验收器额外加入CUDA解码断言导致失败；修正后的第二轮正确拒绝已变化的生产版本。两轮失败状态、unit和证据均保留，不覆盖历史结果，不自动重试。
+第三轮对精确170e3现行源码完成完整离线流程PASS：真实NVENC处理、输出校验、FakeCOS验证、独立manifest及第二次reuse全部通过。
+
+前两轮失败状态保持：首轮是验收器额外加入CUDA解码断言导致失败；修正后的第二轮正确拒绝已变化的生产版本。旧两轮unit和证据均保留，不覆盖历史结果，不自动重试。第三轮使用新提交、新目录、新unit，并另获单次执行授权。
 
 上述两轮验收以fba8为冻结基线，调用真实MediaRepairProcessor、私有FFmpeg/FFprobe和NVENC编码，输入是本地2秒合成视频，下载/COS/HTTP均为隔离替身。生产state只读，生产config不可访问，独立网络命名空间，临时文件仅进入本批次数据目录。未使用生产凭据、真实COS或平台API，未创建生产修复记录或帖子。
 
 此前x-offline-ffmpeg.json和x-offline-nvdec-nvenc.json仅为直接FFmpeg烟测，不能替代整条业务处理流程的验收。
 
-## 执行摘要
+## 前两轮执行摘要
 
 | 项目 | 首轮 | 第二轮 |
 | --- | --- | --- |
@@ -81,9 +83,9 @@
 
 未打印journal正文或凭据。未停止、重启、重新配置生产X/FB/剧集，未改生产current或打开生产闸门。
 
-## 第三轮验收基线准备，尚未执行
+## 第三轮验收基线
 
-第二轮结束后停止了额外测试。随后协调者与另一个任务确认170e3b1325b71a72fcd6de913982ce92bb77fa40为现行版本，授予本地验收来源更新权限，未授予第三次启动权限。
+第二轮结束后停止了额外测试。随后协调者与另一个任务确认170e3b1325b71a72fcd6de913982ce92bb77fa40为现行版本，先仅授予本地验收来源更新权限；完成统一push部署后，才另外授予第三次单次启动权限。
 
 本地Git对象确认该精确commit可从refs/remotes/origin/codex/x-pool-blockers-20260828追溯。逐项读取该commit的blob，计算SHA256，与第二轮香港production-drift-readback.json的实际文件哈希一致。只冻结精确170e3b，不使用远程分支当前tip或其他版本替代。
 
@@ -98,7 +100,56 @@
 
 仅x_offline_pipeline.py的精确release常量及已变化的service.py哈希更新，结果新增source_release_sha/source_root以区分生产源码版本与验收工具版本。current、源码哈希、导入路径守卫全部保留；不修改deploy.py的迁移旧基线、systemd模板或任何生产文件。新增回归覆盖正确冻结源码允许，以及current变化、源码篡改、导入来源变化必须拒绝。
 
-第三轮仍须先统一push部署，再获得新的单次启动授权，使用新SHA、新目录和独立unit。不得重启上述两轮unit，不覆盖或删除其失败记录；本报告不构成远程执行授权。
+## 第三轮实际执行：PASS
+
+验收工具SHA：82788616355f019a1686f6f10c3ac618756e2ab1。
+
+生产源码SHA：170e3b1325b71a72fcd6de913982ce92bb77fa40。
+
+独立静态unit：gpu-migration-x-offline-82788616355f.service。经systemd-analyze verify成功后只start一次，2026-08-28 17:59:40 CST完成，等待start返回耗时1.888秒。start返回0、Result=success、ExecMainStatus=0、result.ok=true。成功oneshot退出后状态为inactive/dead，systemd读回ExecMainPID=0，不将此解释为失败或伪造执行PID。
+
+证据目录：
+
+    /data/migrations/gpu-service-migration-20260828T1502/x-offline-pipeline/82788616355f019a1686f6f10c3ac618756e2ab1
+
+保留unit-preparation.json、operator-start.json、attempt.json、result.json、processor-results.json、operator-completion.json、retained-media-readback.json，以及合成输入、FakeCOS实际成片和独立manifest。
+
+执行前MemAvailable超过30GiB、GPUfree14916MiB，无正在运行的非X媒体进程。unit实际配置为PrivateNetwork=yes、ProtectSystem=strict、MemoryMax=2147483648、CPUQuotaPerSecUSec=2s、TasksMax=128、TimeoutStartUSec=90秒。生产state/releases/runtime只读、生产config不可访问，唯一可写业务区域为本轮验收目录；脚本验证了独立网络及临时目录绑定。
+
+| 验收项 | 实际结果 |
+| --- | --- |
+| 首次真实processor.repair | ready，reused=false |
+| 第二次相同请求 | ready，reused=true |
+| Fake下载 / FakeCOS上传 / HEAD | 1 / 1 / 3 |
+| 复用前后媒体命令数 | 4 / 4，四条命令均退出0 |
+| GPU编码 | 原业务h264_nvenc，未额外要求CUDA解码 |
+| 保留成片 | 1689374字节，2.005秒 |
+| 视频 | H264 High，1280×720，30fps，逐行，yuv420p |
+| 音频 | AAC-LC，48000Hz，双声道 |
+| 真实COS / 平台调用 | 0 / 0 |
+
+输出SHA256：
+
+    070f121667cad779cd969910819b117880e8195d7e981e88cca5f8ed5f801ab0
+
+独立manifest job key：
+
+    c462e47dcb765bf3f2efe434241cc62de0871faf6b28ad73fbc6e0a7b81a9c3c
+
+复用前后manifest SHA256相同：
+
+    13a0e3422d82dd2a724cf5f9a2bafd7afaf90ebf80bb9375e05a0cda37e3cabc
+
+结果文件SHA256：
+
+- result.json：b5917246666322fcf3a5158f2e436feb7822d9ecf7560c5d6e660800f6ab5433
+- processor-results.json：0b58871df4d39e60317dc99f6f3d2b552bc844bd9d2cb88ac05bff3bf27f57d9
+
+验收结束后只读复核保留成片的完整SHA、文件大小及manifest哈希；额外FFprobe仅允许file/pipe协议、无凭据环境，退出0并确认同样的视频/音频元数据。首次与复用返回值除reused外完全一致。
+
+生产X1780296、FB1207342、剧集1188891的PID/NRestarts及unit SHA前后不变，全部保持active。X current保持170e3，运行路径与/tmp、/var/tmp绑定不变；测试job未进入生产manifest。本次170份生产manifest哈希也恰好全部未变。正常生产若自然新增manifest，只记录差异，不能要求全局零变化或因此回滚；隔离与测试job缺席才是本验收的写入边界。
+
+c10/565两轮既有JSON证据及旧unit哈希均保持。未重启旧验收unit，未改动生产service、tunnel、current或CPU。该PASS仅覆盖本地合成输入和Fake上下游的真实处理流程，不代表真实下载、COS上传、X平台发布或新下载完整性修复的全部边界测试已被此单个用例覆盖。
 
 ## 本地验证
 
@@ -106,4 +157,4 @@
 
     python -m unittest discover -s ops/gpu-service-migration-20260828/hk/tests -v
 
-精确170e3b基线的23项测试全部通过，包括默认解码+h264_nvenc允许、缺失/失败/重复NVENC及仅libx264拒绝，以及新增的版本/哈希/导入守卫回归。本地Git blob SHA核对4/4通过，Python3.9语法检查及git diff --check通过；deploy.py与systemd模板无差异。未连接服务器或启动第三轮验收。
+精确170e3b基线的23项测试全部通过，包括默认解码+h264_nvenc允许、缺失/失败/重复NVENC及仅libx264拒绝，以及新增的版本/哈希/导入守卫回归。本地Git blob SHA核对4/4通过，Python3.9语法检查及git diff --check通过；deploy.py与systemd模板无差异。第三轮执行后的补充仅为证据记录，不再修改业务或验收代码。

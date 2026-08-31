@@ -86,7 +86,7 @@ verify只检查health、当前进程来源及/tmp和/var/tmp inode对应/data，
 
 ## X整条处理流程的独立离线验收
 
-已完成的x-offline-ffmpeg.json与x-offline-nvdec-nvenc.json是直接FFmpeg烟测，没有调用业务MediaRepairProcessor。x_offline_pipeline.py用于补齐这一覆盖；现已获单次授权运行两轮，均未取得整体验收PASS，结果与证据见 [X离线处理验收记录](x-offline-pipeline-test-report.md)。
+已完成的x-offline-ffmpeg.json与x-offline-nvdec-nvenc.json是直接FFmpeg烟测，没有调用业务MediaRepairProcessor。x_offline_pipeline.py用于补齐这一覆盖；前两轮失败保留，第三轮已对精确170e3现行源码完成完整离线流程PASS，结果与证据见 [X离线处理验收记录](x-offline-pipeline-test-report.md)。该结果不代表真实COS上传或平台发帖验收。
 
 协调者推送并部署精确SHA后，准备且仅准备以下验收目录及tmp、var-tmp、cache子目录，全部0700：
 
@@ -102,7 +102,9 @@ c10fd5c首轮独立验收的四个媒体子命令均退出0，已产生合格测
 
 56517311第二轮只启动一次，在媒体处理前因现行current已被上述并行任务升级至170e3b而被冻结版本守卫拒绝，ExecMainStatus=1、commands=[]，未生成processor-results或媒体产物。验收期间生产X/FB/剧集PID与NRestarts不变，170份生产manifest哈希不变，c10关键证据哈希不变。协调者确认这是获授权的外部升级，要求停止额外X测试；不放宽守卫、不再重跑、不改现行版本。第二轮失败unit和完整证据同样保留。
 
-后续协调者与该版本所有者确认170e3b为现行稳定基线，明确授权仅更新离线验收来源。已将本地Git远程跟踪对象中的四份源码SHA与香港只读证据逐项核对；仅更新验收脚本、回归和文档，deploy.py迁移旧基线、线上代码/current/unit全部不动。第三轮尚未执行，仍须先统一push部署，再获得新的单次启动授权，使用新证据目录与独立静态unit；不得重用或覆盖c10/565记录。
+后续协调者与该版本所有者确认170e3b为现行稳定基线，明确授权更新离线验收来源。已将本地Git远程跟踪对象中的四份源码SHA与香港只读证据逐项核对；仅更新验收脚本、回归和文档，deploy.py迁移旧基线、线上代码/current/unit全部不动。
+
+82788616355f019a1686f6f10c3ac618756e2ab1经统一push部署后获新的单次执行授权，第三轮于2026-08-28 17:59:40完成：Result=success、ExecMainStatus=0、result.ok=true，精确170e3来源守卫通过。真实处理器首次ready/reused=false，第二次ready/reused=true；Fake下载1、FakeCOS上传1/HEAD3，媒体命令4→4，manifest SHA保持。保留成片1689374字节、H264 720p30/AAC 48kHz双声道，独立只读SHA/FFprobe核验通过。生产X/FB/剧集PID、NRestarts、unit和X current/临时绑定前后不变，测试job未进入生产；本次170份生产manifest也未变化。此处记录现场事实，不把全局manifest零变化作为正常生产前提。旧两轮unit及证据均保留且哈希不变，没有重启或覆盖旧验收。
 
 ## 本地验证
 
