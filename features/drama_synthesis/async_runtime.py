@@ -771,11 +771,21 @@ class AsyncRuntime:
             record = self._active(context)
             if record is None:
                 return
-            prior = record["progress"] if record["stage"] == stage else {}
-            advanced = record["stage"] != stage or any(
-                key in ADVANCEMENT_METRICS and value > prior.get(key, -1) for key, value in clean.items()
-            )
-            if record["stage"] != stage:
+            same_stage = record["stage"] == stage
+            prior = record["progress"] if same_stage else {}
+            advanced = not same_stage
+            if same_stage:
+                for key, value in tuple(clean.items()):
+                    if key not in ADVANCEMENT_METRICS:
+                        continue
+                    previous = prior.get(key)
+                    if (type(previous) in (int, float) and math.isfinite(previous)
+                            and 0 <= previous <= 1e18):
+                        clean[key] = max(previous, value)
+                        advanced = advanced or value > previous
+                    else:
+                        advanced = True
+            else:
                 record["progress"] = {}
             record["stage"] = stage
             record["progress"].update(clean)
@@ -809,8 +819,23 @@ class AsyncRuntime:
                     record["_launches"].pop(launch, None)
             else:
                 identity = record["_children"].get(str(pid))
-                if identity is not None and self.process_probe(identity) == "stopped":
+                if identity is None:
+                    # A missing ledger entry cannot prove that the child is
+                    # gone. Persist an unknown identity so recovery remains
+                    # fenced even if the caller catches this clear failure.
+                    record["_children"][str(pid)] = {"pid": pid}
+                    self._save(record)
+                    raise runtime_error("gpu_process_state_unknown")
+                try:
+                    state = self.process_probe(identity)
+                except Exception:
+                    state = "unknown"
+                if state == "stopped":
                     record["_children"].pop(str(pid), None)
+                elif state == "alive":
+                    raise runtime_error("gpu_previous_process_running")
+                else:
+                    raise runtime_error("gpu_process_state_unknown")
             self._save(record)
 
     def _process_risk(self, record):
@@ -818,7 +843,13 @@ class AsyncRuntime:
         current_boot = _boot_id()
         if any(not current_boot or not row.get("boot_id") or row["boot_id"] == current_boot for row in launches.values()):
             return "gpu_process_state_unknown"
-        states = [self.process_probe(identity) for identity in record.get("_children", {}).values()]
+        states = []
+        for identity in record.get("_children", {}).values():
+            try:
+                state = self.process_probe(identity)
+            except Exception:
+                state = "unknown"
+            states.append(state if state in {"alive", "stopped"} else "unknown")
         if "alive" in states:
             return "gpu_previous_process_running"
         if any(state != "stopped" for state in states):

@@ -692,6 +692,58 @@ class AsyncRuntimeTests(unittest.TestCase):
             async_runtime.emit_progress("failed", percent=0)
         self.assertEqual((value.root / "jobs/async-fixture.json").read_bytes(), before)
 
+    def test_same_stage_advancement_is_high_water_but_rates_refresh_and_new_stage_resets(self):
+        clock, contexts = [1000.0], []
+        entered, finish = threading.Event(), threading.Event()
+
+        def execute(payload):
+            contexts.append(async_runtime.capture_context())
+            async_runtime.emit_progress(
+                "rendering_random", out_time_seconds=120, frame=3600,
+                bytes_done=5000, percent=50, fps=24.0, speed=0.5,
+                duration_seconds=600,
+            )
+            entered.set()
+            finish.wait(3)
+            return result_for(payload)
+
+        value = self.runtime(execute=execute, clock=lambda: clock[0])
+        value.submit(render_payload())
+        try:
+            self.assertTrue(entered.wait(2))
+            initial = value.get("async-fixture")
+            clock[0] += 1
+            with async_runtime.use_context(contexts[0]):
+                async_runtime.emit_progress(
+                    "rendering_random", out_time_seconds=119, frame=3599,
+                    bytes_done=4999, percent=49, fps=30.0, speed=0.75,
+                    duration_seconds=650,
+                )
+            current = value.get("async-fixture")
+            self.assertEqual(
+                {key: current["progress"][key]
+                 for key in ("out_time_seconds", "frame", "bytes_done", "percent")},
+                {"out_time_seconds": 120, "frame": 3600, "bytes_done": 5000, "percent": 50},
+            )
+            self.assertEqual(current["progress"]["fps"], 30.0)
+            self.assertEqual(current["progress"]["speed"], 0.75)
+            self.assertEqual(current["progress"]["duration_seconds"], 650)
+            self.assertEqual(current["last_progress_at"], initial["last_progress_at"])
+
+            clock[0] += 1
+            with async_runtime.use_context(contexts[0]):
+                async_runtime.emit_progress("uploading", uploaded_bytes=10, percent=5,
+                                            fps=12.0, speed=0.2)
+            changed = value.get("async-fixture")
+            self.assertEqual(changed["stage"], "uploading")
+            self.assertEqual(changed["progress"], {
+                "uploaded_bytes": 10, "percent": 5, "fps": 12.0, "speed": 0.2,
+            })
+            self.assertNotEqual(changed["last_progress_at"], current["last_progress_at"])
+        finally:
+            finish.set()
+        wait_for(lambda: value.get("async-fixture")["status"] == "completed")
+
     def test_queued_restart_preserves_generation_and_first_start(self):
         first = self.runtime(autostart=False)
         submitted = first.submit(render_payload())
@@ -803,6 +855,57 @@ class AsyncRuntimeTests(unittest.TestCase):
         self.assertEqual(record["_launches"], {})
         self.assertTrue(value._resource_blocked())
         self.assertNotIn("private", json.dumps(value.get("async-fixture")))
+
+    def test_clear_process_only_accepts_confirmed_stopped_child(self):
+        probe_state = ["stopped"]
+        probe = mock.Mock(side_effect=lambda _: probe_state[0])
+        value = self.runtime(autostart=False, process_probe=probe)
+        identity = {"pid": 123, "start_ticks": "1", "boot_id": "boot"}
+
+        for name, state, recorded, expected_code in (
+                ("stopped", "stopped", True, None),
+                ("alive", "alive", True, "gpu_previous_process_running"),
+                ("unknown", "unknown", True, "gpu_process_state_unknown"),
+                ("missing", "stopped", False, "gpu_process_state_unknown")):
+            with self.subTest(name=name):
+                payload = render_payload("clear-" + name)
+                value.submit(payload)
+                with value._mutex:
+                    record = value._records[payload["job_id"]]
+                    value._begin(record)
+                    if recorded:
+                        record["_children"]["123"] = dict(identity)
+                        value._save(record)
+                    context = async_runtime._ExecutionContext(
+                        value, record["job_id"], record["generation"], value.instance,
+                    )
+
+                probe_state[0] = state
+                calls_before = probe.call_count
+                if expected_code is None:
+                    value._process_event(context, 123, begin=False)
+                else:
+                    with self.assertRaises(DramaSynthesisError) as caught:
+                        value._process_event(context, 123, begin=False)
+                    self.assertEqual(caught.exception.code, expected_code)
+
+                durable = json.loads(
+                    (value.root / "jobs" / (payload["job_id"] + ".json")).read_text(encoding="utf-8")
+                )
+                if name == "stopped":
+                    self.assertNotIn("123", durable["_children"])
+                elif name == "missing":
+                    self.assertEqual(durable["_children"]["123"], {"pid": 123})
+                    self.assertEqual(probe.call_count, calls_before)
+                else:
+                    self.assertEqual(durable["_children"]["123"], identity)
+
+                # Leave this direct private-method fixture in a terminal state
+                # so runtime shutdown does not resemble an interrupted render.
+                with value._mutex:
+                    record.update(status="failed", stage="failed", _owner=None,
+                                  _children={}, _launches={})
+                    value._save(record)
 
     def test_context_propagation_and_stale_generation_fence(self):
         first_context, finish = [], threading.Event()

@@ -1504,7 +1504,7 @@ class RenderCheckpointTests(unittest.TestCase):
             self.assertFalse(self.output.with_name("result.mp4.render.json").exists())
 
     def test_render_deadline_default_env_and_explicit_values_above_four_hours_reach_runner(self):
-        cases = [(None, None, 43200), ("21600", None, 21600), ("120", 36000, 36000), (None, 86400, 86400)]
+        cases = [(None, None, 43200), ("21600", None, 43200), ("120", 36000, 43200), (None, 86400, 86400)]
         for index, (environment, explicit, expected) in enumerate(cases):
             self.kwargs["output"] = self.root / ("timeout-%s.mp4" % index)
             self.kwargs["timeout"] = explicit
@@ -1516,7 +1516,555 @@ class RenderCheckpointTests(unittest.TestCase):
         self.kwargs["timeout"] = None
         with mock.patch.dict(os.environ, {"DRAMA_GPU_RENDER_TIMEOUT": "28800"}), mock.patch.object(gpu, "run_render_with_progress", side_effect=lambda command, **_: Path(command[-1]).write_bytes(b"complete-render")) as tracked:
             gpu.render_random_output(**self.kwargs)
-        self.assertEqual(tracked.call_args.kwargs["timeout"], 28800)
+        self.assertEqual(tracked.call_args.kwargs["timeout"], 43200)
+        self.assertEqual(tracked.call_args.kwargs["configured_timeout"], 28800)
+        self.assertEqual(tracked.call_args.kwargs["absolute_timeout"], 86400)
+
+    def test_probe_duration_drives_conservative_absolute_budget_with_margin_and_cap(self):
+        # The absolute deadline uses a 0.10x planning floor, a 1.25 safety
+        # ratio and 30 minutes.  A caller's shorter transport-style timeout cannot
+        # truncate a long render, while an explicitly larger safe timeout is
+        # retained and the process lifetime remains capped at 24 hours.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(gpu.render_budget_seconds(5400, configured_timeout=60), 69300)
+            self.assertEqual(gpu.render_budget_seconds(300, configured_timeout=43200), 43200)
+            self.assertEqual(gpu.render_budget_seconds(22000, configured_timeout=60), 86400)
+            for duration in (True, 0, -1, float("nan"), float("inf"), "5400"):
+                with self.subTest(duration=duration), self.assertRaises(DramaSynthesisError):
+                    gpu.render_budget_seconds(duration, configured_timeout=60)
+            for configured in (True, 0, 59, 86401, -1, 60.5, "auto", float("inf")):
+                with self.subTest(configured=configured), self.assertRaises(DramaSynthesisError):
+                    gpu.render_budget_seconds(5400, configured_timeout=configured)
+
+    def test_probe_duration_budget_reaches_both_native_and_injected_runners(self):
+        long_info = {
+            **self.result_info,
+            "duration": 5400.0,
+            "video": {**self.result_info["video"], "duration": "5400.0"},
+        }
+        probe = lambda _, path: long_info
+        self.kwargs["timeout"] = 60
+        self.kwargs["output"] = self.root / "long-injected.mp4"
+        with mock.patch.object(gpu, "_probe", side_effect=probe):
+            gpu.render_random_output(**self.kwargs, runner=self.runner)
+        self.assertEqual(self.runner.call_args.kwargs["timeout"], 69300)
+
+        self.kwargs["output"] = self.root / "long-native.mp4"
+        with mock.patch.object(gpu, "_probe", side_effect=probe), mock.patch.object(
+            gpu, "run_render_with_progress",
+            side_effect=lambda command, **_: Path(command[-1]).write_bytes(b"complete-render"),
+        ) as tracked:
+            gpu.render_random_output(**self.kwargs)
+        self.assertEqual(tracked.call_args.kwargs["timeout"], 69300)
+        self.assertEqual(tracked.call_args.kwargs["configured_timeout"], 60)
+        self.assertEqual(tracked.call_args.kwargs["absolute_timeout"], 86400)
+
+    def test_timeout_and_process_failure_leave_only_private_bounded_safe_sidecar(self):
+        secret_url = URL + "&access_token=credential-never-persist"
+        private_stderr = ("Authorization: Bearer credential-never-persist\n" + secret_url + "\n") * 4096
+        cases = (
+            ("timeout", subprocess.TimeoutExpired(["ffmpeg", "-i", secret_url], 60,
+                                                  output="private stdout", stderr=private_stderr),
+             "drama_random_render_timeout"),
+            ("exit", subprocess.CalledProcessError(137, ["ffmpeg", "-i", secret_url],
+                                                    output="private stdout", stderr=private_stderr),
+             "drama_random_render_failed"),
+        )
+        for name, failure, expected_code in cases:
+            with self.subTest(name=name):
+                output = self.root / (name + ".mp4")
+                self.kwargs["output"] = output
+                diagnostic = output.with_name("." + output.name + ".render.failure.json")
+                diagnostic.write_text("legacy world-readable diagnostic", encoding="utf-8")
+                if os.name == "posix":
+                    diagnostic.chmod(0o644)
+
+                def fail(command, **_):
+                    Path(command[-1]).write_bytes(b"unverified-partial-media")
+                    raise failure
+
+                tracked_atomic = mock.Mock(wraps=gpu.atomic_write_record)
+                with mock.patch.object(gpu, "atomic_write_record", tracked_atomic), \
+                        self.assertRaises(DramaSynthesisError) as caught:
+                    gpu.render_random_output(**self.kwargs, runner=fail)
+                self.assertEqual(caught.exception.code, expected_code)
+                self.assertTrue(diagnostic.is_file())
+                if os.name == "posix":
+                    self.assertEqual(stat.S_IMODE(diagnostic.stat().st_mode), 0o600)
+                self.assertLessEqual(diagnostic.stat().st_size, 65536)
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                self.assertEqual(payload["version"], 1)
+                self.assertEqual(payload["public_code"], expected_code)
+                stderr_evidence = payload["stderr"]
+                self.assertEqual(stderr_evidence["bytes"], len(private_stderr.encode("utf-8")))
+                self.assertRegex(stderr_evidence["sha256"], r"^[0-9a-f]{64}$")
+                self.assertFalse(stderr_evidence["truncated"])
+                self.assertFalse(stderr_evidence["raw_stored"])
+                self.assertTrue(stderr_evidence["encoding_transformed"])
+                encoded = json.dumps(payload, ensure_ascii=False)
+                for private in ("credential-never-persist", "private stdout", "media.example.test",
+                                "ffmpeg -i", private_stderr[:80]):
+                    self.assertNotIn(private, encoded)
+                self.assertTrue(any(Path(call.args[0]) == diagnostic for call in tracked_atomic.call_args_list))
+                self.assertEqual(list(self.root.glob("." + diagnostic.name + ".*")), [])
+                self.assertFalse(output.exists())
+                self.assertFalse(output.with_name(output.name + ".render.json").exists())
+                self.assertFalse(output.with_name(output.name + ".render.prepared.json").exists())
+                self.assertEqual(list(self.root.glob(".random-render-*.mp4")), [])
+
+    def test_diagnostic_write_failure_preserves_guard_and_partial_and_blocks_reencode(self):
+        output = self.root / "diagnostic-io-failure.mp4"
+        self.kwargs["output"] = output
+        diagnostic = output.with_name("." + output.name + ".render.failure.json")
+        real_atomic_write = gpu.atomic_write_record
+
+        def fail_diagnostic(path, value):
+            if Path(path) == diagnostic:
+                raise OSError("simulated diagnostic disk failure " + URL)
+            return real_atomic_write(path, value)
+
+        def fail_render(command, **_):
+            Path(command[-1]).write_bytes(b"unverified-partial-media")
+            raise subprocess.TimeoutExpired(["ffmpeg", "-i", URL], 60, stderr="private stderr")
+
+        with mock.patch.object(gpu, "atomic_write_record", side_effect=fail_diagnostic):
+            with self.assertRaises(DramaSynthesisError) as caught:
+                gpu.render_random_output(**self.kwargs, runner=fail_render)
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        guard_path = output.with_name(output.name + ".render.prepared.json")
+        guard = json.loads(guard_path.read_text(encoding="utf-8"))
+        self.assertIsNone(guard["artifact"])
+        self.assertIsNone(guard["result"])
+        partial = output.parent / guard["temporary_name"]
+        self.assertEqual(partial.read_bytes(), b"unverified-partial-media")
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_name(output.name + ".render.json").exists())
+        self.assertFalse(diagnostic.exists())
+
+        retry = mock.Mock(side_effect=AssertionError("unverified partial must block re-encoding"))
+        with self.assertRaises(DramaSynthesisError) as replay:
+            gpu.render_random_output(**self.kwargs, runner=retry)
+        self.assertEqual(replay.exception.code, "drama_media_checkpoint_unverified")
+        retry.assert_not_called()
+        self.assertEqual(partial.read_bytes(), b"unverified-partial-media")
+
+    def test_post_render_validation_failures_are_diagnosed_without_promoting_partial_media(self):
+        original_fingerprint = gpu.file_fingerprint
+        cases = (
+            ("probe", "post_render_probe_failed", "drama_random_probe_failed", False),
+            ("duration", "duration_mismatch", "drama_random_duration_mismatch", False),
+            ("codec", "output_contract_invalid", "drama_random_output_contract_invalid", False),
+            ("fingerprint", "fingerprint_failed", "drama_media_checkpoint_unverified", True),
+        )
+        for name, reason, public_code, preserve in cases:
+            with self.subTest(name=name):
+                output = self.root / ("post-" + name + ".mp4")
+                self.kwargs["output"] = output
+
+                def probe(_, path):
+                    if Path(path) == self.source:
+                        return {**self.result_info, "duration": 5.0}
+                    if name == "probe":
+                        raise DramaSynthesisError("drama_random_probe_failed", "随机模板视频校验失败", 502)
+                    info = {**self.result_info, "video": dict(self.result_info["video"])}
+                    if name == "duration":
+                        info["duration"], info["video"]["duration"] = 3.0, "3.0"
+                    elif name == "codec":
+                        info["video"]["codec_name"] = "hevc"
+                    return info
+
+                def fingerprint(path):
+                    if name == "fingerprint" and Path(path).name.startswith(".random-render-"):
+                        raise gpu.checkpoint_error()
+                    return original_fingerprint(path)
+
+                with mock.patch.object(gpu, "_probe", side_effect=probe), \
+                        mock.patch.object(gpu, "file_fingerprint", side_effect=fingerprint), \
+                        self.assertRaises(DramaSynthesisError) as caught:
+                    gpu.render_random_output(**self.kwargs, runner=self.runner)
+                self.assertEqual(caught.exception.code, public_code)
+                diagnostic = output.with_name("." + output.name + ".render.failure.json")
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                self.assertEqual((payload["reason"], payload["public_code"]), (reason, public_code))
+                self.assertNotIn(str(self.root), json.dumps(payload, ensure_ascii=False))
+                self.assertFalse(output.exists())
+                self.assertFalse(output.with_name(output.name + ".render.json").exists())
+                guard_path = output.with_name(output.name + ".render.prepared.json")
+                self.assertEqual(guard_path.exists(), preserve)
+                partials = list(self.root.glob(".random-render-*.mp4"))
+                self.assertEqual(bool(partials), preserve)
+                if preserve:
+                    guard = json.loads(guard_path.read_text(encoding="utf-8"))
+                    self.assertEqual(partials, [self.root / guard["temporary_name"]])
+                    partials[0].unlink()
+                    guard_path.unlink()
+
+    def test_async_context_uses_private_generation_path_and_invalid_context_never_falls_back(self):
+        from features.drama_synthesis import async_runtime
+        runtime_root = self.root / ".runtime"
+        context = SimpleNamespace(
+            runtime=SimpleNamespace(root=runtime_root), job_id="job-safe_01", generation=7, owner="worker",
+        )
+        self.kwargs["output"] = self.root / "context.mp4"
+
+        def context_timeout(*_, **__):
+            raise subprocess.TimeoutExpired(["ffmpeg"], 60, stderr="safe fixture")
+
+        with async_runtime.use_context(context), self.assertRaises(DramaSynthesisError):
+            gpu.render_random_output(**self.kwargs, runner=context_timeout)
+        diagnostic = runtime_root / "diagnostics" / "job-safe_01" / "generation-00000007.random-render.json"
+        self.assertTrue(diagnostic.is_file())
+        self.assertFalse((self.root / ".context.mp4.render.failure.json").exists())
+        context_payload = json.loads(diagnostic.read_text(encoding="utf-8"))["context"]
+        self.assertEqual((context_payload["job_id"], context_payload["generation"]), ("job-safe_01", 7))
+        self.assertEqual(set(context_payload), {
+            "job_id", "generation", "source_sha256", "source_size_bytes",
+            "recipe_sha256", "asset_set_sha256",
+        })
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(diagnostic.stat().st_mode), 0o600)
+
+        invalid = SimpleNamespace(
+            runtime=SimpleNamespace(root=runtime_root), job_id="../escape", generation=7, owner="worker",
+        )
+        fallback = self.root / ".invalid-context.mp4.render.failure.json"
+        with async_runtime.use_context(invalid), self.assertRaises(DramaSynthesisError) as caught:
+            gpu._render_failure_diagnostic_path(self.root / "invalid-context.mp4")
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertFalse(fallback.exists())
+
+        incomplete_identity = SimpleNamespace(
+            runtime=SimpleNamespace(root=runtime_root), job_id="job-safe_01", generation=8, owner="worker",
+        )
+        invalid_identity_path = (runtime_root / "diagnostics" / "job-safe_01" /
+                                 "generation-00000008.random-render.json")
+        with async_runtime.use_context(incomplete_identity), self.assertRaises(DramaSynthesisError) as identity_error:
+            gpu._write_render_failure_diagnostic(
+                invalid_identity_path, reason="render_timeout",
+                public_code="drama_random_render_timeout", duration_seconds=5,
+                elapsed_seconds=1, configured_floor=60, planned_timeout=43200,
+                final_deadline_offset=43200, global_cap=86400, stall_timeout=1800,
+                last_progress={"duration_seconds": 5}, returncode=-9,
+                stderr_evidence=gpu._new_stderr_evidence(),
+                context={"source_sha256": "a" * 64},
+            )
+        self.assertEqual(identity_error.exception.code, "drama_media_checkpoint_unverified")
+        self.assertFalse(invalid_identity_path.exists())
+
+    def test_success_exit_cleanup_failures_are_diagnosed_and_preserve_recovery_evidence(self):
+        from features.drama_synthesis import async_runtime
+
+        @contextmanager
+        def launch():
+            yield
+
+        for failure in ("poll", "join", "close", "clear"):
+            with self.subTest(failure=failure):
+                output = self.root / ("cleanup-" + failure + ".mp4")
+                self.kwargs["output"] = output
+                killed = []
+
+                class Stream(io.StringIO):
+                    def close(self):
+                        if failure == "close":
+                            raise OSError("simulated close failure")
+                        return super().close()
+
+                class Process:
+                    pid = 12345
+                    returncode = None
+                    stdout, stderr = Stream(""), Stream("")
+                    def wait(self, timeout):
+                        self.returncode = 0
+                        return 0
+                    def poll(self):
+                        if failure == "poll":
+                            raise OSError("simulated poll failure")
+                        return self.returncode
+                    def kill(self):
+                        killed.append(True)
+
+                class Thread:
+                    def __init__(self, target, daemon):
+                        self.target = target
+                    def start(self):
+                        self.target()
+                    def join(self, timeout=None):
+                        if failure == "join":
+                            raise OSError("simulated join failure")
+                    def is_alive(self):
+                        return False
+
+                def popen(command, **_):
+                    Path(command[-1]).write_bytes(b"complete-but-cleanup-unverified")
+                    return Process()
+
+                def clear(_):
+                    if failure == "clear":
+                        raise OSError("simulated clear failure")
+
+                with mock.patch.object(gpu.threading, "Thread", Thread), \
+                        mock.patch.object(gpu.subprocess, "Popen", side_effect=popen), \
+                        mock.patch.object(async_runtime, "process_launch", launch), \
+                        mock.patch.object(async_runtime, "record_process"), \
+                        mock.patch.object(async_runtime, "clear_process", side_effect=clear), \
+                        mock.patch.object(async_runtime, "emit_progress"), \
+                        self.assertRaises(DramaSynthesisError) as caught:
+                    gpu.render_random_output(**self.kwargs)
+                self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+                self.assertEqual(killed, [])
+                diagnostic = output.with_name("." + output.name + ".render.failure.json")
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                self.assertEqual((payload["reason"], payload["public_code"]),
+                                 ("cleanup_unverified", "drama_media_checkpoint_unverified"))
+                guard_path = output.with_name(output.name + ".render.prepared.json")
+                guard = json.loads(guard_path.read_text(encoding="utf-8"))
+                partial = output.parent / guard["temporary_name"]
+                self.assertEqual(partial.read_bytes(), b"complete-but-cleanup-unverified")
+                self.assertFalse(output.exists())
+                self.assertFalse(output.with_name(output.name + ".render.json").exists())
+                partial.unlink()
+                guard_path.unlink()
+
+    def test_structured_unknown_process_clear_failure_is_checkpoint_unverified(self):
+        from features.drama_synthesis import async_runtime
+
+        output = self.root / "clear-process-unknown.mp4"
+        self.kwargs["output"] = output
+
+        @contextmanager
+        def launch():
+            yield
+
+        class Process:
+            pid = 12345
+            returncode = 0
+            stdout, stderr = io.BytesIO(b""), io.BytesIO(b"")
+
+            def wait(self, timeout):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                raise AssertionError("exited child must not be killed")
+
+        class Thread:
+            def __init__(self, target, daemon):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        def popen(command, **_):
+            Path(command[-1]).write_bytes(b"complete-but-process-state-unknown")
+            return Process()
+
+        clear = mock.Mock(side_effect=async_runtime.runtime_error("gpu_process_state_unknown"))
+        with mock.patch.object(gpu.threading, "Thread", Thread), \
+                mock.patch.object(gpu.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(async_runtime, "process_launch", launch), \
+                mock.patch.object(async_runtime, "record_process"), \
+                mock.patch.object(async_runtime, "clear_process", clear), \
+                mock.patch.object(async_runtime, "emit_progress"), \
+                self.assertRaises(DramaSynthesisError) as caught:
+            gpu.render_random_output(**self.kwargs)
+
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        clear.assert_called_once_with(12345)
+        diagnostic = output.with_name("." + output.name + ".render.failure.json")
+        payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+        self.assertEqual((payload["reason"], payload["public_code"]),
+                         ("cleanup_unverified", "drama_media_checkpoint_unverified"))
+        self.assertNotIn("gpu_process_state_unknown", json.dumps(payload, ensure_ascii=False))
+        guard_path = output.with_name(output.name + ".render.prepared.json")
+        guard = json.loads(guard_path.read_text(encoding="utf-8"))
+        self.assertIsNone(guard["artifact"])
+        self.assertIsNone(guard["result"])
+        partial = output.parent / guard["temporary_name"]
+        self.assertEqual(partial.read_bytes(), b"complete-but-process-state-unknown")
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_name(output.name + ".render.json").exists())
+
+    def test_exited_child_with_live_reader_never_closes_its_pipe_or_clears_process(self):
+        from features.drama_synthesis import async_runtime
+
+        @contextmanager
+        def launch():
+            yield
+
+        for stuck_reader, stuck_stream in (("read_progress", "stdout"), ("read_errors", "stderr")):
+            with self.subTest(stuck_reader=stuck_reader):
+                output = self.root / ("reader-" + stuck_stream + ".mp4")
+                self.kwargs["output"] = output
+                close_calls, join_calls = [], []
+
+                class Stream:
+                    def __init__(self, name):
+                        self.name = name
+                    def __iter__(self):
+                        return iter(())
+                    def read(self, size=-1):
+                        return b""
+                    def close(self):
+                        close_calls.append((self.name, threading.current_thread().name))
+
+                class Process:
+                    pid = 12345
+                    returncode = 0
+                    stdout, stderr = Stream("stdout"), Stream("stderr")
+                    def wait(self, timeout):
+                        return 0
+                    def poll(self):
+                        return 0
+                    def kill(self):
+                        raise AssertionError("exited child must not be killed")
+
+                class Thread:
+                    def __init__(self, target, daemon):
+                        self.target, self.name = target, target.__name__
+                    def start(self):
+                        if self.name != stuck_reader:
+                            self.target()
+                    def join(self, timeout=None):
+                        join_calls.append((self.name, timeout))
+                    def is_alive(self):
+                        return self.name == stuck_reader
+
+                def popen(command, **_):
+                    Path(command[-1]).write_bytes(b"complete-but-reader-live")
+                    return Process()
+
+                cleared = mock.Mock()
+                with mock.patch.object(gpu.threading, "Thread", Thread), \
+                        mock.patch.object(gpu.subprocess, "Popen", side_effect=popen), \
+                        mock.patch.object(async_runtime, "process_launch", launch), \
+                        mock.patch.object(async_runtime, "record_process"), \
+                        mock.patch.object(async_runtime, "clear_process", cleared), \
+                        mock.patch.object(async_runtime, "emit_progress"), \
+                        self.assertRaises(DramaSynthesisError) as caught:
+                    gpu.render_random_output(**self.kwargs)
+                self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+                cleared.assert_not_called()
+                self.assertFalse(any(name == stuck_stream for name, _ in close_calls))
+                self.assertTrue(any(name == stuck_reader and timeout in {2, 5} for name, timeout in join_calls))
+                diagnostic = output.with_name("." + output.name + ".render.failure.json")
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                self.assertEqual((payload["reason"], payload["public_code"]),
+                                 ("cleanup_unverified", "drama_media_checkpoint_unverified"))
+                guard_path = output.with_name(output.name + ".render.prepared.json")
+                guard = json.loads(guard_path.read_text(encoding="utf-8"))
+                partial = output.parent / guard["temporary_name"]
+                self.assertEqual(partial.read_bytes(), b"complete-but-reader-live")
+                partial.unlink()
+                guard_path.unlink()
+
+    def test_none_after_durable_prepare_is_checkpoint_failure_and_keeps_artifact(self):
+        original_commit = gpu._commit_prepared_render
+        final_commit_seen = []
+
+        def missing_commit_result(prepared_path, *args, **kwargs):
+            prepared = gpu.read_record(prepared_path)
+            if isinstance(prepared, dict) and prepared.get("result") is not None:
+                final_commit_seen.append(True)
+                return None
+            return original_commit(prepared_path, *args, **kwargs)
+
+        with mock.patch.object(gpu, "_commit_prepared_render", side_effect=missing_commit_result), \
+                self.assertRaises(DramaSynthesisError) as caught:
+            self.render()
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertEqual(final_commit_seen, [True])
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_name("result.mp4.render.json").exists())
+        guard_path = self.output.with_name("result.mp4.render.prepared.json")
+        guard = json.loads(guard_path.read_text(encoding="utf-8"))
+        self.assertIsNotNone(guard["artifact"])
+        self.assertIsNotNone(guard["result"])
+        artifact = self.root / guard["temporary_name"]
+        self.assertEqual(artifact.read_bytes(), b"complete-render")
+
+    def test_finally_cleanup_errors_do_not_mask_failure_and_committed_output_is_never_deleted(self):
+        for failure in ("read_record", "partial_unlink", "guard_unlink"):
+            with self.subTest(failure=failure):
+                output = self.root / ("finally-" + failure + ".mp4")
+                self.kwargs["output"] = output
+                diagnostic = output.with_name("." + output.name + ".render.failure.json")
+                guard_path = output.with_name(output.name + ".render.prepared.json")
+                real_read, real_unlink = gpu.read_record, Path.unlink
+                unlink_order = []
+
+                def read(path):
+                    if failure == "read_record" and Path(path) == guard_path and diagnostic.exists():
+                        raise OSError("simulated final read failure")
+                    return real_read(path)
+
+                def unlink(path, *args, **kwargs):
+                    path = Path(path)
+                    if diagnostic.exists() and (path == guard_path or path.name.startswith(".random-render-")):
+                        unlink_order.append(path.name)
+                    if failure == "partial_unlink" and path.name.startswith(".random-render-") and diagnostic.exists():
+                        raise OSError("simulated final partial unlink failure")
+                    if failure == "guard_unlink" and path == guard_path and diagnostic.exists():
+                        raise OSError("simulated final unlink failure")
+                    return real_unlink(path, *args, **kwargs)
+
+                def timeout_runner(command, **_):
+                    Path(command[-1]).write_bytes(b"known-timeout-partial")
+                    raise subprocess.TimeoutExpired(["ffmpeg"], 60, stderr="safe fixture")
+
+                with mock.patch.object(gpu, "read_record", side_effect=read), \
+                        mock.patch.object(Path, "unlink", new=unlink), \
+                        self.assertRaises(DramaSynthesisError) as caught:
+                    gpu.render_random_output(**self.kwargs, runner=timeout_runner)
+                self.assertEqual(caught.exception.code, "drama_random_render_timeout")
+                self.assertTrue(diagnostic.is_file())
+                self.assertTrue(guard_path.is_file())
+                guard = json.loads(guard_path.read_text(encoding="utf-8"))
+                partial = output.parent / guard["temporary_name"]
+                if failure in {"read_record", "partial_unlink"}:
+                    self.assertTrue(partial.is_file())
+                else:
+                    self.assertFalse(partial.exists())
+                if failure == "partial_unlink":
+                    self.assertEqual(unlink_order, [partial.name])
+                elif failure == "guard_unlink":
+                    self.assertEqual(unlink_order, [partial.name, guard_path.name])
+                partial.unlink(missing_ok=True)
+                guard_path.unlink()
+
+        output = self.root / "committed-cleanup.mp4"
+        self.kwargs["output"] = output
+        checkpoint = output.with_name(output.name + ".render.json")
+        prepared = output.with_name(output.name + ".render.prepared.json")
+        real_unlink = Path.unlink
+
+        def fail_after_commit(path, *args, **kwargs):
+            if Path(path) == prepared and checkpoint.exists():
+                raise OSError("simulated committed prepare cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        committed_runner = mock.Mock(
+            side_effect=lambda command, **_: Path(command[-1]).write_bytes(b"complete-render"),
+        )
+        with mock.patch.object(Path, "unlink", new=fail_after_commit):
+            result = gpu.render_random_output(**self.kwargs, runner=committed_runner)
+        self.assertEqual(result["output_sha256"], hashlib.sha256(b"complete-render").hexdigest())
+        self.assertEqual(output.read_bytes(), b"complete-render")
+        self.assertTrue(checkpoint.is_file())
+        self.assertTrue(prepared.is_file())
+        before = output.stat().st_mtime_ns
+        committed_runner.reset_mock()
+        gpu.render_random_output(**self.kwargs, runner=committed_runner)
+        committed_runner.assert_not_called()
+        self.assertEqual(output.stat().st_mtime_ns, before)
 
     def test_invalid_render_deadline_fails_before_encoder_launch(self):
         for value in (True, 0, 59, 86401, -1, 60.5, "auto", float("inf")):
@@ -1606,11 +2154,15 @@ class ProcessProgressTests(unittest.TestCase):
     def test_timeout_kills_waits_then_clears_confirmed_child(self):
         from features.drama_synthesis import async_runtime
         events = []
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        diagnostic = Path(directory.name) / "native-timeout.json"
 
         class Process:
             pid = 12345
             returncode = None
             stdout = io.StringIO("")
+            stderr = io.StringIO("No space left on device " + URL)
             def wait(self, timeout):
                 events.append("wait")
                 self.returncode = -9
@@ -1624,10 +2176,479 @@ class ProcessProgressTests(unittest.TestCase):
         def launch():
             yield
 
-        with mock.patch.object(async_runtime, "process_launch", launch), mock.patch.object(async_runtime, "record_process"), mock.patch.object(async_runtime, "clear_process", side_effect=lambda _: events.append("clear")), mock.patch.object(async_runtime, "emit_progress"), mock.patch.object(gpu.time, "monotonic", side_effect=[0, 2]):
+        with mock.patch.object(async_runtime, "process_launch", launch), mock.patch.object(async_runtime, "record_process"), mock.patch.object(async_runtime, "clear_process", side_effect=lambda _: events.append("clear")), mock.patch.object(async_runtime, "emit_progress"), mock.patch.object(gpu.time, "monotonic", side_effect=[0, 2, 2]):
             with self.assertRaises(TimeoutError):
-                gpu.run_render_with_progress(["ffmpeg", "output.mp4"], timeout=1, duration_seconds=5, popen=lambda *_, **__: Process())
+                gpu.run_render_with_progress(
+                    ["ffmpeg", "output.mp4"], timeout=1, duration_seconds=5,
+                    diagnostic_path=diagnostic, popen=lambda *_, **__: Process(),
+                )
         self.assertEqual(events, ["kill", "wait", "clear"])
+        payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+        self.assertEqual((payload["reason"], payload["public_code"]),
+                         ("render_timeout", "drama_random_render_timeout"))
+        self.assertIn("disk_full", payload["stderr"]["tags"])
+        self.assertNotIn("media.example.test", diagnostic.read_text(encoding="utf-8"))
+
+    def test_progress_can_extend_but_never_shrink_initial_deadline(self):
+        from features.drama_synthesis import async_runtime
+
+        class ControlledThread:
+            progress_target = None
+            def __init__(self, target, daemon):
+                self.target = target
+            def start(self):
+                if self.target.__name__ == "read_progress":
+                    ControlledThread.progress_target = self.target
+                else:
+                    self.target()
+            def join(self, timeout=None):
+                pass
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+            def __call__(self):
+                return self.now
+
+        class Process:
+            pid = 12345
+            def __init__(self, clock, progress, advances):
+                self.clock, self.stdout = clock, io.StringIO(progress)
+                self.advances, self.returncode = list(advances), None
+            def wait(self, timeout):
+                if self.returncode is not None:
+                    return self.returncode
+                advance, completed = self.advances.pop(0)
+                self.clock.now += advance
+                if ControlledThread.progress_target is not None:
+                    target, ControlledThread.progress_target = ControlledThread.progress_target, None
+                    target()
+                if completed:
+                    self.returncode = 0
+                    return 0
+                raise subprocess.TimeoutExpired(["ffmpeg"], timeout)
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                self.returncode = -9
+
+        @contextmanager
+        def launch():
+            yield
+
+        cases = (
+            # Very slow observed progress outlives the 12 hour initial deadline.
+            # Valid progress extends it toward, but never beyond, the duration
+            # based global budget.
+            ("extend", 43200, 300, "out_time_us=10000000\nprogress=continue\n",
+             [(10000, False), (34000, False), (2000, True)]),
+            # The fast sample's estimate is shorter than the 60000 second base.
+            # A later loop at t=50000 must still run instead of adopting that
+            # shorter estimate as a new deadline.
+            ("no-shrink", 60000, 100, "out_time_us=90000000\nspeed=100x\nprogress=continue\n",
+             [(10000, False), (40000, False), (9000, True)]),
+        )
+        for name, base, duration, progress, advances in cases:
+            with self.subTest(name=name):
+                clock = Clock()
+                ControlledThread.progress_target = None
+                process = Process(clock, progress, advances)
+                with mock.patch.object(gpu.threading, "Thread", ControlledThread), \
+                        mock.patch.object(gpu, "_render_stall_seconds", return_value=86400), \
+                        mock.patch.object(async_runtime, "process_launch", launch), \
+                        mock.patch.object(async_runtime, "record_process"), \
+                        mock.patch.object(async_runtime, "clear_process"), \
+                        mock.patch.object(async_runtime, "emit_progress"):
+                    gpu.run_render_with_progress(
+                        ["ffmpeg", "output.mp4"], timeout=base,
+                        absolute_timeout=86400,
+                        duration_seconds=duration, stall_timeout=None,
+                        popen=lambda *_, **__: process, monotonic=clock,
+                    )
+                self.assertEqual(process.returncode, 0)
+
+    def test_sub_millisecond_strict_progress_refreshes_stall_and_deadline_but_equal_metadata_does_not(self):
+        from features.drama_synthesis import async_runtime
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+            def __call__(self):
+                return self.now
+
+        class ProgressStream:
+            def __init__(self):
+                self.lines = []
+            def feed(self, packet):
+                self.lines = [] if packet is None else packet.splitlines(keepends=True)
+            def __iter__(self):
+                lines, self.lines = self.lines, []
+                return iter(lines)
+            def close(self):
+                pass
+
+        class ControlledThread:
+            progress_target = None
+            def __init__(self, target, daemon):
+                self.target = target
+            def start(self):
+                if self.target.__name__ == "read_progress":
+                    ControlledThread.progress_target = self.target
+                else:
+                    self.target()
+            def join(self, timeout=None):
+                pass
+            def is_alive(self):
+                return False
+
+        class Process:
+            pid = 12345
+            def __init__(self, clock, steps):
+                self.clock, self.steps, self.returncode = clock, list(steps), None
+                self.stdout, self.stderr = ProgressStream(), io.BytesIO(b"")
+            def wait(self, timeout):
+                if self.returncode is not None:
+                    return self.returncode
+                advance, packet, result = self.steps.pop(0)
+                self.clock.now += advance
+                if packet is not None:
+                    self.stdout.feed(packet)
+                    ControlledThread.progress_target()
+                if result == "timeout":
+                    raise subprocess.TimeoutExpired(["ffmpeg"], timeout)
+                self.returncode = result
+                return result
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                self.returncode = -9
+
+        @contextmanager
+        def launch():
+            yield
+
+        first = "out_time_us=1000000\nframe=10\nfps=30\nspeed=1.0x\nprogress=continue\n"
+        variants = {
+            "strict-0.5ms": "out_time_us=1000500\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
+            "strict-1ms": "out_time_us=1001000\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
+            "equal": "out_time_us=1000000\nframe=10\nfps=32\nspeed=1.2x\nprogress=continue\n",
+            "metadata-only": "fps=33\nspeed=1.3x\nprogress=continue\n",
+        }
+
+        def patches(process, clock):
+            return (
+                mock.patch.object(gpu.threading, "Thread", ControlledThread),
+                mock.patch.object(async_runtime, "process_launch", launch),
+                mock.patch.object(async_runtime, "record_process"),
+                mock.patch.object(async_runtime, "clear_process"),
+                mock.patch.object(async_runtime, "emit_progress"),
+            )
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        deadlines = {}
+        for name, second in variants.items():
+            with self.subTest(deadline=name):
+                clock = Clock()
+                ControlledThread.progress_target = None
+                process = Process(clock, [
+                    (400, first, "timeout"),
+                    (400, second, 1),
+                ])
+                diagnostic = Path(directory.name) / (name + ".json")
+                contexts = patches(process, clock)
+                with contexts[0], contexts[1], contexts[2], contexts[3], contexts[4], \
+                        self.assertRaises(RuntimeError):
+                    gpu.run_render_with_progress(
+                        ["ffmpeg", "output.mp4"], timeout=900, absolute_timeout=86400,
+                        configured_timeout=900, duration_seconds=100, stall_timeout=900,
+                        diagnostic_path=diagnostic, popen=lambda *_, **__: process, monotonic=clock,
+                    )
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                deadlines[name] = payload["final_deadline_offset_seconds"]
+                if name.startswith("strict-"):
+                    self.assertEqual(payload["last_progress"]["out_time_seconds"],
+                                     1.0005 if name == "strict-0.5ms" else 1.001)
+                else:
+                    self.assertEqual(payload["last_progress"]["out_time_seconds"], 1.0)
+        self.assertGreater(deadlines["strict-0.5ms"], deadlines["equal"])
+        self.assertGreater(deadlines["strict-1ms"], deadlines["equal"])
+        self.assertEqual(deadlines["equal"], deadlines["metadata-only"])
+
+        for name, second in variants.items():
+            with self.subTest(stall=name):
+                clock = Clock()
+                ControlledThread.progress_target = None
+                process = Process(clock, [
+                    (100, first, "timeout"),
+                    (850, second, "timeout"),
+                    (100, None, "timeout"),
+                    (100, None, 0),
+                ])
+                contexts = patches(process, clock)
+                with contexts[0], contexts[1], contexts[2], contexts[3], contexts[4]:
+                    if name.startswith("strict-"):
+                        gpu.run_render_with_progress(
+                            ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=86400,
+                            duration_seconds=100, stall_timeout=900,
+                            popen=lambda *_, **__: process, monotonic=clock,
+                        )
+                        self.assertEqual(process.returncode, 0)
+                    else:
+                        with self.assertRaisesRegex(TimeoutError, "stalled"):
+                            gpu.run_render_with_progress(
+                                ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=86400,
+                                duration_seconds=100, stall_timeout=900,
+                                popen=lambda *_, **__: process, monotonic=clock,
+                            )
+
+    def test_progress_queue_folds_high_water_and_native_stderr_hashes_exact_bytes(self):
+        from features.drama_synthesis import async_runtime
+        raw_stderr = b"invalid-utf8:\xff\xfe no space left on device\n"
+        progress_text = "".join((
+            "out_time_us=10000000\nframe=100\nfps=30\nspeed=1.0x\nprogress=continue\n",
+            "out_time_us=9000000\nframe=90\nfps=31\nspeed=0.9x\nprogress=continue\n",
+            "out_time_us=11000000\nframe=101\nfps=32\nspeed=1.1x\nprogress=continue\n",
+            "out_time_us=8000000\nframe=80\nfps=33\nspeed=1.2x\nprogress=end\n",
+        ))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        diagnostic = Path(directory.name) / "folded-progress.json"
+
+        class Process:
+            pid = 12345
+            returncode = 1
+            stdout, stderr = io.StringIO(progress_text), io.BytesIO(raw_stderr)
+            def wait(self, timeout):
+                return self.returncode
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                raise AssertionError("exited child must not be killed")
+
+        class Thread:
+            def __init__(self, target, daemon):
+                self.target = target
+            def start(self):
+                self.target()
+            def join(self, timeout=None):
+                pass
+            def is_alive(self):
+                return False
+
+        @contextmanager
+        def launch():
+            yield
+
+        with mock.patch.object(gpu.threading, "Thread", Thread), \
+                mock.patch.object(async_runtime, "process_launch", launch), \
+                mock.patch.object(async_runtime, "record_process"), \
+                mock.patch.object(async_runtime, "clear_process"), \
+                mock.patch.object(async_runtime, "emit_progress") as emitted, \
+                self.assertRaises(RuntimeError):
+            gpu.run_render_with_progress(
+                ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=86400,
+                duration_seconds=100, diagnostic_path=diagnostic,
+                popen=lambda *_, **__: Process(),
+            )
+        payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+        expected = {"out_time_seconds": 11.0, "frame": 101, "fps": 33.0, "speed": 1.2}
+        for key, value in expected.items():
+            self.assertEqual(payload["last_progress"][key], value)
+        self.assertTrue(any(all(call.kwargs.get(key) == value for key, value in expected.items())
+                            for call in emitted.call_args_list))
+        self.assertTrue(payload["progress_stream_complete"])
+        self.assertEqual(payload["stderr"]["bytes"], len(raw_stderr))
+        self.assertEqual(payload["stderr"]["sha256"], hashlib.sha256(raw_stderr).hexdigest())
+        self.assertFalse(payload["stderr"]["encoding_transformed"])
+        self.assertFalse(payload["stderr"]["raw_stored"])
+
+    def test_exited_process_wins_at_exact_deadline_and_stall_boundaries(self):
+        from features.drama_synthesis import async_runtime
+
+        class Thread:
+            def __init__(self, target, daemon):
+                self.target = target
+            def start(self):
+                self.target()
+            def join(self, timeout=None):
+                pass
+            def is_alive(self):
+                return False
+
+        @contextmanager
+        def launch():
+            yield
+
+        for name, timeout, stall, boundary in (("deadline", 900, 1800, 900), ("stall", 43200, 900, 900)):
+            with self.subTest(name=name):
+                killed = []
+
+                class Clock:
+                    calls = 0
+                    def __call__(self):
+                        self.calls += 1
+                        return 0.0 if self.calls == 1 else float(boundary)
+
+                class Process:
+                    pid = 12345
+                    returncode = 0
+                    stdout, stderr = io.StringIO(""), io.BytesIO(b"")
+                    def wait(self, timeout):
+                        return 0
+                    def poll(self):
+                        return 0
+                    def kill(self):
+                        killed.append(True)
+
+                with mock.patch.object(gpu.threading, "Thread", Thread), \
+                        mock.patch.object(async_runtime, "process_launch", launch), \
+                        mock.patch.object(async_runtime, "record_process"), \
+                        mock.patch.object(async_runtime, "clear_process"), \
+                        mock.patch.object(async_runtime, "emit_progress"):
+                    gpu.run_render_with_progress(
+                        ["ffmpeg", "output.mp4"], timeout=timeout, absolute_timeout=86400,
+                        configured_timeout=timeout, duration_seconds=100,
+                        stall_timeout=stall, popen=lambda *_, **__: Process(), monotonic=Clock(),
+                    )
+                self.assertEqual(killed, [])
+
+    def test_poll_time_progress_is_drained_before_deadline_and_stall_decisions(self):
+        from features.drama_synthesis import async_runtime
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+
+        @contextmanager
+        def launch():
+            yield
+
+        for name, timeout, stall, boundary in (("deadline", 900, 1800, 900), ("stall", 43200, 900, 900)):
+            with self.subTest(name=name):
+                class Clock:
+                    calls = 0
+                    def __call__(self):
+                        self.calls += 1
+                        return 0.0 if self.calls == 1 else float(boundary)
+
+                class Stream:
+                    def __init__(self):
+                        self.lines = []
+                    def feed(self, value):
+                        self.lines = value.splitlines(keepends=True)
+                    def __iter__(self):
+                        lines, self.lines = self.lines, []
+                        return iter(lines)
+                    def close(self):
+                        pass
+
+                class Thread:
+                    progress_target = None
+                    def __init__(self, target, daemon):
+                        self.target = target
+                    def start(self):
+                        if self.target.__name__ == "read_progress":
+                            Thread.progress_target = self.target
+                        else:
+                            self.target()
+                    def join(self, timeout=None):
+                        pass
+                    def is_alive(self):
+                        return False
+
+                class Process:
+                    pid = 12345
+                    returncode = None
+                    stdout, stderr = Stream(), io.BytesIO(b"")
+                    poll_calls = 0
+                    def poll(self):
+                        self.poll_calls += 1
+                        if self.returncode is None and self.poll_calls == 1:
+                            self.stdout.feed("out_time_us=500\nfps=30\nspeed=0.1x\nprogress=continue\n")
+                            Thread.progress_target()
+                        return self.returncode
+                    def wait(self, timeout):
+                        self.returncode = 1
+                        return 1
+                    def kill(self):
+                        raise AssertionError("poll-time progress must prevent boundary kill")
+
+                clock, process = Clock(), Process()
+                diagnostic = Path(directory.name) / ("poll-" + name + ".json")
+                callback = mock.Mock()
+                with mock.patch.object(gpu.threading, "Thread", Thread), \
+                        mock.patch.object(async_runtime, "process_launch", launch), \
+                        mock.patch.object(async_runtime, "record_process"), \
+                        mock.patch.object(async_runtime, "clear_process"), \
+                        mock.patch.object(async_runtime, "emit_progress") as emitted, \
+                        self.assertRaises(RuntimeError):
+                    gpu.run_render_with_progress(
+                        ["ffmpeg", "output.mp4"], timeout=timeout, absolute_timeout=86400,
+                        configured_timeout=timeout, duration_seconds=100, stall_timeout=stall,
+                        diagnostic_path=diagnostic, progress_callback=callback,
+                        popen=lambda *_, **__: process, monotonic=clock,
+                    )
+                payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+                self.assertEqual((payload["reason"], payload["public_code"]),
+                                 ("process_exit", "drama_random_render_failed"))
+                self.assertEqual(payload["last_progress"]["out_time_seconds"], 0.0005)
+                self.assertTrue(any(call.args[0].get("out_time_seconds") == 0.0005
+                                    for call in callback.call_args_list))
+                self.assertTrue(any(call.kwargs.get("out_time_seconds") == 0.0005
+                                    for call in emitted.call_args_list))
+
+    def test_stall_watchdog_is_independent_of_long_absolute_budget(self):
+        from features.drama_synthesis import async_runtime
+        events = []
+
+        class Clock:
+            now = 0.0
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+
+        class Process:
+            pid = 12345
+            returncode = None
+            # Repeated rate telemetry is not media advancement and therefore
+            # must not keep a wedged encoder alive indefinitely.
+            stdout = io.StringIO(
+                "fps=30\nspeed=1.0x\nprogress=continue\n"
+                "fps=30\nspeed=1.0x\nprogress=continue\n"
+            )
+            def wait(self, timeout):
+                if self.returncode is not None:
+                    return self.returncode
+                clock.now += 500
+                raise subprocess.TimeoutExpired(["ffmpeg"], timeout)
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+
+        @contextmanager
+        def launch():
+            yield
+
+        with mock.patch.object(async_runtime, "process_launch", launch), \
+                mock.patch.object(async_runtime, "record_process"), \
+                mock.patch.object(async_runtime, "clear_process", side_effect=lambda _: events.append("clear")), \
+                mock.patch.object(async_runtime, "emit_progress"):
+            with self.assertRaises(TimeoutError) as caught:
+                gpu.run_render_with_progress(
+                    ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=69300,
+                    duration_seconds=5400, stall_timeout=900,
+                    popen=lambda *_, **__: Process(), monotonic=clock,
+                )
+        self.assertIn("stall", str(caught.exception).lower())
+        self.assertEqual(events, ["kill", "clear"])
+
+    def test_gpu_runtime_remains_parseable_by_python_39_and_310(self):
+        source = (ROOT / "features" / "drama_synthesis" / "gpu.py").read_text(encoding="utf-8")
+        for version in ((3, 9), (3, 10)):
+            with self.subTest(version=version):
+                ast.parse(source, filename="features/drama_synthesis/gpu.py", feature_version=version)
 
 
 class ResourceGuardTests(unittest.TestCase):
