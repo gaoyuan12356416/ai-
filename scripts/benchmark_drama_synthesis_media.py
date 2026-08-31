@@ -46,6 +46,7 @@ MIN_HOST_MEM_AVAILABLE_BYTES = 8 * 1024 ** 3
 MIN_LAUNCHER_START_MEM_AVAILABLE_BYTES = 24 * 1024 ** 3
 STOP_RENDER_RSS_BYTES = 14 * 1024 ** 3
 MAX_RENDER_THREADS = 120
+RENDER_GLOBAL_CAP_SECONDS = 24 * 60 * 60
 
 
 class BenchmarkGuardError(RuntimeError):
@@ -383,12 +384,15 @@ def benchmark_render(args, *, inherited_lock_fd=None):
                        ("device", "inode", "mtime_ns", "nlink")}
     info = gpu._probe(args.ffprobe, source)
     check_sample_duration(args.sample_kind, info["duration"])
+    render_planned_timeout = gpu.render_budget_seconds(info["duration"], render_timeout)
     output = fresh_directory(args.output_dir)
     evidence = {"version": 1, "kind": "render", "ok": False, "sample_kind": args.sample_kind,
                 "filter_threads": args.filter_threads, "source": source_fp,
                 "duration_seconds": info["duration"], "recipe_sha256": recipe.get("recipe_sha256"),
                 "asset_manifest_sha256": args.asset_manifest_sha256, "limits": cgroup_limits(),
                 "render_timeout_seconds": render_timeout,
+                "render_planned_timeout_seconds": render_planned_timeout,
+                "render_global_cap_seconds": RENDER_GLOBAL_CAP_SECONDS,
                 "rendered_processes": 0, "sample_count": 0, "peak_rss_bytes": 0, "peak_threads": 0,
                 "minimum_mem_available_bytes": None,
                 "sampling_interval_seconds": 1, "peak_values_are_sampled": True,
@@ -550,8 +554,14 @@ def benchmark_render(args, *, inherited_lock_fd=None):
             raise
 
     def runner(command, **kwargs):
-        gpu.run_render_with_progress(command, timeout=kwargs["timeout"], duration_seconds=info["duration"],
-                                     popen=start_process, progress_callback=on_progress)
+        runner_timeout = kwargs.get("timeout")
+        if type(runner_timeout) is not int or runner_timeout != render_planned_timeout:
+            raise BenchmarkGuardError("benchmark_render_timeout_contract_mismatch")
+        gpu.run_render_with_progress(
+            command, timeout=runner_timeout, configured_timeout=render_timeout,
+            absolute_timeout=RENDER_GLOBAL_CAP_SECONDS, duration_seconds=info["duration"],
+            popen=start_process, progress_callback=on_progress,
+        )
         evidence["renderer_elapsed_seconds"] = round(time.monotonic() - rendered_at, 3)
 
     previous_threads = os.environ.get("DRAMA_GPU_FILTER_THREADS")

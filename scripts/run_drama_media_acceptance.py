@@ -58,6 +58,9 @@ MIN_START_MEM_AVAILABLE_BYTES = 24 * 1024 * 1024 * 1024
 MIN_RUNNING_MEM_AVAILABLE_BYTES = 8 * 1024 * 1024 * 1024
 TASKS_MAX = 128
 RENDER_TIMEOUT_SECONDS = 43200
+RENDER_GLOBAL_CAP_SECONDS = 24 * 60 * 60
+RENDER_UNIT_RUNTIME_MAX_SECONDS = RENDER_GLOBAL_CAP_SECONDS + 60 * 60
+NON_RENDER_UNIT_RUNTIME_MAX_SECONDS = 43200
 PREPARE_SHORT_SECONDS = 120
 CHILD_REAP_TIMEOUT_SECONDS = 30
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -204,6 +207,20 @@ def build_spec(candidate_sha, run_id, sample_kind, config_name, operation="rende
     )
 
 
+def unit_runtime_max_seconds(spec):
+    return (RENDER_UNIT_RUNTIME_MAX_SECONDS if spec.operation == "render"
+            else NON_RENDER_UNIT_RUNTIME_MAX_SECONDS)
+
+
+def planned_render_timeout_seconds(duration_seconds):
+    require(type(duration_seconds) in (int, float) and math.isfinite(duration_seconds) and
+            duration_seconds > 0, "render_benchmark_timeout_evidence_invalid")
+    return min(RENDER_GLOBAL_CAP_SECONDS, max(
+        RENDER_TIMEOUT_SECONDS,
+        int(math.ceil(float(duration_seconds) / 0.10 * 1.25 + 1800)),
+    ))
+
+
 def clean_environment():
     return {
         "PATH": "/usr/bin:/bin",
@@ -218,6 +235,7 @@ def clean_environment():
 
 
 def preview(spec):
+    operation_timeout = unit_runtime_max_seconds(spec)
     value = {
         "version": 1,
         "ok": True,
@@ -236,12 +254,16 @@ def preview(spec):
         "minimum_start_mem_available_bytes": MIN_START_MEM_AVAILABLE_BYTES,
         "minimum_running_mem_available_bytes": MIN_RUNNING_MEM_AVAILABLE_BYTES,
         "render_timeout_seconds": RENDER_TIMEOUT_SECONDS,
+        "operation_timeout_seconds": operation_timeout,
         "unit": spec.unit,
         "cos_uploads": 0,
         "production_requests": 0,
     }
     if spec.operation == "render":
-        value.update(source=path_text(spec.source_path),
+        value.update(render_configured_timeout_seconds=RENDER_TIMEOUT_SECONDS,
+                     render_global_cap_seconds=RENDER_GLOBAL_CAP_SECONDS,
+                     render_unit_runtime_max_seconds=operation_timeout,
+                     source=path_text(spec.source_path),
                      output_dir=path_text(spec.output_dir))
         if spec.sample_kind == "short":
             order = dict(SHORT_TRIAL_CONFIG_ORDER)[spec.trial]
@@ -694,7 +716,7 @@ def build_systemd_command(spec):
         "--property=RemainAfterExit=no",
         "--property=KillMode=control-group",
         "--property=TimeoutStopSec=90",
-        "--property=RuntimeMaxSec=" + str(RENDER_TIMEOUT_SECONDS),
+        "--property=RuntimeMaxSec=" + str(unit_runtime_max_seconds(spec)),
         "--property=PrivateDevices=no",
         "--property=ReadOnlyPaths=" + " ".join(path_text(path) for path in (
             spec.candidate_root, INPUT_ROOT, ASSET_ROOT, RUNTIME_ROOT
@@ -778,11 +800,12 @@ def run_public_preflight(spec):
 
 
 def parse_systemd_duration(value, *, maximum_seconds=90, exact_seconds=None):
-    units = {"us": 0.000001, "ms": 0.001, "s": 1, "min": 60, "h": 3600}
+    units = {"us": 0.000001, "ms": 0.001, "s": 1, "min": 60, "h": 3600,
+             "d": 86400}
     require(isinstance(value, str) and value and value != "infinity",
             "media_unit_contract_invalid")
     total, position = 0.0, 0
-    for match in re.finditer(r"(?:^| )([0-9]+(?:\.[0-9]+)?)(us|ms|s|min|h)(?= |$)", value):
+    for match in re.finditer(r"(?:^| )([0-9]+(?:\.[0-9]+)?)(us|ms|s|min|h|d)(?= |$)", value):
         require(match.start() == position, "media_unit_contract_invalid")
         total += float(match[1]) * units[match[2]]
         position = match.end()
@@ -832,10 +855,9 @@ def verify_media_unit_contract(spec):
         spec.candidate_root, INPUT_ROOT, ASSET_ROOT, RUNTIME_ROOT
     )], "media_unit_contract_invalid")
     parse_systemd_duration(values["TimeoutStopUSec"])
-    parse_systemd_duration(
-        values["RuntimeMaxUSec"], maximum_seconds=RENDER_TIMEOUT_SECONDS,
-        exact_seconds=RENDER_TIMEOUT_SECONDS,
-    )
+    operation_timeout = unit_runtime_max_seconds(spec)
+    parse_systemd_duration(values["RuntimeMaxUSec"], maximum_seconds=operation_timeout,
+                           exact_seconds=operation_timeout)
     return values
 
 
@@ -1470,6 +1492,10 @@ def validate_render_result(spec, uid, gid):
             evidence.get("ok") is True and
             evidence.get("sample_kind") == spec.sample_kind and
             evidence.get("filter_threads") == spec.config.filter_threads and
+            evidence.get("render_timeout_seconds") == RENDER_TIMEOUT_SECONDS and
+            evidence.get("render_planned_timeout_seconds") ==
+            planned_render_timeout_seconds(evidence.get("duration_seconds")) and
+            evidence.get("render_global_cap_seconds") == RENDER_GLOBAL_CAP_SECONDS and
             evidence.get("recipe_sha256") == RECIPE_SHA256 and
             evidence.get("asset_manifest_sha256") == ASSET_MANIFEST_SHA256 and
             evidence.get("acceptance_launcher_lock_inherited") is True and
@@ -2064,6 +2090,11 @@ def run_render(spec, uid, gid, lock_fd, benchmark):
     except Exception as exc:
         benchmark_guard_failure(exc, "media_benchmark_preflight_failed")
     require(isinstance(result, dict), "media_benchmark_result_invalid")
+    require(result.get("render_timeout_seconds") == RENDER_TIMEOUT_SECONDS and
+            result.get("render_planned_timeout_seconds") ==
+            planned_render_timeout_seconds(result.get("duration_seconds")) and
+            result.get("render_global_cap_seconds") == RENDER_GLOBAL_CAP_SECONDS,
+            "render_benchmark_timeout_evidence_invalid")
     minimum_mem_available = result.get("minimum_mem_available_bytes")
     require(type(minimum_mem_available) is int and
             minimum_mem_available >= MIN_RUNNING_MEM_AVAILABLE_BYTES,
@@ -2357,7 +2388,7 @@ def internal_verified_stage(spec, proof_fd, lock_fd=None):
         "resources_sha256": verified["proof"]["resources_sha256"],
         "lock_device": lock_identity[0],
         "lock_inode": lock_identity[1],
-        "operation_timeout_seconds": RENDER_TIMEOUT_SECONDS,
+        "operation_timeout_seconds": unit_runtime_max_seconds(spec),
         "cos_uploads": 0,
         "production_requests": 0,
     })

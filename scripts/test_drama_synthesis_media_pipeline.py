@@ -2337,6 +2337,7 @@ class ProcessProgressTests(unittest.TestCase):
         variants = {
             "strict-0.5ms": "out_time_us=1000500\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
             "strict-1ms": "out_time_us=1001000\nframe=10\nfps=31\nspeed=1.1x\nprogress=continue\n",
+            "frame-only": "frame=11\nfps=31\nspeed=1.1x\nprogress=continue\n",
             "equal": "out_time_us=1000000\nframe=10\nfps=32\nspeed=1.2x\nprogress=continue\n",
             "metadata-only": "fps=33\nspeed=1.3x\nprogress=continue\n",
         }
@@ -2357,8 +2358,10 @@ class ProcessProgressTests(unittest.TestCase):
             with self.subTest(deadline=name):
                 clock = Clock()
                 ControlledThread.progress_target = None
+                initial = ("frame=10\nfps=30\nspeed=1.0x\nprogress=continue\n"
+                           if name == "frame-only" else first)
                 process = Process(clock, [
-                    (400, first, "timeout"),
+                    (400, initial, "timeout"),
                     (400, second, 1),
                 ])
                 diagnostic = Path(directory.name) / (name + ".json")
@@ -2375,25 +2378,31 @@ class ProcessProgressTests(unittest.TestCase):
                 if name.startswith("strict-"):
                     self.assertEqual(payload["last_progress"]["out_time_seconds"],
                                      1.0005 if name == "strict-0.5ms" else 1.001)
+                elif name == "frame-only":
+                    self.assertEqual(payload["last_progress"]["frame"], 11)
+                    self.assertEqual(payload["last_progress"]["out_time_seconds"], 0.0)
                 else:
                     self.assertEqual(payload["last_progress"]["out_time_seconds"], 1.0)
         self.assertGreater(deadlines["strict-0.5ms"], deadlines["equal"])
         self.assertGreater(deadlines["strict-1ms"], deadlines["equal"])
+        self.assertEqual(deadlines["frame-only"], 900)
         self.assertEqual(deadlines["equal"], deadlines["metadata-only"])
 
         for name, second in variants.items():
             with self.subTest(stall=name):
                 clock = Clock()
                 ControlledThread.progress_target = None
+                initial = ("frame=10\nfps=30\nspeed=1.0x\nprogress=continue\n"
+                           if name == "frame-only" else first)
                 process = Process(clock, [
-                    (100, first, "timeout"),
+                    (100, initial, "timeout"),
                     (850, second, "timeout"),
                     (100, None, "timeout"),
                     (100, None, 0),
                 ])
                 contexts = patches(process, clock)
                 with contexts[0], contexts[1], contexts[2], contexts[3], contexts[4]:
-                    if name.startswith("strict-"):
+                    if name.startswith("strict-") or name == "frame-only":
                         gpu.run_render_with_progress(
                             ["ffmpeg", "output.mp4"], timeout=43200, absolute_timeout=86400,
                             duration_seconds=100, stall_timeout=900,
@@ -3141,6 +3150,11 @@ class MediaLauncherTests(unittest.TestCase):
         self.assertEqual(value["output_dir"], self.launcher.path_text(self.spec.output_dir))
         self.assertEqual(value["trial_configuration_order"], ["2c2t", "4c2t", "4c4t"])
         self.assertEqual(value["trial_position"], 1)
+        self.assertEqual(value["render_timeout_seconds"], 43200)
+        self.assertEqual(value["render_configured_timeout_seconds"], 43200)
+        self.assertEqual(value["render_global_cap_seconds"], 86400)
+        self.assertEqual(value["render_unit_runtime_max_seconds"], 90000)
+        self.assertEqual(value["operation_timeout_seconds"], 90000)
         self.assertEqual(value["cos_uploads"], 0)
         self.assertEqual(value["production_requests"], 0)
 
@@ -3167,7 +3181,7 @@ class MediaLauncherTests(unittest.TestCase):
         self.assertIn("--property=KillMode=control-group", command)
         self.assertIn("--property=RemainAfterExit=no", command)
         self.assertIn("--property=TimeoutStopSec=90", command)
-        self.assertIn("--property=RuntimeMaxSec=43200", command)
+        self.assertIn("--property=RuntimeMaxSec=90000", command)
         self.assertIn("--property=PrivateDevices=no", command)
         self.assertIn("--property=ReadOnlyPaths=" + " ".join(
             self.launcher.path_text(path) for path in (
@@ -3193,7 +3207,7 @@ class MediaLauncherTests(unittest.TestCase):
             "KillMode=control-group",
             "RemainAfterExit=no",
             "TimeoutStopUSec=1min 30s",
-            "RuntimeMaxUSec=12h",
+            "RuntimeMaxUSec=1d 1h",
             "PrivateDevices=no",
             "ReadOnlyPaths=" + " ".join(self.launcher.path_text(path) for path in (
                 self.spec.candidate_root, self.launcher.INPUT_ROOT,
@@ -3212,10 +3226,30 @@ class MediaLauncherTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(self.launcher.LaunchFailure):
                 self.launcher.parse_systemd_duration(raw)
         self.assertEqual(self.launcher.parse_systemd_duration(
-            "12h", maximum_seconds=43200, exact_seconds=43200), 43200)
+            "1d 1h", maximum_seconds=90000, exact_seconds=90000), 90000)
         with self.assertRaises(self.launcher.LaunchFailure):
             self.launcher.parse_systemd_duration(
-                "12h 1s", maximum_seconds=43200, exact_seconds=43200)
+                "1d 1h 1s", maximum_seconds=90000, exact_seconds=90000)
+        non_render = self.launcher.build_spec(
+            self.SHA, "accept01", "short", "2c2t", "decode")
+        result.stdout = text.replace(self.spec.unit, non_render.unit).replace(
+            "RuntimeMaxUSec=1d 1h", "RuntimeMaxUSec=12h")
+        with mock.patch.object(self.launcher, "require_regular_file"), \
+             mock.patch.object(self.launcher.subprocess, "run", return_value=result), \
+             mock.patch.object(self.launcher.os, "getpid", return_value=321):
+            self.launcher.verify_media_unit_contract(non_render)
+        for checked_spec, wrong_text in (
+            (self.spec, text.replace("RuntimeMaxUSec=1d 1h", "RuntimeMaxUSec=12h")),
+            (non_render, text.replace(self.spec.unit, non_render.unit)),
+        ):
+            result.stdout = wrong_text
+            with self.subTest(wrong_runtime=checked_spec.operation), \
+                 mock.patch.object(self.launcher, "require_regular_file"), \
+                 mock.patch.object(self.launcher.subprocess, "run", return_value=result), \
+                 mock.patch.object(self.launcher.os, "getpid", return_value=321), \
+                 self.assertRaises(self.launcher.LaunchFailure):
+                self.launcher.verify_media_unit_contract(checked_spec)
+        result.stdout = text
         result.stdout = text.replace(
             self.launcher.path_text(self.launcher.RUNTIME_ROOT), "/tmp/unreviewed-runtime"
         )
@@ -3411,10 +3445,10 @@ class MediaLauncherTests(unittest.TestCase):
             source.write_bytes(b"source")
             recipe.write_text(json.dumps({"recipe_sha256": "c" * 64}))
 
-            def arguments(name):
+            def arguments(name, sample_kind="short"):
                 return SimpleNamespace(
                     source=str(source), recipe=str(recipe), output_dir=str(root / name),
-                    sample_kind="short", filter_threads=2, ffmpeg="ffmpeg",
+                    sample_kind=sample_kind, filter_threads=2, ffmpeg="ffmpeg",
                     ffprobe="ffprobe", timeout=60, asset_root=str(root / "assets"),
                     asset_manifest_sha256="d" * 64,
                 )
@@ -3428,19 +3462,41 @@ class MediaLauncherTests(unittest.TestCase):
                 mock.patch.object(benchmark, "cgroup_limits", return_value={"cgroup_version": 1}),
                 mock.patch.object(benchmark.gpu, "render_random_output", return_value={}),
             ]
-            with patches[0], patches[1], patches[2], patches[3]:
+            invalid_results = []
+            with patches[0], patches[1] as probe, patches[2], patches[3] as rendered:
                 ordinary = benchmark.benchmark_render(arguments("ordinary"))
+                probe.return_value = {"duration": 5400}
                 with mock.patch.object(benchmark, "validate_inherited_media_lock_fd",
                                        return_value=(1, 2)):
                     guarded = benchmark.benchmark_render(
-                        arguments("guarded"), inherited_lock_fd=9
+                        arguments("guarded", "long"), inherited_lock_fd=9
                     )
+                for name, bad_timeout in (("wrong-int", 43200), ("wrong-bool", True)):
+                    def run_with_wrong_timeout(**kwargs):
+                        kwargs["runner"](
+                            ["ffmpeg", str(kwargs["output"])], timeout=bad_timeout,
+                        )
+
+                    rendered.side_effect = run_with_wrong_timeout
+                    with mock.patch.object(benchmark.subprocess, "Popen") as popen:
+                        invalid = benchmark.benchmark_render(arguments(name, "long"))
+                    popen.assert_not_called()
+                    invalid_results.append(invalid)
         self.assertFalse(ordinary["acceptance_launcher_lock_inherited"])
         self.assertTrue(guarded["acceptance_launcher_lock_inherited"])
         for value in (ordinary, guarded):
             self.assertTrue(value["source_unchanged"])
             self.assertEqual(value["source"], value["source_final"])
             self.assertEqual(value["source_identity"], value["source_final_identity"])
+            self.assertEqual(value["render_timeout_seconds"], 60)
+            self.assertEqual(value["render_global_cap_seconds"], 86400)
+        self.assertEqual(ordinary["render_planned_timeout_seconds"], 43200)
+        self.assertEqual(guarded["render_planned_timeout_seconds"], 69300)
+        for invalid in invalid_results:
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["error_code"],
+                             "benchmark_render_timeout_contract_mismatch")
+            self.assertEqual(invalid["render_planned_timeout_seconds"], 69300)
 
     def test_guarded_renderer_rechecks_24_gib_immediately_before_popen(self):
         from scripts import benchmark_drama_synthesis_media as benchmark
@@ -3457,7 +3513,8 @@ class MediaLauncherTests(unittest.TestCase):
             original = Path.is_file
 
             def render(**kwargs):
-                kwargs["runner"](["ffmpeg", str(kwargs["output"])], timeout=60)
+                planned = benchmark.gpu.render_budget_seconds(5, kwargs["timeout"])
+                kwargs["runner"](["ffmpeg", str(kwargs["output"])], timeout=planned)
 
             with mock.patch.object(Path, "is_file", autospec=True,
                                    side_effect=lambda path: True if path == Path("/proc/self/stat")
@@ -3535,6 +3592,9 @@ class MediaLauncherTests(unittest.TestCase):
             "ok": False, "source": source, "source_final": source,
             "source_unchanged": True, "source_identity": identity,
             "source_final_identity": identity,
+            "duration_seconds": 120, "render_timeout_seconds": 43200,
+            "render_planned_timeout_seconds": 43200,
+            "render_global_cap_seconds": 86400,
             "minimum_mem_available_bytes": 16 * 1024 ** 3,
         }))
         with mock.patch.object(self.launcher, "validate_prepared_short", return_value={
@@ -3557,6 +3617,9 @@ class MediaLauncherTests(unittest.TestCase):
             "ok": False, "source": source, "source_final": source,
             "source_unchanged": True, "source_identity": identity,
             "source_final_identity": identity,
+            "duration_seconds": 120, "render_timeout_seconds": 43200,
+            "render_planned_timeout_seconds": 43200,
+            "render_global_cap_seconds": 86400,
             "minimum_mem_available_bytes": 16 * 1024 ** 3,
         }))
         with mock.patch.object(self.launcher, "validate_prepared_short", return_value={
@@ -3583,6 +3646,8 @@ class MediaLauncherTests(unittest.TestCase):
                 self.assertEqual(value["operation"], operation)
                 self.assertFalse(value["apply"])
                 self.assertFalse(value["media_started"])
+                self.assertEqual(value["operation_timeout_seconds"], 43200)
+                self.assertNotIn("render_unit_runtime_max_seconds", value)
                 submit.assert_not_called()
                 popen.assert_not_called()
         submitted = {"ok": True, "submitted": True}
@@ -3612,7 +3677,8 @@ class MediaLauncherTests(unittest.TestCase):
                 self.assertIn("--property=TasksMax=128", command)
                 self.assertIn("--property=KillMode=control-group", command)
                 self.assertIn("--property=RemainAfterExit=no", command)
-                self.assertIn("--property=RuntimeMaxSec=43200", command)
+                expected_runtime = 90000 if operation == "render" else 43200
+                self.assertIn("--property=RuntimeMaxSec=" + str(expected_runtime), command)
                 self.assertIn("--property=PrivateDevices=no", command)
                 self.assertTrue(any(item.startswith("--property=ReadOnlyPaths=")
                                     for item in command))
@@ -4009,6 +4075,9 @@ class MediaLauncherTests(unittest.TestCase):
             "version": 1, "kind": "render", "ok": True, "sample_kind": "short",
             "filter_threads": 2, "recipe_sha256": self.launcher.RECIPE_SHA256,
             "asset_manifest_sha256": self.launcher.ASSET_MANIFEST_SHA256,
+            "duration_seconds": 120, "render_timeout_seconds": 43200,
+            "render_planned_timeout_seconds": 43200,
+            "render_global_cap_seconds": 86400,
             "acceptance_launcher_lock_inherited": True,
             "minimum_mem_available_bytes": 16 * 1024 ** 3,
             "source": {"sha256": "3" * 64, "size_bytes": 5678},
@@ -4242,7 +4311,8 @@ class BenchmarkRenderGuardTests(unittest.TestCase):
 
         def render(**kwargs):
             try:
-                kwargs["runner"](["fake-ffmpeg", str(kwargs["output"])], timeout=kwargs["timeout"])
+                planned = benchmark.gpu.render_budget_seconds(5, kwargs["timeout"])
+                kwargs["runner"](["fake-ffmpeg", str(kwargs["output"])], timeout=planned)
             except benchmark.BenchmarkGuardError:
                 if not self.ignore_runner_error:
                     raise
@@ -4269,7 +4339,10 @@ class BenchmarkRenderGuardTests(unittest.TestCase):
         self.assertGreaterEqual(result["resource_guard"]["elapsed_seconds"], 0)
 
     def test_exact_safe_boundaries_succeed_and_host_memory_is_recorded(self):
-        result = self.run_benchmark()
+        original = self.benchmark.gpu.run_render_with_progress
+        with mock.patch.object(self.benchmark.gpu, "run_render_with_progress",
+                               wraps=original) as tracked:
+            result = self.run_benchmark()
         self.assertTrue(result["ok"])
         self.assertFalse(result["resource_guard"]["triggered"])
         self.assertTrue(result["resource_guard"]["outer_cgroup_hard_limits_required"])
@@ -4277,6 +4350,12 @@ class BenchmarkRenderGuardTests(unittest.TestCase):
         self.assertEqual(self.events, [("wait", 1)])
         rows = [json.loads(x) for x in (Path(self.args.output_dir) / "process-samples.jsonl").read_text().splitlines()]
         self.assertTrue(all(row["mem_available_bytes"] == 8 * 1024 ** 3 for row in rows))
+        self.assertEqual(result["render_timeout_seconds"], 60)
+        self.assertEqual(result["render_planned_timeout_seconds"], 43200)
+        self.assertEqual(result["render_global_cap_seconds"], 86400)
+        self.assertEqual(tracked.call_args.kwargs["timeout"], 43200)
+        self.assertEqual(tracked.call_args.kwargs["configured_timeout"], 60)
+        self.assertEqual(tracked.call_args.kwargs["absolute_timeout"], 86400)
 
     def test_low_memory_before_launch_never_starts_a_child(self):
         self.host.return_value["mem_available_bytes"] -= 1
