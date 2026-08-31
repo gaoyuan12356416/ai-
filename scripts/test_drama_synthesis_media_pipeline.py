@@ -1565,12 +1565,15 @@ class RenderCheckpointTests(unittest.TestCase):
         cases = (
             ("timeout", subprocess.TimeoutExpired(["ffmpeg", "-i", secret_url], 60,
                                                   output="private stdout", stderr=private_stderr),
-             "drama_random_render_timeout"),
-            ("exit", subprocess.CalledProcessError(137, ["ffmpeg", "-i", secret_url],
-                                                    output="private stdout", stderr=private_stderr),
-             "drama_random_render_failed"),
+             "drama_random_render_timeout", None, None),
+            ("exit-137", subprocess.CalledProcessError(137, ["ffmpeg", "-i", secret_url],
+                                                        output="private stdout", stderr=private_stderr),
+             "drama_random_render_failed", 137, None),
+            ("signal-9", subprocess.CalledProcessError(-9, ["ffmpeg", "-i", secret_url],
+                                                        output="private stdout", stderr=private_stderr),
+             "drama_random_render_failed", -9, 9),
         )
-        for name, failure, expected_code in cases:
+        for name, failure, expected_code, expected_returncode, expected_signal in cases:
             with self.subTest(name=name):
                 output = self.root / (name + ".mp4")
                 self.kwargs["output"] = output
@@ -1595,6 +1598,9 @@ class RenderCheckpointTests(unittest.TestCase):
                 payload = json.loads(diagnostic.read_text(encoding="utf-8"))
                 self.assertEqual(payload["version"], 1)
                 self.assertEqual(payload["public_code"], expected_code)
+                self.assertEqual(payload["process"], {
+                    "returncode": expected_returncode, "signal": expected_signal,
+                })
                 stderr_evidence = payload["stderr"]
                 self.assertEqual(stderr_evidence["bytes"], len(private_stderr.encode("utf-8")))
                 self.assertRegex(stderr_evidence["sha256"], r"^[0-9a-f]{64}$")
@@ -2405,15 +2411,42 @@ class ProcessProgressTests(unittest.TestCase):
     def test_progress_queue_folds_high_water_and_native_stderr_hashes_exact_bytes(self):
         from features.drama_synthesis import async_runtime
         raw_stderr = b"invalid-utf8:\xff\xfe no space left on device\n"
-        progress_text = "".join((
-            "out_time_us=10000000\nframe=100\nfps=30\nspeed=1.0x\nprogress=continue\n",
-            "out_time_us=9000000\nframe=90\nfps=31\nspeed=0.9x\nprogress=continue\n",
-            "out_time_us=11000000\nframe=101\nfps=32\nspeed=1.1x\nprogress=continue\n",
-            "out_time_us=8000000\nframe=80\nfps=33\nspeed=1.2x\nprogress=end\n",
-        ))
+        packets = [
+            (50, 10, 31, 0.1),
+            (20, 500, 32, 0.2),
+            (3, 30, 33, 0.3),
+            (4, 40, 34, 0.4),
+            (5, 50, 35, 0.5),
+            (6, 60, 36, 0.6),
+            (7, 70, 37, 0.7),
+            (8, 80, 38, 0.8),
+            (9, 90, 39, 0.9),
+            (10, 100, 40, 4.0),
+        ]
+        progress_text = "".join(
+            "out_time_us=%d\nframe=%d\nfps=%d\nspeed=%sx\nprogress=%s\n" % (
+                seconds * 1000000, frame, fps, speed,
+                "end" if index == len(packets) - 1 else "continue",
+            )
+            for index, (seconds, frame, fps, speed) in enumerate(packets)
+        )
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         diagnostic = Path(directory.name) / "folded-progress.json"
+        queue_instances = []
+        queue_type = gpu.queue.Queue
+
+        class TrackingQueue(queue_type):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.full_hits = 0
+                queue_instances.append(self)
+
+            def full(self):
+                value = super().full()
+                if value:
+                    self.full_hits += 1
+                return value
 
         class Process:
             pid = 12345
@@ -2440,7 +2473,8 @@ class ProcessProgressTests(unittest.TestCase):
         def launch():
             yield
 
-        with mock.patch.object(gpu.threading, "Thread", Thread), \
+        with mock.patch.object(gpu.queue, "Queue", TrackingQueue), \
+                mock.patch.object(gpu.threading, "Thread", Thread), \
                 mock.patch.object(async_runtime, "process_launch", launch), \
                 mock.patch.object(async_runtime, "record_process"), \
                 mock.patch.object(async_runtime, "clear_process"), \
@@ -2452,7 +2486,10 @@ class ProcessProgressTests(unittest.TestCase):
                 popen=lambda *_, **__: Process(),
             )
         payload = json.loads(diagnostic.read_text(encoding="utf-8"))
-        expected = {"out_time_seconds": 11.0, "frame": 101, "fps": 33.0, "speed": 1.2}
+        self.assertEqual(len(queue_instances), 1)
+        self.assertEqual(queue_instances[0].maxsize, 8)
+        self.assertEqual(queue_instances[0].full_hits, 2)
+        expected = {"out_time_seconds": 50.0, "frame": 500, "fps": 40.0, "speed": 4.0}
         for key, value in expected.items():
             self.assertEqual(payload["last_progress"][key], value)
         self.assertTrue(any(all(call.kwargs.get(key) == value for key, value in expected.items())
@@ -2462,6 +2499,52 @@ class ProcessProgressTests(unittest.TestCase):
         self.assertEqual(payload["stderr"]["sha256"], hashlib.sha256(raw_stderr).hexdigest())
         self.assertFalse(payload["stderr"]["encoding_transformed"])
         self.assertFalse(payload["stderr"]["raw_stored"])
+
+    def test_native_popen_launch_failure_sidecar_is_bounded_and_redacted(self):
+        from features.drama_synthesis import async_runtime
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        diagnostic = root / "launch-failed.json"
+        secret_url = URL + "&access_token=native-launch-secret"
+        secret_output = root / "private-output.mp4"
+        launch_error = OSError(
+            "cannot launch credential=native-launch-secret for " + secret_url + " at " + str(secret_output)
+        )
+
+        @contextmanager
+        def launch():
+            yield
+
+        failed_popen = mock.Mock(side_effect=launch_error)
+        with mock.patch.object(gpu.subprocess, "Popen", failed_popen), \
+                mock.patch.object(async_runtime, "process_launch", launch), \
+                mock.patch.object(async_runtime, "record_process") as recorded, \
+                mock.patch.object(async_runtime, "clear_process") as cleared, \
+                mock.patch.object(async_runtime, "emit_progress"), \
+                self.assertRaises(OSError) as caught:
+            gpu.run_render_with_progress(
+                ["/private/bin/ffmpeg-secret", "-i", secret_url, str(secret_output)],
+                timeout=43200, absolute_timeout=86400, duration_seconds=100,
+                diagnostic_path=diagnostic,
+            )
+
+        self.assertIs(caught.exception, launch_error)
+        failed_popen.assert_called_once()
+        recorded.assert_not_called()
+        cleared.assert_not_called()
+        payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+        self.assertEqual((payload["reason"], payload["public_code"]),
+                         ("process_launch_failed", "drama_random_render_failed"))
+        self.assertEqual(payload["process"], {"returncode": None, "signal": None})
+        encoded = json.dumps(payload, ensure_ascii=False)
+        for private in (
+            "native-launch-secret", "media.example.test", str(secret_output), str(root),
+            "/private/bin/ffmpeg-secret", "cannot launch", "credential=",
+        ):
+            self.assertNotIn(private, encoded)
+        self.assertFalse(secret_output.exists())
 
     def test_exited_process_wins_at_exact_deadline_and_stall_boundaries(self):
         from features.drama_synthesis import async_runtime
