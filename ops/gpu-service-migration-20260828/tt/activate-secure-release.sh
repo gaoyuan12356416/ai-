@@ -305,8 +305,10 @@ validate_loaded_units() {
     [[ "$(systemctl show -p UnitFileState --value "$unit")" == "$expected_unit_file_state" ]]
     [[ "$(systemctl show -p NeedDaemonReload --value "$unit")" == "no" ]]
   done
-  [[ -z "$(systemctl show -p DropInPaths --value tt-gpu-reverse-tunnel.service)" ]]
-  [[ -z "$(systemctl show -p DropInPaths --value tt-gpu-direct-outro-reverse-tunnel.service)" ]]
+  property="$(systemctl show -p DropInPaths --value tt-gpu-reverse-tunnel.service)"
+  [[ -z "$property" ]]
+  property="$(systemctl show -p DropInPaths --value tt-gpu-direct-outro-reverse-tunnel.service)"
+  [[ -z "$property" ]]
   for unit in "${WORKERS[@]}"; do
     [[ "$(systemctl show -p WorkingDirectory --value "$unit")" == "$ROOT/current" ]]
     [[ "$(systemctl show -p DropInPaths --value "$unit")" == "/etc/systemd/system/$unit.d/40-tt-private-trust.conf" ]]
@@ -323,6 +325,14 @@ validate_loaded_units() {
   [[ "$property" == *"-i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel"* ]]
   [[ "$property" == *"UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts"* ]]
   [[ "$property" == *"StrictHostKeyChecking=yes"* && "$property" == *"ExitOnForwardFailure=yes"* ]]
+}
+
+validate_no_tt_listeners() {
+  local listener
+  listener="$(ss -H -ltnp 'sport = :8830')"
+  [[ -z "$listener" ]]
+  listener="$(ss -H -ltnp 'sport = :8832')"
+  [[ -z "$listener" ]]
 }
 
 validate_no_managed_processes() {
@@ -424,7 +434,7 @@ read_only_preflight() {
   check_path_contract "$ROOT/requirements.lock" '600:0:0:regular file'
   check_sha256 "$ROOT/runtime/bin/python" 614e97717a91e5d74c5e65a74bf25e01fc18fab375139e215f4ddbe8d133cb19
   check_path_contract "$ROOT/runtime/bin/python" '755:0:0:regular file'
-  "$ROOT/runtime/bin/python" - <<'PY'
+  PYTHONDONTWRITEBYTECODE=1 "$ROOT/runtime/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import sys
 expected = {
@@ -476,8 +486,7 @@ PY
     [[ "$(systemctl show -p MainPID --value "$unit")" == "0" ]]
   done
   validate_no_managed_processes
-  [[ -z "$(ss -H -ltnp 'sport = :8830')" ]]
-  [[ -z "$(ss -H -ltnp 'sport = :8832')" ]]
+  validate_no_tt_listeners
   validate_cpu_checkpoint
   validate_import_receipt
   validate_state_idle >/dev/null
@@ -516,7 +525,7 @@ atomic_current_link() {
 
 MUTATION_STARTED=0 SUCCESS=0 EVIDENCE_DIR= BACKUP_DIR=
 rollback_after_failure() {
-  local original_rc="$1" stop_command_ok=true disable_command_ok=true units_stopped=true fallback_linked=true unit attempt
+  local original_rc="$1" stop_command_ok=true disable_command_ok=true units_stopped=true fallback_linked=true unit attempt control_group
   set +e
   trap '' HUP INT TERM
   systemctl stop "${TUNNELS[@]}" "${WORKERS[@]}" || stop_command_ok=false
@@ -524,11 +533,15 @@ rollback_after_failure() {
   for attempt in $(seq 1 30); do
     units_stopped=true
     for unit in "${UNITS[@]}"; do
+      if ! control_group="$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null)"; then
+        units_stopped=false
+        continue
+      fi
       if [[ "$(systemctl show -p ActiveState --value "$unit" 2>/dev/null)" != "inactive" \
         || "$(systemctl show -p SubState --value "$unit" 2>/dev/null)" != "dead" \
         || "$(systemctl show -p MainPID --value "$unit" 2>/dev/null)" != "0" \
         || "$(systemctl show -p ControlPID --value "$unit" 2>/dev/null)" != "0" \
-        || -n "$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null)" \
+        || -n "$control_group" \
         || "$(systemctl show -p UnitFileState --value "$unit" 2>/dev/null)" != "disabled" ]]; then units_stopped=false; fi
     done
     [[ "$units_stopped" == true ]] && break
@@ -598,6 +611,16 @@ cp -a "$CPU_CHECKPOINT" "$EVIDENCE_DIR/coordinator-secure-activation.json"
 MUTATION_STARTED=1
 systemctl enable "${UNITS[@]}"
 validate_loaded_units enabled
+for unit in "${UNITS[@]}"; do
+  [[ "$(systemctl show -p ActiveState --value "$unit")" == "inactive" ]]
+  [[ "$(systemctl show -p SubState --value "$unit")" == "dead" ]]
+  [[ "$(systemctl show -p MainPID --value "$unit")" == "0" ]]
+  [[ "$(systemctl show -p ControlPID --value "$unit")" == "0" ]]
+  property="$(systemctl show -p ControlGroup --value "$unit")"
+  [[ -z "$property" ]]
+done
+validate_no_managed_processes
+validate_no_tt_listeners
 atomic_current_link "$TARGET_RELEASE"
 systemctl start "${WORKERS[@]}"
 

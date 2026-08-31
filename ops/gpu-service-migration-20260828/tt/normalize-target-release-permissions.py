@@ -24,7 +24,9 @@ UNITS = (
 
 
 def run(args):
-    return subprocess.check_output(args, text=True, timeout=10).strip()
+    return subprocess.check_output(
+        args, universal_newlines=True, timeout=10
+    ).strip()
 
 
 def sha(path):
