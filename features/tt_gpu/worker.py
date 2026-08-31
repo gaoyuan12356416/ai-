@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import math
@@ -36,6 +37,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import tempfile
@@ -1469,23 +1471,29 @@ def validate_source_url(value, allowed_hosts):
     return text
 
 
+@dataclass(frozen=True)
+class _ResolvedSourceEndpoint:
+    family: int
+    socktype: int
+    proto: int
+    sockaddr: tuple
+    address: str
+
+
 def _resolve_public_host(hostname, trusted_resolutions=()):
     try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo(
-                hostname,
-                443,
-                type=socket.SOCK_STREAM,
-            )
-        }
+        records = socket.getaddrinfo(
+            hostname,
+            443,
+            type=socket.SOCK_STREAM,
+        )
     except OSError:
         raise TTGPUError(
             "source_download_failed",
             "source host could not be resolved",
             502,
         ) from None
-    if not addresses:
+    if not records:
         raise TTGPUError(
             "source_download_failed",
             "source host could not be resolved",
@@ -1493,11 +1501,29 @@ def _resolve_public_host(hostname, trusted_resolutions=()):
         )
     normalized_hostname = str(hostname or "").lower().rstrip(".")
     trusted = set(trusted_resolutions or ())
-    for address in addresses:
+    endpoints = []
+    seen = set()
+    for record in records:
         try:
-            normalized_address = str(ipaddress.ip_address(address))
+            family, socktype, proto, _canonname, sockaddr = record
             if (
-                not ipaddress.ip_address(normalized_address).is_global
+                family not in {socket.AF_INET, socket.AF_INET6}
+                or socktype != socket.SOCK_STREAM
+                or proto not in {0, socket.IPPROTO_TCP}
+                or not isinstance(sockaddr, tuple)
+                or len(sockaddr) < 2
+                or int(sockaddr[1]) != 443
+            ):
+                raise ValueError("unsupported source endpoint")
+            address = ipaddress.ip_address(sockaddr[0])
+            if (
+                (family == socket.AF_INET and address.version != 4)
+                or (family == socket.AF_INET6 and address.version != 6)
+            ):
+                raise ValueError("source endpoint family mismatch")
+            normalized_address = str(address)
+            if (
+                not address.is_global
                 and (normalized_hostname, normalized_address) not in trusted
             ):
                 raise TTGPUError(
@@ -1505,23 +1531,158 @@ def _resolve_public_host(hostname, trusted_resolutions=()):
                     "source host resolved to a non-public address",
                     400,
                 )
-        except ValueError:
+            if family == socket.AF_INET:
+                normalized_sockaddr = (normalized_address, 443)
+            else:
+                if len(sockaddr) != 4:
+                    raise ValueError("invalid IPv6 source endpoint")
+                flowinfo = int(sockaddr[2])
+                scope_id = int(sockaddr[3])
+                if flowinfo < 0 or flowinfo > 0xFFFFF or scope_id < 0:
+                    raise ValueError("invalid IPv6 source endpoint")
+                normalized_sockaddr = (
+                    normalized_address,
+                    443,
+                    flowinfo,
+                    scope_id,
+                )
+            key = (family, socktype, proto, normalized_sockaddr)
+            if key not in seen:
+                seen.add(key)
+                endpoints.append(
+                    _ResolvedSourceEndpoint(
+                        family=family,
+                        socktype=socktype,
+                        proto=proto,
+                        sockaddr=normalized_sockaddr,
+                        address=normalized_address,
+                    )
+                )
+        except (IndexError, OverflowError, TypeError, ValueError):
             raise TTGPUError(
                 "source_url_not_allowed",
                 "source host address is invalid",
                 400,
             ) from None
+    if not endpoints:
+        raise TTGPUError(
+            "source_download_failed",
+            "source host could not be resolved",
+            502,
+        )
+    return tuple(endpoints)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
-        return None
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection whose TCP endpoint is the validated DNS result."""
+
+    def __init__(self, hostname, endpoint, *, timeout, context):
+        super().__init__(
+            hostname,
+            port=443,
+            timeout=timeout,
+            context=context,
+        )
+        self._pinned_endpoint = endpoint
+
+    def connect(self):
+        if getattr(self, "_tunnel_host", None):
+            raise OSError("source proxy tunnels are disabled")
+        endpoint = self._pinned_endpoint
+        raw_socket = socket.socket(
+            endpoint.family,
+            endpoint.socktype,
+            endpoint.proto,
+        )
+        try:
+            raw_socket.settimeout(self.timeout)
+            raw_socket.connect(endpoint.sockaddr)
+            self.sock = self._context.wrap_socket(
+                raw_socket,
+                server_hostname=self.host,
+            )
+        except BaseException:
+            raw_socket.close()
+            raise
 
 
-_NO_REDIRECT_OPENER = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}),
-    _NoRedirect(),
-)
+@contextmanager
+def _open_pinned_https_response(
+    parsed,
+    endpoints,
+    headers,
+    configured_timeout,
+    deadline=None,
+):
+    hostname = str(parsed.hostname or "").lower().rstrip(".")
+    target = urllib.parse.urlunsplit(
+        ("", "", parsed.path or "/", parsed.query, "")
+    )
+    try:
+        context = ssl.create_default_context()
+    except (ssl.SSLError, OSError):
+        raise TTGPUError(
+            "source_download_failed",
+            "source TLS verification could not be initialized",
+            502,
+        ) from None
+    if (
+        not context.check_hostname
+        or context.verify_mode != ssl.CERT_REQUIRED
+    ):
+        raise TTGPUError(
+            "source_download_failed",
+            "source TLS verification is required",
+            502,
+        )
+    request_headers = dict(headers)
+    request_headers["Host"] = hostname
+    for endpoint in endpoints:
+        timeout = (
+            deadline.stage_timeout(configured_timeout)
+            if deadline is not None
+            else configured_timeout
+        )
+        connection = _PinnedHTTPSConnection(
+            hostname,
+            endpoint,
+            timeout=timeout,
+            context=context,
+        )
+        try:
+            connection.request(
+                "GET",
+                target,
+                headers=request_headers,
+            )
+            response = connection.getresponse()
+        except (
+            ssl.SSLError,
+            socket.timeout,
+            OSError,
+            http.client.HTTPException,
+        ):
+            connection.close()
+            continue
+        if not 200 <= int(response.status) < 300:
+            response.close()
+            connection.close()
+            raise TTGPUError(
+                "source_download_failed",
+                "source download failed",
+                502,
+            )
+        try:
+            yield response
+        finally:
+            response.close()
+            connection.close()
+        return
+    raise TTGPUError(
+        "source_download_failed",
+        "source download failed",
+        502,
+    )
 
 
 def download_source(
@@ -1534,29 +1695,26 @@ def download_source(
 ):
     url = validate_source_url(url, config.allowed_source_hosts)
     parsed = urllib.parse.urlsplit(url)
-    _resolve_public_host(
+    endpoints = _resolve_public_host(
         parsed.hostname,
         config.trusted_source_resolutions,
-    )
-    request = urllib.request.Request(
-        url,
-        method="GET",
-        headers={
-            "Accept": "video/mp4,video/*;q=0.9,application/octet-stream;q=0.8",
-            "User-Agent": "DramawaveTTPostGPU/1",
-        },
     )
     destination = Path(destination)
     digest = hashlib.sha256()
     size = 0
     try:
-        with _NO_REDIRECT_OPENER.open(
-            request,
-            timeout=(
-                deadline.stage_timeout(config.download_timeout)
-                if deadline is not None
-                else config.download_timeout
-            ),
+        with _open_pinned_https_response(
+            parsed,
+            endpoints,
+            {
+                "Accept": (
+                    "video/mp4,video/*;q=0.9,"
+                    "application/octet-stream;q=0.8"
+                ),
+                "User-Agent": "DramawaveTTPostGPU/1",
+            },
+            config.download_timeout,
+            deadline,
         ) as response:
             raw_length = response.headers.get("Content-Length")
             if raw_length not in (None, ""):
@@ -1599,7 +1757,13 @@ def download_source(
         except FileNotFoundError:
             pass
         raise
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        http.client.HTTPException,
+        TimeoutError,
+        OSError,
+    ):
         try:
             destination.unlink()
         except FileNotFoundError:
