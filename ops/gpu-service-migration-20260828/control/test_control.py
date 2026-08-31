@@ -576,7 +576,7 @@ class ControlTests(unittest.TestCase):
                  mock.patch.object(fence, "closure_state", return_value=({"active": "inactive"}, True, None)), \
                  mock.patch.object(fence, "write_failure_evidence") as evidence:
                 fence.fail_closed_drama("mask-source", {"pid": 456}, original, backup)
-        self.assertEqual([call.args[0] for call in command.call_args_list], [
+        self.assertEqual([call[0][0] for call in command.call_args_list], [
             ["systemctl", "stop", "drama-material-api.service"],
             ["systemctl", "disable", "drama-material-api.service"],
             ["systemctl", "mask", "drama-material-api.service"],
@@ -584,8 +584,8 @@ class ControlTests(unittest.TestCase):
         ])
         self.assertFalse(any(fence.DRAMA_SHARED_TUNNEL in str(call) for call in command.call_args_list))
         call = evidence.call_args
-        self.assertEqual(call.args[0:2], ("mask-source", "ValueError"))
-        self.assertTrue(call.args[4])
+        self.assertEqual(call[0][0:2], ("mask-source", "ValueError"))
+        self.assertTrue(call[0][4])
 
     def test_drama_source_failure_raises_high_risk_when_closure_unproven(self):
         original = ValueError("fixture failure")
@@ -601,8 +601,8 @@ class ControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "HIGH RISK") as raised:
                     fence.fail_closed_drama("stop-source", {"pid": 456}, original, backup)
         self.assertIs(raised.exception.__cause__, original)
-        self.assertFalse(evidence.call_args.args[4])
-        commands = evidence.call_args.args[2]
+        self.assertFalse(evidence.call_args[0][4])
+        commands = evidence.call_args[0][2]
         self.assertEqual(commands["stop"]["rc"], 1)
         self.assertEqual(commands["disable"]["rc"], 1)
 
@@ -719,7 +719,7 @@ class ControlTests(unittest.TestCase):
                  mock.patch.object(fence, "run", side_effect=command) as run:
                 fence.main()
         self.assertEqual(runtime, {"active": False, "enabled": "masked"})
-        commands = [call.args[0] for call in run.call_args_list]
+        commands = [call[0][0] for call in run.call_args_list]
         self.assertEqual(commands, [["systemctl", "stop", fence.DRAMA_UNIT],
                                     ["systemctl", "disable", fence.DRAMA_UNIT],
                                     ["systemctl", "mask", fence.DRAMA_UNIT],
@@ -773,9 +773,9 @@ class ControlTests(unittest.TestCase):
                  mock.patch.object(fence, "fail_closed_drama") as fail_closed:
                 with self.assertRaisesRegex(RuntimeError, "fixture mask failure"):
                     fence.main()
-        self.assertEqual(fail_closed.call_args.args[0], "mask-source")
-        self.assertIsInstance(fail_closed.call_args.args[2], RuntimeError)
-        self.assertEqual(fail_closed.call_args.args[3].name, fence.DRAMA_UNIT)
+        self.assertEqual(fail_closed.call_args[0][0], "mask-source")
+        self.assertIsInstance(fail_closed.call_args[0][2], RuntimeError)
+        self.assertEqual(fail_closed.call_args[0][3].name, fence.DRAMA_UNIT)
 
     def test_source_main_drama_resume_accepts_verified_already_masked_only(self):
         shared = {"unit": fence.DRAMA_SHARED_TUNNEL, "active": "active", "substate": "running",
