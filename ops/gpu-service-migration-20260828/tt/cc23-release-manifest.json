@@ -17,7 +17,7 @@
     },
     ".source-commit": {
       "mode": "100644",
-      "sha256": "58a9e7a50b7c3cbae9dd6396196cdae8f083d53a66edad26db261af0ed5a7168",
+      "sha256": "7f79c92360bd22f2a4363e259951d27066e0de8e12fa83071e08323e6d609aac",
       "size": 41
     },
     "CHANGELOG.md": {
@@ -500,62 +500,62 @@
       "sha256": "faaaf61d966458a90abd422ffc5eb2ef2c14d97833671d51c07b3fd141f24e6b",
       "size": 238
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/api-doc.md": {
+    "doc/001.AI投放素材制作/api-doc.md": {
       "mode": "100644",
       "sha256": "d23e5b07ee830f8419ce5924941fbf35a632da263ae6d475e43e3357cac3eb33",
       "size": 3678
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/bugs/BUG-001.md": {
+    "doc/001.AI投放素材制作/bugs/BUG-001.md": {
       "mode": "100644",
       "sha256": "ed17de11c0535e452ebbe8407650239d165264a9191ccc0529ee9b4cb6b20ab9",
       "size": 312
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/deploy.md": {
+    "doc/001.AI投放素材制作/deploy.md": {
       "mode": "100644",
       "sha256": "97fd6fb73d0acd321d482726e33755ca93e9bece4efa7a7997f3bf0ad6024818",
       "size": 2255
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/dev-plan.md": {
+    "doc/001.AI投放素材制作/dev-plan.md": {
       "mode": "100644",
       "sha256": "7b260819169f8b964b14130e36feb3d4cc91946f7ad1b73885f54cf766e56bec",
       "size": 2689
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/gpu-codex-vision.md": {
+    "doc/001.AI投放素材制作/gpu-codex-vision.md": {
       "mode": "100644",
       "sha256": "1fd53a0c46585fcd125ed420d324d739cb7a95d89d49d75b078da05c2144338e",
       "size": 1187
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/requirements.md": {
+    "doc/001.AI投放素材制作/requirements.md": {
       "mode": "100644",
       "sha256": "4b89db5e956d25e1ea032bbc4c184926828451aa725bacf7a64be6467e151bcd",
       "size": 11727
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/restart-recovery.md": {
+    "doc/001.AI投放素材制作/restart-recovery.md": {
       "mode": "100644",
       "sha256": "381b95181118a1fa1a7ffba17027cc52cf82e89adb9dd533f7c7898bf31e089a",
       "size": 2068
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/sa-code-review.md": {
+    "doc/001.AI投放素材制作/sa-code-review.md": {
       "mode": "100644",
       "sha256": "70b40eb2c07ccc88e6b621b6db3524f5158cf3cd007000662f55a32237f3701a",
       "size": 1683
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/sa-review.md": {
+    "doc/001.AI投放素材制作/sa-review.md": {
       "mode": "100644",
       "sha256": "7d3a27041c39990c03f8508bd73d5eb1da87ac84e3a585aa412f90ae60ec171b",
       "size": 1766
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/sa-test-review.md": {
+    "doc/001.AI投放素材制作/sa-test-review.md": {
       "mode": "100644",
       "sha256": "8b93eb4edc900197d7a07b000c9a725276e99b7a408881611b37b92e7b048ee0",
       "size": 620
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/test-cases.md": {
+    "doc/001.AI投放素材制作/test-cases.md": {
       "mode": "100644",
       "sha256": "14ef662dc1f655093dd11e37ee3cc5c2fc4961540fc0903c7ecefd1042c1f7ea",
       "size": 3186
     },
-    "doc/001.AI\u6295\u653e\u7d20\u6750\u5236\u4f5c/test-report.md": {
+    "doc/001.AI投放素材制作/test-report.md": {
       "mode": "100644",
       "sha256": "a28cce2244e846bdf757ca4383d65f57d3399782d6f0ccb797b2d44293da97eb",
       "size": 2495
@@ -3552,8 +3552,8 @@
     },
     "features/tt_gpu/worker.py": {
       "mode": "100644",
-      "sha256": "245900b48fadcb49617c4636beba99aa41e35190c6dc340c86a18b339f552bc5",
-      "size": 200288
+      "sha256": "de1e61f1286f50c5f84e559e5f62b28b4c725e78ac7cd2dbeedc433491723967",
+      "size": 200625
     },
     "features/tt_posts/__init__.py": {
       "mode": "100644",
@@ -3832,8 +3832,8 @@
     },
     "scripts/test_tt_gpu_worker.py": {
       "mode": "100644",
-      "sha256": "d82e21b7333cc870f41ba3ef5c9b96ac781770fb4a221e818d5e11991ffe87c0",
-      "size": 163265
+      "sha256": "2c34dcdba8b64148135738bb1faf5b1a6bfcb913f24fee95bc4759c092ba54ed",
+      "size": 165832
     },
     "scripts/test_tt_post_code_routes.py": {
       "mode": "100644",
@@ -4476,8 +4476,8 @@
       "size": 1063
     }
   },
-  "entries_fingerprint": "98bd9a78edb26e4e91f404e71b08bb1aa0ebf32a0d9be9133f8380507585a6b5",
+  "entries_fingerprint": "8259c304fd503151fef2b4929ab401bc1e1f33318d121941f0c0d2404a7f9edb",
   "entry_count": 895,
   "schema": 1,
-  "source_commit": "cc23dcc5bab5255fe4f1b1b3bb567bea0c074792"
+  "source_commit": "d05adad41a28383a5c9685e6b75c1c8581a2aa49"
 }

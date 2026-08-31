@@ -8,8 +8,8 @@ export LC_ALL=C.utf8
 # that gate, resumes a trigger, submits a job, reconciles a ledger, or posts.
 
 RUN_ID=gpu-service-migration-20260828T1502
-TARGET_SHA=cc23dcc5bab5255fe4f1b1b3bb567bea0c074792
-EXPECTED_CURRENT_SHA=b78dac252ce0e1095cdc6e21df5d3aa40031a6d9
+TARGET_SHA=d05adad41a28383a5c9685e6b75c1c8581a2aa49
+EXPECTED_CURRENT_SHA=9425b39fa45390b3dc107f353dc6ef436415365d
 SAFE_FALLBACK_SHA=9425b39fa45390b3dc107f353dc6ef436415365d
 EXPECTED_UUID=659e6f89-71fa-463d-842e-ccdf2c06e0fe
 EXPECTED_TRUSTED_HOST=advertising-1306474899.cos.ap-hongkong.myqcloud.com
@@ -22,7 +22,7 @@ EXPECTED_CURRENT_STATE_FILE_COUNT=1798
 EXPECTED_CURRENT_STATE_FINGERPRINT=48454e40e6fe73bf1c6805b71ddf88a6206956b6922cb392a2f89bec0727c8f8
 EXPECTED_LOCK_FILE_COUNT=1130
 EXPECTED_LOCK_FINGERPRINT=5000189e30b5a46f6530b135a53a519d13c75897a1de044e50e760a12f78526f
-EXPECTED_TARGET_MANIFEST_SHA256=0d33f7d9f0e750f2be974fd792fde96cf395a4b43f127546f44774dc21bb78bc
+EXPECTED_TARGET_MANIFEST_SHA256=b23950accbb12afd78ee36afd0b9387f6d84363ab8c371130076e0fc1153b2de
 
 ROOT=/data/tt-post-gpu
 STATE_ROOT=/data/tt-post-publisher
@@ -298,10 +298,11 @@ PY
 }
 
 validate_loaded_units() {
-  local unit property
+  local expected_unit_file_state="$1" unit property
+  [[ "$expected_unit_file_state" == "enabled" || "$expected_unit_file_state" == "disabled" ]]
   for unit in "${UNITS[@]}"; do
     [[ "$(systemctl show -p FragmentPath --value "$unit")" == "/etc/systemd/system/$unit" ]]
-    [[ "$(systemctl show -p UnitFileState --value "$unit")" == "enabled" ]]
+    [[ "$(systemctl show -p UnitFileState --value "$unit")" == "$expected_unit_file_state" ]]
     [[ "$(systemctl show -p NeedDaemonReload --value "$unit")" == "no" ]]
   done
   [[ -z "$(systemctl show -p DropInPaths --value tt-gpu-reverse-tunnel.service)" ]]
@@ -384,7 +385,7 @@ read_only_preflight() {
   [[ "$(tr -d '\r\n' <"$TARGET_RELEASE/.source-commit")" == "$TARGET_SHA" ]]
   [[ "$(tr -d '\r\n' <"$SAFE_FALLBACK_RELEASE/.source-commit")" == "$SAFE_FALLBACK_SHA" ]]
   validate_target_release_manifest
-  check_sha256 "$TARGET_RELEASE/features/tt_gpu/worker.py" 245900b48fadcb49617c4636beba99aa41e35190c6dc340c86a18b339f552bc5
+  check_sha256 "$TARGET_RELEASE/features/tt_gpu/worker.py" de1e61f1286f50c5f84e559e5f62b28b4c725e78ac7cd2dbeedc433491723967
   check_sha256 "$TARGET_RELEASE/scripts/tt_gpu_worker.py" b14783bbbff98aa9886c081da501d892243bdf85d617811d9f9203b652ad3198
   check_sha256 "$SAFE_FALLBACK_RELEASE/features/tt_gpu/worker.py" fad7e217d2ac975a5b68be828bba7b6d28d7cf5ed81f59e7e3c56281d77f0b05
   check_sha256 "$SAFE_FALLBACK_RELEASE/scripts/tt_gpu_worker.py" cc4a8c3e6ece6dfb5210b8d50c35f9d457cd7f92602d8ed401db98e850645fea
@@ -442,13 +443,34 @@ if sys.prefix != "/data/tt-post-gpu/runtime":
 if any(metadata.version(name) != version for name, version in expected.items()):
     raise SystemExit("TT runtime dependency version changed")
 PY
+  PYTHONDONTWRITEBYTECODE=1 "$ROOT/runtime/bin/python" - "$TARGET_RELEASE" <<'PY'
+import sys
+import urllib.request
+
+sys.path.insert(0, sys.argv[1])
+from features.tt_gpu import worker
+
+api = worker.TikTokContentPostingAPI()
+if api.opener is not worker._TIKTOK_NO_REDIRECT_OPENER:
+    raise SystemExit("TT default posting client opener mismatch")
+if any(isinstance(handler, urllib.request.ProxyHandler) for handler in api.opener.handlers):
+    raise SystemExit("TT default posting client retained a proxy handler")
+redirects = [
+    handler for handler in api.opener.handlers
+    if isinstance(handler, worker._TikTokNoRedirect)
+]
+if len(redirects) != 1 or redirects[0].redirect_request(
+    None, None, 302, "Found", {}, "https://redirect.invalid/"
+) is not None:
+    raise SystemExit("TT default posting client redirect policy mismatch")
+PY
   [[ -f /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel && ! -L /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel ]]
   [[ -f /etc/x-post-media-repair-tunnel/known_hosts && ! -L /etc/x-post-media-repair-tunnel/known_hosts ]]
   [[ "$(stat -c '%a:%U:%G' /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel)" == "400:root:root" ]]
   [[ "$(stat -c '%a:%U:%G' /etc/x-post-media-repair-tunnel/known_hosts)" == "644:root:root" ]]
   check_sha256 /etc/x-post-media-repair-tunnel/known_hosts 1e99a8797cf69938c63f1cbd152cf40e63186c586f6ebb1cb5526a6acc51d98b
   [[ "$(ssh-keygen -y -f /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel | ssh-keygen -lf - | awk '{print $2}')" == "SHA256:+nkbj63n9YgoP++S+2f+B9O6GLrAlzoHLIWeBKRJnhg" ]]
-  validate_loaded_units
+  validate_loaded_units disabled
   for unit in "${UNITS[@]}"; do
     [[ "$(systemctl show -p ActiveState --value "$unit")" == "inactive" ]]
     [[ "$(systemctl show -p MainPID --value "$unit")" == "0" ]]
@@ -574,6 +596,8 @@ PRE_STATE_JSON="$(validate_state_idle)"; printf '%s\n' "$PRE_STATE_JSON" >"$EVID
 cp -a "$CPU_CHECKPOINT" "$EVIDENCE_DIR/coordinator-secure-activation.json"
 
 MUTATION_STARTED=1
+systemctl enable "${UNITS[@]}"
+validate_loaded_units enabled
 atomic_current_link "$TARGET_RELEASE"
 systemctl start "${WORKERS[@]}"
 
