@@ -13,8 +13,8 @@ from pathlib import Path
 
 HOST = "VM-0-125-centos"
 UUID = "659e6f89-71fa-463d-842e-ccdf2c06e0fe"
-TARGET = "cc23dcc5bab5255fe4f1b1b3bb567bea0c074792"
-MANIFEST_SHA256 = "0d33f7d9f0e750f2be974fd792fde96cf395a4b43f127546f44774dc21bb78bc"
+TARGET = "d05adad41a28383a5c9685e6b75c1c8581a2aa49"
+MANIFEST_SHA256 = "b23950accbb12afd78ee36afd0b9387f6d84363ab8c371130076e0fc1153b2de"
 UNITS = (
     "tt-gpu-publisher.service",
     "tt-gpu-direct-outro.service",
