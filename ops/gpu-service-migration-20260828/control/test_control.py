@@ -1,9 +1,15 @@
 import importlib.util
+import base64
+import contextlib
+import hashlib
+import io
+import json
 import pathlib
 import re
 import unittest
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -21,6 +27,7 @@ fence = load("source_fence")
 permissions = load("hk_tunnel_permissions")
 receiver = load("receive_archive")
 finalize = load("finalize_config")
+revoke = load("revoke_receiver")
 
 
 class ControlTests(unittest.TestCase):
@@ -89,6 +96,89 @@ class ControlTests(unittest.TestCase):
                         "receive a.tgz 999999999999999 " + sha]:
             with self.assertRaises(ValueError):
                 receiver.parse_request(request)
+
+    def receiver_key(self, ending=b"\n"):
+        blob = base64.b64encode(b"synthetic temporary receiver public key")
+        options = (b'command="' + revoke.RECEIVE_COMMAND.encode("ascii")
+                   + b'",from="43.166.178.132",restrict')
+        line = options + b" ssh-ed25519 " + blob + b" " + revoke.COMMENT + ending
+        return line, revoke.fingerprint(blob)
+
+    def test_receiver_revocation_preserves_every_other_byte_and_newline(self):
+        temporary, fp = self.receiver_key(ending=b"\r\n")
+        # Includes an unrelated long-lived tunnel, CRLF, blank lines, a quoted
+        # command and arbitrary comment bytes with no final newline.
+        prefix = (b"# preserved comment\r\n\r\n"
+                  b'command="/usr/bin/sleep infinity",from="43.154.250.89",restrict,'
+                  b'port-forwarding ssh-ed25519 dW5yZWxhdGVk long-lived-tunnel\n')
+        suffix = b"ssh-rsa c2Vjb25k unrelated owner's caf\xe9"
+        self.assertEqual(revoke.rewrite(prefix + temporary + suffix, fp), prefix + suffix)
+        self.assertEqual(revoke.rewrite(prefix + temporary.rstrip(b"\r\n"), fp), prefix)
+
+    def test_receiver_revocation_requires_one_pinned_key(self):
+        temporary, fp = self.receiver_key()
+        for case, content, expected in (
+            ("missing", b"# no receiver\n", fp),
+            ("duplicate", temporary + temporary, fp),
+            ("duplicate_wrong_scope", temporary + temporary.replace(b",restrict", b""), fp),
+            ("wrong_fingerprint", temporary, "SHA256:wrong"),
+        ):
+            with self.subTest(case=case):
+                with self.assertRaises(RuntimeError):
+                    revoke.rewrite(content, expected)
+
+    def test_receiver_revocation_rejects_changed_scope(self):
+        temporary, fp = self.receiver_key()
+        for old, new in (
+            (b"43.166.178.132", b"43.166.187.96"),
+            (b",restrict", b""),
+            (b",restrict", b",restrict,port-forwarding"),
+            (b",restrict", b",restrict,restrict"),
+            (b"/usr/bin/python3.9", b"/usr/bin/python3"),
+            (b"/control-code/", b"/../control-code/"),
+            (b"7c54dedd9d6f59a9c46431aac7f1782f00ba71d1", b"other-commit"),
+            (b"receive_archive.py", b"receive_archive.py; id"),
+            (b"ssh-ed25519", b"ssh-rsa"),
+            (revoke.COMMENT, b"long-lived-tunnel"),
+        ):
+            with self.subTest(scope=old.decode("ascii")):
+                with self.assertRaises(RuntimeError):
+                    revoke.rewrite(temporary.replace(old, new), fp)
+
+    def test_receiver_revocation_defaults_to_dry_run_without_key_output(self):
+        before, _ = self.receiver_key()
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["revoke_receiver.py"]), \
+             mock.patch.object(revoke, "host_guard"), \
+             mock.patch.object(revoke, "read_keys", return_value=(before, ())), \
+             mock.patch.object(revoke, "rewrite", return_value=b""), \
+             mock.patch.object(revoke, "apply_change") as apply, contextlib.redirect_stdout(output):
+            revoke.main()
+        apply.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue()), {
+            "dry_run": True, "before_sha256": hashlib.sha256(before).hexdigest(),
+            "after_sha256": hashlib.sha256(b"").hexdigest(),
+            "fingerprint": revoke.KEY_FP, "removed_count": 1,
+        })
+
+    def test_receiver_revocation_accepts_approved_root_filesystem_layout(self):
+        row = "/ " + revoke.UUID + " rw,relatime"
+        revoke.validate_data_mount(row, False, 42, 42)
+        with self.assertRaises(RuntimeError):
+            revoke.validate_data_mount(row, False, 42, 43)
+
+    def test_receiver_revocation_accepts_approved_dedicated_mount_layout(self):
+        row = "/data " + revoke.UUID + " rw,noatime"
+        revoke.validate_data_mount(row, True, 42, 43)
+        for changed in (
+            "/data wrong-uuid rw,noatime",
+            "/data " + revoke.UUID + " ro,noatime",
+            "/other " + revoke.UUID + " rw,noatime",
+        ):
+            with self.subTest(row=changed), self.assertRaises(RuntimeError):
+                revoke.validate_data_mount(changed, True, 42, 43)
+        with self.assertRaises(RuntimeError):
+            revoke.validate_data_mount(row, False, 42, 43)
 
     def test_unit_retirement_copies_across_disks_without_overwriting_archive(self):
         with tempfile.TemporaryDirectory() as folder:
