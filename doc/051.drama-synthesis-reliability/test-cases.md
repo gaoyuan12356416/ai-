@@ -9,7 +9,7 @@
 - 媒体样本固定源文件SHA、配方SHA、素材manifest和编码参数。短样0.5～300秒，长样5400～7200秒；5秒样例不能充当90分钟验收。
 - 下载测速固定1～8个资源，单资源最多32 MiB，单次最多256 MiB；私有URL文件不入Git，公开证据不含URL查询参数或Token。
 
-最终候选实际执行六模块合并回归 **457/457通过、0跳过，31.455秒**：upgrade85、cache111、CPU catalog16、CPU客户端30、GPU runtime66、media149；另跑FB prepare worker **16/16**。`node scripts/test_drama_synthesis_list_actions.js` 返回 **25/25、2页、0浏览器调用、0网络调用**；cache在 `socket.connect/connect_ex` 硬拒绝下仍111/111，固定MinGit2.27下也为111/111。完整候选、目标Linux无媒体结果、旧候选失败与历史证据以 [test-report.md](test-report.md) 为准；本地结果和无媒体Linux结果都不代替真实COS或长片验收。
+最终候选 `a1519413b23d20acab035853b0f5aeebee53e9ac` 实际执行六模块合并回归 **478/478通过、0跳过，26.653秒**：upgrade85、cache111、CPU catalog16、CPU客户端30、GPU runtime68、media168；另跑FB prepare worker **16/16**。`node scripts/test_drama_synthesis_list_actions.js` 返回 **25/25**。frame/deadline修复后两轮独立增量终审P0/P1/P2均为0。最终候选严格无网络按冻结排除12+3后预期466+13，尚待新书面窗口；历史dc0bad8的457/445+13只作历史证据。完整状态以 [test-report.md](test-report.md) 为准；本地结果和历史无媒体Linux结果都不代替新Linux、真实COS或长片验收。
 
 ## 自动化及隔离故障用例
 
@@ -35,6 +35,10 @@
 | TC-18 | 表面codec/尺寸相同但profile、level、pix_fmt、几何/SAR、色彩、场序、rate/time_base、音轨长短/缺失、声道或H.264/AAC extradata不同；源信息缺失；源/profile/顺序/plan变化；片头为合规JFIF或PNG/ICC/Adobe JPEG；下载乱序完成 | 只有完整流签名一致才直拼；不完整/不同启动单标准化执行器。第1集偶数画布上等比scale+pad，真实BT.709 limited转换和显式bwdif；短音轨apad、无音轨补静音且不截视频。fresh/replay重新probe并匹配目标签名；checkpoint变化拒绝复用。合规JFIF片头真实转换，其他格式在FFmpeg前拒绝；始终保留片头和集序 | P0 | media离线因果fixture通过；真实FFmpeg、实际封面、短片和长片衔接待验 |
 | TC-19 | concat、去BGM或模板成片已完成但上传失败/公开副本丢失；恢复时concat、Demucs和模板runner全部设为禁止调用；另造缺失/损坏/冲突记录及检查点写失败 | 有效工作区成片和本地完成记录复用，只恢复公开副本并续传；任何publish前已经持久提交记录；已有成片缺记录、源/配方/产物/身份冲突或记录写失败都保留并停止，不重制覆盖或上传 | P0 | concat/no-BGM/模板离线回归通过；真实COS上传恢复待验 |
 | TC-20 | FFmpeg进度含NaN/非法值；正常退出与超时退出 | 使用真实媒体时间；先kill/wait确认退出再clear；无命令/URL泄露 | P0 | media/runtime本地通过；真实Linux FFmpeg待验 |
+| TC-31 | 冻结不同时长，计算初始模板预算；在轮询期间注入0.5ms/1ms媒体时间微增量、纯frame-only、先out_time后frame-only、`t<300` out_time后在资格阈值后仅frame再空批次、相等/倒退值及仅fps/speed变化；在首次drain后、stall/deadline判断前再注入推进 | 初始预算取配置、12小时和时长/0.10x×1.25+1800秒最大值并封顶24小时；严格正向媒体时间/帧均刷新stall，只有本批次正向媒体时间估算并延长deadline且不能缩短；早期pending在资格判断前消费，frame-only不复用旧out_time、不猜测预算；poll二次drain消费刚到进度；相等/倒退/仅速率不续命；1800秒无真实推进触发stall | P0 | GPU/media生产路径本地通过；旧实现与仅拆分advanced的半修均被变异回归拒绝；真实长片/stall待Linux窗口 |
+| TC-32 | 向maxsize=8队列连续写10个乱序packet；同stage/generation让out_time/frame/bytes/percent回退，同时更新fps/speed/分母；再切stage | 饱和分支fold高水位且不阻塞reader；推进指标只取数值max，非推进指标更新，last_progress_at只随真实推进；stage变化按现有语义重置 | P0 | runtime/media真实queue饱和与持久emit路径本地通过；页面真实API待验 |
+| TC-33 | timeout、stall、exit137、signal-9及原生Popen抛出含URL/路径/secret的异常；构造超量stderr | 每job/generation生成原子0600、≤64KiB诊断；保存安全stage/预算/高水位、137或-9/9、stderr字节/SHA/静态标签；公开错误及sidecar均无stderr原文、命令、URL、路径、异常原文或凭据 | P0 | media生产失败路径本地通过；Linux权限/重启后审计待验 |
+| TC-34 | `clear_process`分别探测stopped/alive/unknown及probe异常；让progress reader保持存活；注入诊断写失败、partial校验成功后prepared/final提交故障，以及final已提交后的收尾异常 | 仅stopped删除持久身份；alive/unknown/reader存活阻止假清理。诊断或退出不明保留partial/guard；校验通过先durable prepared再提升，final提交后清理异常不删除或反转结果 | P0 | runtime/media生产路径本地通过；真实/proc、reader FD和掉电边界待Linux验收 |
 
 ## 性能、页面及上线验收用例
 
@@ -46,7 +50,7 @@
 | TC-24 | 相同并发/资源/样本比较img与accelerate候选；核对内容与响应 | 实测更快且无内容/校验退化才启用；抽样一致只标抽样证据，完整对象需另证 | P0 | 比较/冻结/隔离回退单测通过；[香港样本](cdn-evaluation.md)结果分化，维持original默认 |
 | TC-25 | 两个真实页面观察下载/标准化/模板/上传、封面先完成、断连、跨小时耗时 | 中文阶段准确；仅阶段百分比；没有源地址/内部错误；封面不覆盖主阶段，耗时持续增长 | P0 | 25/25静态及组件浏览器检查通过；真实认证/API和用户视觉待验 |
 | TC-26 | 原任务自然完成并对账后按GPU→CPU切换；在隔离环境排演回滚 | GitHub精确SHA、备份可用；DB/账本/manifest/成片保留；无重复正式制作或平台发布 | P0 | 待执行，生产未切换 |
-| TC-27 | 固定16GiB launcher依次做无媒体guard-only、短样prepare、两轮三配置render及逐片decode；注入candidate worktree/local config/filter/ignored/index/权限变化、site/.pth、长源同大小替换、提交响应未知、BaseException及动作后cgroup计数增长 | 每个动作以 `-I -S -B` 使用固定unit/路径和同一精确候选；全HEAD blob、root-owned只读树、批次长源SHA、decode前后成片身份、提交intent/不重放、任意中断kill+wait及前后failcnt/memsw/swap/OOM均闭环；不能靠旧手工systemd模板绕过 | P0 | media149/149、upgrade85/85、FB16/16本地通过；真实Linux权限、16GiB unit与媒体均未运行 |
+| TC-27 | 固定16GiB launcher依次做无媒体guard-only、短样prepare、两轮三配置render及逐片decode；注入candidate worktree/local config/filter/ignored/index/权限变化、site/.pth、长源同大小替换、提交响应未知、BaseException及动作后cgroup计数增长 | 每个动作以 `-I -S -B` 使用固定unit/路径和同一精确候选；render外层90000秒、其他动作43200秒并精确回读（含systemd `1d 1h`）；evidence绑定configured/planned/86400硬上限；全HEAD blob、root-owned只读树、批次长源SHA、decode前后成片身份、提交intent/不重放、任意中断kill+wait及前后failcnt/memsw/swap/OOM均闭环；不能靠旧手工systemd模板绕过 | P0 | media168/168、upgrade85/85、FB16/16本地通过；真实Linux权限、16GiB unit与媒体均未运行 |
 | TC-28 | 专用四键凭据、全新私有前缀和非敏感MP4执行真实COS分片；在Part1及Complete成功响应后各丢一次响应；测试通知、双匿名HEAD、owner-only ACL、3600+30期限；注入ignored/replace/fsmonitor、skip-worktree/assume-unchanged、Git环境、候选blob差异、qcloud/requests/urllib3/certifi shadow、`.pth/.pyc/.pyo/.egg-link`、symlink、ffprobe stdout/stderr超限及本地子进程中断 | 同一UploadId续传；完成重放零写；完整认证GET SHA一致；Create/Complete前通知为空，匿名两次403且只有Owner FULL_CONTROL；固定`python -I -S -B`下候选/传输/runtime任一不明都在读凭据或发COS请求前拒绝；超限/中断子进程kill+wait；无delete/abort/业务API | P0 | 最终验收驱动门禁42/42、全cache111/111，固定MinGit2.27与socket连接硬拒绝下均111/111；真实COS写入待独立窗口，不能用mock代替 |
 | TC-29 | 新v3 manifest缺/改输入指纹；同大小对象替换；改SHA、ETag、binding、bucket/key或远端元数据；异步执行无manifest但存在可预测公共文件名 | 每个选中产物均由本地SHA和认证HEAD匹配v3；任何差异进入 `recovery_required`，不得按文件名补URL、缓存未命中或重新渲染 | P0 | cache/app离线fixture及最终全量回归通过；真实COS HEAD待窗口 |
 | TC-30 | 首次创建结果目录、临时文件fsync/replace/父目录fsync/readback各阶段故障；旧同步入口与专用worker争owner.lock；无COS配置 | 任何不确定均保留本地成片/检查点且阻止新渲染；旧同步与worker全局互斥；无COS只写旧兼容manifest并保留本地产物 | P0 | fault-order/锁离线fixture及最终全量回归通过；Linux掉电边界待隔离验收 |

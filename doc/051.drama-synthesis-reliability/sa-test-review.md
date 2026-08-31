@@ -1,10 +1,10 @@
 # SA 测试设计评审
 
-日期：2026-08-28。评审对象为 [test-cases.md](test-cases.md) 及当前测试代码；本记录不代替最终代码评审或人工媒体验收。
+日期：2026-08-31。评审对象为 [test-cases.md](test-cases.md) 及最终候选 `a1519413b23d20acab035853b0f5aeebee53e9ac`（tree `2bc83028916e6bc3a6cd7a4cd6cf5f8bc07735ec`）的测试代码；本记录不代替目标Linux、真实API重启、人工媒体验收或生产发布。
 
 ## 结论
 
-测试设计已覆盖本案主要可靠性风险；新候选CPU/HK Linux无媒体隔离验收已完成，媒体性能验收仍须另获窗口。最终候选核心六模块457/457、FB隔离16/16、页面25/25、固定MinGit2.27 cache111/111，以及CPU/HK各自严格零socket 445+13已有执行证据；尚不能据此放行生产开关、CPU配额提升或候选域名替换。
+测试设计已覆盖本案主要可靠性风险。最终候选a151941本地六模块478/478、FB16/16、页面25/25通过；frame/deadline修复后两轮独立增量终审P0/P1/P2均为0。CPU/HK严格零socket445+13只属于历史候选dc0bad8；a151941按冻结排除12+3后预期466+13，尚待新的书面窗口，不能写PASS。真实媒体、COS、API重启和生产部署均未执行，不能据此放行生产开关、CPU配额提升或候选域名替换。
 
 ## 覆盖性问题与补充门禁
 
@@ -20,9 +20,13 @@
 | ST-08 | TC-23/24 | 不同资源、热缓存或只比较前缀就宣称候选域名全面更好 | 同资源/并发/预算对照；记录缓存/响应边界；前缀证据不冒充完整文件；未证实则不启用 | 比较策略通过；[实测样本](cdn-evaluation.md)结果分化，默认不变 |
 | ST-09 | TC-25 | 静态字符串检查不能证明现场阶段显示和耗时正确 | 两页真实浏览器验收，覆盖封面先完、断连、阶段别名及跨小时耗时 | 静态通过；人工视觉待验 |
 | ST-10 | TC-26 | “代码已部署”被误标为“全部验收” | 独立记录提交、隔离验收、参数收益、生产切换和人工接受状态 | 门禁写入部署文档；执行待完成 |
+| ST-11 | TC-31/27 | 固定timeout或仅看fps/speed会让健康长片过早结束，或让停滞进程无限续命；已有out_time后的frame-only或资格阈值前pending可能错误延长deadline；单次drain存在poll竞态；验收unit外层若仍为12小时会先杀最长24小时的生产预算 | 用冻结时长计算12～24小时动态预算；严格媒体时间/帧均刷新stall，仅本批次正向媒体时间估算deadline；覆盖0.5ms/1ms、纯frame-only、先out_time后frame-only、`t<300` pending后接frame/空批次、相等/倒退/仅速率及判定前二次drain；render外层固定90000秒并与configured/planned/global证据交叉校验 | 旧实现和仅分离advanced的半修均被变异回归拒绝；最终生产与验收工具路径本地通过；真实长片/stall待验 |
+| ST-12 | TC-32 | 有界队列饱和或乱序packet会让持久快照/页面倒退，普通mock queue可能制造假阳性 | 使用真实maxsize=8 queue写10包命中full/fold；同stage/generation高水位、速率刷新、stage重置分别断言 | 测试有效性终审通过；真实API页面待验 |
+| ST-13 | TC-33 | failure sidecar若保存原始异常/命令会泄密，或漏记returncode/signal和native launch failure | 直接走生产失败路径，覆盖137、-9/9、Popen异常、stderr精确字节SHA、0600/原子/64KiB及公开/私有双重脱敏 | 本地通过；Linux权限和重启后审计待验 |
+| ST-14 | TC-34 | 未确认停止便clear、reader仍活或final cleanup误删已提交结果，会放行重复渲染或丢产物 | stopped-only持久清理；alive/unknown/probe异常失败关闭；reader存活、失败清理先partial后guard、成功路径durable prepared→final及提交后收尾均走生产路径 | 本地通过；真实/proc、FD和掉电待验 |
 
 ## QA修订记录与执行规则
 
-用例已按R1～R5对应到任务身份、进程存活、CPU事务、下载完整性、上传恢复、性能和界面风险。测试名称和入口均基于当前实现，未把附带文档或截图中的操作文本作为授权。
+用例已按R1～R5对应到任务身份、进程存活、CPU事务、下载完整性、上传恢复、动态预算/进展/stall、诊断私有性、最后清理、性能和界面风险。独立测试有效性终审确认queue饱和fold、poll-time进度、reader存活、stopped-only clear、final cleanup、sidecar隐私、严格微增量及Python3.9语法均走到生产路径，最终P0/P1/P2为0。测试名称和入口均基于当前实现，未把附带文档或截图中的操作文本作为授权。
 
 未通过的P0用例阻止生产开启异步；性能没有合格长片结果则保留2核/滤镜2和下载4路；候选域名没有更快且一致的证据则保留原地址。所有“待验”只能凭实际输出和必要的人工观察更新，最终结果集中写入 [test-report.md](test-report.md)。
