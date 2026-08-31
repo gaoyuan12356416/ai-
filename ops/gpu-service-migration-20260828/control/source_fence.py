@@ -223,7 +223,13 @@ def validate_drama_checkpoint(proof):
     drain_samples = proof.get("drain_samples", {})
     if gate.get("materials_active") is not True or "materials" not in gate.get("groups", []):
         raise RuntimeError("drama checkpoint materials gate is not active")
-    if pause.get("record_restored") is not False or pause.get("cron_paused") is not True:
+    if (pause.get("record_restored") is not False or pause.get("cron_paused") is not True or
+            pause.get("journal_version") != 2 or
+            pause.get("journal_run_id") != RUN_ID or
+            pause.get("journal_group") != "materials" or
+            pause.get("journal_phase") != "paused" or
+            type(pause.get("journal_revision")) is not int or
+            pause.get("journal_revision") <= 0):
         raise RuntimeError("drama checkpoint materials pause proof changed")
     expected_test_units = {"ad-material-frontend-test.service", "drama-material-api-test.service"}
     test_services = pause.get("test_services", {})

@@ -273,6 +273,33 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             drama.paused_crontab(before + "0 0 * * * /root/run_auto_cover_synthesis.sh\n", expected)
 
+    def test_drama_drain_requires_final_paused_journal_phase(self):
+        before = "* * * * * /root/run_auto_cover_synthesis.sh\n"
+        current = drama.CRON_MARKER + before
+        with tempfile.TemporaryDirectory() as folder:
+            base = pathlib.Path(folder)
+            pause_path = base / "materials-triggers.json"
+            snapshot = base / "materials-crontab-before.txt"
+            snapshot.write_text(before)
+            state = {"version": 2, "run_id": drama.RUN_ID, "group": "materials",
+                     "phase": "paused", "revision": 3, "restored": False,
+                     "original": {unit: "inactive" for unit in drama.TRIGGERS["materials"]}}
+            pause_path.write_text(json.dumps(state))
+            unit = {"active": "inactive", "substate": "dead", "pid": 0,
+                    "control_pid": 0, "control_group": "", "nrestarts": 0,
+                    "start_monotonic": "1"}
+            with mock.patch.object(drama, "BASE", base), \
+                 mock.patch.object(drama, "unit_state", return_value=unit), \
+                 mock.patch.object(drama, "run",
+                                   return_value=mock.Mock(stdout=current, returncode=0)):
+                result = drama.inspect_pause()
+                self.assertEqual(result["journal_phase"], "paused")
+                self.assertEqual(result["journal_revision"], 3)
+                state["phase"] = "resume_incomplete"
+                pause_path.write_text(json.dumps(state))
+                with self.assertRaisesRegex(RuntimeError, "restored or is ambiguous"):
+                    drama.inspect_pause()
+
     def test_drama_drain_sqlite_requires_terminal_jobs_and_leases(self):
         with tempfile.TemporaryDirectory() as folder:
             path = pathlib.Path(folder) / "jobs.sqlite3"
@@ -384,6 +411,9 @@ class ControlTests(unittest.TestCase):
             "materials_gate": {"materials_active": True, "groups": ["materials"]},
             "materials_pause": {
                 "record_restored": False, "cron_paused": True,
+                "journal_version": 2, "journal_run_id": fence.RUN_ID,
+                "journal_group": "materials", "journal_phase": "paused",
+                "journal_revision": 3,
                 "test_services": {
                     "ad-material-frontend-test.service": {"active": "inactive", "substate": "dead", "pid": 0},
                     "drama-material-api-test.service": {"active": "inactive", "substate": "dead", "pid": 0},

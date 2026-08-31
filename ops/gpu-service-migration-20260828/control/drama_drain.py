@@ -212,7 +212,10 @@ def paused_crontab(before, current):
 def inspect_pause():
     pause_path = BASE / "materials-triggers.json"
     pause = json.loads(pause_path.read_text())
-    if pause.get("restored") is not False:
+    if (pause.get("version") != 2 or pause.get("run_id") != RUN_ID or
+            pause.get("group") != "materials" or pause.get("phase") != "paused" or
+            type(pause.get("revision")) is not int or pause.get("revision") <= 0 or
+            pause.get("restored") is not False):
         raise RuntimeError("materials pause record was restored or is ambiguous")
     original = pause.get("original")
     if not isinstance(original, dict) or set(original) != set(TRIGGERS["materials"]):
@@ -224,7 +227,10 @@ def inspect_pause():
     before = (BASE / "materials-crontab-before.txt").read_text()
     current = run(["crontab", "-l"]).stdout
     paused_crontab(before, current)
-    return {"record_restored": False, "test_services": services,
+    return {"record_restored": False, "journal_version": 2,
+            "journal_run_id": RUN_ID, "journal_group": "materials",
+            "journal_phase": "paused", "journal_revision": pause["revision"],
+            "test_services": services,
             "cron_paused": True,
             "cron_before_sha256": hashlib.sha256(before.encode("utf-8")).hexdigest(),
             "cron_current_sha256": hashlib.sha256(current.encode("utf-8")).hexdigest()}
