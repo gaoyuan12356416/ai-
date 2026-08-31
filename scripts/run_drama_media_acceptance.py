@@ -345,46 +345,46 @@ def verify_candidate_filesystem_permissions(candidate_root, tree_entries):
     while pending:
         directory = pending.pop()
         try:
-            entries = list(os.scandir(directory))
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    seen += 1
+                    require(seen <= MAX_CANDIDATE_FILESYSTEM_ENTRIES,
+                            "candidate_filesystem_too_large")
+                    path = Path(entry.path)
+                    if directory == root and entry.name == ".git":
+                        marker_seen = True
+                        try:
+                            marker = os.lstat(path)
+                        except OSError:
+                            raise LaunchFailure("candidate_git_directory_unsafe") from None
+                        marker_kind = "directory" if stat.S_ISDIR(marker.st_mode) else "file"
+                        require_root_owned_secure_path(
+                            path, marker_kind, "candidate_git_directory_unsafe"
+                        )
+                        continue
+                    try:
+                        value = os.lstat(path)
+                    except OSError:
+                        raise LaunchFailure("candidate_directory_permissions_unsafe") from None
+                    try:
+                        relative = path.relative_to(root).as_posix()
+                    except ValueError:
+                        raise LaunchFailure("candidate_filesystem_entry_unsafe") from None
+                    if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+                        require_root_owned_secure_path(
+                            path, "directory", "candidate_directory_permissions_unsafe"
+                        )
+                        actual_directories.add(relative)
+                        pending.append(path)
+                    elif stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+                        require_root_owned_secure_path(
+                            path, "file", "candidate_worktree_file_permissions_unsafe"
+                        )
+                        actual_files.add(relative)
+                    else:
+                        raise LaunchFailure("candidate_filesystem_entry_unsafe")
         except OSError:
             raise LaunchFailure("candidate_directory_permissions_unsafe") from None
-        seen += len(entries)
-        require(seen <= MAX_CANDIDATE_FILESYSTEM_ENTRIES,
-                "candidate_filesystem_too_large")
-        for entry in entries:
-            path = Path(entry.path)
-            if directory == root and entry.name == ".git":
-                marker_seen = True
-                try:
-                    marker = os.lstat(path)
-                except OSError:
-                    raise LaunchFailure("candidate_git_directory_unsafe") from None
-                marker_kind = "directory" if stat.S_ISDIR(marker.st_mode) else "file"
-                require_root_owned_secure_path(
-                    path, marker_kind, "candidate_git_directory_unsafe"
-                )
-                continue
-            try:
-                value = os.lstat(path)
-            except OSError:
-                raise LaunchFailure("candidate_directory_permissions_unsafe") from None
-            try:
-                relative = path.relative_to(root).as_posix()
-            except ValueError:
-                raise LaunchFailure("candidate_filesystem_entry_unsafe") from None
-            if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
-                require_root_owned_secure_path(
-                    path, "directory", "candidate_directory_permissions_unsafe"
-                )
-                actual_directories.add(relative)
-                pending.append(path)
-            elif stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode):
-                require_root_owned_secure_path(
-                    path, "file", "candidate_worktree_file_permissions_unsafe"
-                )
-                actual_files.add(relative)
-            else:
-                raise LaunchFailure("candidate_filesystem_entry_unsafe")
     require(marker_seen, "candidate_git_directory_unsafe")
     expected_files = set(tree_entries)
     expected_directories = {""}
@@ -424,7 +424,7 @@ def bounded_git(args, candidate_root, *, maximum=65536, input_bytes=None):
             "candidate_git_check_failed")
     command = [
         path_text(GIT_PATH), "--no-pager", "--no-replace-objects",
-        "-c", "core.fsmonitor=false",
+        "-c", "core.fsmonitor=",
         "-c", "core.untrackedCache=false",
         "-c", "core.hooksPath=/dev/null",
         "-c", "core.bare=false",
@@ -462,6 +462,18 @@ def bounded_git(args, candidate_root, *, maximum=65536, input_bytes=None):
         raise LaunchFailure("candidate_git_check_failed") from None
 
 
+def verify_fsmonitor_namespace(candidate_root):
+    """Prove the only visible fsmonitor setting is our Git-2.27-safe empty override."""
+    configured = bounded_git([
+        "config", "--includes", "--show-origin", "--show-scope", "--get-all",
+        "core.fsmonitor",
+    ], candidate_root)
+    lines = configured.splitlines()
+    require(len(lines) == 1 and
+            re.fullmatch(r"command[\t ]+command line:[\t ]*", lines[0]) is not None,
+            "candidate_fsmonitor_config_unsafe")
+
+
 def verify_candidate(spec):
     require_secure_git_binary()
     try:
@@ -479,6 +491,10 @@ def verify_candidate(spec):
     )
     for relative in critical:
         require_regular_file(spec.candidate_root / relative)
+    # The config query does not read or refresh the index. It must precede every
+    # ls-files invocation because Git 2.27 treats any non-empty fsmonitor value
+    # as a hook pathname.
+    verify_fsmonitor_namespace(spec.candidate_root)
     top_level = bounded_git(
         ["rev-parse", "--show-toplevel"], spec.candidate_root
     ).strip()
@@ -536,17 +552,20 @@ def verify_candidate(spec):
                 "candidate_index_invalid")
         indexed[match[3]] = (match[1], match[2])
     require(indexed == tree_entries, "candidate_index_not_exact_head")
-    tracked = bounded_git(
-        ["ls-files", "-v", "-z"], spec.candidate_root, maximum=1048576
-    ).split("\x00")
-    require(tracked[-1] == "", "candidate_index_flags_unsafe")
-    tracked_paths = []
-    for row in tracked[:-1]:
-        match = re.fullmatch(r"H ([^\x00\r\n]+)", row)
-        require(match is not None, "candidate_index_flags_unsafe")
-        tracked_paths.append(match[1])
-    require(set(tracked_paths) == set(tree_entries) and
-            len(tracked_paths) == len(tree_entries), "candidate_index_flags_unsafe")
+    # -v exposes assume-unchanged/skip-worktree and -f exposes fsmonitor-valid.
+    for option in ("-v", "-f"):
+        tracked = bounded_git(
+            ["ls-files", option, "-z"], spec.candidate_root, maximum=1048576
+        ).split("\x00")
+        require(tracked[-1] == "", "candidate_index_flags_unsafe")
+        tracked_paths = []
+        for row in tracked[:-1]:
+            match = re.fullmatch(r"H ([^\x00\r\n]+)", row)
+            require(match is not None, "candidate_index_flags_unsafe")
+            tracked_paths.append(match[1])
+        require(set(tracked_paths) == set(tree_entries) and
+                len(tracked_paths) == len(tree_entries),
+                "candidate_index_flags_unsafe")
     verify_candidate_filesystem_permissions(spec.candidate_root, tree_entries)
     identities = {}
     total_bytes = 0

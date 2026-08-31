@@ -1,0 +1,73 @@
+{
+  "recorded_at_local_date": "2026-08-31",
+  "candidate_sha": "1367dd4e508dc81f0fb7eb9c128ed47a22b67d06",
+  "candidate_tree": "4e140bcc3a7a0ebb6d0a924a7c70a71bd2af4e17",
+  "overall_result": "failed",
+  "decision": "Candidate 1367dd4 is rejected for target acceptance and must not be deployed or relayed to HK as an accepted bundle.",
+  "scope": "Isolated no-media, no-network Linux regression only; this is not media, COS, service, database or production acceptance.",
+  "cpu": {
+    "host": "43.166.187.96",
+    "git_version": "2.27.0",
+    "checkout": "/mnt/data-disk/drama-synthesis-acceptance/code/1367dd4e508dc81f0fb7eb9c128ed47a22b67d06-20260831T1415-zero-socket",
+    "evidence_directory": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/1367dd4e508dc81f0fb7eb9c128ed47a22b67d06/zero-socket-20260831T1415",
+    "candidate_identity": {
+      "fresh_github_checkout": true,
+      "tracked_regular_files": 1258,
+      "all_tracked_files_match_git_blob_no_filters": true,
+      "root_owned_and_not_group_or_other_writable": true,
+      "python_3_9_ast_files": 18,
+      "python_3_9_ast_ok": true,
+      "current_python_compile_ok": true,
+      "network_namespace_unshared": true
+    },
+    "tests": {
+      "six_module_filtered_suite": {
+        "selected": 442,
+        "ran": 442,
+        "passed": 440,
+        "errors": 1,
+        "failures": 0,
+        "skipped": 1,
+        "result": "failed"
+      },
+      "fb_prepare_filtered_suite": {
+        "selected": 13,
+        "ran": 13,
+        "passed": 13,
+        "errors": 0,
+        "failures": 0,
+        "skipped": 0,
+        "result": "passed"
+      },
+      "error": {
+        "test": "scripts.test_drama_synthesis_gpu_cache.CosAcceptanceDriverTests.test_git_runner_forces_clean_namespace_and_never_accepts_ambiguous_sha",
+        "cause": "The test used Path('C:/fixed/usr/bin/git'), which is not absolute on POSIX, so the verifier correctly rejected the fake Git path."
+      },
+      "skip": {
+        "test": "scripts.test_drama_synthesis_gpu_cache.CosAcceptanceDriverTests.test_real_local_git_never_executes_configured_fsmonitor_and_rejects_replace_and_ignored",
+        "cause": "The old candidate skipped this test below Git 2.36 even though both target hosts use Git 2.27."
+      }
+    }
+  },
+  "hk": {
+    "host": "43.154.250.89",
+    "tests_started": false,
+    "media_started": false,
+    "first_attempt": "A private-path harness contained CRLF pollution before checkout; the failed private directories were retained and no checkout or test was claimed.",
+    "second_checkout": "/data/drama-synthesis-gpu/acceptance/code/1367dd4e508dc81f0fb7eb9c128ed47a22b67d06-20260831T1420-zero-socket",
+    "second_evidence_directory": "/data/drama-synthesis-gpu/acceptance/20260831-reliability/code-tests/1367dd4e508dc81f0fb7eb9c128ed47a22b67d06/zero-socket-20260831T1420",
+    "second_attempt": "The empty private Git repository was initialized, but GitHub SSH authentication failed with Permission denied (publickey). No credential, token or private key was copied or read, and no checkout or tests ran.",
+    "bundle_relay": "A clean CPU-to-HK bundle relay was considered, then cancelled when the CPU regression rejected this candidate."
+  },
+  "production_effects": {
+    "ffmpeg_or_ffprobe_started": false,
+    "media_download_started": false,
+    "cos_accessed": false,
+    "systemd_or_transient_unit_changed": false,
+    "production_service_restarted": false,
+    "production_database_or_shared_directory_changed": false,
+    "production_ports_changed": false,
+    "output_directory_touched": false
+  },
+  "follow_up": "Fix Git 2.27 compatibility and filter execution exposure locally, create a new exact candidate SHA, rerun complete local and strict zero-socket tests, then request fresh CPU/HK isolated-test permission."
+}

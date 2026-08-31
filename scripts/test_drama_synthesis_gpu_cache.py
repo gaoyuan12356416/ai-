@@ -1740,17 +1740,43 @@ class CosAcceptanceDriverTests(unittest.TestCase):
     def git_result(stdout=b"", returncode=0, stderr=b""):
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
-    def clean_git_results(self, *, status=b"", ignored=b"", replacement=b"",
-                          config=b"command\tcommand line:\tfalse\n", tree=b"b" * 40 + b"\n",
-                          index_entries=b"H fixture\x00"):
-        commit = b"a" * 40 + b"\n"
+    @staticmethod
+    def candidate_tracked():
         return [
-            self.git_result(b"git version 2.39.2\n"), self.git_result(config),
-            self.git_result(replacement), self.git_result(b"sha1\n"),
+            "scripts/verify_drama_cos_upload.py", "features/__init__.py",
+            "features/drama_synthesis/__init__.py", "features/drama_synthesis/core.py",
+            "features/drama_synthesis/local_checkpoint.py", "features/drama_synthesis/gpu_cache.py",
+            "features/drama_synthesis/async_runtime.py", "features/drama_synthesis/cos_upload.py",
+        ]
+
+    def clean_git_results(self, *, replacement=b"",
+                          config=b"command\tcommand line:\t\n",
+                          version=b"git version 2.27.0\n", object_format=b"sha1\n",
+                          candidate_tree=None, index_entries=None,
+                          index_flags=None, fsmonitor_flags=None):
+        commit = b"a" * 40 + b"\n"
+        tree = b"b" * 40 + b"\n"
+        tracked = self.candidate_tracked()
+        blobs = {item: ("{:040x}".format(index + 1)).encode()
+                 for index, item in enumerate(tracked)}
+        tree_entries = b"".join(
+            b"100644 blob " + blobs[item] + b"\t" + item.encode() + b"\x00"
+            for item in tracked)
+        index_entries = index_entries if index_entries is not None else b"".join(
+            b"100644 " + blobs[item] + b" 0\t" + item.encode() + b"\x00"
+            for item in tracked)
+        index_flags = index_flags if index_flags is not None else b"".join(
+            b"H " + item.encode() + b"\x00" for item in tracked)
+        fsmonitor_flags = fsmonitor_flags if fsmonitor_flags is not None else b"".join(
+            b"H " + item.encode() + b"\x00" for item in tracked)
+        return [
+            self.git_result(version), self.git_result(config),
+            self.git_result(replacement), self.git_result(object_format),
             self.git_result((str(ROOT.resolve()) + "\n").encode()),
             self.git_result(commit), self.git_result(commit), self.git_result(tree),
-            self.git_result(tree), self.git_result(index_entries), self.git_result(status),
-            self.git_result(ignored),
+            self.git_result(candidate_tree if candidate_tree is not None else tree),
+            self.git_result(tree_entries), self.git_result(index_entries),
+            self.git_result(index_flags), self.git_result(fsmonitor_flags),
         ]
 
     def test_default_preview_never_reads_credentials_media_or_network(self):
@@ -1813,26 +1839,70 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["code"], "runtime_unverified")
         self.assertFalse(pycache_prefix.exists())
 
-    def test_candidate_gate_rejects_dirty_untracked_before_module_import(self):
-        results = self.clean_git_results(status=b"?? output/shadow.py\n")
+    def test_candidate_gate_rejects_untracked_without_status_or_filter_commands(self):
+        results = self.clean_git_results()
         with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
                 mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path("/usr/bin/git")), \
                 mock.patch.object(cos_verifier, "_run_git", side_effect=results) as run, \
+                mock.patch.object(
+                    cos_verifier, "_verify_candidate_worktree",
+                    side_effect=cos_verifier.VerificationError("candidate_unverified")), \
                 self.assertRaises(cos_verifier.VerificationError) as caught:
             cos_verifier.verify_candidate("a" * 40)
         self.assertEqual(caught.exception.code, "candidate_unverified")
-        self.assertEqual(run.call_count, 11)
-        self.assertIn("--untracked-files=all", run.call_args_list[10].args[1])
-        self.assertIn("--ignored=matching", run.call_args_list[10].args[1])
+        self.assertEqual(run.call_count, 13)
+        commands = [call.args[1] for call in run.call_args_list]
+        self.assertFalse(any(command and command[0] == "status" for command in commands))
+        self.assertFalse(any("--others" in command or "--error-unmatch" in command
+                             for command in commands))
+
+    def test_candidate_filesystem_limit_is_enforced_while_scandir_streams(self):
+        root = (self.root / "streamed-candidate").resolve()
+        root.mkdir()
+        entries = [
+            SimpleNamespace(path=str(root / ".git"), name=".git"),
+            SimpleNamespace(path=str(root / "tracked.py"), name="tracked.py"),
+            SimpleNamespace(path=str(root / "overflow.py"), name="overflow.py"),
+        ]
+
+        class StreamingEntries:
+            def __enter__(self):
+                return iter(entries)
+
+            def __exit__(self, *_args):
+                return False
+
+        directory_stat = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+        file_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+
+        def lstat(path):
+            return directory_stat if Path(path).name == ".git" else file_stat
+
+        deadline = SimpleNamespace(check=mock.Mock())
+        with mock.patch.object(cos_verifier, "ROOT", root), \
+                mock.patch.object(cos_verifier, "MAX_CANDIDATE_FILESYSTEM_ENTRIES", 2), \
+                mock.patch.object(cos_verifier.os, "scandir", return_value=StreamingEntries()), \
+                mock.patch.object(cos_verifier.os, "lstat", side_effect=lstat) as inspected, \
+                self.assertRaises(cos_verifier.VerificationError) as caught:
+            cos_verifier._verify_candidate_worktree(
+                {"tracked.py": ("100644", "a" * 40)}, ["tracked.py"], deadline)
+        self.assertEqual(caught.exception.code, "candidate_unverified")
+        self.assertEqual(inspected.call_count, 2)
+        self.assertEqual(deadline.check.call_count, 2)
 
     def test_candidate_gate_rejects_ignored_replace_fsmonitor_and_git_environment(self):
         cases = (
-            (self.clean_git_results(ignored=b"output/ignored-shadow.py\n"), 12),
             (self.clean_git_results(replacement=b"refs/replace/" + b"a" * 40 + b"\n"), 3),
             (self.clean_git_results(config=(
                 b"local\t.git/config\t/tmp/never-execute\n"
-                b"command\tcommand line:\tfalse\n")), 2),
-            (self.clean_git_results(index_entries=b"S hidden-candidate.py\x00"), 10),
+                b"command\tcommand line:\t\n")), 2),
+            (self.clean_git_results(index_entries=(
+                b"100644 " + b"f" * 40 + b" 0\t" +
+                self.candidate_tracked()[0].encode() + b"\x00")), 11),
+            (self.clean_git_results(index_flags=(
+                b"S " + self.candidate_tracked()[0].encode() + b"\x00")), 12),
+            (self.clean_git_results(fsmonitor_flags=(
+                b"h " + self.candidate_tracked()[0].encode() + b"\x00")), 13),
         )
         for results, calls in cases:
             with self.subTest(calls=calls), mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
@@ -1850,8 +1920,7 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "candidate_unverified")
         verify_git.assert_not_called()
 
-        old_git = self.clean_git_results()
-        old_git[0] = self.git_result(b"git version 2.35.1\n")
+        old_git = self.clean_git_results(version=b"git version 2.26.3\n")
         with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
                 mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path("/usr/bin/git")), \
                 mock.patch.object(cos_verifier, "_run_git", side_effect=old_git) as run, \
@@ -1860,8 +1929,7 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "candidate_unverified")
         self.assertEqual(run.call_count, 1)
 
-        bad_format = self.clean_git_results()
-        bad_format[3] = self.git_result(b"sha256\n")
+        bad_format = self.clean_git_results(object_format=b"sha256\n")
         with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
                 mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path("/usr/bin/git")), \
                 mock.patch.object(cos_verifier, "_run_git", side_effect=bad_format) as run, \
@@ -1870,7 +1938,8 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "candidate_unverified")
         self.assertEqual(run.call_count, 4)
 
-        ambiguous_tree = self.clean_git_results(tree=b"b" * 40 + b"\n" + b"c" * 40 + b"\n")
+        ambiguous_tree = self.clean_git_results(
+            candidate_tree=b"b" * 40 + b"\n" + b"c" * 40 + b"\n")
         with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
                 mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path("/usr/bin/git")), \
                 mock.patch.object(cos_verifier, "_run_git", side_effect=ambiguous_tree) as run, \
@@ -1880,29 +1949,24 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(run.call_count, 9)
 
     def test_candidate_gate_clean_success_checks_every_tracked_file(self):
-        tracked = [
-            "scripts/verify_drama_cos_upload.py", "features/__init__.py",
-            "features/drama_synthesis/__init__.py", "features/drama_synthesis/core.py",
-            "features/drama_synthesis/local_checkpoint.py", "features/drama_synthesis/gpu_cache.py",
-            "features/drama_synthesis/async_runtime.py", "features/drama_synthesis/cos_upload.py",
-        ]
+        tracked = self.candidate_tracked()
         results = self.clean_git_results()
         for item in tracked:
-            results.extend((
-                self.git_result((item + "\n").encode()),
-                self.git_result((ROOT / item).read_bytes()),
-            ))
+            results.append(self.git_result((ROOT / item).read_bytes()))
         with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
                 mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path("/usr/bin/git")), \
-                mock.patch.object(cos_verifier, "_run_git", side_effect=results) as run:
+                mock.patch.object(cos_verifier, "_run_git", side_effect=results) as run, \
+                mock.patch.object(cos_verifier, "_verify_candidate_worktree") as worktree:
             cos_verifier.verify_candidate("a" * 40)
-        self.assertEqual(run.call_count, 12 + 2 * len(tracked))
+        self.assertEqual(run.call_count, 13 + len(tracked))
+        worktree.assert_called_once()
         self.assertEqual(
-            [call.args[1][-1] for call in run.call_args_list[-2 * len(tracked)::2]], tracked)
+            [call.args[1][-1] for call in run.call_args_list[-len(tracked):]],
+            ["{}:{}".format("a" * 40, item) for item in tracked])
 
     def test_git_runner_forces_clean_namespace_and_never_accepts_ambiguous_sha(self):
         response = self.git_result(b"sha1\n")
-        git_path = Path("C:/fixed/usr/bin/git")
+        git_path = Path(tempfile.gettempdir()).resolve() / "fixed-git"
         with mock.patch.object(cos_verifier, "run_bounded_process", return_value=response) as bounded:
             self.assertIs(cos_verifier._run_git(
                 git_path, ["rev-parse", "--show-object-format"],
@@ -1910,25 +1974,28 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         command = bounded.call_args.args[0]
         self.assertEqual(command[0], str(git_path))
         self.assertIn("--no-pager", command)
-        self.assertIn("core.fsmonitor=false", command)
+        self.assertIn("core.fsmonitor=", command)
+        self.assertNotIn("core.fsmonitor=false", command)
         self.assertIn("core.hooksPath=/dev/null", command)
         self.assertEqual(bounded.call_args.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(bounded.call_args.kwargs["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertNotIn("HOME", bounded.call_args.kwargs["env"])
+        self.assertNotIn("XDG_CONFIG_HOME", bounded.call_args.kwargs["env"])
         for candidate in ("a" * 39, "A" * 40, "HEAD", "a" * 41):
             with self.subTest(candidate=candidate), \
                     self.assertRaises(cos_verifier.VerificationError) as caught:
                 cos_verifier.verify_candidate(candidate)
             self.assertEqual(caught.exception.code, "candidate_unverified")
 
-    def test_real_local_git_never_executes_configured_fsmonitor_and_rejects_replace_and_ignored(self):
+    def test_real_local_git_227_or_newer_never_executes_fsmonitor_or_filters_and_checks_exact_tree(self):
         git = shutil.which("git")
         if not git:
             self.skipTest("local Git unavailable")
         version = subprocess.run(
             [git, "--version"], capture_output=True, text=True, check=True, timeout=10).stdout
         found = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
-        if found is None or tuple(map(int, found.groups())) < (2, 36, 0):
-            self.skipTest("test requires Git >=2.36 so false cannot be interpreted as a hook path")
+        if found is None or tuple(map(int, found.groups())) < (2, 27, 0):
+            self.skipTest("test requires Git >=2.27")
 
         repository = self.root / "git-gate-fixture"
         repository.mkdir()
@@ -1943,50 +2010,86 @@ class CosAcceptanceDriverTests(unittest.TestCase):
         git_setup("config", "user.name", "Verifier Fixture")
         git_setup("config", "user.email", "verifier@example.invalid")
         (repository / ".gitignore").write_text("ignored/\n", encoding="utf-8")
-        (repository / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-        git_setup("add", ".gitignore", "tracked.txt")
+        (repository / ".gitattributes").write_text("*.py filter=hostile\n", encoding="utf-8")
+        originals = {}
+        for item in self.candidate_tracked():
+            path = repository / item
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = ("fixture for {}\n".format(item)).encode()
+            path.write_bytes(content)
+            originals[item] = content
+        git_setup("add", ".")
         git_setup("commit", "-m", "fixture")
         candidate = subprocess.run(
             [git, "-C", str(repository), "rev-parse", "HEAD"], check=True,
             capture_output=True, text=True, timeout=10).stdout.strip()
 
-        marker = repository / "fsmonitor-executed.txt"
-        hook = repository / "fsmonitor-marker.sh"
+        marker = repository / "external-command-executed.txt"
+        hook = repository / ".git" / "external-marker.sh"
         hook.write_text(
-            "#!/bin/sh\nprintf executed > {}\nexit 1\n".format(marker.as_posix()), encoding="utf-8")
+            "#!/bin/sh\nprintf executed > '{}'\nexit 1\n".format(marker.as_posix()),
+            encoding="utf-8")
         hook.chmod(0o755)
         git_setup("config", "core.fsmonitor", hook.as_posix())
-        patches = (
-            mock.patch.dict(cos_verifier.os.environ, {}, clear=True),
-            mock.patch.object(cos_verifier, "ROOT", repository.resolve()),
-            mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path(git).resolve()),
-        )
-        with patches[0], patches[1], patches[2], \
-                self.assertRaises(cos_verifier.VerificationError) as caught:
-            cos_verifier.verify_candidate(candidate)
+
+        def verify():
+            with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
+                    mock.patch.object(cos_verifier, "ROOT", repository.resolve()), \
+                    mock.patch.object(
+                        cos_verifier, "verify_git_binary", return_value=Path(git).resolve()):
+                return cos_verifier.verify_candidate(candidate)
+
+        with self.assertRaises(cos_verifier.VerificationError) as caught:
+            verify()
         self.assertEqual(caught.exception.code, "candidate_unverified")
         self.assertFalse(marker.exists())
 
         git_setup("config", "--unset-all", "core.fsmonitor")
-        hook.unlink()
-        git_setup("update-ref", "refs/replace/" + candidate, candidate)
-        with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
-                mock.patch.object(cos_verifier, "ROOT", repository.resolve()), \
-                mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path(git).resolve()), \
-                self.assertRaises(cos_verifier.VerificationError) as caught:
-            cos_verifier.verify_candidate(candidate)
-        self.assertEqual(caught.exception.code, "candidate_unverified")
+        git_setup("config", "filter.hostile.clean", hook.as_posix())
+        git_setup("config", "filter.hostile.process", hook.as_posix())
 
-        git_setup("update-ref", "-d", "refs/replace/" + candidate)
+        # A clean tree with hostile clean/process filters is accepted without
+        # executing either filter; worktree blobs are hashed directly in Python.
+        self.assertIsNone(verify())
+        self.assertFalse(marker.exists())
+
+        dirty_path = repository / self.candidate_tracked()[0]
+        dirty_path.write_bytes(b"dirty tracked content\n")
+        with self.assertRaises(cos_verifier.VerificationError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "candidate_unverified")
+        self.assertFalse(marker.exists())
+        dirty_path.write_bytes(originals[self.candidate_tracked()[0]])
+
         ignored = repository / "ignored" / "shadow.py"
         ignored.parent.mkdir()
         ignored.write_text("must be rejected\n", encoding="utf-8")
-        with mock.patch.dict(cos_verifier.os.environ, {}, clear=True), \
-                mock.patch.object(cos_verifier, "ROOT", repository.resolve()), \
-                mock.patch.object(cos_verifier, "verify_git_binary", return_value=Path(git).resolve()), \
-                self.assertRaises(cos_verifier.VerificationError) as caught:
-            cos_verifier.verify_candidate(candidate)
+        with self.assertRaises(cos_verifier.VerificationError) as caught:
+            verify()
         self.assertEqual(caught.exception.code, "candidate_unverified")
+        self.assertFalse(marker.exists())
+        ignored.unlink()
+        ignored.parent.rmdir()
+
+        # A staged change is rejected by exact HEAD/index comparison. Configure
+        # it before restoring the hostile filters so the fixture setup itself
+        # cannot create a false-positive marker.
+        git_setup("config", "--unset-all", "filter.hostile.clean")
+        git_setup("config", "--unset-all", "filter.hostile.process")
+        dirty_path.write_bytes(b"staged content\n")
+        git_setup("add", self.candidate_tracked()[0])
+        git_setup("config", "filter.hostile.clean", hook.as_posix())
+        git_setup("config", "filter.hostile.process", hook.as_posix())
+        with self.assertRaises(cos_verifier.VerificationError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "candidate_unverified")
+        self.assertFalse(marker.exists())
+
+        git_setup("update-ref", "refs/replace/" + candidate, candidate)
+        with self.assertRaises(cos_verifier.VerificationError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "candidate_unverified")
+        self.assertFalse(marker.exists())
 
     def test_candidate_origin_gate_rejects_real_shadow_file(self):
         shadow = self.root / "shadow" / "features" / "drama_synthesis" / "cos_upload.py"

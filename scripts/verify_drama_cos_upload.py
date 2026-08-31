@@ -78,6 +78,10 @@ MAX_BYTES = 256 * MIB
 MAX_NOTIFICATION_BYTES = 64 * 1024
 LOCAL_TOOL_OUTPUT_MAX_BYTES = 4 * MIB
 FFPROBE_OUTPUT_MAX_BYTES = 64 * 1024
+MAX_CANDIDATE_TRACKED_FILES = 4096
+MAX_CANDIDATE_FILESYSTEM_ENTRIES = 8192
+MAX_CANDIDATE_TRACKED_BYTES = 64 * MIB
+MAX_CANDIDATE_SINGLE_FILE_BYTES = 8 * MIB
 ACCEPTANCE_DEADLINE_SECONDS = 3600
 CLEANUP_DEADLINE_SECONDS = 30
 OUTER_RUNTIME_MAX_SECONDS = 3660
@@ -507,7 +511,7 @@ def _run_git(git, arguments, deadline, *, output_limit=LOCAL_TOOL_OUTPUT_MAX_BYT
     """Run one audited Git command with the fsmonitor and replacement namespace disabled."""
     require(isinstance(git, Path) and git.is_absolute(), "candidate_unverified")
     command = [
-        str(git), "--no-pager", "-c", "core.fsmonitor=false",
+        str(git), "--no-pager", "-c", "core.fsmonitor=",
         "-c", "core.hooksPath=/dev/null", "-c", "core.quotepath=true",
         "-C", str(ROOT), *arguments,
     ]
@@ -532,8 +536,179 @@ def _verify_git_version(git, deadline):
     version_text = _git_text(_run_git(git, ["--version"], deadline))
     version_match = re.fullmatch(r"git version (\d+)\.(\d+)\.(\d+)(?:[^\s]*)?", version_text)
     require(version_match is not None
-            and tuple(int(item) for item in version_match.groups()) >= (2, 36, 0),
+            and tuple(int(item) for item in version_match.groups()) >= (2, 27, 0),
             "candidate_unverified")
+
+
+def _verify_fsmonitor_namespace(git, deadline):
+    """Reject every fsmonitor value except our Git-2.27-safe empty override."""
+    configured = _git_text(_run_git(git, [
+        "config", "--includes", "--show-origin", "--show-scope", "--get-all",
+        "core.fsmonitor",
+    ], deadline))
+    require(re.fullmatch(r"command[\t ]+command line:", configured) is not None,
+            "candidate_unverified")
+
+
+def _git_binary_output(git, arguments, deadline):
+    result = _run_git(
+        git, arguments, deadline, output_limit=LOCAL_TOOL_OUTPUT_MAX_BYTES)
+    require(result.returncode == 0 and result.stderr == b""
+            and isinstance(result.stdout, bytes), "candidate_unverified")
+    return result.stdout
+
+
+def _decode_nul_records(raw):
+    require(isinstance(raw, bytes) and raw.endswith(b"\x00"), "candidate_unverified")
+    try:
+        records = raw[:-1].decode("utf-8", "strict").split("\x00")
+    except UnicodeDecodeError:
+        raise VerificationError("candidate_unverified") from None
+    require(records and all(record and "\r" not in record and "\n" not in record
+                            for record in records), "candidate_unverified")
+    return records
+
+
+def _parse_candidate_tree(git, deadline):
+    records = _decode_nul_records(_git_binary_output(
+        git, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"], deadline))
+    require(len(records) <= MAX_CANDIDATE_TRACKED_FILES, "candidate_unverified")
+    entries = {}
+    order = []
+    for record in records:
+        found = re.fullmatch(
+            r"(100644|100755) blob ([0-9a-f]{40})\t([^\x00\r\n]+)", record)
+        require(found is not None, "candidate_unverified")
+        relative = found[3]
+        path = Path(relative)
+        require(not path.is_absolute() and "\\" not in relative
+                and ".." not in path.parts and path.as_posix() == relative
+                and relative != ".git" and not relative.startswith(".git/")
+                and relative not in entries, "candidate_unverified")
+        entries[relative] = (found[1], found[2])
+        order.append(relative)
+    return entries, order
+
+
+def _verify_candidate_index(git, tree_entries, deadline):
+    records = _decode_nul_records(_git_binary_output(
+        git, ["ls-files", "--stage", "-z"], deadline))
+    indexed = {}
+    for record in records:
+        found = re.fullmatch(
+            r"(100644|100755) ([0-9a-f]{40}) 0\t([^\x00\r\n]+)", record)
+        require(found is not None and found[3] not in indexed, "candidate_unverified")
+        indexed[found[3]] = (found[1], found[2])
+    require(indexed == tree_entries, "candidate_unverified")
+
+    # -v exposes assume-unchanged/skip-worktree and -f exposes fsmonitor-valid.
+    # A normal stage-zero entry is tagged "H " by both views.
+    for option in ("-v", "-f"):
+        flagged = _decode_nul_records(_git_binary_output(
+            git, ["ls-files", option, "-z"], deadline))
+        paths = []
+        for record in flagged:
+            found = re.fullmatch(r"H ([^\x00\r\n]+)", record)
+            require(found is not None, "candidate_unverified")
+            paths.append(found[1])
+        require(len(paths) == len(tree_entries) and set(paths) == set(tree_entries),
+                "candidate_unverified")
+
+
+def _git_blob_sha1(path, size, deadline):
+    digest = hashlib.sha1()
+    digest.update("blob {}\0".format(size).encode("ascii"))
+    try:
+        with path.open("rb") as handle:
+            while True:
+                deadline.check()
+                chunk = handle.read(MIB)
+                if chunk == b"":
+                    break
+                require(isinstance(chunk, bytes), "candidate_unverified")
+                digest.update(chunk)
+    except VerificationError:
+        raise
+    except OSError:
+        raise VerificationError("candidate_unverified") from None
+    return digest.hexdigest()
+
+
+def _verify_candidate_worktree(tree_entries, order, deadline):
+    expected_files = set(tree_entries)
+    expected_directories = {""}
+    for relative in expected_files:
+        parent = Path(relative).parent
+        while parent.as_posix() != ".":
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
+
+    pending = [ROOT]
+    actual_files = set()
+    actual_directories = {""}
+    seen = 0
+    git_marker_seen = False
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as items:
+                for item in items:
+                    seen += 1
+                    require(seen <= MAX_CANDIDATE_FILESYSTEM_ENTRIES,
+                            "candidate_unverified")
+                    deadline.check()
+                    path = Path(item.path)
+                    try:
+                        info = os.lstat(path)
+                        relative = path.relative_to(ROOT).as_posix()
+                    except (OSError, ValueError):
+                        raise VerificationError("candidate_unverified") from None
+                    if directory == ROOT and item.name == ".git":
+                        require(not stat.S_ISLNK(info.st_mode)
+                                and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)),
+                                "candidate_unverified")
+                        git_marker_seen = True
+                        continue
+                    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                        actual_directories.add(relative)
+                        pending.append(path)
+                    elif stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                        actual_files.add(relative)
+                    else:
+                        raise VerificationError("candidate_unverified")
+        except OSError:
+            raise VerificationError("candidate_unverified") from None
+    require(git_marker_seen and actual_files == expected_files
+            and actual_directories == expected_directories, "candidate_unverified")
+
+    total_bytes = 0
+    for relative in order:
+        deadline.check()
+        path = ROOT / Path(relative)
+        try:
+            before = os.lstat(path)
+        except OSError:
+            raise VerificationError("candidate_unverified") from None
+        expected_mode, expected_blob = tree_entries[relative]
+        executable = bool(stat.S_IMODE(before.st_mode) & 0o111)
+        require(stat.S_ISREG(before.st_mode) and not stat.S_ISLNK(before.st_mode)
+                and executable == (expected_mode == "100755")
+                and 0 <= before.st_size <= MAX_CANDIDATE_SINGLE_FILE_BYTES,
+                "candidate_unverified")
+        total_bytes += before.st_size
+        require(total_bytes <= MAX_CANDIDATE_TRACKED_BYTES, "candidate_unverified")
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_nlink, stat.S_IMODE(before.st_mode))
+        blob = _git_blob_sha1(path, before.st_size, deadline)
+        try:
+            after = os.lstat(path)
+        except OSError:
+            raise VerificationError("candidate_unverified") from None
+        require(blob == expected_blob and stat.S_ISREG(after.st_mode)
+                and not stat.S_ISLNK(after.st_mode)
+                and (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                     after.st_nlink, stat.S_IMODE(after.st_mode)) == identity,
+                "candidate_unverified")
 
 
 CANDIDATE_MODULE_PATHS = {
@@ -1100,15 +1275,9 @@ def verify_candidate(candidate_sha, deadline=None):
     git = verify_git_binary(deadline)
     try:
         _verify_git_version(git, deadline)
-
-        # The command-line false value must be the only visible fsmonitor value.
-        # This detects local, worktree and included config without ever invoking
-        # a configured fsmonitor executable.
-        configured = _git_text(_run_git(git, [
-            "config", "--show-origin", "--show-scope", "--get-all", "core.fsmonitor",
-        ], deadline))
-        require(re.fullmatch(r"command\s+command line:\s+false", configured) is not None,
-                "candidate_unverified")
+        # This config-only query is safe and must run before the first ls-files
+        # command that can consult fsmonitor/index state.
+        _verify_fsmonitor_namespace(git, deadline)
 
         replacement_refs = _git_text(_run_git(
             git, ["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"], deadline))
@@ -1124,45 +1293,25 @@ def verify_candidate(candidate_sha, deadline=None):
                 "candidate_unverified")
 
         head_commit = _git_text(_run_git(
-            git, ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], deadline))
+            git, ["rev-parse", "--verify", "HEAD^{commit}"], deadline))
         candidate_commit = _git_text(_run_git(
-            git, ["rev-parse", "--verify", "--end-of-options",
-                  "{}^{{commit}}".format(candidate_sha)], deadline))
+            git, ["rev-parse", "--verify", "{}^{{commit}}".format(candidate_sha)], deadline))
         require(re.fullmatch(r"[0-9a-f]{40}", head_commit) is not None
                 and candidate_commit == head_commit == candidate_sha, "candidate_unverified")
 
         head_tree = _git_text(_run_git(
-            git, ["rev-parse", "--verify", "--end-of-options", "HEAD^{tree}"], deadline))
+            git, ["rev-parse", "--verify", "HEAD^{tree}"], deadline))
         candidate_tree = _git_text(_run_git(
-            git, ["rev-parse", "--verify", "--end-of-options",
-                  "{}^{{tree}}".format(candidate_sha)], deadline))
+            git, ["rev-parse", "--verify", "{}^{{tree}}".format(candidate_sha)], deadline))
         require(re.fullmatch(r"[0-9a-f]{40}", head_tree) is not None
                 and candidate_tree == head_tree, "candidate_unverified")
 
-        index_entries = _run_git(
-            git, ["ls-files", "-v", "-z"], deadline,
-            output_limit=LOCAL_TOOL_OUTPUT_MAX_BYTES)
-        require(index_entries.returncode == 0 and index_entries.stderr == b""
-                and isinstance(index_entries.stdout, bytes) and index_entries.stdout,
-                "candidate_unverified")
-        records = index_entries.stdout.split(b"\x00")
-        require(records[-1] == b"" and all(record.startswith(b"H ") for record in records[:-1]),
-                "candidate_unverified")
-
-        dirty = _git_text(_run_git(git, [
-            "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching",
-            "--no-renames",
-        ], deadline))
-        require(dirty == "", "candidate_unverified")
-        ignored = _git_text(_run_git(git, [
-            "ls-files", "--others", "--ignored", "--exclude-standard",
-        ], deadline))
-        require(ignored == "", "candidate_unverified")
+        tree_entries, tree_order = _parse_candidate_tree(git, deadline)
+        _verify_candidate_index(git, tree_entries, deadline)
+        _verify_candidate_worktree(tree_entries, tree_order, deadline)
 
         for item in tracked:
-            listed = _git_text(_run_git(
-                git, ["ls-files", "--error-unmatch", "--", item], deadline))
-            require(listed == item, "candidate_unverified")
+            require(item in tree_entries, "candidate_unverified")
             _verified_candidate_blob(git, candidate_sha, ROOT / Path(item), deadline)
     except VerificationError:
         raise

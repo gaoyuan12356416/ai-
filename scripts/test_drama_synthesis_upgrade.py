@@ -1390,6 +1390,9 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
 
             def git(args, _root, **_kwargs):
                 calls.append(tuple(args))
+                if args == ["config", "--includes", "--show-origin", "--show-scope",
+                            "--get-all", "core.fsmonitor"]:
+                    return "command\tcommand line:\t\n"
                 if args == ["rev-parse", "--show-toplevel"]:
                     return self.launcher.path_text(root) + "\n"
                 if args == ["rev-parse", "--is-bare-repository"]:
@@ -1400,7 +1403,7 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
                     return self.SHA + "\n" if args[2] == "HEAD^{commit}" else "b" * 40 + "\n"
                 if args[0] == "for-each-ref":
                     return ""
-                if args[:2] == ["ls-files", "-v"]:
+                if args[:2] in (["ls-files", "-v"], ["ls-files", "-f"]):
                     return "".join("H " + name + "\x00" for name in critical)
                 if args[:2] == ["ls-files", "--stage"]:
                     return "".join("100644 %s 0\t%s\x00" % (blobs[name], name)
@@ -1463,6 +1466,25 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
                 self.launcher.verify_candidate(spec)
             self.assertEqual(str(caught.exception), "candidate_index_flags_unsafe")
 
+            def fsmonitor_flagged_git(args, root, **kwargs):
+                if args[:2] == ["ls-files", "-f"]:
+                    return "h " + critical[0] + "\x00" + "".join(
+                        "H " + name + "\x00" for name in critical[1:]
+                    )
+                return git(args, root, **kwargs)
+
+            with mock.patch.object(self.launcher, "require_secure_git_binary"), \
+                 mock.patch.object(self.launcher, "verify_git_directory_security",
+                                   return_value=root / ".git"), \
+                 mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+                 mock.patch.object(self.launcher, "require_root_owned_secure_path",
+                                   side_effect=trusted_stat), \
+                 mock.patch.object(self.launcher, "bounded_git",
+                                   side_effect=fsmonitor_flagged_git), \
+                 self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_candidate(spec)
+            self.assertEqual(str(caught.exception), "candidate_index_flags_unsafe")
+
             def changed_blob(args, root, **kwargs):
                 if args[:2] == ["hash-object", "--no-filters"]:
                     values = git(args, root, **kwargs).splitlines()
@@ -1495,6 +1517,38 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
                 self.launcher.verify_candidate(spec)
             self.assertEqual(str(caught.exception), "candidate_worktree_binding_invalid")
 
+    def test_candidate_filesystem_limit_is_enforced_while_scandir_streams(self):
+        root = Path("/fixed/candidate")
+        entries = [
+            SimpleNamespace(path=str(root / ".git"), name=".git"),
+            SimpleNamespace(path=str(root / "tracked.py"), name="tracked.py"),
+            SimpleNamespace(path=str(root / "overflow.py"), name="overflow.py"),
+        ]
+
+        class StreamingEntries:
+            def __enter__(self):
+                return iter(entries)
+
+            def __exit__(self, *_args):
+                return False
+
+        directory_stat = SimpleNamespace(st_mode=self.launcher.stat.S_IFDIR | 0o755)
+        file_stat = SimpleNamespace(st_mode=self.launcher.stat.S_IFREG | 0o644)
+
+        def lstat(path):
+            return directory_stat if Path(path).name == ".git" else file_stat
+
+        with mock.patch.object(self.launcher, "MAX_CANDIDATE_FILESYSTEM_ENTRIES", 2), \
+             mock.patch.object(self.launcher, "require_secure_directory_ancestors"), \
+             mock.patch.object(self.launcher, "require_root_owned_secure_path"), \
+             mock.patch.object(self.launcher.os, "scandir", return_value=StreamingEntries()), \
+             mock.patch.object(self.launcher.os, "lstat", side_effect=lstat) as inspected, \
+             self.assertRaises(self.launcher.LaunchFailure) as caught:
+            self.launcher.verify_candidate_filesystem_permissions(
+                root, {"tracked.py": ("100644", "a" * 40)})
+        self.assertEqual(str(caught.exception), "candidate_filesystem_too_large")
+        self.assertEqual(inspected.call_count, 2)
+
     def test_bounded_git_uses_fixed_no_hook_no_replace_environment(self):
         captured = {}
 
@@ -1510,7 +1564,8 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
         self.assertEqual(result, "a" * 40 + "\n")
         command = captured["command"]
         self.assertIn("--no-replace-objects", command)
-        self.assertIn("core.fsmonitor=false", command)
+        self.assertIn("core.fsmonitor=", command)
+        self.assertNotIn("core.fsmonitor=false", command)
         self.assertIn("core.untrackedCache=false", command)
         self.assertIn("core.hooksPath=/dev/null", command)
         self.assertIn("core.bare=false", command)
@@ -1520,6 +1575,30 @@ class MediaAcceptanceHardeningTests(unittest.TestCase):
         self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/dev/null")
         self.assertNotIn("HOME", environment)
+        self.assertNotIn("XDG_CONFIG_HOME", environment)
+
+    def test_fsmonitor_gate_accepts_only_command_line_empty_value(self):
+        root = Path("/fixed/candidate")
+        with mock.patch.object(
+                self.launcher, "bounded_git", return_value="command\tcommand line:\t\n") as git:
+            self.launcher.verify_fsmonitor_namespace(root)
+        self.assertEqual(git.call_args.args[0], [
+            "config", "--includes", "--show-origin", "--show-scope", "--get-all",
+            "core.fsmonitor",
+        ])
+        for configured in (
+                "local\tfile:.git/config\t/tmp/execute\ncommand\tcommand line:\t\n",
+                "worktree\tfile:.git/config.worktree\t/tmp/execute\n"
+                "command\tcommand line:\t\n",
+                "local\tfile:/tmp/included.gitconfig\t/tmp/execute\n"
+                "command\tcommand line:\t\n",
+                "command\tcommand line:\tfalse\n",
+        ):
+            with self.subTest(configured=configured), \
+                    mock.patch.object(self.launcher, "bounded_git", return_value=configured), \
+                    self.assertRaises(self.launcher.LaunchFailure) as caught:
+                self.launcher.verify_fsmonitor_namespace(root)
+            self.assertEqual(str(caught.exception), "candidate_fsmonitor_config_unsafe")
 
     def test_git_binary_must_be_fixed_root_owned_and_not_group_writable(self):
         import stat
