@@ -346,6 +346,49 @@ def _parse_allowed_hosts(value):
     return tuple(dict.fromkeys(result))
 
 
+def _parse_trusted_source_resolutions(value, allowed_hosts):
+    result = []
+    for raw in str(value or "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if item.count("=") != 1:
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_TRUSTED_SOURCE_RESOLUTIONS must use host=address pairs",
+                500,
+            )
+        raw_host, raw_address = item.split("=", 1)
+        host = raw_host.strip().lower().rstrip(".")
+        address = raw_address.strip()
+        if (
+            not host
+            or not re.fullmatch(r"[a-z0-9.-]+", host)
+            or not _host_matches(host, allowed_hosts)
+        ):
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_TRUSTED_SOURCE_RESOLUTIONS contains an invalid host",
+                500,
+            )
+        try:
+            normalized_address = str(ipaddress.ip_address(address))
+        except ValueError:
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_TRUSTED_SOURCE_RESOLUTIONS contains an invalid address",
+                500,
+            ) from None
+        if ipaddress.ip_address(normalized_address).is_global:
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_TRUSTED_SOURCE_RESOLUTIONS is only for non-public addresses",
+                500,
+            )
+        result.append((host, normalized_address))
+    return tuple(dict.fromkeys(result))
+
+
 def _normalize_https_origin(value, name):
     text = str(value or "").strip().rstrip("/")
     if "://" not in text:
@@ -483,6 +526,7 @@ class WorkerConfig:
     cos_region: str
     cos_domain: str
     cos_prefix: str
+    trusted_source_resolutions: tuple = ()
     storage_backend: str = DEFAULT_STORAGE_BACKEND
     media_host: str = DEFAULT_MEDIA_HOST
     media_port: int = DEFAULT_MEDIA_PORT
@@ -952,6 +996,9 @@ class WorkerConfig:
                 "manual_canary_profile": profile,
                 "manual_canary_origin": origin,
             }
+        allowed_source_hosts = _parse_allowed_hosts(
+            os.environ.get("TT_POST_GPU_ALLOWED_SOURCE_HOSTS", "")
+        )
         return cls(
             enabled=True,
             host=host,
@@ -968,9 +1015,7 @@ class WorkerConfig:
             fixed_outro_path=fixed_outro_path,
             logo_path=logo_path,
             font_file=font_file,
-            allowed_source_hosts=_parse_allowed_hosts(
-                os.environ.get("TT_POST_GPU_ALLOWED_SOURCE_HOSTS", "")
-            ),
+            allowed_source_hosts=allowed_source_hosts,
             ffmpeg_bin=ffmpeg,
             ffprobe_bin=ffprobe,
             video_encoder=encoder,
@@ -992,6 +1037,13 @@ class WorkerConfig:
                 os.environ.get("TT_POST_GPU_COS_PREFIX", DEFAULT_COS_PREFIX),
                 "TT_POST_GPU_COS_PREFIX",
                 DEFAULT_COS_PREFIX,
+            ),
+            trusted_source_resolutions=_parse_trusted_source_resolutions(
+                os.environ.get(
+                    "TT_POST_GPU_TRUSTED_SOURCE_RESOLUTIONS",
+                    "",
+                ),
+                allowed_source_hosts,
             ),
             storage_backend=storage_backend,
             media_host=media_host,
@@ -1417,7 +1469,7 @@ def validate_source_url(value, allowed_hosts):
     return text
 
 
-def _resolve_public_host(hostname):
+def _resolve_public_host(hostname, trusted_resolutions=()):
     try:
         addresses = {
             item[4][0]
@@ -1439,9 +1491,15 @@ def _resolve_public_host(hostname):
             "source host could not be resolved",
             502,
         )
+    normalized_hostname = str(hostname or "").lower().rstrip(".")
+    trusted = set(trusted_resolutions or ())
     for address in addresses:
         try:
-            if not ipaddress.ip_address(address).is_global:
+            normalized_address = str(ipaddress.ip_address(address))
+            if (
+                not ipaddress.ip_address(normalized_address).is_global
+                and (normalized_hostname, normalized_address) not in trusted
+            ):
                 raise TTGPUError(
                     "source_url_not_allowed",
                     "source host resolved to a non-public address",
@@ -1476,7 +1534,10 @@ def download_source(
 ):
     url = validate_source_url(url, config.allowed_source_hosts)
     parsed = urllib.parse.urlsplit(url)
-    _resolve_public_host(parsed.hostname)
+    _resolve_public_host(
+        parsed.hostname,
+        config.trusted_source_resolutions,
+    )
     request = urllib.request.Request(
         url,
         method="GET",

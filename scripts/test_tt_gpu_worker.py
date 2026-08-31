@@ -647,6 +647,64 @@ def make_manual_canary_publish(config, **overrides):
 
 
 class TTGPUWorkerTests(unittest.TestCase):
+    def test_trusted_source_resolution_allows_only_exact_host_address_pair(self):
+        trusted = (("media.example.com", "169.254.0.47"),)
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    worker.socket.AF_INET,
+                    worker.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("169.254.0.47", 443),
+                )
+            ],
+        ):
+            worker._resolve_public_host("media.example.com", trusted)
+            with self.assertRaises(worker.TTGPUError) as wrong_host:
+                worker._resolve_public_host("other.example.com", trusted)
+        self.assertEqual(wrong_host.exception.code, "source_url_not_allowed")
+
+    def test_trusted_source_resolution_does_not_allow_a_private_range(self):
+        trusted = (("media.example.com", "169.254.0.47"),)
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    worker.socket.AF_INET,
+                    worker.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("10.0.0.8", 443),
+                )
+            ],
+        ):
+            with self.assertRaises(worker.TTGPUError) as rejected:
+                worker._resolve_public_host("media.example.com", trusted)
+        self.assertEqual(rejected.exception.code, "source_url_not_allowed")
+
+    def test_trusted_source_resolution_configuration_is_strict(self):
+        allowed = ("media.example.com",)
+        self.assertEqual(
+            worker._parse_trusted_source_resolutions(
+                "media.example.com=169.254.0.47",
+                allowed,
+            ),
+            (("media.example.com", "169.254.0.47"),),
+        )
+        for value in (
+            "other.example.com=169.254.0.47",
+            "media.example.com=10.0.0.0/8",
+            "media.example.com=43.132.105.206",
+            "media.example.com",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(worker.TTGPUError):
+                    worker._parse_trusted_source_resolutions(value, allowed)
+
     def test_default_prepared_output_ceiling_matches_tiktok_four_gib(self):
         self.assertEqual(
             worker.DEFAULT_MAX_OUTPUT_BYTES,
