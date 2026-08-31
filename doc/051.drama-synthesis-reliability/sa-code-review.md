@@ -32,6 +32,7 @@
 | 异步上传重试仅以公开HEAD长度判断，误用同key旧对象 | 仅drama异步上下文改用 `cos_upload.resume_upload`，认证HEAD必须同时匹配上传标识、SHA/大小元数据、Content-Length及完成记录；无可信检查点的现存对象不收编、不覆盖 |
 | 分片/create/complete丢响应后新建上传或丢断点 | `.runtime/uploads`独立保存目标/源/UploadId/阶段；列举已有分片并与本地长度/MD5核对，只补缺失分片。create未知停止核查，不再create/abort；complete丢响应由绑定元数据的HEAD对账，真实COS验证仍是单独门禁 |
 | COS SDK内部POST重试绕过持久化保护 | 真机SDK 1.9.44默认retry=3；仅异步专用客户端明确retry=0，旧调用保持SDK默认。新增真实SDK假transport用例，必须在目标SDK环境零skip通过 |
+| Git2.27把`core.fsmonitor=false`当外部命令，且COS clean门禁的`git status`可执行候选filter | 两个固定Git wrapper统一使用跨版本空值覆盖，并在首次index读取前只允许唯一command-line空值；任何local/worktree/include fsmonitor值失败关闭。COS不再调用status/ignored/error-unmatch，改为精确HEAD tree、stage-0 index、`-v/-f` flags、流式操作系统全树和Python原生Git-blob SHA比较；固定MinGit2.27恶意marker、完整回归及socket硬拒绝通过，CPU/HK Git2.27精确checkout的445+13也已通过 |
 | COS验收以dirty/replace checkout、index隐藏位、`.pth/.pyc`或影子HTTP栈伪造通过 | Git固定二进制和精确commit/tree，拒绝tracked工作树改动、staged改动、untracked、ignored及skip-worktree/assume-unchanged，禁replace与fsmonitor并核对关键blob；固定Python以`-I -S -B`启动，SDK及传输依赖在导入前递归验证root-owned只读树并拒绝symlink、`.pth/.pyc/.pyo/.egg-link`。ffprobe双管道运行期限流，任何中断均kill+wait；任一不明在读凭据前失败 |
 | 最后一次HEAD后另一writer抢先写入同key | Complete带 `x-cos-forbid-overwrite:true`，创建和完成前只读检查桶版本控制，Enabled/Suspended/读取不明均停止。已只读确认当前桶未启用版本控制，未修改桶配置；新增竞争窗口及SDK请求头用例 |
 

@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "recorded_at_local_date": "2026-08-31",
+  "candidate_sha": "dc0bad87b24318a09fc886c34d6957cbee8f4720",
+  "candidate_tree": "61683821eb7ce551d5e3eac6a556d852116460e7",
+  "overall_result": "passed",
+  "scope": "CPU and HK isolated no-media, no-COS, zero-network Linux regression only; this is not media, COS, service, database or production acceptance.",
+  "cpu": {
+    "host": "43.166.187.96",
+    "git_version": "2.27.0",
+    "python": "3.9.6",
+    "checkout": "/mnt/data-disk/drama-synthesis-acceptance/code/dc0bad87b24318a09fc886c34d6957cbee8f4720-20260831T1516-zero-socket",
+    "evidence_directory": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/dc0bad87b24318a09fc886c34d6957cbee8f4720/zero-socket-20260831T1516",
+    "candidate_identity": {
+      "fresh_github_checkout": true,
+      "tracked_regular_files": 1260,
+      "index_stage_zero_exact_count": 1260,
+      "all_tracked_files_match_git_blob": true,
+      "index_v_and_f_flags_clean": true,
+      "filesystem_entries": 1410,
+      "tracked_bytes": 23472164,
+      "largest_tracked_file_bytes": 4926794,
+      "root_owned_no_group_other_write": true,
+      "python_ast_files": 18,
+      "python_ast_ok": true
+    },
+    "tests": {
+      "linux_network_namespace_unshared": true,
+      "raw_inventory": {
+        "main": 457,
+        "fb": 16
+      },
+      "excluded_real_loopback": {
+        "main": 12,
+        "fb": 3,
+        "total": 15
+      },
+      "main": {
+        "selected": 445,
+        "ran": 445,
+        "passed": 445,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "elapsed_seconds": 24.329
+      },
+      "fb": {
+        "selected": 13,
+        "ran": 13,
+        "passed": 13,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "elapsed_seconds": 0.022
+      },
+      "runner_exit": 0,
+      "result_sha256": "b5b472090895d1ea5d1142ea0c15dbfd1ab94b82680f878aa4326321670da1f5"
+    },
+    "bundle_relay": {
+      "source": "The same fresh GitHub checkout after fetching the complete candidate branch history.",
+      "directory": "/mnt/data-disk/drama-synthesis-acceptance/code-tests/dc0bad87b24318a09fc886c34d6957cbee8f4720/bundle-relay-20260831T1534",
+      "complete_history_verified_in_empty_repository": true,
+      "sha256": "8f55c688d07d4ed5d1a0fbaaf777fdc3a21cee53498229a8631842addd75b60c"
+    }
+  },
+  "hk": {
+    "host": "43.154.250.89",
+    "git_version": "2.27.0",
+    "python": "3.10.20",
+    "target": "/data/drama-synthesis-gpu/acceptance/20260831-reliability/no-media-dc0bad8-20260831T1534",
+    "evidence_directory": "/data/drama-synthesis-gpu/acceptance/20260831-reliability/no-media-dc0bad8-20260831T1534/evidence",
+    "available_bytes_before": 455060553728,
+    "available_bytes_final": 454966894592,
+    "minimum_required_bytes": 32212254720,
+    "bundle": {
+      "cpu_sha256": "8f55c688d07d4ed5d1a0fbaaf777fdc3a21cee53498229a8631842addd75b60c",
+      "local_relay_sha256": "8f55c688d07d4ed5d1a0fbaaf777fdc3a21cee53498229a8631842addd75b60c",
+      "hk_sha256": "8f55c688d07d4ed5d1a0fbaaf777fdc3a21cee53498229a8631842addd75b60c",
+      "complete_history_verified_in_empty_repository": true,
+      "advertised_heads": 1,
+      "head_matches_candidate": true
+    },
+    "candidate_identity": {
+      "detached_checkout": true,
+      "tracked_regular_files": 1260,
+      "index_stage_zero_exact_count": 1260,
+      "all_tracked_files_match_git_blob": true,
+      "index_v_and_f_flags_clean": true,
+      "filesystem_entries": 1409,
+      "tracked_bytes": 23472164,
+      "largest_tracked_file_bytes": 4926794,
+      "root_owned_no_group_other_write": true,
+      "python_ast_files": 18,
+      "python_ast_ok": true
+    },
+    "initial_harness_attempt": {
+      "result": "rejected_before_test_collection",
+      "runner_exit": 2,
+      "runner_error": "ModuleNotFoundError: No module named 'requests'",
+      "tests_run": 0,
+      "cause": "The standalone CPython executable does not add the separately installed service site-packages directory by default.",
+      "production_pid_startticks_unchanged": true,
+      "failed_evidence_preserved": true
+    },
+    "corrected_harness": {
+      "new_evidence_subdirectory": "run2-fixed-dependencies",
+      "runner_sha256": "7c2b29b610a799d1dfc3954688b9ec04aba0f00adac27fabbb5f4cb17e75eb8c",
+      "matches_cpu_runner": true,
+      "fixed_read_only_dependency_root": "/data/drama-synthesis-gpu/runtime/py310-cu124-v1/lib/python3.10/site-packages",
+      "requests_version": "2.32.5",
+      "cos_sdk_version": "1.9.44",
+      "dependencies_installed_or_changed": false,
+      "runtime_current_unchanged": true,
+      "linux_network_namespace_unshared": true,
+      "socket_and_dns_construction_blocked": true,
+      "shell_os_system_and_os_popen_blocked": true,
+      "python_subprocess_allowlist": [
+        "/data/drama-synthesis-gpu/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10",
+        "/usr/bin/git"
+      ],
+      "raw_inventory": {
+        "main": 457,
+        "fb": 16
+      },
+      "excluded_real_loopback": {
+        "main": 12,
+        "fb": 3,
+        "total": 15
+      },
+      "main": {
+        "selected": 445,
+        "ran": 445,
+        "passed": 445,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "elapsed_seconds": 28.036
+      },
+      "fb": {
+        "selected": 13,
+        "ran": 13,
+        "passed": 13,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "elapsed_seconds": 0.03
+      },
+      "runner_exit": 0,
+      "result_sha256": "256efe8dbdbe278d5bb90a2142f4364567978507993f65ef0b17143805c50086"
+    },
+    "production_processes": {
+      "drama-synthesis-gpu-worker.service": {
+        "pid": 1188891,
+        "startticks": 17998923,
+        "restart_count": 0,
+        "unchanged": true
+      },
+      "drama-synthesis-gpu-tunnel.service": {
+        "pid": 1188892,
+        "startticks": 17998923,
+        "restart_count": 0,
+        "unchanged": true
+      },
+      "fb-page-random-overlay-gpu.service": {
+        "pid": 1207342,
+        "startticks": 18273904,
+        "restart_count": 0,
+        "unchanged": true
+      },
+      "fb-page-random-overlay-tunnel.service": {
+        "pid": 1207624,
+        "startticks": 18276761,
+        "restart_count": 0,
+        "unchanged": true
+      }
+    },
+    "acceptance_processes_remaining": 0,
+    "summary_sha256": "8798b9738fcf70547bffb71db2a30d00cf3f8559688c48ad25a0024b3cec5f3a",
+    "final_sha256_check": "passed"
+  },
+  "production_effects": {
+    "ffmpeg_or_ffprobe_started_by_acceptance": false,
+    "media_download_started": false,
+    "cos_accessed": false,
+    "gpu_business_process_started": false,
+    "fixed_listen_port_opened": false,
+    "systemd_or_service_changed": false,
+    "production_database_or_shared_directory_changed": false,
+    "production_current_env_or_output_changed": false,
+    "credentials_read_or_output": false
+  },
+  "next_gate": "A separately coordinated media and COS window is still required. This no-media approval must not be reused for FFmpeg, downloads, COS, GPU work, service changes or deployment."
+}

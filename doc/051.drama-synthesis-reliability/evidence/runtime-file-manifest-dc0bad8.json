@@ -1,0 +1,173 @@
+{
+  "source_candidate": "dc0bad87b24318a09fc886c34d6957cbee8f4720",
+  "source_parent": "23a08e5f933fbbdbea3346b22c680a4180113380",
+  "remote_ref": "origin/codex/drama-synthesis-reliability-20260828",
+  "remote_ref_verified_at_utc": "2026-08-31T07:07:33Z",
+  "scope": "Complete production runtime payload plus separately listed acceptance-only tools; derived from committed Git blobs, not a record of production deployment",
+  "hash_encoding": "Git blob bytes; copy from GitHub checkout/archive without CRLF conversion",
+  "files": [
+    {
+      "path": "app.py",
+      "mode": "100644",
+      "git_blob": "4f4c6364d73331b596e1319ea031e584ad30485d",
+      "sha256_git_bytes": "aef231f60cb81886a5745583b430ba1e131f4bb6db96090e179a100cf2b512a1",
+      "size_git_bytes": 1039300
+    },
+    {
+      "path": "features/drama_synthesis/app_support.py",
+      "mode": "100644",
+      "git_blob": "754511f5d2f7c3673baad3f8d02926fc8017d1c5",
+      "sha256_git_bytes": "fc4bb6e27440c25657c6b8195b0096da97c54e5d06d8205aec5b4b0675f73ab1",
+      "size_git_bytes": 5197
+    },
+    {
+      "path": "features/drama_synthesis/async_runtime.py",
+      "mode": "100644",
+      "git_blob": "b6bb087519dbcb5e39737a54febef81546f3383c",
+      "sha256_git_bytes": "5d915c16e68ef9f3cf9ecc8f82245b4daa38bff82bf5f8812386a6b4ea5910d7",
+      "size_git_bytes": 44446
+    },
+    {
+      "path": "features/drama_synthesis/core.py",
+      "mode": "100644",
+      "git_blob": "c748fb3aeeb681def2fe746103528e6e92622fb2",
+      "sha256_git_bytes": "bb19fa2b8a730de7d7fb814a7e2f8addaa24736a5bbfce4ef92b27686c8d468c",
+      "size_git_bytes": 76613
+    },
+    {
+      "path": "features/drama_synthesis/cos_upload.py",
+      "mode": "100644",
+      "git_blob": "54589fd0dc5d2f17cd7c41a4f3bf013c656c5e0c",
+      "sha256_git_bytes": "da1ddb2aac937968a34d5009d7ea30a9b42861ea8fcb8acd2123fcebd7480211",
+      "size_git_bytes": 18778
+    },
+    {
+      "path": "features/drama_synthesis/cpu_runtime.py",
+      "mode": "100644",
+      "git_blob": "caab80f9d5a49986df9e60ec5c3c73d0f341fe7c",
+      "sha256_git_bytes": "8f08ec151ad4f893b7944450fea3eae1220e791090ff5f68eae53605e2f1e631",
+      "size_git_bytes": 17302
+    },
+    {
+      "path": "features/drama_synthesis/gpu.py",
+      "mode": "100644",
+      "git_blob": "f5b45f02e2dd0f39fcf17232afdb1333de1303ee",
+      "sha256_git_bytes": "0d04b34cffbd625d5e8b23c24f7a01deac1379f8a9f0e23e42de64030cd1a288",
+      "size_git_bytes": 20446
+    },
+    {
+      "path": "features/drama_synthesis/gpu_cache.py",
+      "mode": "100644",
+      "git_blob": "9d7d73ac3bf774fac3a421c2e31ebf31cd33f731",
+      "sha256_git_bytes": "e4ca1aa83a70b0d026505664a460ab83c6d3e4b291fc9e18c52bf416ad5412a1",
+      "size_git_bytes": 8389
+    },
+    {
+      "path": "features/drama_synthesis/local_checkpoint.py",
+      "mode": "100644",
+      "git_blob": "360f9d6fad92dd8f61a8fe2acd95d7ffa3ee8709",
+      "sha256_git_bytes": "cf4d105da7bb6e1303333660d77a011503cc2e5872f2e34154c86be08ac0fd36",
+      "size_git_bytes": 6730
+    },
+    {
+      "path": "features/drama_synthesis/media_pipeline.py",
+      "mode": "100644",
+      "git_blob": "3fbe25f7896aaadf6d4e5ba375188c86e3ecdf49",
+      "sha256_git_bytes": "c4b9a66ac494119fc12c10924a517ffbfecc8403f67750f0957a06b3eab1c3ac",
+      "size_git_bytes": 56953
+    },
+    {
+      "path": "features/drama_synthesis/remote_client.py",
+      "mode": "100644",
+      "git_blob": "5530c255cb1b0e0f021fcd669571fcdd564f5e2d",
+      "sha256_git_bytes": "9cd5af10981a8f0797cdd406c6ded82af5cb7d9b5cd3e682c53c63c50c7835d4",
+      "size_git_bytes": 13485
+    },
+    {
+      "path": "features/fb_gpu/prepare_worker.py",
+      "mode": "100644",
+      "git_blob": "3a79892157d42352c182e548471f146c8b76791f",
+      "sha256_git_bytes": "f459005d1b2da664f4e76b6b64d299c2dacc94a55a965e8d49704253bede9bf1",
+      "size_git_bytes": 20214
+    },
+    {
+      "path": "scripts/drama_job_worker.py",
+      "mode": "100644",
+      "git_blob": "c1ab2edf4ff069e04cb979c6d730505c4c6e4771",
+      "sha256_git_bytes": "b8f1e2a9a2f0ecbcc2e50c09af6a033af0ff8c9ce681492a1174674f2db0a462",
+      "size_git_bytes": 16898
+    },
+    {
+      "path": "scripts/drama_synthesis_gpu_worker.py",
+      "mode": "100644",
+      "git_blob": "67a0ce2bc4c00c5b74ec12af8fe908d3ea278584",
+      "sha256_git_bytes": "6c5d49090e96da19f4a7260d81533653a4a75af1f226f5c3248764059536b14a",
+      "size_git_bytes": 8250
+    },
+    {
+      "path": "static/drama-job-runtime.js",
+      "mode": "100644",
+      "git_blob": "85721ea03c571fe410161c397aa570778e162554",
+      "sha256_git_bytes": "b2723e89478e30159800799cc186b0fb406828bff18df6ac342a6787e88cbf99",
+      "size_git_bytes": 4118
+    },
+    {
+      "path": "static/drama-synthesis.html",
+      "mode": "100644",
+      "git_blob": "80676487b49a6179799e224513b6258abfcb1b24",
+      "sha256_git_bytes": "fed6ee8630f833b4e9fb85025ded3f1b00067e78a8d2450200c984ec6c75653d",
+      "size_git_bytes": 282072
+    },
+    {
+      "path": "static/index.html",
+      "mode": "100644",
+      "git_blob": "80676487b49a6179799e224513b6258abfcb1b24",
+      "sha256_git_bytes": "fed6ee8630f833b4e9fb85025ded3f1b00067e78a8d2450200c984ec6c75653d",
+      "size_git_bytes": 282072
+    }
+  ],
+  "production_runtime_changed_since_parent": [
+    "app.py",
+    "features/drama_synthesis/app_support.py",
+    "features/drama_synthesis/async_runtime.py",
+    "features/drama_synthesis/cos_upload.py",
+    "features/drama_synthesis/gpu_cache.py",
+    "features/drama_synthesis/local_checkpoint.py",
+    "features/drama_synthesis/media_pipeline.py",
+    "features/fb_gpu/prepare_worker.py",
+    "scripts/drama_synthesis_gpu_worker.py"
+  ],
+  "acceptance_tools": [
+    {
+      "path": "scripts/benchmark_drama_synthesis_media.py",
+      "mode": "100644",
+      "git_blob": "9af283d347d859b9b02625f7f81e6d8ebbd5ccb6",
+      "sha256_git_bytes": "9971dad6e20ff14ea93586e6b318dc5a8d7b3241834d4c5cbd73c253906e467f",
+      "size_git_bytes": 39438
+    },
+    {
+      "path": "scripts/check_drama_media_resource_guard.py",
+      "mode": "100644",
+      "git_blob": "fb6adeca5e6d3123d108b703b8bbbdf766bd5b6c",
+      "sha256_git_bytes": "a95e5c698c30524f293d013b28e78a84d8db20411e8f98673ad2c1582f745615",
+      "size_git_bytes": 25086
+    },
+    {
+      "path": "scripts/run_drama_media_acceptance.py",
+      "mode": "100644",
+      "git_blob": "633b5760f97f15a1f7e5cf84546ee494a684a56d",
+      "sha256_git_bytes": "fe13b1c179b7615691c3d3ce464eb715ce6ff3d3fb38d55075bf8cd355f665b6",
+      "size_git_bytes": 111397
+    },
+    {
+      "path": "scripts/verify_drama_cos_upload.py",
+      "mode": "100644",
+      "git_blob": "e861ac8ecdd0f1c4e84c80b7eebc2b0c971081a4",
+      "sha256_git_bytes": "970d76212fbb0b45d6f10f57f010f116ec6f08358ab66a4384597ea458da32e5",
+      "size_git_bytes": 108987
+    }
+  ],
+  "production_deployed": false,
+  "excluded": "Tests, documentation, evidence JSON, example environment files, databases, private output/ inputs, SDK fixtures and media are excluded from the production payload",
+  "deployment_gate": "Use a fresh GitHub checkout of the exact candidate; verify every listed Git blob and SHA256 before promotion; re-read production drift and back up before any change; coordinate CPU shared paths, HK ports and a new media/COS window with the migration task"
+}

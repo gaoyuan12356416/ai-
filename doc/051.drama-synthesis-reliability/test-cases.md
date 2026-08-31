@@ -9,7 +9,7 @@
 - 媒体样本固定源文件SHA、配方SHA、素材manifest和编码参数。短样0.5～300秒，长样5400～7200秒；5秒样例不能充当90分钟验收。
 - 下载测速固定1～8个资源，单资源最多32 MiB，单次最多256 MiB；私有URL文件不入Git，公开证据不含URL查询参数或Token。
 
-冻结增量实际执行六模块合并回归 **454/454通过、0跳过，25.252秒**：upgrade83、cache110、CPU catalog16、CPU客户端30、GPU runtime66、media149；另跑FB prepare worker **16/16**。`node scripts/test_drama_synthesis_list_actions.js` 返回 **25/25、2页、0浏览器调用、0网络调用**；`node --check static/drama-job-runtime.js` 通过。cache在 `socket.connect/connect_ex` 硬拒绝下仍110/110。完整候选与历史证据以 [test-report.md](test-report.md) 为准；这些结果不代替目标Linux、真实COS或长片验收。
+最终候选实际执行六模块合并回归 **457/457通过、0跳过，31.455秒**：upgrade85、cache111、CPU catalog16、CPU客户端30、GPU runtime66、media149；另跑FB prepare worker **16/16**。`node scripts/test_drama_synthesis_list_actions.js` 返回 **25/25、2页、0浏览器调用、0网络调用**；cache在 `socket.connect/connect_ex` 硬拒绝下仍111/111，固定MinGit2.27下也为111/111。完整候选、目标Linux无媒体结果、旧候选失败与历史证据以 [test-report.md](test-report.md) 为准；本地结果和无媒体Linux结果都不代替真实COS或长片验收。
 
 ## 自动化及隔离故障用例
 
@@ -46,8 +46,8 @@
 | TC-24 | 相同并发/资源/样本比较img与accelerate候选；核对内容与响应 | 实测更快且无内容/校验退化才启用；抽样一致只标抽样证据，完整对象需另证 | P0 | 比较/冻结/隔离回退单测通过；[香港样本](cdn-evaluation.md)结果分化，维持original默认 |
 | TC-25 | 两个真实页面观察下载/标准化/模板/上传、封面先完成、断连、跨小时耗时 | 中文阶段准确；仅阶段百分比；没有源地址/内部错误；封面不覆盖主阶段，耗时持续增长 | P0 | 25/25静态及组件浏览器检查通过；真实认证/API和用户视觉待验 |
 | TC-26 | 原任务自然完成并对账后按GPU→CPU切换；在隔离环境排演回滚 | GitHub精确SHA、备份可用；DB/账本/manifest/成片保留；无重复正式制作或平台发布 | P0 | 待执行，生产未切换 |
-| TC-27 | 固定16GiB launcher依次做无媒体guard-only、短样prepare、两轮三配置render及逐片decode；注入candidate worktree/local config/filter/ignored/index/权限变化、site/.pth、长源同大小替换、提交响应未知、BaseException及动作后cgroup计数增长 | 每个动作以 `-I -S -B` 使用固定unit/路径和同一精确候选；全HEAD blob、root-owned只读树、批次长源SHA、decode前后成片身份、提交intent/不重放、任意中断kill+wait及前后failcnt/memsw/swap/OOM均闭环；不能靠旧手工systemd模板绕过 | P0 | media149/149、upgrade83/83、FB16/16本地通过；真实Linux权限、16GiB unit与媒体均未运行 |
-| TC-28 | 专用四键凭据、全新私有前缀和非敏感MP4执行真实COS分片；在Part1及Complete成功响应后各丢一次响应；测试通知、双匿名HEAD、owner-only ACL、3600+30期限；注入ignored/replace/fsmonitor、skip-worktree/assume-unchanged、Git环境、候选blob差异、qcloud/requests/urllib3/certifi shadow、`.pth/.pyc/.pyo/.egg-link`、symlink、ffprobe stdout/stderr超限及本地子进程中断 | 同一UploadId续传；完成重放零写；完整认证GET SHA一致；Create/Complete前通知为空，匿名两次403且只有Owner FULL_CONTROL；固定`python -I -S -B`下候选/传输/runtime任一不明都在读凭据或发COS请求前拒绝；超限/中断子进程kill+wait；无delete/abort/业务API | P0 | 最终验收驱动门禁41/41、全cache110/110，socket连接硬拒绝下仍110/110；真实COS写入待独立窗口，不能用mock代替 |
+| TC-27 | 固定16GiB launcher依次做无媒体guard-only、短样prepare、两轮三配置render及逐片decode；注入candidate worktree/local config/filter/ignored/index/权限变化、site/.pth、长源同大小替换、提交响应未知、BaseException及动作后cgroup计数增长 | 每个动作以 `-I -S -B` 使用固定unit/路径和同一精确候选；全HEAD blob、root-owned只读树、批次长源SHA、decode前后成片身份、提交intent/不重放、任意中断kill+wait及前后failcnt/memsw/swap/OOM均闭环；不能靠旧手工systemd模板绕过 | P0 | media149/149、upgrade85/85、FB16/16本地通过；真实Linux权限、16GiB unit与媒体均未运行 |
+| TC-28 | 专用四键凭据、全新私有前缀和非敏感MP4执行真实COS分片；在Part1及Complete成功响应后各丢一次响应；测试通知、双匿名HEAD、owner-only ACL、3600+30期限；注入ignored/replace/fsmonitor、skip-worktree/assume-unchanged、Git环境、候选blob差异、qcloud/requests/urllib3/certifi shadow、`.pth/.pyc/.pyo/.egg-link`、symlink、ffprobe stdout/stderr超限及本地子进程中断 | 同一UploadId续传；完成重放零写；完整认证GET SHA一致；Create/Complete前通知为空，匿名两次403且只有Owner FULL_CONTROL；固定`python -I -S -B`下候选/传输/runtime任一不明都在读凭据或发COS请求前拒绝；超限/中断子进程kill+wait；无delete/abort/业务API | P0 | 最终验收驱动门禁42/42、全cache111/111，固定MinGit2.27与socket连接硬拒绝下均111/111；真实COS写入待独立窗口，不能用mock代替 |
 | TC-29 | 新v3 manifest缺/改输入指纹；同大小对象替换；改SHA、ETag、binding、bucket/key或远端元数据；异步执行无manifest但存在可预测公共文件名 | 每个选中产物均由本地SHA和认证HEAD匹配v3；任何差异进入 `recovery_required`，不得按文件名补URL、缓存未命中或重新渲染 | P0 | cache/app离线fixture及最终全量回归通过；真实COS HEAD待窗口 |
 | TC-30 | 首次创建结果目录、临时文件fsync/replace/父目录fsync/readback各阶段故障；旧同步入口与专用worker争owner.lock；无COS配置 | 任何不确定均保留本地成片/检查点且阻止新渲染；旧同步与worker全局互斥；无COS只写旧兼容manifest并保留本地产物 | P0 | fault-order/锁离线fixture及最终全量回归通过；Linux掉电边界待隔离验收 |
 

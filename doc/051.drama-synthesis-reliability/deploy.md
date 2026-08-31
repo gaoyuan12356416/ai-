@@ -1,6 +1,6 @@
 # 发布、验收和回滚合同
 
-更新：2026-08-28。**生产尚未切换；本文是受门禁约束的操作程序，不是执行记录。** 当前分支为 `codex/drama-synthesis-reliability-20260828`。发布候选最终SHA、备份位置、性能决定和生产读回证据由主任务写入 [test-report.md](test-report.md)，本文件不填未执行的PASS。
+更新：2026-08-31。**生产尚未切换；本文是受门禁约束的操作程序，不是执行记录。** 当前分支为 `codex/drama-synthesis-reliability-20260828`。发布候选最终SHA、备份位置、性能决定和生产读回证据由主任务写入 [test-report.md](test-report.md)，本文件不填未执行的PASS。
 
 ## 1. 基线与不得变化的边界
 
@@ -14,13 +14,13 @@
 
 原case任务 `679e7c49acbf4af79f78bf60d76c5dd7` 已在约17:36:51自行退出，17:41结果核对确认仅封面、无视频及完成manifest；服务未重启、无OOM证据。旧10800秒渲染超时为时间证据支持的推断，未找回原异常，见 [原任务核对](evidence/original-case-outcome-20260828.json)。未执行终止操作，原CPU failed状态保持；不得盲目重制或写成完成。长片内存缺陷仍未关闭，见 [BUG-002](bugs/BUG-002.md)。
 
-迁移任务 `gpu-service-migration-20260828T1502` 仍在执行；截至本文件更新时，**新的HK媒体窗口尚未明确释放**。在迁移任务另行明确许可远端隔离代码测试前，只做本地、无网络、无媒体的代码测试；即使取得无GPU代码测试许可，仍不得在HK启动FFmpeg、下载压测或COS写入，也不沿用2026-08-28的旧窗口。CPU公共目录/主API及HK剧集上线必须在发布前再次协调目录、端口和窗口；测试窗口不等同生产切换许可。每次渲染或切换前仍须重新证明正式任务排空，旧PID退出不代表之后不会有新任务。
+远端窗口继续由迁移任务 `gpu-service-migration-20260828T1502` 协调；dc0bad8已在一次性书面许可下完成CPU/HK无媒体隔离回归，结果见 [双端无媒体证据](evidence/linux-no-media-regression-dc0bad8-20260831.json)，**该许可已经用完，新的HK媒体/COS及部署窗口仍未释放**。旧候选1367dd4的许可和bundle方案均随该SHA作废。无GPU代码测试通过仍不得在HK启动FFmpeg、下载压测或COS写入，也不沿用2026-08-28的旧窗口。CPU公共目录/主API及HK剧集上线必须在发布前再次协调目录、端口和窗口；测试窗口不等同生产切换许可。每次渲染或切换前仍须重新证明正式任务排空，旧PID退出不代表之后不会有新任务。
 
 现行轻量健康检查是CPU侧 `GET http://127.0.0.1:18788/healthz`（HK侧8787），无需鉴权，预期200及`ok=true, role=media-only`。`/health`不是有效路由。素材catalog `/api/gpu-video/random-overlay/catalog` 需要既有Bearer Token，不打印该值；轻量health通过只证明HTTP入口存活，不证明媒体或COS已验收。
 
 保留现网素材复制通知、输出预览过滤和YouTube弹窗等后续改动。只发布本期涉及代码，不重启或改写FB/X/TT/YouTube发布服务，不调整Token、机器时间、short-link及资源目录。
 
-运行候选 `1367dd4e508dc81f0fb7eb9c128ed47a22b67d06` 已按Git blob字节冻结 [17个生产运行文件和4个验收工具的文件清单及SHA256](evidence/runtime-file-manifest-1367dd4.json)；相对23a08e5实际改变9个生产运行文件。清单供CPU非Git部署目录、GPU版本目录和新鲜checkout逐文件核对，不包含私有输入、数据库或生产配置，也不是部署完成证明。旧 [570c1bd清单](evidence/runtime-file-manifest-570c1bd.json) 只保留历史证据，不能用于本候选。承载新清单的后续文档/证据提交不得改变清单内任何运行或验收工具blob；若改变，必须重新生成、回归并选择新的运行候选。
+运行候选 `dc0bad87b24318a09fc886c34d6957cbee8f4720` 已按Git blob字节冻结 [17个生产运行文件和4个验收工具的文件清单及SHA256](evidence/runtime-file-manifest-dc0bad8.json)；相对23a08e5实际改变9个生产运行文件。清单供CPU非Git部署目录、GPU版本目录和新鲜checkout逐文件核对，不包含私有输入、数据库或生产配置，也不是部署完成证明。作废的 [1367dd4清单](evidence/runtime-file-manifest-1367dd4.json) 和旧 [570c1bd清单](evidence/runtime-file-manifest-570c1bd.json) 只保留历史证据，不能用于本候选。承载新清单的后续文档/证据提交不得改变清单内任何运行或验收工具blob；若改变，必须重新生成、回归并选择新的运行候选。
 
 ## 2. 配置与存储
 
@@ -82,7 +82,7 @@ python -I -S -B scripts/run_drama_media_acceptance.py --candidate-sha <精确40�
 
 尖括号是必须来自本次冻结记录的参数，以上不是已运行命令。下载工具保持普通显式CLI；渲染不得直接调用其 `render` 子命令，必须由固定媒体launcher创建并验证200%/2线程、400%/2线程或400%/4线程的隔离unit。launcher缺省只预览；prepare、render、decode的最终参数和调用顺序以同一候选SHA内的 `--help` 及 [媒体验收手册](media-acceptance-runbook.md) 为准。正式入口仍须先排空；固定锁只防验收批次互相并行。每次记录launcher、`evidence.json`、`process-samples.jsonl` 和解码结果；`ok=true` 不代表用户视觉验收通过。当前 `/data`仍在根文件系统，运行前用 `findmnt -T`、`df` 核验空间，不自动迁盘或无限缓存。
 
-真实COS恢复验收只使用 `scripts/verify_drama_cos_upload.py`，缺省为零网络预览。真实执行必须用固定运行时的 `python -I -S -B scripts/verify_drama_cos_upload.py --apply ...`，并绑定同一干净GitHub候选、全新 `cos-...` 批次、独立非敏感MP4（大于16MiB且不超过256MiB）、全新0700证据目录，以及只含 `COS_SECRET_ID`、`COS_SECRET_KEY`、`COS_BUCKET`、`COS_REGION` 四项的当前用户自有0400/0600专用文件；未知赋值、环境继承和生产COS前缀一律拒绝。clean门禁必须同时拒绝tracked工作树改动、staged改动、untracked、ignored及skip-worktree/assume-unchanged，Git以精确40位commit/tree运行并禁replace refs、全局/系统配置和local fsmonitor；Git二进制root-owned且不可组写/他写，关键候选文件逐字节匹配Git blob。COS SDK 1.9.44及requests/urllib3/certifi/idna/charset-normalizer等真实传输依赖须在任何package导入前证明来自root-owned只读单一依赖树；树内symlink、`.pth`、`.pyc/.pyo`、`.egg-link`或任意组/他写路径均拒绝。目标固定runtime若已有这些文件，验收应安全失败并另行准备受控依赖树，不能删除生产runtime文件来绕过。ffprobe的stdout/stderr在运行期间分别有硬上限，超限、KeyboardInterrupt或读线程异常均kill并wait，且仍未读取凭据。脚本内部固定总期限3600秒，外层独立unit固定 `RuntimeMaxSec=3660` 兜底，不提供CLI或环境变量放宽。创建和完成前各读取一次V2通知配置，必须严格为空；创建前和完成后匿名HEAD必须均为403，完成后还要读取对象ACL并拒绝公开/组授权。任一读回不明即保留证据、UploadId、对象或分片并停止，不abort、不删除、不换前缀自动重试。通过还须证明第一次分片成功响应丢失后复用同一UploadId、Complete成功响应丢失后由绑定HEAD对账、完成重放零写入，以及完整认证下载SHA等于源文件。该验收会真实写入一个新私有COS对象，必须另获COS写入窗口；不触发业务API、通知配置写入或媒体渲染。
+真实COS恢复验收只使用 `scripts/verify_drama_cos_upload.py`，缺省为零网络预览。真实执行必须用固定运行时的 `python -I -S -B scripts/verify_drama_cos_upload.py --apply ...`，并绑定同一干净GitHub候选、全新 `cos-...` 批次、独立非敏感MP4（大于16MiB且不超过256MiB）、全新0700证据目录，以及只含 `COS_SECRET_ID`、`COS_SECRET_KEY`、`COS_BUCKET`、`COS_REGION` 四项的当前用户自有0400/0600专用文件；未知赋值、环境继承和生产COS前缀一律拒绝。clean门禁必须同时拒绝tracked工作树改动、staged改动、untracked、ignored、skip-worktree/assume-unchanged及fsmonitor-valid；Git以精确40位commit/tree运行，使用Git2.27安全的空fsmonitor覆盖并在首次index读取前拒绝额外local/worktree/include值，同时禁replace refs和全局/系统配置。门禁不得调用会执行候选attributes filter的status/ignored路径，必须以HEAD tree、stage-0 index、操作系统完整文件树和原生Git-blob SHA精确比较；Git二进制root-owned且不可组写/他写，关键候选文件仍逐字节匹配Git blob。COS SDK 1.9.44及requests/urllib3/certifi/idna/charset-normalizer等真实传输依赖须在任何package导入前证明来自root-owned只读单一依赖树；树内symlink、`.pth`、`.pyc/.pyo`、`.egg-link`或任意组/他写路径均拒绝。目标固定runtime若已有这些文件，验收应安全失败并另行准备受控依赖树，不能删除生产runtime文件来绕过。ffprobe的stdout/stderr在运行期间分别有硬上限，超限、KeyboardInterrupt或读线程异常均kill并wait，且仍未读取凭据。脚本内部固定总期限3600秒，外层独立unit固定 `RuntimeMaxSec=3660` 兜底，不提供CLI或环境变量放宽。创建和完成前各读取一次V2通知配置，必须严格为空；创建前和完成后匿名HEAD必须均为403，完成后还要读取对象ACL并拒绝公开/组授权。任一读回不明即保留证据、UploadId、对象或分片并停止，不abort、不删除、不换前缀自动重试。通过还须证明第一次分片成功响应丢失后复用同一UploadId、Complete成功响应丢失后由绑定HEAD对账、完成重放零写入，以及完整认证下载SHA等于源文件。该验收会真实写入一个新私有COS对象，必须另获COS写入窗口；不触发业务API、通知配置写入或媒体渲染。
 
 ## 5. 已验收GitHub候选的生产切换步骤
 

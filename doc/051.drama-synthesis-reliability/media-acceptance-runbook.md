@@ -6,7 +6,7 @@
 
 当前不能启动媒体。旧正式渲染已在2026-08-28约17:36:51自行退出，17:41核对没有视频成片；GPU服务未重启、没有OOM证据。退出时间与旧10800秒限时吻合，但原异常未保留，超时原因仍是证据支持的推断，见 [原任务证据](evidence/original-case-outcome-20260828.json)。没有终止旧任务，也不把CPU的failed状态改成done。
 
-2026-08-31只读基线再次确认HK无ffmpeg/ffprobe、GPU空闲且剧集/FB服务未重启，见 [恢复基线](evidence/resume-baseline-20260831.json)；这是时间点快照，不是测试许可。迁移任务 `gpu-service-migration-20260828T1502` 仍在执行，且尚未明确释放**本轮新的HK媒体窗口**。旧排空记录和旧窗口均不能复用。
+2026-08-31只读基线再次确认HK无ffmpeg/ffprobe、GPU空闲且剧集/FB服务未重启，见 [恢复基线](evidence/resume-baseline-20260831.json)；这是时间点快照，不是测试许可。远端窗口继续由迁移任务 `gpu-service-migration-20260828T1502` 协调；新候选dc0bad8的一次性CPU/HK无媒体隔离许可已执行完毕并关闭，结果见 [双端无媒体证据](evidence/linux-no-media-regression-dc0bad8-20260831.json)，仍未释放**本轮新的HK媒体/COS窗口**。旧候选1367dd4的许可、旧排空记录和旧窗口均不能复用，无媒体许可也不能升级使用。
 
 启动验收必须同时满足：
 
@@ -56,7 +56,7 @@ test "${TASK_ACTUAL_LAUNCHER_SHA256%% *}" = "$TASK_LAUNCHER_SHA256" || exit 78
 "$TASK_PYTHON" -I -S -B "$TASK_LAUNCHER" --help || exit 78
 ```
 
-上面的人工命令只核对已评审manifest中的launcher字节，不能代替launcher自身门禁；不要运行 `git status`，仓库内attributes/filter配置可能让它执行外部转换。launcher固定使用root拥有且不可组/其他写的 `/usr/bin/git`，显式绑定当前work-tree，设置 `GIT_NO_LAZY_FETCH=1`，屏蔽system/global config、replace refs、hooks、fsmonitor和untracked cache。它用HEAD tracked清单与实际常规文件集合、实际目录集合精确比较，因而拒绝未跟踪、已忽略文件（包括 `__pycache__/*.pyc`）、index隐藏标志、symlink/submodule及非精确HEAD；再逐个以 `hash-object --no-filters` 核对整个HEAD工作树。候选路径祖先、递归目录、全部tracked文件、`.git`入口和实际gitdir都必须root-owned且不可组/其他写；执行位须与Git mode一致。导入前后还会复核完整文件身份，不能被 `core.worktree`、clean filter或stat cache转向/隐藏。任一项失败均不得导入候选模块或提交unit。公开、guard与verified阶段统一以 `-I -S -B` 运行，不执行site、`.pth`或候选外sitecustomize；资源guard脚本的standalone CLI仅为launcher内部入口，操作员不得直接调用，它本身没有也不需要公开 `--apply`。
+上面的人工命令只核对已评审manifest中的launcher字节，不能代替launcher自身门禁；不要运行 `git status`，仓库内attributes/filter配置可能让它执行外部转换。launcher固定使用root拥有且不可组/其他写的 `/usr/bin/git`，显式绑定当前work-tree，设置 `GIT_NO_LAZY_FETCH=1`，屏蔽system/global config、replace refs、hooks和untracked cache；fsmonitor统一用兼容Git2.27的空值覆盖，并在首次读取index前确认可见配置只有该command-line空值，任何local/worktree/include值都拒绝。它用HEAD tracked清单与实际常规文件集合、实际目录集合精确比较，因而拒绝未跟踪、已忽略文件（包括 `__pycache__/*.pyc`）、assume-unchanged、skip-worktree、fsmonitor-valid、symlink/submodule及非精确HEAD；再逐个以 `hash-object --no-filters` 核对整个HEAD工作树。候选路径祖先、递归目录、全部tracked文件、`.git`入口和实际gitdir都必须root-owned且不可组/其他写；执行位须与Git mode一致。导入前后还会复核完整文件身份，不能被 `core.worktree`、clean filter或stat cache转向/隐藏。任一项失败均不得导入候选模块或提交unit。公开、guard与verified阶段统一以 `-I -S -B` 运行，不执行site、`.pth`或候选外sitecustomize；资源guard脚本的standalone CLI仅为launcher内部入口，操作员不得直接调用，它本身没有也不需要公开 `--apply`。
 
 先运行不读取媒体、不取媒体锁、不创建run root的16GiB guard-only。缺省命令只预览；核对JSON的 `operation=guard-only`、`media_started=false`、`ffmpeg_processes=0` 和 `ffprobe_processes=0` 后，取得迁移任务对该轻量unit的许可，再增加 `--apply`：
 
@@ -193,4 +193,4 @@ done
 
 每个样本记录：候选GitHub SHA、批次、operation/unit、实际配额/Nice/memsw/Tasks/身份、源/配方/素材/运行时SHA、launcher与benchmark原始JSON、进程曲线、完整解码、FB观察、人工视觉/音频结果，以及失败原因或参数决定。原始证据保存在私有验收根；未经确认不上传COS、不回填正式任务、不代替用户接受。
 
-当前状态：长片硬链接已保留，源SHA待计算，GPU固定配方副本待窗口内核对；新媒体launcher仍是未提交候选增量。**16GiB guard-only、短源prepare、六组短片render/decode、约90分钟长片、完整解码及人工效果验收均未执行；新的HK媒体窗口也未释放。** 本手册不替代异步API重启/故障、下载1/2/4/8、真实COS恢复或页面业务验收，最终状态以 [test-report.md](test-report.md) 为准。
+当前状态：长片硬链接已保留，源SHA待计算，GPU固定配方副本待窗口内核对；媒体launcher已作为dc0bad8候选推送，CPU/HK目标Linux无媒体回归已通过。**16GiB guard-only、短源prepare、六组短片render/decode、约90分钟长片、完整解码及人工效果验收均未执行；新的HK媒体/COS窗口也未释放，不能沿用无媒体许可。** 本手册不替代异步API重启/故障、下载1/2/4/8、真实COS恢复或页面业务验收，最终状态以 [test-report.md](test-report.md) 为准。
