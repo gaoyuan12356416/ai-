@@ -13,7 +13,7 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 计划验收用例 | 12 | 8 | 0 | 4 |
-| 自动回归 | 500 | 500 | 0 | 0（另 6 项按既有平台条件跳过） |
+| 自动回归 | 503 | 503 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
@@ -25,10 +25,10 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 500 tests in 28.369s - OK (skipped=6)
+Ran 503 tests in 30.863s - OK (skipped=6)
 ```
 
-exact commit 与真机报告待候选提交后补充。
+已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2，并完成上述 503 项回归。exact commit 与最终真机报告待候选提交后补充。
 
 ## 遗留风险
 
