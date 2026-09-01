@@ -38,6 +38,72 @@ HK_RUNTIME_FILE_SHA256 = {
     JOB_IDS[1]: "c92203d0baf1507d1d37e50252be0a0c8a341b583a60ae37e61540c15397512c",
 }
 HK_RUNTIME_RECORD_MAX_BYTES = 4 * 1024 * 1024
+HK_DOWNLOAD_PARTS = (
+    {
+        "job_id": JOB_IDS[0], "episode": "002",
+        "part_inode": 1709371, "part_size": 8388608,
+        "part_sha256": "9c5b7b48d41b0e6503f1f9b894e2086b381d94de1f21453910f7bbeea9a754ad",
+        "record_inode": 1709373, "record_size": 280,
+        "record_sha256": "80c110ff1112e06f6fee80815ad855bbb81860c8a2ca69c62545d9fb2a2e923c",
+        "expected_size": 214348452,
+    },
+    {
+        "job_id": JOB_IDS[0], "episode": "003",
+        "part_inode": 1709227, "part_size": 319029248,
+        "part_sha256": "4268d78394d012bef2b09306db6ce2b74e7e9245c5600217cec37d48f8e4be2b",
+        "record_inode": 1709372, "record_size": 282,
+        "record_sha256": "7e5655ae516fad5e3d34102ebf6af532dc6e0a2dfbcf442657aef049ca863276",
+        "expected_size": 349379561,
+    },
+    {
+        "job_id": JOB_IDS[0], "episode": "004",
+        "part_inode": 1709370, "part_size": 9437184,
+        "part_sha256": "24eff40e573e808f6e973d14ff3615c43aa82c9861c4a706a52132051f40f3d1",
+        "record_inode": 1709377, "record_size": 280,
+        "record_sha256": "79522a771097eb96645425925ac9dbad373a237f7539effb9455f59e84d520ee",
+        "expected_size": 226154892,
+    },
+    {
+        "job_id": JOB_IDS[0], "episode": "005",
+        "part_inode": 1709375, "part_size": 0,
+        "part_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "record_inode": 1709376, "record_size": 274,
+        "record_sha256": "244a61e9711a2208ebabc6b2e6feb6ab336980641b6af607b41f5fd6845365fc",
+        "expected_size": 154755915,
+    },
+    {
+        "job_id": JOB_IDS[1], "episode": "002",
+        "part_inode": 4065235, "part_size": 72089600,
+        "part_sha256": "f1418a20b25e594d01cae655a6075e2652c442b61ce6613429e84540dc773f18",
+        "record_inode": 4065270, "record_size": 279,
+        "record_sha256": "5e54dee5181ff6a38edd694b779b95747d020f44f033ee934490e7cdbad0bded",
+        "expected_size": 81370743,
+    },
+    {
+        "job_id": JOB_IDS[1], "episode": "003",
+        "part_inode": 4065239, "part_size": 4194304,
+        "part_sha256": "92e83d6ac16ae1b976d7b6fb8fda776566b7ba808d3f836a8d56f62a7a9595da",
+        "record_inode": 4065418, "record_size": 278,
+        "record_sha256": "f6de9ac5a7a0550731e49d3a44b6a0e07208c2677ee70586ae20ea4a611564a4",
+        "expected_size": 63707705,
+    },
+    {
+        "job_id": JOB_IDS[1], "episode": "004",
+        "part_inode": 4065237, "part_size": 141819904,
+        "part_sha256": "26480461441ab4573f43a99a32411b42b45dccc964c68e980a4d83aca9990c83",
+        "record_inode": 4065238, "record_size": 282,
+        "record_sha256": "2a2c5e09c38ea00f1f56023f51e4961c6eeddc306b9c464ea1417766afc72caf",
+        "expected_size": 163071840,
+    },
+    {
+        "job_id": JOB_IDS[1], "episode": "005",
+        "part_inode": 4065240, "part_size": 0,
+        "part_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "record_inode": 4065417, "record_size": 272,
+        "record_sha256": "21854d740ce57361256930ab8706faa99b15c318f769d51ac464822df53e0d4f",
+        "expected_size": 88911492,
+    },
+)
 CPU_DB = common.CPU_LIVE_ROOT / "data" / "drama_material_jobs.sqlite3"
 HK_RELEASES = common.HK_BASE / "releases"
 HK_CURRENT = common.HK_BASE / "current"
@@ -253,6 +319,186 @@ def validate_hk_runtime_contract():
         raise common.OperatorError("HK runtime failure contract is malformed")
 
 
+def validate_hk_download_contract():
+    fields = {
+        "job_id", "episode", "part_inode", "part_size", "part_sha256",
+        "record_inode", "record_size", "record_sha256", "expected_size",
+    }
+    expected_identities = [(job_id, episode) for job_id in JOB_IDS
+                           for episode in ("002", "003", "004", "005")]
+    if (type(HK_DOWNLOAD_PARTS) is not tuple or len(HK_DOWNLOAD_PARTS) != 8 or
+            any(type(item) is not dict or set(item) != fields
+                for item in HK_DOWNLOAD_PARTS)):
+        raise common.OperatorError("HK partial download contract scope is malformed")
+    identities = [(item["job_id"], item["episode"])
+                  for item in HK_DOWNLOAD_PARTS]
+    if identities != expected_identities:
+        raise common.OperatorError("HK partial download contract scope is malformed")
+    for item in HK_DOWNLOAD_PARTS:
+        if (not isinstance(item["job_id"], str) or
+                item["job_id"] not in JOB_IDS or
+                not isinstance(item["episode"], str) or
+                not re.fullmatch(r"00[2-5]", item["episode"]) or
+                type(item["part_inode"]) is not int or item["part_inode"] <= 0 or
+                type(item["record_inode"]) is not int or item["record_inode"] <= 0 or
+                type(item["part_size"]) is not int or item["part_size"] < 0 or
+                type(item["record_size"]) is not int or
+                not 0 < item["record_size"] <= HK_RUNTIME_RECORD_MAX_BYTES or
+                type(item["expected_size"]) is not int or
+                item["expected_size"] <= 0 or
+                item["expected_size"] < item["part_size"] or
+                not isinstance(item["part_sha256"], str) or
+                not re.fullmatch(r"[0-9a-f]{64}", item["part_sha256"]) or
+                not isinstance(item["record_sha256"], str) or
+                not re.fullmatch(r"[0-9a-f]{64}", item["record_sha256"])):
+            raise common.OperatorError("HK partial download contract value is malformed")
+
+
+def hk_download_paths(item):
+    part = (pathlib.Path(HK_WORK_ROOT) / item["job_id"] / "downloads" /
+            (item["episode"] + ".mp4.part"))
+    return part, part.with_name(part.name + ".json")
+
+
+def _anchor_hk_download_file(path, expected_inode, expected_size, expected_sha256,
+                             kind):
+    common.validate_existing_ancestry(
+        path, trusted_root=HK_WORK_ROOT, require_root_owner=False)
+    try:
+        before = os.lstat(str(path))
+    except OSError:
+        raise common.OperatorError("HK approved %s path is unreadable" % kind)
+    if (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or
+            int(before.st_ino) != int(expected_inode) or
+            int(before.st_size) != int(expected_size)):
+        raise common.OperatorError("HK approved %s inode or size changed" % kind)
+    try:
+        descriptor, anchored_stat, digest = common.anchored_file(
+            path, expected_sha256=expected_sha256,
+            expected_inode=expected_inode, expected_size=expected_size)
+    except OSError:
+        raise common.OperatorError("HK approved %s changed during anchored open" % kind)
+    return descriptor, anchored_stat, digest
+
+
+def inspect_hk_download_checkpoint(item):
+    part, record_path = hk_download_paths(item)
+    part_fd, part_stat, part_digest = _anchor_hk_download_file(
+        part, item["part_inode"], item["part_size"], item["part_sha256"],
+        "partial download")
+    try:
+        part_opened = os.fstat(part_fd)
+        try:
+            part_current = os.lstat(str(part))
+        except OSError:
+            raise common.OperatorError("HK approved partial download changed after hashing")
+        if (stat.S_ISLNK(part_current.st_mode) or
+                not stat.S_ISREG(part_current.st_mode) or
+                common.identity_tuple(part_opened) != common.identity_tuple(part_current)):
+            raise common.OperatorError("HK approved partial download changed after hashing")
+    finally:
+        os.close(part_fd)
+    record_fd, record_stat, record_digest = _anchor_hk_download_file(
+        record_path, item["record_inode"], item["record_size"],
+        item["record_sha256"], "partial download record")
+    try:
+        opened = os.fstat(record_fd)
+        raw = _read_exact_fd(record_fd, int(opened.st_size))
+        after = os.fstat(record_fd)
+        try:
+            current = os.lstat(str(record_path))
+        except OSError:
+            raise common.OperatorError("HK partial download record changed while reading")
+        if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or
+                common.identity_tuple(opened) != common.identity_tuple(after) or
+                common.identity_tuple(opened) != common.identity_tuple(current) or
+                common.sha256_bytes(raw) != record_digest):
+            raise common.OperatorError("HK partial download record changed while reading")
+    finally:
+        os.close(record_fd)
+    try:
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_json_object_without_duplicate_keys)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise common.OperatorError("HK partial download record is not strict UTF-8 JSON")
+    keys = {"version", "source_identity", "etag", "expected_size",
+            "partial_size", "partial_sha256"}
+    if (not isinstance(value, dict) or set(value) != keys or
+            type(value.get("version")) is not int or value.get("version") != 1 or
+            not isinstance(value.get("source_identity"), str) or
+            not isinstance(value.get("etag"), str) or
+            type(value.get("expected_size")) is not int or
+            value.get("expected_size") != item["expected_size"] or
+            type(value.get("partial_size")) is not int or
+            value.get("partial_size") != item["part_size"] or
+            value.get("partial_sha256") != part_digest or
+            value["expected_size"] < value["partial_size"]):
+        raise common.OperatorError("HK partial download record is outside the approved checkpoint")
+    return {
+        "job_id": item["job_id"], "episode": item["episode"],
+        "relative_part_path": str(part.relative_to(HK_WORK_ROOT)).replace("\\", "/"),
+        "relative_record_path":
+            str(record_path.relative_to(HK_WORK_ROOT)).replace("\\", "/"),
+        "expected_size": item["expected_size"],
+        "partial_size": item["part_size"], "partial_sha256": part_digest,
+        "part_stat": part_stat, "record_sha256": record_digest,
+        "record_stat": record_stat,
+    }
+
+
+def hk_partial_path_sets():
+    parts = set()
+    records = set()
+    for root in (HK_WORK_ROOT, HK_PUBLIC_ROOT):
+        parts.update(pathlib.Path(root).rglob("*.part"))
+        records.update(pathlib.Path(root).rglob("*.part.json"))
+    return parts, records
+
+
+def inspect_hk_download_checkpoints():
+    validate_hk_download_contract()
+    expected_parts = set()
+    expected_records = set()
+    for item in HK_DOWNLOAD_PARTS:
+        part, record = hk_download_paths(item)
+        expected_parts.add(part)
+        expected_records.add(record)
+    parts, records = hk_partial_path_sets()
+    if parts != expected_parts or records != expected_records:
+        raise common.OperatorError("HK partial download paths differ from the eight approved pairs")
+    summaries = [inspect_hk_download_checkpoint(item) for item in HK_DOWNLOAD_PARTS]
+    final_parts, final_records = hk_partial_path_sets()
+    if final_parts != expected_parts or final_records != expected_records:
+        raise common.OperatorError("HK partial download paths changed while inspecting")
+    for summary in summaries:
+        item = next(row for row in HK_DOWNLOAD_PARTS
+                    if row["job_id"] == summary["job_id"] and
+                    row["episode"] == summary["episode"])
+        part, record = hk_download_paths(item)
+        try:
+            common.validate_existing_ancestry(
+                part, trusted_root=HK_WORK_ROOT, require_root_owner=False)
+            common.validate_existing_ancestry(
+                record, trusted_root=HK_WORK_ROOT, require_root_owner=False)
+            part_current = os.lstat(str(part))
+            record_current = os.lstat(str(record))
+        except OSError:
+            raise common.OperatorError("HK partial download pair changed while inspecting")
+        if (stat.S_ISLNK(part_current.st_mode) or
+                not stat.S_ISREG(part_current.st_mode) or
+                stat.S_ISLNK(record_current.st_mode) or
+                not stat.S_ISREG(record_current.st_mode) or
+                common.stat_record(part_current) != summary["part_stat"] or
+                common.stat_record(record_current) != summary["record_stat"]):
+            raise common.OperatorError("HK partial download pair changed while inspecting")
+    return {
+        "part_files": len(summaries), "part_record_files": len(summaries),
+        "recoverable_downloads": summaries,
+        "recoverable_downloads_sha256":
+            common.sha256_bytes(common.canonical_bytes(summaries)),
+    }
+
+
 def inspect_hk_runtime_record(path, expected_job_id):
     path = pathlib.Path(path)
     if (expected_job_id not in JOB_IDS or
@@ -316,6 +562,7 @@ def inspect_hk_runtime_record(path, expected_job_id):
 
 def inspect_hk_runtime():
     validate_hk_runtime_contract()
+    validate_hk_download_contract()
     common.real_directory(common.HK_BASE)
     common.real_directory(HK_RELEASES)
     common.real_directory(HK_WORK_ROOT, require_root_owner=False)
@@ -328,6 +575,9 @@ def inspect_hk_runtime():
     records = [inspect_hk_runtime_record(
         pathlib.Path(HK_RUNTIME_ACTIVE) / (job_id + ".json"), job_id)
         for job_id in JOB_IDS]
+    if not directory_is_empty(HK_RUNTIME_DIAGNOSTICS):
+        raise common.OperatorError("HK runtime diagnostics directory is not empty")
+    downloads = inspect_hk_download_checkpoints()
     final_entries = sorted(pathlib.Path(HK_RUNTIME_ACTIVE).iterdir(),
                            key=lambda item: item.name)
     if (len(final_entries) != len(JOB_IDS) or
@@ -344,16 +594,10 @@ def inspect_hk_runtime():
             raise common.OperatorError("HK runtime job directory changed while inspecting")
     if not directory_is_empty(HK_RUNTIME_DIAGNOSTICS):
         raise common.OperatorError("HK runtime diagnostics directory is not empty")
-    parts = []
-    for root in (HK_WORK_ROOT, HK_PUBLIC_ROOT):
-        for path in pathlib.Path(root).rglob("*.part"):
-            parts.append(str(path))
-    if parts:
-        raise common.OperatorError("HK drama roots contain diagnostic partial files")
     return {"active_jobs": 0, "durable_failed_jobs": len(records),
             "durable_records": records,
             "durable_records_sha256": common.sha256_bytes(common.canonical_bytes(records)),
-            "diagnostics": 0, "part_files": 0,
+            "diagnostics": 0, **downloads,
             "work_root": str(HK_WORK_ROOT), "public_root": str(HK_PUBLIC_ROOT)}
 
 

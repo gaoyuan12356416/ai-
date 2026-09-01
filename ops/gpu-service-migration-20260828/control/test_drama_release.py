@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -56,9 +57,12 @@ def portable_noreplace(source, destination):
 
 
 @contextlib.contextmanager
-def hk_runtime_fixture(record_changes=None, raw_overrides=None):
+def hk_runtime_fixture(record_changes=None, raw_overrides=None,
+                       partial_record_changes=None, partial_raw_overrides=None):
     record_changes = record_changes or {}
     raw_overrides = raw_overrides or {}
+    partial_record_changes = partial_record_changes or {}
+    partial_raw_overrides = partial_raw_overrides or {}
     with tempfile.TemporaryDirectory() as directory:
         base = pathlib.Path(directory)
         releases = base / "releases"
@@ -97,6 +101,50 @@ def hk_runtime_fixture(record_changes=None, raw_overrides=None):
             records[job_id] = record
             paths[job_id] = path
             hashes[job_id] = hashlib.sha256(raw).hexdigest()
+        download_specs = []
+        part_paths = {}
+        partial_record_paths = {}
+        partial_records = {}
+        for original in release.HK_DOWNLOAD_PARTS:
+            identity = (original["job_id"], original["episode"])
+            part = (work / identity[0] / "downloads" /
+                    (identity[1] + ".mp4.part"))
+            part.parent.mkdir(parents=True, exist_ok=True)
+            part_bytes = (b"" if identity[1] == "005" else
+                          (identity[0] + "-" + identity[1]).encode("ascii"))
+            part.write_bytes(part_bytes)
+            part_sha = hashlib.sha256(part_bytes).hexdigest()
+            partial = {
+                "version": 1,
+                "source_identity": "test-source-" + identity[0] + "-" + identity[1],
+                "etag": '"test-etag-%s"' % identity[1],
+                "expected_size": len(part_bytes) + 100,
+                "partial_size": len(part_bytes),
+                "partial_sha256": part_sha,
+            }
+            partial.update(partial_record_changes.get(identity, {}))
+            record_bytes = partial_raw_overrides.get(identity)
+            if record_bytes is None:
+                record_bytes = json.dumps(
+                    partial, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            elif isinstance(record_bytes, str):
+                record_bytes = record_bytes.encode("utf-8")
+            record_path = part.with_name(part.name + ".json")
+            record_path.write_bytes(record_bytes)
+            part_stat = os.lstat(str(part))
+            record_stat = os.lstat(str(record_path))
+            download_specs.append({
+                "job_id": identity[0], "episode": identity[1],
+                "part_inode": int(part_stat.st_ino),
+                "part_size": len(part_bytes), "part_sha256": part_sha,
+                "record_inode": int(record_stat.st_ino),
+                "record_size": len(record_bytes),
+                "record_sha256": hashlib.sha256(record_bytes).hexdigest(),
+                "expected_size": len(part_bytes) + 100,
+            })
+            part_paths[identity] = part
+            partial_record_paths[identity] = record_path
+            partial_records[identity] = partial
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(common, "HK_BASE", base))
             stack.enter_context(mock.patch.object(release, "HK_RELEASES", releases))
@@ -107,10 +155,15 @@ def hk_runtime_fixture(record_changes=None, raw_overrides=None):
                 release, "HK_RUNTIME_DIAGNOSTICS", diagnostics))
             stack.enter_context(mock.patch.object(
                 release, "HK_RUNTIME_FILE_SHA256", hashes))
+            stack.enter_context(mock.patch.object(
+                release, "HK_DOWNLOAD_PARTS", tuple(download_specs)))
             yield {
                 "base": base, "work": work, "public": public, "jobs": jobs,
                 "diagnostics": diagnostics, "records": records,
                 "paths": paths, "hashes": hashes,
+                "download_specs": download_specs, "part_paths": part_paths,
+                "partial_record_paths": partial_record_paths,
+                "partial_records": partial_records,
             }
 
 
@@ -198,6 +251,60 @@ class DramaReleaseTests(unittest.TestCase):
             self.assertEqual(set(mapping), set(release.JOB_IDS))
             self.assertTrue(all(len(value) == 64 for value in mapping.values()))
 
+    def test_hk_partial_download_contract_is_exact_and_well_formed(self):
+        release.validate_hk_download_contract()
+        self.assertTrue(all(
+            re.fullmatch(r"[0-9a-f]{64}", item[key])
+            for item in release.HK_DOWNLOAD_PARTS
+            for key in ("part_sha256", "record_sha256")))
+        actual = [(
+            item["job_id"], item["episode"], item["part_inode"],
+            item["part_size"], item["part_sha256"], item["record_inode"],
+            item["record_size"], item["record_sha256"], item["expected_size"])
+            for item in release.HK_DOWNLOAD_PARTS]
+        self.assertEqual(actual, [
+            (release.JOB_IDS[0], "002", 1709371, 8388608,
+             "9c5b7b48d41b0e6503f1f9b894e2086b381d94de1f21453910f7bbeea9a754ad",
+             1709373, 280,
+             "80c110ff1112e06f6fee80815ad855bbb81860c8a2ca69c62545d9fb2a2e923c",
+             214348452),
+            (release.JOB_IDS[0], "003", 1709227, 319029248,
+             "4268d78394d012bef2b09306db6ce2b74e7e9245c5600217cec37d48f8e4be2b",
+             1709372, 282,
+             "7e5655ae516fad5e3d34102ebf6af532dc6e0a2dfbcf442657aef049ca863276",
+             349379561),
+            (release.JOB_IDS[0], "004", 1709370, 9437184,
+             "24eff40e573e808f6e973d14ff3615c43aa82c9861c4a706a52132051f40f3d1",
+             1709377, 280,
+             "79522a771097eb96645425925ac9dbad373a237f7539effb9455f59e84d520ee",
+             226154892),
+            (release.JOB_IDS[0], "005", 1709375, 0,
+             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+             1709376, 274,
+             "244a61e9711a2208ebabc6b2e6feb6ab336980641b6af607b41f5fd6845365fc",
+             154755915),
+            (release.JOB_IDS[1], "002", 4065235, 72089600,
+             "f1418a20b25e594d01cae655a6075e2652c442b61ce6613429e84540dc773f18",
+             4065270, 279,
+             "5e54dee5181ff6a38edd694b779b95747d020f44f033ee934490e7cdbad0bded",
+             81370743),
+            (release.JOB_IDS[1], "003", 4065239, 4194304,
+             "92e83d6ac16ae1b976d7b6fb8fda776566b7ba808d3f836a8d56f62a7a9595da",
+             4065418, 278,
+             "f6de9ac5a7a0550731e49d3a44b6a0e07208c2677ee70586ae20ea4a611564a4",
+             63707705),
+            (release.JOB_IDS[1], "004", 4065237, 141819904,
+             "26480461441ab4573f43a99a32411b42b45dccc964c68e980a4d83aca9990c83",
+             4065238, 282,
+             "2a2c5e09c38ea00f1f56023f51e4961c6eeddc306b9c464ea1417766afc72caf",
+             163071840),
+            (release.JOB_IDS[1], "005", 4065240, 0,
+             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+             4065417, 272,
+             "21854d740ce57361256930ab8706faa99b15c318f769d51ac464822df53e0d4f",
+             88911492),
+        ])
+
     def test_hk_runtime_accepts_only_two_exact_failed_records_and_redacts_payload(self):
         with hk_runtime_fixture() as fixture:
             result = release.inspect_hk_runtime()
@@ -210,8 +317,163 @@ class DramaReleaseTests(unittest.TestCase):
         self.assertEqual(
             result["durable_records_sha256"],
             common.sha256_bytes(common.canonical_bytes(result["durable_records"])))
+        self.assertEqual(result["part_files"], 8)
+        self.assertEqual(result["part_record_files"], 8)
+        self.assertEqual(len(result["recoverable_downloads"]), 8)
+        self.assertEqual(
+            {item["relative_part_path"] for item in result["recoverable_downloads"]},
+            {"%s/downloads/%s.mp4.part" % (job_id, episode)
+             for job_id in release.JOB_IDS
+             for episode in ("002", "003", "004", "005")})
+        self.assertEqual(
+            {item["relative_record_path"] for item in result["recoverable_downloads"]},
+            {"%s/downloads/%s.mp4.part.json" % (job_id, episode)
+             for job_id in release.JOB_IDS
+             for episode in ("002", "003", "004", "005")})
+        self.assertEqual(
+            result["recoverable_downloads_sha256"],
+            common.sha256_bytes(common.canonical_bytes(result["recoverable_downloads"])))
         self.assertNotIn("_payload", json.dumps(result, sort_keys=True))
         self.assertNotIn("must-not-appear", json.dumps(result, sort_keys=True))
+        self.assertNotIn("source_identity", json.dumps(result, sort_keys=True))
+        self.assertNotIn("etag", json.dumps(result, sort_keys=True))
+
+    def test_hk_partial_download_record_requires_exact_checkpoint_fields(self):
+        identity = (release.JOB_IDS[0], "002")
+        cases = (
+            {"version": True},
+            {"source_identity": 123},
+            {"etag": 123},
+            {"expected_size": 1},
+            {"partial_size": 1},
+            {"partial_sha256": "0" * 64},
+            {"unexpected": "field"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), \
+                 hk_runtime_fixture(partial_record_changes={identity: changes}):
+                with self.assertRaisesRegex(common.OperatorError,
+                                            "approved checkpoint"):
+                    release.inspect_hk_runtime()
+
+    def test_hk_partial_download_record_rejects_duplicate_key(self):
+        identity = (release.JOB_IDS[0], "002")
+        with hk_runtime_fixture() as initial:
+            raw = initial["partial_record_paths"][identity].read_bytes()
+        duplicate = raw.replace(b"{", b'{"version":1,', 1)
+        with hk_runtime_fixture(partial_raw_overrides={identity: duplicate}):
+            with self.assertRaisesRegex(common.OperatorError, "strict UTF-8 JSON"):
+                release.inspect_hk_runtime()
+
+    def test_hk_partial_download_rejects_extra_missing_or_orphan_pair(self):
+        identity = (release.JOB_IDS[0], "002")
+        with hk_runtime_fixture() as fixture:
+            (fixture["work"] / release.JOB_IDS[0] / "downloads" /
+             "999.mp4.part").write_bytes(b"extra")
+            with self.assertRaisesRegex(common.OperatorError, "eight approved pairs"):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            fixture["part_paths"][identity].unlink()
+            with self.assertRaisesRegex(common.OperatorError, "eight approved pairs"):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            fixture["partial_record_paths"][identity].unlink()
+            with self.assertRaisesRegex(common.OperatorError, "eight approved pairs"):
+                release.inspect_hk_runtime()
+
+    def test_hk_partial_download_rejects_inode_size_or_content_change(self):
+        identity = (release.JOB_IDS[0], "002")
+        with hk_runtime_fixture() as fixture:
+            changed = [dict(item) for item in fixture["download_specs"]]
+            changed[0]["part_inode"] += 1
+            with mock.patch.object(release, "HK_DOWNLOAD_PARTS", tuple(changed)):
+                with self.assertRaisesRegex(common.OperatorError, "inode or size"):
+                    release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            fixture["part_paths"][identity].write_bytes(b"changed")
+            with self.assertRaises(common.OperatorError):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            fixture["partial_record_paths"][identity].write_bytes(b"{}")
+            with self.assertRaises(common.OperatorError):
+                release.inspect_hk_runtime()
+
+    def test_hk_partial_download_rejects_path_replacement_after_anchored_read(self):
+        identity = (release.JOB_IDS[0], "002")
+        for key in ("part_paths", "partial_record_paths"):
+            with self.subTest(key=key), hk_runtime_fixture() as fixture:
+                target = fixture[key][identity]
+                original_lstat = os.lstat
+                calls = {"target": 0}
+
+                def changed_lstat(path):
+                    value = original_lstat(path)
+                    if pathlib.Path(path) == target:
+                        calls["target"] += 1
+                        if calls["target"] == 5:
+                            changed = mock.Mock()
+                            for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                                         "st_mtime", "st_mode"):
+                                setattr(changed, name, getattr(value, name))
+                            changed.st_ino = int(value.st_ino) + 1
+                            return changed
+                    return value
+
+                with mock.patch.object(release.os, "lstat", side_effect=changed_lstat):
+                    with self.assertRaises(common.OperatorError):
+                        release.inspect_hk_runtime()
+                self.assertEqual(calls["target"], 5)
+
+    def test_hk_partial_download_rechecks_path_set_after_all_anchored_reads(self):
+        with hk_runtime_fixture() as fixture:
+            original = release.inspect_hk_download_checkpoint
+            calls = []
+
+            def add_late_extra(item):
+                result = original(item)
+                calls.append((item["job_id"], item["episode"]))
+                if len(calls) == len(release.HK_DOWNLOAD_PARTS):
+                    (fixture["public"] / "late.mp4.part").write_bytes(b"unsafe")
+                return result
+
+            with mock.patch.object(release, "inspect_hk_download_checkpoint",
+                                   side_effect=add_late_extra):
+                with self.assertRaisesRegex(common.OperatorError,
+                                            "changed while inspecting"):
+                    release.inspect_hk_runtime()
+            self.assertEqual(calls, [
+                (item["job_id"], item["episode"])
+                for item in release.HK_DOWNLOAD_PARTS])
+
+    def test_hk_runtime_rechecks_records_and_diagnostics_after_download_hashing(self):
+        for target in ("record", "diagnostic"):
+            with self.subTest(target=target), hk_runtime_fixture() as fixture:
+                original = release.inspect_hk_download_checkpoints
+
+                def change_runtime_after_downloads():
+                    result = original()
+                    if target == "record":
+                        fixture["paths"][release.JOB_IDS[0]].write_bytes(b"changed")
+                    else:
+                        (fixture["diagnostics"] / "late.json").write_bytes(b"{}")
+                    return result
+
+                with mock.patch.object(release, "inspect_hk_download_checkpoints",
+                                       side_effect=change_runtime_after_downloads):
+                    with self.assertRaises(common.OperatorError):
+                        release.inspect_hk_runtime()
+
+    @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
+    def test_hk_partial_download_rejects_symlink_part_or_record(self):
+        identity = (release.JOB_IDS[0], "002")
+        for key in ("part_paths", "partial_record_paths"):
+            with self.subTest(key=key), hk_runtime_fixture() as fixture:
+                target = fixture[key][identity]
+                real = fixture["base"] / (key + "-real")
+                target.rename(real)
+                target.symlink_to(real)
+                with self.assertRaises(common.OperatorError):
+                    release.inspect_hk_runtime()
 
     def test_hk_runtime_rejects_each_unapproved_durable_state(self):
         job_id = release.JOB_IDS[0]
