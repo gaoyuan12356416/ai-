@@ -7,6 +7,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 ## 配置项
 
 - `DRAMA_GPU_COMPOSITOR_BACKEND=opencl_fused_v2`
+- renderer profile：`drama-opencl-fused-h264-720x1280-v3-clean`（代码固定，旧缓存不得复用）
 - `DRAMA_GPU_CHUNK_SECONDS=120`
 - `DRAMA_GPU_CHUNK_TIMEOUT=1800`
 - `DRAMA_GPU_OPENCL_DEVICE=0.0`
@@ -25,14 +26,18 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 2. 核对 CPU worker、GPU runtime、数据盘及无在途正式制作。
 3. 分别备份 CPU drama 文件/单位/配置和 GPU current release/单位/配置；配置备份不进入 GitHub。
 4. 从 GitHub exact commit 构建 `/data/drama-synthesis-gpu/releases/<40位commit>` immutable release；preflight 和 benchmark 都必须解析到该目录。
-5. 切换 GPU `current`，重启 `drama-synthesis-gpu-worker.service`，保留 tunnel。
-6. 先在不切换服务的候选 release 上运行真实五输入 preflight、短样、受控中断/同缓存续跑和约 79.4 分钟长样；完整任务保持 1，并验证 1～4 条分片 lane，同机实测选择 2 条。
+5. 在不切换服务的候选 release 上运行真实五输入 preflight、clean CPU 参考短样、
+   单画面预览、受控中断/同缓存续跑和约 79.4 分钟长样；完整任务保持 1，并验证
+   1～4 条分片 lane，同机实测选择 2 条。
+6. 仅在候选验收通过后切换 GPU `current`，重启
+   `drama-synthesis-gpu-worker.service`，保留 tunnel。
 7. CPU 同步 exact commit 的隔离文件并重启 API/worker，验证异步提交和轮询，不创建正式重试。
 
 ## 验证步骤
 
 - `/healthz` renderer/backend/profile 与配置一致。
 - OpenCL/NVENC 真机 5 秒及长样 benchmark。
+- 三个代表性单画面预览无黑块、横向断层、错位裁切；clean CPU 参考与 GPU 候选完整解码且抽帧一致。
 - systemd status/journal 无 kernel、OOM、swap 或 checkpoint 错误。
 - CPU `/api/auth/status`、GPU tunnel 和异步只读状态正常。
 
@@ -41,7 +46,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 1. 停止 CPU intake，等待/保留当前分片状态。
 2. GPU `current` 切回部署当时已备份并核验的真实旧 release target，恢复原 worker env/unit，重启 GPU worker。
 3. CPU 恢复部署前隔离文件和配置，重启 API/worker。
-4. 不恢复旧 SQLite、不删除 V2 分片；旧 renderer 会忽略 V2 私有检查点。
+4. 不恢复旧 SQLite、不删除 V2 分片；v3 clean profile 会忽略 legacy 兼容候选的私有检查点。
 
 ## 注意事项
 

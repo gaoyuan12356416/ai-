@@ -19,7 +19,7 @@ from .core import DramaSynthesisError, RECIPE_PROFILE
 
 
 SPEC_VERSION = 1
-RENDERER_PROFILE = "drama-opencl-fused-h264-720x1280-v2"
+RENDERER_PROFILE = "drama-opencl-fused-h264-720x1280-v3-clean"
 CANVAS_WIDTH = 720
 CANVAS_HEIGHT = 1280
 CANVAS_FPS = 30

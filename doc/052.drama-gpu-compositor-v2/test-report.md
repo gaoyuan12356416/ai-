@@ -12,12 +12,13 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| 计划验收用例 | 12 | 8 | 0 | 4 |
-| 自动回归 | 505 | 505 | 0 | 0（另 6 项按既有平台条件跳过） |
+| 计划验收用例 | 13 | 9 | 0 | 4 |
+| clean profile 定向回归 | 178 | 178 | 0 | 0 |
+| 完整自动回归 | 506 | 506 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
-累计记录 3 项：诊断上下文兼容问题见 `bugs/BUG-001.md`；`bugs/BUG-002.md` 是已被真机证伪的时间轴诊断假设，不计为生产修复；真实视觉根因与 GPU 几何兼容修复见 `bugs/BUG-003.md`。
+累计记录 4 项：诊断上下文兼容问题见 `bugs/BUG-001.md`；`bugs/BUG-002.md` 是已被真机证伪的时间轴诊断假设；`bugs/BUG-003.md` 保留 legacy 几何根因证据；用户拒绝兼容缺陷后的 clean profile 修复见 `bugs/BUG-004.md`。
 
 ## 验证证据
 
@@ -25,12 +26,19 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 505 tests in 32.926s - OK (skipped=6)
+Ran 506 tests in 31.427s - OK (skipped=6)
 ```
 
-已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2，并完成上述 503 项回归。exact commit 与最终真机报告待候选提交后补充。
+clean profile 定向命令：
 
-候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。候选 `782c41d` 的 source PTS 假设复测为 `0.862533`，同样拒绝。进一步隔离确认 legacy 的错误 `rotw(iw)/roth(ih)` 画布和 YUV420 偶数坐标才是根因；一次性修正诊断达到 `0.931400`，正式 exact release 待提交复测。
+```text
+python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_upgrade
+Ran 178 tests in 11.536s - OK
+```
+
+已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2。exact clean commit、完整回归与最终真机报告待候选提交后补充。
+
+候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。候选 `782c41d` 的 source PTS 假设复测为 `0.862533`，同样拒绝。进一步隔离确认 legacy 的错误 `rotw(iw)/roth(ih)` 画布和 YUV420 偶数坐标才是根因；兼容候选 `d7e121f` 达到 `0.931398`，但因会保留横向断层与异常裁切，被用户明确拒绝作为最终成片。当前 clean profile 不再以 legacy SSIM 为发布基线。
 
 ## 遗留风险
 
@@ -47,4 +55,4 @@ Ran 505 tests in 32.926s - OK (skipped=6)
 
 ## 发布建议
 
-允许提交候选并运行隔离真机验收；暂不切换生产 worker。
+允许提交 clean 候选并运行隔离真机验收；代表性单画面预览通过前不切换生产 worker。

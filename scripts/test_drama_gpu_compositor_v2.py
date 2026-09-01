@@ -277,6 +277,42 @@ class MediaProbeTests(unittest.TestCase):
             graph = command[command.index("-filter_complex") + 1]
             self.assertEqual(graph.count("trim=start="), 2)
 
+    def test_clean_reference_uses_rotation_angle_for_canvas_extents(self):
+        compare = __import__(
+            "scripts.compare_drama_gpu_compositor_v2", fromlist=["render_clean_reference"]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CompositorFixture(Path(directory), duration=30.0)
+            output = fixture.root / "clean-reference.mp4"
+            captured = []
+
+            def runner(command, **_kwargs):
+                captured.append(command)
+                return SimpleNamespace(returncode=0)
+
+            graph = (
+                "[0:v]rotate=1.000000*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[v]"
+            )
+            with mock.patch.object(compare, "load_asset_set", return_value=fixture.asset_set), \
+                    mock.patch.object(compare, "validate_recipe"), \
+                    mock.patch.object(compare, "selected_asset_paths", return_value=fixture.paths), \
+                    mock.patch.object(
+                        compare, "build_drama_random_command",
+                        return_value=["ffmpeg", "-filter_complex", graph, str(output)],
+                    ), \
+                    mock.patch.object(compare.subprocess, "run", side_effect=runner):
+                compare.render_clean_reference(
+                    "ffmpeg", fixture.source, output,
+                    fixture.probe("ffprobe", fixture.source), fixture.recipe,
+                    str(fixture.root), "b" * 64,
+                )
+
+        self.assertEqual(len(captured), 1)
+        corrected = captured[0][captured[0].index("-filter_complex") + 1]
+        self.assertNotIn("rotw(iw)", corrected)
+        self.assertIn("ow=rotw(1.000000*PI/180)", corrected)
+        self.assertIn("oh=roth(1.000000*PI/180)", corrected)
+
 
 class OpenCLCommandTests(unittest.TestCase):
     def setUp(self):
@@ -320,38 +356,29 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertIn("transfer_characteristics=1", command[command.index("-bsf:v") + 1])
         self.assertEqual(kernel["source"].count("get_image_width(source)"), 2)
         self.assertNotIn("SCENE_SOURCE_WIDTH", kernel["source"])
-        geometry = gpu_compositor._legacy_main_geometry(1.005)
+        geometry = gpu_compositor._clean_main_geometry(1.005)
         self.assertEqual(geometry, {
             "main_width": 722,
             "main_height": 1286,
-            "rotated_width": 1299,
-            "rotated_height": 1236,
-            "overlay_x": -290,
-            "overlay_y": 22,
         })
         for name, value in (
             ("SCENE_MAIN_WIDTH", geometry["main_width"]),
             ("SCENE_MAIN_HEIGHT", geometry["main_height"]),
-            ("SCENE_ROTATED_WIDTH", geometry["rotated_width"]),
-            ("SCENE_ROTATED_HEIGHT", geometry["rotated_height"]),
-            ("SCENE_OVERLAY_X", geometry["overlay_x"]),
-            ("SCENE_OVERLAY_Y", geometry["overlay_y"]),
         ):
             self.assertIn("#define %s %d" % (name, value), kernel["source"])
-        self.assertIn("rotated.x >= (float)SCENE_ROTATED_WIDTH", kernel["source"])
+        self.assertNotIn("SCENE_ROTATED_WIDTH", kernel["source"])
+        self.assertNotIn("SCENE_OVERLAY_Y", kernel["source"])
+        self.assertIn("centered.x * cosine + centered.y * sine", kernel["source"])
 
-    def test_legacy_geometry_preserves_negative_yuv420_alignment(self):
-        geometry = gpu_compositor._legacy_main_geometry(0.9963)
+    def test_clean_geometry_keeps_only_centered_scaled_plane(self):
+        geometry = gpu_compositor._clean_main_geometry(0.9963)
         self.assertEqual(geometry, {
             "main_width": 716,
             "main_height": 1274,
-            "rotated_width": 1043,
-            "rotated_height": 821,
-            "overlay_x": -162,
-            "overlay_y": 228,
         })
-        self.assertEqual(geometry["overlay_x"] % 2, 0)
-        self.assertEqual(geometry["overlay_y"] % 2, 0)
+        self.assertEqual(set(geometry), {"main_width", "main_height"})
+        self.assertEqual(geometry["main_width"] % 2, 0)
+        self.assertEqual(geometry["main_height"] % 2, 0)
 
 
 class ChunkedRenderTests(unittest.TestCase):

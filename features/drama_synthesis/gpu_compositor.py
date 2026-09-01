@@ -8,7 +8,6 @@ import math
 import os
 import re
 import shutil
-import struct
 import subprocess
 import tempfile
 import threading
@@ -237,19 +236,14 @@ def _safe_kernel_template(path: Path = KERNEL_TEMPLATE) -> str:
     return value
 
 
-def _float32(value: float) -> float:
-    """Round like the float temporaries used by FFmpeg's rotate filter."""
-    return struct.unpack("!f", struct.pack("!f", float(value)))[0]
+def _clean_main_geometry(scale: float) -> Dict[str, int]:
+    """Compile the centered main-layer extent for the clean visual profile.
 
-
-def _legacy_main_geometry(scale: float) -> Dict[str, int]:
-    """Freeze the established random-overlay geometry, including legacy quirks.
-
-    The public V1 renderer passed ``iw`` and ``ih`` to ``rotw`` and ``roth``
-    instead of passing the rotation angle. Existing produced videos therefore
-    use those historical extents. Its default YUV420 overlay also truncates and
-    aligns both placement coordinates to even pixels. V2 must reproduce that
-    observable contract while the production profile remains V1-compatible.
+    The source is first contain-fitted into a transparent 720x1280 plane, then
+    the whole plane is scaled and rotated about the output center. Mapping the
+    output pixels directly back into that plane avoids an intermediate rotate
+    canvas and therefore cannot inherit the legacy ``rotw(iw)/roth(ih)``
+    extent bug or its horizontal clipping bands.
     """
     if not math.isfinite(scale) or not 0.01 <= scale <= 10.0:
         raise compositor_error()
@@ -257,31 +251,7 @@ def _legacy_main_geometry(scale: float) -> Dict[str, int]:
     main_height = int(CANVAS_HEIGHT * scale / 2.0) * 2
     if main_width <= 0 or main_height <= 0:
         raise compositor_error()
-
-    width_sine = _float32(math.sin(float(main_width)))
-    width_cosine = _float32(math.cos(float(main_width)))
-    height_sine = _float32(math.sin(float(main_height)))
-    height_cosine = _float32(math.cos(float(main_height)))
-    rotated_width = int(
-        abs(main_height * width_sine) + abs(main_width * width_cosine) + 0.5
-    )
-    rotated_height = int(
-        abs(main_height * height_cosine) + abs(main_width * height_sine) + 0.5
-    )
-    if rotated_width <= 0 or rotated_height <= 0:
-        raise compositor_error()
-
-    # vf_overlay casts toward zero and then clears the YUV420 subsample bit.
-    overlay_x = int((CANVAS_WIDTH - rotated_width) / 2.0) & ~1
-    overlay_y = int((CANVAS_HEIGHT - rotated_height) / 2.0) & ~1
-    return {
-        "main_width": main_width,
-        "main_height": main_height,
-        "rotated_width": rotated_width,
-        "rotated_height": rotated_height,
-        "overlay_x": overlay_x,
-        "overlay_y": overlay_y,
-    }
+    return {"main_width": main_width, "main_height": main_height}
 
 
 def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = None) -> Dict[str, str]:
@@ -292,7 +262,7 @@ def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = Non
     opacity = tint["opacity_bp"] / 10000.0
     if not all(math.isfinite(value) for value in (rotation, scale, opacity)):
         raise compositor_error()
-    geometry = _legacy_main_geometry(scale)
+    geometry = _clean_main_geometry(scale)
     prefix = "\n".join((
         "#define SCENE_WIDTH %d" % CANVAS_WIDTH,
         "#define SCENE_HEIGHT %d" % CANVAS_HEIGHT,
@@ -300,10 +270,6 @@ def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = Non
         "#define SCENE_SCALE %.9ff" % scale,
         "#define SCENE_MAIN_WIDTH %d" % geometry["main_width"],
         "#define SCENE_MAIN_HEIGHT %d" % geometry["main_height"],
-        "#define SCENE_ROTATED_WIDTH %d" % geometry["rotated_width"],
-        "#define SCENE_ROTATED_HEIGHT %d" % geometry["rotated_height"],
-        "#define SCENE_OVERLAY_X %d" % geometry["overlay_x"],
-        "#define SCENE_OVERLAY_Y %d" % geometry["overlay_y"],
         "#define SCENE_TINT_OPACITY %.9ff" % opacity,
         "",
     ))

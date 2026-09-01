@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline legacy/V2 visual comparison on the exact immutable GPU release."""
+"""Offline clean-reference/V2 visual comparison on an immutable GPU release."""
 
 from __future__ import annotations
 
@@ -12,14 +12,16 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.drama_synthesis.core import freeze_random_recipe
-from features.drama_synthesis.gpu import _render_random_output_legacy, catalog_from_assets
+from features.drama_synthesis.gpu import build_drama_random_command, catalog_from_assets
 from features.drama_synthesis.gpu_compositor import BACKEND, render_chunked_random_output
+from features.fb_gpu.random_overlay import load_asset_set, selected_asset_paths, validate_recipe
 from scripts.benchmark_drama_gpu_compositor_v2 import (
     PRODUCTION_BENCHMARK_ROOT, PRODUCTION_RELEASES_ROOT, probe, safe_new_output_root,
     sha256_file, write_record,
@@ -43,9 +45,48 @@ def decode_ok(ffmpeg: str, path: Path) -> bool:
     return result.returncode == 0
 
 
-def ssim_score(ffmpeg: str, legacy: Path, candidate: Path) -> float:
+def render_clean_reference(
+    ffmpeg: str,
+    source: Path,
+    output: Path,
+    source_info: dict,
+    recipe: dict,
+    asset_root: str,
+    manifest_sha256: str,
+) -> None:
+    """Render the intended CPU geometry with rotw/roth fed the real angle."""
+    assets = load_asset_set(Path(asset_root), manifest_sha256)
+    fb_recipe = {
+        "asset_set_sha256": recipe.get("asset_set_sha256"),
+        "assets": recipe.get("assets"),
+        "rotation_millidegrees": int(recipe.get("rotation_millidegrees") or 0),
+        "scale_bp": int(recipe.get("scale_bp") or 0),
+        "tint_opacity_bp": int(recipe.get("tint_opacity_bp") or 0),
+        "version": 1,
+    }
+    validate_recipe(fb_recipe, assets)
+    command = build_drama_random_command(
+        SimpleNamespace(ffmpeg=ffmpeg), source, output, source_info, fb_recipe,
+        selected_asset_paths(fb_recipe, assets),
+    )
+    graph_index = command.index("-filter_complex") + 1
+    graph = command[graph_index]
+    malformed = "ow=rotw(iw):oh=roth(ih)"
+    if graph.count(malformed) != 1:
+        raise RuntimeError("clean_reference_graph_contract_invalid")
+    degrees = fb_recipe["rotation_millidegrees"] / 1000.0
+    angle = "%.6f*PI/180" % degrees
+    command[graph_index] = graph.replace(
+        malformed, "ow=rotw(%s):oh=roth(%s)" % (angle, angle), 1
+    )
+    subprocess.run(
+        command, check=True, capture_output=True, text=True, timeout=1800
+    )
+
+
+def ssim_score(ffmpeg: str, reference: Path, candidate: Path) -> float:
     result = subprocess.run([
-        ffmpeg, "-nostdin", "-hide_banner", "-i", str(legacy), "-i", str(candidate),
+        ffmpeg, "-nostdin", "-hide_banner", "-i", str(reference), "-i", str(candidate),
         "-filter_complex", "[0:v][1:v]ssim", "-an", "-f", "null", "-",
     ], check=False, capture_output=True, text=True, timeout=1800)
     match = re.search(r"All:([0-9]+(?:\.[0-9]+)?)", result.stderr or "")
@@ -58,7 +99,7 @@ def ssim_score(ffmpeg: str, legacy: Path, candidate: Path) -> float:
 
 
 def extract_comparisons(
-    ffmpeg: str, legacy: Path, candidate: Path, output_root: Path, duration: float,
+    ffmpeg: str, reference: Path, candidate: Path, output_root: Path, duration: float,
 ) -> list[dict]:
     records = []
     for index, timestamp in enumerate((1.0, duration / 2.0, max(1.0, duration - 1.0)), start=1):
@@ -66,12 +107,33 @@ def extract_comparisons(
         frame_end = min(duration, timestamp + (1.0 / 30.0))
         subprocess.run([
             ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-i", str(legacy), "-i", str(candidate),
+            "-i", str(reference), "-i", str(candidate),
             "-filter_complex",
             "[0:v]trim=start=%.6f:end=%.6f,setpts=PTS-STARTPTS[left];"
             "[1:v]trim=start=%.6f:end=%.6f,setpts=PTS-STARTPTS[right];"
             "[left][right]hstack=inputs=2[view]"
             % (timestamp, frame_end, timestamp, frame_end),
+            "-map", "[view]", "-frames:v", "1", str(output),
+        ], check=True, capture_output=True, text=True, timeout=180)
+        records.append({
+            "timestamp_seconds": round(timestamp, 6), "file": output.name,
+            "sha256": sha256_file(output), "size_bytes": output.stat().st_size,
+        })
+    return records
+
+
+def extract_candidate_frames(
+    ffmpeg: str, candidate: Path, output_root: Path, duration: float,
+) -> list[dict]:
+    records = []
+    for index, timestamp in enumerate((1.0, duration / 2.0, max(1.0, duration - 1.0)), start=1):
+        output = output_root / ("candidate-frame-%02d.png" % index)
+        frame_end = min(duration, timestamp + (1.0 / 30.0))
+        subprocess.run([
+            ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-i", str(candidate), "-filter_complex",
+            "[0:v]trim=start=%.6f:end=%.6f,setpts=PTS-STARTPTS[view]"
+            % (timestamp, frame_end),
             "-map", "[view]", "-frames:v", "1", str(output),
         ], check=True, capture_output=True, text=True, timeout=180)
         records.append({
@@ -129,31 +191,38 @@ def main(argv=None):
         request={"mode": "auto", "source": "concat_video"}, catalog=catalog,
     )
 
-    legacy = output_root / "legacy.mp4"
+    reference = output_root / "clean-reference.mp4"
     candidate = output_root / "candidate.mp4"
-    _render_random_output_legacy(
-        source=clip, output=legacy, recipe=recipe, asset_root=asset_root,
-        manifest_sha256=manifest, ffmpeg=ffmpeg, ffprobe=ffprobe,
+    render_clean_reference(
+        ffmpeg, clip, reference, source_info, recipe, asset_root, manifest,
     )
     os.environ["DRAMA_GPU_COMPOSITOR_CACHE_ROOT"] = str(output_root / "candidate-cache")
     result = render_chunked_random_output(
         source=clip, output=candidate, recipe=recipe, asset_root=asset_root,
         manifest_sha256=manifest, ffmpeg=ffmpeg, ffprobe=ffprobe,
     )
-    score = ssim_score(ffmpeg, legacy, candidate)
+    score = ssim_score(ffmpeg, reference, candidate)
     comparisons = extract_comparisons(
-        ffmpeg, legacy, candidate, output_root, source_info["duration"]
+        ffmpeg, reference, candidate, output_root, source_info["duration"]
     )
-    decoded = {"legacy": decode_ok(ffmpeg, legacy), "candidate": decode_ok(ffmpeg, candidate)}
+    candidate_frames = extract_candidate_frames(
+        ffmpeg, candidate, output_root, source_info["duration"]
+    )
+    decoded = {
+        "clean_reference": decode_ok(ffmpeg, reference),
+        "candidate": decode_ok(ffmpeg, candidate),
+    }
     passed = bool(all(decoded.values()) and score >= args.minimum_ssim)
     report = {
-        "ok": passed, "mode": "offline-no-upload", "candidate_sha": args.candidate_sha,
+        "ok": passed, "mode": "offline-clean-reference-no-upload",
+        "reference_profile": "correct-angle-centered-v1", "candidate_sha": args.candidate_sha,
         "source_sha256": clip_sha256, "recipe_sha256": recipe["recipe_sha256"],
         "asset_manifest_sha256": manifest, "start_seconds": args.start_seconds,
         "clip_duration_seconds": source_info["duration"], "minimum_ssim": args.minimum_ssim,
         "ssim_all": round(score, 6), "decode_ok": decoded,
-        "legacy_sha256": sha256_file(legacy),
+        "clean_reference_sha256": sha256_file(reference),
         "candidate_sha256": result["output_sha256"], "comparison_frames": comparisons,
+        "candidate_frames": candidate_frames,
     }
     write_record(output_root / "report.json", report)
     print(json.dumps(report, sort_keys=True))

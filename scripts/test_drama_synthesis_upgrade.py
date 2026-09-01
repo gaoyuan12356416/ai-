@@ -797,7 +797,7 @@ class UpgradeTests(unittest.TestCase):
                     "compositor_lanes": 1, "release_sha": "",
                 })
                 self.assertRegex(health["kernel_template_sha256"], r"^[0-9a-f]{64}$")
-                self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v2")
+                self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v3-clean")
                 self.assertEqual(health["runtime_identity"], "ffmpeg-opencl-nvenc-runtime-v1")
                 request = Request(base + "/api/gpu-video/render", data=json.dumps({"job_id": JOB_ID, "recipe": "frozen"}).encode(), headers={"Authorization": "Bearer fake-token", "Content-Type": "application/json"}, method="POST")
                 self.assertEqual(json.loads(urlopen(request, timeout=2).read())["recipe"], "frozen")
