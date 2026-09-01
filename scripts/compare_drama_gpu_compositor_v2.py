@@ -121,7 +121,7 @@ def main(argv=None):
     clip_sha256 = sha256_file(clip)
     catalog = catalog_from_assets(asset_root, manifest)
     recipe = freeze_random_recipe(
-        job_id="gpu-compositor-visual-comparison",
+        job_id=clip_sha256[:32],
         content_id=clip_sha256[:24],
         request={"mode": "auto", "source": "concat_video"}, catalog=catalog,
     )
