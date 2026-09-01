@@ -822,13 +822,63 @@ class DramaReleaseTests(unittest.TestCase):
                 self.assertEqual(release.restore_cpu_swaps(swaps), [])
             self.assertEqual((live_root / relative).read_bytes(), old)
 
+    def _assert_result_publish_fsync_fault_is_committed(self, host_role):
+        state = {"committed": False}
+        result = {"schema": 1, "result": "deployed", "host_role": host_role}
+        payload = json.dumps(result, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = pathlib.Path(directory)
+            fsync_calls = []
+
+            def fail_after_publish(path):
+                fsync_calls.append(pathlib.Path(path))
+                if len(fsync_calls) == 2:
+                    raise OSError("injected post-rename directory fsync failure")
+
+            with mock.patch.object(common, "atomic_rename_noreplace",
+                                   side_effect=portable_noreplace), \
+                 mock.patch.object(common, "fsync_directory",
+                                   side_effect=fail_after_publish):
+                with self.assertRaisesRegex(OSError, "post-rename"):
+                    release.publish_authoritative_result(
+                        evidence, result, state, host_role)
+            result_path = evidence / "result.json"
+            self.assertTrue(state["committed"])
+            self.assertEqual(result_path.read_bytes(), payload)
+            self.assertEqual(common.sha256_file(result_path),
+                             hashlib.sha256(payload).hexdigest())
+            self.assertFalse(any(evidence.glob("failure*.json")))
+            self.assertFalse(any(evidence.glob("post-commit-failure*.json")))
+            self.assertFalse(any(evidence.glob(".result-*.tmp")))
+
+    def test_cpu_result_post_rename_fsync_fault_is_authoritative(self):
+        self._assert_result_publish_fsync_fault_is_committed("cpu")
+
+    def test_hk_result_post_rename_fsync_fault_is_authoritative(self):
+        self._assert_result_publish_fsync_fault_is_committed("hk")
+
+    def test_result_pre_rename_failure_remains_uncommitted(self):
+        state = {"committed": False}
+        result = {"schema": 1, "result": "deployed", "host_role": "cpu"}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(common, "atomic_rename_noreplace",
+                               side_effect=OSError("injected pre-rename failure")):
+            evidence = pathlib.Path(directory)
+            with self.assertRaisesRegex(OSError, "pre-rename"):
+                release.publish_authoritative_result(evidence, result, state, "cpu")
+            self.assertFalse(state["committed"])
+            self.assertFalse((evidence / "result.json").exists())
+            temporaries = list(evidence.glob(".result-*.tmp"))
+            self.assertEqual(len(temporaries), 1)
+            self.assertEqual(json.loads(temporaries[0].read_text()), result)
+
     def test_cpu_result_failure_keeps_rollback_temporaries(self):
         state = {"committed": False}
         with tempfile.TemporaryDirectory() as directory, \
-             mock.patch.object(common, "write_exclusive_json",
-                               side_effect=OSError("injected result failure")), \
+             mock.patch.object(release, "publish_authoritative_result",
+                               side_effect=OSError("injected pre-publish failure")), \
              mock.patch.object(release, "cleanup_cpu_temporaries") as cleanup:
-            with self.assertRaisesRegex(OSError, "result failure"):
+            with self.assertRaisesRegex(OSError, "pre-publish failure"):
                 release.persist_cpu_result_and_cleanup(
                     pathlib.Path(directory), {"result": "deployed"}, [], state)
         self.assertFalse(state["committed"])
@@ -836,26 +886,23 @@ class DramaReleaseTests(unittest.TestCase):
 
     def test_cpu_cleanup_failure_occurs_only_after_durable_commit(self):
         state = {"committed": False}
-        writes = []
-
-        def write(path, value):
-            writes.append(pathlib.Path(path).name)
-            return "a" * 64
-
         with tempfile.TemporaryDirectory() as directory, \
-             mock.patch.object(common, "write_exclusive_json", side_effect=write), \
+             mock.patch.object(common, "atomic_rename_noreplace",
+                               side_effect=portable_noreplace), \
              mock.patch.object(release, "cleanup_cpu_temporaries",
                                side_effect=OSError("injected cleanup failure")):
             with self.assertRaisesRegex(OSError, "cleanup failure"):
                 release.persist_cpu_result_and_cleanup(
                     pathlib.Path(directory), {"result": "deployed"}, [], state)
         self.assertTrue(state["committed"])
-        self.assertEqual(writes, ["result.json"])
 
     def test_cpu_apply_never_rolls_back_after_result_commit(self):
         contract = release.role_contract("cpu")
-        units = {unit: {} for unit in common.CPU_TARGET_UNITS}
         active_api = {"process": {"pid": 123}}
+        units = {
+            common.CPU_TARGET_UNITS[0]: {},
+            common.CPU_TARGET_UNITS[1]: active_api,
+        }
 
         def commit_then_fail(evidence, result, swaps, state):
             state["committed"] = True
@@ -876,6 +923,7 @@ class DramaReleaseTests(unittest.TestCase):
                 (common, "assert_no_established_ports"),
                 (release, "inspect_cpu_database"),
                 (common, "assert_inactive_unit"),
+                (common, "assert_active_single_process"),
                 (release, "config_unchanged"),
                 (release, "create_cpu_swap"),
                 (release, "compile_cpu_files"),
@@ -902,15 +950,91 @@ class DramaReleaseTests(unittest.TestCase):
                 common, "protected_signature", return_value={}))
             stack.enter_context(mock.patch.object(
                 release, "persist_cpu_result_and_cleanup", side_effect=commit_then_fail))
-            stack.enter_context(mock.patch.object(
+            failure_writer = stack.enter_context(mock.patch.object(
                 common, "write_exclusive_json", return_value="a" * 64))
-            with self.assertRaisesRegex(common.OperatorError, "POST-COMMIT"):
+            with self.assertRaisesRegex(common.OperatorError, "HIGH RISK"):
                 release.apply_cpu(self.exact_args("cpu"), contract,
                                   {"unit_snapshot": units, "mode": "apply"})
+        failure_writer.assert_not_called()
         self.assertEqual(systemctl.call_args_list, [
             mock.call("stop", common.CPU_TARGET_UNITS[1]),
             mock.call("start", common.CPU_TARGET_UNITS[1]),
         ])
+
+    def test_cpu_pre_publish_result_failure_rolls_back_complete(self):
+        contract = release.role_contract("cpu")
+        api = common.CPU_TARGET_UNITS[1]
+        active_api = {"process": {"pid": 123}}
+        units = {common.CPU_TARGET_UNITS[0]: {}, api: active_api}
+        after_publish_attempt = {"value": False}
+        failure_paths = []
+
+        def pre_publish_fail(evidence, result, swaps, state):
+            self.assertFalse(state["committed"])
+            after_publish_attempt["value"] = True
+            raise OSError("injected pre-rename result failure")
+
+        def reviewed_hash(path):
+            value = str(path).replace("\\", "/")
+            mapping = (common.CPU_OLD_FILES if after_publish_attempt["value"]
+                       else common.CPU_NEW_FILES)
+            for relative, expected in mapping.items():
+                if value.endswith(relative):
+                    return expected
+            raise AssertionError("unexpected hash path: %s" % path)
+
+        def write(path, value):
+            failure_paths.append(pathlib.Path(path))
+            return "a" * 64
+
+        with contextlib.ExitStack() as stack:
+            for owner, name in (
+                    (common, "create_private_ancestry"), (release, "phase"),
+                    (common, "assert_no_media_processes"),
+                    (common, "assert_no_established_ports"),
+                    (release, "inspect_cpu_database"),
+                    (common, "assert_inactive_unit"),
+                    (common, "assert_active_single_process"),
+                    (release, "config_unchanged"),
+                    (release, "create_cpu_swap"),
+                    (release, "compile_cpu_files"),
+                    (release, "prove_cpu_rollback")):
+                stack.enter_context(mock.patch.object(owner, name))
+            systemctl = stack.enter_context(mock.patch.object(release, "systemctl"))
+            stack.enter_context(mock.patch.object(
+                release, "compact_snapshot", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "backup_cpu_files", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "wait_unit", return_value=active_api))
+            stack.enter_context(mock.patch.object(
+                common, "snapshot_units", return_value=units))
+            stack.enter_context(mock.patch.object(
+                release, "target_restart_bound", return_value={}))
+            stack.enter_context(mock.patch.object(
+                common, "exact_health", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(
+                release, "listener_owned_by", return_value={}))
+            stack.enter_context(mock.patch.object(
+                common, "sha256_file", side_effect=reviewed_hash))
+            stack.enter_context(mock.patch.object(
+                common, "protected_signature", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "persist_cpu_result_and_cleanup",
+                side_effect=pre_publish_fail))
+            stack.enter_context(mock.patch.object(
+                common, "unit_identity",
+                return_value={"systemd": {"ActiveState": "active"}}))
+            stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", side_effect=write))
+            with self.assertRaisesRegex(OSError, "pre-rename result failure"):
+                release.apply_cpu(self.exact_args("cpu"), contract,
+                                  {"unit_snapshot": units, "mode": "apply"})
+        self.assertEqual(systemctl.call_args_list, [
+            mock.call("stop", api), mock.call("start", api),
+            mock.call("stop", api), mock.call("start", api),
+        ])
+        self.assertEqual([path.name for path in failure_paths], ["failure.json"])
 
     def test_cpu_backup_is_exclusive_and_never_overwrites(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1084,33 +1208,96 @@ class DramaReleaseTests(unittest.TestCase):
     def test_target_restart_bound_models_explicit_counter_reset(self):
         unit = common.HK_TARGET_UNITS[0]
 
-        def item(restarts, fragment_sha="a" * 64):
+        def item(restarts, fragment_sha="a" * 64, generation=0):
+            pid = 101 + generation
             return {
                 "unit": unit,
                 "systemd": {"NRestarts": str(restarts),
-                            "UnitFileState": "enabled", "Restart": "on-failure"},
+                            "UnitFileState": "enabled", "Restart": "on-failure",
+                            "ActiveState": "active", "SubState": "running",
+                            "ControlPID": "0", "MainPID": str(pid),
+                            "ExecMainStartTimestampMonotonic": str(1000 + generation),
+                            "ActiveEnterTimestampMonotonic": str(900 + generation)},
                 "fragment": {"path": "/etc/systemd/system/worker.service",
                              "sha256": fragment_sha},
                 "dropins": [],
+                "process": {"pid": pid, "startticks": 2000 + generation,
+                            "children": []},
+                "cgroup": {"pids": [pid]},
             }
 
-        for old, new in ((1, 0), (0, 0), (0, 1), (1, 1), (1, 2)):
+        for baseline, start, final in (
+                (1, 0, 0), (1, 0, 1), (1, 1, 1),
+                (0, 0, 0), (0, 0, 1), (0, 1, 1)):
             result = release.target_restart_bound(
-                {unit: item(old)}, {unit: item(new)}, unit)
-            self.assertEqual((result["old"], result["new"]), (old, new))
-            self.assertEqual(result["counter_reset"], new < old)
-            self.assertEqual(result["allowed_upper"], {
-                "without_counter_reset": old + 1,
-                "after_counter_reset": 1,
-            })
+                {unit: item(baseline)}, {unit: item(start)},
+                {unit: item(final, generation=1 if final > start else 0)}, unit)
+            self.assertEqual(
+                (result["baseline"], result["start"], result["final"]),
+                (baseline, start, final))
+            self.assertEqual(result["counter_reset_possible"], baseline > 0)
+            self.assertEqual(result["automatic_restarts_after_start_anchor"],
+                             final - start)
+            self.assertEqual(result["allowed_final_min"], start)
+            self.assertEqual(result["allowed_final_max"], 1)
             self.assertEqual(result["automatic_restart_limit"], 1)
-        for old, new in ((0, 2), (1, 3)):
+        for baseline, start, final in (
+                (1, 0, 2), (1, 1, 2), (0, 0, 2), (1, 2, 2), (1, 1, 0)):
             with self.assertRaisesRegex(common.OperatorError, "maintenance window"):
                 release.target_restart_bound(
-                    {unit: item(old)}, {unit: item(new)}, unit)
+                    {unit: item(baseline)}, {unit: item(start)},
+                    {unit: item(final, generation=1 if final > start else 0)}, unit)
         with self.assertRaisesRegex(common.OperatorError, "definition changed"):
             release.target_restart_bound(
-                {unit: item(1)}, {unit: item(0, fragment_sha="b" * 64)}, unit)
+                {unit: item(1)}, {unit: item(0, fragment_sha="b" * 64)},
+                {unit: item(0)}, unit)
+        with self.assertRaisesRegex(common.OperatorError, "definition changed"):
+            release.target_restart_bound(
+                {unit: item(1)}, {unit: item(0)},
+                {unit: item(1, fragment_sha="b" * 64)}, unit)
+
+    def test_restart_identity_drift_is_rejected_for_every_target(self):
+        targets = (common.CPU_TARGET_UNITS[1],) + common.HK_TARGET_UNITS
+
+        def item(unit, restarts, pid=101, startticks=201,
+                 exec_start=301, active_enter=401):
+            return {
+                "unit": unit,
+                "systemd": {
+                    "NRestarts": str(restarts), "UnitFileState": "enabled",
+                    "Restart": "on-failure", "ActiveState": "active",
+                    "SubState": "running", "ControlPID": "0",
+                    "MainPID": str(pid),
+                    "ExecMainStartTimestampMonotonic": str(exec_start),
+                    "ActiveEnterTimestampMonotonic": str(active_enter),
+                },
+                "fragment": {"path": "/etc/" + unit, "sha256": "a" * 64},
+                "dropins": [],
+                "process": {"pid": pid, "startticks": startticks, "children": []},
+                "cgroup": {"pids": [pid]},
+            }
+
+        for unit in targets:
+            baseline = {unit: item(unit, 1)}
+            start = {unit: item(unit, 0)}
+            manual_restart_same_counter = {
+                unit: item(unit, 0, pid=102, startticks=202,
+                           exec_start=302, active_enter=402),
+            }
+            with self.assertRaisesRegex(common.OperatorError, "without an observed"):
+                release.target_restart_bound(
+                    baseline, start, manual_restart_same_counter, unit)
+            unchanged_identity_with_increment = {unit: item(unit, 1)}
+            with self.assertRaisesRegex(common.OperatorError, "not newer"):
+                release.target_restart_bound(
+                    baseline, start, unchanged_identity_with_increment, unit)
+            active_enter_regressed = {
+                unit: item(unit, 1, pid=102, startticks=202,
+                           exec_start=302, active_enter=400),
+            }
+            with self.assertRaisesRegex(common.OperatorError, "not newer"):
+                release.target_restart_bound(
+                    baseline, start, active_enter_regressed, unit)
 
     def test_runtime_checkpoint_identity_requires_exact_summary(self):
         runtime = {
@@ -1143,6 +1330,8 @@ class DramaReleaseTests(unittest.TestCase):
                     "MainPID": "100" if active else "0", "ControlPID": "0",
                     "NRestarts": str(restarts), "UnitFileState": "enabled",
                     "Restart": "on-failure",
+                    "ExecMainStartTimestampMonotonic": "300" if active else "0",
+                    "ActiveEnterTimestampMonotonic": "250" if active else "0",
                 },
                 "fragment": {"path": "/etc/systemd/system/" + name,
                              "sha256": "a" * 64},
@@ -1166,6 +1355,11 @@ class DramaReleaseTests(unittest.TestCase):
             tunnel_unit: unit_item(tunnel_unit),
         }
         protected = {unit: baseline[unit] for unit in common.HK_PROTECTED_UNITS}
+        tunnel_start = {
+            unit: (unit_item(unit, active=True, restarts=0)
+                   if unit in common.HK_TARGET_UNITS else baseline[unit])
+            for unit in common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS
+        }
         runtime = {
             "durable_records_sha256": "a" * 64,
             "recoverable_downloads_sha256": "b" * 64,
@@ -1192,13 +1386,17 @@ class DramaReleaseTests(unittest.TestCase):
         args.apply = True
         contract = release.validate_cli(args)
         failures = []
+        snapshot_scopes = []
 
         def snapshot(units):
             units = tuple(units)
+            snapshot_scopes.append(units)
             if units == common.HK_PROTECTED_UNITS:
                 return protected
             if units == (worker_unit,) + common.HK_PROTECTED_UNITS:
                 return {unit: worker_after[unit] for unit in units}
+            if units == common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS:
+                return tunnel_start
             if units == common.HK_TARGET_UNITS:
                 return inactive_targets
             raise AssertionError("unexpected snapshot scope: %r" % (units,))
@@ -1269,8 +1467,10 @@ class DramaReleaseTests(unittest.TestCase):
         self.assertFalse(failures[0]["rollback"]["complete"])
         self.assertIn("prove-runtime-unchanged",
                       [item["stage"] for item in failures[0]["rollback"]["errors"]])
+        self.assertIn(common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS,
+                      snapshot_scopes)
 
-    def test_post_tunnel_failure_with_unchanged_runtime_rolls_back_complete(self):
+    def test_hk_pre_publish_result_failure_rolls_back_complete(self):
         worker_unit, tunnel_unit = common.HK_TARGET_UNITS
         release_path = release.HK_RELEASES / common.NEW_SHA
         runtime = {
@@ -1378,7 +1578,128 @@ class DramaReleaseTests(unittest.TestCase):
                 common, "unit_identity", side_effect=lambda unit: item(unit, True)))
             stack.enter_context(mock.patch.object(
                 common, "exact_health",
-                side_effect=[{"ok": True}, common.OperatorError("post-tunnel probe failed")]))
+                return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(
+                release, "listener_owned_by", return_value={"pid": 100}))
+            stack.enter_context(mock.patch.object(
+                release.os.path, "realpath",
+                side_effect=lambda path: (str(release_path)
+                                          if str(path) in (str(release_path),
+                                                           str(release.HK_CURRENT))
+                                          else str(path))))
+            stack.enter_context(mock.patch.object(release, "retain_hk_old_link"))
+            stack.enter_context(mock.patch.object(
+                release, "publish_authoritative_result",
+                side_effect=OSError("injected pre-rename result failure")))
+            stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", side_effect=write))
+            with self.assertRaisesRegex(OSError, "pre-rename result failure"):
+                release.apply_hk(args, contract, before)
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(failures[0]["rollback"]["complete"])
+        self.assertEqual(failures[0]["rollback"]["errors"], [])
+        self.assertEqual(failures[0]["runtime_rollback_proof"]["durable_failed_jobs"],
+                         len(release.JOB_IDS))
+
+    def test_hk_authoritative_result_failure_never_rolls_back_or_writes_failure(self):
+        worker_unit, tunnel_unit = common.HK_TARGET_UNITS
+        release_path = release.HK_RELEASES / common.NEW_SHA
+        runtime = {
+            "durable_records_sha256": "a" * 64,
+            "recoverable_downloads_sha256": "b" * 64,
+            "durable_failed_jobs": len(release.JOB_IDS),
+            "part_files": len(release.HK_DOWNLOAD_PARTS),
+            "part_record_files": len(release.HK_DOWNLOAD_PARTS),
+            "durable_records": [{"job_id": value} for value in release.JOB_IDS],
+        }
+
+        def item(name, active=False):
+            pid = 100 if name == worker_unit else 101
+            return {
+                "unit": name,
+                "systemd": {
+                    "ActiveState": "active" if active else "inactive",
+                    "SubState": "running" if active else "dead",
+                    "MainPID": str(pid) if active else "0", "ControlPID": "0",
+                    "NRestarts": "0", "UnitFileState": "enabled",
+                    "Restart": "on-failure",
+                    "ExecMainStartTimestampMonotonic": "300" if active else "0",
+                    "ActiveEnterTimestampMonotonic": "250" if active else "0",
+                },
+                "fragment": {"path": "/etc/" + name, "sha256": "a" * 64},
+                "dropins": [],
+                "process": ({"pid": pid, "cwd": str(release_path),
+                             "startticks": 200 + pid, "children": []}
+                            if active else None),
+                "cgroup": {"pids": [pid] if active else []},
+            }
+
+        baseline = {unit: item(unit) for unit in common.HK_TARGET_UNITS}
+        baseline.update({unit: item(unit, True) for unit in common.HK_PROTECTED_UNITS})
+        protected = {unit: baseline[unit] for unit in common.HK_PROTECTED_UNITS}
+        reviewed = {"sha256": release.HK_REVIEWED_FAILURE_SHA256}
+        existing = {"commit": common.NEW_SHA, "tree": "d" * 40}
+        retry_link = {"path": str(release.hk_current_temporary_path())}
+        before = {
+            "unit_snapshot": baseline, "mode": "apply", "runtime": runtime,
+            "source": {"tree": "d" * 40}, "reviewed_failure": reviewed,
+            "existing_release": existing, "existing_retry_link": retry_link,
+        }
+        args = self.exact_args("hk")
+        args.reviewed_failure_resume = True
+        args.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        args.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        args.retry_id = release.HK_RETRY_ID
+        args.apply = True
+        contract = release.validate_cli(args)
+
+        def snapshot(units):
+            units = tuple(units)
+            if units == common.HK_PROTECTED_UNITS:
+                return protected
+            return {unit: (item(unit, True) if unit in common.HK_TARGET_UNITS
+                           else protected[unit]) for unit in units}
+
+        def switch(record, anchor):
+            record.update({"exchange_complete": True,
+                           "reused_existing_temporary": True})
+
+        def publish(evidence, result, state, host_role):
+            self.assertEqual(host_role, "hk")
+            state.update({"committed": True,
+                          "result": str(pathlib.Path(evidence) / "result.json"),
+                          "result_sha256": "e" * 64})
+            raise OSError("injected post-rename directory fsync failure")
+
+        with contextlib.ExitStack() as stack:
+            for owner, name in (
+                    (common, "create_private_ancestry"), (release, "phase"),
+                    (common, "assert_no_media_processes"),
+                    (common, "assert_no_established_ports"),
+                    (common, "assert_protected_units")):
+                stack.enter_context(mock.patch.object(owner, name))
+            stack.enter_context(mock.patch.object(
+                release, "inspect_hk_runtime", return_value=runtime))
+            stack.enter_context(mock.patch.object(
+                release, "verify_reviewed_hk_failure", return_value=reviewed))
+            stack.enter_context(mock.patch.object(
+                release, "verify_existing_hk_release", return_value=existing))
+            stack.enter_context(mock.patch.object(
+                release, "assert_hk_retry_link", return_value=retry_link))
+            stack.enter_context(mock.patch.object(
+                common, "snapshot_units", side_effect=snapshot))
+            stack.enter_context(mock.patch.object(
+                common, "protected_signature", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "target_restart_bound", return_value={"allowed": True}))
+            stack.enter_context(mock.patch.object(
+                release, "switch_hk_current", side_effect=switch))
+            restore = stack.enter_context(mock.patch.object(release, "restore_hk_current"))
+            stack.enter_context(mock.patch.object(release, "retain_hk_old_link"))
+            systemctl = stack.enter_context(mock.patch.object(release, "systemctl"))
+            stack.enter_context(mock.patch.object(release, "wait_unit"))
+            stack.enter_context(mock.patch.object(
+                common, "exact_health", return_value={"ok": True}))
             stack.enter_context(mock.patch.object(
                 release, "listener_owned_by", return_value={"pid": 100}))
             stack.enter_context(mock.patch.object(
@@ -1388,14 +1709,18 @@ class DramaReleaseTests(unittest.TestCase):
                                                            str(release.HK_CURRENT))
                                           else str(path))))
             stack.enter_context(mock.patch.object(
-                common, "write_exclusive_json", side_effect=write))
-            with self.assertRaisesRegex(common.OperatorError, "post-tunnel probe failed"):
+                release, "publish_authoritative_result", side_effect=publish))
+            failure_writer = stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", return_value="f" * 64))
+            unit_identity = stack.enter_context(mock.patch.object(common, "unit_identity"))
+            with self.assertRaisesRegex(common.OperatorError, "HIGH RISK"):
                 release.apply_hk(args, contract, before)
-        self.assertEqual(len(failures), 1)
-        self.assertTrue(failures[0]["rollback"]["complete"])
-        self.assertEqual(failures[0]["rollback"]["errors"], [])
-        self.assertEqual(failures[0]["runtime_rollback_proof"]["durable_failed_jobs"],
-                         len(release.JOB_IDS))
+        self.assertEqual(systemctl.call_args_list, [
+            mock.call("start", worker_unit), mock.call("start", tunnel_unit),
+        ])
+        restore.assert_not_called()
+        failure_writer.assert_not_called()
+        unit_identity.assert_not_called()
 
     def test_protected_pid_startticks_and_restart_count_must_be_identical(self):
         item = {
