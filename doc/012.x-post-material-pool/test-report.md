@@ -1,5 +1,14 @@
 # 012.x-post-material-pool 测试报告
 
+## 2026-09-01 Post 发布明细任务来源
+
+- 发布明细新增 `task_source` 列与筛选：`drama_pool=短剧池`、`material_pool=素材池`、`auto_publish=自动发布`。素材池口径包含素材池定时批次和人工素材池批次；自动发布仅由关联 manual run 的 `trigger_source=auto_template` 判定。
+- X release 使用 GitHub commit `401069b2e35e56192c33efac623bf24ddee57a56`，部署到 `/mnt/data-disk/x-post-automation/releases/401069b2e35e56192c33efac623bf24ddee57a56`。主 API 保留 2026-09-01 剧集合成现行 `app.py` 基线，仅叠加查询参数透传，commit 为 `c42ce20dd7d75e7cab951545614bcf62eab32845`。
+- 本地与服务器精确 X release 均通过 299 项回归；现行主 API release 另通过参数解析和 Cookie/no-store 路由 2 项回归；内嵌 JavaScript、Python 编译和 `git diff --check` 通过。Playwright mock 验证三种来源同时渲染，选择“自动发布”后请求包含 `task_source=auto_publish` 且只显示对应行。
+- 生产只读验证覆盖全部 1,142 条 queue：短剧池 520、素材池 585、自动发布 37，合计与未筛选总数一致。部署前后 queue/log/published 为 `1142/1142/1108`，active queue/manual/schedule 均为 0；历史 `unknown_outcome=1` 仍为 1 条（queue/log 726），未重试或改写。
+- SQLite `quick_check=ok`；Token 文件哈希、`0600` 权限和 owner 未变化。Sidecar、主 API、六个原 active timer 均恢复 active；自然轮询返回 manual `no_pending`、claim 0、schedule `no_due`，没有因部署创建、重放或发布真实 X Post。
+- 回滚包：`/mnt/data-disk/x-post-automation/backups/20260901T181954+0800-x-post-log-source-401069b`。回滚时先停止相同六个 timer 并等待 oneshot 排空，切回 `/mnt/data-disk/x-post-automation/releases/e300542887fb89314bef145b752c3ad8aa6c5c9c`，从包内恢复主 API/客户端/service/两份静态页，重启 `x-post-automation.service` 与 `drama-material-api.service`，再按 `timer-state.txt` 恢复 timer。默认保留当前 SQLite 与 Token，不用备份覆盖后来事实。
+
 ## 测试结论
 
 生产当前精确 commit 为 `622a8caff321dc297871d7cea354ad8d5fed4e52`。仅 X Post selector 已取消 `drama_labels` 色情/暴力内容词拦截，其他渠道、违规历史、素材源/资源危险标签和既有权限边界均未修改。本次本地和服务器均完成 143/143 X 回归；旧 `drama_label_unsafe` 三条记录重校验为可供发布，未手工触发 daily、未调用真实 X。
