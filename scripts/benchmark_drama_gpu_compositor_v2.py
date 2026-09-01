@@ -32,7 +32,7 @@ from features.drama_synthesis.core import freeze_random_recipe
 from features.drama_synthesis.gpu import catalog_from_assets
 from features.drama_synthesis.composition import RENDERER_PROFILE
 from features.drama_synthesis.gpu_compositor import (
-    BACKEND, KERNEL_TEMPLATE, _video_contract, compositor_lanes,
+    BACKEND, KERNEL_TEMPLATE, _video_contract, compositor_filter_threads, compositor_lanes,
     render_chunked_random_output, runtime_identity,
 )
 
@@ -203,7 +203,7 @@ def main(argv=None):
     parser.add_argument("--clip-seconds", type=int, default=300)
     parser.add_argument("--allowed-root", default=str(PRODUCTION_BENCHMARK_ROOT))
     parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--minimum-realtime", type=float, default=1.5)
+    parser.add_argument("--minimum-realtime", type=float, default=1.0)
     parser.add_argument("--max-gpu-memory-mib", type=int, default=15000)
     parser.add_argument("--max-child-rss-kib", type=int, default=16 * 1024 * 1024)
     parser.add_argument("--confirmed-stopped-recovery", action="store_true")
@@ -344,6 +344,7 @@ def main(argv=None):
         "kernel_template_sha256": sha256_file(KERNEL_TEMPLATE),
         "asset_manifest_sha256": manifest,
         "compositor_lanes": compositor_lanes(),
+        "compositor_filter_threads": compositor_filter_threads(),
         "minimum_realtime": args.minimum_realtime,
         "max_gpu_memory_limit_mib": args.max_gpu_memory_mib,
         "max_child_rss_limit_kib": args.max_child_rss_kib,

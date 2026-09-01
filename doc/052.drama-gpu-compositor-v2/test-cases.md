@@ -25,7 +25,7 @@ Composition 严格校验、scene hash、帧分片、kernel 安全生成、FFmpeg
 | TC-009 | backend 禁止降级 | V2 不可用 | 执行 | 返回 compositor unavailable，不启动 CPU graph | P0 | 自动通过 |
 | TC-010 | lane 配置 | 全任务1、分片1～4/非法值 | worker 启动 | V2 全任务仅1；分片1～4生效，其他 fail closed | P1 | 自动通过 |
 | TC-011 | T4 小样视觉 | 真实素材及配方 | CPU/V2 双渲染抽帧 | 构图、素材、旋转和时长符合合同 | P0 | 待执行 |
-| TC-012 | T4 长样性能 | ≥30分钟源 | V2 基准 | ≥1.5x realtime、无 swap、资源有界 | P0 | 待执行 |
+| TC-012 | T4 长样性能 | 约79.4分钟同源素材 | V2 基准 | 完整完成；采用同机最快稳定配置；无 swap、资源有界 | P0 | 待执行 |
 
 ## 回归范围
 

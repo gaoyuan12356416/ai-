@@ -13,7 +13,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 - `DRAMA_GPU_RUNTIME_IDENTITY=<已核验的 FFmpeg/OpenCL/NVENC 运行时版本>`
 - `DRAMA_GPU_MAX_CONCURRENCY=1`（完整任务固定单并发）
 - `DRAMA_GPU_COMPOSITOR_LANES=2`（支持 1～4；T4 实测双分片最快）
-- `DRAMA_GPU_FILTER_THREADS=2`（每条 lane 显式限制解码/复杂滤镜线程）
+- `DRAMA_GPU_FILTER_THREADS=2`（每个输入 decoder 2 线程，complex filter 2 线程）
 
 ## 数据库变更
 

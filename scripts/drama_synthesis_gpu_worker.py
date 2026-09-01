@@ -24,7 +24,7 @@ from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
 from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, safe_error  # noqa: E402
 from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
 from features.drama_synthesis.gpu_compositor import (  # noqa: E402
-    KERNEL_TEMPLATE, compositor_lanes, runtime_identity,
+    KERNEL_TEMPLATE, compositor_filter_threads, compositor_lanes, runtime_identity,
 )
 
 
@@ -45,6 +45,7 @@ RENDER_CONCURRENCY = render_concurrency()
 COMPOSITOR_BACKEND = os.environ.get("DRAMA_GPU_COMPOSITOR_BACKEND", "legacy_cpu")
 COMPOSITOR_CHUNK_SECONDS = int(os.environ.get("DRAMA_GPU_CHUNK_SECONDS", "120"))
 COMPOSITOR_LANES = compositor_lanes()
+COMPOSITOR_FILTER_THREADS = compositor_filter_threads()
 RELEASE_SHA = os.environ.get("DRAMA_GPU_RELEASE_SHA", "")
 RUNTIME_IDENTITY = runtime_identity()
 KERNEL_TEMPLATE_SHA256 = hashlib.sha256(KERNEL_TEMPLATE.read_bytes()).hexdigest()
@@ -130,6 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 "compositor_backend": COMPOSITOR_BACKEND,
                 "compositor_chunk_seconds": COMPOSITOR_CHUNK_SECONDS,
                 "compositor_lanes": COMPOSITOR_LANES,
+                "compositor_filter_threads": COMPOSITOR_FILTER_THREADS,
                 "renderer_profile": RENDERER_PROFILE,
                 "kernel_template_sha256": KERNEL_TEMPLATE_SHA256,
                 "release_sha": RELEASE_SHA,

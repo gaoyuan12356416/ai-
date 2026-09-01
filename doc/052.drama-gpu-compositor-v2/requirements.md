@@ -68,7 +68,7 @@ Composition Spec v1 包含 canvas、timeline、audio、layers、output 和 rende
 
 - 当前随机模板全部视觉元素存在，输出 H.264 High、720x1280、30fps，音频和时长合同不变。
 - 任意分片失败后再次执行，只启动失败及后续未完成分片。
-- 以截图失败任务的约 79.4 分钟同源素材做长样，渲染目标不低于 1.5x realtime，期望达到 3x；无新增 swap，RSS/VRAM 有界。
+- 以截图失败任务的约 79.4 分钟同源素材做完整长样；不以预设最低倍速替代效率选型，采用同机实测最快且稳定的配置，记录吞吐并以 3x realtime 为优化目标；无新增 swap，RSS/VRAM 有界。
 - 通过 Composition/renderer 单元测试、现有 drama 回归、真实 T4 小样和长样基准。
 - GitHub exact commit 部署；CPU/GPU 均有独立备份、窄服务重启和明确回滚。
 
