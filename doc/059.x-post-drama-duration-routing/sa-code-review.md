@@ -25,4 +25,4 @@
 
 ## 编译 / 验证结果
 
-`python -m compileall -q features scripts` 与 `git diff --check` 通过；store 128/128、全量 X 888 项通过、2 项环境跳过。未解析 route 无 publish log，只有 resolved relay 有 ledger，resolved 路线/relay/媒体由应用与 DB 双围栏冻结，新 pending 不使用 141。全部平台写操作均为 mock，未创建真实 Post/Repost。
+`python -m compileall -q app.py features scripts` 与 `git diff --check` 通过；store 128/128、合并生产并行变更后全量 X 889 项通过、2 项环境跳过。未解析 route 无 publish log，只有 resolved relay 有 ledger，resolved 路线/relay/媒体由应用与 DB 双围栏冻结，新 pending 不使用 141；生产已有 task source 筛选/展示完整保留。全部平台写操作均为 mock，未创建真实 Post/Repost。

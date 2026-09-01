@@ -15,8 +15,8 @@ schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/rand
 | 变更前基线聚焦 | 259 | 259 | 0 | 0 |
 | UI 聚焦 | 48 | 48 | 0 | 0 |
 | Store 路由/崩溃/公平性专项 | 128 | 128 | 0 | 0 |
-| 实现后全量 X | 890 | 888 | 0 | 2（环境跳过） |
-| 全仓 discovery | 1453 | 1446 | 5 | 2（环境跳过） |
+| 合并生产并行变更后全量 X | 891 | 889 | 0 | 2（环境跳过） |
+| 合并生产并行变更后全仓 discovery | 1454 | 1447 | 5 | 2（环境跳过） |
 
 ## 缺陷情况
 
@@ -25,6 +25,7 @@ schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/rand
 ## 验证证据
 
 - 基线 commit：`955e54b64f137ec4298cba39ccf9e443dc4a4e73`。
+- 已精确合并生产并行 commit `401069b2e35e56192c33efac623bf24ddee57a56`，保留任务来源筛选/展示，并与时长路线字段共同回归。
 - 测试方式：本地 Python unittest、临时 SQLite、mock HTTP/X；禁止真实平台写入。
 - 生产基线：quick_check=ok、FK=0、无 queued/publishing；历史 unknown 隔离保留。
 - 全仓 5 个错误均来自 TT 基线：`_TTDramawaveCandidateSelector._violation_counts` 缺失及 `_pool_material_rows(... allow_long_duration=...)` 合同不匹配；同样 5 个错误已在干净 `955e54b` 复现，本次未修改 TT 代码，判定无新增全仓回归。
