@@ -221,7 +221,8 @@ def _safe_diagnostic(value, limit=500, targets=()):
     return redact_sensitive_text(text, limit=limit)
 
 
-def format_fallback_message(private_text, reason_code="editor_not_found", reason_text=""):
+def format_fallback_message(private_text, reason_code="editor_not_found", reason_text="",
+                            editor_username=""):
     """Prefix the already-frozen private body without ever re-rendering it."""
 
     if not isinstance(private_text, str) or not private_text:
@@ -229,8 +230,10 @@ def format_fallback_message(private_text, reason_code="editor_not_found", reason
     code = _safe_code(reason_code)
     reason = _FALLBACK_REASON_LABELS.get(code) or _safe_diagnostic(reason_text, 200)
     reason = reason or "未匹配到对应剪辑用户"
+    username = _safe_diagnostic(editor_username, 100) or "（空）"
     return "\n".join([
         "【⚠️ 自动复刻播报未能私聊】", "",
+        "收到的 username：%s" % username,
         "失败原因：%s" % code, "说明：%s" % reason, "", private_text,
     ])
 
@@ -262,7 +265,13 @@ def validate_message_size(payload_or_private_text):
             _invalid("消息包含无效的 Unicode 字符")
     else:
         _invalid("消息必须为有效请求体或冻结文本")
-    maximum_text = format_fallback_message(private_text, "r" * 64, "\U0001f680" * 200)
+    if isinstance(payload_or_private_text, dict):
+        maximum_username = payload_or_private_text["editor_username"]
+    else:
+        maximum_username = "\U0001f680" * 100
+    maximum_text = format_fallback_message(
+        private_text, "r" * 64, "\U0001f680" * 200, maximum_username,
+    )
     size = _serialized_request_size(maximum_text, "\U0001f680" * 128, "u" * 50)
     if size > MAX_FEISHU_REQUEST_BYTES:
         raise ReplicationError("message_too_large", "飞书消息超过大小限制，请减少批次素材或语种数量", 413)
@@ -588,7 +597,10 @@ class ReplicationOutbox:
             if any(target and target in code for target in targets):
                 code = "delivery_error"
             reason = _safe_diagnostic(reason_text, 200, targets)
-            fallback = format_fallback_message(row["private_text"], code, reason)
+            payload = json.loads(row["payload_json"])
+            fallback = format_fallback_message(
+                row["private_text"], code, reason, payload.get("editor_username", ""),
+            )
             message_uuid = "mrb-%d-fallback" % row["id"]
             if _serialized_request_size(fallback, receive_id, message_uuid) > MAX_FEISHU_REQUEST_BYTES:
                 raise ReplicationError("message_too_large", "飞书消息超过大小限制", 413)

@@ -25,7 +25,7 @@
         ],
         "operationId": "acceptMaterialReplicationEvent",
         "summary": "可靠接收复刻汇总批次（已上线）",
-        "description": "严格整批接收；同键同规范化内容返回原批次当前状态，JSON 对象键序无关，但 items/failed_languages 顺序有意义；同键改内容/顺序为 409。上游超时或 5xx 保持原键原内容按 1、5、30、120 秒重试；202 后不为补发而换键。收件人经 editor_username -> admin_users.username（大小写敏感精确匹配）-> admin_users.id -> admin_user_group.sub_user_id（status=0）-> email（复用既有用户名/邮箱映射缓存）-> 按邮箱查询飞书得到 open_id（首次发送前冻结）。空用户名、映射失败或明确私聊失败走既有兜底群。结果不确定时只在最多 3300 秒窗口内以同一冻结目标、正文和 UUID 尝试，最多 5 次；之后 delivery_unknown，不盲目换目标兜底。不承诺端到端严格 exactly-once。 最终消息大小预检仅对新批次执行；原键原内容重放读取原批次，不因未来模板变大拒绝或新增发送。",
+        "description": "严格整批接收；同键同规范化内容返回原批次当前状态，JSON 对象键序无关，但 items/failed_languages 顺序有意义；同键改内容/顺序为 409。上游超时或 5xx 保持原键原内容按 1、5、30、120 秒重试；202 后不为补发而换键。收件人经 editor_username -> admin_users.username（大小写敏感精确匹配）-> admin_users.id -> admin_user_group.sub_user_id（status=0）-> email（复用既有用户名/邮箱映射缓存）-> 按邮箱查询飞书得到 open_id（首次发送前冻结）。空用户名、映射失败或明确私聊失败走既有兜底群，兜底文案显示请求中收到的 editor_username，空值显示为“（空）”。结果不确定时只在最多 3300 秒窗口内以同一冻结目标、正文和 UUID 尝试，最多 5 次；之后 delivery_unknown，不盲目换目标兜底。不承诺端到端严格 exactly-once。 最终消息大小预检仅对新批次执行；原键原内容重放读取原批次，不因未来模板变大拒绝或新增发送。",
         "security": [
           {
             "MaterialReplicationBearer": []

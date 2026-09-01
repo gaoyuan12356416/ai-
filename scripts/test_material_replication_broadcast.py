@@ -193,13 +193,17 @@ class RenderingTests(unittest.TestCase):
         frozen = "【旧版已冻结文本】\n批次编号：MRB-0000000021"
         reason = "person@example.com Bearer top-secret open_id=ou_123456789012 token=secret"
         with mock.patch.object(service, "format_private_message", side_effect=AssertionError("rerender forbidden")):
-            message = service.format_fallback_message(frozen, "synthetic_reason", reason)
+            message = service.format_fallback_message(
+                frozen, "synthetic_reason", reason, " editor_qa ",
+            )
         self.assertTrue(message.startswith("【⚠️ 自动复刻播报未能私聊】"))
         self.assertTrue(message.endswith(frozen))
+        self.assertIn("收到的 username：editor_qa", message)
         self.assertIn("失败原因：synthetic_reason", message)
         for secret in ("person@example.com", "top-secret", "ou_123456789012", "token=secret"):
             self.assertNotIn(secret, message)
         known = service.format_fallback_message(frozen, "editor_username_missing", "unsafe detail")
+        self.assertIn("收到的 username：（空）", known)
         self.assertIn("说明：接口未提供剪辑用户名", known)
         self.assertNotIn("unsafe detail", known)
 
@@ -274,7 +278,9 @@ class RenderingTests(unittest.TestCase):
 
     def test_wire_size_matches_outer_ascii_encoding_and_full_reserved_envelope(self):
         private = "测试🚀\"\\" * 100
-        fallback = service.format_fallback_message(private, "r" * 64, "🚀" * 200)
+        fallback = service.format_fallback_message(
+            private, "r" * 64, "🚀" * 200, "🚀" * 100,
+        )
         request = {
             "receive_id": "🚀" * 128, "msg_type": "text",
             "content": json.dumps({"text": fallback}, ensure_ascii=False), "uuid": "u" * 50,
@@ -536,6 +542,7 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(fallback["attempt_count"], 0)
         self.assertEqual(fallback["lease_id"], "")
         self.assertEqual(fallback["message_uuid"], "mrb-1-fallback")
+        self.assertIn("收到的 username：剪辑甲", fallback["message_text"])
         self.assertNotEqual(fallback["message_uuid"], row["message_uuid"])
         self.assertTrue(fallback["message_text"].endswith(row["private_text"]))
         self.assertEqual(fallback["delivery_kind"], "")

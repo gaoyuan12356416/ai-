@@ -183,7 +183,7 @@ curl --request POST \
   → admin_user_group.email（复用既有用户名/邮箱映射缓存）
   → 按邮箱查询飞书得到 open_id
   → 首次发送前冻结目标，通知对应剪辑师私聊</code></pre>
-    <p>空 <code>editor_username</code> 允许接收，直接进入既有兜底群。未找到唯一有效映射、缺少有效邮箱/open_id，或收到确定的私聊失败结果时，使用既有兜底群。消息保留原批次正文并补充中文原因，不向调用方公开内部群标识。</p>
+    <p>空 <code>editor_username</code> 允许接收，直接进入既有兜底群。未找到唯一有效映射、缺少有效邮箱/open_id，或收到确定的私聊失败结果时，使用既有兜底群。消息保留原批次正文，显示请求中收到的 <code>editor_username</code>（空值显示为“（空）”）并补充中文原因，不向调用方公开内部群标识。</p>
     <p>复用的是用户名/邮箱身份映射缓存，不是 open_id 缓存。每个新批次解析出飞书 open_id 后，在首次发送前冻结目标；已冻结请求的重试不重复选择或更换收件人。</p>
     <p>发送前将目标、正文和 UUID 持久化冻结。网络超时或连接中断不等于发送失败：如果不能确认飞书是否已经接收，只在最多 3300 秒的安全重试窗口内，对同一冻结目标、正文和 UUID 进行有限重试，最多 5 次投递尝试。仍不能确认或超出窗口则标记 <code>delivery_unknown</code>，不改目标、不换 UUID、不盲目转发兜底群。</p>
     <p>3300 秒是我方留有余量的重试边界，不是官方 UUID 时限。官方 SDK 对相同 UUID 描述为 1 小时内最多成功发送一条消息；本接口不能据此承诺跨任意时间的 exactly-once。<a href="https://pkg.go.dev/github.com/larksuite/oapi-sdk-go/v3/service/im/v1#CreateMessageReqBody">官方 SDK：Uuid 字段</a></p>
