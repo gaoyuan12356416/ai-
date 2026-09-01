@@ -1688,6 +1688,9 @@ def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256,
             u = state["unit"]
             unit_backup = BASE / u
             transition_results = {}
+            if (a.group == "materials-images" and
+                    split_ad_baseline() != split_ad_before):
+                raise RuntimeError("temporary US ad lane changed before image source mutation")
             if prop(u, "UnitFileState") == "masked":
                 if int(prop(u, "MainPID") or 0) or prop(u, "ActiveState") not in ("inactive", "failed"):
                     raise RuntimeError("masked source is still active: " + u)

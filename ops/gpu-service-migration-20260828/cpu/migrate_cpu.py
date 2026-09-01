@@ -319,9 +319,11 @@ def backup(root, run_id, scope='all'):
             paths.update(system_property(unit, key).split())
     paths = sorted(path for path in paths if path and os.path.isfile(path))
     archive = scoped_evidence(private, 'cpu-config-before.tar.gz', scope)
+    db_backup = scoped_evidence(private, 'drama_material_jobs.sqlite3', scope)
+    if archive.exists() or db_backup.exists():
+        raise RuntimeError('partial backup artifacts already exist; do not overwrite them')
     command(['tar', '-czf', archive, '-C', '/'] + [p.lstrip('/') for p in paths])
     os.chmod(str(archive), 0o600)
-    db_backup = scoped_evidence(private, 'drama_material_jobs.sqlite3', scope)
     with sqlite3.connect('file:' + DB + '?mode=ro', uri=True, timeout=5) as source:
         with sqlite3.connect(str(db_backup)) as destination:
             source.backup(destination, pages=128, sleep=0.05)
@@ -567,7 +569,7 @@ def main():
     parser.add_argument('--run-id', required=True, type=validate_run_id)
     parser.add_argument('--expected-commit')
     parser.add_argument('--authorization')
-    parser.add_argument('--scope', choices=tuple(SCOPES), default='all')
+    parser.add_argument('--scope', choices=tuple(SCOPES), required=True)
     args = parser.parse_args()
     if os.geteuid() != 0 or socket.gethostname() != 'VM-0-108-centos':
         raise RuntimeError('this operator must run as root on the designated CPU host')
