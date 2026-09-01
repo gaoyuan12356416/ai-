@@ -152,3 +152,56 @@ endpoint is active.
 The existing cleanup cron is deliberately retained in this migration round.
 Historical manifests and archives are handled separately; these drama control
 tools do not modify cleanup behavior.
+
+## Exact drama `0d2dc5e` release operator
+
+`drama_release.py` is the reviewed code-only release operator for
+`a1519413b23d20acab035853b0f5aeebee53e9ac` to
+`0d2dc5ee90d056a58231fd0292186d73b0d083f8`. It defaults to a read-only dry
+run. It never creates, retries, resumes or publishes a business job.
+
+The CPU scope is exactly `drama-material-worker.service` and
+`drama-material-api.service`. The worker must already be fully stopped, the API
+must be a drained single-process service, both approved failed jobs must remain
+`failed`, and the job/lease tables must have zero active rows. Apply backs up
+and atomically exchanges only these two files, then keeps the worker stopped:
+
+```text
+/root/drama_material_service/app.py
+/root/drama_material_service/features/drama_synthesis/async_runtime.py
+```
+
+The HK scope is exactly `drama-synthesis-gpu-worker.service` and
+`drama-synthesis-gpu-tunnel.service`; both must already be stopped. It creates
+an immutable release below `/data/drama-synthesis-gpu/releases`, atomically
+exchanges `current`, and starts each exact unit at most once. The following
+eight services are never systemctl targets and their FragmentPath, file hash,
+PID, startticks, NRestarts and cgroup identity must remain identical at every
+guard boundary: both FB units, all four TT units, and both X units.
+
+For either host, first run the exact command without `--apply`. Required
+arguments are deliberately verbose: run id, hostname, old/new SHA, fixed data
+root, current `findmnt` source, fixed source checkout, every exact target and
+protected unit. The dry-run prints `required_fragment_arguments`; copy every
+`UNIT|ABSOLUTE_FRAGMENT|SHA256` value back as one `--fragment` argument only
+after reviewing that fresh output. Apply refuses missing or changed fragment
+bindings. The fixed GitHub checkout paths are:
+
+```text
+CPU /mnt/data-disk/migrations/gpu-service-migration-20260828T1502/drama-release/source/0d2dc5ee90d056a58231fd0292186d73b0d083f8
+HK  /data/migrations/gpu-service-migration-20260828T1502/drama-release/source/0d2dc5ee90d056a58231fd0292186d73b0d083f8
+```
+
+The checkout must be clean, have the approved GitHub origin, and have both
+`HEAD` and the fetched remote branch at the exact new commit. CPU backups and
+receipts stay under `/mnt/data-disk/migrations/$RUN/drama-release/$NEW/cpu`;
+HK receipts and the retained rollback symlink stay under
+`/data/migrations/$RUN/drama-release/$NEW/hk`. Existing evidence, release,
+backup, stage or swap names are never adopted or overwritten.
+
+HK apply is not complete route acceptance by itself. Its result is
+`deployed_local_route_pending` after exact local `8787/healthz` and listener
+ownership checks. Run the read-only `drama_release.py route` on the CPU host to
+prove `127.0.0.1:18788/healthz` and that the unique sshd reverse listener is
+associated with the HK `43.154.250.89` SSH peer. Preserve both result hashes in
+the coordinator report. No credential value is read or written by this tool.
