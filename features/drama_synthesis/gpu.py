@@ -243,7 +243,10 @@ def _bounded_progress_record(metrics):
 def _safe_diagnostic_context(value):
     source = value if isinstance(value, Mapping) else {}
     result = {}
-    for key in ("source_sha256", "recipe_sha256", "asset_set_sha256"):
+    for key in (
+        "source_sha256", "recipe_sha256", "asset_set_sha256",
+        "composition_sha256", "kernel_sha256",
+    ):
         candidate = str(source.get(key) or "")
         if re.fullmatch(r"[0-9a-f]{64}", candidate):
             result[key] = candidate
@@ -298,11 +301,12 @@ def _write_render_failure_diagnostic(path, *, reason, public_code, duration_seco
     if execution is not None:
         job_id = str(getattr(execution, "job_id", ""))
         generation = getattr(execution, "generation", None)
+        required_context = {
+            "source_sha256", "source_size_bytes", "recipe_sha256", "asset_set_sha256",
+        }
         if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id) or
                 type(generation) is not int or not 1 <= generation <= 2 ** 31 - 1 or
-                set(safe_context) != {
-                    "source_sha256", "source_size_bytes", "recipe_sha256", "asset_set_sha256",
-                }):
+                not required_context.issubset(safe_context)):
             raise checkpoint_error()
         safe_context.update(job_id=job_id, generation=generation)
     try:
@@ -346,7 +350,9 @@ def _write_render_failure_diagnostic(path, *, reason, public_code, duration_seco
 
 def run_render_with_progress(command, *, timeout, duration_seconds, absolute_timeout=None,
                              configured_timeout=None, diagnostic_path=None, diagnostic_context=None, stall_timeout=None,
-                             popen=None, progress_callback=None, monotonic=None):
+                             popen=None, progress_callback=None, monotonic=None,
+                             progress_offset_seconds=0.0, progress_total_seconds=None,
+                             progress_frame_offset=0):
     """Track one child with monotonic extension, stall fencing and safe evidence."""
     from .async_runtime import clear_process, emit_progress, process_launch, record_process
 
@@ -364,6 +370,20 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
             not 0 < configured_timeout <= timeout):
         raise _timeout_configuration_error()
     stall_timeout = _render_stall_seconds(stall_timeout)
+    if (isinstance(progress_offset_seconds, bool) or
+            not isinstance(progress_offset_seconds, (int, float)) or
+            not math.isfinite(float(progress_offset_seconds)) or float(progress_offset_seconds) < 0):
+        raise _timeout_configuration_error()
+    if (isinstance(progress_frame_offset, bool) or not isinstance(progress_frame_offset, int) or
+            progress_frame_offset < 0):
+        raise _timeout_configuration_error()
+    if progress_total_seconds is not None:
+        if (isinstance(progress_total_seconds, bool) or
+                not isinstance(progress_total_seconds, (int, float)) or
+                not math.isfinite(float(progress_total_seconds)) or
+                float(progress_total_seconds) + 0.000001 <
+                float(progress_offset_seconds) + float(duration_seconds)):
+            raise _timeout_configuration_error()
     monotonic = monotonic or time.monotonic
     popen = popen or subprocess.Popen
     tracked_command = [command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
@@ -388,9 +408,19 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
     final_deadline_offset = float(timeout)
 
     def emit(metrics):
-        emit_progress("rendering_random", **metrics)
+        displayed = dict(metrics)
+        if progress_total_seconds is not None:
+            displayed["duration_seconds"] = float(progress_total_seconds)
+            if "out_time_seconds" in displayed:
+                displayed["out_time_seconds"] = min(
+                    float(progress_total_seconds),
+                    float(progress_offset_seconds) + float(displayed["out_time_seconds"]),
+                )
+            if "frame" in displayed:
+                displayed["frame"] = progress_frame_offset + int(displayed["frame"])
+        emit_progress("rendering_random", **displayed)
         if progress_callback:
-            progress_callback(dict(metrics))
+            progress_callback(dict(displayed))
 
     def fold_progress(first, latest):
         folded = {"duration_seconds": float(duration_seconds)}
@@ -756,7 +786,7 @@ def _commit_prepared_render(prepared_path, checkpoint_path, output_path, identit
     return result
 
 
-def render_random_output(
+def _render_random_output_legacy(
     *,
     source: Union[str, os.PathLike],
     output: Union[str, os.PathLike],
@@ -1005,4 +1035,54 @@ def render_random_output(
             raise checkpoint_error() from None
 
 
-__all__ = ["catalog_from_assets", "render_budget_seconds", "render_random_output", "render_timeout_seconds"]
+def compositor_backend(value=None):
+    raw = os.environ.get("DRAMA_GPU_COMPOSITOR_BACKEND", "legacy_cpu") if value is None else value
+    backend = str(raw or "").strip().lower()
+    if backend not in {"legacy_cpu", "opencl_fused_v2"}:
+        raise DramaSynthesisError("drama_gpu_compositor_unavailable", "GPU合成引擎不可用", 503)
+    return backend
+
+
+def render_random_output(
+    *,
+    source: Union[str, os.PathLike],
+    output: Union[str, os.PathLike],
+    recipe: Mapping[str, Any],
+    asset_root: Union[str, os.PathLike],
+    manifest_sha256: str,
+    ffmpeg: str = "/usr/bin/ffmpeg",
+    ffprobe: str = "/usr/bin/ffprobe",
+    timeout: Optional[int] = None,
+    runner=None,
+) -> Dict[str, Any]:
+    backend = compositor_backend()
+    if backend == "opencl_fused_v2":
+        from .gpu_compositor import render_chunked_random_output
+        return render_chunked_random_output(
+            source=source,
+            output=output,
+            recipe=recipe,
+            asset_root=asset_root,
+            manifest_sha256=manifest_sha256,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            timeout=timeout,
+            runner=runner,
+        )
+    return _render_random_output_legacy(
+        source=source,
+        output=output,
+        recipe=recipe,
+        asset_root=asset_root,
+        manifest_sha256=manifest_sha256,
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        timeout=timeout,
+        runner=runner,
+    )
+
+
+__all__ = [
+    "catalog_from_assets", "compositor_backend", "render_budget_seconds", "render_random_output",
+    "render_timeout_seconds",
+]

@@ -788,7 +788,17 @@ class UpgradeTests(unittest.TestCase):
         try:
             with mock.patch.dict(os.environ, {"GPU_VIDEO_WORKER_TOKEN": "fake-token"}, clear=False):
                 health = json.loads(urlopen(base + "/healthz", timeout=2).read())
-                self.assertEqual(health, {"ok": True, "role": "media-only"})
+                self.assertEqual({key: health[key] for key in (
+                    "ok", "role", "render_concurrency", "compositor_backend",
+                    "compositor_chunk_seconds", "compositor_lanes", "release_sha",
+                )}, {
+                    "ok": True, "role": "media-only", "render_concurrency": 1,
+                    "compositor_backend": "legacy_cpu", "compositor_chunk_seconds": 120,
+                    "compositor_lanes": 1, "release_sha": "",
+                })
+                self.assertRegex(health["kernel_template_sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v2")
+                self.assertEqual(health["runtime_identity"], "ffmpeg-opencl-nvenc-runtime-v1")
                 request = Request(base + "/api/gpu-video/render", data=json.dumps({"job_id": JOB_ID, "recipe": "frozen"}).encode(), headers={"Authorization": "Bearer fake-token", "Content-Type": "application/json"}, method="POST")
                 self.assertEqual(json.loads(urlopen(request, timeout=2).read())["recipe"], "frozen")
                 with self.assertRaises(HTTPError) as denied:
