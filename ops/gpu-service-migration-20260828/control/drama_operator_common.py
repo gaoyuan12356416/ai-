@@ -40,7 +40,7 @@ CPU_LIVE_ROOT = pathlib.Path("/root/drama_material_service")
 HK_BASE = pathlib.Path("/data/drama-synthesis-gpu")
 
 CPU_TARGET_UNITS = (
-    "drama-material-worker.service",
+    "drama-material-job-worker.service",
     "drama-material-api.service",
 )
 HK_TARGET_UNITS = (

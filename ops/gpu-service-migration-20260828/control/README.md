@@ -160,7 +160,7 @@ tools do not modify cleanup behavior.
 `0d2dc5ee90d056a58231fd0292186d73b0d083f8`. It defaults to a read-only dry
 run. It never creates, retries, resumes or publishes a business job.
 
-The CPU scope is exactly `drama-material-worker.service` and
+The CPU scope is exactly `drama-material-job-worker.service` and
 `drama-material-api.service`. The worker must already be fully stopped, the API
 must be a drained single-process service, both approved failed jobs must remain
 `failed`, and the job/lease tables must have zero active rows. Apply backs up

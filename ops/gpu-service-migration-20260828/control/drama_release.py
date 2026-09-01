@@ -362,7 +362,9 @@ def backup_cpu_files(evidence):
             "manifest_sha256": manifest_sha, "files": manifest["files"]}
 
 
-def create_cpu_swap(relative, evidence):
+def create_cpu_swap(relative, evidence, swap_journal):
+    if not isinstance(swap_journal, list):
+        raise common.OperatorError("CPU swap journal must be a caller-owned list")
     source = role_contract("cpu")["source_root"] / pathlib.PurePosixPath(relative)
     live = common.CPU_LIVE_ROOT / pathlib.PurePosixPath(relative)
     source_fd, _, _ = common.anchored_file(
@@ -382,17 +384,24 @@ def create_cpu_swap(relative, evidence):
             raise common.OperatorError("CPU replacement temporary SHA256 mismatch")
         if common.identity_tuple(os.lstat(str(live))) != common.identity_tuple(os.fstat(old_fd)):
             raise common.OperatorError("CPU live file changed before atomic exchange")
+        record = {"relative": relative, "live": str(live),
+                  "temporary_old": str(temporary), "old_stat": old_record,
+                  "new_sha256": common.CPU_NEW_FILES[relative],
+                  "old_sha256": common.CPU_OLD_FILES[relative],
+                  "exchange_complete": False,
+                  "rollback_anchor_retained": False}
         common.atomic_rename_exchange(temporary, live)
+        # The exchange is the mutation boundary.  Journal it before every
+        # fallible verification/fsync so the outer transaction can always
+        # restore the exact old bytes.
+        record["exchange_complete"] = True
+        record["rollback_anchor_retained"] = True
+        swap_journal.append(record)
         if (common.sha256_file(live) != common.CPU_NEW_FILES[relative] or
                 common.sha256_file(temporary) != common.CPU_OLD_FILES[relative]):
-            try:
-                common.atomic_rename_exchange(temporary, live)
-            finally:
-                raise common.OperatorError("CPU atomic exchange verification failed")
+            raise common.OperatorError("CPU atomic exchange verification failed")
         common.fsync_directory(live.parent)
-        return {"relative": relative, "live": str(live), "temporary_old": str(temporary),
-                "old_stat": old_record, "new_sha256": common.CPU_NEW_FILES[relative],
-                "old_sha256": common.CPU_OLD_FILES[relative]}
+        return record
     finally:
         os.close(source_fd)
         os.close(old_fd)
@@ -401,6 +410,8 @@ def create_cpu_swap(relative, evidence):
 def restore_cpu_swaps(swaps):
     errors = []
     for item in reversed(swaps):
+        if not item.get("exchange_complete"):
+            continue
         live = pathlib.Path(item["live"])
         temporary = pathlib.Path(item["temporary_old"])
         try:
@@ -409,6 +420,7 @@ def restore_cpu_swaps(swaps):
                     common.sha256_file(temporary) != item["old_sha256"]):
                 raise common.OperatorError("CPU rollback exchange anchors changed")
             common.atomic_rename_exchange(temporary, live)
+            item["exchange_complete"] = False
             common.fsync_directory(live.parent)
             if common.sha256_file(live) != item["old_sha256"]:
                 raise common.OperatorError("CPU rollback did not restore old bytes")
@@ -462,12 +474,37 @@ def listener_owned_by(port, pid):
 
 
 def cleanup_cpu_temporaries(swaps):
+    cleaned = []
     for item in swaps:
         temporary = pathlib.Path(item["temporary_old"])
         if common.sha256_file(temporary) != item["old_sha256"]:
             raise common.OperatorError("old CPU temporary changed before cleanup")
         os.unlink(str(temporary))
+        item["rollback_anchor_retained"] = False
+        cleaned.append({"relative": item["relative"], "path": str(temporary),
+                        "old_sha256": item["old_sha256"]})
         common.fsync_directory(temporary.parent)
+    return cleaned
+
+
+def persist_cpu_result_and_cleanup(evidence, result, swaps, commit_state):
+    if not isinstance(commit_state, dict) or commit_state.get("committed"):
+        raise common.OperatorError("CPU commit journal is invalid")
+    result_path = pathlib.Path(evidence) / "result.json"
+    receipt_sha = common.write_exclusive_json(result_path, result)
+    # Result durability is the commit boundary.  From this point onward a
+    # cleanup failure must never trigger an automatic code rollback.
+    commit_state.update({"committed": True, "result": str(result_path),
+                         "result_sha256": receipt_sha})
+    cleaned = cleanup_cpu_temporaries(swaps)
+    cleanup = {"schema": 1, "result": "rollback_temporaries_cleaned",
+               "host_role": "cpu", "run_id": common.RUN_ID,
+               "result_sha256": receipt_sha, "cleaned": cleaned,
+               "completed_at_epoch": time.time()}
+    cleanup_path = pathlib.Path(evidence) / "cleanup.json"
+    cleanup_sha = common.write_exclusive_json(cleanup_path, cleanup)
+    return {"result": str(result_path), "result_sha256": receipt_sha,
+            "cleanup": str(cleanup_path), "cleanup_sha256": cleanup_sha}
 
 
 def apply_cpu(args, contract, before):
@@ -480,6 +517,7 @@ def apply_cpu(args, contract, before):
     swaps = []
     api = common.CPU_TARGET_UNITS[1]
     api_stop_started = False
+    commit_state = {"committed": False}
     rollback = {"attempted": False, "complete": None, "errors": []}
     try:
         common.assert_no_media_processes()
@@ -498,7 +536,7 @@ def apply_cpu(args, contract, before):
         for relative in sorted(common.CPU_NEW_FILES):
             common.assert_no_media_processes()
             inspect_cpu_database()
-            swaps.append(create_cpu_swap(relative, evidence))
+            create_cpu_swap(relative, evidence, swaps)
         compile_cpu_files()
         phase(evidence, "cpu-files-switched", {"swaps": swaps})
         systemctl("start", api)
@@ -517,20 +555,44 @@ def apply_cpu(args, contract, before):
                                          "restart_bound": restart_bound,
                                          "units": {unit: common.protected_signature(item)
                                                    for unit, item in after.items()}})
-        cleanup_cpu_temporaries(swaps)
         result = {"schema": 1, "result": "deployed", "host_role": "cpu",
                   "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,
                   "new_sha": common.NEW_SHA, "backup": backup,
                   "changed_files": sorted(common.CPU_NEW_FILES),
                   "worker_remained_stopped": True, "api_health": health,
-                  "api_listener": listener, "api_restart_bound": restart_bound,
-                  "rollback": rollback,
-                  "production_job_or_publish_calls": 0,
-                  "completed_at_epoch": time.time()}
-        receipt_sha = common.write_exclusive_json(evidence / "result.json", result)
-        return {"ok": True, "result": str(evidence / "result.json"),
-                "result_sha256": receipt_sha, "host_role": "cpu"}
+                   "api_listener": listener, "api_restart_bound": restart_bound,
+                   "rollback": rollback,
+                   "rollback_temporaries_retained_at_commit": [
+                       {"relative": item["relative"],
+                        "path": item["temporary_old"],
+                        "old_sha256": item["old_sha256"]}
+                       for item in swaps],
+                   "cleanup_receipt_required": True,
+                   "production_job_or_publish_calls": 0,
+                   "completed_at_epoch": time.time()}
+        receipts = persist_cpu_result_and_cleanup(evidence, result, swaps, commit_state)
+        return dict({"ok": True, "host_role": "cpu"}, **receipts)
     except Exception as error:
+        if commit_state.get("committed"):
+            failure = {"schema": 1, "result": "post_commit_cleanup_failed",
+                       "host_role": "cpu", "run_id": common.RUN_ID,
+                       "old_sha": common.OLD_SHA, "new_sha": common.NEW_SHA,
+                       "error_type": type(error).__name__,
+                       "automatic_rollback_suppressed": True,
+                       "live_release_remains": common.NEW_SHA,
+                       "rollback_anchor_state": [
+                           {"relative": item["relative"],
+                            "path": item["temporary_old"],
+                            "retained": item.get("rollback_anchor_retained", False)}
+                           for item in swaps],
+                       "failed_at_epoch": time.time()}
+            try:
+                common.write_exclusive_json(evidence / "post-commit-failure.json", failure)
+            except Exception:
+                pass
+            raise common.OperatorError(
+                "POST-COMMIT: CPU release is deployed; cleanup receipt is incomplete; "
+                "automatic rollback suppressed")
         rollback["attempted"] = bool(api_stop_started or swaps)
         if rollback["attempted"]:
             try:
@@ -542,12 +604,22 @@ def apply_cpu(args, contract, before):
                 rollback["errors"].append({"stage": "stop-new-api",
                                            "error": type(stop_error).__name__})
             rollback["errors"].extend(restore_cpu_swaps(swaps))
-            try:
-                systemctl("start", api)
-                wait_unit(api, True)
-            except Exception as start_error:
-                rollback["errors"].append({"stage": "start-old-api",
-                                           "error": type(start_error).__name__})
+            if not rollback["errors"]:
+                try:
+                    for relative, expected in common.CPU_OLD_FILES.items():
+                        live = common.CPU_LIVE_ROOT / pathlib.PurePosixPath(relative)
+                        if common.sha256_file(live) != expected:
+                            raise common.OperatorError("CPU rollback left mixed live bytes")
+                    systemctl("start", api)
+                    wait_unit(api, True)
+                    restored_units = common.snapshot_units(common.CPU_TARGET_UNITS)
+                    common.assert_inactive_unit(restored_units[common.CPU_TARGET_UNITS[0]])
+                    common.assert_active_single_process(restored_units[api])
+                    config_unchanged(baseline_units, restored_units,
+                                     common.CPU_TARGET_UNITS)
+                except Exception as start_error:
+                    rollback["errors"].append({"stage": "start-old-api",
+                                               "error": type(start_error).__name__})
         rollback["complete"] = not rollback["errors"]
         failure = {"schema": 1, "result": "failed", "host_role": "cpu",
                    "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,
@@ -593,7 +665,17 @@ def current_link_anchor():
     return {"stat": common.stat_record(value), "target": target}
 
 
-def switch_hk_current():
+def assert_hk_current_release(expected_release):
+    value = os.lstat(str(HK_CURRENT))
+    if not stat.S_ISLNK(value.st_mode):
+        raise common.OperatorError("HK current is not a symlink")
+    if os.path.realpath(str(HK_CURRENT)) != str(expected_release):
+        raise common.OperatorError("HK current does not point at the expected release")
+
+
+def switch_hk_current(record):
+    if not isinstance(record, dict) or record:
+        raise common.OperatorError("HK current journal must be an empty caller-owned dict")
     anchor = current_link_anchor()
     temporary = common.HK_BASE / (".current-%s-%s" % (common.RUN_ID, common.NEW_SHA[:12]))
     if common.path_lexists(temporary):
@@ -603,27 +685,61 @@ def switch_hk_current():
     current = os.lstat(str(HK_CURRENT))
     if common.stat_record(current) != anchor["stat"] or os.readlink(str(HK_CURRENT)) != anchor["target"]:
         raise common.OperatorError("HK current changed before atomic exchange")
+    record.update({"old_link_temporary": str(temporary),
+                   "old_target": anchor["target"],
+                   "new_target": str(HK_RELEASES / common.NEW_SHA),
+                   "exchange_complete": False,
+                   "old_link_retained": False})
     common.atomic_rename_exchange(temporary, HK_CURRENT)
+    # Record the namespace mutation before every fallible durability/probe
+    # operation so rollback never depends on the function returning normally.
+    record["exchange_complete"] = True
     common.fsync_directory(common.HK_BASE)
     if (os.path.realpath(str(HK_CURRENT)) != str(HK_RELEASES / common.NEW_SHA) or
             not temporary.is_symlink() or os.readlink(str(temporary)) != anchor["target"]):
-        try:
-            common.atomic_rename_exchange(temporary, HK_CURRENT)
-        finally:
-            raise common.OperatorError("HK current exchange verification failed")
-    return {"old_link_temporary": str(temporary), "old_target": anchor["target"],
-            "new_target": str(HK_RELEASES / common.NEW_SHA)}
+        raise common.OperatorError("HK current exchange verification failed")
+    return record
+
+
+def hk_old_link_anchor(record):
+    candidates = [pathlib.Path(record["old_link_temporary"])]
+    destination = record.get("old_link_destination")
+    if destination and pathlib.Path(destination) not in candidates:
+        candidates.append(pathlib.Path(destination))
+    present = [path for path in candidates if common.path_lexists(path)]
+    if len(present) != 1:
+        raise common.OperatorError("HK old current link location is ambiguous")
+    path = present[0]
+    value = os.lstat(str(path))
+    if not stat.S_ISLNK(value.st_mode) or os.readlink(str(path)) != record["old_target"]:
+        raise common.OperatorError("HK old current link anchor changed")
+    return path
+
+
+def retain_hk_old_link(record, evidence):
+    source = hk_old_link_anchor(record)
+    destination = pathlib.Path(evidence) / "current-before"
+    record["old_link_destination"] = str(destination)
+    record["old_link_move_started"] = True
+    common.atomic_rename_noreplace(source, destination)
+    # Update immediately after the namespace mutation, before fsync.
+    record["old_link_temporary"] = str(destination)
+    record["old_link_retained"] = True
+    common.fsync_directory(destination.parent)
+    return destination
 
 
 def restore_hk_current(record):
-    temporary = pathlib.Path(record["old_link_temporary"])
-    if (not temporary.is_symlink() or os.readlink(str(temporary)) != record["old_target"] or
-            os.path.realpath(str(HK_CURRENT)) != record["new_target"]):
+    if not record.get("exchange_complete"):
+        raise common.OperatorError("HK current journal has no completed exchange")
+    temporary = hk_old_link_anchor(record)
+    if os.path.realpath(str(HK_CURRENT)) != record["new_target"]:
         raise common.OperatorError("HK current rollback anchors changed")
     common.atomic_rename_exchange(temporary, HK_CURRENT)
+    record["exchange_complete"] = False
+    record["restored"] = True
     common.fsync_directory(common.HK_BASE)
-    if os.path.realpath(str(HK_CURRENT)) != str(HK_RELEASES / common.OLD_SHA):
-        raise common.OperatorError("HK current rollback did not restore old release")
+    assert_hk_current_release(HK_RELEASES / common.OLD_SHA)
 
 
 def target_restart_bound(before, after, unit):
@@ -645,7 +761,7 @@ def apply_hk(args, contract, before):
     protected_before = {unit: baseline[unit] for unit in common.HK_PROTECTED_UNITS}
     release = HK_RELEASES / common.NEW_SHA
     stage = HK_RELEASES / (".stage-%s-%s" % (common.RUN_ID, common.NEW_SHA[:12]))
-    current_record = None
+    current_record = {}
     published = False
     started = []
     rollback = {"attempted": False, "complete": None, "errors": []}
@@ -673,7 +789,7 @@ def apply_hk(args, contract, before):
         phase(evidence, "hk-release-published", {"release": str(release),
                                                   "commit": common.NEW_SHA})
         guard_protected_and_idle()
-        current_record = switch_hk_current()
+        switch_hk_current(current_record)
         guard_protected_and_idle()
         phase(evidence, "hk-current-switched", current_record)
         systemctl("start", common.HK_TARGET_UNITS[0])
@@ -703,11 +819,7 @@ def apply_hk(args, contract, before):
             "protected_units": {unit: common.protected_signature(after[unit])
                                 for unit in common.HK_PROTECTED_UNITS},
         })
-        old_link = pathlib.Path(current_record["old_link_temporary"])
-        retained_link = evidence / "current-before"
-        common.atomic_rename_noreplace(old_link, retained_link)
-        common.fsync_directory(retained_link.parent)
-        current_record["old_link_temporary"] = str(retained_link)
+        retain_hk_old_link(current_record, evidence)
         result = {"schema": 1, "result": "deployed_local_route_pending",
                   "host_role": "hk", "run_id": common.RUN_ID,
                   "old_sha": common.OLD_SHA, "new_sha": common.NEW_SHA,
@@ -734,7 +846,7 @@ def apply_hk(args, contract, before):
             except Exception as stop_error:
                 rollback["errors"].append({"stage": "stop-new-target", "unit": unit,
                                            "error": type(stop_error).__name__})
-        if current_record is not None:
+        if current_record.get("exchange_complete"):
             try:
                 restore_hk_current(current_record)
             except Exception as current_error:
@@ -747,6 +859,7 @@ def apply_hk(args, contract, before):
             stopped = common.snapshot_units(common.HK_TARGET_UNITS)
             for unit in common.HK_TARGET_UNITS:
                 common.assert_inactive_unit(stopped[unit])
+            assert_hk_current_release(HK_RELEASES / common.OLD_SHA)
             protected_after = common.snapshot_units(common.HK_PROTECTED_UNITS)
             common.assert_protected_units(protected_before, protected_after)
         except Exception as proof_error:

@@ -38,6 +38,23 @@ def portable_exchange(left, right):
     os.rename(str(hold), str(right))
 
 
+def portable_content_exchange(left, right):
+    left = pathlib.Path(left)
+    right = pathlib.Path(right)
+    left_bytes = left.read_bytes()
+    right_bytes = right.read_bytes()
+    left.write_bytes(right_bytes)
+    right.write_bytes(left_bytes)
+
+
+def portable_noreplace(source, destination):
+    source = pathlib.Path(source)
+    destination = pathlib.Path(destination)
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError("test no-replace collision")
+    os.rename(str(source), str(destination))
+
+
 class DramaReleaseTests(unittest.TestCase):
     def exact_args(self, role):
         contract = release.role_contract(role)
@@ -51,6 +68,11 @@ class DramaReleaseTests(unittest.TestCase):
         )
 
     def test_exact_host_commit_path_and_unit_bindings(self):
+        self.assertEqual(common.CPU_TARGET_UNITS, (
+            "drama-material-job-worker.service",
+            "drama-material-api.service",
+        ))
+        self.assertNotIn("drama-material-worker.service", common.CPU_TARGET_UNITS)
         for role in ("cpu", "hk"):
             args = self.exact_args(role)
             self.assertEqual(release.validate_cli(args), release.role_contract(role))
@@ -74,6 +96,16 @@ class DramaReleaseTests(unittest.TestCase):
                                       if changed.protected_unit else ["unexpected.service"])
             with self.assertRaises(common.OperatorError):
                 release.validate_cli(changed)
+
+    def test_not_found_cpu_worker_name_is_rejected_before_fragment_access(self):
+        wrong = "drama-material-worker.service"
+        output = ("Id=%s\nLoadState=not-found\nNeedDaemonReload=no\n"
+                  "FragmentPath=\n" % wrong)
+        with mock.patch.object(common, "run", return_value=(0, output, "")), \
+             mock.patch.object(common, "fragment_record") as fragment_record:
+            with self.assertRaisesRegex(common.OperatorError, "not loaded"):
+                common.unit_identity(wrong)
+        fragment_record.assert_not_called()
 
     def test_reviewed_commit_file_hash_constants_match_git_objects(self):
         repository = pathlib.Path(__file__).resolve().parents[3]
@@ -152,7 +184,9 @@ class DramaReleaseTests(unittest.TestCase):
                  mock.patch.object(common, "CPU_NEW_FILES", new_files), \
                  mock.patch.object(common, "atomic_rename_exchange", side_effect=portable_exchange), \
                  mock.patch.object(common, "fsync_directory"):
-                swap = release.create_cpu_swap(relative, root)
+                swaps = []
+                swap = release.create_cpu_swap(relative, root, swaps)
+                self.assertEqual(swaps, [swap])
                 self.assertEqual((live_root / relative).read_bytes(), new)
                 self.assertEqual(pathlib.Path(swap["temporary_old"]).read_bytes(), old)
                 self.assertEqual(release.restore_cpu_swaps([swap]), [])
@@ -170,13 +204,153 @@ class DramaReleaseTests(unittest.TestCase):
             item = {"relative": "app.py", "live": str(live),
                     "temporary_old": str(temporary),
                     "old_sha256": hashlib.sha256(old).hexdigest(),
-                    "new_sha256": hashlib.sha256(new).hexdigest()}
+                    "new_sha256": hashlib.sha256(new).hexdigest(),
+                    "exchange_complete": True}
             with mock.patch.object(common, "atomic_rename_exchange",
                                    side_effect=portable_exchange), \
                  mock.patch.object(common, "fsync_directory"):
                 self.assertEqual(release.restore_cpu_swaps([item]), [])
             self.assertEqual(live.read_bytes(), old)
             self.assertEqual(temporary.read_bytes(), new)
+
+    def test_cpu_exchange_is_journaled_before_post_exchange_fsync_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source_root = root / "source"
+            live_root = root / "live"
+            source_root.mkdir()
+            live_root.mkdir()
+            relative = "app.py"
+            old = b"old reviewed app\n"
+            new = b"new reviewed app\n"
+            (source_root / relative).write_bytes(new)
+            (live_root / relative).write_bytes(old)
+            old_files = {relative: hashlib.sha256(old).hexdigest()}
+            new_files = {relative: hashlib.sha256(new).hexdigest()}
+            original_contract = release.role_contract
+
+            def contract(role):
+                value = dict(original_contract(role))
+                if role == "cpu":
+                    value["source_root"] = source_root
+                return value
+
+            fsync_calls = []
+
+            def fail_after_exchange(path):
+                fsync_calls.append(pathlib.Path(path))
+                if len(fsync_calls) == 2:
+                    raise OSError("injected post-exchange fsync failure")
+
+            swaps = []
+            with mock.patch.object(release, "role_contract", side_effect=contract), \
+                 mock.patch.object(common, "CPU_LIVE_ROOT", live_root), \
+                 mock.patch.object(common, "CPU_OLD_FILES", old_files), \
+                 mock.patch.object(common, "CPU_NEW_FILES", new_files), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_content_exchange), \
+                 mock.patch.object(common, "fsync_directory",
+                                   side_effect=fail_after_exchange):
+                with self.assertRaisesRegex(OSError, "post-exchange"):
+                    release.create_cpu_swap(relative, root, swaps)
+            self.assertEqual(len(swaps), 1)
+            self.assertTrue(swaps[0]["exchange_complete"])
+            self.assertEqual((live_root / relative).read_bytes(), new)
+            with mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_content_exchange), \
+                 mock.patch.object(common, "fsync_directory"):
+                self.assertEqual(release.restore_cpu_swaps(swaps), [])
+            self.assertEqual((live_root / relative).read_bytes(), old)
+
+    def test_cpu_result_failure_keeps_rollback_temporaries(self):
+        state = {"committed": False}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(common, "write_exclusive_json",
+                               side_effect=OSError("injected result failure")), \
+             mock.patch.object(release, "cleanup_cpu_temporaries") as cleanup:
+            with self.assertRaisesRegex(OSError, "result failure"):
+                release.persist_cpu_result_and_cleanup(
+                    pathlib.Path(directory), {"result": "deployed"}, [], state)
+        self.assertFalse(state["committed"])
+        cleanup.assert_not_called()
+
+    def test_cpu_cleanup_failure_occurs_only_after_durable_commit(self):
+        state = {"committed": False}
+        writes = []
+
+        def write(path, value):
+            writes.append(pathlib.Path(path).name)
+            return "a" * 64
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(common, "write_exclusive_json", side_effect=write), \
+             mock.patch.object(release, "cleanup_cpu_temporaries",
+                               side_effect=OSError("injected cleanup failure")):
+            with self.assertRaisesRegex(OSError, "cleanup failure"):
+                release.persist_cpu_result_and_cleanup(
+                    pathlib.Path(directory), {"result": "deployed"}, [], state)
+        self.assertTrue(state["committed"])
+        self.assertEqual(writes, ["result.json"])
+
+    def test_cpu_apply_never_rolls_back_after_result_commit(self):
+        contract = release.role_contract("cpu")
+        units = {unit: {} for unit in common.CPU_TARGET_UNITS}
+        active_api = {"process": {"pid": 123}}
+
+        def commit_then_fail(evidence, result, swaps, state):
+            state["committed"] = True
+            raise OSError("injected post-commit cleanup failure")
+
+        def reviewed_hash(path):
+            value = str(path).replace("\\", "/")
+            for relative, expected in common.CPU_NEW_FILES.items():
+                if value.endswith(relative):
+                    return expected
+            raise AssertionError("unexpected hash path: %s" % path)
+
+        with contextlib.ExitStack() as stack:
+            for owner, name in (
+                (common, "create_private_ancestry"),
+                (release, "phase"),
+                (common, "assert_no_media_processes"),
+                (common, "assert_no_established_ports"),
+                (release, "inspect_cpu_database"),
+                (common, "assert_inactive_unit"),
+                (release, "config_unchanged"),
+                (release, "create_cpu_swap"),
+                (release, "compile_cpu_files"),
+            ):
+                stack.enter_context(mock.patch.object(owner, name))
+            systemctl = stack.enter_context(mock.patch.object(release, "systemctl"))
+            stack.enter_context(mock.patch.object(
+                release, "compact_snapshot", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "backup_cpu_files", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "wait_unit", return_value=active_api))
+            stack.enter_context(mock.patch.object(
+                common, "snapshot_units", return_value=units))
+            stack.enter_context(mock.patch.object(
+                release, "target_restart_bound", return_value={}))
+            stack.enter_context(mock.patch.object(
+                common, "exact_health", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(
+                release, "listener_owned_by", return_value={}))
+            stack.enter_context(mock.patch.object(
+                common, "sha256_file", side_effect=reviewed_hash))
+            stack.enter_context(mock.patch.object(
+                common, "protected_signature", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "persist_cpu_result_and_cleanup", side_effect=commit_then_fail))
+            stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", return_value="a" * 64))
+            with self.assertRaisesRegex(common.OperatorError, "POST-COMMIT"):
+                release.apply_cpu(self.exact_args("cpu"), contract,
+                                  {"unit_snapshot": units, "mode": "apply"})
+        self.assertEqual(systemctl.call_args_list, [
+            mock.call("stop", common.CPU_TARGET_UNITS[1]),
+            mock.call("start", common.CPU_TARGET_UNITS[1]),
+        ])
 
     def test_cpu_backup_is_exclusive_and_never_overwrites(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -213,10 +387,99 @@ class DramaReleaseTests(unittest.TestCase):
                  mock.patch.object(common, "HK_BASE", base), \
                  mock.patch.object(common, "atomic_rename_exchange", side_effect=portable_exchange), \
                  mock.patch.object(common, "fsync_directory"):
-                record = release.switch_hk_current()
+                record = {}
+                release.switch_hk_current(record)
                 self.assertEqual(os.path.realpath(str(current)), str(new))
                 release.restore_hk_current(record)
                 self.assertEqual(os.path.realpath(str(current)), str(old))
+
+    @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
+    def test_hk_exchange_is_journaled_before_post_exchange_fsync_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            releases = base / "releases"
+            releases.mkdir()
+            old = releases / common.OLD_SHA
+            new = releases / common.NEW_SHA
+            old.mkdir()
+            new.mkdir()
+            current = base / "current"
+            os.symlink(str(old), str(current), target_is_directory=True)
+            fsync_calls = []
+
+            def fail_after_exchange(path):
+                fsync_calls.append(pathlib.Path(path))
+                if len(fsync_calls) == 2:
+                    raise OSError("injected HK post-exchange fsync failure")
+
+            record = {}
+            with mock.patch.object(release, "HK_RELEASES", releases), \
+                 mock.patch.object(release, "HK_CURRENT", current), \
+                 mock.patch.object(common, "HK_BASE", base), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_exchange), \
+                 mock.patch.object(common, "fsync_directory",
+                                   side_effect=fail_after_exchange):
+                with self.assertRaisesRegex(OSError, "post-exchange"):
+                    release.switch_hk_current(record)
+            self.assertTrue(record["exchange_complete"])
+            self.assertEqual(os.path.realpath(str(current)), str(new))
+            with mock.patch.object(release, "HK_RELEASES", releases), \
+                 mock.patch.object(release, "HK_CURRENT", current), \
+                 mock.patch.object(common, "HK_BASE", base), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_exchange), \
+                 mock.patch.object(common, "fsync_directory"):
+                release.restore_hk_current(record)
+            self.assertEqual(os.path.realpath(str(current)), str(old))
+
+    @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
+    def test_hk_retained_link_location_updates_before_fsync_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            releases = base / "releases"
+            evidence = base / "evidence"
+            releases.mkdir()
+            evidence.mkdir()
+            old = releases / common.OLD_SHA
+            new = releases / common.NEW_SHA
+            old.mkdir()
+            new.mkdir()
+            current = base / "current"
+            os.symlink(str(old), str(current), target_is_directory=True)
+            record = {}
+            with mock.patch.object(release, "HK_RELEASES", releases), \
+                 mock.patch.object(release, "HK_CURRENT", current), \
+                 mock.patch.object(common, "HK_BASE", base), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_exchange), \
+                 mock.patch.object(common, "fsync_directory"):
+                release.switch_hk_current(record)
+            retained = evidence / "current-before"
+            with mock.patch.object(common, "atomic_rename_noreplace",
+                                   side_effect=portable_noreplace), \
+                 mock.patch.object(common, "fsync_directory",
+                                   side_effect=OSError("injected retained-link fsync failure")):
+                with self.assertRaisesRegex(OSError, "retained-link"):
+                    release.retain_hk_old_link(record, evidence)
+            self.assertEqual(record["old_link_temporary"], str(retained))
+            self.assertTrue(record["old_link_retained"])
+            with mock.patch.object(release, "HK_RELEASES", releases), \
+                 mock.patch.object(release, "HK_CURRENT", current), \
+                 mock.patch.object(common, "HK_BASE", base), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_exchange), \
+                 mock.patch.object(common, "fsync_directory"):
+                release.restore_hk_current(record)
+            self.assertEqual(os.path.realpath(str(current)), str(old))
+
+    def test_hk_rollback_proof_rejects_current_still_on_new_release(self):
+        fake_symlink = mock.Mock(st_mode=release.stat.S_IFLNK | 0o777)
+        with mock.patch.object(release.os, "lstat", return_value=fake_symlink), \
+             mock.patch.object(release.os.path, "realpath",
+                               return_value=str(release.HK_RELEASES / common.NEW_SHA)):
+            with self.assertRaisesRegex(common.OperatorError, "expected release"):
+                release.assert_hk_current_release(release.HK_RELEASES / common.OLD_SHA)
 
     def test_protected_pid_startticks_and_restart_count_must_be_identical(self):
         item = {
