@@ -9,7 +9,7 @@
 - 新 drama schedule candidate 在开关开启时必须带 `delivery_mode=duration_pending`、`media_validation_mode=deferred`、空 relay 与 0 media evidence。非 drama/非 schedule 请求禁止该值。
 - 队列响应新增或补全：`delivery_mode`（可为逻辑 `duration_pending`）、`route_state`、`resolved_delivery_mode`、`queue_status`（可为 `waiting_relay`）、`preflight_duration/width/height`、relay ID/username、repost status。
 - waiting publish 响应可只包含 `status=waiting_relay`、`queue_id`、`delivery_mode=duration_pending`、最终时长与已知错误码，不含 `log_id` 或 URL。
-- admin logs 与 drama episodes 只展示运营所需的路线、最终时长和宽高；最终 URL、SHA-256、文件大小及内部 media validation 字段不下发浏览器。
+- admin logs 与 drama episodes 只展示运营所需的路线、最终时长和宽高；最终 URL、SHA-256、文件大小、内部 media validation、route version 与 resolved timestamp 不下发浏览器。
 
 ## 错误码
 

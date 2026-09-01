@@ -15,12 +15,12 @@ schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/rand
 | 变更前基线聚焦 | 259 | 259 | 0 | 0 |
 | UI 聚焦 | 48 | 48 | 0 | 0 |
 | Store 路由/崩溃/公平性专项 | 128 | 128 | 0 | 0 |
-| 合并生产并行变更后全量 X | 891 | 889 | 0 | 2（环境跳过） |
-| 合并生产并行变更后全仓 discovery | 1454 | 1447 | 5 | 2（环境跳过） |
+| 最终全量 X | 892 | 890 | 0 | 2（环境跳过） |
+| 最终全仓 discovery | 1455 | 1448 | 5 | 2（环境跳过） |
 
 ## 缺陷情况
 
-独立审查发现并关闭 6 类 P1：waiting 队列被 limit 饿死、冻结剧集污染下一 slot、waiting 媒体证据可直接 SQL 改写、resolved 后跨日崩溃误停、resolved relay ledger 可删除/搬移，以及 rollout 遗漏同库 writer。另关闭 browser DTO 暴露 SHA/size 与 feature-off timer 顺序两项问题。当前无已知未关闭代码 P0/P1。
+独立审查发现并关闭 6 类 P1：waiting 队列被 limit 饿死、冻结剧集污染下一 slot、waiting 媒体证据可直接 SQL 改写、resolved 后跨日崩溃误停、resolved relay ledger 可删除/搬移，以及 rollout 遗漏同库 writer。另关闭 browser DTO 暴露 SHA/size、未使用内部 route 元数据、旧/非短剧日志误标新路线及 feature-off timer 顺序问题。当前无已知未关闭代码 P0/P1/P2。
 
 ## 验证证据
 

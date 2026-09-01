@@ -170,6 +170,18 @@
       };
       const deliveryRouteLabel = item => {
         const deliveryMode = String(item.delivery_mode || "");
+        const isDurationRoutedDrama = (
+          String(item.source_type || "") === "drama"
+          && String(item.route_state || "").trim() !== ""
+        );
+        const relay = item.relay_account_username
+          ? `@${String(item.relay_account_username).replace(/^@/, "")}`
+          : (item.relay_account_id ? `账号 ${item.relay_account_id}` : "待分配会员号");
+        if (!isDurationRoutedDrama) {
+          return deliveryMode === "premium_relay_repost"
+            ? `目标账号 Repost · 原帖由 ${relay}`
+            : "";
+        }
         const queueStatus = String(item.queue_status || item.status || "").toLowerCase();
         const duration = finalDurationLabel(item.preflight_duration ?? item.final_duration);
         if (deliveryMode === "duration_pending") {
@@ -178,9 +190,6 @@
             : `正在检测最终成片时长 · ${duration}`;
         }
         if (deliveryMode === "premium_relay_repost") {
-          const relay = item.relay_account_username
-            ? `@${String(item.relay_account_username).replace(/^@/, "")}`
-            : (item.relay_account_id ? `账号 ${item.relay_account_id}` : "待分配会员号");
           return `目标账号 Repost · 原帖由 ${relay} · ${duration}`;
         }
         if (deliveryMode === "direct") return `目标账号直接发布 · ${duration}`;

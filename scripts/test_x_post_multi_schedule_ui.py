@@ -422,6 +422,8 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('<option value="waiting_relay">等待同语言会员号</option>', LOGS)
         self.assertIn('waiting_relay:"等待同语言会员号"', LOGS)
         self.assertIn(".status.waiting_relay", LOGS)
+        self.assertIn('String(item.source_type || "") === "drama"', LOGS)
+        self.assertIn('String(item.route_state || "").trim() !== ""', LOGS)
         self.assertIn('deliveryMode === "duration_pending"', LOGS)
         self.assertIn('queueStatus === "waiting_relay"', LOGS)
         self.assertIn("正在检测最终成片时长", LOGS)
@@ -431,6 +433,85 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("最终时长待检测", LOGS)
         self.assertIn("duration.toFixed(3)", LOGS)
         self.assertIn("deliveryRouteLabel(item)", LOGS)
+
+    def test_logs_route_labels_preserve_legacy_copy_and_scope_duration_copy(self):
+        start = LOGS.index("const finalDurationLabel")
+        end = LOGS.index("const statusLabel")
+        snippet = LOGS[start:end]
+        cases = [
+            {
+                "source_type": "material",
+                "route_state": "",
+                "delivery_mode": "direct",
+                "media_type": "image",
+            },
+            {
+                "source_type": "material",
+                "delivery_mode": "direct",
+                "media_type": "video",
+                "preflight_duration": 90,
+            },
+            {
+                "source_type": "drama",
+                "route_state": "",
+                "delivery_mode": "premium_relay_repost",
+                "relay_account_username": "RelayOld",
+                "preflight_duration": 141,
+            },
+            {
+                "source_type": "drama",
+                "route_state": "duration_pending",
+                "delivery_mode": "duration_pending",
+                "queue_status": "queued",
+            },
+            {
+                "source_type": "drama",
+                "route_state": "waiting_relay",
+                "delivery_mode": "duration_pending",
+                "queue_status": "waiting_relay",
+                "preflight_duration": 141,
+            },
+            {
+                "source_type": "drama",
+                "route_state": "resolved",
+                "delivery_mode": "direct",
+                "preflight_duration": 140,
+            },
+            {
+                "source_type": "drama",
+                "route_state": "resolved",
+                "delivery_mode": "premium_relay_repost",
+                "relay_account_username": "RelayNew",
+                "preflight_duration": 140.001,
+            },
+        ]
+        program = (
+            snippet
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases, ensure_ascii=False)
+            + ".map(deliveryRouteLabel)));"
+        )
+        completed = subprocess.run(
+            ["node", "-e", program],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [
+                "",
+                "",
+                "目标账号 Repost · 原帖由 @RelayOld",
+                "正在检测最终成片时长 · 最终时长待检测",
+                "等待同语言会员号 · 最终时长 141.000s",
+                "目标账号直接发布 · 最终时长 140.000s",
+                "目标账号 Repost · 原帖由 @RelayNew · 最终时长 140.001s",
+            ],
+        )
 
     def test_inline_javascript_parses(self):
         for path, source in (

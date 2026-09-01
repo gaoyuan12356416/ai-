@@ -6843,6 +6843,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertNotIn("preflight_sha256", logs[0])
         self.assertNotIn("preflight_size", logs[0])
         self.assertNotIn("media_validation_mode", logs[0])
+        self.assertNotIn("route_version", logs[0])
+        self.assertNotIn("resolved_at", logs[0])
 
         episodes = self.store.query_drama_pool_episodes(pool["id"])["items"]
         self.assertEqual(episodes[0]["delivery_mode"], "duration_pending")
@@ -6852,6 +6854,9 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(episodes[1]["route_state"], "")
         self.assertEqual(episodes[1]["preflight_duration"], 0.0)
         self.assertEqual(episodes[1]["relay_account_id"], 0)
+        for episode in episodes:
+            self.assertNotIn("route_version", episode)
+            self.assertNotIn("resolved_at", episode)
 
     def test_duration_route_boundaries_entitlement_and_lifetime_relay_load(self):
         self.save_schedule("drama", [2, 3, 4], ["09:00", "12:00"])

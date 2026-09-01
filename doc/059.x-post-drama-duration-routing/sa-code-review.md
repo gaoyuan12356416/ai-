@@ -22,7 +22,9 @@
 | CR-005 | P1 | relay ledger | resolved relay ledger 可删除或搬移 | scoped delete/identity immutability trigger | 已修复/篡改回归 |
 | CR-006 | P1 | rollout | feature-off 恢复 timer 会产生旧 141，新迁移遗漏 X Auto/Main writer | 全 writer 排空；双端 true 后恢复原状态 | 已修订 |
 | CR-007 | P2 | admin DTO | logs 下发 UI 未使用的 SHA/size/internal mode | 仅展示路线、时长、宽高 | 已修复/contract |
+| CR-008 | P2 | logs UI | 历史及非短剧 direct 被误标为“最终时长待检测” | 仅 `source_type=drama` 且存在 route state 显示新路线文案 | 已修复/行为回归 |
+| CR-009 | P2 | public DTO | logs/episodes 下发 UI 未使用的 route version/resolved timestamp | 公共响应投影移除，内部 replay 继续保留 | 已修复/contract |
 
 ## 编译 / 验证结果
 
-`python -m compileall -q app.py features scripts` 与 `git diff --check` 通过；store 128/128、合并生产并行变更后全量 X 889 项通过、2 项环境跳过。未解析 route 无 publish log，只有 resolved relay 有 ledger，resolved 路线/relay/媒体由应用与 DB 双围栏冻结，新 pending 不使用 141；生产已有 task source 筛选/展示完整保留。全部平台写操作均为 mock，未创建真实 Post/Repost。
+`python -m compileall -q app.py features scripts` 与 `git diff --check` 通过；store 128/128、最终全量 X 890 项通过、2 项环境跳过。未解析 route 无 publish log，只有 resolved relay 有 ledger，resolved 路线/relay/媒体由应用与 DB 双围栏冻结，新 pending 不使用 141；生产已有 task source 筛选/展示完整保留。全部平台写操作均为 mock，未创建真实 Post/Repost。

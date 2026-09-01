@@ -4465,6 +4465,15 @@ def _overlay_drama_delivery_route(item):
     return item
 
 
+def _public_drama_delivery_route(item):
+    """Overlay the operator-facing route while hiding internal route metadata."""
+    item = _overlay_drama_delivery_route(item)
+    if item is not None:
+        item.pop("route_version", None)
+        item.pop("resolved_at", None)
+    return item
+
+
 def _normalize_drama_duration_media_evidence(payload):
     if not isinstance(payload, dict):
         raise XPostError(
@@ -8407,7 +8416,7 @@ class XPostStore:
                 item["error_message"],
                 500,
             )
-            items.append(_overlay_drama_delivery_route(item))
+            items.append(_public_drama_delivery_route(item))
         return {
             "items": items,
             "pagination": {
@@ -15419,7 +15428,7 @@ class XPostStore:
             item = _row_dict(row)
             item["unknown_outcome"] = bool(item["unknown_outcome"])
             item["error_message"] = redact_text(item["error_message"], 500)
-            items.append(_overlay_drama_delivery_route(item))
+            items.append(_public_drama_delivery_route(item))
         return {
             "items": items,
             "pagination": {
