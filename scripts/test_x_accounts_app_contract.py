@@ -712,8 +712,8 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         parse = namespace["x_post_admin_query_params"]
         self.assertEqual(
-            parse("page=2&page_size=500&run_date=2026-07-23&material_id=5221348"),
-            {"page": 2, "page_size": 100, "run_date": "2026-07-23", "material_id": "5221348"},
+            parse("page=2&page_size=500&run_date=2026-07-23&material_id=5221348&task_source=auto_publish"),
+            {"page": 2, "page_size": 100, "run_date": "2026-07-23", "material_id": "5221348", "task_source": "auto_publish"},
         )
         with self.assertRaises(ValueError):
             parse("access_token=secret")
@@ -721,6 +721,8 @@ class XAccountsAppContractTest(unittest.TestCase):
             parse("run_date=23-07-2026")
         with self.assertRaises(ValueError):
             parse("account_id=1%20OR%201=1")
+        with self.assertRaises(ValueError):
+            parse("task_source=other")
 
         pool_function = next(
             node for node in tree.body
