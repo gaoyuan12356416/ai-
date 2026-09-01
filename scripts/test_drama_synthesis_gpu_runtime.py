@@ -404,7 +404,7 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn("ProtectHome=yes", unit)
         self.assertIn("DRAMA_GPU_MAX_CONCURRENCY=1", env)
         self.assertIn("DRAMA_GPU_COMPOSITOR_BACKEND=opencl_fused_v2", env)
-        self.assertIn("DRAMA_GPU_COMPOSITOR_LANES=4", env)
+        self.assertIn("DRAMA_GPU_COMPOSITOR_LANES=2", env)
         self.assertIn("DRAMA_GPU_FILTER_THREADS=2", env)
         self.assertIn("DRAMA_GPU_COMPOSITOR_CACHE_ROOT=/data/drama-synthesis-gpu/work/compositor-cache", env)
         self.assertIn("CPUQuota=800%", unit)

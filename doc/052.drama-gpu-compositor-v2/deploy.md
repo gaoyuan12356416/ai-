@@ -12,7 +12,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 - `DRAMA_GPU_OPENCL_DEVICE=0.0`
 - `DRAMA_GPU_RUNTIME_IDENTITY=<已核验的 FFmpeg/OpenCL/NVENC 运行时版本>`
 - `DRAMA_GPU_MAX_CONCURRENCY=1`（完整任务固定单并发）
-- `DRAMA_GPU_COMPOSITOR_LANES=4`（同一任务内部最多四分片）
+- `DRAMA_GPU_COMPOSITOR_LANES=2`（支持 1～4；T4 实测双分片最快）
 - `DRAMA_GPU_FILTER_THREADS=2`（每条 lane 显式限制解码/复杂滤镜线程）
 
 ## 数据库变更
@@ -26,7 +26,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 3. 分别备份 CPU drama 文件/单位/配置和 GPU current release/单位/配置；配置备份不进入 GitHub。
 4. 从 GitHub exact commit 构建 `/data/drama-synthesis-gpu/releases/<40位commit>` immutable release；preflight 和 benchmark 都必须解析到该目录。
 5. 切换 GPU `current`，重启 `drama-synthesis-gpu-worker.service`，保留 tunnel。
-6. 先在不切换服务的候选 release 上运行真实五输入 preflight、短样、受控中断/同缓存续跑和约 79.4 分钟长样；完整任务保持 1，并验证最多 4 条分片 lane 同属一个任务。
+6. 先在不切换服务的候选 release 上运行真实五输入 preflight、短样、受控中断/同缓存续跑和约 79.4 分钟长样；完整任务保持 1，并验证 1～4 条分片 lane，同机实测选择 2 条。
 7. CPU 同步 exact commit 的隔离文件并重启 API/worker，验证异步提交和轮询，不创建正式重试。
 
 ## 验证步骤
