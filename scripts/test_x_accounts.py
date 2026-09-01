@@ -2485,7 +2485,13 @@ class XAccountsTestCase(unittest.TestCase):
             )
             self.assertEqual(
                 client.query_x_post_logs(
-                    {"actor": self.admin, "scope": "all", "page": 1, "page_size": 10}
+                    {
+                        "actor": self.admin,
+                        "scope": "all",
+                        "page": 1,
+                        "page_size": 10,
+                        "task_source": "material_pool",
+                    }
                 )["pagination"]["total"],
                 3,
             )

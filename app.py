@@ -42193,7 +42193,7 @@ def x_post_admin_query_params(raw_query, *, runs=False):
     raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
     allowed = {"page", "page_size", "run_date", "source_date", "status"}
     if not runs:
-        allowed.update({"account_id", "material_id", "unknown_outcome"})
+        allowed.update({"account_id", "material_id", "unknown_outcome", "task_source"})
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError("unsupported query parameter: %s" % unknown[0])
@@ -42230,6 +42230,11 @@ def x_post_admin_query_params(raw_query, *, runs=False):
             if unknown_outcome not in ("0", "1", "true", "false"):
                 raise ValueError("unknown_outcome must be 0 or 1")
             result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
+        task_source = str((raw.get("task_source") or [""])[0] or "").strip().lower()
+        if task_source:
+            if task_source not in {"drama_pool", "material_pool", "auto_publish"}:
+                raise ValueError("invalid task_source")
+            result["task_source"] = task_source
     return result
 
 
