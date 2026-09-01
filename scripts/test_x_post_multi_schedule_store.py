@@ -176,6 +176,71 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         return item
 
+    def duration_pending_drama_candidate(
+        self, pool, account_id, episode_number=1
+    ):
+        item = self.drama_candidate(pool, account_id, episode_number)
+        item.update(
+            {
+                "account_drama_language": "en",
+                "delivery_mode": service.DURATION_PENDING_DELIVERY_MODE,
+                "media_validation_mode": service.MEDIA_VALIDATION_DEFERRED,
+                "preflight_sha256": "",
+                "preflight_size": 0,
+                "preflight_duration": 0,
+            }
+        )
+        return item
+
+    @staticmethod
+    def duration_media_evidence(candidate, duration, fingerprint=1):
+        return {
+            "material_url": candidate["material_url"],
+            "preflight_sha256": "%064x" % fingerprint,
+            "preflight_size": 4096 + fingerprint,
+            "preflight_duration": duration,
+            "preflight_width": 720,
+            "preflight_height": 1280,
+        }
+
+    @staticmethod
+    def duration_route_snapshot(queue):
+        fields = (
+            "delivery_mode",
+            "relay_account_id",
+            "relay_account_username",
+            "material_url",
+            "original_material_url",
+            "media_repair_trigger_code",
+            "media_repair_job_key",
+            "media_repair_profile",
+            "media_repair_source_sha256",
+            "media_validation_mode",
+            "preflight_sha256",
+            "preflight_size",
+            "preflight_duration",
+            "route_version",
+            "route_state",
+            "resolved_delivery_mode",
+            "preflight_width",
+            "preflight_height",
+            "resolved_at",
+        )
+        return {field: queue[field] for field in fields}
+
+    def claim_schedule_slot(self, run_date, publish_time):
+        current = datetime.fromisoformat(
+            "%sT%s:10" % (run_date, publish_time)
+        ).replace(tzinfo=service.BEIJING_TZ)
+        claimed = self.store.due_schedule_slots(current, grace_seconds=90)
+        self.assertIn(
+            (run_date, publish_time),
+            {
+                (item["run_date"], item["publish_time"])
+                for item in claimed["items"]
+            },
+        )
+
     def material_candidate(self, pool, account_id):
         item = base_candidate(
             account_id,
@@ -4629,6 +4694,14 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
 
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_drama_delivery_route "
+                    "WHERE queue_id=?",
+                    (relay_queue["id"],),
+                ).fetchone()[0],
+                0,
+            )
             conn.execute(
                 "UPDATE x_post_queue SET preflight_duration=141 "
                 "WHERE id=?",
@@ -6715,6 +6788,888 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+    def test_duration_pending_plan_uses_overlay_and_fences_log_creation(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="DURATION-PENDING", free_episode_count=2)
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [candidate]
+        )
+        queue = plan["queues"][0]
+
+        self.assertEqual(queue["delivery_mode"], "duration_pending")
+        self.assertEqual(queue["route_state"], "duration_pending")
+        self.assertEqual(queue["resolved_delivery_mode"], "")
+        self.assertEqual(queue["preflight_duration"], 0.0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            raw_queue = conn.execute(
+                "SELECT delivery_mode,status,media_validation_mode,"
+                "preflight_sha256,preflight_size,preflight_duration "
+                "FROM x_post_queue WHERE id=?",
+                (queue["id"],),
+            ).fetchone()
+            route = conn.execute(
+                "SELECT route_version,route_state,resolved_delivery_mode,"
+                "preflight_width,preflight_height,resolved_at "
+                "FROM x_post_drama_delivery_route WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()
+            log_count = conn.execute(
+                "SELECT COUNT(*) FROM x_post_publish_log WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()[0]
+            relay_count = conn.execute(
+                "SELECT COUNT(*) FROM x_post_repost_ledger WHERE queue_id=?",
+                (queue["id"],),
+            ).fetchone()[0]
+        self.assertEqual(raw_queue, ("direct", "queued", "deferred", "", 0, 0.0))
+        self.assertEqual(route, (1, "duration_pending", "", 0, 0, ""))
+        self.assertEqual((log_count, relay_count), (0, 0))
+
+        with self.assertRaises(service.XPostError) as blocked:
+            self.store.reserve_log(queue["id"])
+        self.assertEqual(blocked.exception.code, "x_post_drama_route_pending")
+
+        frozen = self.store.query_schedule_plan(
+            "drama", "2026-07-27", "09:00"
+        )["queues"][0]
+        self.assertEqual(frozen["delivery_mode"], "duration_pending")
+        self.assertEqual(frozen["route_state"], "duration_pending")
+        logs = self.store.query_logs({"source_type": "drama"})["items"]
+        self.assertEqual(logs[0]["delivery_mode"], "duration_pending")
+        self.assertEqual(logs[0]["route_state"], "duration_pending")
+        self.assertNotIn("preflight_sha256", logs[0])
+        self.assertNotIn("preflight_size", logs[0])
+        self.assertNotIn("media_validation_mode", logs[0])
+
+        episodes = self.store.query_drama_pool_episodes(pool["id"])["items"]
+        self.assertEqual(episodes[0]["delivery_mode"], "duration_pending")
+        self.assertEqual(episodes[0]["route_state"], "duration_pending")
+        self.assertEqual(episodes[0]["preflight_width"], 0)
+        self.assertEqual(episodes[1]["delivery_mode"], "")
+        self.assertEqual(episodes[1]["route_state"], "")
+        self.assertEqual(episodes[1]["preflight_duration"], 0.0)
+        self.assertEqual(episodes[1]["relay_account_id"], 0)
+
+    def test_duration_route_boundaries_entitlement_and_lifetime_relay_load(self):
+        self.save_schedule("drama", [2, 3, 4], ["09:00", "12:00"])
+        target_long_pool = self.add_drama(
+            content_id="TARGET-LONG", free_episode_count=1
+        )
+        boundary_140_pool = self.add_drama(
+            content_id="BOUNDARY-140", free_episode_count=1
+        )
+        boundary_139_pool = self.add_drama(
+            content_id="BOUNDARY-139", free_episode_count=1
+        )
+        boundary_candidates = [
+            self.duration_pending_drama_candidate(boundary_139_pool, 2),
+            self.duration_pending_drama_candidate(boundary_140_pool, 3),
+            self.duration_pending_drama_candidate(target_long_pool, 4),
+        ]
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        boundary_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, boundary_candidates
+        )
+        boundary_cases = (
+            (139.999, False),
+            (140.0, False),
+            (140.000001, True),
+        )
+        for index, (queue, candidate, case) in enumerate(
+            zip(
+                boundary_plan["queues"],
+                boundary_candidates,
+                boundary_cases,
+            ),
+            start=1,
+        ):
+            duration, target_eligible = case
+            resolved = self.store.resolve_drama_duration_route(
+                queue["id"],
+                self.duration_media_evidence(candidate, duration, index),
+                target_eligible,
+                [],
+            )
+            self.assertEqual(resolved["route_state"], "resolved")
+            self.assertEqual(resolved["delivery_mode"], "direct")
+            self.assertEqual(resolved["resolved_delivery_mode"], "direct")
+            self.assertEqual(resolved["relay_account_id"], 0)
+            self.assertEqual(resolved["preflight_duration"], duration)
+            self.assertEqual(resolved["preflight_width"], 720)
+            self.assertEqual(resolved["preflight_height"], 1280)
+            self.assertTrue(resolved["resolved_at"])
+            self.publish_queue(resolved, 1, "boundary-%s" % index)
+
+        self.add_drama(content_id="RELAY-FILLER")
+        self.add_drama(content_id="RELAY-LEAST-LOAD")
+        self.add_drama(content_id="RELAY-FIRST")
+        relay_assignments = self.store.available_drama_pool_items(
+            limit=3,
+            account_ids=[2, 3, 4],
+            configured_account_ids=[2, 3, 4],
+        )
+        relay_candidates = [
+            self.duration_pending_drama_candidate(
+                pool,
+                pool["candidate_account_id"],
+            )
+            for pool in relay_assignments
+        ]
+        self.claim_schedule_slot("2026-07-27", "12:00")
+        relay_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "12:00", 2, relay_candidates
+        )
+        relays = [
+            {"id": 11, "username": "Relay11", "drama_language": "en"},
+            {"id": 10, "username": "Relay10", "drama_language": "en"},
+        ]
+        first_relay = self.store.resolve_drama_duration_route(
+            relay_plan["queues"][0]["id"],
+            self.duration_media_evidence(relay_candidates[0], 140.000001, 10),
+            False,
+            relays,
+        )
+        second_relay = self.store.resolve_drama_duration_route(
+            relay_plan["queues"][1]["id"],
+            self.duration_media_evidence(relay_candidates[1], 141.0, 11),
+            False,
+            relays,
+        )
+        self.assertEqual(first_relay["relay_account_id"], 10)
+        self.assertEqual(second_relay["relay_account_id"], 11)
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            relay_ids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT relay_account_id FROM x_post_repost_ledger "
+                    "ORDER BY id"
+                ).fetchall()
+            ]
+        self.assertEqual(relay_ids, [10, 11])
+
+    def test_duration_route_waits_then_resolves_once_and_freezes_media(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="WAIT-RELAY")
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [candidate]
+        )
+        queue_id = plan["queues"][0]["id"]
+        evidence = self.duration_media_evidence(candidate, 141.0, 77)
+
+        waiting = self.store.resolve_drama_duration_route(
+            queue_id,
+            evidence,
+            False,
+            [{"id": 3, "username": "Relay3", "drama_language": "ja"}],
+        )
+        self.assertEqual(waiting["status"], "waiting_relay")
+        self.assertEqual(waiting["delivery_mode"], "duration_pending")
+        self.assertEqual(waiting["route_state"], "waiting_relay")
+        self.assertEqual(waiting["preflight_duration"], 141.0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log WHERE queue_id=?",
+                    (queue_id,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_repost_ledger WHERE queue_id=?",
+                    (queue_id,),
+                ).fetchone()[0],
+                0,
+            )
+        with self.assertRaises(service.XPostError) as blocked:
+            self.store.reserve_log(queue_id)
+        self.assertEqual(blocked.exception.code, "x_post_drama_route_pending")
+        waiting_log = self.store.query_logs({"status": "waiting_relay"})[
+            "items"
+        ][0]
+        self.assertEqual(waiting_log["route_state"], "waiting_relay")
+
+        # The database, not just the resolver, is authoritative for the final
+        # media frozen by the first pending -> waiting transition.
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            for assignment, values in (
+                ("material_url=?", ("https://media.example.test/tampered.mp4",)),
+                ("preflight_sha256=?", ("f" * 64,)),
+                ("preflight_size=?", (999999,)),
+                ("preflight_duration=?", (142.0,)),
+                ("media_repair_profile=?", ("tampered",)),
+            ):
+                with self.subTest(waiting_media_assignment=assignment):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute(
+                            "UPDATE x_post_queue SET %s WHERE id=?" % assignment,
+                            tuple(values) + (queue_id,),
+                        )
+                    conn.rollback()
+
+            # A waiting -> resolved transition may change status/route, but it
+            # may not substitute different frozen dimensions.
+            conn.execute(
+                "UPDATE x_post_queue SET status='queued' WHERE id=?",
+                (queue_id,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_drama_delivery_route SET "
+                    "route_state='resolved',resolved_delivery_mode='direct',"
+                    "preflight_width=preflight_width+1,"
+                    "resolved_at='2026-07-27T02:00:00Z',"
+                    "updated_at='2026-07-27T02:00:00Z' WHERE queue_id=?",
+                    (queue_id,),
+                )
+            conn.rollback()
+
+        resolved = self.store.resolve_drama_duration_route(
+            queue_id,
+            None,
+            False,
+            [{"id": 4, "username": "Relay4", "drama_language": "en"}],
+        )
+        self.assertEqual(resolved["delivery_mode"], "premium_relay_repost")
+        self.assertEqual(resolved["relay_account_id"], 4)
+        self.assertEqual(resolved["repost_status"], "reserved")
+        replayed_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [candidate]
+        )
+        self.assertFalse(replayed_plan["created"])
+        self.assertEqual(
+            replayed_plan["queues"][0]["delivery_mode"],
+            "premium_relay_repost",
+        )
+        self.assertEqual(replayed_plan["queues"][0]["relay_account_id"], 4)
+        same_route = self.store.resolve_drama_duration_route(
+            queue_id,
+            self.duration_media_evidence(candidate, 139.0, 88),
+            True,
+            [{"id": 3, "username": "Relay3", "drama_language": "en"}],
+        )
+        self.assertEqual(same_route["delivery_mode"], "premium_relay_repost")
+        self.assertEqual(same_route["relay_account_id"], 4)
+        self.assertEqual(same_route["preflight_sha256"], evidence["preflight_sha256"])
+        with self.assertRaises(service.XPostError) as reassigned:
+            self.store.reassign_premium_relay(
+                queue_id,
+                [{"id": 3, "username": "Relay3", "drama_language": "en"}],
+            )
+        self.assertEqual(
+            reassigned.exception.code, "x_post_relay_reassignment_fenced"
+        )
+
+        self.save_schedule("material", [2], ["10:00"])
+        alternate_pool = self.store.add_pool_materials(
+            ["998"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": "998", "error_code": ""}],
+        )["items"][0]
+        alternate = self.material_candidate(alternate_pool, 2)
+        alternate.update(
+            {
+                "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+                "relay_account_id": 4,
+                "relay_account_username": "Relay4",
+                "preflight_duration": 141.0,
+            }
+        )
+        self.claim_schedule_slot("2026-07-27", "10:00")
+        alternate_queue = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "10:00",
+            2,
+            [alternate],
+            premium_account_ids=[],
+            premium_relay_accounts=[
+                {"id": 4, "username": "Relay4", "drama_language": "en"}
+            ],
+        )["queues"][0]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            # Legacy relay ledgers remain subject to their historical cleanup
+            # contract; remove this one solely to provide another queue that
+            # the generic binding trigger would accept as a move target.
+            conn.execute(
+                "DELETE FROM x_post_repost_ledger WHERE queue_id=?",
+                (alternate_queue["id"],),
+            )
+            conn.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "DELETE FROM x_post_repost_ledger WHERE queue_id=?",
+                    (queue_id,),
+                )
+            conn.rollback()
+            # The generic binding trigger considers this alternate queue a
+            # valid target. The duration-route fence must still prohibit
+            # moving the already frozen relay ledger identity to it.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_repost_ledger SET queue_id=? "
+                    "WHERE queue_id=?",
+                    (alternate_queue["id"], queue_id),
+                )
+            conn.rollback()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_queue SET preflight_duration=142 WHERE id=?",
+                    (queue_id,),
+                )
+            conn.rollback()
+        self.assertTrue(self.store.reserve_log(queue_id)["created"])
+
+    def test_waiting_relay_resolves_direct_after_target_entitlement_change(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="TARGET-BECOMES-ELIGIBLE")
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [candidate]
+        )
+        queue_id = plan["queues"][0]["id"]
+        waiting = self.store.resolve_drama_duration_route(
+            queue_id,
+            self.duration_media_evidence(candidate, 141.0, 89),
+            False,
+            [],
+        )
+        self.assertEqual(waiting["route_state"], "waiting_relay")
+
+        resolved = self.store.resolve_drama_duration_route(
+            queue_id,
+            None,
+            True,
+            [],
+        )
+        self.assertEqual(resolved["route_state"], "resolved")
+        self.assertEqual(resolved["delivery_mode"], "direct")
+        self.assertEqual(resolved["resolved_delivery_mode"], "direct")
+        self.assertEqual(resolved["relay_account_id"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_repost_ledger WHERE queue_id=?",
+                    (queue_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_previous_day_duration_pending_run_remains_naturally_due(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="PENDING-NEXT-DAY")
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-26", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-26", "09:00", 2, [candidate]
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='running',"
+                "updated_at='2026-07-26T01:00:00Z',"
+                "lease_heartbeat_at='2026-07-26T01:00:00Z' WHERE id=?",
+                (plan["id"],),
+            )
+            conn.commit()
+
+        due = self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertIn(
+            ("drama", "2026-07-26", "09:00"),
+            {
+                (item["source_type"], item["run_date"], item["publish_time"])
+                for item in due["items"]
+            },
+        )
+        self.assertEqual(self.store.get_schedule_run(plan["id"])["status"], "running")
+        self.assertNotEqual(
+            self.store.query_drama_pool(
+                {"drama_id": pool["content_id"]}
+            )["items"][0]["status"],
+            "needs_review",
+        )
+
+    def test_previous_day_resolved_direct_without_log_resumes_after_restart(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="RESOLVED-DIRECT-NEXT-DAY")
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-26", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-26", "09:00", 2, [candidate]
+        )
+        resolved = self.store.resolve_drama_duration_route(
+            plan["queues"][0]["id"],
+            self.duration_media_evidence(candidate, 140.0, 301),
+            False,
+            [],
+        )
+        self.assertEqual(resolved["resolved_delivery_mode"], "direct")
+        frozen_route = self.duration_route_snapshot(resolved)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log WHERE queue_id=?",
+                    (resolved["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_repost_ledger WHERE queue_id=?",
+                    (resolved["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='running',"
+                "updated_at='2026-07-26T01:00:00Z',"
+                "lease_heartbeat_at='2026-07-26T01:00:00Z' WHERE id=?",
+                (plan["id"],),
+            )
+            conn.commit()
+
+        restarted = service.XPostStore(self.db_path)
+        due = restarted.due_schedule_slots(
+            datetime(2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertIn(
+            ("drama", "2026-07-26", "09:00"),
+            {
+                (item["source_type"], item["run_date"], item["publish_time"])
+                for item in due["items"]
+            },
+        )
+        self.assertEqual(
+            self.duration_route_snapshot(restarted.get_queue(resolved["id"])),
+            frozen_route,
+        )
+        log = restarted.reserve_log(resolved["id"])
+        self.assertTrue(log["created"])
+        self.assertEqual(log["status"], "reserved")
+        self.assertEqual(log["attempt_count"], 0)
+        self.assertEqual(
+            self.duration_route_snapshot(restarted.get_queue(resolved["id"])),
+            frozen_route,
+        )
+        self.assertEqual(
+            restarted.get_schedule_run(plan["id"])["status"],
+            "running",
+        )
+
+    def test_previous_day_resolved_relay_reserved_log_resumes_after_restart(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="RESOLVED-RELAY-NEXT-DAY")
+        candidate = self.duration_pending_drama_candidate(pool, 2)
+        self.claim_schedule_slot("2026-07-26", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-26", "09:00", 2, [candidate]
+        )
+        resolved = self.store.resolve_drama_duration_route(
+            plan["queues"][0]["id"],
+            self.duration_media_evidence(candidate, 141.0, 302),
+            False,
+            [{"id": 3, "username": "Relay3", "drama_language": "en"}],
+        )
+        self.assertEqual(
+            resolved["resolved_delivery_mode"],
+            "premium_relay_repost",
+        )
+        frozen_route = self.duration_route_snapshot(resolved)
+        frozen_ledger = self.store.get_repost_ledger(resolved["id"])
+        self.assertEqual(frozen_ledger["status"], "reserved")
+        self.assertEqual(frozen_ledger["source_attempt_count"], 0)
+        self.assertEqual(frozen_ledger["repost_attempt_count"], 0)
+        self.assertFalse(frozen_ledger["unknown_outcome"])
+        reserved_log = self.store.reserve_log(resolved["id"])
+        self.assertTrue(reserved_log["created"])
+        self.assertEqual(reserved_log["status"], "reserved")
+        self.assertEqual(reserved_log["attempt_count"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='running',"
+                "updated_at='2026-07-26T01:00:00Z',"
+                "lease_heartbeat_at='2026-07-26T01:00:00Z' WHERE id=?",
+                (plan["id"],),
+            )
+            conn.commit()
+
+        restarted = service.XPostStore(self.db_path)
+        due = restarted.due_schedule_slots(
+            datetime(2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertIn(
+            ("drama", "2026-07-26", "09:00"),
+            {
+                (item["source_type"], item["run_date"], item["publish_time"])
+                for item in due["items"]
+            },
+        )
+        self.assertEqual(
+            self.duration_route_snapshot(restarted.get_queue(resolved["id"])),
+            frozen_route,
+        )
+        self.assertEqual(
+            restarted.get_repost_ledger(resolved["id"]),
+            frozen_ledger,
+        )
+        log = restarted.reserve_log(resolved["id"])
+        self.assertFalse(log["created"])
+        self.assertEqual(log["id"], reserved_log["id"])
+        self.assertEqual(log["status"], "reserved")
+        self.assertEqual(log["attempt_count"], 0)
+        self.assertEqual(
+            self.duration_route_snapshot(restarted.get_queue(resolved["id"])),
+            frozen_route,
+        )
+        self.assertEqual(
+            restarted.get_repost_ledger(resolved["id"]),
+            frozen_ledger,
+        )
+        self.assertEqual(
+            restarted.get_schedule_run(plan["id"])["status"],
+            "running",
+        )
+
+    def test_previous_day_waiting_relay_with_published_sibling_remains_due(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        published_pool = self.add_drama(content_id="PUBLISHED-SIBLING")
+        waiting_pool = self.add_drama(content_id="WAITING-SIBLING")
+        published_candidate = self.duration_pending_drama_candidate(
+            published_pool, 2
+        )
+        waiting_candidate = self.duration_pending_drama_candidate(waiting_pool, 3)
+        self.claim_schedule_slot("2026-07-26", "09:00")
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-26",
+            "09:00",
+            2,
+            [published_candidate, waiting_candidate],
+        )
+        published_queue, waiting_queue = plan["queues"]
+        self.store.resolve_drama_duration_route(
+            published_queue["id"],
+            self.duration_media_evidence(published_candidate, 120.0, 91),
+            False,
+            [],
+        )
+        published_log = self.store.reserve_log(published_queue["id"])
+        self.store.resolve_drama_duration_route(
+            waiting_queue["id"],
+            self.duration_media_evidence(waiting_candidate, 141.0, 92),
+            False,
+            [],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='published',"
+                "x_post_id='published-sibling',"
+                "published_at='2026-07-26T02:00:00Z' WHERE id=?",
+                (published_log["id"],),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET status='published' WHERE id=?",
+                (published_queue["id"],),
+            )
+            conn.execute(
+                "UPDATE x_post_schedule_run SET status='running',"
+                "published_count=1,updated_at='2026-07-26T01:00:00Z',"
+                "lease_heartbeat_at='2026-07-26T01:00:00Z' WHERE id=?",
+                (plan["id"],),
+            )
+            conn.commit()
+
+        due = self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertIn(
+            ("drama", "2026-07-26", "09:00"),
+            {
+                (item["source_type"], item["run_date"], item["publish_time"])
+                for item in due["items"]
+            },
+        )
+        self.assertEqual(
+            self.store.get_queue(published_queue["id"])["status"], "published"
+        )
+        self.assertEqual(
+            self.store.get_queue(waiting_queue["id"])["status"], "waiting_relay"
+        )
+        self.assertNotEqual(
+            self.store.query_drama_pool(
+                {"drama_id": waiting_pool["content_id"]}
+            )["items"][0]["status"],
+            "needs_review",
+        )
+
+    def test_waiting_bound_drama_does_not_poison_next_healthy_slot(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        waiting_pool = self.add_drama(content_id="WAITING-BOUND")
+        waiting_candidate = self.duration_pending_drama_candidate(
+            waiting_pool, 2
+        )
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        waiting_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [waiting_candidate]
+        )
+        waiting_queue = self.store.resolve_drama_duration_route(
+            waiting_plan["queues"][0]["id"],
+            self.duration_media_evidence(waiting_candidate, 141.0, 201),
+            False,
+            [],
+        )
+        self.assertEqual(waiting_queue["status"], "waiting_relay")
+
+        healthy_pool = self.add_drama(content_id="HEALTHY-NEXT")
+        self.claim_schedule_slot("2026-07-27", "10:00")
+        assignments = self.store.available_drama_pool_items(
+            limit=10,
+            account_ids=[2, 3],
+            configured_account_ids=[2, 3],
+        )
+        self.assertEqual(
+            [
+                (item["content_id"], item["candidate_account_id"])
+                for item in assignments
+            ],
+            [(healthy_pool["content_id"], 3)],
+        )
+        healthy_candidate = self.duration_pending_drama_candidate(
+            assignments[0], 3
+        )
+        healthy_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "10:00", 2, [healthy_candidate]
+        )
+        self.assertEqual(len(healthy_plan["queues"]), 1)
+        self.assertEqual(healthy_plan["queues"][0]["account_id"], 3)
+        self.assertEqual(
+            self.store.get_queue(waiting_queue["id"])["status"],
+            "waiting_relay",
+        )
+        waiting_state = self.store.query_drama_pool(
+            {"drama_id": waiting_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(waiting_state["next_sub_number"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue "
+                    "WHERE episode_key=?",
+                    (waiting_queue["episode_key"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_resolved_direct_pre_attempt_does_not_poison_next_healthy_slot(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        held_pool = self.add_drama(content_id="RESOLVED-DIRECT-HELD")
+        held_candidate = self.duration_pending_drama_candidate(held_pool, 2)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        held_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [held_candidate]
+        )
+        held_queue = self.store.resolve_drama_duration_route(
+            held_plan["queues"][0]["id"],
+            self.duration_media_evidence(held_candidate, 120.0, 401),
+            False,
+            [],
+        )
+        frozen_route = self.duration_route_snapshot(held_queue)
+
+        healthy_pool = self.add_drama(content_id="HEALTHY-AFTER-DIRECT")
+        self.claim_schedule_slot("2026-07-27", "10:00")
+        assignments = self.store.available_drama_pool_items(
+            limit=10,
+            account_ids=[2, 3],
+            configured_account_ids=[2, 3],
+        )
+        self.assertEqual(
+            [
+                (item["content_id"], item["candidate_account_id"])
+                for item in assignments
+            ],
+            [(healthy_pool["content_id"], 3)],
+        )
+        healthy_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.duration_pending_drama_candidate(assignments[0], 3)],
+        )
+        self.assertEqual(healthy_plan["queues"][0]["account_id"], 3)
+        self.assertEqual(
+            self.duration_route_snapshot(self.store.get_queue(held_queue["id"])),
+            frozen_route,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log WHERE queue_id=?",
+                    (held_queue["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE episode_key=?",
+                    (held_queue["episode_key"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_resolved_relay_reserved_log_does_not_poison_next_healthy_slot(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        held_pool = self.add_drama(content_id="RESOLVED-RELAY-HELD")
+        held_candidate = self.duration_pending_drama_candidate(held_pool, 2)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        held_plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [held_candidate]
+        )
+        held_queue = self.store.resolve_drama_duration_route(
+            held_plan["queues"][0]["id"],
+            self.duration_media_evidence(held_candidate, 141.0, 402),
+            False,
+            [{"id": 4, "username": "Relay4", "drama_language": "en"}],
+        )
+        frozen_route = self.duration_route_snapshot(held_queue)
+        frozen_ledger = self.store.get_repost_ledger(held_queue["id"])
+        reserved_log = self.store.reserve_log(held_queue["id"])
+        self.assertTrue(reserved_log["created"])
+        self.assertEqual(reserved_log["attempt_count"], 0)
+
+        healthy_pool = self.add_drama(content_id="HEALTHY-AFTER-RELAY")
+        self.claim_schedule_slot("2026-07-27", "10:00")
+        assignments = self.store.available_drama_pool_items(
+            limit=10,
+            account_ids=[2, 3],
+            configured_account_ids=[2, 3],
+        )
+        self.assertEqual(
+            [
+                (item["content_id"], item["candidate_account_id"])
+                for item in assignments
+            ],
+            [(healthy_pool["content_id"], 3)],
+        )
+        healthy_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.duration_pending_drama_candidate(assignments[0], 3)],
+        )
+        self.assertEqual(healthy_plan["queues"][0]["account_id"], 3)
+        self.assertEqual(
+            self.duration_route_snapshot(self.store.get_queue(held_queue["id"])),
+            frozen_route,
+        )
+        self.assertEqual(
+            self.store.get_repost_ledger(held_queue["id"]),
+            frozen_ledger,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE episode_key=?",
+                    (held_queue["episode_key"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_previous_day_pending_runs_rotate_fairly_across_due_limit(self):
+        account_ids = list(range(20, 26))
+        publish_times = ["09:0%s" % index for index in range(6)]
+        config = self.store.save_schedule_config(
+            "drama",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": account_ids,
+                "publish_times": publish_times,
+                "version": 1,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=account_ids,
+            now=datetime(
+                2026, 7, 25, 8, 0, tzinfo=service.BEIJING_TZ
+            ),
+        )
+        run_ids = []
+        for index, (account_id, publish_time) in enumerate(
+            zip(account_ids, publish_times)
+        ):
+            language = "en"
+            pool = self.add_drama(content_id="ROTATE-%s" % index)
+            candidate = self.duration_pending_drama_candidate(
+                pool, account_id
+            )
+            candidate["material_language"] = language
+            candidate["account_drama_language"] = language
+            self.claim_schedule_slot("2026-07-26", publish_time)
+            plan = self.store.create_schedule_plan(
+                "drama",
+                "2026-07-26",
+                publish_time,
+                config["version"],
+                [candidate],
+            )
+            run_ids.append(int(plan["id"]))
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            for index, run_id in enumerate(run_ids):
+                cursor = "2026-07-26T00:00:%02dZ" % index
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET status='queued',"
+                    "updated_at=?,lease_heartbeat_at=? WHERE id=?",
+                    (cursor, cursor, run_id),
+                )
+            conn.commit()
+
+        retry_now = datetime(
+            2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ
+        )
+        first = self.store.due_schedule_slots(retry_now, limit=2)["items"]
+        second = self.store.due_schedule_slots(retry_now, limit=2)["items"]
+        third = self.store.due_schedule_slots(retry_now, limit=2)["items"]
+        returned = [
+            (item["run_date"], item["publish_time"])
+            for batch in (first, second, third)
+            for item in batch
+        ]
+        self.assertEqual(
+            returned,
+            [("2026-07-26", value) for value in publish_times],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_repost_ledger"
+                ).fetchone()[0],
+                0,
+            )
+            states = conn.execute(
+                "SELECT status FROM x_post_schedule_run WHERE id IN "
+                "(%s) ORDER BY id"
+                % ",".join("?" for _run_id in run_ids),
+                tuple(run_ids),
+            ).fetchall()
+        self.assertEqual(states, [("queued",)] * len(run_ids))
+
     def test_schema_is_additive_and_integrity_check_passes(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             tables = {
@@ -6757,6 +7712,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
             self.assertIn("x_post_schedule_random_plan", tables)
             self.assertIn("x_post_drama_pool", tables)
+            self.assertIn("x_post_drama_delivery_route", tables)
             drama_columns = {
                 row[1]
                 for row in conn.execute(
@@ -6798,6 +7754,11 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     "trg_x_post_drama_pool_assignment_immutable",
                     "trg_x_post_drama_pool_assignment_evidence",
                     "trg_x_post_drama_pool_assignment_insert_evidence",
+                    "trg_x_post_drama_delivery_route_insert",
+                    "trg_x_post_drama_delivery_route_update",
+                    "trg_x_post_drama_delivery_route_delete",
+                    "trg_x_post_queue_drama_delivery_route_update",
+                    "trg_x_post_publish_log_drama_delivery_route_insert",
                 }.issubset(triggers)
             )
             self.assertEqual(

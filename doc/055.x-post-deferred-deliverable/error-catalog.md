@@ -273,6 +273,10 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 | `x_post_account_needs_review` | 该账号有未完成或结果待核对的发布；也可能是冻结转发源被占用 | 新批次跳过该账号；原未知记录不变，不可通过清状态或重发确认 |
 | `x_post_account_locked` | X 明确返回账号临时锁定 | 新批次跳过该账号；先登录 X 解锁并人工核对。资料接口成功不代表解除发布锁定 |
 | `x_post_schedule_account_state_changed` | 素材容量预检后账号可用范围发生变化 | 本次建计划为已知拒绝、零队列；不得用过期容量证据继续建计划 |
+| `x_post_drama_route_pending` | 新短剧队列的最终成片路线尚未解析 | 在 publish log、Token 凭据和 X 写入前阻断；等待自然重试 |
+| `x_post_drama_route_not_pending` / `x_post_drama_route_resolution_fenced` | 队列不属于可解析路线，或已经带有执行/媒体证据 | 重新读取冻结路线；不得改路、重选 relay 或绕过账本 |
+| `x_post_drama_duration_routing_disabled` | 兼容部署或回滚期间最终时长路由开关关闭 | 原地停放 pending/waiting，零 X 写入；不得用旧 141 路径接管 |
+| `x_post_schedule_invalid_configuration` | 排期功能开关或其他安全配置值无效 | 失败关闭；修正 Sidecar/scheduler 一致配置后再自然运行 |
 | `x_post_media_repair_config_invalid` | 短剧逐条修复配置缺失、不安全或不符合现行协议 | 尚未尝试发帖；修正服务配置，不能放宽媒体校验 |
 | `x_post_media_preparation_failed` | 短剧上传前的媒体准备出现未分类异常 | 保留原队列并记零次发帖尝试；排查后按精确恢复流程处理 |
 | `x_post_bound_drama_source_changed` | 历史短剧恢复时权威素材 ID 或 URL 与原冻结队列不一致 | 阻断恢复，不修复替代源、不改绑定，不自动重发 |

@@ -79,6 +79,36 @@ def make_config(work_dir):
 
 
 class ScheduleConfigTest(unittest.TestCase):
+    def test_drama_duration_routing_feature_flag_defaults_off_and_is_strict(self):
+        base_env = {
+            "X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS": "media.example.test",
+        }
+        with mock.patch.dict("os.environ", base_env, clear=True):
+            self.assertFalse(
+                ScheduleConfig.from_env().drama_duration_routing_enabled
+            )
+        for enabled_value in ("1", "true", "YES", "on"):
+            with self.subTest(enabled_value=enabled_value), mock.patch.dict(
+                "os.environ",
+                {
+                    **base_env,
+                    "X_POST_DRAMA_DURATION_ROUTING_ENABLED": enabled_value,
+                },
+                clear=True,
+            ):
+                self.assertTrue(
+                    ScheduleConfig.from_env().drama_duration_routing_enabled
+                )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                **base_env,
+                "X_POST_DRAMA_DURATION_ROUTING_ENABLED": "sometimes",
+            },
+            clear=True,
+        ), self.assertRaises(ScheduleRunError):
+            ScheduleConfig.from_env()
+
     def test_schedule_repair_budget_overrides_legacy_daily_budget(self):
         with mock.patch.dict(
             "os.environ",
@@ -170,6 +200,7 @@ class FakeSidecar:
         self.existing = {}
         self.calls = []
         self.publish_errors = {}
+        self.publish_results = {}
         self.created_queues = None
         self.create_error = None
         self.next_queue_id = 101
@@ -241,6 +272,8 @@ class FakeSidecar:
         self.calls.append(("publish", queue_id))
         if queue_id in self.publish_errors:
             raise self.publish_errors[queue_id]
+        if queue_id in self.publish_results:
+            return dict(self.publish_results[queue_id])
         return {
             "status": "published",
             "log_id": 1000 + queue_id,
@@ -1679,6 +1712,147 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(sidecar.checks, [])
 
+    def test_enabled_duration_routing_freezes_all_drama_targets_without_relay_or_media(self):
+        class Connection:
+            def close(self):
+                return None
+
+        class DramaSidecar:
+            def __init__(self):
+                self.checks = []
+                self.premium_relay_accounts = mock.Mock(
+                    side_effect=AssertionError("relay discovery called")
+                )
+
+            def available_drama_pool(self, _path, _limit, _account_ids):
+                return [
+                    {
+                        "id": 138,
+                        "content_id": "UNKNOWN-DURATION-STANDARD",
+                        "created_at": "2026-08-11T01:00:00+00:00",
+                        "next_sub_number": 1,
+                        "assigned_account_id": 0,
+                        "candidate_account_id": 10,
+                    },
+                    {
+                        "id": 137,
+                        "content_id": "UNKNOWN-DURATION-PREMIUM",
+                        "created_at": "2026-08-11T00:00:00+00:00",
+                        "next_sub_number": 2,
+                        "assigned_account_id": 9,
+                        "candidate_account_id": 9,
+                    },
+                ]
+
+            def record_drama_pool_checks(self, _path, checks):
+                self.checks.extend(checks)
+                return {"updated_count": len(checks)}
+
+        def selected(_connection, pool_items, **_kwargs):
+            return [
+                {
+                    "drama_pool_item_id": item["id"],
+                    "drama_pool_created_at": item["created_at"],
+                    "episode_number": item["next_sub_number"],
+                    "sub_num": item["next_sub_number"],
+                    "episode_key": "%s:%s"
+                    % (item["content_id"], item["next_sub_number"]),
+                    "material_key": "",
+                    "material_id": str(item["id"]),
+                    "content_id": item["content_id"],
+                    "material_url": "https://media.example.test/%s.mp4"
+                    % item["id"],
+                    "material_name": "Episode",
+                    "material_language": "en",
+                    "drama_name": "Drama",
+                    "tag": "Drama",
+                    "name_tag": "#Drama",
+                    "description": "A complete episode description.",
+                    "free_episode_count": 20,
+                    "assigned_account_id": item["assigned_account_id"],
+                    "candidate_account_id": item["candidate_account_id"],
+                    "spend": 0,
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                }
+                for item in pool_items
+            ]
+
+        accounts = [
+            {
+                "id": 10,
+                "username": "standard",
+                "x_user_id": "x10",
+                "display_name": "Standard",
+                "drama_language": "en",
+                "long_video_eligible": False,
+            },
+            {
+                "id": 9,
+                "username": "premium",
+                "x_user_id": "x9",
+                "display_name": "Premium",
+                "drama_language": "en",
+                "long_video_eligible": True,
+            },
+        ]
+        config = ScheduleConfig(
+            **{
+                **self.config.__dict__,
+                "drama_duration_routing_enabled": True,
+            }
+        )
+        sidecar = DramaSidecar()
+        downloader = mock.Mock(side_effect=AssertionError("download called"))
+        prober = mock.Mock(side_effect=AssertionError("probe called"))
+        repair_client = mock.Mock(side_effect=AssertionError("repair called"))
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_drama_pool_episodes",
+            side_effect=selected,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=AssertionError("media preflight called"),
+        ) as preflight:
+            planned = _drama_candidates(
+                config,
+                sidecar,
+                accounts,
+                source_date="2026-08-11",
+                connection_factory=lambda _config: Connection(),
+                downloader=downloader,
+                prober=prober,
+                repair_client=repair_client,
+                timestamp=1,
+            )
+
+        self.assertEqual(
+            [(item["account_id"], item["content_id"]) for item in planned],
+            [
+                (10, "UNKNOWN-DURATION-STANDARD"),
+                (9, "UNKNOWN-DURATION-PREMIUM"),
+            ],
+        )
+        for item in planned:
+            self.assertEqual(item["delivery_mode"], "duration_pending")
+            self.assertEqual(item["media_validation_mode"], "deferred")
+            self.assertEqual(item["preflight_duration"], 0.0)
+            self.assertEqual(item["preflight_sha256"], "")
+            self.assertEqual(item["preflight_size"], 0)
+            self.assertEqual(item["preflight_width"], 0)
+            self.assertEqual(item["preflight_height"], 0)
+            self.assertEqual(item["relay_account_id"], 0)
+            self.assertEqual(item["relay_account_username"], "")
+            self.assertEqual(item["account_drama_language"], "en")
+        sidecar.premium_relay_accounts.assert_not_called()
+        preflight.assert_not_called()
+        downloader.assert_not_called()
+        prober.assert_not_called()
+        repair_client.assert_not_called()
+        self.assertEqual(sidecar.checks, [])
+
     def test_owned_premium_account_can_relay_for_another_target(self):
         class Connection:
             def close(self):
@@ -1858,6 +2032,198 @@ class ScheduleRunnerTests(unittest.TestCase):
             preflight_calls,
             [],
         )
+
+    def test_schedule_sidecar_normalizes_pending_and_waiting_drama_queues(self):
+        identity = due_item(source_type="drama", accounts=[11, 12])
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "found": True,
+                        "run": frozen_run("drama", 2),
+                        "queues": [
+                            {
+                                **queue(301, 11, 1),
+                                "delivery_mode": "duration_pending",
+                                "preflight_duration": 0.0,
+                            },
+                            {
+                                **queue(
+                                    302,
+                                    12,
+                                    2,
+                                    status="waiting_relay",
+                                ),
+                                "delivery_mode": "duration_pending",
+                                "preflight_duration": 140.000001,
+                            },
+                        ],
+                    }
+                }
+            ]
+        )
+
+        plan = client.query_schedule_plan(
+            "/internal/posts/schedule-plan/query", identity
+        )
+
+        self.assertEqual(
+            plan["queues"],
+            [
+                {
+                    **queue(301, 11, 1),
+                    "delivery_mode": "duration_pending",
+                    "preflight_duration": 0.0,
+                },
+                {
+                    **queue(302, 12, 2, status="waiting_relay"),
+                    "delivery_mode": "duration_pending",
+                    "preflight_duration": 140.000001,
+                },
+            ],
+        )
+
+    def test_schedule_sidecar_rejects_invalid_pending_queue_state(self):
+        valid = {
+            **queue(301, 11, 1),
+            "delivery_mode": "duration_pending",
+            "preflight_duration": 0.0,
+        }
+        invalid_queues = (
+            {**valid, "status": "waiting_relay"},
+            {**valid, "preflight_duration": 1.0},
+            {
+                **valid,
+                "status": "waiting_relay",
+                "preflight_duration": 140.0,
+            },
+            {**valid, "relay_account_id": 9},
+            {**valid, "unknown_outcome": True},
+            {**valid, "preflight_duration": float("nan")},
+            {
+                **valid,
+                "delivery_mode": "direct",
+                "status": "waiting_relay",
+                "preflight_duration": 141.0,
+            },
+        )
+        for invalid in invalid_queues:
+            with self.subTest(invalid=invalid), self.assertRaises(SidecarError):
+                ScheduleSidecarClient._normalize_queues([invalid], [11])
+
+    def test_schedule_sidecar_accepts_waiting_publish_without_log_or_preview(self):
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "status": "waiting_relay",
+                        "queue_id": 41,
+                        "delivery_mode": "duration_pending",
+                        "preflight_duration": 141.25,
+                        "error_code": "x_post_premium_relay_unavailable",
+                    }
+                }
+            ]
+        )
+
+        result = client.publish_queue(
+            "/internal/posts/queue/{queue_id}/publish", 41
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "waiting_relay",
+                "queue_id": 41,
+                "delivery_mode": "duration_pending",
+                "preflight_duration": 141.25,
+                "error_code": "x_post_premium_relay_unavailable",
+            },
+        )
+        self.assertNotIn("log_id", result)
+        self.assertNotIn("preview_url", result)
+        self.assertEqual(
+            client.requests,
+            [
+                (
+                    "/internal/posts/queue/41/publish",
+                    {},
+                    True,
+                )
+            ],
+        )
+
+    def test_schedule_sidecar_accepts_feature_off_pending_park_without_x_write(self):
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "status": "waiting_relay",
+                        "queue_id": 42,
+                        "delivery_mode": "duration_pending",
+                        "preflight_duration": 0.0,
+                        "error_code": "x_post_drama_duration_routing_disabled",
+                    }
+                }
+            ]
+        )
+
+        result = client.publish_queue(
+            "/internal/posts/queue/{queue_id}/publish", 42
+        )
+
+        self.assertEqual(result["status"], "waiting_relay")
+        self.assertEqual(result["preflight_duration"], 0.0)
+        self.assertNotIn("log_id", result)
+        self.assertNotIn("preview_url", result)
+
+    def test_schedule_sidecar_preserves_strict_published_response_validation(self):
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "status": "published",
+                        "log_id": 91,
+                        "short_url": "https://gy.g2flow.com/s2l/91.html",
+                        "post_id": "123456789",
+                        "preview_url": (
+                            "https://x.com/example/status/123456789"
+                        ),
+                    }
+                }
+            ]
+        )
+
+        result = client.publish_queue(
+            "/internal/posts/queue/{queue_id}/publish", 41
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["log_id"], 91)
+        self.assertEqual(result["post_id"], "123456789")
+        self.assertEqual(len(client.requests), 1)
+
+    def test_schedule_sidecar_rejects_waiting_publish_with_x_write_evidence(self):
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "status": "waiting_relay",
+                        "queue_id": 41,
+                        "delivery_mode": "duration_pending",
+                        "preflight_duration": 141.25,
+                        "log_id": 91,
+                    }
+                }
+            ]
+        )
+
+        with self.assertRaises(SidecarError) as raised:
+            client.publish_queue(
+                "/internal/posts/queue/{queue_id}/publish", 41
+            )
+
+        self.assertTrue(raised.exception.unknown_outcome)
 
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):
         identity = due_item(accounts=[11, 12])
@@ -2312,6 +2678,67 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(
             [call[1] for call in sidecar.calls if call[0] == "publish"],
             [101, 102],
+        )
+
+    def test_waiting_relay_keeps_batch_nonterminal_and_continues_siblings(self):
+        sidecar = FakeSidecar([due_item(source_type="drama")])
+        sidecar.publish_results[101] = {
+            "status": "waiting_relay",
+            "queue_id": 101,
+            "delivery_mode": "duration_pending",
+            "preflight_duration": 141.25,
+            "error_code": "x_post_premium_relay_unavailable",
+        }
+
+        result = self.execute(sidecar)
+
+        self.assertEqual(result["status"], "waiting_relay")
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [101, 102],
+        )
+        batch = result["batches"][0]
+        self.assertEqual(batch["status"], "waiting_relay")
+        self.assertEqual(batch["waiting_relay_count"], 1)
+        self.assertEqual(batch["published_count"], 1)
+        self.assertEqual(batch["attempted_count"], 2)
+        self.assertNotIn("log_id", batch["results"][0])
+        self.assertNotIn("preview_url", batch["results"][0])
+        self.assertEqual(batch["results"][1]["status"], "published")
+
+    def test_frozen_waiting_relay_is_rechecked_on_each_natural_tick(self):
+        identity = due_item(source_type="drama", accounts=[11, 12])
+        sidecar = FakeSidecar([identity])
+        sidecar.existing[("drama", "2026-07-27", "10:00", 3)] = {
+            "found": True,
+            "run": frozen_run("drama", 2),
+            "queues": [
+                {
+                    **queue(201, 11, 1, status="waiting_relay"),
+                    "delivery_mode": "duration_pending",
+                    "preflight_duration": 141.25,
+                },
+                queue(202, 12, 2, status="published"),
+            ],
+        }
+        sidecar.publish_results[201] = {
+            "status": "waiting_relay",
+            "queue_id": 201,
+            "delivery_mode": "duration_pending",
+            "preflight_duration": 141.25,
+            "error_code": "x_post_premium_relay_unavailable",
+        }
+
+        first = self.execute(sidecar)
+        second = self.execute(sidecar)
+
+        self.assertEqual(first["status"], "waiting_relay")
+        self.assertEqual(second["status"], "waiting_relay")
+        self.assertTrue(first["batches"][0]["resumed_existing_plan"])
+        self.assertTrue(second["batches"][0]["resumed_existing_plan"])
+        self.assertEqual(
+            [call[1] for call in sidecar.calls if call[0] == "publish"],
+            [201, 201],
         )
 
     def test_stopped_drama_batch_does_not_skip_independent_due_batch(self):

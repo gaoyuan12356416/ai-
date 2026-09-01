@@ -160,6 +160,20 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("data-episodes-pool-id", DRAMA)
         self.assertIn("data-delete-pool-id", DRAMA)
 
+    def test_drama_episode_detail_explains_duration_routing_and_waiting_relay(self):
+        self.assertIn('waiting_relay: "等待同语言会员号"', DRAMA)
+        self.assertIn(".badge.waiting_relay", DRAMA)
+        self.assertIn('deliveryMode === "duration_pending"', DRAMA)
+        self.assertIn('queueStatus === "waiting_relay"', DRAMA)
+        self.assertIn("正在检测最终成片时长", DRAMA)
+        self.assertIn("目标账号直接发布", DRAMA)
+        self.assertIn("目标账号 Repost", DRAMA)
+        self.assertIn("item.preflight_duration ?? item.final_duration", DRAMA)
+        self.assertIn("Number.isFinite(duration) && duration > 0", DRAMA)
+        self.assertIn("最终时长待检测", DRAMA)
+        self.assertIn("duration.toFixed(3)", DRAMA)
+        self.assertIn("deliveryRouteLabel(item)", DRAMA)
+
     def test_drama_pool_supports_current_page_select_all_and_atomic_batch_delete(self):
         for element_id in (
             "selectAllDramaPage",
@@ -401,8 +415,22 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         )
         self.assertIn('repost_creating:"目标账号 Repost 中"', LOGS)
         self.assertIn('item.delivery_mode || "direct"', LOGS)
-        self.assertIn("目标账号 Repost · 原帖由 @", LOGS)
+        self.assertIn("目标账号 Repost · 原帖由 ${relay}", LOGS)
         self.assertIn('relayDelivery ? "预览原 Post" : "预览 Post"', LOGS)
+
+    def test_logs_explain_duration_routing_and_filter_waiting_relay(self):
+        self.assertIn('<option value="waiting_relay">等待同语言会员号</option>', LOGS)
+        self.assertIn('waiting_relay:"等待同语言会员号"', LOGS)
+        self.assertIn(".status.waiting_relay", LOGS)
+        self.assertIn('deliveryMode === "duration_pending"', LOGS)
+        self.assertIn('queueStatus === "waiting_relay"', LOGS)
+        self.assertIn("正在检测最终成片时长", LOGS)
+        self.assertIn("目标账号直接发布", LOGS)
+        self.assertIn("item.preflight_duration ?? item.final_duration", LOGS)
+        self.assertIn("Number.isFinite(duration) && duration > 0", LOGS)
+        self.assertIn("最终时长待检测", LOGS)
+        self.assertIn("duration.toFixed(3)", LOGS)
+        self.assertIn("deliveryRouteLabel(item)", LOGS)
 
     def test_inline_javascript_parses(self):
         for path, source in (

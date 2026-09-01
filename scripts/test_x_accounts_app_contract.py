@@ -712,6 +712,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             parse("page=2&page_size=500&run_date=2026-07-23&material_id=5221348"),
             {"page": 2, "page_size": 100, "run_date": "2026-07-23", "material_id": "5221348"},
         )
+        self.assertEqual(
+            parse("status=waiting_relay"),
+            {"page": 1, "page_size": 20, "status": "waiting_relay"},
+        )
         with self.assertRaises(ValueError):
             parse("access_token=secret")
         with self.assertRaises(ValueError):

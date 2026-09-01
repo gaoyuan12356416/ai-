@@ -309,6 +309,103 @@ MEDIA_VALIDATION_MODES = frozenset(
 
 DIRECT_DELIVERY_MODE = "direct"
 PREMIUM_RELAY_REPOST_MODE = "premium_relay_repost"
+DURATION_PENDING_DELIVERY_MODE = "duration_pending"
+DRAMA_DURATION_ROUTE_VERSION = 1
+DRAMA_ROUTE_PENDING = "duration_pending"
+DRAMA_ROUTE_WAITING_RELAY = "waiting_relay"
+DRAMA_ROUTE_RESOLVED = "resolved"
+DRAMA_ROUTE_STATES = frozenset(
+    {
+        DRAMA_ROUTE_PENDING,
+        DRAMA_ROUTE_WAITING_RELAY,
+        DRAMA_ROUTE_RESOLVED,
+    }
+)
+
+
+def _unresolved_drama_duration_route_sql(queue_alias, route_alias):
+    """Return the exact pre-resolution queue predicate for internal SQL."""
+    q = queue_alias
+    route = route_alias
+    return (
+        f"({q}.source_type='drama' "
+        f"AND {q}.schedule_run_id IS NOT NULL "
+        f"AND {route}.route_version={DRAMA_DURATION_ROUTE_VERSION} "
+        f"AND (({route}.route_state='{DRAMA_ROUTE_PENDING}' "
+        f"AND {q}.status='queued') OR "
+        f"({route}.route_state='{DRAMA_ROUTE_WAITING_RELAY}' "
+        f"AND {q}.status='waiting_relay')) "
+        "AND NOT EXISTS(SELECT 1 FROM x_post_publish_log route_log "
+        f"WHERE route_log.queue_id={q}.id) "
+        "AND NOT EXISTS(SELECT 1 FROM x_post_repost_ledger route_repost "
+        f"WHERE route_repost.queue_id={q}.id))"
+    )
+
+
+def _resolved_pre_attempt_drama_duration_route_sql(
+    queue_alias,
+    route_alias,
+):
+    """Return resolved routes safe to resume before the first X attempt."""
+    q = queue_alias
+    route = route_alias
+    return (
+        f"({q}.source_type='drama' "
+        f"AND {q}.schedule_run_id IS NOT NULL "
+        f"AND {q}.status='queued' "
+        f"AND {q}.media_validation_mode='preflight' "
+        f"AND length({q}.preflight_sha256)=64 "
+        f"AND {q}.preflight_size>0 AND {q}.preflight_duration>0 "
+        f"AND {route}.route_version={DRAMA_DURATION_ROUTE_VERSION} "
+        f"AND {route}.route_state='{DRAMA_ROUTE_RESOLVED}' "
+        f"AND {route}.resolved_at<>'' "
+        f"AND {route}.preflight_width>0 "
+        f"AND {route}.preflight_height>0 "
+        "AND (NOT EXISTS(SELECT 1 FROM x_post_publish_log route_log "
+        f"WHERE route_log.queue_id={q}.id) "
+        "OR EXISTS(SELECT 1 FROM x_post_publish_log route_log "
+        f"WHERE route_log.queue_id={q}.id "
+        "AND route_log.status='reserved' "
+        "AND route_log.attempt_count=0 "
+        "AND route_log.unknown_outcome=0)) AND (("
+        f"{route}.resolved_delivery_mode='{DIRECT_DELIVERY_MODE}' "
+        f"AND {q}.delivery_mode='{DIRECT_DELIVERY_MODE}' "
+        f"AND {q}.relay_account_id=0 "
+        f"AND {q}.relay_account_username='' "
+        "AND NOT EXISTS(SELECT 1 FROM x_post_repost_ledger route_repost "
+        f"WHERE route_repost.queue_id={q}.id)) OR ("
+        f"{route}.resolved_delivery_mode='{PREMIUM_RELAY_REPOST_MODE}' "
+        f"AND {q}.delivery_mode='{PREMIUM_RELAY_REPOST_MODE}' "
+        f"AND {q}.preflight_duration>{STANDARD_MAX_DURATION_SECONDS:g} "
+        f"AND {q}.relay_account_id>0 "
+        f"AND {q}.relay_account_id<>{q}.account_id "
+        f"AND {q}.relay_account_username<>'' "
+        "AND EXISTS(SELECT 1 FROM x_post_repost_ledger route_repost "
+        f"WHERE route_repost.queue_id={q}.id "
+        f"AND route_repost.run_date={q}.run_date "
+        f"AND route_repost.target_account_id={q}.account_id "
+        f"AND route_repost.relay_account_id={q}.relay_account_id "
+        "AND route_repost.status='reserved' "
+        "AND route_repost.source_attempt_count=0 "
+        "AND route_repost.repost_attempt_count=0 "
+        "AND route_repost.unknown_outcome=0 "
+        "AND route_repost.source_post_id='' "
+        "AND route_repost.source_post_url='' "
+        "AND route_repost.repost_id=''))))"
+    )
+
+
+def _resumable_drama_duration_route_sql(queue_alias, route_alias):
+    """Share the exact held/resumable route semantics across selectors."""
+    return "(%s OR %s)" % (
+        _unresolved_drama_duration_route_sql(queue_alias, route_alias),
+        _resolved_pre_attempt_drama_duration_route_sql(
+            queue_alias,
+            route_alias,
+        ),
+    )
+
+
 MATERIAL_RELAY_ASSIGNMENT_VERSION = "material-random-relay-v1"
 DELIVERY_MODES = frozenset(
     {DIRECT_DELIVERY_MODE, PREMIUM_RELAY_REPOST_MODE}
@@ -1597,6 +1694,53 @@ def ensure_storage(db_path):
                     updated_at TEXT NOT NULL,
                     source_published_at TEXT NOT NULL DEFAULT '',
                     reposted_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(queue_id) REFERENCES x_post_queue(id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_drama_delivery_route (
+                    queue_id INTEGER PRIMARY KEY,
+                    route_version INTEGER NOT NULL DEFAULT 1
+                        CHECK(route_version=1),
+                    route_state TEXT NOT NULL
+                        CHECK(route_state IN (
+                            'duration_pending','waiting_relay','resolved'
+                        )),
+                    resolved_delivery_mode TEXT NOT NULL DEFAULT ''
+                        CHECK(resolved_delivery_mode IN (
+                            '','direct','premium_relay_repost'
+                        )),
+                    preflight_width INTEGER NOT NULL DEFAULT 0
+                        CHECK(preflight_width>=0),
+                    preflight_height INTEGER NOT NULL DEFAULT 0
+                        CHECK(preflight_height>=0),
+                    resolved_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(
+                        (
+                            route_state IN (
+                                'duration_pending','waiting_relay'
+                            )
+                            AND resolved_delivery_mode=''
+                            AND resolved_at=''
+                        ) OR (
+                            route_state='resolved'
+                            AND resolved_delivery_mode IN (
+                                'direct','premium_relay_repost'
+                            )
+                            AND resolved_at<>''
+                        )
+                    ),
+                    CHECK(
+                        route_state='duration_pending'
+                        OR (
+                            preflight_width>0
+                            AND preflight_height>0
+                        )
+                    ),
                     FOREIGN KEY(queue_id) REFERENCES x_post_queue(id)
                 )
                 """
@@ -3439,9 +3583,380 @@ def ensure_storage(db_path):
                 ) OR (
                     OLD.source_attempt_count>0
                     AND NEW.relay_account_id<>OLD.relay_account_id
+                ) OR (
+                    EXISTS(
+                        SELECT 1 FROM x_post_drama_delivery_route d
+                        WHERE d.queue_id=OLD.queue_id
+                          AND d.route_state='resolved'
+                          AND d.resolved_delivery_mode=
+                              'premium_relay_repost'
+                    )
+                    AND (
+                        NEW.queue_id<>OLD.queue_id
+                        OR NEW.run_date<>OLD.run_date
+                        OR NEW.target_account_id<>OLD.target_account_id
+                        OR NEW.relay_account_id<>OLD.relay_account_id
+                    )
                 )
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_repost binding invalid');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_duration_repost_delete"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_duration_repost_delete
+                BEFORE DELETE ON x_post_repost_ledger
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_drama_delivery_route d
+                    WHERE d.queue_id=OLD.queue_id
+                      AND d.route_state='resolved'
+                      AND d.resolved_delivery_mode=
+                          'premium_relay_repost'
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_duration_repost immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_delivery_route_insert"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_delivery_route_insert
+                BEFORE INSERT ON x_post_drama_delivery_route
+                WHEN NEW.route_state<>'duration_pending'
+                  OR NEW.resolved_delivery_mode<>''
+                  OR NEW.resolved_at<>''
+                  OR NEW.preflight_width<>0
+                  OR NEW.preflight_height<>0
+                  OR NOT EXISTS(
+                      SELECT 1 FROM x_post_queue q
+                      WHERE q.id=NEW.queue_id
+                        AND q.source_type='drama'
+                        AND q.schedule_run_id IS NOT NULL
+                        AND q.delivery_mode='direct'
+                        AND q.relay_account_id=0
+                        AND q.relay_account_username=''
+                        AND q.status='queued'
+                        AND q.media_validation_mode='deferred'
+                        AND q.original_material_url=''
+                        AND q.media_repair_trigger_code=''
+                        AND q.media_repair_job_key=''
+                        AND q.media_repair_profile=''
+                        AND q.media_repair_source_sha256=''
+                        AND q.preflight_sha256=''
+                        AND q.preflight_size=0
+                        AND q.preflight_duration=0
+                        AND NOT EXISTS(
+                            SELECT 1 FROM x_post_publish_log l
+                            WHERE l.queue_id=q.id
+                        )
+                        AND NOT EXISTS(
+                            SELECT 1 FROM x_post_repost_ledger r
+                            WHERE r.queue_id=q.id
+                        )
+                  )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_delivery_route insert invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_delivery_route_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_delivery_route_update
+                BEFORE UPDATE ON x_post_drama_delivery_route
+                WHEN NEW.queue_id<>OLD.queue_id
+                  OR NEW.route_version<>OLD.route_version
+                  OR NEW.created_at<>OLD.created_at
+                  OR OLD.route_state='resolved'
+                  OR (
+                      OLD.route_state='waiting_relay'
+                      AND (
+                          NEW.preflight_width<>OLD.preflight_width
+                          OR NEW.preflight_height<>OLD.preflight_height
+                      )
+                  )
+                  OR NOT (
+                      (
+                          OLD.route_state='duration_pending'
+                          AND NEW.route_state IN (
+                              'waiting_relay','resolved'
+                          )
+                      ) OR (
+                          OLD.route_state='waiting_relay'
+                          AND NEW.route_state='resolved'
+                      )
+                  )
+                  OR EXISTS(
+                      SELECT 1 FROM x_post_publish_log l
+                      WHERE l.queue_id=OLD.queue_id
+                  )
+                  OR (
+                      NEW.route_state='waiting_relay'
+                      AND NOT EXISTS(
+                          SELECT 1 FROM x_post_queue q
+                          WHERE q.id=NEW.queue_id
+                            AND q.source_type='drama'
+                            AND q.schedule_run_id IS NOT NULL
+                            AND q.delivery_mode='direct'
+                            AND q.relay_account_id=0
+                            AND q.relay_account_username=''
+                            AND q.status='waiting_relay'
+                            AND q.media_validation_mode='preflight'
+                            AND q.preflight_sha256<>''
+                            AND q.preflight_size>0
+                            AND q.preflight_duration>140
+                            AND NOT EXISTS(
+                                SELECT 1 FROM x_post_repost_ledger r
+                                WHERE r.queue_id=q.id
+                            )
+                      )
+                  )
+                  OR (
+                      NEW.route_state='resolved'
+                      AND NEW.resolved_delivery_mode='direct'
+                      AND NOT EXISTS(
+                          SELECT 1 FROM x_post_queue q
+                          WHERE q.id=NEW.queue_id
+                            AND q.source_type='drama'
+                            AND q.schedule_run_id IS NOT NULL
+                            AND q.delivery_mode='direct'
+                            AND q.relay_account_id=0
+                            AND q.relay_account_username=''
+                            AND q.status='queued'
+                            AND q.media_validation_mode='preflight'
+                            AND q.preflight_sha256<>''
+                            AND q.preflight_size>0
+                            AND q.preflight_duration>0
+                            AND NOT EXISTS(
+                                SELECT 1 FROM x_post_repost_ledger r
+                                WHERE r.queue_id=q.id
+                            )
+                      )
+                  )
+                  OR (
+                      NEW.route_state='resolved'
+                      AND NEW.resolved_delivery_mode=
+                          'premium_relay_repost'
+                      AND NOT EXISTS(
+                          SELECT 1 FROM x_post_queue q
+                          JOIN x_post_repost_ledger r
+                            ON r.queue_id=q.id
+                          WHERE q.id=NEW.queue_id
+                            AND q.source_type='drama'
+                            AND q.schedule_run_id IS NOT NULL
+                            AND q.delivery_mode=
+                                'premium_relay_repost'
+                            AND q.relay_account_id>0
+                            AND q.relay_account_id<>q.account_id
+                            AND q.relay_account_username<>''
+                            AND q.status='queued'
+                            AND q.media_validation_mode='preflight'
+                            AND q.preflight_sha256<>''
+                            AND q.preflight_size>0
+                            AND q.preflight_duration>140
+                            AND r.target_account_id=q.account_id
+                            AND r.relay_account_id=q.relay_account_id
+                            AND r.status='reserved'
+                            AND r.source_attempt_count=0
+                            AND r.repost_attempt_count=0
+                            AND r.unknown_outcome=0
+                      )
+                  )
+                  OR (
+                      NEW.route_state='resolved'
+                      AND NEW.resolved_delivery_mode NOT IN (
+                          'direct','premium_relay_repost'
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_delivery_route update invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_delivery_route_delete"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_delivery_route_delete
+                BEFORE DELETE ON x_post_drama_delivery_route
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_delivery_route immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_queue_drama_delivery_route_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_drama_delivery_route_update
+                BEFORE UPDATE OF delivery_mode,relay_account_id,
+                    relay_account_username,material_url,
+                    original_material_url,media_validation_mode,
+                    preflight_sha256,preflight_size,preflight_duration,
+                    media_repair_trigger_code,media_repair_job_key,
+                    media_repair_profile,media_repair_source_sha256
+                    ON x_post_queue
+                WHEN (
+                    EXISTS(
+                        SELECT 1 FROM x_post_drama_delivery_route d
+                        WHERE d.queue_id=OLD.id
+                          AND d.route_state='resolved'
+                    )
+                    AND (
+                        NEW.delivery_mode<>OLD.delivery_mode
+                        OR NEW.relay_account_id<>OLD.relay_account_id
+                        OR NEW.relay_account_username<>
+                            OLD.relay_account_username
+                        OR NEW.material_url<>OLD.material_url
+                        OR NEW.original_material_url<>
+                            OLD.original_material_url
+                        OR NEW.media_validation_mode<>
+                            OLD.media_validation_mode
+                        OR NEW.preflight_sha256<>OLD.preflight_sha256
+                        OR NEW.preflight_size<>OLD.preflight_size
+                        OR NEW.preflight_duration<>OLD.preflight_duration
+                        OR NEW.media_repair_trigger_code<>
+                            OLD.media_repair_trigger_code
+                        OR NEW.media_repair_job_key<>
+                            OLD.media_repair_job_key
+                        OR NEW.media_repair_profile<>
+                            OLD.media_repair_profile
+                        OR NEW.media_repair_source_sha256<>
+                            OLD.media_repair_source_sha256
+                    )
+                ) OR (
+                    EXISTS(
+                        SELECT 1 FROM x_post_drama_delivery_route d
+                        WHERE d.queue_id=OLD.id
+                          AND d.route_state='waiting_relay'
+                    )
+                    AND (
+                        NEW.material_url<>OLD.material_url
+                        OR NEW.original_material_url<>
+                            OLD.original_material_url
+                        OR NEW.media_validation_mode<>
+                            OLD.media_validation_mode
+                        OR NEW.preflight_sha256<>OLD.preflight_sha256
+                        OR NEW.preflight_size<>OLD.preflight_size
+                        OR NEW.preflight_duration<>OLD.preflight_duration
+                        OR NEW.media_repair_trigger_code<>
+                            OLD.media_repair_trigger_code
+                        OR NEW.media_repair_job_key<>
+                            OLD.media_repair_job_key
+                        OR NEW.media_repair_profile<>
+                            OLD.media_repair_profile
+                        OR NEW.media_repair_source_sha256<>
+                            OLD.media_repair_source_sha256
+                    )
+                ) OR (
+                    EXISTS(
+                        SELECT 1 FROM x_post_drama_delivery_route d
+                        WHERE d.queue_id=OLD.id
+                          AND d.route_state IN (
+                              'duration_pending','waiting_relay'
+                          )
+                    )
+                    AND EXISTS(
+                        SELECT 1 FROM x_post_publish_log l
+                        WHERE l.queue_id=OLD.id
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_delivery_route queue immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_publish_log_drama_delivery_route_insert"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_publish_log_drama_delivery_route_insert
+                BEFORE INSERT ON x_post_publish_log
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_drama_delivery_route d
+                    WHERE d.queue_id=NEW.queue_id
+                      AND (
+                          d.route_state<>'resolved'
+                          OR NOT EXISTS(
+                              SELECT 1 FROM x_post_queue q
+                              WHERE q.id=d.queue_id
+                                AND q.status IN (
+                                    'queued','reserved','publishing',
+                                    'published','failed'
+                                )
+                                AND q.media_validation_mode='preflight'
+                                AND q.preflight_sha256<>''
+                                AND q.preflight_size>0
+                                AND q.preflight_duration>0
+                                AND (
+                                    (
+                                        d.resolved_delivery_mode='direct'
+                                        AND q.delivery_mode='direct'
+                                        AND q.relay_account_id=0
+                                        AND q.relay_account_username=''
+                                        AND NOT EXISTS(
+                                            SELECT 1
+                                            FROM x_post_repost_ledger r
+                                            WHERE r.queue_id=q.id
+                                        )
+                                    ) OR (
+                                        d.resolved_delivery_mode=
+                                            'premium_relay_repost'
+                                        AND q.delivery_mode=
+                                            'premium_relay_repost'
+                                        AND EXISTS(
+                                            SELECT 1
+                                            FROM x_post_repost_ledger r
+                                            WHERE r.queue_id=q.id
+                                              AND r.target_account_id=
+                                                  q.account_id
+                                              AND r.relay_account_id=
+                                                  q.relay_account_id
+                                        )
+                                    )
+                                )
+                          )
+                      )
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_delivery_route unresolved'
+                    );
                 END
                 """
             )
@@ -3932,6 +4447,175 @@ def ensure_storage(db_path):
 
 def _row_dict(row):
     return dict(row) if row is not None else None
+
+
+def _overlay_drama_delivery_route(item):
+    if item is None:
+        return None
+    route_state = str(item.get("route_state", "") or "")
+    if route_state in {DRAMA_ROUTE_PENDING, DRAMA_ROUTE_WAITING_RELAY}:
+        item["delivery_mode"] = DURATION_PENDING_DELIVERY_MODE
+    item["route_version"] = int(item.get("route_version", 0) or 0)
+    item["preflight_width"] = int(item.get("preflight_width", 0) or 0)
+    item["preflight_height"] = int(item.get("preflight_height", 0) or 0)
+    item["resolved_delivery_mode"] = str(
+        item.get("resolved_delivery_mode", "") or ""
+    )
+    item["resolved_at"] = str(item.get("resolved_at", "") or "")
+    return item
+
+
+def _normalize_drama_duration_media_evidence(payload):
+    if not isinstance(payload, dict):
+        raise XPostError(
+            "invalid_request",
+            "短剧最终媒体证据必须是对象",
+            400,
+        )
+
+    material_url = str(
+        payload.get("material_url")
+        or payload.get("final_material_url")
+        or ""
+    ).strip()
+
+    def checked_https_url(value, label):
+        if (
+            not value
+            or len(value) > 4096
+            or any(ord(char) < 32 for char in value)
+        ):
+            raise XPostError("invalid_request", "%s无效" % label, 400)
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise XPostError("invalid_request", "%s无效" % label, 400)
+        return value
+
+    checked_https_url(material_url, "短剧最终媒体地址")
+    preflight_sha256 = str(
+        payload.get("preflight_sha256")
+        or payload.get("sha256")
+        or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
+        raise XPostError(
+            "invalid_request",
+            "短剧最终媒体指纹无效",
+            400,
+        )
+    preflight_size = _positive_int(
+        payload.get("preflight_size", payload.get("size")),
+        "preflight_size",
+    )
+    preflight_duration = _nonnegative_float(
+        payload.get("preflight_duration", payload.get("duration")),
+        "preflight_duration",
+    )
+    if preflight_duration <= 0:
+        raise XPostError(
+            "invalid_request",
+            "短剧最终媒体时长无效",
+            400,
+        )
+    preflight_width = _positive_int(
+        payload.get("preflight_width", payload.get("width")),
+        "preflight_width",
+    )
+    preflight_height = _positive_int(
+        payload.get("preflight_height", payload.get("height")),
+        "preflight_height",
+    )
+
+    original_material_url = str(
+        payload.get("original_material_url", "") or ""
+    ).strip()
+    repair_trigger_code = str(
+        payload.get("media_repair_trigger_code", "") or ""
+    ).strip()
+    repair_job_key = str(
+        payload.get("media_repair_job_key", "") or ""
+    ).strip()
+    repair_profile = str(
+        payload.get("media_repair_profile", "") or ""
+    ).strip()
+    repair_source_sha256 = str(
+        payload.get("media_repair_source_sha256", "") or ""
+    ).strip().lower()
+    repair_values = (
+        original_material_url,
+        repair_trigger_code,
+        repair_job_key,
+        repair_profile,
+        repair_source_sha256,
+    )
+    if any(repair_values):
+        if not all(repair_values):
+            raise XPostError(
+                "invalid_request",
+                "短剧媒体修复审计字段必须完整提供",
+                400,
+            )
+        checked_https_url(original_material_url, "短剧原始媒体地址")
+        if original_material_url == material_url:
+            raise XPostError(
+                "invalid_request",
+                "短剧修复前后媒体地址不能相同",
+                400,
+            )
+        if repair_trigger_code not in {
+            "invalid_media_codec",
+            "invalid_media_dimensions",
+            "invalid_media_duration",
+        }:
+            raise XPostError(
+                "invalid_request",
+                "短剧媒体修复触发原因无效",
+                400,
+            )
+        try:
+            repair_job_key = _clean_token(
+                repair_job_key,
+                "media repair job key",
+                200,
+            )
+            repair_profile = _clean_token(
+                repair_profile,
+                "media repair profile",
+                64,
+            )
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "短剧媒体修复标识无效",
+                400,
+            ) from None
+        if not re.fullmatch(r"[0-9a-f]{64}", repair_source_sha256):
+            raise XPostError(
+                "invalid_request",
+                "短剧媒体修复源文件指纹无效",
+                400,
+            )
+
+    return {
+        "material_url": material_url,
+        "original_material_url": original_material_url,
+        "media_repair_trigger_code": repair_trigger_code,
+        "media_repair_job_key": repair_job_key,
+        "media_repair_profile": repair_profile,
+        "media_repair_source_sha256": repair_source_sha256,
+        "media_validation_mode": MEDIA_VALIDATION_PREFLIGHT,
+        "preflight_sha256": preflight_sha256,
+        "preflight_size": preflight_size,
+        "preflight_duration": preflight_duration,
+        "preflight_width": preflight_width,
+        "preflight_height": preflight_height,
+    }
 
 
 def _schedule_source_type(value):
@@ -4954,7 +5638,7 @@ class XPostStore:
             conn.commit()
         return self.get_schedule_config(source_type, now=current_time)
 
-    def due_schedule_slots(self, now=None, grace_seconds=90):
+    def due_schedule_slots(self, now=None, grace_seconds=90, limit=100):
         current = now or datetime.now(BEIJING_TZ)
         if current.tzinfo is None:
             current = current.replace(tzinfo=BEIJING_TZ)
@@ -4980,6 +5664,14 @@ class XPostStore:
                 "grace_seconds无效",
                 400,
             )
+        if isinstance(limit, bool):
+            raise XPostError("invalid_request", "limit无效", 400)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            raise XPostError("invalid_request", "limit无效", 400) from None
+        if limit < 1 or limit > 100:
+            raise XPostError("invalid_request", "limit无效", 400)
         earliest = current - timedelta(seconds=grace_seconds)
         cursor = earliest.replace(second=0, microsecond=0)
         final_minute = current.replace(second=0, microsecond=0)
@@ -5092,10 +5784,29 @@ class XPostStore:
                 current.astimezone(timezone.utc)
                 - timedelta(seconds=SCHEDULE_RUN_LEASE_SECONDS)
             ).isoformat(timespec="seconds").replace("+00:00", "Z")
+            unresolved_drama_route_sql = (
+                "(x_post_schedule_run.source_type='drama' AND EXISTS("
+                "SELECT 1 FROM x_post_queue dq JOIN "
+                "x_post_drama_delivery_route dd ON dd.queue_id=dq.id "
+                "WHERE dq.schedule_run_id=x_post_schedule_run.id AND %s))"
+                % _unresolved_drama_duration_route_sql("dq", "dd")
+            )
+            resolved_pre_attempt_drama_route_sql = (
+                "(x_post_schedule_run.source_type='drama' AND EXISTS("
+                "SELECT 1 FROM x_post_queue dq JOIN "
+                "x_post_drama_delivery_route dd ON dd.queue_id=dq.id "
+                "WHERE dq.schedule_run_id=x_post_schedule_run.id AND %s))"
+                % _resolved_pre_attempt_drama_duration_route_sql("dq", "dd")
+            )
+            resumable_drama_route_sql = "(%s OR %s)" % (
+                unresolved_drama_route_sql,
+                resolved_pre_attempt_drama_route_sql,
+            )
             stale_rows = conn.execute(
                 "SELECT id,run_date,publish_time FROM x_post_schedule_run "
                 "WHERE run_date<? AND status NOT IN (?,?,?,?,?) "
                 "AND COALESCE(NULLIF(lease_heartbeat_at,''),updated_at)<=? "
+                "AND NOT " + resumable_drama_route_sql + " "
                 "AND NOT (status='running' AND EXISTS("
                 "SELECT 1 FROM "
                 "x_post_schedule_bound_drama_failed_media_recovery_audit a "
@@ -5172,36 +5883,77 @@ class XPostStore:
                 )
                 scope_values.extend((run_date, publish_time))
             scoped_runs_sql = (
-                "SELECT * FROM x_post_schedule_run "
+                "SELECT *,CASE WHEN %s THEN 1 ELSE 0 END AS "
+                "unresolved_drama_route,CASE WHEN %s THEN 1 ELSE 0 END AS "
+                "resolved_pre_attempt_drama_route,"
+                "CASE WHEN %s THEN 1 ELSE 0 END AS "
+                "resumable_drama_route FROM x_post_schedule_run "
                 "WHERE ((%s) OR (status='running' AND EXISTS("
                 "SELECT 1 FROM "
                 "x_post_schedule_bound_drama_failed_media_recovery_audit a "
-                "WHERE a.schedule_run_id=x_post_schedule_run.id))) "
+                "WHERE a.schedule_run_id=x_post_schedule_run.id)) OR %s) "
                 "AND status NOT IN (?,?,?,?,?) "
                 "ORDER BY run_date,publish_time,source_type,id"
-                % " OR ".join(scope_clauses)
+                % (
+                    unresolved_drama_route_sql,
+                    resolved_pre_attempt_drama_route_sql,
+                    resumable_drama_route_sql,
+                    " OR ".join(scope_clauses),
+                    resumable_drama_route_sql,
+                )
             )
             rows = conn.execute(
                 scoped_runs_sql,
                 (*scope_values, *terminal_status_values),
             ).fetchall()
-            conn.commit()
-        rows = sorted(
-            rows,
-            key=lambda row: (
-                0
-                if (
-                    str(row["run_date"]),
+            rows = sorted(
+                rows,
+                key=lambda row: (
+                    0
+                    if (
+                        str(row["run_date"]),
+                        str(row["publish_time"]),
+                    )
+                    in current_slot_keys
+                    else (
+                        2
+                        if int(row["resumable_drama_route"] or 0) == 1
+                        else 1
+                    ),
+                    (
+                        str(row["lease_heartbeat_at"] or "")
+                        or str(row["updated_at"] or "")
+                        or str(row["created_at"] or "")
+                    )
+                    if (
+                        int(row["resumable_drama_route"] or 0) == 1
+                        and (
+                            str(row["run_date"]),
+                            str(row["publish_time"]),
+                        )
+                        not in current_slot_keys
+                    )
+                    else str(row["run_date"]),
                     str(row["publish_time"]),
+                    str(row["source_type"]),
+                    int(row["id"]),
+                ),
+            )[:limit]
+            for row in rows:
+                if int(row["resumable_drama_route"] or 0) != 1:
+                    continue
+                cursor = conn.execute(
+                    "UPDATE x_post_schedule_run SET lease_heartbeat_at=? "
+                    "WHERE id=? AND " + resumable_drama_route_sql,
+                    (timestamp, int(row["id"])),
                 )
-                in current_slot_keys
-                else 1,
-                str(row["run_date"]),
-                str(row["publish_time"]),
-                str(row["source_type"]),
-                int(row["id"]),
-            ),
-        )[:100]
+                if cursor.rowcount != 1:
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "短剧时长路线自然重试游标更新冲突",
+                        500,
+                    )
+            conn.commit()
         items = []
         for row in rows:
             account_ids = _schedule_account_ids(
@@ -5323,6 +6075,7 @@ class XPostStore:
         require_compliance=False,
         allow_material_relay=False,
         allow_deferred_media=False,
+        allow_duration_pending=False,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
@@ -5464,14 +6217,33 @@ class XPostStore:
             payload.get("body_template"),
             source_type,
         )
-        delivery_mode = str(
+        requested_delivery_mode = str(
             payload.get("delivery_mode", DIRECT_DELIVERY_MODE) or ""
         ).strip().lower()
+        duration_pending = bool(
+            requested_delivery_mode == DURATION_PENDING_DELIVERY_MODE
+        )
+        if duration_pending:
+            if (
+                not allow_duration_pending
+                or not require_compliance
+                or not allow_deferred_media
+                or source_type != "drama"
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "duration_pending仅允许用于短剧池定时计划",
+                    400,
+                )
+            delivery_mode = DIRECT_DELIVERY_MODE
+        else:
+            delivery_mode = requested_delivery_mode
         if delivery_mode not in DELIVERY_MODES:
             raise XPostError(
                 "invalid_request", "delivery_mode is invalid", 400
             )
         result["delivery_mode"] = delivery_mode
+        result["_logical_delivery_mode"] = requested_delivery_mode
         result["relay_account_id"] = _nonnegative_int(
             payload.get("relay_account_id", 0),
             "relay_account_id",
@@ -5703,6 +6475,20 @@ class XPostStore:
             not preflight_sha256 or result["preflight_size"] <= 0
         ):
             raise XPostError("invalid_request", "每日计划缺少完整媒体预检指纹", 400)
+        if duration_pending and (
+            media_validation_mode != MEDIA_VALIDATION_DEFERRED
+            or preflight_sha256
+            or result["preflight_size"] != 0
+            or result["preflight_duration"] != 0
+            or any(repair_values)
+            or result["relay_account_id"] != 0
+            or relay_username
+        ):
+            raise XPostError(
+                "invalid_request",
+                "duration_pending短剧队列只能冻结未检测源媒体",
+                400,
+            )
         result["preflight_sha256"] = preflight_sha256
         result.update(_compliance_counts(payload, require_all=require_compliance))
         if source_type == "material":
@@ -5763,6 +6549,9 @@ class XPostStore:
                     "name_tag",
                     "candidate_rank",
                     "spend",
+                    "delivery_mode",
+                    "relay_account_id",
+                    "relay_account_username",
                     "original_material_url",
                     "media_repair_trigger_code",
                     "media_repair_job_key",
@@ -5771,6 +6560,7 @@ class XPostStore:
                     "media_validation_mode",
                     "preflight_sha256",
                     "preflight_size",
+                    "preflight_duration",
                 ):
                     if field in payload and payload.get(field) not in (None, ""):
                         comparison_fields.append(field)
@@ -6811,6 +7601,28 @@ class XPostStore:
             "ORDER BY created_at,id" % placeholders,
             tuple(account_ids),
         ).fetchall()
+        held_route_episode_rows = conn.execute(
+            "SELECT q.drama_pool_item_id,q.account_id,q.episode_number,"
+            "q.drama_replay_generation FROM x_post_queue q "
+            "JOIN x_post_drama_delivery_route route ON route.queue_id=q.id "
+            "WHERE q.source_type='drama' AND q.account_id IN (%s) "
+            "AND %s"
+            % (
+                placeholders,
+                _resumable_drama_duration_route_sql("q", "route"),
+            ),
+            tuple(account_ids),
+        ).fetchall()
+        held_route_episode_bindings = {
+            (
+                int(row["drama_pool_item_id"]),
+                int(row["account_id"]),
+                int(row["episode_number"]),
+                int(row["drama_replay_generation"]),
+            )
+            for row in held_route_episode_rows
+            if row["drama_pool_item_id"] is not None
+        }
         owned_by_account = {}
         occupied_account_ids = set()
         for row in bound_rows:
@@ -6826,6 +7638,18 @@ class XPostStore:
             # account (so no second drama can be bound there) but is not offered
             # as a candidate until an explicit revalidation clears last_error.
             if str(row["last_error_code"] or ""):
+                continue
+            # A duration route that is unresolved or has not made its first X
+            # attempt resumes only through its original run. Keep its account
+            # occupied and never offer that exact episode to a later slot.
+            # Other legacy/resolved queues retain the historical owned-drama
+            # projection until their normal advancement.
+            if (
+                int(row["id"]),
+                owner_id,
+                int(row["next_sub_number"]),
+                int(row["replay_generation"]),
+            ) in held_route_episode_bindings:
                 continue
             if not same_drama_language(
                 row["language"],
@@ -7515,6 +8339,16 @@ class XPostStore:
                 "SELECT q.id AS queue_id,q.episode_number,q.account_id,"
                 "q.account_username,q.status AS queue_status,"
                 "q.drama_replay_generation,"
+                "q.delivery_mode,q.relay_account_id,"
+                "q.relay_account_username,q.preflight_duration,"
+                "COALESCE(d.route_version,0) AS route_version,"
+                "COALESCE(d.route_state,'') AS route_state,"
+                "COALESCE(d.resolved_delivery_mode,'') AS "
+                "resolved_delivery_mode,"
+                "COALESCE(d.preflight_width,0) AS preflight_width,"
+                "COALESCE(d.preflight_height,0) AS preflight_height,"
+                "COALESCE(d.resolved_at,'') AS resolved_at,"
+                "COALESCE(rl.status,'') AS repost_status,"
                 "COALESCE(r.run_date,'') AS run_date,"
                 "COALESCE(r.publish_time,'') AS publish_time,"
                 "COALESCE(l.status,'') AS publish_status,"
@@ -7525,6 +8359,8 @@ class XPostStore:
                 "FROM x_post_queue q "
                 "LEFT JOIN x_post_schedule_run r ON r.id=q.schedule_run_id "
                 "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "LEFT JOIN x_post_repost_ledger rl ON rl.queue_id=q.id "
+                "LEFT JOIN x_post_drama_delivery_route d ON d.queue_id=q.id "
                 "WHERE q.drama_pool_item_id=? "
                 "AND q.drama_replay_generation=? "
                 "ORDER BY q.episode_number,q.id",
@@ -7547,6 +8383,17 @@ class XPostStore:
                     "account_id": 0,
                     "account_username": "",
                     "queue_status": "pending",
+                    "delivery_mode": "",
+                    "relay_account_id": 0,
+                    "relay_account_username": "",
+                    "preflight_duration": 0.0,
+                    "route_version": 0,
+                    "route_state": "",
+                    "resolved_delivery_mode": "",
+                    "preflight_width": 0,
+                    "preflight_height": 0,
+                    "resolved_at": "",
+                    "repost_status": "",
                     "run_date": "",
                     "publish_time": "",
                     "publish_status": "",
@@ -7560,7 +8407,7 @@ class XPostStore:
                 item["error_message"],
                 500,
             )
-            items.append(item)
+            items.append(_overlay_drama_delivery_route(item))
         return {
             "items": items,
             "pagination": {
@@ -7802,7 +8649,7 @@ class XPostStore:
                 "SELECT q.id FROM x_post_queue q "
                 "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
                 "WHERE q.source_type='drama' AND ("
-                "q.status IN ('queued','reserved','publishing') "
+                "q.status IN ('queued','waiting_relay','reserved','publishing') "
                 "OR COALESCE(l.unknown_outcome,0)=1"
                 ") ORDER BY q.id LIMIT 1"
             ).fetchone()
@@ -9164,8 +10011,20 @@ class XPostStore:
             "account_id",
             "candidate_rank",
             "episode_number",
+            "material_url",
             "delivery_mode",
             "relay_account_id",
+            "relay_account_username",
+            "media_validation_mode",
+            "preflight_sha256",
+            "preflight_size",
+            "preflight_duration",
+            "route_version",
+            "route_state",
+            "resolved_delivery_mode",
+            "preflight_width",
+            "preflight_height",
+            "resolved_at",
             "repost_status",
             "status",
             "error_code",
@@ -9185,8 +10044,18 @@ class XPostStore:
                 conn.execute(
                     "SELECT q.id,q.schedule_run_id,q.source_type,q.run_date,"
                     "q.source_date,q.account_id,q.candidate_rank,"
-                    "q.episode_number,q.delivery_mode,"
-                    "q.relay_account_id,COALESCE(r.status,'') AS repost_status,"
+                    "q.episode_number,q.material_url,q.delivery_mode,"
+                    "q.relay_account_id,q.relay_account_username,"
+                    "q.media_validation_mode,q.preflight_sha256,"
+                    "q.preflight_size,q.preflight_duration,"
+                    "COALESCE(d.route_version,0) AS route_version,"
+                    "COALESCE(d.route_state,'') AS route_state,"
+                    "COALESCE(d.resolved_delivery_mode,'') AS "
+                    "resolved_delivery_mode,"
+                    "COALESCE(d.preflight_width,0) AS preflight_width,"
+                    "COALESCE(d.preflight_height,0) AS preflight_height,"
+                    "COALESCE(d.resolved_at,'') AS resolved_at,"
+                    "COALESCE(r.status,'') AS repost_status,"
                     "q.status,COALESCE(l.error_code,'') AS error_code,"
                     "CASE WHEN l.status IN ('post_creating','repost_creating') "
                     "OR COALESCE(l.unknown_outcome,0)=1 "
@@ -9197,6 +10066,8 @@ class XPostStore:
                     "FROM x_post_queue q "
                     "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
                     "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                    "LEFT JOIN x_post_drama_delivery_route d "
+                    "ON d.queue_id=q.id "
                     "WHERE q.schedule_run_id=? "
                     "ORDER BY q.candidate_rank,q.id",
                     (run["id"],),
@@ -9223,14 +10094,14 @@ class XPostStore:
             "found": True,
             "run": run_item,
             "queues": [
-                {
+                _overlay_drama_delivery_route({
                     field: (
                         bool(row[field])
                         if field == "unknown_outcome"
                         else row[field]
                     )
                     for field in queue_fields
-                }
+                })
                 for row in queues
             ],
         }
@@ -11342,6 +12213,7 @@ class XPostStore:
                 require_compliance=True,
                 allow_material_relay=(source_type == "material"),
                 allow_deferred_media=True,
+                allow_duration_pending=(source_type == "drama"),
             )
             raw_deploy_time = payload.get("drama_deploy_time")
             if raw_deploy_time not in (None, ""):
@@ -11551,8 +12423,17 @@ class XPostStore:
                         409,
                     )
                 existing_queues = conn.execute(
-                    "SELECT * FROM x_post_queue WHERE schedule_run_id=? "
-                    "ORDER BY candidate_rank,id",
+                    "SELECT q.*,COALESCE(d.route_version,0) AS route_version,"
+                    "COALESCE(d.route_state,'') AS route_state,"
+                    "COALESCE(d.resolved_delivery_mode,'') AS "
+                    "resolved_delivery_mode,"
+                    "COALESCE(d.preflight_width,0) AS preflight_width,"
+                    "COALESCE(d.preflight_height,0) AS preflight_height,"
+                    "COALESCE(d.resolved_at,'') AS resolved_at "
+                    "FROM x_post_queue q LEFT JOIN "
+                    "x_post_drama_delivery_route d ON d.queue_id=q.id "
+                    "WHERE q.schedule_run_id=? "
+                    "ORDER BY q.candidate_rank,q.id",
                     (existing["id"],),
                 ).fetchall()
                 if existing_queues:
@@ -11563,43 +12444,53 @@ class XPostStore:
                             "该时间点已存在不同数量的发布计划",
                             409,
                         )
-                    expected = [
-                        (
-                            values["account_id"],
-                            values["material_key"],
-                            values["episode_key"],
-                            (
-                                values["delivery_mode"]
-                                if source_type == "material"
-                                else ""
-                            ),
-                            (
-                                int(values["relay_account_id"] or 0)
-                                if source_type == "material"
-                                else 0
-                            ),
+                    replay_conflict = False
+                    for row, values in zip(existing_queues, prepared):
+                        if (
+                            int(row["account_id"])
+                            != int(values["account_id"])
+                            or str(row["material_key"])
+                            != str(values["material_key"])
+                            or str(row["episode_key"])
+                            != str(values["episode_key"])
+                        ):
+                            replay_conflict = True
+                            continue
+                        expected_mode = str(
+                            values.get(
+                                "_logical_delivery_mode",
+                                values["delivery_mode"],
+                            )
                         )
-                        for values in prepared
-                    ]
-                    actual = [
-                        (
-                            int(row["account_id"]),
-                            str(row["material_key"]),
-                            str(row["episode_key"]),
-                            (
-                                str(row["delivery_mode"])
-                                if source_type == "material"
-                                else ""
-                            ),
-                            (
-                                int(row["relay_account_id"] or 0)
-                                if source_type == "material"
-                                else 0
-                            ),
-                        )
-                        for row in existing_queues
-                    ]
-                    if actual != expected:
+                        if (
+                            source_type == "drama"
+                            and expected_mode
+                            == DURATION_PENDING_DELIVERY_MODE
+                        ):
+                            try:
+                                route = self._assert_drama_duration_route_consistency(
+                                    conn,
+                                    row,
+                                )
+                            except XPostError:
+                                replay_conflict = True
+                                continue
+                            if (
+                                not route
+                                or int(route["route_version"])
+                                != DRAMA_DURATION_ROUTE_VERSION
+                            ):
+                                replay_conflict = True
+                        elif (
+                            str(row["delivery_mode"])
+                            != str(values["delivery_mode"])
+                            or int(row["relay_account_id"] or 0)
+                            != int(values["relay_account_id"] or 0)
+                            or str(row["relay_account_username"] or "")
+                            != str(values["relay_account_username"] or "")
+                        ):
+                            replay_conflict = True
+                    if replay_conflict:
                         conn.rollback()
                         raise XPostError(
                             "x_post_schedule_run_exists",
@@ -11609,7 +12500,8 @@ class XPostStore:
                     conn.commit()
                     item = self.get_schedule_run(existing["id"])
                     item["queues"] = [
-                        _row_dict(row) for row in existing_queues
+                        _overlay_drama_delivery_route(_row_dict(row))
+                        for row in existing_queues
                     ]
                     item["created"] = False
                     return item
@@ -12078,6 +12970,23 @@ class XPostStore:
                     )
                     queue_ids.append(int(cursor.lastrowid))
                     if (
+                        values.get("_logical_delivery_mode")
+                        == DURATION_PENDING_DELIVERY_MODE
+                    ):
+                        conn.execute(
+                            "INSERT INTO x_post_drama_delivery_route("
+                            "queue_id,route_version,route_state,"
+                            "resolved_delivery_mode,preflight_width,"
+                            "preflight_height,resolved_at,created_at,updated_at"
+                            ") VALUES(?,?,'duration_pending','',0,0,'',?,?)",
+                            (
+                                int(cursor.lastrowid),
+                                DRAMA_DURATION_ROUTE_VERSION,
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+                    elif (
                         values["delivery_mode"]
                         == PREMIUM_RELAY_REPOST_MODE
                     ):
@@ -13180,14 +14089,23 @@ class XPostStore:
         queue_id = _positive_int(queue_id, "queue_id")
         with contextlib.closing(_connect(self.db_path)) as conn:
             row = conn.execute(
-                "SELECT q.*,COALESCE(r.status,'') AS repost_status "
+                "SELECT q.*,COALESCE(r.status,'') AS repost_status,"
+                "COALESCE(d.route_version,0) AS route_version,"
+                "COALESCE(d.route_state,'') AS route_state,"
+                "COALESCE(d.resolved_delivery_mode,'') AS "
+                "resolved_delivery_mode,"
+                "COALESCE(d.preflight_width,0) AS preflight_width,"
+                "COALESCE(d.preflight_height,0) AS preflight_height,"
+                "COALESCE(d.resolved_at,'') AS resolved_at "
                 "FROM x_post_queue q LEFT JOIN x_post_repost_ledger r "
-                "ON r.queue_id=q.id WHERE q.id=?",
+                "ON r.queue_id=q.id LEFT JOIN "
+                "x_post_drama_delivery_route d ON d.queue_id=q.id "
+                "WHERE q.id=?",
                 (queue_id,),
             ).fetchone()
         if not row:
             raise XPostError("x_post_queue_not_found", "发布队列记录不存在", 404)
-        return _row_dict(row)
+        return _overlay_drama_delivery_route(_row_dict(row))
 
     def get_repost_ledger(self, queue_id):
         queue_id = _positive_int(queue_id, "queue_id")
@@ -13203,6 +14121,470 @@ class XPostStore:
                 404,
             )
         return _row_dict(row)
+
+    @staticmethod
+    def _assert_drama_duration_route_consistency(conn, queue):
+        if not queue:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "短剧发布队列不存在",
+                500,
+            )
+        route = conn.execute(
+            "SELECT * FROM x_post_drama_delivery_route WHERE queue_id=?",
+            (int(queue["id"]),),
+        ).fetchone()
+        if route is None:
+            return None
+        log = conn.execute(
+            "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+            (int(queue["id"]),),
+        ).fetchone()
+        ledger = conn.execute(
+            "SELECT * FROM x_post_repost_ledger WHERE queue_id=?",
+            (int(queue["id"]),),
+        ).fetchone()
+        state = str(route["route_state"] or "")
+        mode = str(route["resolved_delivery_mode"] or "")
+        width = int(route["preflight_width"] or 0)
+        height = int(route["preflight_height"] or 0)
+        raw_mode = str(queue["delivery_mode"] or "")
+        common_invalid = bool(
+            int(route["route_version"] or 0)
+            != DRAMA_DURATION_ROUTE_VERSION
+            or str(queue["source_type"] or "") != "drama"
+            or queue["schedule_run_id"] is None
+            or state not in DRAMA_ROUTE_STATES
+        )
+        if state == DRAMA_ROUTE_PENDING:
+            invalid = bool(
+                common_invalid
+                or mode
+                or str(route["resolved_at"] or "")
+                or width != 0
+                or height != 0
+                or raw_mode != DIRECT_DELIVERY_MODE
+                or int(queue["relay_account_id"] or 0) != 0
+                or str(queue["relay_account_username"] or "")
+                or str(queue["status"] or "") != "queued"
+                or str(queue["media_validation_mode"] or "")
+                != MEDIA_VALIDATION_DEFERRED
+                or str(queue["original_material_url"] or "")
+                or str(queue["media_repair_trigger_code"] or "")
+                or str(queue["media_repair_job_key"] or "")
+                or str(queue["media_repair_profile"] or "")
+                or str(queue["media_repair_source_sha256"] or "")
+                or str(queue["preflight_sha256"] or "")
+                or int(queue["preflight_size"] or 0) != 0
+                or float(queue["preflight_duration"] or 0) != 0
+                or log is not None
+                or ledger is not None
+            )
+        elif state == DRAMA_ROUTE_WAITING_RELAY:
+            invalid = bool(
+                common_invalid
+                or mode
+                or str(route["resolved_at"] or "")
+                or width <= 0
+                or height <= 0
+                or raw_mode != DIRECT_DELIVERY_MODE
+                or int(queue["relay_account_id"] or 0) != 0
+                or str(queue["relay_account_username"] or "")
+                or str(queue["status"] or "") != "waiting_relay"
+                or str(queue["media_validation_mode"] or "")
+                != MEDIA_VALIDATION_PREFLIGHT
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(queue["preflight_sha256"] or ""),
+                )
+                or int(queue["preflight_size"] or 0) <= 0
+                or float(queue["preflight_duration"] or 0)
+                <= STANDARD_MAX_DURATION_SECONDS
+                or log is not None
+                or ledger is not None
+            )
+        else:
+            resolved_direct = bool(
+                mode == DIRECT_DELIVERY_MODE
+                and raw_mode == DIRECT_DELIVERY_MODE
+                and int(queue["relay_account_id"] or 0) == 0
+                and not str(queue["relay_account_username"] or "")
+                and ledger is None
+            )
+            resolved_relay = bool(
+                mode == PREMIUM_RELAY_REPOST_MODE
+                and raw_mode == PREMIUM_RELAY_REPOST_MODE
+                and ledger is not None
+                and int(queue["relay_account_id"] or 0) > 0
+                and int(queue["relay_account_id"])
+                != int(queue["account_id"])
+                and str(queue["relay_account_username"] or "")
+                and int(ledger["target_account_id"])
+                == int(queue["account_id"])
+                and int(ledger["relay_account_id"])
+                == int(queue["relay_account_id"])
+            )
+            invalid = bool(
+                common_invalid
+                or not str(route["resolved_at"] or "")
+                or width <= 0
+                or height <= 0
+                or str(queue["status"] or "") == "waiting_relay"
+                or str(queue["media_validation_mode"] or "")
+                != MEDIA_VALIDATION_PREFLIGHT
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(queue["preflight_sha256"] or ""),
+                )
+                or int(queue["preflight_size"] or 0) <= 0
+                or float(queue["preflight_duration"] or 0) <= 0
+                or not (resolved_direct or resolved_relay)
+                or (
+                    resolved_relay
+                    and float(queue["preflight_duration"] or 0)
+                    <= STANDARD_MAX_DURATION_SECONDS
+                )
+            )
+        if invalid:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "短剧时长路线账本与发布队列不一致",
+                500,
+            )
+        return route
+
+    def resolve_drama_duration_route(
+        self,
+        queue_id,
+        media_evidence,
+        target_long_video_eligible,
+        eligible_relay_accounts,
+    ):
+        queue_id = _positive_int(queue_id, "queue_id")
+        if not isinstance(target_long_video_eligible, bool):
+            raise XPostError(
+                "invalid_request",
+                "target_long_video_eligible必须为布尔值",
+                400,
+            )
+        if not isinstance(eligible_relay_accounts, list):
+            raise XPostError(
+                "invalid_request",
+                "eligible_relay_accounts必须是数组",
+                400,
+            )
+        relay_options = []
+        seen_relay_ids = set()
+        for raw in eligible_relay_accounts:
+            if not isinstance(raw, dict):
+                raise XPostError(
+                    "invalid_request",
+                    "Premium relay account is invalid",
+                    400,
+                )
+            relay_id = _positive_int(raw.get("id"), "relay account id")
+            relay_username = str(
+                raw.get("username", "") or ""
+            ).strip().lstrip("@")
+            if (
+                relay_id in seen_relay_ids
+                or not re.fullmatch(
+                    r"[A-Za-z0-9_]{1,50}", relay_username
+                )
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "Premium relay account is invalid",
+                    400,
+                )
+            try:
+                relay_language = canonical_drama_language(
+                    raw.get(
+                        "drama_language",
+                        raw.get("account_drama_language"),
+                    )
+                )
+            except ValueError as exc:
+                raise XPostError(
+                    "x_account_drama_language_invalid",
+                    str(exc),
+                    400,
+                ) from None
+            seen_relay_ids.add(relay_id)
+            relay_options.append(
+                (relay_id, relay_username, relay_language)
+            )
+
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (queue_id,),
+            ).fetchone()
+            if not queue:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_queue_not_found",
+                    "发布队列记录不存在",
+                    404,
+                )
+            route = self._assert_drama_duration_route_consistency(
+                conn,
+                queue,
+            )
+            if route is None:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_route_not_pending",
+                    "该短剧队列不属于时长待解析路线",
+                    409,
+                )
+            if str(route["route_state"]) == DRAMA_ROUTE_RESOLVED:
+                conn.commit()
+                return self.get_queue(queue_id)
+
+            self._assert_drama_queue_assignment(conn, queue)
+            state = str(route["route_state"])
+            if state == DRAMA_ROUTE_PENDING:
+                evidence = _normalize_drama_duration_media_evidence(
+                    media_evidence
+                )
+                source_url = str(queue["material_url"])
+                if evidence["original_material_url"]:
+                    if evidence["original_material_url"] != source_url:
+                        conn.rollback()
+                        raise XPostError(
+                            "media_preflight_changed",
+                            "短剧修复证据与冻结源媒体不一致",
+                            409,
+                        )
+                elif evidence["material_url"] != source_url:
+                    conn.rollback()
+                    raise XPostError(
+                        "media_preflight_changed",
+                        "短剧最终媒体与冻结源媒体不一致",
+                        409,
+                    )
+            else:
+                evidence = {
+                    "material_url": str(queue["material_url"]),
+                    "original_material_url": str(
+                        queue["original_material_url"] or ""
+                    ),
+                    "media_repair_trigger_code": str(
+                        queue["media_repair_trigger_code"] or ""
+                    ),
+                    "media_repair_job_key": str(
+                        queue["media_repair_job_key"] or ""
+                    ),
+                    "media_repair_profile": str(
+                        queue["media_repair_profile"] or ""
+                    ),
+                    "media_repair_source_sha256": str(
+                        queue["media_repair_source_sha256"] or ""
+                    ),
+                    "media_validation_mode": MEDIA_VALIDATION_PREFLIGHT,
+                    "preflight_sha256": str(
+                        queue["preflight_sha256"]
+                    ),
+                    "preflight_size": int(queue["preflight_size"]),
+                    "preflight_duration": float(
+                        queue["preflight_duration"]
+                    ),
+                    "preflight_width": int(route["preflight_width"]),
+                    "preflight_height": int(route["preflight_height"]),
+                }
+                if media_evidence is not None:
+                    supplied = _normalize_drama_duration_media_evidence(
+                        media_evidence
+                    )
+                    if supplied != evidence:
+                        conn.rollback()
+                        raise XPostError(
+                            "media_preflight_changed",
+                            "短剧最终媒体证据与等待队列不一致",
+                            409,
+                        )
+
+            duration = float(evidence["preflight_duration"])
+            direct_delivery = bool(
+                duration <= STANDARD_MAX_DURATION_SECONDS
+                or target_long_video_eligible
+            )
+            selected_relay = None
+            if not direct_delivery:
+                target_language = canonical_drama_language(
+                    queue["account_drama_language"]
+                )
+                selectable = [
+                    option
+                    for option in relay_options
+                    if option[0] != int(queue["account_id"])
+                    and same_drama_language(
+                        option[2],
+                        target_language,
+                    )
+                ]
+                blockers = read_account_publish_blockers(
+                    conn,
+                    [option[0] for option in selectable],
+                )
+                selectable = [
+                    option
+                    for option in selectable
+                    if option[0] not in blockers
+                ]
+                if selectable:
+                    placeholders = ",".join(
+                        "?" for _option in selectable
+                    )
+                    counts = {
+                        option[0]: 0 for option in selectable
+                    }
+                    for row in conn.execute(
+                        "SELECT relay_account_id,COUNT(*) AS "
+                        "assignment_count FROM x_post_repost_ledger "
+                        "WHERE relay_account_id IN (%s) "
+                        "GROUP BY relay_account_id" % placeholders,
+                        tuple(option[0] for option in selectable),
+                    ).fetchall():
+                        counts[int(row["relay_account_id"])] = int(
+                            row["assignment_count"]
+                        )
+                    selected_relay = min(
+                        selectable,
+                        key=lambda option: (
+                            counts[option[0]],
+                            option[0],
+                        ),
+                    )
+
+            media_values = (
+                evidence["material_url"],
+                evidence["original_material_url"],
+                evidence["media_repair_trigger_code"],
+                evidence["media_repair_job_key"],
+                evidence["media_repair_profile"],
+                evidence["media_repair_source_sha256"],
+                evidence["media_validation_mode"],
+                evidence["preflight_sha256"],
+                evidence["preflight_size"],
+                evidence["preflight_duration"],
+            )
+            try:
+                if direct_delivery:
+                    conn.execute(
+                        "UPDATE x_post_queue SET delivery_mode='direct',"
+                        "relay_account_id=0,relay_account_username='',"
+                        "material_url=?,original_material_url=?,"
+                        "media_repair_trigger_code=?,"
+                        "media_repair_job_key=?,media_repair_profile=?,"
+                        "media_repair_source_sha256=?,"
+                        "media_validation_mode=?,preflight_sha256=?,"
+                        "preflight_size=?,preflight_duration=?,"
+                        "status='queued',updated_at=? WHERE id=?",
+                        media_values + (timestamp, queue_id),
+                    )
+                    conn.execute(
+                        "UPDATE x_post_drama_delivery_route SET "
+                        "route_state='resolved',"
+                        "resolved_delivery_mode='direct',"
+                        "preflight_width=?,preflight_height=?,"
+                        "resolved_at=?,updated_at=? WHERE queue_id=?",
+                        (
+                            evidence["preflight_width"],
+                            evidence["preflight_height"],
+                            timestamp,
+                            timestamp,
+                            queue_id,
+                        ),
+                    )
+                elif selected_relay is None:
+                    if state == DRAMA_ROUTE_PENDING:
+                        conn.execute(
+                            "UPDATE x_post_queue SET delivery_mode='direct',"
+                            "relay_account_id=0,relay_account_username='',"
+                            "material_url=?,original_material_url=?,"
+                            "media_repair_trigger_code=?,"
+                            "media_repair_job_key=?,"
+                            "media_repair_profile=?,"
+                            "media_repair_source_sha256=?,"
+                            "media_validation_mode=?,preflight_sha256=?,"
+                            "preflight_size=?,preflight_duration=?,"
+                            "status='waiting_relay',updated_at=? WHERE id=?",
+                            media_values + (timestamp, queue_id),
+                        )
+                        conn.execute(
+                            "UPDATE x_post_drama_delivery_route SET "
+                            "route_state='waiting_relay',"
+                            "preflight_width=?,preflight_height=?,"
+                            "updated_at=? WHERE queue_id=?",
+                            (
+                                evidence["preflight_width"],
+                                evidence["preflight_height"],
+                                timestamp,
+                                queue_id,
+                            ),
+                        )
+                else:
+                    relay_id, relay_username, _relay_language = (
+                        selected_relay
+                    )
+                    conn.execute(
+                        "UPDATE x_post_queue SET "
+                        "delivery_mode='premium_relay_repost',"
+                        "relay_account_id=?,relay_account_username=?,"
+                        "material_url=?,original_material_url=?,"
+                        "media_repair_trigger_code=?,"
+                        "media_repair_job_key=?,media_repair_profile=?,"
+                        "media_repair_source_sha256=?,"
+                        "media_validation_mode=?,preflight_sha256=?,"
+                        "preflight_size=?,preflight_duration=?,"
+                        "status='queued',updated_at=? WHERE id=?",
+                        (relay_id, relay_username)
+                        + media_values
+                        + (timestamp, queue_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO x_post_repost_ledger("
+                        "queue_id,run_date,target_account_id,"
+                        "relay_account_id,status,created_at,updated_at"
+                        ") VALUES(?,?,?,?,'reserved',?,?)",
+                        (
+                            queue_id,
+                            str(queue["run_date"]),
+                            int(queue["account_id"]),
+                            relay_id,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE x_post_drama_delivery_route SET "
+                        "route_state='resolved',"
+                        "resolved_delivery_mode="
+                        "'premium_relay_repost',"
+                        "preflight_width=?,preflight_height=?,"
+                        "resolved_at=?,updated_at=? WHERE queue_id=?",
+                        (
+                            evidence["preflight_width"],
+                            evidence["preflight_height"],
+                            timestamp,
+                            timestamp,
+                            queue_id,
+                        ),
+                    )
+                self._sync_run(conn, queue_id, timestamp)
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "短剧时长路线原子解析冲突",
+                    409,
+                ) from exc
+        return self.get_queue(queue_id)
 
     @staticmethod
     def _assert_relay_queue_binding(conn, queue):
@@ -13337,6 +14719,18 @@ class XPostStore:
             queue = conn.execute(
                 "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
             ).fetchone()
+            route = (
+                self._assert_drama_duration_route_consistency(conn, queue)
+                if queue is not None
+                else None
+            )
+            if route is not None:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_relay_reassignment_fenced",
+                    "Duration-routed drama relay assignment is immutable",
+                    409,
+                )
             ledger = self._assert_relay_queue_binding(conn, queue)
             if str(queue["source_type"] or "") == "material" and any(
                 option[2] is None for option in options
@@ -13910,7 +15304,7 @@ class XPostStore:
         status = str(payload.get("status", "") or "").strip()
         if status:
             allowed_statuses = {
-                "queued", "reserved", "publishing", "media_uploading",
+                "queued", "waiting_relay", "reserved", "publishing", "media_uploading",
                 "post_creating", "source_published", "repost_creating",
                 "published", "failed",
             }
@@ -13957,6 +15351,14 @@ class XPostStore:
             "ELSE 'canary' END AS batch_kind,"
             "q.source_type,q.run_date,q.source_date,q.account_id,"
             "q.delivery_mode,q.relay_account_id,q.relay_account_username,"
+            "q.preflight_duration,"
+            "COALESCE(d.route_version,0) AS route_version,"
+            "COALESCE(d.route_state,'') AS route_state,"
+            "COALESCE(d.resolved_delivery_mode,'') AS "
+            "resolved_delivery_mode,"
+            "COALESCE(d.preflight_width,0) AS preflight_width,"
+            "COALESCE(d.preflight_height,0) AS preflight_height,"
+            "COALESCE(d.resolved_at,'') AS resolved_at,"
             "COALESCE(r.status,'') AS repost_status,"
             "q.pool_item_id,q.pool_created_at,q.drama_pool_item_id,"
             "q.drama_pool_created_at,q.episode_number,q.episode_key,q.name_tag,"
@@ -13974,6 +15376,7 @@ class XPostStore:
             "q.created_at,q.updated_at FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+            "LEFT JOIN x_post_drama_delivery_route d ON d.queue_id=q.id "
             "LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
         )
         offset = (page - 1) * page_size
@@ -13994,7 +15397,7 @@ class XPostStore:
             item = _row_dict(row)
             item["unknown_outcome"] = bool(item["unknown_outcome"])
             item["error_message"] = redact_text(item["error_message"], 500)
-            items.append(item)
+            items.append(_overlay_drama_delivery_route(item))
         return {
             "items": items,
             "pagination": {
@@ -14401,6 +15804,17 @@ class XPostStore:
             if not queue:
                 conn.rollback()
                 raise XPostError("x_post_queue_not_found", "发布队列记录不存在", 404)
+            route = self._assert_drama_duration_route_consistency(conn, queue)
+            if (
+                route is not None
+                and str(route["route_state"] or "") != DRAMA_ROUTE_RESOLVED
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_route_pending",
+                    "短剧最终成片路线尚未解析，已阻止创建发布日志",
+                    409,
+                )
             row = conn.execute("SELECT * FROM x_post_publish_log WHERE queue_id=?", (queue_id,)).fetchone()
             if not row or str(row["status"]) != "published":
                 self._assert_drama_queue_assignment(conn, queue)
@@ -17382,12 +18796,25 @@ def publish_canary(
                 durable_storage=durable_storage,
             )
         if prepared_media is not None:
-            from features.x_posts.publish_media_repair import PreparedDeferredDramaMedia
+            from features.x_posts.publish_media_repair import (
+                PreparedDeferredDramaMedia,
+                PreparedDurationPendingDramaMedia,
+            )
 
-            if (
+            deferred_capability = bool(
+                deferred_media_validation
+                and isinstance(prepared_media, PreparedDeferredDramaMedia)
+            )
+            duration_routed_capability = bool(
                 not deferred_media_validation
-                or queue.get("source_type") != "drama"
-                or not isinstance(prepared_media, PreparedDeferredDramaMedia)
+                and str(queue.get("route_state") or "")
+                == DRAMA_ROUTE_RESOLVED
+                and isinstance(
+                    prepared_media, PreparedDurationPendingDramaMedia
+                )
+            )
+            if queue.get("source_type") != "drama" or not (
+                deferred_capability or duration_routed_capability
             ):
                 raise XPostError(
                     "media_preflight_changed", "已准备媒体只能用于原冻结短剧队列", 409,

@@ -123,6 +123,20 @@ def env_positive_int_tuple(name):
     return tuple(values)
 
 
+def env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    # Invalid feature-flag values fail closed instead of silently enabling a
+    # new publishing route.
+    return False
+
+
 load_env_file(os.environ.get("X_POST_ENV_FILE", DEFAULT_ENV_FILE))
 
 CLIENT_ID = os.environ.get("X_CLIENT_ID", "").strip()
@@ -180,6 +194,9 @@ POST_MEDIA_ALLOWED_HOSTS = tuple(
 POST_HTTP_TIMEOUT_SECONDS = env_int("X_POST_HTTP_TIMEOUT_SECONDS", 30, 5, 120)
 POST_MAX_MEDIA_BYTES = env_int(
     "X_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+)
+POST_DRAMA_DURATION_ROUTING_ENABLED = env_bool(
+    "X_POST_DRAMA_DURATION_ROUTING_ENABLED", False
 )
 
 CANARY_ACTOR = {
@@ -1540,7 +1557,17 @@ def _raise_x_post_error(exc, secrets_to_redact=()):
 def _safe_canary_result(result):
     if not isinstance(result, dict):
         raise ServiceError("x_posts_unavailable", "X发布服务返回无效", 503)
-    allowed = ("status", "log_id", "short_url", "post_id", "preview_url")
+    allowed = (
+        "status",
+        "queue_id",
+        "delivery_mode",
+        "preflight_duration",
+        "error_code",
+        "log_id",
+        "short_url",
+        "post_id",
+        "preview_url",
+    )
     return {key: result[key] for key in allowed if key in result}
 
 
@@ -2453,6 +2480,140 @@ def preflight_post_storage_request(required_media_count=1):
         raise
 
 
+def _resolve_duration_pending_queue(store, queue, actor, contexts):
+    """Resolve a new short-drama route before any publish log or credential.
+
+    The caller owns ``contexts`` through the source upload so a freshly
+    prepared final file can be passed straight to ``publish_canary``.
+    """
+    if str(queue.get("delivery_mode") or "") != "duration_pending":
+        return queue, None, None
+    if (
+        queue.get("source_type") != "drama"
+        or int(queue.get("schedule_run_id") or 0) <= 0
+        or str(queue.get("route_state") or "")
+        not in {"duration_pending", "waiting_relay"}
+    ):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "Short-drama duration route state is invalid",
+            503,
+        )
+    if not POST_DRAMA_DURATION_ROUTING_ENABLED:
+        parked = {
+            # The schedule runner already understands waiting_relay as a
+            # zero-write nonterminal result. Reuse that safe park signal even
+            # when the companion row is still duration_pending.
+            "status": "waiting_relay",
+            "queue_id": int(queue["id"]),
+            "delivery_mode": "duration_pending",
+            "preflight_duration": float(
+                queue.get("preflight_duration", 0) or 0
+            ),
+            "error_code": "x_post_drama_duration_routing_disabled",
+        }
+        return queue, None, parked
+    try:
+        frozen_language = canonical_drama_language(
+            queue.get("account_drama_language")
+        )
+    except ValueError as exc:
+        raise ServiceError(
+            "x_post_account_language_mismatch", clean_text(exc), 409
+        ) from None
+
+    prepared_media = None
+    media_evidence = None
+    if str(queue.get("route_state") or "") == "duration_pending":
+        from features.x_posts.publish_media_repair import (
+            prepare_duration_pending_drama_media,
+        )
+
+        prepared_media = contexts.enter_context(
+            prepare_duration_pending_drama_media(
+                queue=queue,
+                public_root=POST_PUBLIC_ROOT,
+                allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                timeout=POST_HTTP_TIMEOUT_SECONDS,
+                max_media_bytes=POST_MAX_MEDIA_BYTES,
+                storage_guard=preflight_post_storage_request,
+                durable_storage={
+                    "mount_root": POST_STORAGE_MOUNT_ROOT,
+                    "storage_root": POST_STORAGE_ROOT,
+                },
+            )
+        )
+        media_evidence = dict(prepared_media.evidence)
+        final_duration = float(media_evidence["preflight_duration"])
+    else:
+        final_duration = float(queue.get("preflight_duration", 0) or 0)
+        if not math.isfinite(final_duration) or final_duration <= 0:
+            raise ServiceError(
+                "x_posts_unavailable",
+                "Waiting short-drama queue is missing final media evidence",
+                503,
+            )
+
+    target = verify_account(
+        int(queue["account_id"]),
+        actor,
+        "all",
+        preserve_transient_status=True,
+        require_publish_approved=True,
+    )
+    if not same_drama_language(
+        target.get("drama_language"), frozen_language
+    ):
+        raise ServiceError(
+            "x_post_account_language_mismatch",
+            "X target account drama language no longer matches the frozen queue",
+            409,
+        )
+    target_long_video_eligible = bool(
+        target.get("long_video_publish_eligible")
+        and target.get("protected") is False
+    )
+    relay_accounts = []
+    if final_duration > 140.0 and not target_long_video_eligible:
+        relay_accounts = _premium_relay_accounts(
+            str(queue.get("run_date") or ""),
+            refresh=True,
+            drama_language=frozen_language,
+        )
+    try:
+        queue = store.resolve_drama_duration_route(
+            int(queue["id"]),
+            media_evidence,
+            target_long_video_eligible,
+            relay_accounts,
+        )
+    except Exception:
+        raise
+    if str(queue.get("route_state") or "") == "waiting_relay":
+        return queue, None, {
+            "status": "waiting_relay",
+            "queue_id": int(queue["id"]),
+            "delivery_mode": "duration_pending",
+            "preflight_duration": float(
+                queue.get("preflight_duration", 0) or 0
+            ),
+            "error_code": "x_post_premium_relay_unavailable",
+        }
+    if (
+        str(queue.get("route_state") or "") != "resolved"
+        or str(queue.get("delivery_mode") or "")
+        not in {"direct", "premium_relay_repost"}
+    ):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "Short-drama duration route did not resolve atomically",
+            503,
+        )
+    if prepared_media is not None:
+        prepared_media = prepared_media.bind_resolved(queue)
+    return queue, prepared_media, None
+
+
 def publish_queue_request(
     queue_id,
     allowed_account_ids=None,
@@ -2464,6 +2625,8 @@ def publish_queue_request(
 ):
     """Publish one frozen queue row; no request field can override its account or copy."""
     XPostError, XPostStore, publish_canary = _x_posts_api()
+    duration_route_contexts = contextlib.ExitStack()
+    duration_prepared_media = None
     try:
         if allow_schedule is None:
             allow_schedule = allowed_account_ids is not None
@@ -2562,15 +2725,46 @@ def publish_queue_request(
                     "X手动发布队列账号与冻结任务不一致",
                     403,
                 )
+        actor = dict(
+            AUTO_TEMPLATE_ACTOR
+            if expected_manual_trigger_source == "auto_template"
+            else CANARY_ACTOR
+        )
+        frozen_drama_language = None
+        if int(queue.get("account_drama_language_frozen") or 0) == 1:
+            try:
+                frozen_drama_language = canonical_drama_language(
+                    queue.get("account_drama_language")
+                )
+            except ValueError as exc:
+                raise ServiceError(
+                    "x_post_account_language_mismatch",
+                    clean_text(exc),
+                    409,
+                ) from None
+        queue, duration_prepared_media, parked_result = (
+            _resolve_duration_pending_queue(
+                store,
+                queue,
+                actor,
+                duration_route_contexts,
+            )
+        )
+        if parked_result is not None:
+            duration_route_contexts.close()
+            return _safe_canary_result(parked_result)
         log = store.reserve_log(queue["id"])
     except ServiceError:
+        duration_route_contexts.close()
         raise
     except XPostError as exc:
+        duration_route_contexts.close()
         _raise_x_post_error(exc)
     relay_delivery = bool(
         queue.get("delivery_mode") == "premium_relay_repost"
     )
     if log["status"] == "published":
+        duration_route_contexts.close()
         return _safe_canary_result(
             {
                 "status": "published",
@@ -2585,6 +2779,7 @@ def publish_queue_request(
         if relay_delivery
         else {"reserved"}
     ):
+        duration_route_contexts.close()
         unknown = bool(log["unknown_outcome"]) or log["status"] in {
             "post_creating",
             "repost_creating",
@@ -2599,23 +2794,6 @@ def publish_queue_request(
             )
         )
 
-    actor = dict(
-        AUTO_TEMPLATE_ACTOR
-        if expected_manual_trigger_source == "auto_template"
-        else CANARY_ACTOR
-    )
-    frozen_drama_language = None
-    if int(queue.get("account_drama_language_frozen") or 0) == 1:
-        try:
-            frozen_drama_language = canonical_drama_language(
-                queue.get("account_drama_language")
-            )
-        except ValueError as exc:
-            raise ServiceError(
-                "x_post_account_language_mismatch",
-                clean_text(exc),
-                409,
-            ) from None
     if log["status"] == "reserved":
         source_account_id = int(
             queue["relay_account_id"]
@@ -2666,7 +2844,7 @@ def publish_queue_request(
                     require_publish_approved=True,
                 )
             with contextlib.ExitStack() as publish_contexts:
-                prepared_media = None
+                prepared_media = duration_prepared_media
                 if deferred_media_validation and queue.get("source_type") == "drama":
                     from features.x_posts.publish_media_repair import prepare_deferred_drama_media
 
@@ -2792,10 +2970,13 @@ def publish_queue_request(
             except XPostError as storage_exc:
                 _raise_x_post_error(storage_exc)
             raise
+        finally:
+            duration_route_contexts.close()
         if not relay_delivery:
             return _safe_canary_result(result)
         log = store.get_log(log["id"])
 
+    duration_route_contexts.close()
     # The source Post has a confirmed durable ID. Resuming from here can only
     # execute the target Repost; it can never upload or create the source again.
     if not relay_delivery or log["status"] != "source_published":
@@ -3875,6 +4056,7 @@ def _safe_schedule_queue(queue):
     status = str(queue.get("status", "") or "")
     if status not in {
         "queued",
+        "waiting_relay",
         "reserved",
         "publishing",
         "published",
@@ -3897,9 +4079,55 @@ def _safe_schedule_queue(queue):
     delivery_mode = str(
         queue.get("delivery_mode", "direct") or "direct"
     )
+    route_state = str(queue.get("route_state", "") or "")
+    resolved_delivery_mode = str(
+        queue.get("resolved_delivery_mode", "") or ""
+    )
     repost_status = str(queue.get("repost_status", "") or "")
     relay_account_id = int(queue.get("relay_account_id") or 0)
-    if delivery_mode not in {"direct", "premium_relay_repost"} or (
+    relay_account_username = str(
+        queue.get("relay_account_username", "") or ""
+    ).strip().lstrip("@")
+    try:
+        preflight_duration = float(queue.get("preflight_duration", 0) or 0)
+        preflight_width = int(queue.get("preflight_width", 0) or 0)
+        preflight_height = int(queue.get("preflight_height", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X schedule media evidence is invalid",
+            503,
+        ) from None
+    if (
+        not math.isfinite(preflight_duration)
+        or preflight_duration < 0
+        or preflight_width < 0
+        or preflight_height < 0
+        or (
+            relay_account_username
+            and not re.fullmatch(r"[A-Za-z0-9_]{1,50}", relay_account_username)
+        )
+    ):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X schedule media evidence is invalid",
+            503,
+        )
+    if delivery_mode not in {
+        "duration_pending",
+        "direct",
+        "premium_relay_repost",
+    } or (
+        delivery_mode == "duration_pending"
+        and (
+            route_state not in {"duration_pending", "waiting_relay"}
+            or resolved_delivery_mode
+            or relay_account_id != 0
+            or relay_account_username
+            or repost_status
+            or status == "waiting_relay" and route_state != "waiting_relay"
+        )
+    ) or (
         delivery_mode == "direct"
         and (relay_account_id != 0 or repost_status)
     ) or (
@@ -3931,8 +4159,14 @@ def _safe_schedule_queue(queue):
         "error_code": error_code,
         "unknown_outcome": bool(queue.get("unknown_outcome", False)),
         "delivery_mode": delivery_mode,
+        "route_state": route_state,
+        "resolved_delivery_mode": resolved_delivery_mode,
         "relay_account_id": relay_account_id,
+        "relay_account_username": relay_account_username,
         "repost_status": repost_status,
+        "preflight_duration": preflight_duration,
+        "preflight_width": preflight_width,
+        "preflight_height": preflight_height,
     }
 
 
@@ -4029,10 +4263,18 @@ def due_post_schedules_request(payload):
         result = XPostStore(POST_DB_PATH).due_schedule_slots(
             now=server_now,
             grace_seconds=90,
+            limit=limit,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
-    return {"items": list(result.get("items", []))[:limit]}
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list) or len(items) > limit:
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布待执行范围超过冻结上限",
+            503,
+        )
+    return {"items": list(items)}
 
 
 def previous_day_due_post_schedules_request(payload):
@@ -4219,7 +4461,31 @@ def create_post_schedule_plan_request(payload):
             raise ServiceError(
                 "invalid_request", "preflight_duration is invalid", 400
             ) from None
+        requested_delivery_mode = str(
+            candidate.get("delivery_mode", "direct") or "direct"
+        ).strip().lower()
+        duration_pending = requested_delivery_mode == "duration_pending"
+        if duration_pending and not (
+            POST_DRAMA_DURATION_ROUTING_ENABLED and source_type == "drama"
+        ):
+            raise ServiceError(
+                "invalid_request",
+                "duration_pending is restricted to enabled short-drama schedules",
+                400,
+            )
+        if (
+            POST_DRAMA_DURATION_ROUTING_ENABLED
+            and source_type == "drama"
+            and not duration_pending
+        ):
+            raise ServiceError(
+                "invalid_request",
+                "new short-drama schedules must defer routing until final duration is known",
+                400,
+            )
         relay_required = bool(
+            not duration_pending
+            and
             source_type in {"drama", "material"}
             and math.isfinite(duration)
             and duration > 140.0
@@ -4265,7 +4531,7 @@ def create_post_schedule_plan_request(payload):
                         "Frozen same-language material relay account is no longer eligible",
                         409,
                     )
-        else:
+        elif not duration_pending:
             _require_candidate_duration_capability(candidate, account)
         if account.get("long_video_eligible"):
             premium_account_ids.append(int(account["id"]))
@@ -4287,7 +4553,15 @@ def create_post_schedule_plan_request(payload):
                 ),
             }
         )
-        if relay_required:
+        if duration_pending:
+            item.update(
+                {
+                    "delivery_mode": "duration_pending",
+                    "relay_account_id": 0,
+                    "relay_account_username": "",
+                }
+            )
+        elif relay_required:
             item.update(
                 {
                     "delivery_mode": "premium_relay_repost",

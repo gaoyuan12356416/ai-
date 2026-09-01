@@ -256,7 +256,7 @@
     .badge.completed, .badge.published, .badge.available { color: #08734f; background: #e8f8f1; }
     .badge.pending, .badge.publishing, .badge.reserved, .badge.queued { color: #2457b8; background: #eef4ff; }
     .badge.validation_failed, .badge.failed, .badge.blocked { color: #ad2f3b; background: #ffedef; }
-    .badge.needs_review, .badge.paused { color: #925d00; background: #fff4d9; }
+    .badge.needs_review, .badge.paused, .badge.waiting_relay { color: #925d00; background: #fff4d9; }
     .badge.other { color: #56657b; background: #edf1f6; }
     .progress { width: 150px; height: 7px; margin: 8px 0 5px; overflow: hidden; border-radius: 99px; background: #e9eef6; }
     .progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2563eb, #20ba85); }
@@ -1099,10 +1099,35 @@ Episode {{episode_number}}
           validation_failed: "不可用",
           failed: "发布失败",
           blocked: "已阻塞",
+          waiting_relay: "等待同语言会员号",
           needs_review: "结果待核查",
           paused: "已暂停",
         };
         return { value: labels[value] ? value : "other", label: labels[value] || value || "未知" };
+      }
+      function finalDurationLabel(value) {
+        const duration = Number(value);
+        return Number.isFinite(duration) && duration > 0
+          ? `最终时长 ${duration.toFixed(3)}s`
+          : "最终时长待检测";
+      }
+      function deliveryRouteLabel(item) {
+        const deliveryMode = String(item.delivery_mode || "");
+        const queueStatus = String(item.queue_status || item.publish_status || item.status || "").toLowerCase();
+        const duration = finalDurationLabel(item.preflight_duration ?? item.final_duration);
+        if (deliveryMode === "duration_pending") {
+          return queueStatus === "waiting_relay"
+            ? `等待同语言会员号 · ${duration}`
+            : `正在检测最终成片时长 · ${duration}`;
+        }
+        if (deliveryMode === "premium_relay_repost") {
+          const relay = item.relay_account_username
+            ? `@${String(item.relay_account_username).replace(/^@/, "")}`
+            : (item.relay_account_id ? `账号 ${item.relay_account_id}` : "待分配会员号");
+          return `会员号 ${relay} 发原帖，目标账号 Repost · ${duration}`;
+        }
+        if (deliveryMode === "direct") return `目标账号直接发布 · ${duration}`;
+        return "";
       }
       function extractPagination(result) {
         const pagination = result && result.pagination && typeof result.pagination === "object" ? result.pagination : (result || {});
@@ -1463,14 +1488,21 @@ Episode {{episode_number}}
           items.forEach(item => {
             const row = document.createElement("tr");
             appendCell(row, `Episode ${item.sub_num ?? item.episode_number ?? "—"}`);
+            const queueStatus = String(item.queue_status || "").toLowerCase();
             const status = poolStatus({
-              status: item.publish_status || item.queue_status || "pending",
+              status: queueStatus === "waiting_relay"
+                ? queueStatus
+                : (item.publish_status || item.queue_status || "pending"),
             });
             const statusCell = document.createElement("td");
             statusCell.appendChild(badge(status.label, status.value));
             row.appendChild(statusCell);
             const username = String(item.account_username || "").replace(/^@/, "");
-            appendCell(row, username ? `@${username}` : (item.account_id ? `账号 ${item.account_id}` : "—"));
+            appendCell(
+              row,
+              username ? `@${username}` : (item.account_id ? `账号 ${item.account_id}` : "—"),
+              deliveryRouteLabel(item)
+            );
             appendCell(
               row,
               item.run_date && item.publish_time

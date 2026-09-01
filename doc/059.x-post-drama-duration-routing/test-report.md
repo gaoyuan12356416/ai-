@@ -1,0 +1,38 @@
+# 测试报告
+
+## 测试结论
+
+代码、专项、全量 X 回归及独立审查通过；尚未执行 feature-off 生产迁移和自然排期业务验收。
+
+## 测试范围
+
+schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/random/waiting、DTO/UI、历史恢复和全量 X 回归。
+
+## 执行统计
+
+| 类型 | 数量 | 通过 | 失败 | 阻塞 |
+| --- | --- | --- | --- | --- |
+| 变更前基线聚焦 | 259 | 259 | 0 | 0 |
+| UI 聚焦 | 48 | 48 | 0 | 0 |
+| Store 路由/崩溃/公平性专项 | 128 | 128 | 0 | 0 |
+| 实现后全量 X | 890 | 888 | 0 | 2（环境跳过） |
+| 全仓 discovery | 1453 | 1446 | 5 | 2（环境跳过） |
+
+## 缺陷情况
+
+独立审查发现并关闭 6 类 P1：waiting 队列被 limit 饿死、冻结剧集污染下一 slot、waiting 媒体证据可直接 SQL 改写、resolved 后跨日崩溃误停、resolved relay ledger 可删除/搬移，以及 rollout 遗漏同库 writer。另关闭 browser DTO 暴露 SHA/size 与 feature-off timer 顺序两项问题。当前无已知未关闭代码 P0/P1。
+
+## 验证证据
+
+- 基线 commit：`955e54b64f137ec4298cba39ccf9e443dc4a4e73`。
+- 测试方式：本地 Python unittest、临时 SQLite、mock HTTP/X；禁止真实平台写入。
+- 生产基线：quick_check=ok、FK=0、无 queued/publishing；历史 unknown 隔离保留。
+- 全仓 5 个错误均来自 TT 基线：`_TTDramawaveCandidateSelector._violation_counts` 缺失及 `_pool_material_rows(... allow_long_duration=...)` 合同不匹配；同样 5 个错误已在干净 `955e54b` 复现，本次未修改 TT 代码，判定无新增全仓回归。
+
+## 遗留风险
+
+自然首条短 direct 与长 relay 的平台结果只能在上线后由自然排期产生，不能由 mock 代替。
+
+## 发布建议
+
+允许进入 GitHub-first feature-off 部署；必须保持全部 SQLite writer 停止完成迁移检查，双端 feature=true 后才恢复 timers。最终业务通过仍取决于首个自然短 direct 与长 relay 的 queue/ledger/X 对账。

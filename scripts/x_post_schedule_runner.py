@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 import random
 import re
@@ -105,6 +106,7 @@ _QUEUE_STATUSES = {
     "publishing",
     "published",
     "failed",
+    "waiting_relay",
 }
 _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
     {
@@ -187,6 +189,20 @@ def _env_int(name, fallback_name, default, minimum, maximum):
     return max(int(minimum), min(value, int(maximum)))
 
 
+def _env_bool(name, default=False):
+    raw = str(
+        os.environ.get(name, "1" if default else "0") or ""
+    ).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise ScheduleRunError(
+        "%s must be 0 or 1" % name,
+        "x_post_schedule_invalid_configuration",
+    )
+
+
 def _endpoint_path(value, *, template=False):
     value = str(value or "").strip()
     if not value.startswith("/internal/") or "?" in value or "#" in value:
@@ -236,6 +252,7 @@ class ScheduleConfig:
     drama_app_id: int = DRAMAWAVE_APP_ID
     previous_day_recovery_reason: str = ""
     previous_day_deployed_commit: str = ""
+    drama_duration_routing_enabled: bool = False
 
     @property
     def pool_check_path(self):
@@ -428,9 +445,17 @@ class ScheduleConfig:
                 1,
                 9223372036854775807,
             ),
+            drama_duration_routing_enabled=_env_bool(
+                "X_POST_DRAMA_DURATION_ROUTING_ENABLED", False
+            ),
         )
 
     def validate(self):
+        if not isinstance(self.drama_duration_routing_enabled, bool):
+            raise ScheduleRunError(
+                "drama duration routing flag must be boolean",
+                "x_post_schedule_invalid_configuration",
+            )
         parsed = urllib.parse.urlsplit(self.internal_url)
         if (
             parsed.scheme != "http"
@@ -568,6 +593,91 @@ class ScheduleSidecarClient(SidecarClient):
 
     def verify_account(self, account_id):
         return super().verify_account(account_id, schedule_preflight=True)
+
+    def publish_queue(self, path_template, queue_id):
+        """Accept a zero-X-write relay wait while preserving publish validation."""
+        path = path_template.format(queue_id=int(queue_id))
+        result = self.post(path, {}, write_may_have_happened=True)
+        item = (
+            result.get("item")
+            if isinstance(result, dict)
+            and isinstance(result.get("item"), dict)
+            else result
+        )
+        if isinstance(item, dict) and item.get("status") == "waiting_relay":
+            delivery_mode = str(item.get("delivery_mode", "") or "")
+            response_queue_id = item.get("queue_id")
+            error_code = str(item.get("error_code", "") or "")
+            duration_present = (
+                "preflight_duration" in item or "final_duration" in item
+            )
+            duration_value = item.get(
+                "preflight_duration", item.get("final_duration")
+            )
+            invalid_duration = False
+            if duration_present:
+                routing_disabled = bool(
+                    error_code
+                    == "x_post_drama_duration_routing_disabled"
+                )
+                invalid_duration = (
+                    not isinstance(duration_value, (int, float))
+                    or isinstance(duration_value, bool)
+                    or not math.isfinite(float(duration_value))
+                    or (
+                        float(duration_value) < 0.0
+                        if routing_disabled
+                        else float(duration_value) <= 140.0
+                    )
+                )
+            if (
+                delivery_mode != "duration_pending"
+                or not isinstance(response_queue_id, int)
+                or isinstance(response_queue_id, bool)
+                or response_queue_id != int(queue_id)
+                or not duration_present
+                or invalid_duration
+                or (
+                    bool(error_code)
+                    and not re.fullmatch(
+                        r"[A-Za-z0-9_.:-]{1,64}", error_code
+                    )
+                )
+                or bool(item.get("unknown_outcome"))
+                or any(
+                    item.get(key) not in (None, "", 0)
+                    for key in (
+                        "log_id",
+                        "post_id",
+                        "preview_url",
+                        "short_url",
+                    )
+                )
+            ):
+                raise SidecarError(
+                    "x_publish_invalid_response",
+                    "Relay-wait response is incomplete or inconsistent",
+                    502,
+                    unknown_outcome=True,
+                )
+            waiting = {
+                "status": "waiting_relay",
+                "queue_id": int(queue_id),
+                "delivery_mode": "duration_pending",
+                "preflight_duration": float(duration_value),
+                "error_code": error_code,
+            }
+            return waiting
+
+        class _ResponseReplay:
+            def post(self, *_args, **_kwargs):
+                return result
+
+        # Reuse the daily publisher's strict successful-Post validator without
+        # issuing a second HTTP request to the write endpoint.
+        return SidecarClient.publish_queue(
+            _ResponseReplay(), path_template, queue_id
+        )
 
     def due_schedules(
         self,
@@ -712,6 +822,18 @@ class ScheduleSidecarClient(SidecarClient):
             )
             relay_account_id = raw.get("relay_account_id", 0)
             repost_status = str(raw.get("repost_status", "") or "")
+            duration_present = (
+                "preflight_duration" in raw or "final_duration" in raw
+            )
+            duration_value = raw.get(
+                "preflight_duration", raw.get("final_duration", 0.0)
+            )
+            valid_duration = (
+                isinstance(duration_value, (int, float))
+                and not isinstance(duration_value, bool)
+                and math.isfinite(float(duration_value))
+                and float(duration_value) >= 0.0
+            )
             if (
                 not isinstance(queue_id, int)
                 or isinstance(queue_id, bool)
@@ -732,12 +854,39 @@ class ScheduleSidecarClient(SidecarClient):
                 or bool(error_code)
                 and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", error_code)
                 or delivery_mode
-                not in {"direct", "premium_relay_repost"}
+                not in {
+                    "direct",
+                    "duration_pending",
+                    "premium_relay_repost",
+                }
                 or not isinstance(relay_account_id, int)
                 or isinstance(relay_account_id, bool)
+                or not valid_duration
                 or (
                     delivery_mode == "direct"
                     and (relay_account_id != 0 or repost_status)
+                )
+                or (
+                    delivery_mode == "duration_pending"
+                    and (
+                        relay_account_id != 0
+                        or repost_status
+                        or unknown
+                        or error_code
+                        or status not in {"queued", "waiting_relay"}
+                        or (
+                            status == "queued"
+                            and float(duration_value) != 0.0
+                        )
+                        or (
+                            status == "waiting_relay"
+                            and float(duration_value) <= 140.0
+                        )
+                    )
+                )
+                or (
+                    status == "waiting_relay"
+                    and delivery_mode != "duration_pending"
                 )
                 or (
                     delivery_mode == "premium_relay_repost"
@@ -771,7 +920,14 @@ class ScheduleSidecarClient(SidecarClient):
                 "unknown_outcome": unknown,
                 "error_code": error_code,
             }
-            if delivery_mode == "premium_relay_repost":
+            if delivery_mode == "duration_pending":
+                normalized.update(
+                    {
+                        "delivery_mode": delivery_mode,
+                        "preflight_duration": float(duration_value),
+                    }
+                )
+            elif delivery_mode == "premium_relay_repost":
                 normalized.update(
                     {
                         "delivery_mode": delivery_mode,
@@ -779,6 +935,10 @@ class ScheduleSidecarClient(SidecarClient):
                         "repost_status": repost_status,
                     }
                 )
+                if duration_present:
+                    normalized["preflight_duration"] = float(duration_value)
+            elif duration_present:
+                normalized["preflight_duration"] = float(duration_value)
             queues.append(normalized)
         return queues
 
@@ -1750,6 +1910,9 @@ def _drama_candidates(
                         "media_validation_mode": "deferred",
                         "preflight_sha256": "",
                         "preflight_size": 0,
+                        "preflight_duration": float(
+                            item.get("preflight_duration") or 0.0
+                        ),
                         "preflight_width": 0,
                         "preflight_height": 0,
                         "delivery_mode": item.get("delivery_mode") or "direct",
@@ -1814,6 +1977,22 @@ def _drama_candidates(
                         candidate.get("material_language")
                         or candidate.get("language")
                     )
+                    if config.drama_duration_routing_enabled:
+                        item = _plan_candidate(
+                            account, helper_candidate, rank, timestamp
+                        )
+                        item.update(
+                            {
+                                "delivery_mode": "duration_pending",
+                                "relay_account_id": 0,
+                                "relay_account_username": "",
+                                "preflight_duration": 0.0,
+                            }
+                        )
+                        planned_by_index[index] = normalize_item(
+                            item, candidate
+                        )
+                        continue
                     if account.get("long_video_eligible"):
                         item = _plan_candidate(
                             account, helper_candidate, rank, timestamp
@@ -1955,13 +2134,16 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
             published = sidecar.publish_queue(
                 config.publish_path_template, queue["id"]
             )
-            entry.update(
-                {
-                    "status": published["status"],
-                    "log_id": published["log_id"],
-                    "preview_url": published["preview_url"],
-                }
-            )
+            entry["status"] = published["status"]
+            for key in (
+                "log_id",
+                "preview_url",
+                "delivery_mode",
+                "preflight_duration",
+                "error_code",
+            ):
+                if key in published:
+                    entry[key] = published[key]
         except SidecarError as exc:
             entry.update(
                 {
@@ -1975,6 +2157,7 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         results.append(entry)
         if stopped:
             break
+    result_statuses = [item["status"] for item in results]
     return {
         "source_type": identity["source_type"],
         "run_date": identity["run_date"],
@@ -1984,11 +2167,25 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         "planned_count": len(queues),
         "attempted_count": len(results),
         "published_count": sum(item["status"] == "published" for item in results),
+        "waiting_relay_count": sum(
+            item["status"] == "waiting_relay" for item in results
+        ),
         "status": "stopped" if stopped else (
             "published"
             if len(results) == len(queues)
-            and all(item["status"] == "published" for item in results)
-            else "completed_with_errors"
+            and all(status == "published" for status in result_statuses)
+            else (
+                "waiting_relay"
+                if len(results) == len(queues)
+                and any(
+                    status == "waiting_relay" for status in result_statuses
+                )
+                and all(
+                    status in {"published", "waiting_relay"}
+                    for status in result_statuses
+                )
+                else "completed_with_errors"
+            )
         ),
         "results": results,
     }
@@ -2235,7 +2432,18 @@ def execute_schedule_tick(
             else (
                 "published"
                 if batches and all(item["status"] == "published" for item in batches)
-                else "completed_with_errors"
+                else (
+                    "waiting_relay"
+                    if batches
+                    and any(
+                        item["status"] == "waiting_relay" for item in batches
+                    )
+                    and all(
+                        item["status"] in {"published", "waiting_relay"}
+                        for item in batches
+                    )
+                    else "completed_with_errors"
+                )
             )
         ),
         "run_date": run_date,
@@ -2257,6 +2465,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result.get("status") in {
             "published",
+            "waiting_relay",
             "no_due",
             "skipped_before_start_date",
             "skipped_locked",
