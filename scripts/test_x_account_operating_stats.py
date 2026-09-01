@@ -364,8 +364,11 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertNotIn("CAP_DAC_OVERRIDE", SERVICE_UNIT)
         self.assertIn("/var/lib/sql-connection-gate/session-locks", SERVICE_UNIT)
         self.assertIn("InaccessiblePaths=/var/lib/x-post-automation/tokens /etc/ssh", SERVICE_UNIT)
-        self.assertIn("09:10:00 Asia/Shanghai", TIMER_UNIT)
-        self.assertIn("21:10:00 Asia/Shanghai", TIMER_UNIT)
+        self.assertIn("10:00:00 Asia/Shanghai", TIMER_UNIT)
+        self.assertIn("11:00:00 Asia/Shanghai", TIMER_UNIT)
+        self.assertIn("12:00:00 Asia/Shanghai", TIMER_UNIT)
+        self.assertNotIn("09:10:00 Asia/Shanghai", TIMER_UNIT)
+        self.assertNotIn("21:10:00 Asia/Shanghai", TIMER_UNIT)
 
 
 if __name__ == "__main__":

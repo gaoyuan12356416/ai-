@@ -13,7 +13,7 @@
 1. 部署 exact Git 的 module/script/app/static/env，安装 unit/timer；运行 `systemd-analyze verify`。oneshot 在 `ProtectSystem=strict` 下仅额外放行 SQL Gate 的既有 session-lock 目录写锁，不放行其状态账本或配置目录；为只读打开 `0600 x-post-automation` 账本仅保留 `CAP_DAC_READ_SEARCH`，不授予任何 DAC 写能力，Token 与 SSH 路径继续不可见。
 2. 先手动启动 refresh oneshot（只读、无 X），核验 current.json mode/schema/time/金额。
 3. 仅重启主 API，发布 static 到实际 Nginx docroot；管理员核验 API/UI/no-store。
-4. 启用 timer，核对下一次北京时间 09:10/21:10；不得用真实 X Post 验收。
+4. 启用 timer，核对每天北京时间 10:00、11:00、12:00 三次触发；不得用真实 X Post 验收。
 
 ## 回滚
 

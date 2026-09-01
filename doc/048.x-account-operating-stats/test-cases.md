@@ -13,7 +13,7 @@
 | TC-009 | UI | 六项存在；公众仅 followers/tweet/like | P0 | 通过 |
 | TC-010 | auth/no-store | admin gate 与 no-store 保持 | P0 | 通过 |
 | TC-011 | gate/secret | argv 仅 `/usr/bin/mysql`；密码仅 MYSQL_PWD | P0 | 通过 |
-| TC-012 | timer/OAuth 回归 | 09:10/21:10；既有账号/relay tests 通过 | P0 | 通过 |
+| TC-012 | timer/OAuth 回归 | 10:00/11:00/12:00；不再包含 09:10/21:10；既有账号/relay tests 通过 | P0 | 通过 |
 | TC-013 | relay ledger 对抗冲突 | ledger relay 与 queue 冻结 relay 不同 | P0 | 通过：记录 conflict，双方均不计数 |
 | TC-014 | gate 漂移 | mysql.real、mariadb、其他 binary/path | P0 | 通过：均 fail closed |
 | TC-015 | cache 跨日/未来 | TTL 内跨北京日、未来 10 分钟、未来 2 分钟 | P0 | 通过：前两者 stale，允许 2 分钟偏差 |
