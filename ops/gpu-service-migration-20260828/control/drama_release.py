@@ -112,6 +112,19 @@ HK_PUBLIC_ROOT = common.HK_BASE / "results" / "public"
 HK_RUNTIME_ACTIVE = HK_WORK_ROOT / ".runtime" / "jobs"
 HK_RUNTIME_DIAGNOSTICS = HK_WORK_ROOT / ".runtime" / "diagnostics"
 MIN_FREE_BYTES = 30 * 1024 * 1024 * 1024
+HK_REVIEWED_FAILURE_PATH = (
+    common.HK_DATA_ROOT / "migrations" / common.RUN_ID / "drama-release" /
+    common.NEW_SHA / "hk" / "failure.json"
+)
+HK_REVIEWED_FAILURE_SHA256 = (
+    "78ba694be60342a4b3f94468b3a88c35c92061550025deea5aa76cbd5745b005"
+)
+HK_RETRY_ID = "hk-retry-restart-counter-20260901"
+HK_RETRY_EVIDENCE = (
+    common.HK_DATA_ROOT / "migrations" / common.RUN_ID / "drama-release" /
+    common.NEW_SHA / HK_RETRY_ID
+)
+REVIEWED_FAILURE_MAX_BYTES = 64 * 1024
 
 
 def role_contract(role):
@@ -125,6 +138,7 @@ def role_contract(role):
             "protected_units": (),
             "evidence": common.CPU_DATA_ROOT / "migrations" / common.RUN_ID /
                         "drama-release" / common.NEW_SHA / "cpu",
+            "reviewed_failure_resume": None,
         }
     if role == "hk":
         return {
@@ -136,6 +150,7 @@ def role_contract(role):
             "protected_units": common.HK_PROTECTED_UNITS,
             "evidence": common.HK_DATA_ROOT / "migrations" / common.RUN_ID /
                         "drama-release" / common.NEW_SHA / "hk",
+            "reviewed_failure_resume": None,
         }
     raise common.OperatorError("unknown host role")
 
@@ -227,6 +242,31 @@ def validate_cli(args):
         raise common.OperatorError("protected unit scope or order changed")
     if not args.expected_data_device or any(ch.isspace() for ch in args.expected_data_device):
         raise common.OperatorError("expected data device binding is missing or invalid")
+    resume = bool(getattr(args, "reviewed_failure_resume", False))
+    failure_path = getattr(args, "reviewed_failure_path", None)
+    failure_sha256 = getattr(args, "reviewed_failure_sha256", None)
+    retry_id = getattr(args, "retry_id", None)
+    if resume:
+        if args.role != "hk":
+            raise common.OperatorError("reviewed-failure resume is limited to the exact HK retry")
+        if (pathlib.Path(failure_path or "") != HK_REVIEWED_FAILURE_PATH or
+                failure_sha256 != HK_REVIEWED_FAILURE_SHA256 or
+                retry_id != HK_RETRY_ID):
+            raise common.OperatorError("reviewed-failure resume binding differs from the approved retry")
+        contract = dict(contract)
+        contract["evidence"] = HK_RETRY_EVIDENCE
+        contract["reviewed_failure_resume"] = {
+            "failure_path": str(HK_REVIEWED_FAILURE_PATH),
+            "failure_sha256": HK_REVIEWED_FAILURE_SHA256,
+            "retry_id": HK_RETRY_ID,
+            "evidence": str(HK_RETRY_EVIDENCE),
+        }
+    else:
+        if any(value is not None for value in (failure_path, failure_sha256, retry_id)):
+            raise common.OperatorError(
+                "reviewed-failure bindings require explicit --reviewed-failure-resume")
+        contract = dict(contract)
+        contract["reviewed_failure_resume"] = None
     return contract
 
 
@@ -601,6 +641,91 @@ def inspect_hk_runtime():
             "work_root": str(HK_WORK_ROOT), "public_root": str(HK_PUBLIC_ROOT)}
 
 
+def verify_reviewed_hk_failure(path, expected_sha256):
+    path = pathlib.Path(path)
+    if path != HK_REVIEWED_FAILURE_PATH or expected_sha256 != HK_REVIEWED_FAILURE_SHA256:
+        raise common.OperatorError("reviewed HK failure path or SHA256 binding changed")
+    value = common.validate_existing_ancestry(path, trusted_root=common.HK_DATA_ROOT)
+    if (stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode) or
+            int(value.st_size) <= 0 or int(value.st_size) > REVIEWED_FAILURE_MAX_BYTES):
+        raise common.OperatorError("reviewed HK failure is not a bounded regular file")
+    descriptor, record, digest = common.anchored_file(
+        path, expected_sha256=HK_REVIEWED_FAILURE_SHA256,
+        expected_inode=int(value.st_ino), expected_size=int(value.st_size))
+    try:
+        raw = _read_exact_fd(descriptor, int(value.st_size))
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(str(path))
+    if (common.stat_record(opened_after) != record or
+            common.stat_record(current) != record):
+        raise common.OperatorError("reviewed HK failure changed while reading")
+    try:
+        failure = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_json_object_without_duplicate_keys)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise common.OperatorError("reviewed HK failure is not strict JSON")
+    expected_keys = {
+        "schema", "result", "host_role", "run_id", "old_sha", "new_sha",
+        "release_published", "error_type", "rollback", "failed_at_epoch",
+    }
+    if not isinstance(failure, dict) or set(failure) != expected_keys:
+        raise common.OperatorError("reviewed HK failure fields changed")
+    rollback = failure.get("rollback")
+    if (type(failure.get("schema")) is not int or failure.get("schema") != 1 or
+            failure.get("result") != "failed" or
+            failure.get("host_role") != "hk" or failure.get("run_id") != common.RUN_ID or
+            failure.get("old_sha") != common.OLD_SHA or
+            failure.get("new_sha") != common.NEW_SHA or
+            failure.get("release_published") is not True or
+            failure.get("error_type") != "OperatorError" or
+            not isinstance(failure.get("failed_at_epoch"), (int, float)) or
+            isinstance(failure.get("failed_at_epoch"), bool) or
+            not isinstance(rollback, dict) or
+            set(rollback) != {"attempted", "complete", "errors"} or
+            rollback.get("attempted") is not True or rollback.get("complete") is not True or
+            rollback.get("errors") != []):
+        raise common.OperatorError("reviewed HK failure does not prove a complete safe rollback")
+    return {
+        "path": str(path), "sha256": digest, "stat": record,
+        "result": "failed", "error_type": "OperatorError",
+        "release_published": True, "rollback_complete": True,
+        "rollback_errors": 0,
+    }
+
+
+def verify_existing_hk_release(release, expected_tree):
+    release = pathlib.Path(release)
+    expected = HK_RELEASES / common.NEW_SHA
+    if release != expected:
+        raise common.OperatorError("existing HK release path differs from the approved release")
+    common.real_directory(release, expected_parent=HK_RELEASES)
+    if git_output(release, ["rev-parse", "--show-toplevel"]) != str(release):
+        raise common.OperatorError("existing HK release top-level path changed")
+    if git_output(release, ["rev-parse", "HEAD"]) != common.NEW_SHA:
+        raise common.OperatorError("existing HK release commit mismatch")
+    if git_output(release, ["remote", "get-url", "origin"]) != common.GITHUB_REMOTE:
+        raise common.OperatorError("existing HK release origin mismatch")
+    if git_output(release, ["status", "--porcelain=v1", "--untracked-files=all"]):
+        raise common.OperatorError("existing HK release is not clean")
+    tree = git_output(release, ["rev-parse", "HEAD^{tree}"])
+    if (not re.match(r"^[0-9a-f]{40}$", tree) or tree != expected_tree):
+        raise common.OperatorError("existing HK release Git tree mismatch")
+    files = {}
+    for relative, expected_sha256 in common.CPU_NEW_FILES.items():
+        path = release / pathlib.PurePosixPath(relative)
+        common.validate_existing_ancestry(path, trusted_root=release)
+        actual = common.sha256_file(path)
+        if actual != expected_sha256:
+            raise common.OperatorError("existing HK release file SHA256 mismatch: %s" % relative)
+        files[relative] = {"sha256": actual, "bytes": int(os.lstat(str(path)).st_size)}
+    return {
+        "path": str(release), "commit": common.NEW_SHA, "tree": tree,
+        "remote": common.GITHUB_REMOTE, "clean": True, "files": files,
+    }
+
+
 def initial_snapshot(args, contract):
     common.require_host(contract["host"])
     mount = common.validate_data_root(args.role, contract["data_root"], args.expected_data_device)
@@ -642,7 +767,16 @@ def initial_snapshot(args, contract):
             raise common.OperatorError("HK current is not the expected old release")
         if git_output(old_release, ["rev-parse", "HEAD"]) != common.OLD_SHA:
             raise common.OperatorError("HK current Git commit differs from expected old SHA")
-        if common.path_lexists(HK_RELEASES / common.NEW_SHA):
+        reviewed_failure = None
+        existing_release = None
+        existing_retry_link = None
+        if contract.get("reviewed_failure_resume"):
+            reviewed_failure = verify_reviewed_hk_failure(
+                args.reviewed_failure_path, args.reviewed_failure_sha256)
+            existing_release = verify_existing_hk_release(
+                HK_RELEASES / common.NEW_SHA, source["tree"])
+            existing_retry_link = inspect_hk_retry_link()
+        elif common.path_lexists(HK_RELEASES / common.NEW_SHA):
             raise common.OperatorError("new HK release path already exists; inspect instead of adopting")
         current = {"link": str(HK_CURRENT), "target": os.readlink(str(HK_CURRENT)),
                    "resolved": str(old_release),
@@ -658,6 +792,11 @@ def initial_snapshot(args, contract):
             "target_units": target, "protected_units": protected,
             "database": database, "runtime": runtime, "live_files": live_files,
             "current": current, "media_processes": [], "established_connections": 0,
+            "reviewed_failure_resume": contract.get("reviewed_failure_resume"),
+            "reviewed_failure": (reviewed_failure if args.role == "hk" else None),
+            "existing_release": (existing_release if args.role == "hk" else None),
+            "existing_retry_link": (
+                existing_retry_link if args.role == "hk" else None),
             "unit_snapshot": units}
 
 
@@ -807,8 +946,9 @@ def restore_cpu_swaps(swaps):
 
 
 def systemctl(action, unit):
-    if action not in ("start", "stop"):
-        raise common.OperatorError("unapproved systemctl action")
+    approved_units = set(common.CPU_TARGET_UNITS + common.HK_TARGET_UNITS)
+    if action not in ("start", "stop") or unit not in approved_units:
+        raise common.OperatorError("unapproved systemctl action or target")
     common.run(["systemctl", "--job-mode=ignore-dependencies", action, unit])
 
 
@@ -1060,6 +1200,36 @@ def current_link_anchor():
     return {"stat": common.stat_record(value), "target": target}
 
 
+def hk_current_temporary_path():
+    return common.HK_BASE / (".current-%s-%s" % (common.RUN_ID, common.NEW_SHA[:12]))
+
+
+def inspect_hk_retry_link():
+    path = hk_current_temporary_path()
+    try:
+        value = os.lstat(str(path))
+    except OSError:
+        raise common.OperatorError("reviewed HK retry current symlink is missing")
+    target = os.readlink(str(path)) if stat.S_ISLNK(value.st_mode) else None
+    release = HK_RELEASES / common.NEW_SHA
+    if (not stat.S_ISLNK(value.st_mode) or target != str(release) or
+            os.path.realpath(str(path)) != str(release)):
+        raise common.OperatorError("reviewed HK retry current symlink target changed")
+    return {
+        "path": str(path), "target": target, "resolved": str(release),
+        "stat": common.stat_record(value),
+    }
+
+
+def assert_hk_retry_link(anchor):
+    if not isinstance(anchor, dict) or anchor.get("path") != str(hk_current_temporary_path()):
+        raise common.OperatorError("reviewed HK retry current symlink anchor is invalid")
+    current = inspect_hk_retry_link()
+    if current != anchor:
+        raise common.OperatorError("reviewed HK retry current symlink inode or target changed")
+    return current
+
+
 def assert_hk_current_release(expected_release):
     value = os.lstat(str(HK_CURRENT))
     if not stat.S_ISLNK(value.st_mode):
@@ -1068,21 +1238,35 @@ def assert_hk_current_release(expected_release):
         raise common.OperatorError("HK current does not point at the expected release")
 
 
-def switch_hk_current(record):
+def switch_hk_current(record, existing_retry_link=None):
     if not isinstance(record, dict) or record:
         raise common.OperatorError("HK current journal must be an empty caller-owned dict")
     anchor = current_link_anchor()
-    temporary = common.HK_BASE / (".current-%s-%s" % (common.RUN_ID, common.NEW_SHA[:12]))
-    if common.path_lexists(temporary):
-        raise common.OperatorError("HK current temporary already exists")
-    os.symlink(str(HK_RELEASES / common.NEW_SHA), str(temporary))
-    common.fsync_directory(common.HK_BASE)
+    temporary = hk_current_temporary_path()
+    if existing_retry_link is None:
+        if common.path_lexists(temporary):
+            raise common.OperatorError("HK current temporary already exists")
+        os.symlink(str(HK_RELEASES / common.NEW_SHA), str(temporary))
+        common.fsync_directory(common.HK_BASE)
+        new_link_anchor = {
+            "path": str(temporary),
+            "target": str(HK_RELEASES / common.NEW_SHA),
+            "resolved": str(HK_RELEASES / common.NEW_SHA),
+            "stat": common.stat_record(os.lstat(str(temporary))),
+        }
+        reused = False
+    else:
+        new_link_anchor = assert_hk_retry_link(existing_retry_link)
+        reused = True
     current = os.lstat(str(HK_CURRENT))
     if common.stat_record(current) != anchor["stat"] or os.readlink(str(HK_CURRENT)) != anchor["target"]:
         raise common.OperatorError("HK current changed before atomic exchange")
     record.update({"old_link_temporary": str(temporary),
                    "old_target": anchor["target"],
                    "new_target": str(HK_RELEASES / common.NEW_SHA),
+                   "new_link_anchor": new_link_anchor,
+                   "retry_link_original_path": str(temporary),
+                   "reused_existing_temporary": reused,
                    "exchange_complete": False,
                    "old_link_retained": False})
     common.atomic_rename_exchange(temporary, HK_CURRENT)
@@ -1091,6 +1275,7 @@ def switch_hk_current(record):
     record["exchange_complete"] = True
     common.fsync_directory(common.HK_BASE)
     if (os.path.realpath(str(HK_CURRENT)) != str(HK_RELEASES / common.NEW_SHA) or
+            common.stat_record(os.lstat(str(HK_CURRENT))) != new_link_anchor["stat"] or
             not temporary.is_symlink() or os.readlink(str(temporary)) != anchor["target"]):
         raise common.OperatorError("HK current exchange verification failed")
     return record
@@ -1135,17 +1320,66 @@ def restore_hk_current(record):
     record["restored"] = True
     common.fsync_directory(common.HK_BASE)
     assert_hk_current_release(HK_RELEASES / common.OLD_SHA)
+    if record.get("reused_existing_temporary"):
+        original = pathlib.Path(record["retry_link_original_path"])
+        if temporary != original:
+            common.atomic_rename_noreplace(temporary, original)
+            record["old_link_temporary"] = str(original)
+            common.fsync_directory(original.parent)
+        assert_hk_retry_link(record["new_link_anchor"])
 
 
 def target_restart_bound(before, after, unit):
     old_restarts = int(before[unit]["systemd"].get("NRestarts") or 0)
     new_restarts = int(after[unit]["systemd"].get("NRestarts") or 0)
-    if new_restarts not in (old_restarts, old_restarts + 1):
-        raise common.OperatorError("target unit restart count exceeded one maintenance window")
     if common.unit_config_signature(before[unit]) != common.unit_config_signature(after[unit]):
         raise common.OperatorError("target unit definition changed during restart")
-    return {"before": old_restarts, "after": new_restarts,
-            "delta": new_restarts - old_restarts}
+    if old_restarts < 0 or new_restarts < 0:
+        raise common.OperatorError("target unit restart count is negative")
+    allowed_without_reset = (old_restarts, old_restarts + 1)
+    allowed_after_reset = (0, 1)
+    if new_restarts not in set(allowed_without_reset + allowed_after_reset):
+        raise common.OperatorError("target unit restart count exceeded one maintenance window")
+    counter_reset = new_restarts < old_restarts
+    return {
+        # Keep the original names for existing evidence consumers while also
+        # recording the reviewed old/new terminology explicitly.
+        "before": old_restarts, "after": new_restarts,
+        "old": old_restarts, "new": new_restarts,
+        "delta": new_restarts - old_restarts,
+        "counter_reset": counter_reset,
+        "allowed_upper": {
+            "without_counter_reset": old_restarts + 1,
+            "after_counter_reset": 1,
+        },
+        "automatic_restart_limit": 1,
+    }
+
+
+def hk_runtime_identity(runtime):
+    if not isinstance(runtime, dict):
+        raise common.OperatorError("HK runtime summary is missing")
+    fields = (
+        "durable_records_sha256", "recoverable_downloads_sha256",
+        "durable_failed_jobs", "part_files", "part_record_files",
+    )
+    result = {field: runtime.get(field) for field in fields}
+    if (not re.fullmatch(r"[0-9a-f]{64}", str(result["durable_records_sha256"])) or
+            not re.fullmatch(r"[0-9a-f]{64}", str(result["recoverable_downloads_sha256"])) or
+            result["durable_failed_jobs"] != len(JOB_IDS) or
+            result["part_files"] != len(HK_DOWNLOAD_PARTS) or
+            result["part_record_files"] != len(HK_DOWNLOAD_PARTS)):
+        raise common.OperatorError("HK runtime identity is outside the approved failed checkpoint")
+    result["exact_summary_sha256"] = common.sha256_bytes(common.canonical_bytes(runtime))
+    return result
+
+
+def assert_hk_runtime_unchanged(expected, actual):
+    expected_identity = hk_runtime_identity(expected)
+    actual_identity = hk_runtime_identity(actual)
+    if expected_identity != actual_identity or expected != actual:
+        raise common.OperatorError("HK failed runtime or partial checkpoint changed in maintenance window")
+    return actual_identity
 
 
 def apply_hk(args, contract, before):
@@ -1157,13 +1391,17 @@ def apply_hk(args, contract, before):
     release = HK_RELEASES / common.NEW_SHA
     stage = HK_RELEASES / (".stage-%s-%s" % (common.RUN_ID, common.NEW_SHA[:12]))
     current_record = {}
-    published = False
+    resume = contract.get("reviewed_failure_resume")
+    published = bool(resume)
+    release_reused = bool(resume)
     started = []
     rollback = {"attempted": False, "complete": None, "errors": []}
+    rollback_runtime_proof = None
 
     def guard_protected_and_idle():
         common.assert_no_media_processes()
-        inspect_hk_runtime()
+        observed_runtime = inspect_hk_runtime()
+        assert_hk_runtime_unchanged(before["runtime"], observed_runtime)
         live = common.snapshot_units(common.HK_PROTECTED_UNITS)
         common.assert_protected_units(protected_before, live)
         return live
@@ -1171,26 +1409,74 @@ def apply_hk(args, contract, before):
     try:
         common.assert_no_media_processes()
         common.assert_no_established_ports((8787,))
-        inspect_hk_runtime()
-        clone_hk_release(contract["source_root"], stage)
+        assert_hk_runtime_unchanged(before["runtime"], inspect_hk_runtime())
+        if resume:
+            reviewed_failure = verify_reviewed_hk_failure(
+                args.reviewed_failure_path, args.reviewed_failure_sha256)
+            existing_release = verify_existing_hk_release(
+                release, before["source"]["tree"])
+            existing_retry_link = assert_hk_retry_link(
+                before["existing_retry_link"])
+            if (reviewed_failure != before.get("reviewed_failure") or
+                    existing_release != before.get("existing_release") or
+                    existing_retry_link != before.get("existing_retry_link")):
+                raise common.OperatorError(
+                    "reviewed failure, release or retry symlink changed after preflight")
+            phase(evidence, "hk-reviewed-failure-release-reused", {
+                "retry_id": resume["retry_id"],
+                "reviewed_failure": reviewed_failure,
+                "existing_release": existing_release,
+                "existing_retry_link": existing_retry_link,
+                "clone_or_publish_calls": 0,
+            })
+        else:
+            clone_hk_release(contract["source_root"], stage)
+            guard_protected_and_idle()
+            phase(evidence, "hk-release-staged", {"stage": str(stage),
+                                                   "commit": common.NEW_SHA})
+            common.atomic_rename_noreplace(stage, release)
+            published = True
+            common.fsync_directory(HK_RELEASES)
+            if git_output(release, ["rev-parse", "HEAD"]) != common.NEW_SHA:
+                raise common.OperatorError("published HK release commit mismatch")
+            phase(evidence, "hk-release-published", {"release": str(release),
+                                                      "commit": common.NEW_SHA})
         guard_protected_and_idle()
-        phase(evidence, "hk-release-staged", {"stage": str(stage),
-                                               "commit": common.NEW_SHA})
-        common.atomic_rename_noreplace(stage, release)
-        published = True
-        common.fsync_directory(HK_RELEASES)
-        if git_output(release, ["rev-parse", "HEAD"]) != common.NEW_SHA:
-            raise common.OperatorError("published HK release commit mismatch")
-        phase(evidence, "hk-release-published", {"release": str(release),
-                                                  "commit": common.NEW_SHA})
-        guard_protected_and_idle()
-        switch_hk_current(current_record)
+        switch_hk_current(
+            current_record,
+            before.get("existing_retry_link") if resume else None)
         guard_protected_and_idle()
         phase(evidence, "hk-current-switched", current_record)
         systemctl("start", common.HK_TARGET_UNITS[0])
         wait_unit(common.HK_TARGET_UNITS[0], True, attempts=120)
         started.append(common.HK_TARGET_UNITS[0])
         guard_protected_and_idle()
+        worker_after = common.snapshot_units(
+            (common.HK_TARGET_UNITS[0],) + common.HK_PROTECTED_UNITS)
+        common.assert_protected_units(
+            protected_before,
+            {unit: worker_after[unit] for unit in common.HK_PROTECTED_UNITS})
+        worker_restart_bound = target_restart_bound(
+            baseline, worker_after, common.HK_TARGET_UNITS[0])
+        worker = worker_after[common.HK_TARGET_UNITS[0]]
+        if os.path.realpath(worker["process"]["cwd"]) != str(release):
+            raise common.OperatorError("HK worker cwd is not the new release")
+        if os.path.realpath(str(HK_CURRENT)) != str(release):
+            raise common.OperatorError("HK current changed after worker start")
+        common.assert_no_media_processes()
+        worker_runtime = inspect_hk_runtime()
+        assert_hk_runtime_unchanged(before["runtime"], worker_runtime)
+        worker_health = common.exact_health("127.0.0.1", 8787)
+        worker_listener = listener_owned_by(8787, worker["process"]["pid"])
+        phase(evidence, "hk-worker-verified-before-tunnel", {
+            "health": worker_health, "listener": worker_listener,
+            "restart_bound": worker_restart_bound,
+            "runtime": worker_runtime,
+            "protected_units": {
+                unit: common.protected_signature(worker_after[unit])
+                for unit in common.HK_PROTECTED_UNITS
+            },
+        })
         systemctl("start", common.HK_TARGET_UNITS[1])
         wait_unit(common.HK_TARGET_UNITS[1], True, attempts=120)
         started.append(common.HK_TARGET_UNITS[1])
@@ -1205,6 +1491,7 @@ def apply_hk(args, contract, before):
             raise common.OperatorError("HK worker cwd is not the new release")
         common.assert_no_media_processes()
         runtime = inspect_hk_runtime()
+        assert_hk_runtime_unchanged(before["runtime"], runtime)
         health = common.exact_health("127.0.0.1", 8787)
         listener = listener_owned_by(8787, worker["process"]["pid"])
         if os.path.realpath(str(HK_CURRENT)) != str(release):
@@ -1222,6 +1509,9 @@ def apply_hk(args, contract, before):
                   "release": str(release), "current": str(HK_CURRENT),
                   "health_hk_8787": health, "listener_hk_8787": listener,
                   "restart_bounds": restart_bounds,
+                  "release_reused": release_reused,
+                  "retry_id": resume["retry_id"] if resume else None,
+                  "reviewed_failure": before.get("reviewed_failure"),
                   "protected_units_unchanged": True,
                   "cpu_route_verification_required": True,
                   "cpu_route_command": "drama_release.py route (read-only)",
@@ -1258,14 +1548,27 @@ def apply_hk(args, contract, before):
             assert_hk_current_release(HK_RELEASES / common.OLD_SHA)
             protected_after = common.snapshot_units(common.HK_PROTECTED_UNITS)
             common.assert_protected_units(protected_before, protected_after)
+            if resume:
+                assert_hk_retry_link(before["existing_retry_link"])
         except Exception as proof_error:
             rollback["errors"].append({"stage": "prove-rollback",
                                        "error": type(proof_error).__name__})
+        try:
+            rollback_runtime = inspect_hk_runtime()
+            rollback_runtime_proof = assert_hk_runtime_unchanged(
+                before["runtime"], rollback_runtime)
+        except Exception as runtime_error:
+            rollback["errors"].append({"stage": "prove-runtime-unchanged",
+                                       "error": type(runtime_error).__name__})
         rollback["complete"] = not rollback["errors"]
         failure = {"schema": 1, "result": "failed", "host_role": "hk",
                    "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,
                    "new_sha": common.NEW_SHA, "release_published": published,
+                   "release_reused": release_reused,
+                   "retry_id": resume["retry_id"] if resume else None,
+                   "reviewed_failure": before.get("reviewed_failure"),
                    "error_type": type(error).__name__, "rollback": rollback,
+                   "runtime_rollback_proof": rollback_runtime_proof,
                    "failed_at_epoch": time.time()}
         try:
             common.write_exclusive_json(evidence / "failure.json", failure)
@@ -1343,6 +1646,10 @@ def parser():
         item.add_argument("--unit", action="append", default=[])
         item.add_argument("--protected-unit", action="append", default=[])
         item.add_argument("--fragment", action="append", default=[])
+        item.add_argument("--reviewed-failure-resume", action="store_true")
+        item.add_argument("--reviewed-failure-path")
+        item.add_argument("--reviewed-failure-sha256")
+        item.add_argument("--retry-id")
         item.add_argument("--apply", action="store_true")
         item.set_defaults(role=role)
     route = sub.add_parser("route")
@@ -1361,6 +1668,9 @@ def main(argv=None):
     contract = validate_cli(args)
     before = initial_snapshot(args, contract)
     if not args.apply:
+        if (contract.get("reviewed_failure_resume") and
+                common.path_lexists(contract["evidence"])):
+            raise common.OperatorError("reviewed-failure retry evidence path already exists")
         print(json.dumps(compact_snapshot(before), sort_keys=True, indent=2))
         return 0
     control = contract["data_root"] / "migrations" / common.RUN_ID / "control"

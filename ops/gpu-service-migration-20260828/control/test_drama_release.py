@@ -176,7 +176,9 @@ class DramaReleaseTests(unittest.TestCase):
             data_root=str(contract["data_root"]), expected_data_device="/dev/test",
             source_root=str(contract["source_root"]),
             unit=list(contract["target_units"]),
-            protected_unit=list(contract["protected_units"]), fragment=[], apply=False,
+            protected_unit=list(contract["protected_units"]), fragment=[],
+            reviewed_failure_resume=False, reviewed_failure_path=None,
+            reviewed_failure_sha256=None, retry_id=None, apply=False,
         )
 
     def test_exact_host_commit_path_and_unit_bindings(self):
@@ -208,6 +210,80 @@ class DramaReleaseTests(unittest.TestCase):
                                       if changed.protected_unit else ["unexpected.service"])
             with self.assertRaises(common.OperatorError):
                 release.validate_cli(changed)
+
+    def test_reviewed_failure_resume_requires_all_exact_hk_bindings(self):
+        args = self.exact_args("hk")
+        args.reviewed_failure_resume = True
+        args.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        args.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        args.retry_id = release.HK_RETRY_ID
+        contract = release.validate_cli(args)
+        self.assertEqual(contract["evidence"], release.HK_RETRY_EVIDENCE)
+        self.assertEqual(contract["reviewed_failure_resume"]["retry_id"],
+                         release.HK_RETRY_ID)
+        for field, value in (
+                ("reviewed_failure_path", "/data/wrong/failure.json"),
+                ("reviewed_failure_sha256", "0" * 64),
+                ("retry_id", "wrong-retry")):
+            changed = argparse.Namespace(**vars(args))
+            setattr(changed, field, value)
+            with self.assertRaisesRegex(common.OperatorError, "binding"):
+                release.validate_cli(changed)
+        cpu = self.exact_args("cpu")
+        cpu.reviewed_failure_resume = True
+        cpu.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        cpu.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        cpu.retry_id = release.HK_RETRY_ID
+        with self.assertRaisesRegex(common.OperatorError, "exact HK retry"):
+            release.validate_cli(cpu)
+        partial = self.exact_args("hk")
+        partial.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        with self.assertRaisesRegex(common.OperatorError, "explicit"):
+            release.validate_cli(partial)
+
+    def test_reviewed_failure_is_nofollow_hashed_and_strictly_validated(self):
+        valid = {
+            "schema": 1, "result": "failed", "host_role": "hk",
+            "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,
+            "new_sha": common.NEW_SHA, "release_published": True,
+            "error_type": "OperatorError",
+            "rollback": {"attempted": True, "complete": True, "errors": []},
+            "failed_at_epoch": 1.5,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            path = root / "failure.json"
+
+            def inspect(payload):
+                raw = (json.dumps(payload, sort_keys=True, indent=2).encode("utf-8") +
+                       b"\n")
+                path.write_bytes(raw)
+                digest = hashlib.sha256(raw).hexdigest()
+                with mock.patch.object(common, "HK_DATA_ROOT", root), \
+                     mock.patch.object(release, "HK_REVIEWED_FAILURE_PATH", path), \
+                     mock.patch.object(release, "HK_REVIEWED_FAILURE_SHA256", digest):
+                    return release.verify_reviewed_hk_failure(path, digest)
+
+            summary = inspect(valid)
+            self.assertTrue(summary["rollback_complete"])
+            self.assertEqual(summary["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            changed = dict(valid, release_published=False)
+            with self.assertRaisesRegex(common.OperatorError, "complete safe rollback"):
+                inspect(changed)
+            changed = dict(valid, unexpected=True)
+            with self.assertRaisesRegex(common.OperatorError, "fields changed"):
+                inspect(changed)
+            raw = (json.dumps(valid, sort_keys=True, indent=2)
+                   .replace('"result": "failed",',
+                            '"result": "failed",\n  "result": "failed",', 1)
+                   .encode("utf-8") + b"\n")
+            path.write_bytes(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+            with mock.patch.object(common, "HK_DATA_ROOT", root), \
+                 mock.patch.object(release, "HK_REVIEWED_FAILURE_PATH", path), \
+                 mock.patch.object(release, "HK_REVIEWED_FAILURE_SHA256", digest):
+                with self.assertRaisesRegex(common.OperatorError, "strict JSON"):
+                    release.verify_reviewed_hk_failure(path, digest)
 
     def test_not_found_cpu_worker_name_is_rejected_before_fragment_access(self):
         wrong = "drama-material-worker.service"
@@ -878,6 +954,46 @@ class DramaReleaseTests(unittest.TestCase):
                 self.assertEqual(os.path.realpath(str(current)), str(old))
 
     @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
+    def test_hk_retry_reuses_exact_temporary_link_and_rollback_restores_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            releases = base / "releases"
+            evidence = base / "retry-evidence"
+            releases.mkdir()
+            evidence.mkdir()
+            old = releases / common.OLD_SHA
+            new = releases / common.NEW_SHA
+            old.mkdir()
+            new.mkdir()
+            current = base / "current"
+            temporary = base / (".current-%s-%s" %
+                                (common.RUN_ID, common.NEW_SHA[:12]))
+            os.symlink(str(old), str(current), target_is_directory=True)
+            os.symlink(str(new), str(temporary), target_is_directory=True)
+            with mock.patch.object(release, "HK_RELEASES", releases), \
+                 mock.patch.object(release, "HK_CURRENT", current), \
+                 mock.patch.object(common, "HK_BASE", base), \
+                 mock.patch.object(common, "atomic_rename_exchange",
+                                   side_effect=portable_exchange), \
+                 mock.patch.object(common, "atomic_rename_noreplace",
+                                   side_effect=portable_noreplace), \
+                 mock.patch.object(common, "fsync_directory"):
+                anchor = release.inspect_hk_retry_link()
+                original_inode = anchor["stat"]["inode"]
+                record = {}
+                release.switch_hk_current(record, anchor)
+                self.assertTrue(record["reused_existing_temporary"])
+                self.assertEqual(os.path.realpath(str(current)), str(new))
+                self.assertEqual(os.lstat(str(current)).st_ino, original_inode)
+                release.retain_hk_old_link(record, evidence)
+                self.assertFalse(temporary.exists() or temporary.is_symlink())
+                release.restore_hk_current(record)
+                self.assertEqual(os.path.realpath(str(current)), str(old))
+                self.assertEqual(os.path.realpath(str(temporary)), str(new))
+                self.assertEqual(os.lstat(str(temporary)).st_ino, original_inode)
+                self.assertEqual(release.assert_hk_retry_link(anchor), anchor)
+
+    @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
     def test_hk_exchange_is_journaled_before_post_exchange_fsync_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             base = pathlib.Path(directory)
@@ -965,6 +1081,322 @@ class DramaReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(common.OperatorError, "expected release"):
                 release.assert_hk_current_release(release.HK_RELEASES / common.OLD_SHA)
 
+    def test_target_restart_bound_models_explicit_counter_reset(self):
+        unit = common.HK_TARGET_UNITS[0]
+
+        def item(restarts, fragment_sha="a" * 64):
+            return {
+                "unit": unit,
+                "systemd": {"NRestarts": str(restarts),
+                            "UnitFileState": "enabled", "Restart": "on-failure"},
+                "fragment": {"path": "/etc/systemd/system/worker.service",
+                             "sha256": fragment_sha},
+                "dropins": [],
+            }
+
+        for old, new in ((1, 0), (0, 0), (0, 1), (1, 1), (1, 2)):
+            result = release.target_restart_bound(
+                {unit: item(old)}, {unit: item(new)}, unit)
+            self.assertEqual((result["old"], result["new"]), (old, new))
+            self.assertEqual(result["counter_reset"], new < old)
+            self.assertEqual(result["allowed_upper"], {
+                "without_counter_reset": old + 1,
+                "after_counter_reset": 1,
+            })
+            self.assertEqual(result["automatic_restart_limit"], 1)
+        for old, new in ((0, 2), (1, 3)):
+            with self.assertRaisesRegex(common.OperatorError, "maintenance window"):
+                release.target_restart_bound(
+                    {unit: item(old)}, {unit: item(new)}, unit)
+        with self.assertRaisesRegex(common.OperatorError, "definition changed"):
+            release.target_restart_bound(
+                {unit: item(1)}, {unit: item(0, fragment_sha="b" * 64)}, unit)
+
+    def test_runtime_checkpoint_identity_requires_exact_summary(self):
+        runtime = {
+            "durable_records_sha256": "a" * 64,
+            "recoverable_downloads_sha256": "b" * 64,
+            "durable_failed_jobs": len(release.JOB_IDS),
+            "part_files": len(release.HK_DOWNLOAD_PARTS),
+            "part_record_files": len(release.HK_DOWNLOAD_PARTS),
+            "durable_records": [{"job_id": release.JOB_IDS[0]}],
+        }
+        identity = release.assert_hk_runtime_unchanged(runtime, dict(runtime))
+        self.assertEqual(identity["durable_failed_jobs"], len(release.JOB_IDS))
+        changed = dict(runtime)
+        changed["durable_records"] = [{"job_id": release.JOB_IDS[1]}]
+        with self.assertRaisesRegex(common.OperatorError, "checkpoint changed"):
+            release.assert_hk_runtime_unchanged(runtime, changed)
+
+    def test_tunnel_window_runtime_drift_makes_rollback_high_risk(self):
+        worker_unit, tunnel_unit = common.HK_TARGET_UNITS
+        release_path = release.HK_RELEASES / common.NEW_SHA
+
+        def unit_item(name, active=False, restarts=0, cwd=None):
+            process = ({"pid": 100, "startticks": 200, "children": [],
+                        "cwd": str(cwd or release_path)} if active else None)
+            return {
+                "unit": name,
+                "systemd": {
+                    "ActiveState": "active" if active else "inactive",
+                    "SubState": "running" if active else "dead",
+                    "MainPID": "100" if active else "0", "ControlPID": "0",
+                    "NRestarts": str(restarts), "UnitFileState": "enabled",
+                    "Restart": "on-failure",
+                },
+                "fragment": {"path": "/etc/systemd/system/" + name,
+                             "sha256": "a" * 64},
+                "dropins": [], "process": process,
+                "cgroup": {"pids": [100] if active else []},
+            }
+
+        baseline = {
+            worker_unit: unit_item(worker_unit, restarts=1),
+            tunnel_unit: unit_item(tunnel_unit, restarts=1),
+        }
+        for index, unit in enumerate(common.HK_PROTECTED_UNITS, 1):
+            item = unit_item(unit, active=True, restarts=0)
+            item["process"]["pid"] = 1000 + index
+            item["cgroup"]["pids"] = [1000 + index]
+            baseline[unit] = item
+        worker_after = dict(baseline)
+        worker_after[worker_unit] = unit_item(worker_unit, active=True, restarts=0)
+        inactive_targets = {
+            worker_unit: unit_item(worker_unit),
+            tunnel_unit: unit_item(tunnel_unit),
+        }
+        protected = {unit: baseline[unit] for unit in common.HK_PROTECTED_UNITS}
+        runtime = {
+            "durable_records_sha256": "a" * 64,
+            "recoverable_downloads_sha256": "b" * 64,
+            "durable_failed_jobs": len(release.JOB_IDS),
+            "part_files": len(release.HK_DOWNLOAD_PARTS),
+            "part_record_files": len(release.HK_DOWNLOAD_PARTS),
+            "durable_records": [{"job_id": value} for value in release.JOB_IDS],
+        }
+        drifted = dict(runtime)
+        drifted["durable_records_sha256"] = "c" * 64
+        reviewed = {"sha256": release.HK_REVIEWED_FAILURE_SHA256}
+        existing = {"commit": common.NEW_SHA, "tree": "d" * 40}
+        retry_link = {"path": str(release.hk_current_temporary_path())}
+        before = {
+            "unit_snapshot": baseline, "mode": "apply", "runtime": runtime,
+            "source": {"tree": "d" * 40}, "reviewed_failure": reviewed,
+            "existing_release": existing, "existing_retry_link": retry_link,
+        }
+        args = self.exact_args("hk")
+        args.reviewed_failure_resume = True
+        args.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        args.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        args.retry_id = release.HK_RETRY_ID
+        args.apply = True
+        contract = release.validate_cli(args)
+        failures = []
+
+        def snapshot(units):
+            units = tuple(units)
+            if units == common.HK_PROTECTED_UNITS:
+                return protected
+            if units == (worker_unit,) + common.HK_PROTECTED_UNITS:
+                return {unit: worker_after[unit] for unit in units}
+            if units == common.HK_TARGET_UNITS:
+                return inactive_targets
+            raise AssertionError("unexpected snapshot scope: %r" % (units,))
+
+        def switch(record, anchor):
+            record.update({"exchange_complete": True,
+                           "reused_existing_temporary": True})
+
+        def restore(record):
+            record["exchange_complete"] = False
+
+        def write(path, value):
+            if pathlib.Path(path).name == "failure.json":
+                self.assertEqual(pathlib.Path(path).parent, contract["evidence"])
+                self.assertNotEqual(pathlib.Path(path).parent,
+                                    release.HK_REVIEWED_FAILURE_PATH.parent)
+                failures.append(value)
+            return "e" * 64
+
+        def realpath(path):
+            if str(path) in (str(release_path), str(release.HK_CURRENT)):
+                return str(release_path)
+            return str(path)
+
+        with contextlib.ExitStack() as stack:
+            for owner, name in (
+                    (common, "create_private_ancestry"), (release, "phase"),
+                    (common, "assert_no_media_processes"),
+                    (common, "assert_no_established_ports"),
+                    (common, "assert_protected_units"),
+                    (common, "assert_inactive_unit"),
+                    (release, "assert_hk_current_release")):
+                stack.enter_context(mock.patch.object(owner, name))
+            stack.enter_context(mock.patch.object(
+                release, "inspect_hk_runtime",
+                side_effect=[runtime, runtime, runtime, runtime, runtime,
+                             drifted, drifted]))
+            stack.enter_context(mock.patch.object(
+                release, "verify_reviewed_hk_failure", return_value=reviewed))
+            stack.enter_context(mock.patch.object(
+                release, "verify_existing_hk_release", return_value=existing))
+            stack.enter_context(mock.patch.object(
+                release, "assert_hk_retry_link", return_value=retry_link))
+            stack.enter_context(mock.patch.object(
+                common, "snapshot_units", side_effect=snapshot))
+            stack.enter_context(mock.patch.object(
+                common, "protected_signature", return_value={}))
+            stack.enter_context(mock.patch.object(release, "switch_hk_current",
+                                                   side_effect=switch))
+            stack.enter_context(mock.patch.object(release, "restore_hk_current",
+                                                   side_effect=restore))
+            stack.enter_context(mock.patch.object(release, "systemctl"))
+            stack.enter_context(mock.patch.object(release, "wait_unit"))
+            stack.enter_context(mock.patch.object(
+                common, "unit_identity",
+                side_effect=lambda unit: unit_item(unit, active=True)))
+            stack.enter_context(mock.patch.object(
+                common, "exact_health", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(
+                release, "listener_owned_by", return_value={"pid": 100}))
+            stack.enter_context(mock.patch.object(
+                release.os.path, "realpath", side_effect=realpath))
+            stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", side_effect=write))
+            with self.assertRaisesRegex(common.OperatorError, "HIGH RISK"):
+                release.apply_hk(args, contract, before)
+        self.assertEqual(len(failures), 1)
+        self.assertFalse(failures[0]["rollback"]["complete"])
+        self.assertIn("prove-runtime-unchanged",
+                      [item["stage"] for item in failures[0]["rollback"]["errors"]])
+
+    def test_post_tunnel_failure_with_unchanged_runtime_rolls_back_complete(self):
+        worker_unit, tunnel_unit = common.HK_TARGET_UNITS
+        release_path = release.HK_RELEASES / common.NEW_SHA
+        runtime = {
+            "durable_records_sha256": "a" * 64,
+            "recoverable_downloads_sha256": "b" * 64,
+            "durable_failed_jobs": len(release.JOB_IDS),
+            "part_files": len(release.HK_DOWNLOAD_PARTS),
+            "part_record_files": len(release.HK_DOWNLOAD_PARTS),
+            "durable_records": [{"job_id": value} for value in release.JOB_IDS],
+        }
+
+        def item(name, active=False):
+            return {
+                "unit": name,
+                "systemd": {"ActiveState": "active" if active else "inactive",
+                            "SubState": "running" if active else "dead",
+                            "MainPID": "100" if active else "0", "ControlPID": "0",
+                            "NRestarts": "0", "UnitFileState": "enabled",
+                            "Restart": "on-failure"},
+                "fragment": {"path": "/etc/" + name, "sha256": "a" * 64},
+                "dropins": [],
+                "process": ({"pid": 100, "cwd": str(release_path),
+                             "startticks": 1, "children": []} if active else None),
+                "cgroup": {"pids": [100] if active else []},
+            }
+
+        baseline = {unit: item(unit) for unit in common.HK_TARGET_UNITS}
+        baseline.update({unit: item(unit, True) for unit in common.HK_PROTECTED_UNITS})
+        reviewed = {"sha256": release.HK_REVIEWED_FAILURE_SHA256}
+        existing = {"commit": common.NEW_SHA, "tree": "d" * 40}
+        retry_link = {"path": str(release.hk_current_temporary_path())}
+        before = {
+            "unit_snapshot": baseline, "mode": "apply", "runtime": runtime,
+            "source": {"tree": "d" * 40}, "reviewed_failure": reviewed,
+            "existing_release": existing, "existing_retry_link": retry_link,
+        }
+        args = self.exact_args("hk")
+        args.reviewed_failure_resume = True
+        args.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        args.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        args.retry_id = release.HK_RETRY_ID
+        args.apply = True
+        contract = release.validate_cli(args)
+        failures = []
+
+        def snapshot(units):
+            units = tuple(units)
+            if units == common.HK_PROTECTED_UNITS:
+                return {unit: baseline[unit] for unit in units}
+            if units == (worker_unit,) + common.HK_PROTECTED_UNITS:
+                return {unit: (item(unit, True) if unit == worker_unit else baseline[unit])
+                        for unit in units}
+            if units == common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS:
+                return {unit: (item(unit, True) if unit in common.HK_TARGET_UNITS
+                               else baseline[unit]) for unit in units}
+            if units == common.HK_TARGET_UNITS:
+                return {unit: item(unit) for unit in units}
+            raise AssertionError("unexpected snapshot scope: %r" % (units,))
+
+        def switch(record, anchor):
+            record.update({"exchange_complete": True,
+                           "reused_existing_temporary": True})
+
+        def restore(record):
+            record["exchange_complete"] = False
+
+        def write(path, value):
+            if pathlib.Path(path).name == "failure.json":
+                self.assertEqual(pathlib.Path(path).parent, contract["evidence"])
+                self.assertNotEqual(pathlib.Path(path).parent,
+                                    release.HK_REVIEWED_FAILURE_PATH.parent)
+                failures.append(value)
+            return "e" * 64
+
+        with contextlib.ExitStack() as stack:
+            for owner, name in (
+                    (common, "create_private_ancestry"), (release, "phase"),
+                    (common, "assert_no_media_processes"),
+                    (common, "assert_no_established_ports"),
+                    (common, "assert_protected_units"),
+                    (common, "assert_inactive_unit"),
+                    (release, "assert_hk_current_release")):
+                stack.enter_context(mock.patch.object(owner, name))
+            stack.enter_context(mock.patch.object(
+                release, "inspect_hk_runtime", return_value=runtime))
+            stack.enter_context(mock.patch.object(
+                release, "verify_reviewed_hk_failure", return_value=reviewed))
+            stack.enter_context(mock.patch.object(
+                release, "verify_existing_hk_release", return_value=existing))
+            stack.enter_context(mock.patch.object(
+                release, "assert_hk_retry_link", return_value=retry_link))
+            stack.enter_context(mock.patch.object(
+                common, "snapshot_units", side_effect=snapshot))
+            stack.enter_context(mock.patch.object(
+                common, "protected_signature", return_value={}))
+            stack.enter_context(mock.patch.object(
+                release, "target_restart_bound", return_value={"allowed": True}))
+            stack.enter_context(mock.patch.object(release, "switch_hk_current",
+                                                   side_effect=switch))
+            stack.enter_context(mock.patch.object(release, "restore_hk_current",
+                                                   side_effect=restore))
+            stack.enter_context(mock.patch.object(release, "systemctl"))
+            stack.enter_context(mock.patch.object(release, "wait_unit"))
+            stack.enter_context(mock.patch.object(
+                common, "unit_identity", side_effect=lambda unit: item(unit, True)))
+            stack.enter_context(mock.patch.object(
+                common, "exact_health",
+                side_effect=[{"ok": True}, common.OperatorError("post-tunnel probe failed")]))
+            stack.enter_context(mock.patch.object(
+                release, "listener_owned_by", return_value={"pid": 100}))
+            stack.enter_context(mock.patch.object(
+                release.os.path, "realpath",
+                side_effect=lambda path: (str(release_path)
+                                          if str(path) in (str(release_path),
+                                                           str(release.HK_CURRENT))
+                                          else str(path))))
+            stack.enter_context(mock.patch.object(
+                common, "write_exclusive_json", side_effect=write))
+            with self.assertRaisesRegex(common.OperatorError, "post-tunnel probe failed"):
+                release.apply_hk(args, contract, before)
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(failures[0]["rollback"]["complete"])
+        self.assertEqual(failures[0]["rollback"]["errors"], [])
+        self.assertEqual(failures[0]["runtime_rollback_proof"]["durable_failed_jobs"],
+                         len(release.JOB_IDS))
+
     def test_protected_pid_startticks_and_restart_count_must_be_identical(self):
         item = {
             "unit": "x.service",
@@ -995,6 +1427,9 @@ class DramaReleaseTests(unittest.TestCase):
                 common.HK_TARGET_UNITS[0]])
         with self.assertRaises(common.OperatorError):
             release.systemctl("restart", common.HK_PROTECTED_UNITS[0])
+        for action in ("start", "stop"):
+            with self.assertRaises(common.OperatorError):
+                release.systemctl(action, common.HK_PROTECTED_UNITS[0])
 
     def test_cpu_pre_mutation_guard_failure_never_restarts_api(self):
         contract = release.role_contract("cpu")
