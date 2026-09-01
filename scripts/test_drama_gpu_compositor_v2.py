@@ -287,7 +287,7 @@ class MediaProbeTests(unittest.TestCase):
             )
         command = run.call_args.args[0]
         self.assertNotIn("copy", command)
-        self.assertIn("h264_nvenc", command)
+        self.assertIn("libx264", command)
         self.assertEqual(command[command.index("-ss") + 1], "60")
         self.assertEqual(command[command.index("-t") + 1], "30")
 
