@@ -33,22 +33,53 @@ float4 sample_cover(__read_only image2d_t source, float2 canvas_uv)
 
 float4 sample_main(__read_only image2d_t source, float2 canvas_uv)
 {
-    float2 centered = canvas_uv - (float2)(0.5f, 0.5f);
-    float cosine = cos(-SCENE_ROTATION_RADIANS);
-    float sine = sin(-SCENE_ROTATION_RADIANS);
-    float2 unrotated = (float2)(
-        cosine * centered.x - sine * centered.y,
-        sine * centered.x + cosine * centered.y
-    ) / SCENE_SCALE;
+    // Reproduce the established FFmpeg V1 scale/rotate/overlay geometry. The
+    // legacy graph has observable malformed rotw/roth extents and YUV420-even
+    // placement; compile_opencl_kernel freezes those values as constants.
+    float2 destination = canvas_uv *
+        (float2)((float)SCENE_WIDTH, (float)SCENE_HEIGHT) -
+        (float2)(0.5f, 0.5f);
+    float2 rotated = destination -
+        (float2)((float)SCENE_OVERLAY_X, (float)SCENE_OVERLAY_Y);
+    if (rotated.x < 0.0f || rotated.x >= (float)SCENE_ROTATED_WIDTH ||
+        rotated.y < 0.0f || rotated.y >= (float)SCENE_ROTATED_HEIGHT)
+        return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+    float2 centered = rotated - (float2)(
+        ((float)SCENE_ROTATED_WIDTH - 1.0f) * 0.5f,
+        ((float)SCENE_ROTATED_HEIGHT - 1.0f) * 0.5f
+    );
+    float cosine = cos(SCENE_ROTATION_RADIANS);
+    float sine = sin(SCENE_ROTATION_RADIANS);
+    float2 scaled = (float2)(
+        ((float)SCENE_MAIN_WIDTH - 1.0f) * 0.5f +
+            centered.x * cosine + centered.y * sine,
+        ((float)SCENE_MAIN_HEIGHT - 1.0f) * 0.5f -
+            centered.x * sine + centered.y * cosine
+    );
+    if (scaled.x < -1.0f || scaled.x > (float)SCENE_MAIN_WIDTH ||
+        scaled.y < -1.0f || scaled.y > (float)SCENE_MAIN_HEIGHT)
+        return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+
+    // FFmpeg's rotate clips its bilinear source coordinates at the scaled
+    // image boundary. Map that scaled canvas back through the contain/pad fit
+    // so landscape and portrait inputs share the same fused kernel.
+    scaled = clamp(
+        scaled,
+        (float2)(0.0f, 0.0f),
+        (float2)((float)SCENE_MAIN_WIDTH - 1.0f,
+                 (float)SCENE_MAIN_HEIGHT - 1.0f)
+    );
+    float2 fitted_uv = (scaled + (float2)(0.5f, 0.5f)) /
+        (float2)((float)SCENE_MAIN_WIDTH, (float)SCENE_MAIN_HEIGHT);
     float source_aspect = (float)get_image_width(source) / (float)get_image_height(source);
     float canvas_aspect = (float)SCENE_WIDTH / (float)SCENE_HEIGHT;
     float2 uv;
     if (source_aspect > canvas_aspect) {
         float height = canvas_aspect / source_aspect;
-        uv = (float2)(unrotated.x + 0.5f, unrotated.y / height + 0.5f);
+        uv = (float2)(fitted_uv.x, (fitted_uv.y - 0.5f) / height + 0.5f);
     } else {
         float width = source_aspect / canvas_aspect;
-        uv = (float2)(unrotated.x / width + 0.5f, unrotated.y + 0.5f);
+        uv = (float2)((fitted_uv.x - 0.5f) / width + 0.5f, fitted_uv.y);
     }
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
         return (float4)(0.0f, 0.0f, 0.0f, 0.0f);

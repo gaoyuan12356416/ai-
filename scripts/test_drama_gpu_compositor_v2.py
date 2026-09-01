@@ -294,6 +294,38 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertIn("transfer_characteristics=1", command[command.index("-bsf:v") + 1])
         self.assertEqual(kernel["source"].count("get_image_width(source)"), 2)
         self.assertNotIn("SCENE_SOURCE_WIDTH", kernel["source"])
+        geometry = gpu_compositor._legacy_main_geometry(1.005)
+        self.assertEqual(geometry, {
+            "main_width": 722,
+            "main_height": 1286,
+            "rotated_width": 1299,
+            "rotated_height": 1236,
+            "overlay_x": -290,
+            "overlay_y": 22,
+        })
+        for name, value in (
+            ("SCENE_MAIN_WIDTH", geometry["main_width"]),
+            ("SCENE_MAIN_HEIGHT", geometry["main_height"]),
+            ("SCENE_ROTATED_WIDTH", geometry["rotated_width"]),
+            ("SCENE_ROTATED_HEIGHT", geometry["rotated_height"]),
+            ("SCENE_OVERLAY_X", geometry["overlay_x"]),
+            ("SCENE_OVERLAY_Y", geometry["overlay_y"]),
+        ):
+            self.assertIn("#define %s %d" % (name, value), kernel["source"])
+        self.assertIn("rotated.x >= (float)SCENE_ROTATED_WIDTH", kernel["source"])
+
+    def test_legacy_geometry_preserves_negative_yuv420_alignment(self):
+        geometry = gpu_compositor._legacy_main_geometry(0.9963)
+        self.assertEqual(geometry, {
+            "main_width": 716,
+            "main_height": 1274,
+            "rotated_width": 1043,
+            "rotated_height": 821,
+            "overlay_x": -162,
+            "overlay_y": 228,
+        })
+        self.assertEqual(geometry["overlay_x"] % 2, 0)
+        self.assertEqual(geometry["overlay_y"] % 2, 0)
 
 
 class ChunkedRenderTests(unittest.TestCase):

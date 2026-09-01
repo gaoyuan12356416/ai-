@@ -13,11 +13,11 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 计划验收用例 | 12 | 8 | 0 | 4 |
-| 自动回归 | 503 | 503 | 0 | 0（另 6 项按既有平台条件跳过） |
+| 自动回归 | 504 | 504 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
-累计发现 2 个缺陷，均已在候选代码中修复并完成本地回归：诊断上下文兼容问题见 `bugs/BUG-001.md`，横竖屏切换的 source 时间轴重置问题见 `bugs/BUG-002.md`。
+累计记录 3 项：诊断上下文兼容问题见 `bugs/BUG-001.md`；`bugs/BUG-002.md` 是已被真机证伪的时间轴诊断假设，不计为生产修复；真实视觉根因与 GPU 几何兼容修复见 `bugs/BUG-003.md`。
 
 ## 验证证据
 
@@ -25,12 +25,12 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 503 tests in 30.573s - OK (skipped=6)
+Ran 504 tests in 33.162s - OK (skipped=6)
 ```
 
 已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2，并完成上述 503 项回归。exact commit 与最终真机报告待候选提交后补充。
 
-候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。逐帧和并排帧定位为 BUG-002，修复后的新 exact release 待复测。
+候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。候选 `782c41d` 的 source PTS 假设复测为 `0.862533`，同样拒绝。进一步隔离确认 legacy 的错误 `rotw(iw)/roth(ih)` 画布和 YUV420 偶数坐标才是根因；一次性修正诊断达到 `0.931400`，正式 exact release 待提交复测。
 
 ## 遗留风险
 
