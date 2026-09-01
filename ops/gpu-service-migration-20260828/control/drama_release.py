@@ -1120,17 +1120,31 @@ def apply_cpu(args, contract, before):
         for relative, expected in common.CPU_NEW_FILES.items():
             if common.sha256_file(common.CPU_LIVE_ROOT / pathlib.PurePosixPath(relative)) != expected:
                 raise common.OperatorError("CPU live file changed after API start")
-        after = common.snapshot_units(common.CPU_TARGET_UNITS)
-        common.assert_inactive_unit(after[common.CPU_TARGET_UNITS[0]])
-        common.assert_active_single_process(after[api])
-        config_unchanged(baseline_units, after, common.CPU_TARGET_UNITS)
-        restart_bound = target_restart_bound(
-            baseline_units, start_anchor, after, api)
-        listener = listener_owned_by(8787, after[api]["process"]["pid"])
+        listener = listener_owned_by(8787, start_anchor[api]["process"]["pid"])
+        post_probe_anchor = common.snapshot_units(common.CPU_TARGET_UNITS)
+        common.assert_inactive_unit(post_probe_anchor[common.CPU_TARGET_UNITS[0]])
+        common.assert_active_single_process(post_probe_anchor[api])
+        config_unchanged(baseline_units, post_probe_anchor, common.CPU_TARGET_UNITS)
+        post_probe_bound = target_restart_bound(
+            baseline_units, start_anchor, post_probe_anchor, api)
         phase(evidence, "cpu-verified", {"health_hk": health, "api_listener": listener,
-                                         "restart_bound": restart_bound,
+                                         "restart_bound": post_probe_bound,
                                          "units": {unit: common.protected_signature(item)
-                                                   for unit, item in after.items()}})
+                                                   for unit, item in post_probe_anchor.items()}})
+        # Commit only while the exact zero-restart process that answered the
+        # health/listener probes is still active.  This final anchor closes the
+        # gap introduced by evidence writes and the remaining database guard.
+        common.assert_no_media_processes()
+        inspect_cpu_database()
+        for relative, expected in common.CPU_NEW_FILES.items():
+            if common.sha256_file(common.CPU_LIVE_ROOT / pathlib.PurePosixPath(relative)) != expected:
+                raise common.OperatorError("CPU live file changed before result commit")
+        final_anchor = common.snapshot_units(common.CPU_TARGET_UNITS)
+        common.assert_inactive_unit(final_anchor[common.CPU_TARGET_UNITS[0]])
+        common.assert_active_single_process(final_anchor[api])
+        config_unchanged(baseline_units, final_anchor, common.CPU_TARGET_UNITS)
+        restart_bound = target_restart_bound(
+            baseline_units, start_anchor, final_anchor, api)
         result = {"schema": 1, "result": "deployed", "host_role": "cpu",
                   "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,
                   "new_sha": common.NEW_SHA, "backup": backup,
@@ -1395,37 +1409,25 @@ def target_restart_bound(baseline, start_anchor, final, unit):
     final_identity = process_identity(final[unit])
     if baseline_restarts < 0 or start_restarts < 0 or final_restarts < 0:
         raise common.OperatorError("target unit restart count is negative")
-    # The explicit stop/start may reset systemd's historical counter.  The
-    # baseline is evidence only: it must never enlarge the post-start budget.
-    # Once the immediate start anchor is captured, no further manual reset is
-    # permitted, so the counter must remain monotonic and at most one.
-    if start_restarts not in (0, 1):
+    # An explicit stop/start resets systemd's historical counter.  A later
+    # manual restart can reset it again and conceal an intervening automatic
+    # restart, so no positive post-start count is acceptable.  Every anchor in
+    # this maintenance transaction must observe the same zero-count process.
+    if start_restarts != 0 or final_restarts != 0:
         raise common.OperatorError(
-            "target unit restart count exceeded one maintenance window at start anchor")
-    if final_restarts < start_restarts or final_restarts > 1:
-        raise common.OperatorError("target unit restart count exceeded one maintenance window")
-    if final_restarts == start_restarts:
-        if final_identity != start_identity:
-            raise common.OperatorError(
-                "target unit process identity changed without an observed automatic restart")
-    else:
-        if ((final_identity["pid"], final_identity["startticks"]) ==
-                (start_identity["pid"], start_identity["startticks"]) or
-                final_identity["exec_main_start_monotonic"] <=
-                start_identity["exec_main_start_monotonic"] or
-                final_identity["active_enter_monotonic"] <
-                start_identity["active_enter_monotonic"]):
-            raise common.OperatorError(
-                "target unit automatic restart process identity is not newer")
+            "target unit restart count is nonzero in the zero-restart maintenance window")
+    if final_identity != start_identity:
+        raise common.OperatorError(
+            "target unit process identity changed in the zero-restart maintenance window")
     return {
         "baseline": baseline_restarts,
         "start": start_restarts,
         "final": final_restarts,
-        "counter_reset_possible": baseline_restarts > 0 and start_restarts <= 1,
-        "automatic_restarts_after_start_anchor": final_restarts - start_restarts,
-        "allowed_final_min": start_restarts,
-        "allowed_final_max": 1,
-        "automatic_restart_limit": 1,
+        "counter_reset_possible": baseline_restarts > 0 and start_restarts == 0,
+        "automatic_restarts_after_start_anchor": 0,
+        "allowed_final_min": 0,
+        "allowed_final_max": 0,
+        "automatic_restart_limit": 0,
         "start_process_identity": start_identity,
         "final_process_identity": final_identity,
     }
@@ -1547,12 +1549,29 @@ def apply_hk(args, contract, before):
         assert_hk_runtime_unchanged(before["runtime"], worker_runtime)
         worker_health = common.exact_health("127.0.0.1", 8787)
         worker_listener = listener_owned_by(8787, worker["process"]["pid"])
+        worker_post_probe_anchor = common.snapshot_units(
+            (common.HK_TARGET_UNITS[0],) + common.HK_PROTECTED_UNITS)
+        common.assert_active_single_process(
+            worker_post_probe_anchor[common.HK_TARGET_UNITS[0]])
+        common.assert_protected_units(
+            protected_before,
+            {unit: worker_post_probe_anchor[unit]
+             for unit in common.HK_PROTECTED_UNITS})
+        worker_post_probe_bound = target_restart_bound(
+            baseline, worker_start_anchor, worker_post_probe_anchor,
+            common.HK_TARGET_UNITS[0])
+        worker = worker_post_probe_anchor[common.HK_TARGET_UNITS[0]]
+        if os.path.realpath(worker["process"]["cwd"]) != str(release):
+            raise common.OperatorError("HK worker cwd changed during local probes")
+        if os.path.realpath(str(HK_CURRENT)) != str(release):
+            raise common.OperatorError("HK current changed during worker probes")
         phase(evidence, "hk-worker-verified-before-tunnel", {
             "health": worker_health, "listener": worker_listener,
             "restart_start_anchor": worker_start_bound,
+            "restart_post_probe_anchor": worker_post_probe_bound,
             "runtime": worker_runtime,
             "protected_units": {
-                unit: common.protected_signature(worker_start_anchor[unit])
+                unit: common.protected_signature(worker_post_probe_anchor[unit])
                 for unit in common.HK_PROTECTED_UNITS
             },
         })
@@ -1581,34 +1600,66 @@ def apply_hk(args, contract, before):
                 for unit in common.HK_PROTECTED_UNITS
             },
         })
-        after = common.snapshot_units(common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS)
-        for unit in common.HK_TARGET_UNITS:
-            common.assert_active_single_process(after[unit])
-        common.assert_protected_units(
-            protected_before, {unit: after[unit] for unit in common.HK_PROTECTED_UNITS})
-        restart_bounds = {
-            common.HK_TARGET_UNITS[0]: target_restart_bound(
-                baseline, worker_start_anchor, after, common.HK_TARGET_UNITS[0]),
-            common.HK_TARGET_UNITS[1]: target_restart_bound(
-                baseline, tunnel_start_anchor, after, common.HK_TARGET_UNITS[1]),
-        }
-        worker = after[common.HK_TARGET_UNITS[0]]
-        if os.path.realpath(worker["process"]["cwd"]) != str(release):
-            raise common.OperatorError("HK worker cwd is not the new release")
         common.assert_no_media_processes()
         runtime = inspect_hk_runtime()
         assert_hk_runtime_unchanged(before["runtime"], runtime)
         health = common.exact_health("127.0.0.1", 8787)
-        listener = listener_owned_by(8787, worker["process"]["pid"])
+        listener = listener_owned_by(
+            8787, tunnel_start_anchor[common.HK_TARGET_UNITS[0]]["process"]["pid"])
         if os.path.realpath(str(HK_CURRENT)) != str(release):
             raise common.OperatorError("HK current changed after service start")
+        post_probe_anchor = common.snapshot_units(
+            common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS)
+        for unit in common.HK_TARGET_UNITS:
+            common.assert_active_single_process(post_probe_anchor[unit])
+        common.assert_protected_units(
+            protected_before,
+            {unit: post_probe_anchor[unit] for unit in common.HK_PROTECTED_UNITS})
+        post_probe_bounds = {
+            common.HK_TARGET_UNITS[0]: target_restart_bound(
+                baseline, worker_start_anchor, post_probe_anchor,
+                common.HK_TARGET_UNITS[0]),
+            common.HK_TARGET_UNITS[1]: target_restart_bound(
+                baseline, tunnel_start_anchor, post_probe_anchor,
+                common.HK_TARGET_UNITS[1]),
+        }
+        worker = post_probe_anchor[common.HK_TARGET_UNITS[0]]
+        if os.path.realpath(worker["process"]["cwd"]) != str(release):
+            raise common.OperatorError("HK worker cwd changed during target probes")
+        if os.path.realpath(str(HK_CURRENT)) != str(release):
+            raise common.OperatorError("HK current changed during target probes")
         phase(evidence, "hk-local-verified", {
-            "health": health, "listener": listener, "restart_bounds": restart_bounds,
+            "health": health, "listener": listener,
+            "restart_bounds": post_probe_bounds,
             "runtime": runtime,
-            "protected_units": {unit: common.protected_signature(after[unit])
+            "protected_units": {unit: common.protected_signature(post_probe_anchor[unit])
                                 for unit in common.HK_PROTECTED_UNITS},
         })
         retain_hk_old_link(current_record, evidence)
+        # No target or protected process may change between the probes and the
+        # authoritative result boundary.  Runtime/partials are checked once
+        # more immediately before the final service identity anchor.
+        guard_protected_and_idle()
+        final_anchor = common.snapshot_units(
+            common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS)
+        for unit in common.HK_TARGET_UNITS:
+            common.assert_active_single_process(final_anchor[unit])
+        common.assert_protected_units(
+            protected_before,
+            {unit: final_anchor[unit] for unit in common.HK_PROTECTED_UNITS})
+        restart_bounds = {
+            common.HK_TARGET_UNITS[0]: target_restart_bound(
+                baseline, worker_start_anchor, final_anchor,
+                common.HK_TARGET_UNITS[0]),
+            common.HK_TARGET_UNITS[1]: target_restart_bound(
+                baseline, tunnel_start_anchor, final_anchor,
+                common.HK_TARGET_UNITS[1]),
+        }
+        worker = final_anchor[common.HK_TARGET_UNITS[0]]
+        if os.path.realpath(worker["process"]["cwd"]) != str(release):
+            raise common.OperatorError("HK worker cwd changed before result commit")
+        if os.path.realpath(str(HK_CURRENT)) != str(release):
+            raise common.OperatorError("HK current changed before result commit")
         result = {"schema": 1, "result": "deployed_local_route_pending",
                   "host_role": "hk", "run_id": common.RUN_ID,
                   "old_sha": common.OLD_SHA, "new_sha": common.NEW_SHA,

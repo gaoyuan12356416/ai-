@@ -181,6 +181,31 @@ class DramaReleaseTests(unittest.TestCase):
             reviewed_failure_sha256=None, retry_id=None, apply=False,
         )
 
+    def target_item(self, unit, active, restarts=0, pid=100,
+                    startticks=200, exec_start=300, active_enter=250,
+                    cwd=None):
+        return {
+            "unit": unit,
+            "systemd": {
+                "ActiveState": "active" if active else "inactive",
+                "SubState": "running" if active else "dead",
+                "MainPID": str(pid) if active else "0", "ControlPID": "0",
+                "NRestarts": str(restarts), "UnitFileState": "enabled",
+                "Restart": "on-failure",
+                "ExecMainStartTimestampMonotonic": (
+                    str(exec_start) if active else "0"),
+                "ActiveEnterTimestampMonotonic": (
+                    str(active_enter) if active else "0"),
+            },
+            "fragment": {"path": "/etc/systemd/system/" + unit,
+                         "sha256": "a" * 64},
+            "dropins": [],
+            "process": ({"pid": pid, "startticks": startticks,
+                         "children": [], "cwd": str(cwd or "/approved/release")}
+                        if active else None),
+            "cgroup": {"pids": [pid] if active else []},
+        }
+
     def test_exact_host_commit_path_and_unit_bindings(self):
         self.assertEqual(common.CPU_TARGET_UNITS, (
             "drama-material-job-worker.service",
@@ -1226,23 +1251,23 @@ class DramaReleaseTests(unittest.TestCase):
                 "cgroup": {"pids": [pid]},
             }
 
-        for baseline, start, final in (
-                (1, 0, 0), (1, 0, 1), (1, 1, 1),
-                (0, 0, 0), (0, 0, 1), (0, 1, 1)):
+        for baseline, start, final in ((1, 0, 0), (0, 0, 0)):
             result = release.target_restart_bound(
                 {unit: item(baseline)}, {unit: item(start)},
-                {unit: item(final, generation=1 if final > start else 0)}, unit)
+                {unit: item(final)}, unit)
             self.assertEqual(
                 (result["baseline"], result["start"], result["final"]),
                 (baseline, start, final))
             self.assertEqual(result["counter_reset_possible"], baseline > 0)
             self.assertEqual(result["automatic_restarts_after_start_anchor"],
-                             final - start)
-            self.assertEqual(result["allowed_final_min"], start)
-            self.assertEqual(result["allowed_final_max"], 1)
-            self.assertEqual(result["automatic_restart_limit"], 1)
+                             0)
+            self.assertEqual(result["allowed_final_min"], 0)
+            self.assertEqual(result["allowed_final_max"], 0)
+            self.assertEqual(result["automatic_restart_limit"], 0)
         for baseline, start, final in (
-                (1, 0, 2), (1, 1, 2), (0, 0, 2), (1, 2, 2), (1, 1, 0)):
+                (1, 0, 1), (1, 1, 1), (0, 0, 1), (0, 1, 1),
+                (1, 0, 2), (1, 1, 2), (0, 0, 2), (1, 2, 2),
+                (1, 1, 0)):
             with self.assertRaisesRegex(common.OperatorError, "maintenance window"):
                 release.target_restart_bound(
                     {unit: item(baseline)}, {unit: item(start)},
@@ -1284,20 +1309,338 @@ class DramaReleaseTests(unittest.TestCase):
                 unit: item(unit, 0, pid=102, startticks=202,
                            exec_start=302, active_enter=402),
             }
-            with self.assertRaisesRegex(common.OperatorError, "without an observed"):
+            with self.assertRaisesRegex(common.OperatorError, "identity changed"):
                 release.target_restart_bound(
                     baseline, start, manual_restart_same_counter, unit)
+            manual_reset_then_automatic_restart = {
+                unit: item(unit, 1, pid=103, startticks=203,
+                           exec_start=303, active_enter=403),
+            }
+            with self.assertRaisesRegex(common.OperatorError, "nonzero"):
+                release.target_restart_bound(
+                    baseline, start, manual_reset_then_automatic_restart, unit)
             unchanged_identity_with_increment = {unit: item(unit, 1)}
-            with self.assertRaisesRegex(common.OperatorError, "not newer"):
+            with self.assertRaisesRegex(common.OperatorError, "nonzero"):
                 release.target_restart_bound(
                     baseline, start, unchanged_identity_with_increment, unit)
             active_enter_regressed = {
-                unit: item(unit, 1, pid=102, startticks=202,
+                unit: item(unit, 0, pid=102, startticks=202,
                            exec_start=302, active_enter=400),
             }
-            with self.assertRaisesRegex(common.OperatorError, "not newer"):
+            with self.assertRaisesRegex(common.OperatorError, "identity changed"):
                 release.target_restart_bound(
                     baseline, start, active_enter_regressed, unit)
+
+    def test_cpu_apply_rejects_restart_during_health_or_after_probes(self):
+        worker, api = common.CPU_TARGET_UNITS
+        baseline = {
+            worker: self.target_item(worker, False),
+            api: self.target_item(api, True, restarts=1, pid=90,
+                                  startticks=190, exec_start=290,
+                                  active_enter=240),
+        }
+        stopped = {
+            worker: self.target_item(worker, False),
+            api: self.target_item(api, False, restarts=1),
+        }
+        start = {
+            worker: self.target_item(worker, False),
+            api: self.target_item(api, True, restarts=0, pid=101,
+                                  startticks=201, exec_start=301,
+                                  active_enter=251),
+        }
+        drift = {
+            worker: self.target_item(worker, False),
+            api: self.target_item(api, True, restarts=0, pid=102,
+                                  startticks=202, exec_start=302,
+                                  active_enter=252),
+        }
+
+        for drift_stage in ("during-health", "after-probes"):
+            with self.subTest(drift_stage=drift_stage):
+                snapshots = ([stopped, start, drift, baseline]
+                             if drift_stage == "during-health" else
+                             [stopped, start, start, drift, baseline])
+                events = []
+                snapshot_calls = 0
+                failures = []
+
+                def snapshot(units):
+                    nonlocal snapshot_calls
+                    self.assertEqual(tuple(units), common.CPU_TARGET_UNITS)
+                    snapshot_calls += 1
+                    events.append("snapshot-%d" % snapshot_calls)
+                    if not snapshots:
+                        raise AssertionError("unexpected extra CPU unit snapshot")
+                    return snapshots.pop(0)
+
+                def health(*unused):
+                    events.append("health")
+                    return {"ok": True}
+
+                def listener(port, pid):
+                    events.append("listener")
+                    self.assertEqual((port, pid), (8787, 101))
+                    return {"port": port, "owner_pid": pid}
+
+                def phase_event(unused_evidence, name, unused_payload):
+                    events.append("phase-" + name)
+
+                def write(path, value):
+                    if pathlib.Path(path).name == "failure.json":
+                        failures.append(value)
+                    return "f" * 64
+
+                contract = release.role_contract("cpu")
+                with contextlib.ExitStack() as stack:
+                    for owner, name in (
+                            (common, "create_private_ancestry"),
+                            (common, "assert_no_media_processes"),
+                            (common, "assert_no_established_ports"),
+                            (release, "inspect_cpu_database"),
+                            (release, "compile_cpu_files"),
+                            (release, "prove_cpu_rollback")):
+                        stack.enter_context(mock.patch.object(owner, name))
+                    stack.enter_context(mock.patch.object(
+                        common, "CPU_NEW_FILES", {}))
+                    stack.enter_context(mock.patch.object(
+                        common, "CPU_OLD_FILES", {}))
+                    stack.enter_context(mock.patch.object(
+                        release, "phase", side_effect=phase_event))
+                    stack.enter_context(mock.patch.object(
+                        release, "compact_snapshot", return_value={}))
+                    stack.enter_context(mock.patch.object(
+                        release, "backup_cpu_files", return_value={}))
+                    stack.enter_context(mock.patch.object(
+                        release, "restore_cpu_swaps", return_value=[]))
+                    stack.enter_context(mock.patch.object(release, "systemctl"))
+                    stack.enter_context(mock.patch.object(release, "wait_unit"))
+                    stack.enter_context(mock.patch.object(
+                        common, "snapshot_units", side_effect=snapshot))
+                    stack.enter_context(mock.patch.object(
+                        common, "exact_health", side_effect=health))
+                    stack.enter_context(mock.patch.object(
+                        release, "listener_owned_by", side_effect=listener))
+                    stack.enter_context(mock.patch.object(
+                        common, "unit_identity", return_value=drift[api]))
+                    stack.enter_context(mock.patch.object(
+                        common, "write_exclusive_json", side_effect=write))
+                    publish = stack.enter_context(mock.patch.object(
+                        release, "persist_cpu_result_and_cleanup"))
+                    with self.assertRaisesRegex(common.OperatorError,
+                                                "identity changed"):
+                        release.apply_cpu(
+                            self.exact_args("cpu"), contract,
+                            {"unit_snapshot": baseline, "mode": "apply"})
+                publish.assert_not_called()
+                self.assertFalse(snapshots)
+                self.assertEqual(len(failures), 1)
+                self.assertTrue(failures[0]["rollback"]["complete"])
+                self.assertLess(events.index("health"), events.index("listener"))
+                if drift_stage == "during-health":
+                    self.assertLess(events.index("health"),
+                                    events.index("snapshot-3"))
+                else:
+                    self.assertLess(events.index("phase-cpu-verified"),
+                                    events.index("snapshot-4"))
+
+    def test_hk_apply_rejects_worker_health_and_tunnel_post_probe_restarts(self):
+        worker, tunnel = common.HK_TARGET_UNITS
+        release_path = release.HK_RELEASES / common.NEW_SHA
+        baseline = {
+            worker: self.target_item(worker, False, restarts=1),
+            tunnel: self.target_item(tunnel, False, restarts=1),
+        }
+        protected = {}
+        for index, unit in enumerate(common.HK_PROTECTED_UNITS, 1):
+            protected[unit] = self.target_item(
+                unit, True, pid=1000 + index, startticks=2000 + index,
+                exec_start=3000 + index, active_enter=2500 + index)
+        baseline.update(protected)
+        worker_start = self.target_item(
+            worker, True, restarts=0, pid=101, startticks=201,
+            exec_start=301, active_enter=251, cwd=release_path)
+        worker_drift = self.target_item(
+            worker, True, restarts=0, pid=111, startticks=211,
+            exec_start=311, active_enter=261, cwd=release_path)
+        tunnel_start = self.target_item(
+            tunnel, True, restarts=0, pid=102, startticks=202,
+            exec_start=302, active_enter=252, cwd=release_path)
+        tunnel_drift = self.target_item(
+            tunnel, True, restarts=0, pid=112, startticks=212,
+            exec_start=312, active_enter=262, cwd=release_path)
+        inactive_targets = {
+            worker: self.target_item(worker, False),
+            tunnel: self.target_item(tunnel, False),
+        }
+        runtime = {
+            "durable_records_sha256": "a" * 64,
+            "recoverable_downloads_sha256": "b" * 64,
+            "durable_failed_jobs": len(release.JOB_IDS),
+            "part_files": len(release.HK_DOWNLOAD_PARTS),
+            "part_record_files": len(release.HK_DOWNLOAD_PARTS),
+            "durable_records": [{"job_id": value} for value in release.JOB_IDS],
+        }
+        reviewed = {"sha256": release.HK_REVIEWED_FAILURE_SHA256}
+        existing = {"commit": common.NEW_SHA, "tree": "d" * 40}
+        retry_link = {"path": str(release.hk_current_temporary_path())}
+        before = {
+            "unit_snapshot": baseline, "mode": "apply", "runtime": runtime,
+            "source": {"tree": "d" * 40}, "reviewed_failure": reviewed,
+            "existing_release": existing, "existing_retry_link": retry_link,
+        }
+        args = self.exact_args("hk")
+        args.reviewed_failure_resume = True
+        args.reviewed_failure_path = str(release.HK_REVIEWED_FAILURE_PATH)
+        args.reviewed_failure_sha256 = release.HK_REVIEWED_FAILURE_SHA256
+        args.retry_id = release.HK_RETRY_ID
+        args.apply = True
+        contract = release.validate_cli(args)
+
+        for drift_stage in ("worker-health", "tunnel-after-probes"):
+            with self.subTest(drift_stage=drift_stage):
+                worker_scope_calls = 0
+                all_scope_calls = 0
+                health_calls = 0
+                events = []
+                started = set()
+                failures = []
+
+                def combined(worker_item, tunnel_item=None):
+                    values = {worker: worker_item}
+                    if tunnel_item is not None:
+                        values[tunnel] = tunnel_item
+                    values.update(protected)
+                    return values
+
+                def snapshot(units):
+                    nonlocal worker_scope_calls, all_scope_calls
+                    units = tuple(units)
+                    if units == common.HK_PROTECTED_UNITS:
+                        return protected
+                    if units == (worker,) + common.HK_PROTECTED_UNITS:
+                        worker_scope_calls += 1
+                        events.append("worker-snapshot-%d" % worker_scope_calls)
+                        item = (worker_drift
+                                if (drift_stage == "worker-health" and
+                                    worker_scope_calls == 2)
+                                else worker_start)
+                        return combined(item)
+                    if units == common.HK_TARGET_UNITS + common.HK_PROTECTED_UNITS:
+                        all_scope_calls += 1
+                        events.append("all-snapshot-%d" % all_scope_calls)
+                        tunnel_item = (tunnel_drift
+                                       if (drift_stage == "tunnel-after-probes" and
+                                           all_scope_calls == 3)
+                                       else tunnel_start)
+                        return combined(worker_start, tunnel_item)
+                    if units == common.HK_TARGET_UNITS:
+                        return inactive_targets
+                    raise AssertionError("unexpected snapshot scope: %r" % (units,))
+
+                def health(*unused):
+                    nonlocal health_calls
+                    health_calls += 1
+                    events.append("health-%d" % health_calls)
+                    return {"ok": True}
+
+                def listener(port, pid):
+                    events.append("listener-%d" % health_calls)
+                    self.assertEqual((port, pid), (8787, 101))
+                    return {"port": port, "owner_pid": pid}
+
+                def systemctl(action, unit):
+                    self.assertIn(unit, common.HK_TARGET_UNITS)
+                    if action == "start":
+                        started.add(unit)
+                    elif action == "stop":
+                        started.discard(unit)
+
+                def unit_identity(unit):
+                    if unit == worker and unit in started:
+                        return worker_start
+                    if unit == tunnel and unit in started:
+                        return tunnel_start
+                    return inactive_targets[unit]
+
+                def switch(record, unused_anchor):
+                    record.update({"exchange_complete": True,
+                                   "reused_existing_temporary": True})
+
+                def restore(record):
+                    record["exchange_complete"] = False
+
+                def write(path, value):
+                    if pathlib.Path(path).name == "failure.json":
+                        failures.append(value)
+                    return "f" * 64
+
+                def realpath(path):
+                    if str(path) in (str(release_path), str(release.HK_CURRENT)):
+                        return str(release_path)
+                    return str(path)
+
+                with contextlib.ExitStack() as stack:
+                    for owner, name in (
+                            (common, "create_private_ancestry"),
+                            (common, "assert_no_media_processes"),
+                            (common, "assert_no_established_ports"),
+                            (release, "assert_hk_current_release"),
+                            (release, "retain_hk_old_link")):
+                        stack.enter_context(mock.patch.object(owner, name))
+                    stack.enter_context(mock.patch.object(
+                        release, "phase",
+                        side_effect=lambda unused_evidence, name, unused_payload:
+                        events.append("phase-" + name)))
+                    stack.enter_context(mock.patch.object(
+                        release, "compact_snapshot", return_value={}))
+                    stack.enter_context(mock.patch.object(
+                        release, "inspect_hk_runtime", return_value=runtime))
+                    stack.enter_context(mock.patch.object(
+                        release, "verify_reviewed_hk_failure", return_value=reviewed))
+                    stack.enter_context(mock.patch.object(
+                        release, "verify_existing_hk_release", return_value=existing))
+                    stack.enter_context(mock.patch.object(
+                        release, "assert_hk_retry_link", return_value=retry_link))
+                    stack.enter_context(mock.patch.object(
+                        common, "snapshot_units", side_effect=snapshot))
+                    stack.enter_context(mock.patch.object(
+                        release, "switch_hk_current", side_effect=switch))
+                    restore_mock = stack.enter_context(mock.patch.object(
+                        release, "restore_hk_current", side_effect=restore))
+                    stack.enter_context(mock.patch.object(
+                        release, "systemctl", side_effect=systemctl))
+                    stack.enter_context(mock.patch.object(release, "wait_unit"))
+                    stack.enter_context(mock.patch.object(
+                        common, "unit_identity", side_effect=unit_identity))
+                    stack.enter_context(mock.patch.object(
+                        common, "exact_health", side_effect=health))
+                    stack.enter_context(mock.patch.object(
+                        release, "listener_owned_by", side_effect=listener))
+                    stack.enter_context(mock.patch.object(
+                        release.os.path, "realpath", side_effect=realpath))
+                    stack.enter_context(mock.patch.object(
+                        common, "write_exclusive_json", side_effect=write))
+                    publish = stack.enter_context(mock.patch.object(
+                        release, "publish_authoritative_result"))
+                    with self.assertRaisesRegex(common.OperatorError,
+                                                "identity changed"):
+                        release.apply_hk(args, contract, before)
+                publish.assert_not_called()
+                restore_mock.assert_called_once()
+                self.assertEqual(len(failures), 1)
+                self.assertTrue(failures[0]["rollback"]["complete"])
+                self.assertEqual(started, set())
+                if drift_stage == "worker-health":
+                    self.assertEqual((worker_scope_calls, all_scope_calls), (2, 0))
+                    self.assertLess(events.index("health-1"),
+                                    events.index("worker-snapshot-2"))
+                else:
+                    self.assertEqual((worker_scope_calls, all_scope_calls), (2, 3))
+                    self.assertLess(events.index("health-2"),
+                                    events.index("all-snapshot-2"))
+                    self.assertLess(events.index("phase-hk-local-verified"),
+                                    events.index("all-snapshot-3"))
 
     def test_runtime_checkpoint_identity_requires_exact_summary(self):
         runtime = {
