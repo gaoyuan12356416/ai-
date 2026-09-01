@@ -124,7 +124,7 @@ def probe(ffprobe: str, path: Path) -> dict:
     streams = payload.get("streams") or []
     video = next(row for row in streams if row.get("codec_type") == "video")
     audio = next((row for row in streams if row.get("codec_type") == "audio"), None)
-    duration = float((payload.get("format") or {}).get("duration") or video.get("duration"))
+    duration = float(video.get("duration") or (payload.get("format") or {}).get("duration"))
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("benchmark_probe_invalid")
     packets = json.loads(packet_result.stdout).get("packets") or []

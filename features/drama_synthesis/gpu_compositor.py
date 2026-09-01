@@ -202,7 +202,10 @@ def _probe(ffprobe: str, path: Path) -> Dict[str, Any]:
     video = next((row for row in streams if row.get("codec_type") == "video"), {})
     audio = next((row for row in streams if row.get("codec_type") == "audio"), None)
     try:
-        duration = float((payload.get("format") or {}).get("duration") or video.get("duration") or 0)
+        # The composition follows the video timeline. Container duration can be
+        # one muxer tick longer than the last video frame (especially after a
+        # stream-copy clip), which would otherwise invent a non-existent frame.
+        duration = float(video.get("duration") or (payload.get("format") or {}).get("duration") or 0)
     except (TypeError, ValueError, OverflowError):
         duration = 0
     if not math.isfinite(duration) or duration <= 0:

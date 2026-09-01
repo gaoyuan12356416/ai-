@@ -223,6 +223,28 @@ class CompositionSpecTests(unittest.TestCase):
         self.assertRegex(result["gpu_driver_identity_sha256"], r"^[0-9a-f]{64}$")
 
 
+class MediaProbeTests(unittest.TestCase):
+    def _responses(self):
+        media = {
+            "streams": [{"codec_type": "video", "duration": "30.000000"}],
+            "format": {"duration": "30.043984"},
+        }
+        return [
+            SimpleNamespace(stdout=json.dumps(media)),
+            SimpleNamespace(stdout=json.dumps({"packets": [{"flags": "K_"}]})),
+        ]
+
+    def test_compositor_probe_prefers_video_timeline_over_container_tick(self):
+        with mock.patch.object(gpu_compositor.subprocess, "run", side_effect=self._responses()):
+            info = gpu_compositor._probe("ffprobe", Path("source.mp4"))
+        self.assertEqual(info["duration"], 30.0)
+
+    def test_benchmark_probe_uses_the_same_video_timeline(self):
+        with mock.patch.object(benchmark.subprocess, "run", side_effect=self._responses()):
+            info = benchmark.probe("ffprobe", Path("source.mp4"))
+        self.assertEqual(info["duration"], 30.0)
+
+
 class OpenCLCommandTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
