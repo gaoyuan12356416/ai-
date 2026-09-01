@@ -341,14 +341,16 @@ def build_opencl_chunk_command(
     graph_parts.append(
         "[source][border][opacity][corners][tint]"
         "program_opencl=inputs=5:size=%dx%d:source='%s':kernel=compose_random_overlay_v2:"
-        "shortest=1:eof_action=endall,hwdownload,format=rgba[v]"
-        % (CANVAS_WIDTH, CANVAS_HEIGHT, _filter_escape(kernel_path))
+        "shortest=1:eof_action=endall,hwdownload,format=rgba,"
+        "fps=%d,setpts=N/(%d*TB)[v]"
+        % (CANVAS_WIDTH, CANVAS_HEIGHT, _filter_escape(kernel_path), CANVAS_FPS, CANVAS_FPS)
     )
     command.extend([
         "-filter_complex", ";".join(graph_parts), "-map", "[v]", "-an",
         "-c:v", "h264_nvenc", "-profile:v", "high", "-preset", "p3",
         "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0",
-        "-rgb_mode", "yuv420", "-pix_fmt", "yuv420p", "-fps_mode", "cfr", "-g", "60",
+        "-rgb_mode", "yuv420", "-pix_fmt", "yuv420p", "-r", str(CANVAS_FPS),
+        "-fps_mode", "cfr", "-g", "60",
         "-keyint_min", "60", "-forced-idr", "1", "-no-scenecut", "1", "-bf", "0",
         "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
         "-color_primaries", "bt709", "-chroma_sample_location", "left",
