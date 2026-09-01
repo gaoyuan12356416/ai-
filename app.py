@@ -69006,55 +69006,112 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-def rebuild_unsupported_legacy_intro(intro_path, cover_path, reference_path):
-    """Atomically rebuild a derived legacy intro rejected by the normalizer.
+def select_compatible_intro(intro_path, cover_path, reference_path, workdir):
+    """Select a compatible intro without ever replacing the legacy artifact.
 
     Older workers wrote one-second intros without color transfer or primaries
     metadata. Reusing one makes the strict normalization plan fail immediately
-    after the first episode download. A replacement is rendered and validated
-    under a private same-filesystem path before it replaces the legacy file, so
-    the cover, episode files, and previous intro all survive a failed rebuild.
+    after the first episode download. A replacement is rendered under a private
+    same-filesystem name, anchored to the exact bytes that were probed, then
+    published through an atomic no-clobber hard link. The legacy file is never
+    removed or replaced, including every failure and race path.
     """
+    parent = os.path.abspath(os.path.dirname(intro_path))
+    root = os.path.abspath(workdir)
+    try:
+        durable_ensure_directory(parent)
+        if (os.path.realpath(parent) != parent
+                or os.path.realpath(root) != root
+                or os.path.commonpath((parent, root)) != root):
+            raise checkpoint_error()
+    except DramaSynthesisError:
+        raise
+    except (OSError, ValueError):
+        raise checkpoint_error() from None
     if os.path.islink(intro_path):
         raise checkpoint_error()
     if not file_ready(intro_path):
-        return False
-    intro_fingerprint = file_fingerprint(intro_path)
-    reference_info = probe_media_stream_info(reference_path)
+        return intro_path
+    reference_info, reference_anchor = probe_media_source_with_anchor(
+        reference_path, probe_media_stream_info,
+    )
     # A bad episode reference cannot be repaired by replacing its intro.
     freeze_concat_normalization_plan(reference_info, reference_info, 0)
+    intro_info, intro_anchor = probe_media_source_with_anchor(
+        intro_path, probe_media_stream_info,
+    )
     try:
-        intro_info = probe_media_stream_info(intro_path)
         freeze_concat_normalization_plan(reference_info, intro_info, -1)
     except DramaSynthesisError as exc:
         if exc.code != "drama_concat_normalization_source_unsupported":
             raise
-        if file_fingerprint(intro_path) != intro_fingerprint:
-            raise checkpoint_error(conflict=True)
+        verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+        verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+        replacement_path = os.path.join(parent, "000_intro.bt709-v1.mp4")
+
+        def validate_replacement(path):
+            if os.path.islink(path) or not file_ready(path):
+                raise checkpoint_error()
+            info, anchor = probe_media_source_with_anchor(
+                path, probe_media_stream_info,
+            )
+            freeze_concat_normalization_plan(reference_info, info, -1)
+            verify_media_source_anchor(path, info, anchor)
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+            verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+            return anchor
+
+        if os.path.lexists(replacement_path):
+            validate_replacement(replacement_path)
+            return replacement_path
+
         candidate_fd, candidate_path = tempfile.mkstemp(
             prefix=".intro-rebuild-", suffix=".mp4",
-            dir=os.path.dirname(intro_path),
+            dir=parent,
         )
         os.close(candidate_fd)
-        os.remove(candidate_path)
         try:
             render_intro(
                 cover_path, candidate_path, reference_path=reference_path,
             )
-            candidate_info = probe_media_stream_info(candidate_path)
+            candidate_info, candidate_anchor = probe_media_source_with_anchor(
+                candidate_path, probe_media_stream_info,
+            )
             freeze_concat_normalization_plan(reference_info, candidate_info, -1)
-            candidate_fingerprint = file_fingerprint(candidate_path)
-            if (os.path.islink(intro_path)
-                    or file_fingerprint(intro_path) != intro_fingerprint):
+            verify_media_source_anchor(candidate_path, candidate_info, candidate_anchor)
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+            verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+            with open(candidate_path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            try:
+                os.link(candidate_path, replacement_path, follow_symlinks=False)
+            except FileExistsError:
+                validate_replacement(replacement_path)
+                return replacement_path
+            except OSError:
+                raise checkpoint_error() from None
+            candidate_stat = os.stat(candidate_path, follow_symlinks=False)
+            replacement_stat = os.stat(replacement_path, follow_symlinks=False)
+            if (os.path.islink(candidate_path) or os.path.islink(replacement_path)
+                    or (candidate_stat.st_dev, candidate_stat.st_ino)
+                    != (replacement_stat.st_dev, replacement_stat.st_ino)):
                 raise checkpoint_error(conflict=True)
-            os.replace(candidate_path, intro_path)
-            if file_fingerprint(intro_path) != candidate_fingerprint:
+            replacement_anchor = validate_replacement(replacement_path)
+            if replacement_anchor != candidate_anchor:
                 raise checkpoint_error(conflict=True)
-            return True
+            if os.name == "posix":
+                directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            return replacement_path
         finally:
-            if os.path.exists(candidate_path):
-                os.remove(candidate_path)
-    return False
+            if os.path.lexists(candidate_path):
+                os.unlink(candidate_path)
+    verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+    verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    return intro_path
 
 
 def concat_segments(segment_paths, output_path):
@@ -79494,9 +79551,9 @@ def _handle_gpu_video_render_unlocked(payload):
     # the first directory entry durable before a render can create either file.
     durable_ensure_directory(workdir)
     durable_ensure_directory(public_dir, mode=0o755)
-    ensure_dir(download_dir)
-    ensure_dir(segment_dir)
-    ensure_dir(concat_segment_dir)
+    durable_ensure_directory(download_dir)
+    durable_ensure_directory(segment_dir)
+    durable_ensure_directory(concat_segment_dir)
     ensure_dir(public_dir)
 
     job = {
@@ -79550,8 +79607,8 @@ def _handle_gpu_video_render_unlocked(payload):
         remove_invalid_video_file(intro_path, "GPU intro")
         if not file_ready(cover_path):
             download_file(selected_cover, cover_path)
-        rebuild_unsupported_legacy_intro(
-            intro_path, cover_path, first_source_path,
+        intro_path = select_compatible_intro(
+            intro_path, cover_path, first_source_path, workdir,
         )
         if not file_ready(intro_path):
             render_intro(cover_path, intro_path, reference_path=first_source_path)

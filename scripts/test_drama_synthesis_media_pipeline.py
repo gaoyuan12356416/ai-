@@ -29,7 +29,9 @@ if str(ROOT) not in sys.path:
 import requests
 from features.drama_synthesis import gpu, media_pipeline as media
 from features.drama_synthesis.core import DramaSynthesisError, RECIPE_PROFILE
-from features.drama_synthesis.local_checkpoint import file_fingerprint
+from features.drama_synthesis.local_checkpoint import (
+    checkpoint_error, durable_ensure_directory, file_fingerprint,
+)
 
 
 URL = "https://media.example.test/episode.mp4?token=never-print-this"
@@ -1285,11 +1287,13 @@ class AppConcatCompatibilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
                     env["validate_intro_cover_color_contract"](str(path))
 
-    def test_legacy_intro_without_transfer_metadata_is_rebuilt_atomically(self):
-        intro = self.root / "legacy-intro.mp4"
+    def test_legacy_intro_without_transfer_metadata_uses_no_clobber_replacement(self):
+        intro = self.root / "000_intro.mp4"
         intro.write_bytes(b"legacy-intro")
         cover = self.root / "cover.jpg"
         cover.write_bytes(b"cover")
+        reference_path = self.root / "episode-001.mp4"
+        reference_path.write_bytes(b"reference")
         reference = stream_info()
         legacy_intro = stream_info(video_updates={
             "pix_fmt": "yuvj420p",
@@ -1298,43 +1302,56 @@ class AppConcatCompatibilityTests(unittest.TestCase):
             "color_transfer": None,
             "color_primaries": None,
         })
-        probe = mock.Mock(side_effect=[reference, legacy_intro, stream_info()])
+        probe = mock.Mock(side_effect=[reference, legacy_intro, stream_info(), stream_info()])
         renderer = mock.Mock(side_effect=lambda _cover, output, **_kwargs: Path(output).write_bytes(b"rebuilt-intro"))
         env = self.load(
-            "rebuild_unsupported_legacy_intro",
+            "select_compatible_intro",
             file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
             probe_media_stream_info=probe,
             freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
             DramaSynthesisError=DramaSynthesisError,
-            checkpoint_error=mock.Mock(side_effect=AssertionError("checkpoint guard should not fire")),
-            file_fingerprint=file_fingerprint,
+            checkpoint_error=checkpoint_error,
+            durable_ensure_directory=durable_ensure_directory,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
             render_intro=renderer,
             tempfile=tempfile,
         )
 
-        self.assertTrue(env["rebuild_unsupported_legacy_intro"](
-            str(intro), str(cover), "episode-001.mp4",
-        ))
-        self.assertEqual(intro.read_bytes(), b"rebuilt-intro")
+        selected = env["select_compatible_intro"](
+            str(intro), str(cover), str(reference_path), str(self.root),
+        )
+        replacement = self.root / "000_intro.bt709-v1.mp4"
+        self.assertEqual(selected, str(replacement))
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(replacement.read_bytes(), b"rebuilt-intro")
         self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
         renderer.assert_called_once()
 
-        current = self.root / "current-intro.mp4"
+        current_dir = self.root / "current"
+        current_dir.mkdir()
+        current = current_dir / "000_intro.mp4"
         current.write_bytes(b"current-intro")
         probe.side_effect = [reference, stream_info()]
         renderer.reset_mock()
-        self.assertFalse(env["rebuild_unsupported_legacy_intro"](
-            str(current), str(cover), "episode-001.mp4",
-        ))
+        self.assertEqual(env["select_compatible_intro"](
+            str(current), str(cover), str(reference_path), str(self.root),
+        ), str(current))
         self.assertEqual(current.read_bytes(), b"current-intro")
+        renderer.assert_not_called()
+
+        probe.side_effect = [reference, legacy_intro, stream_info()]
+        self.assertEqual(env["select_compatible_intro"](
+            str(intro), str(cover), str(reference_path), str(self.root),
+        ), str(replacement))
         renderer.assert_not_called()
 
         probe.side_effect = DramaSynthesisError(
             "drama_media_checkpoint_unverified", "temporary probe failure", 503,
         )
         with self.assertRaises(DramaSynthesisError) as caught:
-            env["rebuild_unsupported_legacy_intro"](
-                str(current), str(cover), "episode-001.mp4",
+            env["select_compatible_intro"](
+                str(current), str(cover), str(reference_path), str(self.root),
             )
         self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
         self.assertTrue(current.exists())
@@ -1342,17 +1359,19 @@ class AppConcatCompatibilityTests(unittest.TestCase):
         unsupported_reference = stream_info(video_updates={"color_transfer": None})
         probe.side_effect = [unsupported_reference]
         with self.assertRaises(DramaSynthesisError) as caught:
-            env["rebuild_unsupported_legacy_intro"](
-                str(current), str(cover), "episode-001.mp4",
+            env["select_compatible_intro"](
+                str(current), str(cover), str(reference_path), str(self.root),
             )
         self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
         self.assertEqual(current.read_bytes(), b"current-intro")
 
     def test_legacy_intro_rebuild_failure_preserves_previous_file(self):
-        intro = self.root / "legacy-intro.mp4"
+        intro = self.root / "000_intro.mp4"
         intro.write_bytes(b"legacy-intro")
         cover = self.root / "cover.jpg"
         cover.write_bytes(b"cover")
+        reference_path = self.root / "episode-001.mp4"
+        reference_path.write_bytes(b"reference")
         reference = stream_info()
         legacy_intro = stream_info(video_updates={
             "color_transfer": None,
@@ -1361,20 +1380,22 @@ class AppConcatCompatibilityTests(unittest.TestCase):
         probe = mock.Mock(side_effect=[reference, legacy_intro])
         renderer = mock.Mock(side_effect=RuntimeError("render failed"))
         env = self.load(
-            "rebuild_unsupported_legacy_intro",
+            "select_compatible_intro",
             file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
             probe_media_stream_info=probe,
             freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
             DramaSynthesisError=DramaSynthesisError,
-            checkpoint_error=mock.Mock(side_effect=AssertionError("checkpoint guard should not fire")),
-            file_fingerprint=file_fingerprint,
+            checkpoint_error=checkpoint_error,
+            durable_ensure_directory=durable_ensure_directory,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
             render_intro=renderer,
             tempfile=tempfile,
         )
 
         with self.assertRaisesRegex(RuntimeError, "render failed"):
-            env["rebuild_unsupported_legacy_intro"](
-                str(intro), str(cover), "episode-001.mp4",
+            env["select_compatible_intro"](
+                str(intro), str(cover), str(reference_path), str(self.root),
             )
         self.assertEqual(intro.read_bytes(), b"legacy-intro")
         self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
@@ -1382,11 +1403,133 @@ class AppConcatCompatibilityTests(unittest.TestCase):
         probe.side_effect = [reference, legacy_intro, legacy_intro]
         renderer.side_effect = lambda _cover, output, **_kwargs: Path(output).write_bytes(b"bad-rebuild")
         with self.assertRaises(DramaSynthesisError) as caught:
-            env["rebuild_unsupported_legacy_intro"](
-                str(intro), str(cover), "episode-001.mp4",
+            env["select_compatible_intro"](
+                str(intro), str(cover), str(reference_path), str(self.root),
             )
         self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
         self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+
+    def test_intro_rebuild_binds_probed_bytes_and_rejects_parent_escape(self):
+        intro = self.root / "000_intro.mp4"
+        intro.write_bytes(b"legacy-intro")
+        cover = self.root / "cover.jpg"
+        cover.write_bytes(b"cover")
+        reference_path = self.root / "episode-001.mp4"
+        reference_path.write_bytes(b"reference")
+        reference = stream_info()
+        legacy_intro = stream_info(video_updates={
+            "color_transfer": None, "color_primaries": None,
+        })
+
+        def mutating_probe(path):
+            if ".intro-rebuild-" in str(path):
+                Path(path).write_bytes(b"changed-during-probe")
+            return stream_info()
+
+        probe_values = iter([reference, legacy_intro])
+
+        def probe_value(path):
+            try:
+                return next(probe_values)
+            except StopIteration:
+                return mutating_probe(path)
+
+        probe = mock.Mock(side_effect=probe_value)
+        renderer = mock.Mock(side_effect=lambda _cover, output, **_kwargs: Path(output).write_bytes(b"candidate"))
+        env = self.load(
+            "select_compatible_intro",
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=probe,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            DramaSynthesisError=DramaSynthesisError,
+            checkpoint_error=checkpoint_error,
+            durable_ensure_directory=durable_ensure_directory,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            render_intro=renderer,
+            tempfile=tempfile,
+        )
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["select_compatible_intro"](
+                str(intro), str(cover), str(reference_path), str(self.root),
+            )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertFalse((self.root / "000_intro.bt709-v1.mp4").exists())
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+
+        realpath = os.path.realpath
+        with mock.patch.object(
+                os.path, "realpath",
+                side_effect=lambda path: str(self.root / "outside")
+                if os.path.abspath(path) == os.path.abspath(self.root) else realpath(path)):
+            with self.assertRaises(DramaSynthesisError) as caught:
+                env["select_compatible_intro"](
+                    str(intro), str(cover), str(reference_path), str(self.root),
+                )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+
+    def test_intro_rebuild_never_clobbers_a_racing_replacement(self):
+        intro = self.root / "000_intro.mp4"
+        intro.write_bytes(b"legacy-intro")
+        cover = self.root / "cover.jpg"
+        cover.write_bytes(b"cover")
+        reference_path = self.root / "episode-001.mp4"
+        reference_path.write_bytes(b"reference")
+        reference = stream_info()
+        legacy_intro = stream_info(video_updates={
+            "color_transfer": None, "color_primaries": None,
+        })
+        probe = mock.Mock(side_effect=[
+            reference, legacy_intro, stream_info(), stream_info(),
+        ])
+        renderer = mock.Mock(side_effect=lambda _cover, output, **_kwargs: Path(output).write_bytes(b"candidate"))
+        env = self.load(
+            "select_compatible_intro",
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=probe,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            DramaSynthesisError=DramaSynthesisError,
+            checkpoint_error=checkpoint_error,
+            durable_ensure_directory=durable_ensure_directory,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            render_intro=renderer,
+            tempfile=tempfile,
+        )
+        replacement = self.root / "000_intro.bt709-v1.mp4"
+
+        def racing_link(_source, target, **_kwargs):
+            Path(target).write_bytes(b"concurrent-winner")
+            raise FileExistsError(target)
+
+        with mock.patch.object(os, "link", side_effect=racing_link):
+            selected = env["select_compatible_intro"](
+                str(intro), str(cover), str(reference_path), str(self.root),
+            )
+        self.assertEqual(selected, str(replacement))
+        self.assertEqual(replacement.read_bytes(), b"concurrent-winner")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+
+        replacement.unlink()
+        probe.side_effect = [reference, legacy_intro, stream_info(), stream_info()]
+        real_link = os.link
+
+        def mutate_before_link(source, target, **kwargs):
+            Path(source).write_bytes(b"mutated-after-probe")
+            return real_link(source, target, **kwargs)
+
+        with mock.patch.object(os, "link", side_effect=mutate_before_link):
+            with self.assertRaises(DramaSynthesisError) as caught:
+                env["select_compatible_intro"](
+                    str(intro), str(cover), str(reference_path), str(self.root),
+                )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(replacement.read_bytes(), b"mutated-after-probe")
         self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
 
 
