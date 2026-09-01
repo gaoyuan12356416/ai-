@@ -17,7 +17,7 @@
 
 ## 缺陷情况
 
-开发期发现 1 个诊断上下文兼容缺陷，已修复并回归，见 `bugs/BUG-001.md`。
+累计发现 2 个缺陷，均已在候选代码中修复并完成本地回归：诊断上下文兼容问题见 `bugs/BUG-001.md`，横竖屏切换的 source 时间轴重置问题见 `bugs/BUG-002.md`。
 
 ## 验证证据
 
@@ -25,10 +25,12 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 503 tests in 30.863s - OK (skipped=6)
+Ran 503 tests in 30.573s - OK (skipped=6)
 ```
 
 已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2，并完成上述 503 项回归。exact commit 与最终真机报告待候选提交后补充。
+
+候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。逐帧和并排帧定位为 BUG-002，修复后的新 exact release 待复测。
 
 ## 遗留风险
 
