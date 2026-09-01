@@ -116,6 +116,8 @@ def result_fixture():
 
 def app_functions(root, client=None):
     client = client or FakeHeadCos()
+    (root / 'work').mkdir(parents=True, exist_ok=True)
+    (root / 'public').mkdir(parents=True, exist_ok=True)
     names = {
         'gpu_video_result_path', 'gpu_video_result_satisfies_outputs',
         'read_gpu_video_result', 'write_gpu_video_result', 'verify_gpu_artifact_uploads',
@@ -123,7 +125,7 @@ def app_functions(root, client=None):
         'gpu_video_local_artifact_identity', 'gpu_video_local_checkpoint_path',
         'load_gpu_video_local_artifact', 'save_gpu_video_local_artifact',
         'restore_gpu_video_public_artifact', 'gpu_video_no_bgm_profile',
-        'handle_gpu_video_render',
+        'handle_gpu_video_render', 'strict_drama_job_directory',
         '_handle_gpu_video_render_unlocked',
     }
     tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8'))
@@ -143,6 +145,7 @@ def app_functions(root, client=None):
         'drama_async_runtime': SimpleNamespace(
             capture_context=lambda: None, render_fingerprint=lambda _payload: 'f' * 64,
             emit_progress=mock.Mock(),
+            valid_job_id=lambda value: isinstance(value, str) and bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', value)),
         ),
         'WORK_ROOT': str(root / 'work'), 'PUBLIC_ROOT': str(root / 'public'),
         'NORMALIZATION_PROFILE': 'unit-normalization-v1',
@@ -1018,6 +1021,8 @@ class CompatibilityOwnerLockTests(unittest.TestCase):
         return SimpleNamespace(
             capture_context=lambda: context, _FileLock=lock_factory,
             runtime_error=lambda code: DramaSynthesisError(code, code, 503),
+            valid_job_id=lambda value: isinstance(value, str)
+            and bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', value)),
         )
 
     def test_async_runtime_context_does_not_reacquire_owner_lock(self):

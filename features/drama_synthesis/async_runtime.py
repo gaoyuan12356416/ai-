@@ -79,6 +79,7 @@ ERROR_MESSAGES = {
     "drama_episode_download_failed": "视频下载失败，已保留可校验的下载进度",
     "drama_episode_download_route_invalid": "视频下载线路配置与冻结任务不一致",
     "drama_download_configuration_invalid": "下载并发配置无效",
+    "drama_concat_normalization_source_unsupported": "源视频缺少可验证的色彩或流信息，已停止转码",
     "drama_concat_normalization_invalid": "转码后的剧集片段仍不兼容，已停止拼接",
     "drama_media_checkpoint_unverified": "本地制作记录暂时无法校验，已停止重制",
     "drama_media_checkpoint_conflict": "本地制作记录与当前任务不一致，已停止重制",

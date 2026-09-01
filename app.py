@@ -133,6 +133,7 @@ import hmac
 
 
 import logging
+import math
 
 
 
@@ -792,6 +793,7 @@ from features.drama_synthesis.media_pipeline import (
     concat_signature as drama_concat_signature,
     concat_signatures_are_compatible,
     download_and_prepare_segments,
+    freeze_concat_normalization_plan,
     freeze_episode_download_route,
     prepare_normalized_concat_segment,
     probe_media_source_with_anchor,
@@ -69005,6 +69007,71 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
+def strict_drama_job_directory(root, job_id):
+    """Resolve one internal job directory without creating outside a real root."""
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
+    root = os.path.abspath(os.fspath(root))
+    try:
+        if (not os.path.lexists(root) or os.path.islink(root)
+                or not os.path.isdir(root) or os.path.realpath(root) != root):
+            raise checkpoint_error()
+        target = os.path.abspath(os.path.join(root, job_id))
+        if os.path.commonpath((root, target)) != root:
+            raise checkpoint_error()
+        if (os.path.lexists(target)
+                and (os.path.islink(target) or os.path.realpath(target) != target)):
+            raise checkpoint_error()
+        return target
+    except DramaSynthesisError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise checkpoint_error() from None
+
+
+def validate_intro_for_reference(intro_path, reference_path):
+    """Bind an existing intro's exact bytes to the current normalization contract."""
+    if (not os.path.lexists(intro_path) or os.path.islink(intro_path)
+            or not file_ready(intro_path)):
+        raise checkpoint_error()
+    reference_info, reference_anchor = probe_media_source_with_anchor(
+        reference_path, probe_media_stream_info,
+    )
+    try:
+        freeze_concat_normalization_plan(reference_info, reference_info, 0)
+    finally:
+        verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    try:
+        intro_info, intro_anchor = probe_media_source_with_anchor(
+            intro_path, probe_media_stream_info,
+        )
+        try:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+            duration = float((intro_info.get("format") or {}).get("duration") or 0)
+            streams = intro_info.get("streams") or []
+            videos = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "video"]
+            audios = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "audio"]
+            values = [duration, *videos, *audios]
+            if (not videos or not audios
+                    or any(not math.isfinite(value) or value <= 0 for value in values)
+                    or abs(duration - float(INTRO_SECONDS)) > 0.25
+                    or abs(videos[0] - audios[0]) > 1.0):
+                raise checkpoint_error()
+            freeze_concat_normalization_plan(reference_info, intro_info, -1)
+        finally:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+    except DramaSynthesisError as exc:
+        if exc.code in {"drama_media_checkpoint_unverified", "drama_media_checkpoint_conflict"}:
+            raise
+        raise checkpoint_error() from None
+    except (AttributeError, TypeError, ValueError):
+        raise checkpoint_error() from None
+    verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    return intro_anchor
+
+
 def concat_segments(segment_paths, output_path):
 
 
@@ -79284,13 +79351,14 @@ def verify_gpu_artifact_uploads(job_id, result, artifact_paths):
 def handle_gpu_video_cover(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
+    job_id = payload.get("job_id")
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     if not cover_16x9_url:
         raise ValueError("missing cover_16x9_url")
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
+    durable_ensure_directory(workdir)
     write_gpu_cover_url(workdir, cover_16x9_url)
     return {"job_id": job_id, "ok": True}
 
@@ -79373,9 +79441,9 @@ def gpu_video_resume_ready(payload):
 
 
 def handle_gpu_video_render(payload):
-    job_id = str((payload or {}).get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    job_id = (payload or {}).get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     # The dedicated worker owns this lock for its full lifetime.  A legacy
     # monolith route may render only while that worker is absent, which avoids
     # cross-process duplicate jobs and preserves the global heavy concurrency
@@ -79399,9 +79467,9 @@ def handle_gpu_video_render(payload):
 def _handle_gpu_video_render_unlocked(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    job_id = payload.get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     episodes = payload.get("episodes") or []
     if not episodes:
         raise ValueError("missing episodes")
@@ -79433,19 +79501,18 @@ def _handle_gpu_video_render_unlocked(payload):
         logging.info("reuse GPU video result for job=%s", job_id)
         return existing_result
 
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
     segment_dir = os.path.join(workdir, "segments")
     concat_segment_dir = os.path.join(workdir, "concat_segments")
-    public_dir = os.path.join(PUBLIC_ROOT, job_id)
+    public_dir = strict_drama_job_directory(PUBLIC_ROOT, job_id)
     # The completed artifact/checkpoint pair lives directly in workdir.  Make
     # the first directory entry durable before a render can create either file.
     durable_ensure_directory(workdir)
     durable_ensure_directory(public_dir, mode=0o755)
-    ensure_dir(download_dir)
-    ensure_dir(segment_dir)
-    ensure_dir(concat_segment_dir)
-    ensure_dir(public_dir)
+    durable_ensure_directory(download_dir)
+    durable_ensure_directory(segment_dir)
+    durable_ensure_directory(concat_segment_dir)
 
     job = {
         "_gpu_worker": True,
@@ -79495,11 +79562,13 @@ def _handle_gpu_video_render_unlocked(payload):
             selected_cover = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
-        remove_invalid_video_file(intro_path, "GPU intro")
-        if not file_ready(cover_path):
-            download_file(selected_cover, cover_path)
-        if not file_ready(intro_path):
+        if os.path.lexists(intro_path):
+            validate_intro_for_reference(intro_path, first_source_path)
+        else:
+            if not file_ready(cover_path):
+                download_file(selected_cover, cover_path)
             render_intro(cover_path, intro_path, reference_path=first_source_path)
+            validate_intro_for_reference(intro_path, first_source_path)
         return intro_path
 
     segment_paths = download_and_prepare_segments(

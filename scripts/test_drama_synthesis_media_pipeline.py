@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 import requests
 from features.drama_synthesis import gpu, media_pipeline as media
 from features.drama_synthesis.core import DramaSynthesisError, RECIPE_PROFILE
-from features.drama_synthesis.local_checkpoint import file_fingerprint
+from features.drama_synthesis.local_checkpoint import checkpoint_error, file_fingerprint
 
 
 URL = "https://media.example.test/episode.mp4?token=never-print-this"
@@ -1284,6 +1284,129 @@ class AppConcatCompatibilityTests(unittest.TestCase):
                 path.write_bytes(payload)
                 with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
                     env["validate_intro_cover_color_contract"](str(path))
+
+    def test_existing_intro_is_anchored_and_legacy_failure_preserves_bytes(self):
+        intro = self.root / "000_intro.mp4"
+        reference_path = self.root / "001.mp4"
+        intro.write_bytes(b"legacy-intro")
+        reference_path.write_bytes(b"reference")
+        reference = stream_info()
+        legacy = stream_info(video_updates={
+            "color_transfer": None, "color_primaries": None,
+        })
+        for item in legacy["streams"]:
+            item["duration"] = "1.0"
+        legacy["format"] = {"duration": "1.0"}
+        probe = mock.Mock(side_effect=[reference, legacy])
+        env = self.load(
+            "validate_intro_for_reference",
+            INTRO_SECONDS=1,
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=probe,
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            checkpoint_error=checkpoint_error,
+            DramaSynthesisError=DramaSynthesisError,
+            math=math,
+        )
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["validate_intro_for_reference"](str(intro), str(reference_path))
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+
+        current = stream_info()
+        for item in current["streams"]:
+            item["duration"] = "1.0"
+        current["format"] = {"duration": "1.0"}
+        probe.side_effect = [reference, current]
+        anchor = env["validate_intro_for_reference"](str(intro), str(reference_path))
+        self.assertEqual(anchor["sha256"], file_fingerprint(intro)["sha256"])
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+
+        invalid_duration = stream_info()
+        for item in invalid_duration["streams"]:
+            item["duration"] = "1.0"
+        invalid_duration["format"] = {"duration": "nan"}
+        probe.side_effect = [reference, invalid_duration]
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["validate_intro_for_reference"](str(intro), str(reference_path))
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+
+    def test_existing_intro_invalid_or_changed_enters_checkpoint_recovery(self):
+        intro = self.root / "000_intro.mp4"
+        reference_path = self.root / "001.mp4"
+        intro.write_bytes(b"")
+        reference_path.write_bytes(b"reference")
+        env = self.load(
+            "validate_intro_for_reference",
+            INTRO_SECONDS=1,
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=mock.Mock(),
+            probe_media_source_with_anchor=media.probe_media_source_with_anchor,
+            verify_media_source_anchor=media.verify_media_source_anchor,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            checkpoint_error=checkpoint_error,
+            DramaSynthesisError=DramaSynthesisError,
+            math=math,
+        )
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["validate_intro_for_reference"](str(intro), str(reference_path))
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertTrue(intro.exists())
+        self.assertEqual(intro.read_bytes(), b"")
+
+        intro.write_bytes(b"intro")
+        values = iter([stream_info(), stream_info()])
+
+        def mutate_intro(path):
+            value = next(values)
+            if Path(path) == intro:
+                intro.write_bytes(b"changed-during-probe")
+            if Path(path) == intro:
+                for item in value["streams"]:
+                    item["duration"] = "1.0"
+                value["format"] = {"duration": "1.0"}
+            return value
+
+        env["probe_media_stream_info"] = mutate_intro
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["validate_intro_for_reference"](str(intro), str(reference_path))
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_conflict")
+        self.assertEqual(intro.read_bytes(), b"changed-during-probe")
+
+    def test_strict_job_directory_rejects_escape_before_creating_any_path(self):
+        root = self.root / "jobs"
+        root.mkdir()
+        env = self.load(
+            "strict_drama_job_directory",
+            checkpoint_error=checkpoint_error,
+            DramaSynthesisError=DramaSynthesisError,
+            drama_async_runtime=SimpleNamespace(
+                valid_job_id=lambda value: isinstance(value, str)
+                and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value)),
+            ),
+        )
+        self.assertEqual(
+            env["strict_drama_job_directory"](str(root), "safe-job_1"),
+            str(root / "safe-job_1"),
+        )
+        with self.assertRaises(ValueError):
+            env["strict_drama_job_directory"](str(root), "../outside")
+        for invalid in (123, True, " safe-job_1", "safe-job_1 "):
+            with self.assertRaises(ValueError):
+                env["strict_drama_job_directory"](str(root), invalid)
+        self.assertFalse((self.root / "outside").exists())
+
+        realpath = os.path.realpath
+        with mock.patch.object(
+                os.path, "realpath",
+                side_effect=lambda path: str(self.root / "outside")
+                if os.path.abspath(path) == os.path.abspath(root) else realpath(path)):
+            with self.assertRaises(DramaSynthesisError):
+                env["strict_drama_job_directory"](str(root), "safe-job_2")
+        self.assertFalse((root / "safe-job_2").exists())
 
 
 def recipe():
