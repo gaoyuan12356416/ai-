@@ -13,7 +13,7 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 计划验收用例 | 12 | 8 | 0 | 4 |
-| 自动回归 | 497 | 497 | 0 | 0（另 6 项按既有平台条件跳过） |
+| 自动回归 | 500 | 500 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
@@ -25,14 +25,14 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 497 tests in 29.955s - OK (skipped=6)
+Ran 500 tests in 28.369s - OK (skipped=6)
 ```
 
 exact commit 与真机报告待候选提交后补充。
 
 ## 遗留风险
 
-OpenCL→NVENC 互操作性能、视觉差异和双 lane 资源边界待真机验证。
+OpenCL→NVENC 互操作性能、视觉差异和四 lane 资源边界待真机验证。
 
 ## 发布建议
 

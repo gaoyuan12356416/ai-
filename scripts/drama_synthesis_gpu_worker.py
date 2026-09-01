@@ -23,7 +23,9 @@ import app as drama_app  # noqa: E402
 from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
 from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, safe_error  # noqa: E402
 from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
-from features.drama_synthesis.gpu_compositor import KERNEL_TEMPLATE, runtime_identity  # noqa: E402
+from features.drama_synthesis.gpu_compositor import (  # noqa: E402
+    KERNEL_TEMPLATE, compositor_lanes, runtime_identity,
+)
 
 
 def render_concurrency(environ=None):
@@ -42,7 +44,7 @@ def render_concurrency(environ=None):
 RENDER_CONCURRENCY = render_concurrency()
 COMPOSITOR_BACKEND = os.environ.get("DRAMA_GPU_COMPOSITOR_BACKEND", "legacy_cpu")
 COMPOSITOR_CHUNK_SECONDS = int(os.environ.get("DRAMA_GPU_CHUNK_SECONDS", "120"))
-COMPOSITOR_LANES = int(os.environ.get("DRAMA_GPU_COMPOSITOR_LANES", "1"))
+COMPOSITOR_LANES = compositor_lanes()
 RELEASE_SHA = os.environ.get("DRAMA_GPU_RELEASE_SHA", "")
 RUNTIME_IDENTITY = runtime_identity()
 KERNEL_TEMPLATE_SHA256 = hashlib.sha256(KERNEL_TEMPLATE.read_bytes()).hexdigest()

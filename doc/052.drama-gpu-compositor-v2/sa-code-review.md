@@ -16,9 +16,9 @@ Composition、OpenCL kernel/command、分片检查点、合并/mux、backend 路
 | CR-002 | P1 | 分片媒体合同 | 仅时长/分辨率不足以保证 stream-copy concat | 校验精确帧数、首包关键帧、SPS/PPS SHA、timebase、色彩与音频合同 | 已修复 |
 | CR-003 | P1 | cache identity | 未绑定分片规划与实际运行时 | 纳入 plan、release、FFmpeg 指纹、OpenCL device、GPU/driver hash | 已修复 |
 | CR-004 | P1 | preflight | 服务启动未执行真实五输入与 runtime fingerprint | 启动前执行 1 秒 program_opencl→NVENC，并校验受信 nvidia-smi/运行时指纹 | 已修复 |
-| CR-005 | P1 | 并发 | 两个完整任务会争抢 Demucs、显存和收尾缓存 | V2 固定完整任务 1；仅同一任务内部允许 2 个 chunk lane | 已修复，双 lane 待真机 |
+| CR-005 | P1 | 并发 | 两个完整任务会争抢 Demucs、显存和收尾缓存 | V2 固定完整任务 1；仅同一任务内部允许 1～4 个 chunk lane | 已修复，四 lane 待真机 |
 | CR-006 | P2 | 部署文档 | compositor cache 路径写成 jobs | 改为 `work/compositor-cache` | 已修复 |
 
 ## 编译 / 验证结果
 
-本地 Python 3.9 AST 校验通过；497 项相关完整回归通过，6 项按既有平台条件跳过。真机结果记录到测试报告。
+本地 Python 3.9 AST 校验通过；500 项相关完整回归通过，6 项按既有平台条件跳过。真机结果记录到测试报告。

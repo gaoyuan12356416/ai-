@@ -244,6 +244,13 @@ class MediaProbeTests(unittest.TestCase):
             info = benchmark.probe("ffprobe", Path("source.mp4"))
         self.assertEqual(info["duration"], 30.0)
 
+    def test_compositor_accepts_four_lanes_and_bounds_threads(self):
+        self.assertEqual(gpu_compositor.compositor_lanes("4"), 4)
+        self.assertEqual(gpu_compositor.compositor_filter_threads("2"), 2)
+        for invalid in ("0", "5", True):
+            with self.subTest(invalid=invalid), self.assertRaises(DramaSynthesisError):
+                gpu_compositor.compositor_lanes(invalid)
+
 
 class OpenCLCommandTests(unittest.TestCase):
     def setUp(self):
@@ -270,6 +277,8 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertIn("inputs=5", graph)
         self.assertIn("h264_nvenc", command)
         self.assertIn("opencl=ocl:0.0", command)
+        self.assertEqual(command[command.index("-filter_complex_threads") + 1], "2")
+        self.assertGreaterEqual(command.count("-threads"), 5)
         self.assertNotIn("overlay=", graph)
         self.assertNotIn("rotate=", graph)
         self.assertNotIn("scale=720:1280", graph)

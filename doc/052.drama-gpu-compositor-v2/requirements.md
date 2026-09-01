@@ -10,7 +10,7 @@
 - 将缩放、裁剪、任意角度旋转、染色、圆角/边框与多层 Alpha 合成融合为一个 GPU shader pass。
 - 将长视频切分为可独立校验、缓存和重试的固定帧分片。
 - 保持现有 CPU/GPU 异步任务、COS、随机配方及结果字段兼容。
-- 生产保持单个完整任务；每个任务内部使用 2 条独立分片 lane 并行占用 T4。
+- 生产保持单个完整任务；每个任务内部最多使用 4 条独立分片 lane 并行占用 T4。
 
 ## 范围
 
@@ -46,7 +46,7 @@ CPU 异步提交 → GPU 下载/拼接/去 BGM → 编译 Composition Spec → �
 - `features/drama_synthesis/composition.py`：场景协议、规范化与分片规划。
 - `features/drama_synthesis/gpu_compositor.py`：shader、命令编译、检查点、合并和 mux。
 - `features/drama_synthesis/gpu.py`：backend 路由与全局进度映射。
-- `scripts/drama_synthesis_gpu_worker.py`：1～2 lane 配置和健康能力快照。
+- `scripts/drama_synthesis_gpu_worker.py`：1～4 lane 配置和健康能力快照。
 - `deploy/drama-synthesis-gpu/worker.env.example`：V2 配置合同。
 
 ### 数据结构

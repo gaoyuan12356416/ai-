@@ -39,7 +39,8 @@ def load_fake_worker(fake_app):
         os.environ, {
             "DRAMA_GPU_MAX_CONCURRENCY": "1",
             "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
-            "DRAMA_GPU_COMPOSITOR_LANES": "2",
+            "DRAMA_GPU_COMPOSITOR_LANES": "4",
+            "DRAMA_GPU_FILTER_THREADS": "2",
             "DRAMA_GPU_CHUNK_SECONDS": "120",
         }
     ):
@@ -403,7 +404,8 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn("ProtectHome=yes", unit)
         self.assertIn("DRAMA_GPU_MAX_CONCURRENCY=1", env)
         self.assertIn("DRAMA_GPU_COMPOSITOR_BACKEND=opencl_fused_v2", env)
-        self.assertIn("DRAMA_GPU_COMPOSITOR_LANES=2", env)
+        self.assertIn("DRAMA_GPU_COMPOSITOR_LANES=4", env)
+        self.assertIn("DRAMA_GPU_FILTER_THREADS=2", env)
         self.assertIn("DRAMA_GPU_COMPOSITOR_CACHE_ROOT=/data/drama-synthesis-gpu/work/compositor-cache", env)
         self.assertIn("CPUQuota=800%", unit)
         self.assertIn("TasksMax=512", unit)
@@ -471,7 +473,7 @@ class WorkerHTTPTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(health["compositor_backend"], "opencl_fused_v2")
             self.assertEqual(health["compositor_chunk_seconds"], 120)
-            self.assertEqual(health["compositor_lanes"], 2)
+            self.assertEqual(health["compositor_lanes"], 4)
             self.assertEqual(health["render_concurrency"], 1)
             self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v2")
             self.assertRegex(health["kernel_template_sha256"], r"^[0-9a-f]{64}$")

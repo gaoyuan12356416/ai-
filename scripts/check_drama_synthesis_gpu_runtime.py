@@ -148,8 +148,10 @@ def validate_environment(env, *, root=BASE):
             issues.append("invalid:v2_full_job_concurrency")
         if not re.fullmatch(r"[0-9]{1,2}\.[0-9]{1,2}", env.get("DRAMA_GPU_OPENCL_DEVICE", "")):
             issues.append("invalid:DRAMA_GPU_OPENCL_DEVICE")
-        if not re.fullmatch(r"[1-2]", env.get("DRAMA_GPU_COMPOSITOR_LANES", "")):
+        if not re.fullmatch(r"[1-4]", env.get("DRAMA_GPU_COMPOSITOR_LANES", "")):
             issues.append("invalid:DRAMA_GPU_COMPOSITOR_LANES")
+        if not re.fullmatch(r"[1-4]", env.get("DRAMA_GPU_FILTER_THREADS", "")):
+            issues.append("invalid:DRAMA_GPU_FILTER_THREADS")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{7,99}", env.get("DRAMA_GPU_RUNTIME_IDENTITY", "")):
             issues.append("invalid:DRAMA_GPU_RUNTIME_IDENTITY")
         try:

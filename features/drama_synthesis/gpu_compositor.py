@@ -48,6 +48,7 @@ MIN_CHUNK_TIMEOUT_SECONDS = 300
 MAX_CHUNK_TIMEOUT_SECONDS = 7200
 DEFAULT_OPENCL_DEVICE = "0.0"
 DEFAULT_COMPOSITOR_LANES = 1
+DEFAULT_FILTER_THREADS = 2
 DEFAULT_RUNTIME_IDENTITY = "ffmpeg-opencl-nvenc-runtime-v1"
 KERNEL_TEMPLATE = Path(__file__).with_name("opencl") / "random_overlay_v2.cl"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -92,7 +93,14 @@ def opencl_device(value: Any = None) -> str:
 
 def compositor_lanes(value: Any = None) -> int:
     raw = os.environ.get("DRAMA_GPU_COMPOSITOR_LANES", str(DEFAULT_COMPOSITOR_LANES)) if value is None else value
-    if isinstance(raw, bool) or not re.fullmatch(r"[1-2]", str(raw)):
+    if isinstance(raw, bool) or not re.fullmatch(r"[1-4]", str(raw)):
+        raise compositor_error()
+    return int(raw)
+
+
+def compositor_filter_threads(value: Any = None) -> int:
+    raw = os.environ.get("DRAMA_GPU_FILTER_THREADS", str(DEFAULT_FILTER_THREADS)) if value is None else value
+    if isinstance(raw, bool) or not re.fullmatch(r"[1-4]", str(raw)):
         raise compositor_error()
     return int(raw)
 
@@ -300,11 +308,17 @@ def _filter_escape(value: Union[str, os.PathLike]) -> str:
     return str(value).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
 
 
-def _input_arguments(path: Path, media_type: str, phase_seconds: float = 0.0) -> list[str]:
+def _input_arguments(
+    path: Path, media_type: str, phase_seconds: float = 0.0, threads: int = DEFAULT_FILTER_THREADS
+) -> list[str]:
     if media_type == "image/png":
-        return ["-loop", "1", "-framerate", str(CANVAS_FPS), "-i", str(path)]
+        return [
+            "-threads", str(threads), "-loop", "1", "-framerate", str(CANVAS_FPS),
+            "-i", str(path),
+        ]
     if media_type == "video/webm":
         return [
+            "-threads", str(threads),
             "-stream_loop", "-1", "-ss", "%.6f" % max(0.0, phase_seconds),
             "-c:v", "libvpx-vp9", "-i", str(path),
         ]
@@ -325,17 +339,21 @@ def build_opencl_chunk_command(
     device: Optional[str] = None,
 ) -> list[str]:
     device = opencl_device(device)
+    threads = compositor_filter_threads()
     start = float(chunk["start_seconds"])
     command = [
         ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-filter_complex_threads", str(threads),
         "-init_hw_device", "opencl=ocl:%s" % device, "-filter_hw_device", "ocl",
-        "-ss", "%.6f" % start, "-i", str(source),
+        "-threads", str(threads), "-ss", "%.6f" % start, "-i", str(source),
     ]
     # program_opencl arguments are source, border, opacity, corners, tint.
     for category in ("border", "opacity_video", "corners", "tint"):
         duration = float(asset_durations.get(category) or 0)
         phase = (start % duration) if duration > 0 else 0.0
-        command.extend(_input_arguments(Path(assets[category]), asset_media_types[category], phase))
+        command.extend(_input_arguments(
+            Path(assets[category]), asset_media_types[category], phase, threads
+        ))
     graph_parts = []
     for index, label in enumerate(("source", "border", "opacity", "corners", "tint")):
         tail_pad = ",tpad=stop_mode=clone:stop_duration=1" if label == "source" else ""
@@ -1182,6 +1200,7 @@ def render_chunked_random_output(
 
 __all__ = [
     "BACKEND", "DEFAULT_CHUNK_TIMEOUT_SECONDS", "build_audio_mux_command", "build_join_command",
-    "build_opencl_chunk_command", "cache_root", "chunk_timeout_seconds", "compile_opencl_kernel", "compositor_lanes",
+    "build_opencl_chunk_command", "cache_root", "chunk_timeout_seconds", "compile_opencl_kernel",
+    "compositor_filter_threads", "compositor_lanes",
     "opencl_device", "render_chunked_random_output", "runtime_identity",
 ]
