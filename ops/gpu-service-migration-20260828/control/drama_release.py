@@ -29,6 +29,15 @@ JOB_IDS = (
     "679e7c49acbf4af79f78bf60d76c5dd7",
     "b6e0bc51bb3f44e19c12b20cef7b93fe",
 )
+HK_RUNTIME_FINGERPRINTS = {
+    JOB_IDS[0]: "f7f96fa4144c00f127e7b4f2b1dbc920f2a3902729ce4da77a0dbe76f2ba852e",
+    JOB_IDS[1]: "60dac1dd63668b5a60724dc6c92b475fdb4ddd1d252ce9104e81749d16142c3c",
+}
+HK_RUNTIME_FILE_SHA256 = {
+    JOB_IDS[0]: "fe204d9ce3931cb9c55d4328e26b99f9afa235c2453152284e5b20fc178c65f5",
+    JOB_IDS[1]: "c92203d0baf1507d1d37e50252be0a0c8a341b583a60ae37e61540c15397512c",
+}
+HK_RUNTIME_RECORD_MAX_BYTES = 4 * 1024 * 1024
 CPU_DB = common.CPU_LIVE_ROOT / "data" / "drama_material_jobs.sqlite3"
 HK_RELEASES = common.HK_BASE / "releases"
 HK_CURRENT = common.HK_BASE / "current"
@@ -205,13 +214,134 @@ def directory_is_empty(path):
     return not any(pathlib.Path(path).iterdir())
 
 
+def _json_object_without_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _read_exact_fd(descriptor, size):
+    chunks = []
+    offset = 0
+    while offset < size:
+        amount = min(1024 * 1024, size - offset)
+        if hasattr(os, "pread"):
+            block = os.pread(descriptor, amount, offset)
+        else:  # pragma: no cover - Linux production always has pread.
+            os.lseek(descriptor, offset, os.SEEK_SET)
+            block = os.read(descriptor, amount)
+        if not block:
+            raise common.OperatorError("HK runtime record was truncated while reading")
+        chunks.append(block)
+        offset += len(block)
+    return b"".join(chunks)
+
+
+def validate_hk_runtime_contract():
+    expected = set(JOB_IDS)
+    if (len(JOB_IDS) != 2 or len(expected) != 2 or
+            set(HK_RUNTIME_FINGERPRINTS) != expected or
+            set(HK_RUNTIME_FILE_SHA256) != expected or
+            any(not re.fullmatch(r"[0-9a-f]{32}", job_id) for job_id in JOB_IDS) or
+            any(not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in HK_RUNTIME_FINGERPRINTS.values()) or
+            any(not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in HK_RUNTIME_FILE_SHA256.values())):
+        raise common.OperatorError("HK runtime failure contract is malformed")
+
+
+def inspect_hk_runtime_record(path, expected_job_id):
+    path = pathlib.Path(path)
+    if (expected_job_id not in JOB_IDS or
+            path != pathlib.Path(HK_RUNTIME_ACTIVE) / (expected_job_id + ".json")):
+        raise common.OperatorError("HK runtime job record path is outside the approved scope")
+    try:
+        before = os.lstat(str(path))
+    except OSError:
+        raise common.OperatorError("HK runtime job record path is unreadable")
+    if (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or
+            int(before.st_size) <= 0 or
+            int(before.st_size) > HK_RUNTIME_RECORD_MAX_BYTES):
+        raise common.OperatorError("HK runtime job record is not an approved regular JSON file")
+    descriptor, anchored_stat, digest = common.anchored_file(
+        path, expected_inode=before.st_ino, expected_size=before.st_size)
+    try:
+        opened = os.fstat(descriptor)
+        raw = _read_exact_fd(descriptor, int(opened.st_size))
+        after = os.fstat(descriptor)
+        try:
+            current = os.lstat(str(path))
+        except OSError:
+            raise common.OperatorError("HK runtime job record changed while reading")
+        if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or
+                common.identity_tuple(opened) != common.identity_tuple(after) or
+                common.identity_tuple(opened) != common.identity_tuple(current) or
+                common.sha256_bytes(raw) != digest):
+            raise common.OperatorError("HK runtime job record changed while reading")
+    finally:
+        os.close(descriptor)
+    if digest != HK_RUNTIME_FILE_SHA256[expected_job_id]:
+        raise common.OperatorError("HK runtime job record SHA256 differs from the approved failure")
+    try:
+        record = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_json_object_without_duplicate_keys)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise common.OperatorError("HK runtime job record is not strict UTF-8 JSON")
+    if not isinstance(record, dict):
+        raise common.OperatorError("HK runtime job record root is not an object")
+    if (type(record.get("version")) is not int or record.get("version") != 1 or
+            record.get("job_id") != expected_job_id or
+            type(record.get("generation")) is not int or record.get("generation") != 1 or
+            record.get("status") != "failed" or record.get("stage") != "failed" or
+            record.get("fingerprint") != HK_RUNTIME_FINGERPRINTS[expected_job_id] or
+            not isinstance(record.get("error"), dict) or
+            record["error"].get("code") != "gpu_render_failed" or
+            record.get("_children") != {} or record.get("_launches") != {} or
+            record.get("_resource_blocked") is not False or
+            record.get("_cache_blocked") is not False):
+        raise common.OperatorError("HK runtime job record is outside the approved failed state")
+    return {
+        "job_id": expected_job_id,
+        "status": "failed",
+        "stage": "failed",
+        "generation": 1,
+        "fingerprint": record["fingerprint"],
+        "file_sha256": digest,
+        "stat": anchored_stat,
+    }
+
+
 def inspect_hk_runtime():
+    validate_hk_runtime_contract()
     common.real_directory(common.HK_BASE)
     common.real_directory(HK_RELEASES)
     common.real_directory(HK_WORK_ROOT, require_root_owner=False)
     common.real_directory(HK_PUBLIC_ROOT, require_root_owner=False)
-    if not directory_is_empty(HK_RUNTIME_ACTIVE):
-        raise common.OperatorError("HK active runtime job directory is not empty")
+    common.real_directory(HK_RUNTIME_ACTIVE, require_root_owner=False)
+    expected_names = {job_id + ".json" for job_id in JOB_IDS}
+    entries = sorted(pathlib.Path(HK_RUNTIME_ACTIVE).iterdir(), key=lambda item: item.name)
+    if len(entries) != len(JOB_IDS) or {item.name for item in entries} != expected_names:
+        raise common.OperatorError("HK runtime job directory differs from the two approved records")
+    records = [inspect_hk_runtime_record(
+        pathlib.Path(HK_RUNTIME_ACTIVE) / (job_id + ".json"), job_id)
+        for job_id in JOB_IDS]
+    final_entries = sorted(pathlib.Path(HK_RUNTIME_ACTIVE).iterdir(),
+                           key=lambda item: item.name)
+    if (len(final_entries) != len(JOB_IDS) or
+            {item.name for item in final_entries} != expected_names):
+        raise common.OperatorError("HK runtime job directory changed while inspecting")
+    for record in records:
+        path = pathlib.Path(HK_RUNTIME_ACTIVE) / (record["job_id"] + ".json")
+        try:
+            current = os.lstat(str(path))
+        except OSError:
+            raise common.OperatorError("HK runtime job directory changed while inspecting")
+        if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or
+                common.stat_record(current) != record["stat"]):
+            raise common.OperatorError("HK runtime job directory changed while inspecting")
     if not directory_is_empty(HK_RUNTIME_DIAGNOSTICS):
         raise common.OperatorError("HK runtime diagnostics directory is not empty")
     parts = []
@@ -220,7 +350,10 @@ def inspect_hk_runtime():
             parts.append(str(path))
     if parts:
         raise common.OperatorError("HK drama roots contain diagnostic partial files")
-    return {"active_jobs": 0, "diagnostics": 0, "part_files": 0,
+    return {"active_jobs": 0, "durable_failed_jobs": len(records),
+            "durable_records": records,
+            "durable_records_sha256": common.sha256_bytes(common.canonical_bytes(records)),
+            "diagnostics": 0, "part_files": 0,
             "work_root": str(HK_WORK_ROOT), "public_root": str(HK_PUBLIC_ROOT)}
 
 
@@ -827,13 +960,14 @@ def apply_hk(args, contract, before):
         if os.path.realpath(worker["process"]["cwd"]) != str(release):
             raise common.OperatorError("HK worker cwd is not the new release")
         common.assert_no_media_processes()
-        inspect_hk_runtime()
+        runtime = inspect_hk_runtime()
         health = common.exact_health("127.0.0.1", 8787)
         listener = listener_owned_by(8787, worker["process"]["pid"])
         if os.path.realpath(str(HK_CURRENT)) != str(release):
             raise common.OperatorError("HK current changed after service start")
         phase(evidence, "hk-local-verified", {
             "health": health, "listener": listener, "restart_bounds": restart_bounds,
+            "runtime": runtime,
             "protected_units": {unit: common.protected_signature(after[unit])
                                 for unit in common.HK_PROTECTED_UNITS},
         })

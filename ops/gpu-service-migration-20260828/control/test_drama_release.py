@@ -55,6 +55,65 @@ def portable_noreplace(source, destination):
     os.rename(str(source), str(destination))
 
 
+@contextlib.contextmanager
+def hk_runtime_fixture(record_changes=None, raw_overrides=None):
+    record_changes = record_changes or {}
+    raw_overrides = raw_overrides or {}
+    with tempfile.TemporaryDirectory() as directory:
+        base = pathlib.Path(directory)
+        releases = base / "releases"
+        work = base / "work" / "jobs"
+        public = base / "results" / "public"
+        jobs = work / ".runtime" / "jobs"
+        diagnostics = work / ".runtime" / "diagnostics"
+        for path in (releases, public, jobs, diagnostics):
+            path.mkdir(parents=True, exist_ok=True)
+        records = {}
+        paths = {}
+        hashes = {}
+        for job_id in release.JOB_IDS:
+            record = {
+                "version": 1,
+                "job_id": job_id,
+                "fingerprint": release.HK_RUNTIME_FINGERPRINTS[job_id],
+                "generation": 1,
+                "status": "failed",
+                "stage": "failed",
+                "error": {"code": "gpu_render_failed", "message": "safe"},
+                "_children": {},
+                "_launches": {},
+                "_resource_blocked": False,
+                "_cache_blocked": False,
+                "_payload": {"private": "must-not-appear-in-evidence"},
+            }
+            record.update(record_changes.get(job_id, {}))
+            raw = raw_overrides.get(job_id)
+            if raw is None:
+                raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            elif isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            path = jobs / (job_id + ".json")
+            path.write_bytes(raw)
+            records[job_id] = record
+            paths[job_id] = path
+            hashes[job_id] = hashlib.sha256(raw).hexdigest()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(common, "HK_BASE", base))
+            stack.enter_context(mock.patch.object(release, "HK_RELEASES", releases))
+            stack.enter_context(mock.patch.object(release, "HK_WORK_ROOT", work))
+            stack.enter_context(mock.patch.object(release, "HK_PUBLIC_ROOT", public))
+            stack.enter_context(mock.patch.object(release, "HK_RUNTIME_ACTIVE", jobs))
+            stack.enter_context(mock.patch.object(
+                release, "HK_RUNTIME_DIAGNOSTICS", diagnostics))
+            stack.enter_context(mock.patch.object(
+                release, "HK_RUNTIME_FILE_SHA256", hashes))
+            yield {
+                "base": base, "work": work, "public": public, "jobs": jobs,
+                "diagnostics": diagnostics, "records": records,
+                "paths": paths, "hashes": hashes,
+            }
+
+
 class DramaReleaseTests(unittest.TestCase):
     def exact_args(self, role):
         contract = release.role_contract(role)
@@ -119,6 +178,154 @@ class DramaReleaseTests(unittest.TestCase):
             ["git", "-C", str(repository), "rev-parse", common.NEW_REMOTE_REF],
             universal_newlines=True).strip()
         self.assertEqual(remote, common.NEW_SHA)
+
+    def test_hk_runtime_contract_hashes_are_exact_and_well_formed(self):
+        release.validate_hk_runtime_contract()
+        self.assertEqual(release.HK_RUNTIME_FINGERPRINTS, {
+            release.JOB_IDS[0]:
+                "f7f96fa4144c00f127e7b4f2b1dbc920f2a3902729ce4da77a0dbe76f2ba852e",
+            release.JOB_IDS[1]:
+                "60dac1dd63668b5a60724dc6c92b475fdb4ddd1d252ce9104e81749d16142c3c",
+        })
+        self.assertEqual(release.HK_RUNTIME_FILE_SHA256, {
+            release.JOB_IDS[0]:
+                "fe204d9ce3931cb9c55d4328e26b99f9afa235c2453152284e5b20fc178c65f5",
+            release.JOB_IDS[1]:
+                "c92203d0baf1507d1d37e50252be0a0c8a341b583a60ae37e61540c15397512c",
+        })
+        for mapping in (release.HK_RUNTIME_FINGERPRINTS,
+                        release.HK_RUNTIME_FILE_SHA256):
+            self.assertEqual(set(mapping), set(release.JOB_IDS))
+            self.assertTrue(all(len(value) == 64 for value in mapping.values()))
+
+    def test_hk_runtime_accepts_only_two_exact_failed_records_and_redacts_payload(self):
+        with hk_runtime_fixture() as fixture:
+            result = release.inspect_hk_runtime()
+        self.assertEqual(result["active_jobs"], 0)
+        self.assertEqual(result["durable_failed_jobs"], 2)
+        self.assertEqual([item["job_id"] for item in result["durable_records"]],
+                         list(release.JOB_IDS))
+        self.assertEqual([item["file_sha256"] for item in result["durable_records"]],
+                         [fixture["hashes"][job_id] for job_id in release.JOB_IDS])
+        self.assertEqual(
+            result["durable_records_sha256"],
+            common.sha256_bytes(common.canonical_bytes(result["durable_records"])))
+        self.assertNotIn("_payload", json.dumps(result, sort_keys=True))
+        self.assertNotIn("must-not-appear", json.dumps(result, sort_keys=True))
+
+    def test_hk_runtime_rejects_each_unapproved_durable_state(self):
+        job_id = release.JOB_IDS[0]
+        cases = (
+            {"version": True},
+            {"job_id": "0" * 32},
+            {"generation": True},
+            {"generation": 2},
+            {"status": "running"},
+            {"stage": "running"},
+            {"fingerprint": "0" * 64},
+            {"error": {"code": "gpu_process_state_unknown"}},
+            {"_children": {"1": {"pid": 1}}},
+            {"_launches": {"launch": {}}},
+            {"_resource_blocked": True},
+            {"_resource_blocked": 0},
+            {"_cache_blocked": True},
+            {"_cache_blocked": 0},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), \
+                 hk_runtime_fixture({job_id: changes}):
+                with self.assertRaisesRegex(common.OperatorError, "approved failed state"):
+                    release.inspect_hk_runtime()
+
+    def test_hk_runtime_rejects_duplicate_json_key(self):
+        job_id = release.JOB_IDS[0]
+        with hk_runtime_fixture() as initial:
+            raw = initial["paths"][job_id].read_bytes()
+        duplicate = raw.replace(b"{", b'{"version":1,', 1)
+        with hk_runtime_fixture(raw_overrides={job_id: duplicate}):
+            with self.assertRaisesRegex(common.OperatorError, "strict UTF-8 JSON"):
+                release.inspect_hk_runtime()
+
+    def test_hk_runtime_rejects_extra_missing_and_oversize_entries(self):
+        with hk_runtime_fixture() as fixture:
+            (fixture["jobs"] / "unexpected.tmp").write_bytes(b"unsafe")
+            with self.assertRaisesRegex(common.OperatorError, "two approved records"):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            fixture["paths"][release.JOB_IDS[1]].unlink()
+            with self.assertRaisesRegex(common.OperatorError, "two approved records"):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            target = fixture["paths"][release.JOB_IDS[0]]
+            with target.open("wb") as stream:
+                stream.truncate(release.HK_RUNTIME_RECORD_MAX_BYTES + 1)
+            with mock.patch.object(common, "anchored_file") as anchored:
+                with self.assertRaisesRegex(common.OperatorError, "regular JSON"):
+                    release.inspect_hk_runtime()
+            anchored.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "Windows test user cannot create symlinks")
+    def test_hk_runtime_rejects_symlink_record(self):
+        with hk_runtime_fixture() as fixture:
+            target = fixture["paths"][release.JOB_IDS[0]]
+            real = fixture["base"] / "record-real.json"
+            target.rename(real)
+            target.symlink_to(real)
+            with self.assertRaisesRegex(common.OperatorError, "regular JSON"):
+                release.inspect_hk_runtime()
+
+    def test_hk_runtime_rejects_path_replacement_after_anchored_read(self):
+        with hk_runtime_fixture() as fixture:
+            target = fixture["paths"][release.JOB_IDS[0]]
+            original_lstat = os.lstat
+            calls = {"target": 0}
+
+            def changed_final_lstat(path):
+                value = original_lstat(path)
+                if pathlib.Path(path) == target:
+                    calls["target"] += 1
+                    if calls["target"] == 4:
+                        changed = mock.Mock()
+                        for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns",
+                                     "st_mtime", "st_mode"):
+                            setattr(changed, name, getattr(value, name))
+                        changed.st_ino = int(value.st_ino) + 1
+                        return changed
+                return value
+
+            with mock.patch.object(release.os, "lstat", side_effect=changed_final_lstat):
+                with self.assertRaisesRegex(common.OperatorError, "changed while reading"):
+                    release.inspect_hk_runtime()
+            self.assertEqual(calls["target"], 4)
+
+    def test_hk_runtime_rechecks_directory_after_both_anchored_reads(self):
+        with hk_runtime_fixture() as fixture:
+            original = release.inspect_hk_runtime_record
+            calls = []
+
+            def add_late_extra(path, job_id):
+                result = original(path, job_id)
+                calls.append(job_id)
+                if len(calls) == 2:
+                    (fixture["jobs"] / "late.tmp").write_bytes(b"unsafe")
+                return result
+
+            with mock.patch.object(release, "inspect_hk_runtime_record",
+                                   side_effect=add_late_extra):
+                with self.assertRaisesRegex(common.OperatorError,
+                                            "changed while inspecting"):
+                    release.inspect_hk_runtime()
+            self.assertEqual(calls, list(release.JOB_IDS))
+
+    def test_hk_runtime_keeps_diagnostics_and_part_guards(self):
+        with hk_runtime_fixture() as fixture:
+            (fixture["diagnostics"] / "unexpected.json").write_bytes(b"{}")
+            with self.assertRaisesRegex(common.OperatorError, "diagnostics"):
+                release.inspect_hk_runtime()
+        with hk_runtime_fixture() as fixture:
+            (fixture["public"] / "unexpected.part").write_bytes(b"partial")
+            with self.assertRaisesRegex(common.OperatorError, "partial"):
+                release.inspect_hk_runtime()
 
     def test_apply_requires_fresh_exact_fragment_bindings(self):
         item = {"unit": "drama.service",
