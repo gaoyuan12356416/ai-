@@ -476,7 +476,7 @@ class WorkerHTTPTests(unittest.TestCase):
             self.assertEqual(health["compositor_lanes"], 4)
             self.assertEqual(health["compositor_filter_threads"], 2)
             self.assertEqual(health["render_concurrency"], 1)
-            self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v3-clean")
+            self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v4-fullbleed")
             self.assertRegex(health["kernel_template_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(health["release_sha"], "")
             self.assertEqual(health["runtime_identity"], "ffmpeg-opencl-nvenc-runtime-v1")

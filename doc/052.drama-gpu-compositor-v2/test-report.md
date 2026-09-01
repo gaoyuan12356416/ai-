@@ -13,12 +13,12 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 计划验收用例 | 13 | 9 | 0 | 4 |
-| clean profile 定向回归 | 178 | 178 | 0 | 0 |
+| full-bleed profile 定向回归 | 179 | 179 | 0 | 0 |
 | 完整自动回归 | 507 | 507 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
-累计记录 4 项：诊断上下文兼容问题见 `bugs/BUG-001.md`；`bugs/BUG-002.md` 是已被真机证伪的时间轴诊断假设；`bugs/BUG-003.md` 保留 legacy 几何根因证据；用户拒绝兼容缺陷后的 clean profile 修复见 `bugs/BUG-004.md`。
+累计记录 5 项：诊断上下文兼容问题见 `bugs/BUG-001.md`；`bugs/BUG-002.md` 是已被真机证伪的时间轴诊断假设；`bugs/BUG-003.md` 保留 legacy 几何根因证据；移除错误画布见 `bugs/BUG-004.md`；横屏 contain 仍形成横向分层及 full-bleed 修复见 `bugs/BUG-005.md`。
 
 ## 验证证据
 
@@ -26,19 +26,24 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 507 tests in 33.222s - OK (skipped=6)
+Ran 507 tests in 31.939s - OK (skipped=6)
 ```
 
-clean profile 定向命令：
+full-bleed profile 定向命令：
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_upgrade
-Ran 178 tests in 11.536s - OK
+Ran 179 tests in 11.396s - OK
 ```
 
 已把 `drama-legacy-intro-resume-20260901` 的旧片头隔离、严格任务目录和恢复错误语义合入 V2。exact clean commit、完整回归与最终真机报告待候选提交后补充。
 
 候选 `d2b49b2` 在香港 T4 的 exact release preflight 与 root 离线 503 项回归通过；服务用户直接运行完整测试时有 3 项被旧验收证据目录的既有权限拒绝，未修改旧证据权限。该候选的真实 30 秒视觉对照两条视频均完整解码，但 SSIM 为 `0.865390 < 0.90`，已拒绝且未切换生产。候选 `782c41d` 的 source PTS 假设复测为 `0.862533`，同样拒绝。进一步隔离确认 legacy 的错误 `rotw(iw)/roth(ih)` 画布和 YUV420 偶数坐标才是根因；兼容候选 `d7e121f` 达到 `0.931398`，但因会保留横向断层与异常裁切，被用户明确拒绝作为最终成片。当前 clean profile 不再以 legacy SSIM 为发布基线。
+
+clean centered 候选 `dfb22cc` 的竖屏 30 秒样本完整解码，正确角度参考与 GPU 候选
+SSIM 为 `0.930477`，三张单画面预览无断层。后续 exact 候选 `08985e6` 的横屏样本
+完整解码但 SSIM 为 `0.899375`，更重要的是人工抽帧仍显示 contain 主体的上下横向
+边界，因此按业务视觉直接拒绝；未以接近阈值为由放行。最终 v4 full-bleed 待复测。
 
 ## 遗留风险
 

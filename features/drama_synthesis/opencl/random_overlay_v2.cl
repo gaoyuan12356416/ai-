@@ -51,22 +51,12 @@ float4 sample_main(__read_only image2d_t source, float2 canvas_uv)
         scaled.y < 0.0f || scaled.y >= (float)SCENE_MAIN_HEIGHT)
         return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
 
-    // Map the transparent contain/pad plane back to the original source.
+    // Full-bleed main plane: landscape and portrait inputs both cover the
+    // portrait canvas. Only the transformed plane's outside edge is transparent;
+    // there are no internal contain/pad bands.
     float2 fitted_uv = scaled /
         (float2)((float)SCENE_MAIN_WIDTH, (float)SCENE_MAIN_HEIGHT);
-    float source_aspect = (float)get_image_width(source) / (float)get_image_height(source);
-    float canvas_aspect = (float)SCENE_WIDTH / (float)SCENE_HEIGHT;
-    float2 uv;
-    if (source_aspect > canvas_aspect) {
-        float height = canvas_aspect / source_aspect;
-        uv = (float2)(fitted_uv.x, (fitted_uv.y - 0.5f) / height + 0.5f);
-    } else {
-        float width = source_aspect / canvas_aspect;
-        uv = (float2)((fitted_uv.x - 0.5f) / width + 0.5f, fitted_uv.y);
-    }
-    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
-        return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
-    float4 pixel = read_imagef(source, linear_clear, uv);
+    float4 pixel = sample_cover(source, fitted_uv);
     pixel.w = 1.0f;
     return pixel;
 }

@@ -239,8 +239,8 @@ def _safe_kernel_template(path: Path = KERNEL_TEMPLATE) -> str:
 def _clean_main_geometry(scale: float) -> Dict[str, int]:
     """Compile the centered main-layer extent for the clean visual profile.
 
-    The source is first contain-fitted into a transparent 720x1280 plane, then
-    the whole plane is scaled and rotated about the output center. Mapping the
+    The source is first cover-fitted into a full-bleed 720x1280 plane, then the
+    whole plane is scaled and rotated about the output center. Mapping the
     output pixels directly back into that plane avoids an intermediate rotate
     canvas and therefore cannot inherit the legacy ``rotw(iw)/roth(ih)``
     extent bug or its horizontal clipping bands.

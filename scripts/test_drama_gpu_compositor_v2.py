@@ -171,6 +171,8 @@ class CompositionSpecTests(unittest.TestCase):
         second = compile_random_overlay_spec(dict(self.fixture.recipe), dict(self.source_info))
         self.assertEqual(composition_sha256(first), composition_sha256(second))
         self.assertEqual(first["renderer_profile"], RENDERER_PROFILE)
+        self.assertEqual(first["layers"][0]["fit"], "cover")
+        self.assertEqual(first["layers"][1]["fit"], "cover")
         chunks = plan_chunks(first["timeline"]["total_frames"], seconds=120)
         self.assertEqual([row["frame_count"] for row in chunks], [3600, 3600, 300])
         self.assertEqual(sum(row["frame_count"] for row in chunks), 7500)
@@ -305,7 +307,9 @@ class MediaProbeTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             graph = (
-                "[0:v]rotate=1.000000*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[v]"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                "rotate=1.000000*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[v]"
             )
             with mock.patch.object(compare, "load_asset_set", return_value=fixture.asset_set), \
                     mock.patch.object(compare, "validate_recipe"), \
@@ -324,6 +328,9 @@ class MediaProbeTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         corrected = captured[0][captured[0].index("-filter_complex") + 1]
         self.assertNotIn("rotw(iw)", corrected)
+        self.assertNotIn("force_original_aspect_ratio=decrease", corrected)
+        self.assertIn("force_original_aspect_ratio=increase", corrected)
+        self.assertIn("crop=720:1280", corrected)
         self.assertIn("ow=rotw(1.000000*PI/180)", corrected)
         self.assertIn("oh=roth(1.000000*PI/180)", corrected)
 
@@ -368,7 +375,7 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertIn("fps=30,setpts=N/(30*TB)", graph)
         self.assertEqual(command[command.index("-r") + 1], "30")
         self.assertIn("transfer_characteristics=1", command[command.index("-bsf:v") + 1])
-        self.assertEqual(kernel["source"].count("get_image_width(source)"), 2)
+        self.assertEqual(kernel["source"].count("get_image_width(source)"), 1)
         self.assertNotIn("SCENE_SOURCE_WIDTH", kernel["source"])
         geometry = gpu_compositor._clean_main_geometry(1.005)
         self.assertEqual(geometry, {
@@ -383,6 +390,8 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertNotIn("SCENE_ROTATED_WIDTH", kernel["source"])
         self.assertNotIn("SCENE_OVERLAY_Y", kernel["source"])
         self.assertIn("centered.x * cosine + centered.y * sine", kernel["source"])
+        self.assertIn("sample_cover(source, fitted_uv)", kernel["source"])
+        self.assertNotIn("(fitted_uv.y - 0.5f) / height", kernel["source"])
 
     def test_clean_geometry_keeps_only_centered_scaled_plane(self):
         geometry = gpu_compositor._clean_main_geometry(0.9963)

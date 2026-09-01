@@ -71,6 +71,8 @@ Composition Spec v1 包含 canvas、timeline、audio、layers、output 和 rende
   黑块、横向断层、错位裁切或分片边界跳帧。
 - 主体层按正确旋转角围绕画布中心缩放/旋转；renderer profile 必须升级，禁止复用
   曾按 legacy 错误几何生成的分片或最终检查点。
+- 主体层必须以 full-bleed cover 填满 9:16 画布；横屏源不得通过 contain/pad 形成
+  中间矩形或上下两条横向边界。背景仅允许在缩放/旋转后的外缘自然露出。
 - 输出 H.264 High、720x1280、30fps，音频和时长合同不变。
 - 任意分片失败后再次执行，只启动失败及后续未完成分片。
 - 以截图失败任务的约 79.4 分钟同源素材做完整长样；不以预设最低倍速替代效率选型，采用同机实测最快且稳定的配置，记录吞吐并以 3x realtime 为优化目标；无新增 swap，RSS/VRAM 有界。
@@ -86,3 +88,4 @@ Composition Spec v1 包含 canvas、timeline、audio、layers、output 和 rende
 
 - 2026-09-01：按制作效率和泛用性优先原则创建 V2 需求与技术设计。
 - 2026-09-01：用户拒绝 legacy 错误几何兼容成片；验收基线改为正确角度、连续画面的 clean profile。
+- 2026-09-01：横屏 clean 样本证明 contain/pad 仍会形成可见横向边界；主体改为 full-bleed cover。

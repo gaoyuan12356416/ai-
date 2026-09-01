@@ -58,7 +58,7 @@ def render_clean_reference(
     asset_root: str,
     manifest_sha256: str,
 ) -> None:
-    """Render the intended CPU geometry with rotw/roth fed the real angle."""
+    """Render the intended full-bleed CPU geometry with the real angle."""
     assets = load_asset_set(Path(asset_root), manifest_sha256)
     fb_recipe = {
         "asset_set_sha256": recipe.get("asset_set_sha256"),
@@ -75,12 +75,20 @@ def render_clean_reference(
     )
     graph_index = command.index("-filter_complex") + 1
     graph = command[graph_index]
+    contain = (
+        "scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,"
+        "pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0"
+    )
+    cover = (
+        "scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,"
+        "crop=720:1280"
+    )
     malformed = "ow=rotw(iw):oh=roth(ih)"
-    if graph.count(malformed) != 1:
+    if graph.count(malformed) != 1 or graph.count(contain) != 1:
         raise RuntimeError("clean_reference_graph_contract_invalid")
     degrees = fb_recipe["rotation_millidegrees"] / 1000.0
     angle = "%.6f*PI/180" % degrees
-    command[graph_index] = graph.replace(
+    command[graph_index] = graph.replace(contain, cover, 1).replace(
         malformed, "ow=rotw(%s):oh=roth(%s)" % (angle, angle), 1
     )
     subprocess.run(
@@ -219,7 +227,7 @@ def main(argv=None):
     passed = bool(all(decoded.values()) and score >= args.minimum_ssim)
     report = {
         "ok": passed, "mode": "offline-clean-reference-no-upload",
-        "reference_profile": "correct-angle-centered-v1", "candidate_sha": args.candidate_sha,
+        "reference_profile": "correct-angle-full-bleed-v1", "candidate_sha": args.candidate_sha,
         "source_sha256": clip_sha256, "recipe_sha256": recipe["recipe_sha256"],
         "asset_manifest_sha256": manifest, "start_seconds": args.start_seconds,
         "clip_duration_seconds": source_info["duration"], "minimum_ssim": args.minimum_ssim,

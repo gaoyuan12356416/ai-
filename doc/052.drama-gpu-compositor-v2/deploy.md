@@ -7,7 +7,7 @@ GPU release 增加 Composition/renderer 模块和 OpenCL kernel；CPU 仅需同�
 ## 配置项
 
 - `DRAMA_GPU_COMPOSITOR_BACKEND=opencl_fused_v2`
-- renderer profile：`drama-opencl-fused-h264-720x1280-v3-clean`（代码固定，旧缓存不得复用）
+- renderer profile：`drama-opencl-fused-h264-720x1280-v4-fullbleed`（代码固定，旧缓存不得复用）
 - `DRAMA_GPU_CHUNK_SECONDS=120`
 - `DRAMA_GPU_CHUNK_TIMEOUT=1800`
 - `DRAMA_GPU_OPENCL_DEVICE=0.0`

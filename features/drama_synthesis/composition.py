@@ -19,7 +19,7 @@ from .core import DramaSynthesisError, RECIPE_PROFILE
 
 
 SPEC_VERSION = 1
-RENDERER_PROFILE = "drama-opencl-fused-h264-720x1280-v3-clean"
+RENDERER_PROFILE = "drama-opencl-fused-h264-720x1280-v4-fullbleed"
 CANVAS_WIDTH = 720
 CANVAS_HEIGHT = 1280
 CANVAS_FPS = 30
@@ -148,7 +148,7 @@ def compile_random_overlay_spec(
             "id": "source-main",
             "kind": "video",
             "source": "input",
-            "fit": "contain",
+            "fit": "cover",
             "opacity_bp": 10000,
             "transform": {
                 "rotation_millidegrees": _strict_int(recipe.get("rotation_millidegrees"), -2000, 2000),
