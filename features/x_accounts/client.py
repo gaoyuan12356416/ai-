@@ -271,7 +271,7 @@ def _post_query_payload(params):
     }
     for field in (
         "page", "page_size", "run_date", "source_date", "account_id", "status",
-        "material_id", "unknown_outcome",
+        "material_id", "unknown_outcome", "task_source",
     ):
         if field in params and params[field] not in (None, ""):
             result[field] = params[field]

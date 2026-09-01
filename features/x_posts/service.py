@@ -13930,6 +13930,23 @@ class XPostStore:
         if source_type:
             clauses.append("q.source_type=?")
             values.append(_schedule_source_type(source_type))
+        task_source_sql = (
+            "CASE WHEN q.manual_run_id IS NOT NULL "
+            "AND COALESCE(mr.trigger_source,'manual')='auto_template' "
+            "THEN 'auto_publish' "
+            "WHEN q.source_type='drama' THEN 'drama_pool' "
+            "ELSE 'material_pool' END"
+        )
+        task_source = str(payload.get("task_source", "") or "").strip().lower()
+        if task_source:
+            if task_source not in {
+                "drama_pool",
+                "material_pool",
+                "auto_publish",
+            }:
+                raise XPostError("invalid_request", "task_source筛选值无效", 400)
+            clauses.append("(%s)=?" % task_source_sql)
+            values.append(task_source)
         if "unknown_outcome" in payload and payload.get("unknown_outcome") not in (None, ""):
             raw_unknown = payload.get("unknown_outcome")
             if isinstance(raw_unknown, bool):
@@ -13944,6 +13961,12 @@ class XPostStore:
             )
             values.append(unknown_outcome)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        from_sql = (
+            " FROM x_post_queue q "
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+            "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+            "LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
+        )
         select = (
             "SELECT q.id AS queue_id,q.run_id,q.catchup_run_id,"
             "q.schedule_run_id,q.manual_run_id,"
@@ -13955,6 +13978,8 @@ class XPostStore:
             "THEN 'auto_template' "
             "WHEN q.manual_run_id IS NOT NULL THEN 'manual' "
             "ELSE 'canary' END AS batch_kind,"
+            + task_source_sql
+            + " AS task_source,"
             "q.source_type,q.run_date,q.source_date,q.account_id,"
             "q.delivery_mode,q.relay_account_id,q.relay_account_username,"
             "COALESCE(r.status,'') AS repost_status,"
@@ -13971,17 +13996,14 @@ class XPostStore:
             "COALESCE(l.x_post_id,'') AS post_id,COALESCE(l.x_post_url,'') AS preview_url,"
             "COALESCE(l.error_code,'') AS error_code,COALESCE(l.error_message,'') AS error_message,"
             "COALESCE(l.started_at,'') AS started_at,COALESCE(l.published_at,'') AS published_at,"
-            "q.created_at,q.updated_at FROM x_post_queue q "
-            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
-            "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
-            "LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
+            "q.created_at,q.updated_at"
+            + from_sql
         )
         offset = (page - 1) * page_size
         with contextlib.closing(_connect(self.db_path)) as conn:
             total = int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM x_post_queue q "
-                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id" + where,
+                    "SELECT COUNT(*)" + from_sql + where,
                     tuple(values),
                 ).fetchone()[0]
             )

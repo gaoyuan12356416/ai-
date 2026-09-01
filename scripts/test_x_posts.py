@@ -170,6 +170,55 @@ class XPostsTests(unittest.TestCase):
             self.assertIn("media_validation_mode", columns)
             self.assertNotIn("source_queue_id", columns)
 
+    def test_log_task_source_labels_and_filters_all_three_origins(self):
+        store = service.XPostStore(self.db_path)
+        store.enqueue(candidate(2, "MaterialAccount"))
+        deferred_drama_queue(store, 3, "DramaAccount")
+
+        auto_run = store.create_auto_template_run(
+            "99001",
+            4,
+            "task-source-auto-1",
+            "template-1",
+            1,
+            "{{drama_name}}\n{{desc}}",
+            {"user_id": "admin-1", "name": "Admin"},
+        )
+        auto_candidate = candidate(4, "AutoAccount")
+        auto_candidate.update(
+            {
+                "material_id": "99001",
+                "source_date": auto_run["source_date"],
+                "preflight_sha256": service.hashlib.sha256(b"video").hexdigest(),
+                "preflight_size": 5,
+                "facebook_violation_count": 0,
+                "tiktok_violation_count": 0,
+                "twitter_violation_count": 0,
+                "resource_audit_count": 0,
+                "dangerous_tag_count": 0,
+            }
+        )
+        store.create_manual_plan(
+            auto_run["id"],
+            [auto_candidate],
+            "auto_template",
+        )
+
+        all_items = store.query_logs({"page_size": 10})["items"]
+        self.assertEqual(
+            {item["task_source"] for item in all_items},
+            {"drama_pool", "material_pool", "auto_publish"},
+        )
+        for task_source in ("drama_pool", "material_pool", "auto_publish"):
+            with self.subTest(task_source=task_source):
+                result = store.query_logs({"task_source": task_source})
+                self.assertEqual(result["pagination"]["total"], 1)
+                self.assertEqual(result["items"][0]["task_source"], task_source)
+
+        with self.assertRaises(service.XPostError) as caught:
+            store.query_logs({"task_source": "other"})
+        self.assertEqual(caught.exception.code, "invalid_request")
+
     def test_daily_plan_accepts_nine_candidates_with_dynamic_expected_count(self):
         candidates = []
         for rank, account_id in enumerate(range(2, 11), 1):

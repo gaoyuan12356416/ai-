@@ -36,7 +36,7 @@
     .stat { min-height:104px; padding:17px; border:1px solid var(--line); border-radius:16px; background:#fff; }
     .stat span { color:var(--muted); font-size:13px; }
     .stat strong { display:block; margin-top:11px; font-size:26px; }
-    .filters { display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)) auto auto; gap:10px; margin-bottom:16px; }
+    .filters { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)) auto auto; gap:10px; margin-bottom:16px; }
     .filters input,.filters select { min-height:40px; width:100%; padding:0 12px; border:1px solid var(--line); border-radius:11px; background:#fff; color:var(--ink); outline:none; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
     table { width:100%; min-width:1560px; border-collapse:collapse; background:#fff; }
@@ -105,6 +105,12 @@
             <input id="runDate" type="date" aria-label="运行日期" />
             <input id="accountId" inputmode="numeric" placeholder="账号 ID" aria-label="账号 ID" />
             <input id="materialId" inputmode="numeric" placeholder="素材 ID" aria-label="素材 ID" />
+            <select id="taskSource" aria-label="任务来源">
+              <option value="">全部来源</option>
+              <option value="drama_pool">短剧池</option>
+              <option value="material_pool">素材池</option>
+              <option value="auto_publish">自动发布</option>
+            </select>
             <select id="status" aria-label="发布状态">
               <option value="">全部状态</option>
               <option value="published">已发布</option>
@@ -124,8 +130,8 @@
 
           <div class="table-wrap">
             <table>
-              <thead><tr><th>运行/参考日期</th><th>X账号</th><th>素材</th><th>短剧</th><th>素材池顺序</th><th>状态</th><th>链接</th><th>时间</th><th>错误</th></tr></thead>
-              <tbody id="logRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>运行/参考日期</th><th>任务来源</th><th>X账号</th><th>素材</th><th>短剧</th><th>素材池顺序</th><th>状态</th><th>链接</th><th>时间</th><th>错误</th></tr></thead>
+              <tbody id="logRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
           <div class="pager">
@@ -207,7 +213,7 @@
         body.replaceChildren();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 9;
+        cell.colSpan = 10;
         cell.className = "empty";
         text(cell, message);
         row.appendChild(cell);
@@ -250,14 +256,18 @@
         if (!items.length) { setEmpty("没有符合当前筛选条件的发布记录。"); return; }
         items.forEach(item => {
           const row = document.createElement("tr");
-          const batchLabel = item.batch_kind === "manual" && item.manual_run_id
-            ? `手动批次 ${item.manual_run_id}`
-            : (item.batch_kind === "schedule" && item.schedule_run_id
+          const batchLabel = item.batch_kind === "auto_template" && item.manual_run_id
+            ? `自动发布批次 ${item.manual_run_id}`
+            : (item.batch_kind === "manual" && item.manual_run_id
+              ? `手动批次 ${item.manual_run_id}`
+              : (item.batch_kind === "schedule" && item.schedule_run_id
               ? `定时批次 ${item.schedule_run_id}`
               : (item.batch_kind === "catchup" && item.catchup_run_id
                 ? `补发批次 ${item.catchup_run_id}`
-                : (item.run_id ? `日批次 ${item.run_id}` : "测试批次")));
+                : (item.run_id ? `日批次 ${item.run_id}` : "测试批次"))));
           appendCell(row, item.run_date, `数据：${item.source_date || "—"} · ${batchLabel}`);
+          const sourceLabels = { drama_pool:"短剧池", material_pool:"素材池", auto_publish:"自动发布" };
+          appendCell(row, sourceLabels[item.task_source] || "—");
           const relayDelivery = String(item.delivery_mode || "direct") === "premium_relay_repost";
           const accountSecondary = relayDelivery
             ? `目标账号 Repost · 原帖由 @${item.relay_account_username || `账号${item.relay_account_id || "—"}`}`
@@ -297,7 +307,7 @@
       }
       function queryString() {
         const params = new URLSearchParams({ page:String(state.page), page_size:String(state.pageSize) });
-        [["run_date","runDate"],["account_id","accountId"],["material_id","materialId"],["status","status"],["unknown_outcome","unknownOutcome"]].forEach(([key,id]) => {
+        [["run_date","runDate"],["account_id","accountId"],["material_id","materialId"],["task_source","taskSource"],["status","status"],["unknown_outcome","unknownOutcome"]].forEach(([key,id]) => {
           const value = byId(id).value.trim();
           if (value) params.set(key, value);
         });

@@ -9,6 +9,18 @@
 - daily bearer 只允许 `available`、`check`、固定三账号 verify、正式 `daily-plan` 和对应 queue publish；不能查询、添加或删除素材池。
 - 响应不返回 OAuth Token、内部 bearer、MySQL 凭据；错误说明在存储/输出前脱敏。
 
+## GET /api/admin/x-posts/logs
+
+发布明细新增只读字段 `task_source`，取值与页面文案对应如下：
+
+| `task_source` | 页面文案 | 判定口径 |
+| --- | --- | --- |
+| `drama_pool` | 短剧池 | queue 的 `source_type=drama` |
+| `material_pool` | 素材池 | 非自动模板的素材 queue，包含素材池定时批次和人工素材池批次 |
+| `auto_publish` | 自动发布 | queue 关联的 manual run 为 `trigger_source=auto_template` |
+
+GET 查询参数支持同名 `task_source` 精确筛选；空值表示全部来源，其他枚举返回 400。筛选在 Sidecar 的分页 SQL 中完成，`pagination.total` 与当前来源筛选保持同一口径。
+
 ## GET /api/admin/x-posts/material-pool
 
 允许查询参数：

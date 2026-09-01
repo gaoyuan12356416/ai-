@@ -162,6 +162,15 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("`补发批次 ${item.catchup_run_id}`", X_POST_LOGS_SOURCE)
         self.assertIn('item.batch_kind === "manual"', X_POST_LOGS_SOURCE)
         self.assertIn("`手动批次 ${item.manual_run_id}`", X_POST_LOGS_SOURCE)
+        self.assertIn('item.batch_kind === "auto_template"', X_POST_LOGS_SOURCE)
+        self.assertIn("`自动发布批次 ${item.manual_run_id}`", X_POST_LOGS_SOURCE)
+        self.assertIn('<th>任务来源</th>', X_POST_LOGS_SOURCE)
+        self.assertIn('<select id="taskSource" aria-label="任务来源">', X_POST_LOGS_SOURCE)
+        self.assertIn('<option value="drama_pool">短剧池</option>', X_POST_LOGS_SOURCE)
+        self.assertIn('<option value="material_pool">素材池</option>', X_POST_LOGS_SOURCE)
+        self.assertIn('<option value="auto_publish">自动发布</option>', X_POST_LOGS_SOURCE)
+        self.assertIn('["task_source","taskSource"]', X_POST_LOGS_SOURCE)
+        self.assertIn('colspan="10"', X_POST_LOGS_SOURCE)
         self.assertIn(
             '"href": "/x-account-list.html?v=20260727catchup1"',
             NAVIGATION_SOURCE,
@@ -709,8 +718,8 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         parse = namespace["x_post_admin_query_params"]
         self.assertEqual(
-            parse("page=2&page_size=500&run_date=2026-07-23&material_id=5221348"),
-            {"page": 2, "page_size": 100, "run_date": "2026-07-23", "material_id": "5221348"},
+            parse("page=2&page_size=500&run_date=2026-07-23&material_id=5221348&task_source=auto_publish"),
+            {"page": 2, "page_size": 100, "run_date": "2026-07-23", "material_id": "5221348", "task_source": "auto_publish"},
         )
         with self.assertRaises(ValueError):
             parse("access_token=secret")
@@ -718,6 +727,8 @@ class XAccountsAppContractTest(unittest.TestCase):
             parse("run_date=23-07-2026")
         with self.assertRaises(ValueError):
             parse("account_id=1%20OR%201=1")
+        with self.assertRaises(ValueError):
+            parse("task_source=other")
 
         pool_function = next(
             node for node in tree.body
