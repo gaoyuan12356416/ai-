@@ -178,12 +178,13 @@ class DramaQuarantineTests(unittest.TestCase):
             path = root / "drama-ledger-before-20260901T050000Z.json"
             args = self.exact_args(root)
 
-            def verify(document, captured_now=now):
+            def verify(document, captured_now=now, mode=0o600):
                 payload = json.dumps(document, sort_keys=True).encode("utf-8")
-                return verify_payload(payload, captured_now)
+                return verify_payload(payload, captured_now, mode=mode)
 
-            def verify_payload(payload, captured_now=now):
+            def verify_payload(payload, captured_now=now, mode=0o600):
                 path.write_bytes(payload)
+                os.chmod(str(path), mode)
                 args.ledger_evidence_sha256 = hashlib.sha256(payload).hexdigest()
                 with mock.patch.object(quarantine, "LEDGER_INPUT_ROOT", root), \
                      mock.patch.object(common, "validate_existing_ancestry"):
@@ -230,6 +231,9 @@ class DramaQuarantineTests(unittest.TestCase):
             payload = payload.replace('"schema": 1', '"schema": 1, "schema": 1', 1)
             with self.assertRaisesRegex(common.OperatorError, "valid JSON"):
                 verify_payload(payload.encode("utf-8"))
+            if os.name != "nt":
+                with self.assertRaisesRegex(common.OperatorError, "private single-link"):
+                    verify(self.ledger_document(now), mode=0o644)
             stale = self.ledger_document(now - quarantine.LEDGER_MAX_AGE_SECONDS - 1)
             with self.assertRaisesRegex(common.OperatorError, "stale"):
                 verify(stale)
