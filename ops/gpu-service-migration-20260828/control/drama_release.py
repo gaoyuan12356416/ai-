@@ -473,6 +473,17 @@ def listener_owned_by(port, pid):
             "line_sha256": hashlib.sha256(lines[0].encode("utf-8")).hexdigest()}
 
 
+def prove_cpu_rollback(baseline_units, restored_units, api):
+    common.assert_inactive_unit(restored_units[common.CPU_TARGET_UNITS[0]])
+    common.assert_active_single_process(restored_units[api])
+    config_unchanged(baseline_units, restored_units, common.CPU_TARGET_UNITS)
+    process = restored_units[api].get("process") or {}
+    pid = int(process.get("pid") or 0)
+    if pid <= 1:
+        raise common.OperatorError("restored CPU API process identity is missing")
+    return listener_owned_by(8787, pid)
+
+
 def cleanup_cpu_temporaries(swaps):
     cleaned = []
     for item in swaps:
@@ -610,16 +621,23 @@ def apply_cpu(args, contract, before):
                         live = common.CPU_LIVE_ROOT / pathlib.PurePosixPath(relative)
                         if common.sha256_file(live) != expected:
                             raise common.OperatorError("CPU rollback left mixed live bytes")
+                except Exception as bytes_error:
+                    rollback["errors"].append({"stage": "prove-old-bytes",
+                                               "error": type(bytes_error).__name__})
+            if not rollback["errors"]:
+                try:
                     systemctl("start", api)
                     wait_unit(api, True)
-                    restored_units = common.snapshot_units(common.CPU_TARGET_UNITS)
-                    common.assert_inactive_unit(restored_units[common.CPU_TARGET_UNITS[0]])
-                    common.assert_active_single_process(restored_units[api])
-                    config_unchanged(baseline_units, restored_units,
-                                     common.CPU_TARGET_UNITS)
                 except Exception as start_error:
                     rollback["errors"].append({"stage": "start-old-api",
                                                "error": type(start_error).__name__})
+            if not rollback["errors"]:
+                try:
+                    restored_units = common.snapshot_units(common.CPU_TARGET_UNITS)
+                    prove_cpu_rollback(baseline_units, restored_units, api)
+                except Exception as proof_error:
+                    rollback["errors"].append({"stage": "prove-old-api",
+                                               "error": type(proof_error).__name__})
         rollback["complete"] = not rollback["errors"]
         failure = {"schema": 1, "result": "failed", "host_role": "cpu",
                    "run_id": common.RUN_ID, "old_sha": common.OLD_SHA,

@@ -213,6 +213,21 @@ class DramaReleaseTests(unittest.TestCase):
             self.assertEqual(live.read_bytes(), old)
             self.assertEqual(temporary.read_bytes(), new)
 
+    def test_cpu_rollback_rejects_active_api_without_8787_listener(self):
+        api = common.CPU_TARGET_UNITS[1]
+        units = {
+            common.CPU_TARGET_UNITS[0]: {"process": None},
+            api: {"process": {"pid": 4321}},
+        }
+        with mock.patch.object(common, "assert_inactive_unit"), \
+             mock.patch.object(common, "assert_active_single_process"), \
+             mock.patch.object(release, "config_unchanged"), \
+             mock.patch.object(release, "listener_owned_by",
+                               side_effect=common.OperatorError("listener missing")) as listener:
+            with self.assertRaisesRegex(common.OperatorError, "listener missing"):
+                release.prove_cpu_rollback(units, units, api)
+        listener.assert_called_once_with(8787, 4321)
+
     def test_cpu_exchange_is_journaled_before_post_exchange_fsync_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
