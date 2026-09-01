@@ -32,7 +32,11 @@ def create_clip(ffmpeg: str, source: Path, output: Path, start: int, seconds: in
     subprocess.run([
         ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-ss", str(start), "-i", str(source), "-t", str(seconds),
-        "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "h264_nvenc", "-profile:v", "high", "-preset", "p3",
+        "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-profile:a", "aac_low",
+        "-ar", "48000", "-ac", "2", "-b:a", "192k",
         "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(output),
     ], check=True, capture_output=True, text=True, timeout=900)
 

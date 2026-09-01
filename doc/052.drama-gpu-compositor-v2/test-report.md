@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- |
 | 计划验收用例 | 13 | 9 | 0 | 4 |
 | clean profile 定向回归 | 178 | 178 | 0 | 0 |
-| 完整自动回归 | 506 | 506 | 0 | 0（另 6 项按既有平台条件跳过） |
+| 完整自动回归 | 507 | 507 | 0 | 0（另 6 项按既有平台条件跳过） |
 
 ## 缺陷情况
 
@@ -26,7 +26,7 @@
 
 ```text
 python -m unittest scripts.test_drama_gpu_compositor_v2 scripts.test_drama_synthesis_gpu_runtime scripts.test_drama_synthesis_media_pipeline scripts.test_drama_synthesis_gpu_cache scripts.test_drama_synthesis_remote_client scripts.test_drama_synthesis_cpu_catalog scripts.test_drama_synthesis_upgrade
-Ran 506 tests in 31.427s - OK (skipped=6)
+Ran 507 tests in 33.222s - OK (skipped=6)
 ```
 
 clean profile 定向命令：

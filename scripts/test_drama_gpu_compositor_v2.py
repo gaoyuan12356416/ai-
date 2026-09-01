@@ -277,6 +277,20 @@ class MediaProbeTests(unittest.TestCase):
             graph = command[command.index("-filter_complex") + 1]
             self.assertEqual(graph.count("trim=start="), 2)
 
+    def test_visual_clip_uses_accurate_transcode_not_keyframe_stream_copy(self):
+        compare = __import__(
+            "scripts.compare_drama_gpu_compositor_v2", fromlist=["create_clip"]
+        )
+        with mock.patch.object(compare.subprocess, "run") as run:
+            compare.create_clip(
+                "ffmpeg", Path("source.mp4"), Path("clip.mp4"), 60, 30
+            )
+        command = run.call_args.args[0]
+        self.assertNotIn("copy", command)
+        self.assertIn("h264_nvenc", command)
+        self.assertEqual(command[command.index("-ss") + 1], "60")
+        self.assertEqual(command[command.index("-t") + 1], "30")
+
     def test_clean_reference_uses_rotation_angle_for_canvas_extents(self):
         compare = __import__(
             "scripts.compare_drama_gpu_compositor_v2", fromlist=["render_clean_reference"]
