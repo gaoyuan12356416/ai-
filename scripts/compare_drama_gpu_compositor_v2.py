@@ -63,12 +63,15 @@ def extract_comparisons(
     records = []
     for index, timestamp in enumerate((1.0, duration / 2.0, max(1.0, duration - 1.0)), start=1):
         output = output_root / ("comparison-%02d.png" % index)
+        frame_end = min(duration, timestamp + (1.0 / 30.0))
         subprocess.run([
             ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-ss", "%.6f" % timestamp, "-i", str(legacy),
-            "-ss", "%.6f" % timestamp, "-i", str(candidate),
-            "-filter_complex", "[0:v]setpts=PTS-STARTPTS[left];"
-            "[1:v]setpts=PTS-STARTPTS[right];[left][right]hstack=inputs=2[view]",
+            "-i", str(legacy), "-i", str(candidate),
+            "-filter_complex",
+            "[0:v]trim=start=%.6f:end=%.6f,setpts=PTS-STARTPTS[left];"
+            "[1:v]trim=start=%.6f:end=%.6f,setpts=PTS-STARTPTS[right];"
+            "[left][right]hstack=inputs=2[view]"
+            % (timestamp, frame_end, timestamp, frame_end),
             "-map", "[view]", "-frames:v", "1", str(output),
         ], check=True, capture_output=True, text=True, timeout=180)
         records.append({

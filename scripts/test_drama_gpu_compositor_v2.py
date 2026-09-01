@@ -251,6 +251,32 @@ class MediaProbeTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(DramaSynthesisError):
                 gpu_compositor.compositor_lanes(invalid)
 
+    def test_visual_comparison_frames_use_sequential_trim_not_fast_seek(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy.mp4"
+            candidate = root / "candidate.mp4"
+            legacy.write_bytes(b"legacy")
+            candidate.write_bytes(b"candidate")
+            commands = []
+
+            def runner(command, **_kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"comparison")
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch.object(benchmark.subprocess, "run", side_effect=runner):
+                records = __import__(
+                    "scripts.compare_drama_gpu_compositor_v2", fromlist=["extract_comparisons"]
+                ).extract_comparisons("ffmpeg", legacy, candidate, root, 30.0)
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertNotIn("-ss", command)
+            graph = command[command.index("-filter_complex") + 1]
+            self.assertEqual(graph.count("trim=start="), 2)
+
 
 class OpenCLCommandTests(unittest.TestCase):
     def setUp(self):
