@@ -251,8 +251,10 @@ class OpenCLCommandTests(unittest.TestCase):
         self.assertNotIn("overlay=", graph)
         self.assertNotIn("rotate=", graph)
         self.assertNotIn("scale=720:1280", graph)
+        self.assertIn("[0:v]fps=30,tpad=stop_mode=clone:stop_duration=1", graph)
         self.assertIn("fps=30,setpts=N/(30*TB)", graph)
         self.assertEqual(command[command.index("-r") + 1], "30")
+        self.assertIn("transfer_characteristics=1", command[command.index("-bsf:v") + 1])
         self.assertEqual(kernel["source"].count("get_image_width(source)"), 2)
         self.assertNotIn("SCENE_SOURCE_WIDTH", kernel["source"])
 

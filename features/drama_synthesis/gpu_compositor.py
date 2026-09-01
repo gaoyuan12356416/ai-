@@ -335,8 +335,10 @@ def build_opencl_chunk_command(
         command.extend(_input_arguments(Path(assets[category]), asset_media_types[category], phase))
     graph_parts = []
     for index, label in enumerate(("source", "border", "opacity", "corners", "tint")):
+        tail_pad = ",tpad=stop_mode=clone:stop_duration=1" if label == "source" else ""
         graph_parts.append(
-            "[%d:v]fps=%d,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]" % (index, CANVAS_FPS, label)
+            "[%d:v]fps=%d%s,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]"
+            % (index, CANVAS_FPS, tail_pad, label)
         )
     graph_parts.append(
         "[source][border][opacity][corners][tint]"
@@ -354,6 +356,8 @@ def build_opencl_chunk_command(
         "-keyint_min", "60", "-forced-idr", "1", "-no-scenecut", "1", "-bf", "0",
         "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
         "-color_primaries", "bt709", "-chroma_sample_location", "left",
+        "-bsf:v", "h264_metadata=video_full_range_flag=0:colour_primaries=1:"
+        "transfer_characteristics=1:matrix_coefficients=1",
         "-frames:v", str(int(chunk["frame_count"])), "-movflags", "+faststart", str(output),
     ])
     return command
