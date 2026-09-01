@@ -1,5 +1,29 @@
 # CPU screenshot and cover migration
 
+## Images-only split scope
+
+While ad generation/vision remains on the US host, every screenshot/cover
+operator phase must include `--scope images`. This scope contains only
+`/usr/share/nginx/html/drama-screenshot-materials`,
+`/usr/share/nginx/html/drama-materials`, and `/root/drama_material_jobs`. It
+never copies, switches, verifies, or rolls back `ad-materials` or
+`ad_material_tasks`.
+
+`/root/drama_screenshot_jobs` is not consolidated. The operator requires its
+existing symlink to resolve to a real directory below the approved
+`/mnt/data-disk` mount, verifies both the link and resolved path with the mount
+guard, and preserves it.
+
+In images scope, every target-only or byte-different entry is first copied to a
+content-addressed private `conflicts/<path>/<hash>/` archive. Existing archive
+bytes are verified and never overwritten. Only then does exact rsync with
+`--delete-after` make the CPU current tree authoritative; any source change or
+remaining extra/different target entry blocks the atomic switch. Fresh
+authorization must declare `scope=images`, prove both old US tunnels stopped,
+and record zero requests/children for every US image worker. The workers may
+remain locally active behind stopped tunnels until the later
+`materials-images` source fence.
+
 Owner: CPU migration worker. This package never edits `app.py`, Nginx, crontab,
 existing CPU workers, the US services, or their tunnels. The root coordinator
 owns admission fencing and the one shared tunnel cutover window.

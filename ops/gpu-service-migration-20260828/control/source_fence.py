@@ -17,17 +17,33 @@ import time
 RUN_ID = "gpu-service-migration-20260828T1502"
 DATA_ROOT = pathlib.Path("/data")
 BASE = DATA_ROOT / "migrations" / RUN_ID / "source-fence"
+MATERIAL_IMAGE_UNITS = [
+    "codex-cover-generator.service", "codex-screenshot-batch.service",
+    "codex-screenshot-batch-burst.service", "codex-screenshot-square.service",
+    "codex-screenshot-portrait.service", "codex-screenshot-landscape.service",
+    "gpu-worker-reverse-tunnel.service",
+    "gpu-screenshot-batch-burst-tunnel.service",
+]
+MATERIAL_AD_UNITS = [
+    "ad-material-generation.service", "ad-material-vision.service",
+    "gpu-ad-only-reverse-tunnel.service",
+]
+LEGACY_MATERIAL_UNITS = MATERIAL_AD_UNITS[:2] + MATERIAL_IMAGE_UNITS
 GROUPS = {
-    "materials": ["ad-material-generation.service", "ad-material-vision.service",
-                  "codex-cover-generator.service", "codex-screenshot-batch.service",
-                  "codex-screenshot-batch-burst.service", "codex-screenshot-square.service",
-                  "codex-screenshot-portrait.service", "codex-screenshot-landscape.service",
-                  "gpu-worker-reverse-tunnel.service",
-                  "gpu-screenshot-batch-burst-tunnel.service"],
+    # Retained for read-only inventory compatibility. Applying this legacy
+    # coupled scope is prohibited after the ad-only tunnel split.
+    "materials": LEGACY_MATERIAL_UNITS,
+    "materials-images": MATERIAL_IMAGE_UNITS,
+    "materials-ad": MATERIAL_AD_UNITS,
     "drama": ["drama-material-api.service"],
     "tt": ["tt-gpu-publisher.service", "tt-gpu-direct-outro.service",
            "tt-gpu-reverse-tunnel.service", "tt-gpu-direct-outro-reverse-tunnel.service"],
     "x": ["x-post-media-repair.service", "x-post-media-repair-tunnel.service"],
+}
+AD_ONLY_TUNNEL = "gpu-ad-only-reverse-tunnel.service"
+LEGACY_MATERIAL_TUNNELS = {
+    "gpu-worker-reverse-tunnel.service",
+    "gpu-screenshot-batch-burst-tunnel.service",
 }
 DRAMA_UNIT = "drama-material-api.service"
 DRAMA_SHARED_TUNNEL = "gpu-worker-reverse-tunnel.service"
@@ -811,6 +827,85 @@ def proc_start_ticks(pid):
     return int(raw_stat[raw_stat.rfind(")") + 2:].split()[19])
 
 
+def split_service_identity(unit):
+    """Return non-secret process/unit identity for the temporary US ad lane."""
+    state = inspect(unit)
+    pid = state["pid"]
+    control_group = state.get("control_group", "")
+    return {
+        "unit": unit,
+        "active": state["active"],
+        "substate": state["substate"],
+        "enabled": state["enabled"],
+        "pid": pid,
+        "pid_start_ticks": proc_start_ticks(pid) if pid else 0,
+        "control_pid": state["control_pid"],
+        "control_group": control_group,
+        "cgroup_pids": systemd_cgroup_pids(control_group) if control_group else [],
+        "nrestarts": int(prop(unit, "NRestarts") or 0),
+        "start_monotonic": prop(unit, "ExecMainStartTimestampMonotonic"),
+        "active_enter_monotonic": prop(unit, "ActiveEnterTimestampMonotonic"),
+        "unit_sha256": unit_definition_sha256(unit),
+    }
+
+
+def split_ad_baseline():
+    baseline = {
+        "services": [split_service_identity(unit) for unit in MATERIAL_AD_UNITS[:2]],
+        "tunnel": split_service_identity(AD_ONLY_TUNNEL),
+    }
+    for state in baseline["services"] + [baseline["tunnel"]]:
+        if (state["active"] != "active" or state["substate"] != "running" or
+                state["pid"] <= 0 or state["control_pid"] != 0 or
+                state["pid_start_ticks"] <= 0 or state["pid"] not in state["cgroup_pids"] or
+                not str(state["start_monotonic"]).isdigit() or
+                int(state["start_monotonic"]) <= 0 or
+                not str(state["active_enter_monotonic"]).isdigit() or
+                int(state["active_enter_monotonic"]) <= 0 or
+                not re.fullmatch(r"[0-9a-f]{64}", state["unit_sha256"] or "")):
+            raise RuntimeError("temporary US ad lane identity is not stable: " + state["unit"])
+    tunnel = baseline["tunnel"]
+    if tunnel["enabled"] != "enabled" or tunnel["cgroup_pids"] != [tunnel["pid"]]:
+        raise RuntimeError("temporary US ad-only tunnel is not singly owned and enabled")
+    return baseline
+
+
+def validate_materials_split_checkpoint(proof, group, states, ad_baseline=None):
+    """Validate the coordinator-owned split handoff without reading credentials."""
+    if proof.get("coordinator_host") != "VM-0-108-centos" or proof.get("ready") is not True:
+        raise RuntimeError("materials split checkpoint is not a ready CPU coordinator snapshot")
+    if proof.get("ad_requests_drained") is not True:
+        raise RuntimeError("materials split checkpoint has not drained ad requests")
+    if group == "materials-images":
+        if (proof.get("split_mode") != "us-ad-only" or
+                proof.get("legacy_shared_tunnel_stopped") is not True or
+                proof.get("legacy_burst_tunnel_stopped") is not True or
+                proof.get("cpu_image_ports_owned_by_local_units") is not True or
+                proof.get("cpu_ad_ports_owned_by_us_ad_only_tunnel") is not True or
+                proof.get("ad_services_healthy") is not True or
+                proof.get("us_ad_baseline") != ad_baseline):
+            raise RuntimeError("materials-images tunnel or ad-lane proof changed")
+        tunnel_states = {state["unit"]: state for state in states
+                         if state["unit"] in LEGACY_MATERIAL_TUNNELS}
+        if set(tunnel_states) != LEGACY_MATERIAL_TUNNELS or any(
+                state["pid"] != 0 or state["control_pid"] != 0 or
+                state["active"] not in ("inactive", "failed")
+                for state in tunnel_states.values()):
+            raise RuntimeError("legacy material tunnels are not stopped before image fencing")
+    elif group == "materials-ad":
+        if (proof.get("split_mode") != "hk-ad" or
+                proof.get("ad_only_tunnel_stopped") is not True or
+                proof.get("cpu_ad_ports_owned_by_hk_tunnel") is not True or
+                proof.get("hk_ad_target_ready") is not True):
+            raise RuntimeError("materials-ad target or tunnel proof changed")
+        tunnel = next((state for state in states if state["unit"] == AD_ONLY_TUNNEL), None)
+        if (not tunnel or tunnel["pid"] != 0 or tunnel["control_pid"] != 0 or
+                tunnel["active"] not in ("inactive", "failed")):
+            raise RuntimeError("US ad-only tunnel is not stopped before ad fencing")
+    else:
+        raise RuntimeError("unsupported split materials group")
+
+
 def systemd_cgroup_pids(control_group):
     target = pathlib.Path("/sys/fs/cgroup/systemd") / control_group.lstrip("/") / "cgroup.procs"
     return sorted(int(value) for value in target.read_text().split())
@@ -1548,7 +1643,8 @@ def is_persistent_mask(local):
         return False
 
 
-def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256):
+def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256,
+                              split_ad_before=None):
     snapshot = BASE / (a.group + "-before.json")
     if path_lexists(snapshot) and not a.resume:
         raise RuntimeError("fence snapshot already exists; inspect partial result before retry")
@@ -1562,6 +1658,8 @@ def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256):
             raise RuntimeError("initial fence snapshot changed during directory sync")
         if [s["unit"] for s in initial["states"]] != GROUPS[a.group]:
             raise RuntimeError("initial snapshot service scope changed")
+        if a.group == "materials-images" and initial.get("us_ad_baseline") != split_ad_before:
+            raise RuntimeError("temporary US ad lane changed since initial fence snapshot")
         live_states = states
         states = initial["states"]
         if a.group == "drama":
@@ -1580,6 +1678,8 @@ def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256):
         if a.group == "drama":
             snapshot_payload["shared_tunnel"] = shared_before
             snapshot_payload["port_8787_established"] = []
+        if a.group == "materials-images":
+            snapshot_payload["us_ad_baseline"] = split_ad_before
         write_private_json(snapshot, snapshot_payload)
     mutation_started = False
     stage = "pre-mutation"
@@ -1692,11 +1792,34 @@ def apply_locked_source_fence(a, states, shared_before, checkpoint_sha256):
             else:
                 print(json.dumps({"fenced": u, "active": prop(u, "ActiveState"),
                                   "enabled": prop(u, "UnitFileState")}))
+                if (a.group == "materials-images" and
+                        split_ad_baseline() != split_ad_before):
+                    raise RuntimeError("temporary US ad lane changed while fencing image sources")
     except Exception as original_error:
         if a.group == "drama" and mutation_started:
             fail_closed_drama(stage, shared_before, original_error, unit_backup,
                               original_state=state)
         raise
+    if a.group == "materials-images":
+        split_ad_after = split_ad_baseline()
+        if split_ad_after != split_ad_before:
+            raise RuntimeError("temporary US ad lane changed after image source fence")
+        evidence_path = BASE / "materials-images-after.json"
+        evidence = {
+            "group": a.group, "completed_at_epoch": time.time(),
+            "checkpoint_sha256": checkpoint_sha256,
+            "us_ad_baseline_before": split_ad_before,
+            "us_ad_baseline_after": split_ad_after,
+            "ad_lane_unchanged": True,
+        }
+        if path_lexists(evidence_path):
+            existing = read_private_json(evidence_path)
+            for value in (existing, evidence):
+                value.pop("completed_at_epoch", None)
+            if existing != evidence:
+                raise RuntimeError("existing materials-images success evidence differs")
+        else:
+            write_private_json(evidence_path, evidence)
 
 
 def main():
@@ -1708,21 +1831,31 @@ def main():
     a = ap.parse_args()
     if socket.gethostname() != "VM-0-13-centos":
         raise RuntimeError("wrong host: US source only")
+    if a.group == "materials" and a.apply:
+        raise RuntimeError(
+            "legacy coupled materials --apply is disabled; use reviewed materials-images or materials-ad scope")
     source_storage_guard(create=False)
     states = [inspect(u) for u in GROUPS[a.group]]
     assert_idle(states)
     shared_before = None
+    split_ad_before = None
     if a.group == "drama":
         if not a.resume:
             states[0]["definition"] = unit_definition_snapshot(DRAMA_UNIT, state=states[0])
         validate_drama_preflight(states, resume=a.resume)
         shared_before = shared_tunnel_snapshot()
         validate_shared_tunnel_baseline(shared_before)
+    if a.group == "materials-images":
+        split_ad_before = split_ad_baseline()
     if not a.apply:
         result = {"dry_run": True, "group": a.group, "states": states}
         if shared_before is not None:
             result["shared_tunnel"] = shared_before
             result["port_8787_established"] = []
+        if split_ad_before is not None:
+            result["us_ad_baseline"] = split_ad_before
+        if a.group == "materials":
+            result["deprecated_apply_scope"] = True
         print(json.dumps(result))
         return
     if a.checkpoint is None:
@@ -1743,11 +1876,15 @@ def main():
         raise RuntimeError("checkpoint not ready: " + outcome_field)
     if a.group == "drama":
         validate_drama_checkpoint(proof)
+    if a.group in ("materials-images", "materials-ad"):
+        validate_materials_split_checkpoint(
+            proof, a.group, states, ad_baseline=split_ad_before)
     checkpoint_sha256 = hashlib.sha256(a.checkpoint.read_bytes()).hexdigest()
     source_storage_guard(create=True)
     lock_handle = acquire_source_lock()
     try:
-        apply_locked_source_fence(a, states, shared_before, checkpoint_sha256)
+        apply_locked_source_fence(a, states, shared_before, checkpoint_sha256,
+                                  split_ad_before=split_ad_before)
     finally:
         lock_handle.close()
 

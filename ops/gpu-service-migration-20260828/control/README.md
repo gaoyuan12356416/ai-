@@ -1,5 +1,55 @@
 # Coordinator control tools
 
+## Split screenshot/cover and temporary US ad lane
+
+The legacy `materials` group remains available only for read-only inventory.
+`source_fence.py materials --apply` always fails before inspecting or mutating
+services. The reviewed scopes are `materials-images` (the six US image services
+plus the old shared and burst tunnels) and `materials-ad` (US ad generation,
+vision, and `gpu-ad-only-reverse-tunnel.service`).
+
+The install-only template is
+`control/units/gpu-ad-only-reverse-tunnel.service.in`. It has exactly two
+loopback reverse forwards, 18796->8796 and 18797->8797. It uses fixed
+`/etc/gpu-ad-only-tunnel/known_hosts`, `StrictHostKeyChecking=yes`,
+`UpdateHostKeys=no`, and `ExitOnForwardFailure=yes`. Do not start it while the
+old shared tunnel owns either CPU port. Back up prior unit states, validate the
+rendered unit with `systemd-analyze verify`, and leave it stopped until the
+approved handoff.
+
+For `materials-images --apply`, the fresh checkpoint retains the common
+`run_id`, `group`, `new_admission_closed`, `triggers_paused`, `cpu_drained`, and
+`no_unknown` fields, and adds these exact non-secret facts:
+
+```json
+{
+  "coordinator_host": "VM-0-108-centos",
+  "ready": true,
+  "split_mode": "us-ad-only",
+  "ad_requests_drained": true,
+  "legacy_shared_tunnel_stopped": true,
+  "legacy_burst_tunnel_stopped": true,
+  "cpu_image_ports_owned_by_local_units": true,
+  "cpu_ad_ports_owned_by_us_ad_only_tunnel": true,
+  "ad_services_healthy": true,
+  "us_ad_baseline": "COPY THE EXACT OBJECT FROM THE CURRENT US DRY RUN"
+}
+```
+
+Run the US dry run after the ad-only tunnel is stable. Its `us_ad_baseline`
+contains unit/process identity and hashes, never credentials. The checkpoint
+must carry that object unchanged. Both legacy tunnels must already be inactive
+with zero MainPID/ControlPID. During every image mask and at completion, the
+fence rechecks that the two US ad services and ad-only tunnel retain the same
+PID start identity, cgroup, restart count, timestamps, unit hashes, and active
+state. A change aborts without restarting an old image unit or tunnel.
+
+For the later `materials-ad` fence, use `split_mode=hk-ad` and prove
+`ad_only_tunnel_stopped`, `cpu_ad_ports_owned_by_hk_tunnel`,
+`hk_ad_target_ready`, and `ad_requests_drained` are true. The US ad-only tunnel
+must already be inactive with zero MainPID/ControlPID. Never operate the US
+ad-only and HK ad tunnels at the same time.
+
 The `drama` source fence is intentionally separate from `materials`. It owns
 only `drama-material-api.service` on the US GPU host. The shared
 `gpu-worker-reverse-tunnel.service` remains in `materials` and must not be

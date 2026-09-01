@@ -163,19 +163,74 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(any("metric" in u for u in units))
 
     def test_source_scope_and_idle_guard(self):
-        units = sum(fence.GROUPS.values(), [])
+        units = sum((value for key, value in fence.GROUPS.items()
+                     if key != "materials"), [])
         self.assertEqual(len(units), len(set(units)))
         self.assertEqual(len([u for u in units if "tunnel" not in u]), 12)
         self.assertFalse(any("kronos" in u or "fb-page" in u for u in units))
         self.assertEqual(fence.GROUPS["drama"], ["drama-material-api.service"])
         self.assertNotIn("drama-material-api.service", fence.GROUPS["materials"])
         self.assertIn("gpu-worker-reverse-tunnel.service", fence.GROUPS["materials"])
+        self.assertEqual(fence.GROUPS["materials-images"], fence.MATERIAL_IMAGE_UNITS)
+        self.assertEqual(fence.GROUPS["materials-ad"], fence.MATERIAL_AD_UNITS)
+        self.assertEqual(fence.GROUPS["materials"],
+                         fence.MATERIAL_AD_UNITS[:2] + fence.MATERIAL_IMAGE_UNITS)
         idle = {"unit": "tt-gpu-publisher.service", "pid": 123, "threads": 1, "children": []}
         fence.assert_idle([idle])
         with self.assertRaises(RuntimeError):
             fence.assert_idle([dict(idle, threads=2)])
         with self.assertRaises(RuntimeError):
             fence.assert_idle([dict(idle, children=["234"])])
+
+    def test_legacy_materials_apply_is_blocked_before_source_inspection(self):
+        with mock.patch.object(sys, "argv", ["source_fence.py", "materials", "--apply"]), \
+             mock.patch.object(fence.socket, "gethostname", return_value="VM-0-13-centos"), \
+             mock.patch.object(fence, "source_storage_guard") as storage, \
+             mock.patch.object(fence, "inspect") as inspect:
+            with self.assertRaisesRegex(RuntimeError, "legacy coupled materials"):
+                fence.main()
+        storage.assert_not_called()
+        inspect.assert_not_called()
+
+    def test_materials_images_checkpoint_preserves_ad_only_lane(self):
+        baseline = {"services": [{"unit": "ad-material-generation.service"}],
+                    "tunnel": {"unit": fence.AD_ONLY_TUNNEL}}
+        states = [
+            {"unit": unit, "pid": 0, "control_pid": 0, "active": "inactive"}
+            for unit in fence.MATERIAL_IMAGE_UNITS
+        ]
+        proof = {
+            "coordinator_host": "VM-0-108-centos", "ready": True,
+            "ad_requests_drained": True, "split_mode": "us-ad-only",
+            "legacy_shared_tunnel_stopped": True,
+            "legacy_burst_tunnel_stopped": True,
+            "cpu_image_ports_owned_by_local_units": True,
+            "cpu_ad_ports_owned_by_us_ad_only_tunnel": True,
+            "ad_services_healthy": True, "us_ad_baseline": baseline,
+        }
+        fence.validate_materials_split_checkpoint(
+            proof, "materials-images", states, ad_baseline=baseline)
+        changed = dict(proof, cpu_ad_ports_owned_by_us_ad_only_tunnel=False)
+        with self.assertRaises(RuntimeError):
+            fence.validate_materials_split_checkpoint(
+                changed, "materials-images", states, ad_baseline=baseline)
+        live_tunnel = [dict(row) for row in states]
+        next(row for row in live_tunnel
+             if row["unit"] == "gpu-worker-reverse-tunnel.service")["pid"] = 12
+        with self.assertRaisesRegex(RuntimeError, "legacy material tunnels"):
+            fence.validate_materials_split_checkpoint(
+                proof, "materials-images", live_tunnel, ad_baseline=baseline)
+
+    def test_ad_only_tunnel_template_has_exact_two_strict_forwards(self):
+        unit = (pathlib.Path(__file__).parent / "units" /
+                "gpu-ad-only-reverse-tunnel.service.in").read_text()
+        self.assertIn("StrictHostKeyChecking=yes", unit)
+        self.assertIn("UserKnownHostsFile=/etc/gpu-ad-only-tunnel/known_hosts", unit)
+        self.assertIn("-R 127.0.0.1:18796:127.0.0.1:8796", unit)
+        self.assertIn("-R 127.0.0.1:18797:127.0.0.1:8797", unit)
+        self.assertEqual(unit.count(" -R "), 2)
+        for port in (18787, 18790, 18792, 18793, 18794, 18795, 18798):
+            self.assertNotIn(":" + str(port) + ":", unit)
 
     def test_tunnel_permissions_remain_host_and_loopback_restricted(self):
         key = "dGVzdC1wdWJsaWMta2V5"

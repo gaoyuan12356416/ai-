@@ -1,0 +1,21 @@
+[Unit]
+Description=Temporary US ad generation and vision reverse tunnel to CPU
+Wants=network-online.target ad-material-generation.service ad-material-vision.service
+After=network-online.target ad-material-generation.service ad-material-vision.service
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/usr/bin/test -f /etc/gpu-ad-only-tunnel/id_ed25519_cpu_tunnel
+ExecStartPre=/usr/bin/test -f /etc/gpu-ad-only-tunnel/known_hosts
+ExecStart=/usr/bin/ssh -F /dev/null -NT -i /etc/gpu-ad-only-tunnel/id_ed25519_cpu_tunnel -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/gpu-ad-only-tunnel/known_hosts -o UpdateHostKeys=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -R 127.0.0.1:18796:127.0.0.1:8796 -R 127.0.0.1:18797:127.0.0.1:8797 root@43.166.187.96
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/gpu-ad-only-tunnel
+
+[Install]
+WantedBy=multi-user.target

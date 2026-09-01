@@ -45,10 +45,14 @@ Never commit environments, auth files, keys, SQLite databases or tokens.
 7. A post-cutover rollback first fences the destination and returns current
    TT manifests/publish facts; it must not restore stale publishing databases.
 
-The shared screenshot/cover/ad/vision tunnel requires a joint short window.
-HK drama continues on CPU 18788; X remains 18820. CPU local workers take
-18790/18795/18798, HK ad tunnels take 18796/18797, HK TT takes 18830/18834.
-Unused US 18792-18794 workers are archived and retired, not duplicated.
+Screenshot/cover may use a reviewed split window while HK ad authorization is
+blocked. The old shared tunnel must first be replaced by a temporary US
+ad-only tunnel carrying exactly CPU 18796 -> US 8796 and CPU 18797 -> US 8797.
+CPU local workers then take 18790/18795/18798. The old coupled
+`materials --apply` fence is disabled: use `materials-images`, and later use
+`materials-ad` only after HK owns 18796/18797. HK drama continues on CPU 18788;
+X remains 18820 and HK TT remains 18830/18834. Unused US 18792-18794 workers
+are archived and retired, not duplicated.
 
 ## Acceptance
 

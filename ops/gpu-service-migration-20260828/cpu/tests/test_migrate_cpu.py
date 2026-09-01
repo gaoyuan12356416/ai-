@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -187,6 +188,16 @@ class CpuMigrationTests(unittest.TestCase):
                 'source_units': {unit: {'active': 'inactive', 'enabled': 'masked', 'children': 0}
                                  for unit in migration.SOURCE_UNITS}}
 
+    def valid_images_proof(self):
+        value = self.valid_proof()
+        value['scope'] = 'images'
+        value['source_tunnels_stopped'] = True
+        value['source_units'] = {
+            unit: {'active': 'active', 'enabled': 'enabled', 'children': 0, 'requests': 0}
+            for unit in migration.SOURCE_UNITS
+        }
+        return value
+
     def check_proof(self, value):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'proof.json'; path.write_text(json.dumps(value))
@@ -217,7 +228,63 @@ class CpuMigrationTests(unittest.TestCase):
     def test_start_rejects_stale_evidence(self):
         value = self.valid_proof(); value['observed_at_epoch'] = 1
         with self.assertRaises(RuntimeError):
-            self.check_proof(value)
+                self.check_proof(value)
+
+    def test_images_proof_allows_idle_workers_only_behind_stopped_tunnels(self):
+        value = self.valid_images_proof()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'proof.json'; path.write_text(json.dumps(value))
+            with mock.patch.object(migration.time, 'time', return_value=1010):
+                migration.proof(path, 'gpu-service-migration-20260828T1502',
+                                source_stopped=True, scope='images')
+            value['source_units'][migration.SOURCE_UNITS[0]]['requests'] = 1
+            path.write_text(json.dumps(value))
+            with mock.patch.object(migration.time, 'time', return_value=1010), \
+                 self.assertRaises(RuntimeError):
+                migration.proof(path, 'gpu-service-migration-20260828T1502',
+                                source_stopped=True, scope='images')
+
+    def test_images_scope_contains_only_three_root_paths(self):
+        paths = migration.scope_paths('images')
+        self.assertEqual(tuple(paths), migration.IMAGE_PATH_KEYS)
+        self.assertEqual(set(paths), {'screenshot-public', 'drama-public', 'drama-work'})
+        self.assertNotIn('ad-public', paths)
+        self.assertNotIn('ad-work', paths)
+
+    def test_existing_screenshot_jobs_link_must_resolve_under_data_disk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            disk = Path(folder) / 'disk'; jobs = disk / 'existing-jobs'; jobs.mkdir(parents=True)
+            link = mock.Mock()
+            link.is_symlink.return_value = True
+            link.resolve.return_value = jobs
+            with mock.patch.object(migration, 'DISK', disk), \
+                 mock.patch.object(migration, 'SCREENSHOT_JOBS', link), \
+                 mock.patch.object(migration, 'check_mount') as check, \
+                 mock.patch.object(migration.os, 'readlink', return_value=str(jobs)):
+                result = migration.verify_screenshot_jobs_link()
+            self.assertTrue(result['preserved'])
+            self.assertEqual(result['realpath'], str(jobs))
+            check.assert_called_once()
+
+    def test_image_conflicts_are_content_addressed_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'evidence'; target = Path(folder) / 'target'
+            root.mkdir(); target.mkdir()
+            (target / 'same.jpg').write_bytes(b'us-old')
+            target_manifest = migration.tree_manifest(target)
+            source_manifest = {'same.jpg': {'bytes': 7, 'sha256': hashlib.sha256(b'cpu-new').hexdigest()}}
+            first = migration.archive_target_conflicts(
+                root, 'screenshot-public', target, source_manifest, target_manifest)
+            archived = Path(first['archive']) / 'payload' / 'same.jpg'
+            self.assertEqual(archived.read_bytes(), b'us-old')
+            second = migration.archive_target_conflicts(
+                root, 'screenshot-public', target, source_manifest, target_manifest)
+            self.assertEqual(second, first)
+            self.assertEqual(archived.read_bytes(), b'us-old')
+            archived.write_bytes(b'tampered')
+            with self.assertRaisesRegex(RuntimeError, 'archive differs'):
+                migration.archive_target_conflicts(
+                    root, 'screenshot-public', target, source_manifest, target_manifest)
 
     def test_mount_guard_rejects_root_directory_fallback(self):
         with mock.patch.object(mount_guard.subprocess, 'check_output',
