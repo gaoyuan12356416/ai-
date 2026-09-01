@@ -1285,6 +1285,110 @@ class AppConcatCompatibilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
                     env["validate_intro_cover_color_contract"](str(path))
 
+    def test_legacy_intro_without_transfer_metadata_is_rebuilt_atomically(self):
+        intro = self.root / "legacy-intro.mp4"
+        intro.write_bytes(b"legacy-intro")
+        cover = self.root / "cover.jpg"
+        cover.write_bytes(b"cover")
+        reference = stream_info()
+        legacy_intro = stream_info(video_updates={
+            "pix_fmt": "yuvj420p",
+            "color_range": "pc",
+            "color_space": "bt470bg",
+            "color_transfer": None,
+            "color_primaries": None,
+        })
+        probe = mock.Mock(side_effect=[reference, legacy_intro, stream_info()])
+        renderer = mock.Mock(side_effect=lambda _cover, output, **_kwargs: Path(output).write_bytes(b"rebuilt-intro"))
+        env = self.load(
+            "rebuild_unsupported_legacy_intro",
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=probe,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            DramaSynthesisError=DramaSynthesisError,
+            checkpoint_error=mock.Mock(side_effect=AssertionError("checkpoint guard should not fire")),
+            file_fingerprint=file_fingerprint,
+            render_intro=renderer,
+            tempfile=tempfile,
+        )
+
+        self.assertTrue(env["rebuild_unsupported_legacy_intro"](
+            str(intro), str(cover), "episode-001.mp4",
+        ))
+        self.assertEqual(intro.read_bytes(), b"rebuilt-intro")
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+        renderer.assert_called_once()
+
+        current = self.root / "current-intro.mp4"
+        current.write_bytes(b"current-intro")
+        probe.side_effect = [reference, stream_info()]
+        renderer.reset_mock()
+        self.assertFalse(env["rebuild_unsupported_legacy_intro"](
+            str(current), str(cover), "episode-001.mp4",
+        ))
+        self.assertEqual(current.read_bytes(), b"current-intro")
+        renderer.assert_not_called()
+
+        probe.side_effect = DramaSynthesisError(
+            "drama_media_checkpoint_unverified", "temporary probe failure", 503,
+        )
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["rebuild_unsupported_legacy_intro"](
+                str(current), str(cover), "episode-001.mp4",
+            )
+        self.assertEqual(caught.exception.code, "drama_media_checkpoint_unverified")
+        self.assertTrue(current.exists())
+
+        unsupported_reference = stream_info(video_updates={"color_transfer": None})
+        probe.side_effect = [unsupported_reference]
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["rebuild_unsupported_legacy_intro"](
+                str(current), str(cover), "episode-001.mp4",
+            )
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+        self.assertEqual(current.read_bytes(), b"current-intro")
+
+    def test_legacy_intro_rebuild_failure_preserves_previous_file(self):
+        intro = self.root / "legacy-intro.mp4"
+        intro.write_bytes(b"legacy-intro")
+        cover = self.root / "cover.jpg"
+        cover.write_bytes(b"cover")
+        reference = stream_info()
+        legacy_intro = stream_info(video_updates={
+            "color_transfer": None,
+            "color_primaries": None,
+        })
+        probe = mock.Mock(side_effect=[reference, legacy_intro])
+        renderer = mock.Mock(side_effect=RuntimeError("render failed"))
+        env = self.load(
+            "rebuild_unsupported_legacy_intro",
+            file_ready=lambda path: Path(path).is_file() and Path(path).stat().st_size > 0,
+            probe_media_stream_info=probe,
+            freeze_concat_normalization_plan=media.freeze_concat_normalization_plan,
+            DramaSynthesisError=DramaSynthesisError,
+            checkpoint_error=mock.Mock(side_effect=AssertionError("checkpoint guard should not fire")),
+            file_fingerprint=file_fingerprint,
+            render_intro=renderer,
+            tempfile=tempfile,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "render failed"):
+            env["rebuild_unsupported_legacy_intro"](
+                str(intro), str(cover), "episode-001.mp4",
+            )
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+
+        probe.side_effect = [reference, legacy_intro, legacy_intro]
+        renderer.side_effect = lambda _cover, output, **_kwargs: Path(output).write_bytes(b"bad-rebuild")
+        with self.assertRaises(DramaSynthesisError) as caught:
+            env["rebuild_unsupported_legacy_intro"](
+                str(intro), str(cover), "episode-001.mp4",
+            )
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+        self.assertEqual(intro.read_bytes(), b"legacy-intro")
+        self.assertEqual(list(self.root.glob(".intro-rebuild-*.mp4")), [])
+
 
 def recipe():
     value = {"profile": RECIPE_PROFILE, "version": 1, "source": "concat_video", "assets": {},

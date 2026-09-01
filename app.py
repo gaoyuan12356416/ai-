@@ -792,6 +792,7 @@ from features.drama_synthesis.media_pipeline import (
     concat_signature as drama_concat_signature,
     concat_signatures_are_compatible,
     download_and_prepare_segments,
+    freeze_concat_normalization_plan,
     freeze_episode_download_route,
     prepare_normalized_concat_segment,
     probe_media_source_with_anchor,
@@ -69005,6 +69006,57 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
+def rebuild_unsupported_legacy_intro(intro_path, cover_path, reference_path):
+    """Atomically rebuild a derived legacy intro rejected by the normalizer.
+
+    Older workers wrote one-second intros without color transfer or primaries
+    metadata. Reusing one makes the strict normalization plan fail immediately
+    after the first episode download. A replacement is rendered and validated
+    under a private same-filesystem path before it replaces the legacy file, so
+    the cover, episode files, and previous intro all survive a failed rebuild.
+    """
+    if os.path.islink(intro_path):
+        raise checkpoint_error()
+    if not file_ready(intro_path):
+        return False
+    intro_fingerprint = file_fingerprint(intro_path)
+    reference_info = probe_media_stream_info(reference_path)
+    # A bad episode reference cannot be repaired by replacing its intro.
+    freeze_concat_normalization_plan(reference_info, reference_info, 0)
+    try:
+        intro_info = probe_media_stream_info(intro_path)
+        freeze_concat_normalization_plan(reference_info, intro_info, -1)
+    except DramaSynthesisError as exc:
+        if exc.code != "drama_concat_normalization_source_unsupported":
+            raise
+        if file_fingerprint(intro_path) != intro_fingerprint:
+            raise checkpoint_error(conflict=True)
+        candidate_fd, candidate_path = tempfile.mkstemp(
+            prefix=".intro-rebuild-", suffix=".mp4",
+            dir=os.path.dirname(intro_path),
+        )
+        os.close(candidate_fd)
+        os.remove(candidate_path)
+        try:
+            render_intro(
+                cover_path, candidate_path, reference_path=reference_path,
+            )
+            candidate_info = probe_media_stream_info(candidate_path)
+            freeze_concat_normalization_plan(reference_info, candidate_info, -1)
+            candidate_fingerprint = file_fingerprint(candidate_path)
+            if (os.path.islink(intro_path)
+                    or file_fingerprint(intro_path) != intro_fingerprint):
+                raise checkpoint_error(conflict=True)
+            os.replace(candidate_path, intro_path)
+            if file_fingerprint(intro_path) != candidate_fingerprint:
+                raise checkpoint_error(conflict=True)
+            return True
+        finally:
+            if os.path.exists(candidate_path):
+                os.remove(candidate_path)
+    return False
+
+
 def concat_segments(segment_paths, output_path):
 
 
@@ -79498,6 +79550,9 @@ def _handle_gpu_video_render_unlocked(payload):
         remove_invalid_video_file(intro_path, "GPU intro")
         if not file_ready(cover_path):
             download_file(selected_cover, cover_path)
+        rebuild_unsupported_legacy_intro(
+            intro_path, cover_path, first_source_path,
+        )
         if not file_ready(intro_path):
             render_intro(cover_path, intro_path, reference_path=first_source_path)
         return intro_path

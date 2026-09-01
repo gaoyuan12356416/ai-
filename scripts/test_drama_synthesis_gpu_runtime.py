@@ -1043,6 +1043,7 @@ class AsyncRuntimeTests(unittest.TestCase):
         value = self.runtime(execute=mock.Mock())
         for code, message in (("drama_episode_source_changed", "视频源版本发生变化，已停止续传"),
                               ("drama_episode_download_route_invalid", "视频下载线路配置与冻结任务不一致"),
+                              ("drama_concat_normalization_source_unsupported", "源视频缺少可验证的色彩或流信息，已停止转码"),
                               ("drama_concat_normalization_invalid", "转码后的剧集片段仍不兼容，已停止拼接")):
             error = DramaSynthesisError(code, "private https://source.test/token", 409)
             value.execute.side_effect = error
