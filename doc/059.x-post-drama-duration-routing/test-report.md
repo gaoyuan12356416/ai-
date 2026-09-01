@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-代码、专项、全量 X 回归及独立审查通过；尚未执行 feature-off 生产迁移和自然排期业务验收。
+代码、专项、全量 X 回归、独立审查、feature-off 生产迁移与双端启用均通过；自然排期业务验收仍在观察。
 
 ## 测试范围
 
@@ -28,6 +28,9 @@ schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/rand
 - 已精确合并生产并行 commit `401069b2e35e56192c33efac623bf24ddee57a56`，保留任务来源筛选/展示，并与时长路线字段共同回归。
 - 测试方式：本地 Python unittest、临时 SQLite、mock HTTP/X；禁止真实平台写入。
 - 生产基线：quick_check=ok、FK=0、无 queued/publishing；历史 unknown 隔离保留。
+- 生产 release：`e64742213f171a49d5befd88c3507ef25f42c63b`；Sidecar 与 scheduler 运行时开关均为 true，原 active 的 6 个 timers 已恢复。
+- 生产迁移：1142 queue、1142 publish log、409 repost ledger、76 drama pool 计数不变；新增 route 表 0 行、6 个约束触发器；feature-off/on 两阶段均 quick_check=ok、FK=0、inflight=0、历史 unknown=1。
+- 生产备份：`/mnt/data-disk/x-post-automation/backups/duration-routing-20260901T113528Z-pre-401069b2e35e56192c33efac623bf24ddee57a56-to-e64742213f171a49d5befd88c3507ef25f42c63b`，含在线/停写 SQLite、unit/env 与 Main composite 文件；目录权限为 0700，配置内容未输出。
 - 全仓 5 个错误均来自 TT 基线：`_TTDramawaveCandidateSelector._violation_counts` 缺失及 `_pool_material_rows(... allow_long_duration=...)` 合同不匹配；同样 5 个错误已在干净 `955e54b` 复现，本次未修改 TT 代码，判定无新增全仓回归。
 
 ## 遗留风险
@@ -36,4 +39,4 @@ schema/store/resolver、媒体修复、Sidecar call-order、scheduler fixed/rand
 
 ## 发布建议
 
-允许进入 GitHub-first feature-off 部署；必须保持全部 SQLite writer 停止完成迁移检查，双端 feature=true 后才恢复 timers。最终业务通过仍取决于首个自然短 direct 与长 relay 的 queue/ledger/X 对账。
+GitHub-first 部署、feature-off 迁移与 feature-on 恢复已完成。最终业务通过仍取决于首个自然短 direct 与长 relay 的 queue/ledger/X 对账；只读心跳已安排，禁止测试帖和人工重试。

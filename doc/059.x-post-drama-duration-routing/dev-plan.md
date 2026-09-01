@@ -16,7 +16,7 @@
 | 发布入口与能力校验 | Backend | `features/x_accounts/oauth_service.py` | 已完成 |
 | fixed/random 排期 | Scheduler | `scripts/x_post_schedule_runner.py` | 已完成 |
 | UI 与 contract | Frontend/QA | `static/`、`scripts/test_x_post_*` | 已完成 |
-| 部署与验收 | Ops | CPU server release/systemd/SQLite | 待执行 |
+| 部署与验收 | Ops | CPU server release/systemd/SQLite | 已部署；自然样本对账中 |
 
 ## 编译 / 构建命令
 
@@ -38,3 +38,4 @@ python -m unittest scripts.test_x_post_schedule_runner scripts.test_x_posts scri
 - 2026-09-01：完成需求/SA/测试/部署设计，开始并行实现。
 - 2026-09-01：完成实现与独立审查；关闭 waiting 公平性、冻结剧集污染、媒体/relay DB 篡改、解析后崩溃恢复及 rollout writer 竞态。
 - 2026-09-01：精确合并生产并行 commit `401069b`；关闭旧/非短剧日志误标与公共 DTO 内部元数据两项 P2；最终全量 X 回归 892 项无失败（890 通过、2 项按环境跳过），全仓仅保留 5 个已在干净基线复现的 TT 错误；未调用真实 X 写入。
+- 2026-09-01：release `e64742213f171a49d5befd88c3507ef25f42c63b` 完成 feature-off 副本演练、全 writer 停写迁移、Sidecar/Main 同步与双端 feature-on；quick/FK/计数/健康/timers 均通过，等待 20:31 及后续自然样本对账。

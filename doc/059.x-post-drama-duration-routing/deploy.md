@@ -42,3 +42,12 @@
 ## 注意事项
 
 全程禁止真实测试 Post/Repost。健康、mock 或 worker activity 不等于外部平台发布成功；自然排期证据需单独对账。
+
+## 2026-09-01 执行记录
+
+- 从 GitHub 精确提交 `e64742213f171a49d5befd88c3507ef25f42c63b` 构建不可变 release；保留并合并生产已有 `401069b` 任务来源功能。
+- 数据盘 UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`，部署前可用 63606 MB；备份目录为 `/mnt/data-disk/x-post-automation/backups/duration-routing-20260901T113528Z-pre-401069b2e35e56192c33efac623bf24ddee57a56-to-e64742213f171a49d5befd88c3507ef25f42c63b`。
+- 副本演练和生产迁移均 quick_check=ok、FK=0；1142 queue、1142 publish log、409 repost ledger、76 drama pool 计数不变，route 表初始 0 行、6 个约束触发器。
+- feature-off 三项健康检查均 200；随后再次停止写入口，把 `/etc/x-post-automation.env` 与 `/etc/x-post-schedule.env` 同时设为 true，Sidecar 与 X Auto 进程运行时读取均为 true。
+- 恢复原 active 的 schedule/claim/manual、X Auto runner/scheduler/metric 六个 timers；原 inactive 的 runner path 保持 inactive。首个完整自然周期 oneshot 全部 success，无 SQLITE_BUSY/锁错误、新 unknown 或在途状态。
+- 当日下一次自然 drama random slot 为北京时间 20:31；自然 direct/relay 对账由只读心跳继续观察。
