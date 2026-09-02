@@ -45,6 +45,15 @@ _NORMALIZATION_COLOR_PRIMARIES = frozenset({
 _NORMALIZATION_COLOR_RANGES = frozenset({"tv", "pc"})
 _NORMALIZATION_PROGRESSIVE_FIELD_ORDERS = frozenset({"progressive"})
 _NORMALIZATION_INTERLACED_FIELD_ORDERS = frozenset({"tt", "bb", "tb", "bt"})
+_NORMALIZATION_EXPLICIT_COLOR_POLICY = "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1"
+_NORMALIZATION_INFERRED_COLOR_POLICY = "ffmpeg-colorspace-infer-missing-hd-sdr-to-bt709-v1"
+_NORMALIZATION_SDR_INFERENCE_CODECS = frozenset({
+    "h264", "hevc", "vp8", "vp9", "av1", "mpeg2video", "mpeg4",
+})
+_NORMALIZATION_SDR_INFERENCE_PIXEL_FORMATS = frozenset({
+    "yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p",
+})
+_NORMALIZATION_SDR_INFERENCE_MIN_PIXELS = 500_000
 CONCAT_STREAM_PROBE_FIELDS = (
     "codec_type", "codec_name", "profile", "level", "pix_fmt",
     "codec_tag_string", "codec_tag", "is_avc", "nal_length_size", "width", "height", "coded_width", "coded_height",
@@ -594,29 +603,64 @@ def freeze_concat_normalization_plan(reference_info, source_info, segment_index,
     source_sar = _signature_ratio(source_video, "sample_aspect_ratio", separator=":")
     if None in (reference_width, reference_height, source_width, source_height, source_sar):
         raise _normalization_source_error()
-    colors = {
+    raw_colors = {
         "space": _signature_text(source_video, "color_space"),
         "transfer": _signature_text(source_video, "color_transfer"),
         "primaries": _signature_text(source_video, "color_primaries"),
         "range": _signature_text(source_video, "color_range"),
     }
+    color_allowlists = {
+        "space": _NORMALIZATION_COLOR_SPACES,
+        "transfer": _NORMALIZATION_COLOR_TRANSFERS,
+        "primaries": _NORMALIZATION_COLOR_PRIMARIES,
+        "range": _NORMALIZATION_COLOR_RANGES,
+    }
     field_order = _signature_text(source_video, "field_order")
-    if (colors["space"] not in _NORMALIZATION_COLOR_SPACES or
-            colors["transfer"] not in _NORMALIZATION_COLOR_TRANSFERS or
-            colors["primaries"] not in _NORMALIZATION_COLOR_PRIMARIES or
-            colors["range"] not in _NORMALIZATION_COLOR_RANGES or
+    if (any(value is not None and value not in color_allowlists[name]
+            for name, value in raw_colors.items()) or
             field_order not in _NORMALIZATION_PROGRESSIVE_FIELD_ORDERS | _NORMALIZATION_INTERLACED_FIELD_ORDERS):
         raise _normalization_source_error()
+    missing_color_fields = [
+        field for field, name in (
+            ("color_space", "space"), ("color_transfer", "transfer"),
+            ("color_primaries", "primaries"), ("color_range", "range"),
+        ) if raw_colors[name] is None
+    ]
+    color_inference = None
+    if missing_color_fields:
+        codec_name = _signature_text(source_video, "codec_name")
+        pixel_format = _signature_text(source_video, "pix_fmt")
+        if (codec_name not in _NORMALIZATION_SDR_INFERENCE_CODECS or
+                pixel_format not in _NORMALIZATION_SDR_INFERENCE_PIXEL_FORMATS or
+                source_width * source_height < _NORMALIZATION_SDR_INFERENCE_MIN_PIXELS):
+            raise _normalization_source_error()
+        colors = {
+            "space": raw_colors["space"] or "bt709",
+            "transfer": raw_colors["transfer"] or "bt709",
+            "primaries": raw_colors["primaries"] or "bt709",
+            "range": raw_colors["range"] or ("pc" if pixel_format.startswith("yuvj") else "tv"),
+        }
+        color_policy = _NORMALIZATION_INFERRED_COLOR_POLICY
+        color_inference = {
+            "version": 1,
+            "decision": "hd-equivalent-8bit-yuv-sdr-default-bt709-v1",
+            "missing_fields": missing_color_fields,
+            "codec_name": codec_name,
+            "pix_fmt": pixel_format,
+        }
+    else:
+        colors = raw_colors
+        color_policy = _NORMALIZATION_EXPLICIT_COLOR_POLICY
     target_width = reference_width + reference_width % 2
     target_height = reference_height + reference_height % 2
     divisor = math.gcd(target_width, target_height)
     sar_numerator, sar_denominator = (int(value) for value in source_sar.split(":"))
     plan = {
-        "version": 3,
+        "version": 4 if color_inference is not None else 3,
         "profile": normalization_profile,
         "segment_index": segment_index,
         "geometry_policy": "episode0-even-display-aspect-scale-pad-black-v1",
-        "color_policy": "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1",
+        "color_policy": color_policy,
         "scan_policy": "preserve-progressive-or-bwdif-explicit-display-parity-v2",
         "audio_policy": "preserve-first-resample-apad-or-video-bounded-silence-v2",
         "target": {
@@ -669,23 +713,32 @@ def freeze_concat_normalization_plan(reference_info, source_info, segment_index,
             "tag_hex": "0x6134706d",
         },
     }
+    if color_inference is not None:
+        plan["color_inference"] = color_inference
     return validate_concat_normalization_plan(plan)
 
 
 def validate_concat_normalization_plan(plan):
     """Validate the closed plan before it can influence an FFmpeg command."""
-    if not isinstance(plan, dict) or set(plan) != {
+    if not isinstance(plan, dict) or type(plan.get("version")) is not int or plan["version"] not in (3, 4):
+        raise _normalization_error()
+    expected_keys = {
         "version", "profile", "segment_index", "geometry_policy", "color_policy", "scan_policy",
         "audio_policy",
         "target", "source", "audio",
-    }:
+    }
+    if plan["version"] == 4:
+        expected_keys.add("color_inference")
+    if set(plan) != expected_keys:
         raise _normalization_error()
-    if (type(plan["version"]) is not int or plan["version"] != 3 or
-            isinstance(plan["segment_index"], bool) or type(plan["segment_index"]) is not int or
+    inferred_color = plan["version"] == 4
+    if (isinstance(plan["segment_index"], bool) or type(plan["segment_index"]) is not int or
             plan["segment_index"] < -1 or not isinstance(plan["profile"], str) or
             not re.fullmatch(r"[a-z0-9.-]{1,512}", plan["profile"]) or
             plan["geometry_policy"] != "episode0-even-display-aspect-scale-pad-black-v1" or
-            plan["color_policy"] != "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1" or
+            plan["color_policy"] != (
+                _NORMALIZATION_INFERRED_COLOR_POLICY if inferred_color else _NORMALIZATION_EXPLICIT_COLOR_POLICY
+            ) or
             plan["scan_policy"] != "preserve-progressive-or-bwdif-explicit-display-parity-v2" or
             plan["audio_policy"] != "preserve-first-resample-apad-or-video-bounded-silence-v2"):
         raise _normalization_error()
@@ -709,6 +762,28 @@ def validate_concat_normalization_plan(plan):
                 audio["bit_rate"])
     if any(type(value) is not int or value <= 0 for value in integers):
         raise _normalization_error()
+    if inferred_color:
+        inference = plan["color_inference"]
+        allowed_missing_fields = {"color_space", "color_transfer", "color_primaries", "color_range"}
+        if (not isinstance(inference, dict) or set(inference) != {
+                "version", "decision", "missing_fields", "codec_name", "pix_fmt",
+        } or type(inference["version"]) is not int or inference["version"] != 1 or
+                inference["decision"] != "hd-equivalent-8bit-yuv-sdr-default-bt709-v1" or
+                not isinstance(inference["missing_fields"], list) or not inference["missing_fields"] or
+                len(inference["missing_fields"]) != len(set(inference["missing_fields"])) or
+                not set(inference["missing_fields"]).issubset(allowed_missing_fields) or
+                inference["codec_name"] not in _NORMALIZATION_SDR_INFERENCE_CODECS or
+                inference["pix_fmt"] not in _NORMALIZATION_SDR_INFERENCE_PIXEL_FORMATS or
+                source["width"] * source["height"] < _NORMALIZATION_SDR_INFERENCE_MIN_PIXELS):
+            raise _normalization_error()
+        inferred_defaults = {
+            "color_space": "bt709",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709",
+            "color_range": "pc" if inference["pix_fmt"].startswith("yuvj") else "tv",
+        }
+        if any(source[field] != inferred_defaults[field] for field in inference["missing_fields"]):
+            raise _normalization_error()
     divisor = math.gcd(target["width"], target["height"])
     if (target["width"] % 2 or target["height"] % 2 or
             target != {
