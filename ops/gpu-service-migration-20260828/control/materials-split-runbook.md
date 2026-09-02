@@ -49,7 +49,8 @@ forward; close it and prove no process or control socket remains. Do not test
 Require all of the following in two consecutive samples:
 
 1. The materials gate returns 503 for exact GET batch creation and POST
-   screenshot, drama and ad creation routes. The pause journal is `paused`, its
+   screenshot and ad creation routes. The independently completed drama
+   rendering cutover remains admitted. The pause journal is `paused`, its
    two test services are inactive, and current crontab matches `paused_sha256`.
 2. CPU SQLite passes `quick_check` and foreign-key check. Screenshot/drama rows
    are terminal, no worker lease is running, and no ad task/asset is generating

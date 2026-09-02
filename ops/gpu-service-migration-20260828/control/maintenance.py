@@ -26,7 +26,9 @@ MAP = pathlib.Path("/etc/nginx/conf.d/00-gpu-service-migration-map.conf")
 GATE = pathlib.Path("/etc/nginx/default.d/00-gpu-service-migration-gate.conf")
 CPU_UUID = "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"
 PATTERNS = {
-    "materials": r"/api/(ad-material|drama-screenshot-material|drama-material)(/|$)",
+    # Drama rendering has completed its independent CPU/HK cutover. Keep the
+    # remaining image/ad migration fenced without blocking the live drama API.
+    "materials": r"/api/(ad-material|drama-screenshot-material)(/|$)",
     "tt": r"/api/admin/(tt-posts|tt-auto-publish)(/|$)",
     "x": r"/api/admin/(x-posts|x-auto-posts|x-auto-publish)(/|$)",
 }

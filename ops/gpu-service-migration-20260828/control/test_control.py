@@ -146,13 +146,15 @@ class ControlTests(unittest.TestCase):
             self.assertTrue(any(p.search(route) for p in patterns), route)
         for route in ["GET:/api/admin/tt-posts/queues", "POST:/api/gpu-video/cover",
                       "POST:/api/admin/x-accounts/1/verify", "GET:/tt",
-                      "POST:/api/ad-material-other/jobs"]:
+                      "POST:/api/ad-material-other/jobs",
+                      "POST:/api/drama-material/jobs"]:
             self.assertFalse(any(p.search(route) for p in patterns), route)
 
     def test_group_gate_retains_other_groups(self):
         text, gate = maintenance.gate_text({"tt", "materials"})
         self.assertIn("tt-posts", text)
         self.assertIn("drama-screenshot-material", text)
+        self.assertNotIn("/api/drama-material", text)
         self.assertNotIn("x-posts", text)
         self.assertIn("503", gate)
         self.assertIn('~^[A-Z]+:/api/drama-screenshot-material/jobs/batch$', text)

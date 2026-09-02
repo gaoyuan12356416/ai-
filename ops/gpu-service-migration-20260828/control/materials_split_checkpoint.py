@@ -420,7 +420,6 @@ def verify_gate_and_pause(maintenance):
     probes = {
         "GET batch": http_json(80, "/api/drama-screenshot-material/jobs/batch", "GET"),
         "POST screenshot": http_json(80, "/api/drama-screenshot-material/jobs", "POST"),
-        "POST drama": http_json(80, "/api/drama-material/jobs", "POST"),
         "POST ad": http_json(80, "/api/ad-material/tasks", "POST"),
     }
     if any(row != {"status": 503, "body": {
