@@ -383,7 +383,7 @@ def fetch_insight_candidates(day, data_level="CAMPAIGN", account_metadata=None):
       WHERE account_stats like '%minis_id%'
         AND platform_id='3'
     ) target_accounts
-      ON CAST(target_accounts.account_id AS CHAR) = i.advertiser_id
+      ON CAST(target_accounts.account_id AS UNSIGNED) = CAST(i.advertiser_id AS UNSIGNED)
     WHERE i.dt = {day}
       AND i.category = 0
       AND i.advertiser_id <> ''

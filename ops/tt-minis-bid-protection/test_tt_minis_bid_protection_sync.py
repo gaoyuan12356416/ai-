@@ -221,6 +221,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertIn("SELECT DISTINCT account_id", sql)
         self.assertIn("account_stats like '%minis_id%'", sql)
         self.assertIn("platform_id='3'", sql)
+        self.assertIn(
+            "CAST(target_accounts.account_id AS UNSIGNED) = CAST(i.advertiser_id AS UNSIGNED)",
+            sql,
+        )
         self.assertIn("HAVING SUM(i.stat_cost) > 0", sql)
 
     def test_account_scope_statement_matches_operator_sql(self):
