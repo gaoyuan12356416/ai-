@@ -33,3 +33,15 @@
 ## 注意事项
 
 生产验收不得为测试创建真实 YouTube 发布。
+
+## 生产记录（2026-09-03）
+
+- 代码提交：`7ac4b55a402c90a590610505d2280f5aec6c6afc`。
+- 服务器：`43.166.187.96`。
+- 发布路径：`/root/drama_material_service/static/` 与 `/usr/share/nginx/html/`。
+- 备份：`/mnt/data-disk/drama-synthesis-cpu/backups/20260903T121700+0800-youtube-detail-status-pre-7ac4b55a402c90a590610505d2280f5aec6c6afc`。
+- 发布哈希：`71848c62d166231462210ab1559f26df6e762e5b697af406dec6c9b39b47e9dd`，GitHub release、四个线上文件和公网响应一致。
+- 服务：API、YouTube Worker 均为 `active`；未重启。
+- 队列：发布前后均为 0，12 点时段没有新增 YouTube POST。
+
+回滚：从上述备份目录分别恢复 `root-static/*.html` 到 `/root/drama_material_service/static/`，恢复 `nginx-html/*.html` 到 `/usr/share/nginx/html/`，再校验备份 `SHA256SUMS` 与公网 HTTP 200；无需恢复数据库或重启服务。

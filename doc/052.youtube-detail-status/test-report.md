@@ -34,3 +34,10 @@ BUG-001 已修复并关闭。
 ## 发布建议
 
 允许发布静态页面；无需数据库迁移或 API 重启。
+
+## 生产验证
+
+- 公网 `drama-synthesis.html` 返回 HTTP 200。
+- 公网源码包含 `jobDetailYoutubePublishes` 与发布状态组件。
+- 公网响应 SHA-256 与 GitHub release、服务器四个静态文件一致。
+- API 与 YouTube Worker 均保持 `active`，队列为 0，未发生测试发布。
