@@ -33,6 +33,15 @@
           ]
         },
         {
+          "path": "static/drama-job-runtime.js",
+          "public_path": "drama-job-runtime.js",
+          "contains": [
+            "root.DramaJobRuntime",
+            "install",
+            "progressHtml"
+          ]
+        },
+        {
           "path": "static/quick-nav.js",
           "public_path": "quick-nav.js",
           "contains": [

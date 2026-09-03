@@ -715,6 +715,13 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn('require.resolve("@playwright/test"', browser_spec)
         self.assertIn("recipe audit renders hostile values", browser_spec)
 
+    def test_live_feature_guard_requires_shared_browser_runtime(self):
+        manifest = json.loads((ROOT / "deploy/live_feature_guard.json").read_text(encoding="utf-8"))
+        feature = next(item for item in manifest["features"] if item["id"] == "drama_synthesis")
+        runtime = next(item for item in feature["required"] if item["path"] == "static/drama-job-runtime.js")
+        self.assertEqual(runtime["public_path"], "drama-job-runtime.js")
+        self.assertIn("root.DramaJobRuntime", runtime["contains"])
+
     def test_app_exposes_exact_six_routes_and_macro_precondition(self):
         text = (ROOT / "app.py").read_text(encoding="utf-8")
         for fragment in ("/api/drama-material/random-template-catalog", "short-links", "/api/drama-material/youtube/channels", "youtube-publishes", "retry-comment"):
