@@ -15,6 +15,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -418,6 +419,7 @@ class YouTubeHTTPClient:
             session.close()
         return self._upload_response(response, size)
 
+
     def upload(self, session_uri: str, source: Path, offset: int) -> Dict[str, Any]:
         size = source.stat().st_size
         offset = max(0, int(offset))
@@ -543,6 +545,88 @@ class YouTubeHTTPClient:
         return {"state": "unknown", "visibility": visibility}
 
 
+class YouTubeRemoteMediaExecutor:
+    """Loopback client for the HK media data plane."""
+
+    def __init__(self, base_url: str, token: str, *, timeout: int = 7200, session_factory=requests.Session):
+        parsed = urlsplit(str(base_url or "").rstrip("/"))
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
+            raise ValueError("YouTube media executor must use a loopback tunnel URL")
+        if not str(token or ""):
+            raise ValueError("YouTube media executor token is required")
+        self.base_url = str(base_url).rstrip("/")
+        self.token = str(token)
+        self.timeout = max(60, int(timeout))
+        self.session_factory = session_factory
+
+    def _request(self, path: str, payload: Mapping[str, Any], heartbeat: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+        outcome: Dict[str, Any] = {}
+
+        def execute() -> None:
+            session = self.session_factory()
+            session.trust_env = False
+            try:
+                outcome["response"] = session.post(
+                    self.base_url + path, json=dict(payload),
+                    headers={"Authorization": "Bearer " + self.token},
+                    timeout=self.timeout, allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                outcome["exception"] = exc
+            finally:
+                session.close()
+
+        thread = threading.Thread(target=execute, name="youtube-hk-media", daemon=True)
+        thread.start()
+        while thread.is_alive():
+            thread.join(20)
+            if thread.is_alive() and heartbeat is not None:
+                heartbeat()
+        if "exception" in outcome or outcome.get("response") is None:
+            raise YouTubeHTTPError("youtube_media_executor_unavailable", "香港YouTube媒体服务不可用", retryable=True)
+        response = outcome["response"]
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if response.status_code != 200 or not isinstance(body, Mapping) or body.get("ok") is not True:
+            code = str(body.get("code") or "youtube_media_executor_failed") if isinstance(body, Mapping) else "youtube_media_executor_failed"
+            message = str(body.get("error") or "香港YouTube媒体服务执行失败") if isinstance(body, Mapping) else "香港YouTube媒体服务执行失败"
+            unknown = body.get("unknown") is True if isinstance(body, Mapping) else False
+            retryable = body.get("retryable") is True if isinstance(body, Mapping) else response.status_code >= 500
+            raise YouTubeHTTPError(code, message, status=response.status_code, unknown=unknown, retryable=retryable)
+        return dict(body)
+
+    def prepare(self, task_id: int, source_url: str, *, heartbeat: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+        body = self._request("/api/gpu-video/youtube-media/prepare", {"task_id": int(task_id), "source_url": source_url}, heartbeat)
+        sha256, size, duration_ms = str(body.get("sha256") or ""), int(body.get("size") or 0), int(body.get("duration_ms") or 0)
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0 or duration_ms <= 0:
+            raise YouTubeHTTPError("youtube_media_executor_response_invalid", "香港YouTube媒体服务返回无效")
+        return {"sha256": sha256, "size": size, "duration_ms": duration_ms}
+
+    def upload(self, task_id: int, session_uri: str, offset: int, *, size: int, sha256: str, heartbeat: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+        body = self._request("/api/gpu-video/youtube-media/upload", {
+            "task_id": int(task_id), "session_uri": session_uri, "offset": int(offset),
+            "size": int(size), "sha256": str(sha256),
+        }, heartbeat)
+        state = str(body.get("state") or "")
+        if state not in {"submitted", "resume", "expired"}:
+            raise YouTubeHTTPError("youtube_media_executor_response_invalid", "香港YouTube媒体服务返回无效")
+        result = {"state": state}
+        if state == "submitted":
+            result["video_id"] = str(body.get("video_id") or "")
+            if not VIDEO_ID_RE.fullmatch(result["video_id"]):
+                raise YouTubeHTTPError("youtube_media_executor_response_invalid", "香港YouTube媒体服务返回无效", unknown=True)
+        if state == "resume": result["next_byte"] = int(body.get("next_byte") or 0)
+        return result
+
+    def cleanup(self, task_id: int) -> None:
+        try:
+            self._request("/api/gpu-video/youtube-media/cleanup", {"task_id": int(task_id)})
+        except YouTubeHTTPError:
+            return
+
+
 class YouTubePublishEngine:
     def __init__(
         self,
@@ -553,6 +637,7 @@ class YouTubePublishEngine:
         work_root: Union[str, os.PathLike],
         allowed_source_hosts: Iterable[str],
         ffprobe: str = "/usr/bin/ffprobe",
+        media_executor: Optional[YouTubeRemoteMediaExecutor] = None,
     ):
         root = Path(work_root)
         if not root.is_absolute():
@@ -563,6 +648,7 @@ class YouTubePublishEngine:
         self.work_root = root
         self.allowed_source_hosts = tuple(dict.fromkeys(str(item).strip().lower() for item in allowed_source_hosts if str(item).strip()))
         self.ffprobe = str(ffprobe)
+        self.media_executor = media_executor
         self._canary_tick_token: Optional[tuple[int, str]] = None
         if not self.allowed_source_hosts:
             raise ValueError("YouTube source allowlist is required")
@@ -751,6 +837,8 @@ class YouTubePublishEngine:
         return token
 
     def _cleanup_terminal(self, task_id: int) -> None:
+        if self.media_executor is not None:
+            self.media_executor.cleanup(task_id)
         shutil.rmtree(self.work_root / ("task-%d" % int(task_id)), ignore_errors=True)
 
     @staticmethod
@@ -794,7 +882,15 @@ class YouTubePublishEngine:
         frozen_size = int(task.get("source_size") or 0)
         root = self.work_root / ("task-%d" % task_id)
         source = root / "source.mp4"
-        if not source.is_file():
+        remote_source = None
+        if self.media_executor is not None:
+            task = self._renew(task, worker_id)
+            if not task.get("source_sha256") or not int(task.get("source_size") or 0):
+                task = self.store.advance_youtube(task_id, "downloading", worker_id=worker_id, lease_generation=lease_generation)
+            remote_source = self.media_executor.prepare(
+                task_id, task["source_url"], heartbeat=lambda: self._renew(task, worker_id),
+            )
+        elif not source.is_file():
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             task = self._renew(task, worker_id)
             task = self.store.advance_youtube(task_id, "downloading", worker_id=worker_id, lease_generation=lease_generation)
@@ -804,26 +900,33 @@ class YouTubePublishEngine:
                 allowed_hosts=self.allowed_source_hosts,
                 heartbeat=lambda: self._renew(task, worker_id),
             )
-        digest = hashlib.sha256()
-        with source.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        try:
-            probe = subprocess.run(
-                [self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source)],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
-            )
-            duration_ms = int(float(json.loads(probe.stdout)["format"]["duration"]) * 1000)
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-            raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败") from None
+        if remote_source is not None:
+            digest_hex = remote_source["sha256"]
+            size = int(remote_source["size"])
+            duration_ms = int(remote_source["duration_ms"])
+        else:
+            digest = hashlib.sha256()
+            with source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest_hex = digest.hexdigest()
+            size = source.stat().st_size
+            try:
+                probe = subprocess.run(
+                    [self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source)],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+                )
+                duration_ms = int(float(json.loads(probe.stdout)["format"]["duration"]) * 1000)
+            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+                raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败") from None
         if duration_ms <= 0:
             raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败")
-        if canary and task.get("resumable_session_uri") and (
-            frozen_sha256 != digest.hexdigest() or frozen_size != source.stat().st_size
+        if task.get("resumable_session_uri") and (
+            frozen_sha256 != digest_hex or frozen_size != size
         ):
-            raise YouTubeHTTPError("youtube_canary_source_changed", "内部测试素材与原上传会话指纹不一致，禁止继续上传", unknown=True)
-        task = self.store.advance_youtube(task_id, "uploading", worker_id=worker_id, lease_generation=lease_generation, source_sha256=digest.hexdigest(), source_duration_ms=duration_ms)
-        size = source.stat().st_size
+            code = "youtube_canary_source_changed" if canary else "youtube_media_source_changed"
+            raise YouTubeHTTPError(code, "素材与原上传会话指纹不一致，禁止继续上传", unknown=True)
+        task = self.store.advance_youtube(task_id, "uploading", worker_id=worker_id, lease_generation=lease_generation, source_sha256=digest_hex, source_duration_ms=duration_ms)
         session_uri = str(task.get("resumable_session_uri") or "")
         offset = int(task.get("next_byte") or 0)
         if session_uri:
@@ -875,7 +978,13 @@ class YouTubePublishEngine:
             task["video_attempt_count"] = 1 if canary else int(task.get("video_attempt_count") or 0) + 1
         task = self._renew(task, worker_id)
         try:
-            result = self.client.upload(session_uri, source, offset)
+            if self.media_executor is None:
+                result = self.client.upload(session_uri, source, offset)
+            else:
+                result = self.media_executor.upload(
+                    task_id, session_uri, offset, size=size, sha256=digest_hex,
+                    heartbeat=lambda: self._renew(task, worker_id),
+                )
         except YouTubeHTTPError as exc:
             if not exc.unknown:
                 raise
@@ -907,4 +1016,5 @@ __all__ = [
     "YouTubeHTTPClient",
     "YouTubeHTTPError",
     "YouTubePublishEngine",
+    "YouTubeRemoteMediaExecutor",
 ]

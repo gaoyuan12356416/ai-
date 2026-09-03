@@ -27,6 +27,7 @@ from features.drama_synthesis.unified_youtube import (  # noqa: E402
 from features.drama_synthesis.youtube import (  # noqa: E402
     YouTubeHTTPClient,
     YouTubePublishEngine,
+    YouTubeRemoteMediaExecutor,
 )
 
 
@@ -51,12 +52,21 @@ def build_engine() -> YouTubePublishEngine:
         for item in os.environ.get("DRAMA_YOUTUBE_SOURCE_HOSTS", "").split(",")
         if item.strip()
     )
+    executor_url = os.environ.get("DRAMA_YOUTUBE_MEDIA_EXECUTOR_URL", "").strip()
+    media_executor = None
+    if executor_url:
+        media_executor = YouTubeRemoteMediaExecutor(
+            executor_url,
+            os.environ.get("GPU_VIDEO_WORKER_TOKEN", ""),
+            timeout=env_int("DRAMA_YOUTUBE_MEDIA_EXECUTOR_TIMEOUT", 7200, 60, 21600),
+        )
     return YouTubePublishEngine(
         drama_app.DRAMA_SYNTHESIS_STORE,
         drama_app.drama_youtube_repository(),
         YouTubeHTTPClient(timeout=env_int("DRAMA_YOUTUBE_HTTP_TIMEOUT", 120, 30, 600)),
         work_root=os.environ.get("DRAMA_YOUTUBE_WORK_ROOT", "/mnt/data-disk/drama-youtube-publish"),
         allowed_source_hosts=source_hosts,
+        media_executor=media_executor,
     )
 
 

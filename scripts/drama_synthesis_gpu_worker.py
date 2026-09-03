@@ -21,6 +21,8 @@ if str(ROOT) not in sys.path:
 import app as drama_app  # noqa: E402
 from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
 from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, safe_error  # noqa: E402
+from features.drama_synthesis.youtube import YouTubeHTTPError  # noqa: E402
+from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  # noqa: E402
 
 
 def render_concurrency(environ=None):
@@ -37,6 +39,8 @@ def render_concurrency(environ=None):
 RENDER_SLOTS = threading.BoundedSemaphore(render_concurrency())
 RUNTIME = None
 RUNTIME_LOCK = threading.Lock()
+YOUTUBE_MEDIA = None
+YOUTUBE_MEDIA_LOCK = threading.Lock()
 
 
 def get_runtime():
@@ -58,6 +62,20 @@ def get_runtime():
                 render_slots=RENDER_SLOTS, queue_limit=limit,
             )
         return RUNTIME
+
+
+def get_youtube_media():
+    global YOUTUBE_MEDIA
+    with YOUTUBE_MEDIA_LOCK:
+        if YOUTUBE_MEDIA is None:
+            hosts = [item.strip().lower() for item in os.environ.get("DRAMA_YOUTUBE_SOURCE_HOSTS", "").split(",") if item.strip()]
+            YOUTUBE_MEDIA = YouTubeMediaExecutorService(
+                os.environ.get("DRAMA_YOUTUBE_MEDIA_ROOT", "/data/drama-synthesis-gpu/work/youtube-publish"),
+                hosts,
+                ffprobe=os.environ.get("DRAMA_YOUTUBE_FFPROBE", "/usr/bin/ffprobe"),
+                timeout=int(os.environ.get("DRAMA_YOUTUBE_MEDIA_HTTP_TIMEOUT", "7200")),
+            )
+        return YOUTUBE_MEDIA
 
 
 def valid_job_id(payload):
@@ -128,6 +146,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._reply(503, {"code": "gpu_asset_catalog_unavailable"})
             return
+        if self.path == "/api/gpu-video/youtube-media/health" and self._authorized():
+            try:
+                service = get_youtube_media()
+                service.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self._reply(200, {"ok": True, "role": "youtube-media-only"})
+            except Exception:
+                self._reply(503, {"code": "youtube_media_unavailable"})
+            return
         self._reply(404, {"code": "not_found"})
 
     def do_POST(self):
@@ -135,7 +161,12 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(401, {"code": "unauthorized"})
             return
         resume_match = re.fullmatch(r"/api/gpu-video/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/resume", self.path)
-        if self.path not in {"/api/gpu-video/render", "/api/gpu-video/cover", "/api/gpu-video/jobs"} and not resume_match:
+        youtube_media_paths = {
+            "/api/gpu-video/youtube-media/prepare": "prepare",
+            "/api/gpu-video/youtube-media/upload": "upload",
+            "/api/gpu-video/youtube-media/cleanup": "cleanup",
+        }
+        if self.path not in {"/api/gpu-video/render", "/api/gpu-video/cover", "/api/gpu-video/jobs"} and self.path not in youtube_media_paths and not resume_match:
             self._reply(404, {"code": "not_found"})
             return
         try:
@@ -145,6 +176,18 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
         except (ValueError, UnicodeError):
             self._reply(400, {"code": "invalid_request"})
+            return
+        if self.path in youtube_media_paths:
+            try:
+                result = getattr(get_youtube_media(), youtube_media_paths[self.path])(payload)
+                self._reply(200, result)
+            except YouTubeHTTPError as exc:
+                self._reply(exc.status or 500, {
+                    "code": exc.code, "error": str(exc),
+                    "unknown": bool(exc.unknown), "retryable": bool(exc.retryable),
+                })
+            except Exception:
+                self._reply(500, {"code": "youtube_media_failed", "error": "香港YouTube媒体服务执行失败"})
             return
         if not valid_job_id(payload):
             self._reply(400, {"code": "invalid_job_id"})
