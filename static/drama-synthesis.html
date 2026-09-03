@@ -12978,6 +12978,7 @@
 
 
           <div id="jobDetailActions" class="actions-inline" style="margin-bottom:12px;"></div>
+          <div id="jobDetailYoutubePublishes" class="stack" style="margin-bottom:12px;"></div>
           <div id="jobDetailResults" class="stack"></div>
 
 
@@ -13376,6 +13377,7 @@
       youtubePublishRequestId: 0,
       youtubePublishLoading: false,
       youtubeChannelsRequest: null,
+      youtubeDetailPollTimer: null,
       materialPickerResolve: null,
 
 
@@ -14187,6 +14189,7 @@
 
 
 
+      jobDetailYoutubePublishes: document.getElementById("jobDetailYoutubePublishes"),
       jobDetailResults: document.getElementById("jobDetailResults"),
 
 
@@ -18670,6 +18673,96 @@ function buildJobRow(job) {
 
 
 
+    function youtubePublishStatusMeta(task) {
+      const status = String(task?.status || "");
+      const commentStatus = String(task?.comment_status || "");
+      const syncStatus = String(task?.sync_status || "");
+      if (task?.unknown_outcome || status === "unknown") return { label: "结果待核查", className: "status-failed", terminal: true };
+      if (status === "failed") return { label: "发布失败", className: "status-failed", terminal: true };
+      if (status === "queued") return { label: "排队中", className: "status-active", terminal: false };
+      if (["validating", "downloading", "uploading"].includes(status)) {
+        const labels = { validating: "校验中", downloading: "下载素材中", uploading: "上传中" };
+        return { label: labels[status], className: "status-active", terminal: false };
+      }
+      if (["submitted", "processing"].includes(status)) return { label: "YouTube 处理中", className: "status-active", terminal: false };
+      if (status === "published") {
+        if (commentStatus === "failed") return { label: "视频已发布，评论失败", className: "status-failed", terminal: !["pending", "syncing"].includes(syncStatus) };
+        if (["queued", "retry", "publishing"].includes(commentStatus)) return { label: "视频已发布，评论处理中", className: "status-active", terminal: false };
+        if (syncStatus === "failed") return { label: "已发布，记录同步失败", className: "status-failed", terminal: true };
+        if (["pending", "syncing"].includes(syncStatus)) return { label: "已发布，记录同步中", className: "status-active", terminal: false };
+        return { label: "发布成功", className: "status-done", terminal: true };
+      }
+      return { label: status || "状态待更新", className: "status-active", terminal: false };
+    }
+
+    function youtubePublishStepLabel(value, kind) {
+      const maps = {
+        video: { queued: "排队中", validating: "校验中", downloading: "下载中", uploading: "上传中", submitted: "已提交", processing: "处理中", published: "已发布", failed: "失败", unknown: "待核查" },
+        comment: { queued: "排队中", retry: "等待重试", publishing: "发布中", published: "已发布", skipped: "未要求评论", failed: "失败", unknown: "待核查" },
+        sync: { pending: "待同步", syncing: "同步中", synced: "已同步", failed: "同步失败" },
+      };
+      return maps[kind]?.[String(value || "")] || String(value || "--");
+    }
+
+    function youtubeSourceKindLabel(value) {
+      return ({ concat_video: "合集视频（含 BGM）", no_bgm_video: "去 BGM 合集视频", random_template: "随机模板视频" })[String(value || "")] || String(value || "视频");
+    }
+
+    function stopYoutubeDetailPolling() {
+      if (state.youtubeDetailPollTimer) clearTimeout(state.youtubeDetailPollTimer);
+      state.youtubeDetailPollTimer = null;
+    }
+
+    function scheduleYoutubeDetailRefresh(job) {
+      stopYoutubeDetailPolling();
+      const tasks = Array.isArray(job?.youtube_publish_tasks) ? job.youtube_publish_tasks : [];
+      if (!tasks.some(task => !youtubePublishStatusMeta(task).terminal) || !els.detailDrawer.classList.contains("open")) return;
+      const jobId = String(job.job_id || "");
+      state.youtubeDetailPollTimer = setTimeout(async () => {
+        state.youtubeDetailPollTimer = null;
+        if (!state.selectedJob || state.selectedJob.job_id !== jobId || !els.detailDrawer.classList.contains("open")) return;
+        try {
+          const fresh = await api(`/api/drama-material/jobs/${jobId}`);
+          if (!state.selectedJob || state.selectedJob.job_id !== jobId || !els.detailDrawer.classList.contains("open")) return;
+          state.selectedJob = fresh;
+          renderJobDetail(fresh);
+        } catch (_) {
+          scheduleYoutubeDetailRefresh(job);
+        }
+      }, 3000);
+    }
+
+    function renderYoutubePublishRecords(job) {
+      const tasks = Array.isArray(job?.youtube_publish_tasks) ? job.youtube_publish_tasks : [];
+      if (!tasks.length) {
+        els.jobDetailYoutubePublishes.innerHTML = "";
+        return;
+      }
+      const rows = tasks.map((task, index) => {
+        const status = youtubePublishStatusMeta(task);
+        const videoLink = task.video_id
+          ? `<a href="https://www.youtube.com/watch?v=${encodeURIComponent(task.video_id)}" target="_blank" rel="noopener">查看 YouTube 视频</a>`
+          : "";
+        const retryComment = task.video_state === "published" && task.comment_status === "failed" && !task.unknown_outcome
+          ? `<button class="btn btn-secondary mini" type="button" onclick="retryYoutubeComment(${Number(task.id)},'${job.job_id}')">仅重试评论</button>` : "";
+        return `<div class="card" data-youtube-publish-record="${Number(task.id)}">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+            <strong>${index === 0 ? "本次发布" : "历史发布"} #${Number(task.id)}</strong>
+            <span class="status-pill ${status.className}" data-youtube-publish-status>${navText(status.label)}</span>
+          </div>
+          <div style="margin-top:8px;line-height:1.8;">
+            <div>标题：${navText(task.title || "--")}</div>
+            <div>发布素材：${navText(youtubeSourceKindLabel(task.source_kind))}</div>
+            <div>创建时间：${navText(formatBeijingTime(task.created_at_utc))}</div>
+            <div>视频：${navText(youtubePublishStepLabel(task.video_state, "video"))} · 评论：${navText(youtubePublishStepLabel(task.comment_status, "comment"))} · 记录同步：${navText(youtubePublishStepLabel(task.sync_status, "sync"))}</div>
+            ${task.error_message ? `<div style="color:var(--bad);">失败原因：${navText(task.error_message)}</div>` : ""}
+          </div>
+          ${(videoLink || retryComment) ? `<div class="actions-inline" style="margin-top:8px;">${videoLink}${retryComment}</div>` : ""}
+        </div>`;
+      }).join("");
+      els.jobDetailYoutubePublishes.innerHTML = `<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;"><strong>YouTube 发布记录</strong><span class="hint">共 ${tasks.length} 条</span></div><div class="stack" style="margin-top:10px;">${rows}</div></div>`;
+    }
+
     function renderJobDetail(job) {
 
 
@@ -18688,6 +18781,8 @@ function buildJobRow(job) {
 
       if (!job) {
 
+        stopYoutubeDetailPolling();
+
 
 
 
@@ -18705,6 +18800,8 @@ function buildJobRow(job) {
         els.jobDetailMeta.innerHTML = `<div class="muted">点击列表里的“查看详情”查看任务详情。</div>`;
 
         els.jobDetailActions.innerHTML = "";
+
+        els.jobDetailYoutubePublishes.innerHTML = "";
 
 
 
@@ -19096,11 +19193,6 @@ function buildJobRow(job) {
         const shortValue = link.short_url ? `<a href="${navText(link.short_url)}" target="_blank">${navText(link.short_url)}</a>` : navText(link.error_message || "短链尚未发布");
         detailResultCards.push(`<div class="card"><strong>短链 · ${navText(link.material_kind || "视频")}</strong><div style="margin-top:8px;">状态：${navText(link.publish_state || "--")} · ${shortValue}</div></div>`);
       });
-      (job.youtube_publish_tasks || []).forEach(task => {
-        const retryComment = task.video_state === "published" && task.comment_status === "failed" && !task.unknown_outcome
-          ? `<div style="margin-top:8px;"><button class="btn btn-secondary" type="button" onclick="retryYoutubeComment(${Number(task.id)},'${job.job_id}')">仅重试评论</button></div>` : "";
-        detailResultCards.push(`<div class="card"><strong>YouTube：${navText(task.title || task.channel_id || "发布任务")}</strong><div style="margin-top:8px;line-height:1.8;">视频状态：${navText(task.video_state || "--")}<br />评论状态：${navText(task.comment_status || "--")}<br />同步状态：${navText(task.sync_status || "--")}<br />任务状态：${navText(task.status || "--")}${task.error_message ? `<br />原因：${navText(task.error_message)}` : ""}</div>${retryComment}</div>`);
-      });
       els.jobDetailResults.innerHTML = detailResultCards.join("");
       if (frozenRecipe) {
         const auditText = value => ["string", "number", "boolean"].includes(typeof value) ? String(value) : "--";
@@ -19136,6 +19228,8 @@ function buildJobRow(job) {
         <button class="btn btn-primary" type="button" ${hasVideoMaterial ? `onclick="openYoutubePublish('${job.job_id}')"` : "disabled"}>发布到 YouTube</button>
         ${hasVideoMaterial ? "" : '<span class="hint">无可用视频产物</span>'}
       ` : "";
+      renderYoutubePublishRecords(job);
+      scheduleYoutubeDetailRefresh(job);
 
 
 
@@ -19203,6 +19297,7 @@ function buildJobRow(job) {
       const panel = els.detailDrawer.querySelector(".detail-panel");
       els.detailDrawer.classList.add("open");
       document.body.classList.add("drawer-open");
+      if (state.selectedJob) scheduleYoutubeDetailRefresh(state.selectedJob);
       if (panel) {
         panel.tabIndex = -1;
         panel.scrollTop = 0;
@@ -19212,6 +19307,8 @@ function buildJobRow(job) {
     }
 
     function closeDetailDrawer() {
+
+      stopYoutubeDetailPolling();
 
 
 
@@ -20025,6 +20122,8 @@ function buildJobRow(job) {
     }
 
     function renderScreenshotJobDetail(job) {
+      stopYoutubeDetailPolling();
+      els.jobDetailYoutubePublishes.innerHTML = "";
       if (!job) {
         els.jobDetailMeta.innerHTML = `<div class="muted">\u70b9\u51fb\u5217\u8868\u91cc\u7684\u201c\u67e5\u770b\u8be6\u60c5\u201d\u67e5\u770b\u4efb\u52a1\u8be6\u60c5\u3002</div>`;
         els.jobDetailResults.innerHTML = "";

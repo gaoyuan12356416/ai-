@@ -18,6 +18,7 @@ const { test, expect } = loadPlaywrightTest();
 const VIDEO_JOB = "a".repeat(32);
 const COVER_JOB = "b".repeat(32);
 const XSS_JOB = "c".repeat(32);
+const PUBLISH_JOB = "d".repeat(32);
 let server;
 let baseUrl;
 
@@ -46,6 +47,8 @@ test.afterAll(async () => {
 
 async function openFakePage(page) {
   let channelRequests = 0;
+  let publishTasks = [];
+  let publishDetailReads = 0;
   await page.route("**/api/**", async route => {
     const requestUrl = new URL(route.request().url());
     const pathname = requestUrl.pathname;
@@ -69,6 +72,33 @@ async function openFakePage(page) {
           asset_set_sha256: "sha&<tag>",
           assets: { border: { name: '\" onmouseover="window.__recipeXss=3' }, corners: { name: "corner<script>bad</script>" } }
         }
+      } });
+      return;
+    }
+    if (pathname === `/api/drama-material/jobs/${PUBLISH_JOB}/youtube-publishes` && route.request().method() === "POST") {
+      const payload = route.request().postDataJSON();
+      publishTasks = [{
+        id: 42, channel_id: payload.channel_id, source_kind: payload.material_kind,
+        title: payload.title, status: "queued", video_state: "queued", comment_status: "skipped",
+        sync_status: "pending", video_id: "", unknown_outcome: 0, error_message: "",
+        created_at_utc: "2026-09-03T04:00:00Z", updated_at_utc: "2026-09-03T04:00:00Z",
+      }];
+      await route.fulfill({ status: 202, json: publishTasks[0] });
+      return;
+    }
+    if (pathname === `/api/drama-material/jobs/${PUBLISH_JOB}`) {
+      if (publishTasks.length && ++publishDetailReads >= 2) {
+        publishTasks = publishTasks.map(task => ({
+          ...task, status: "published", video_state: "published", sync_status: "synced",
+          video_id: "video_42", updated_at_utc: "2026-09-03T04:00:03Z",
+        }));
+      }
+      await route.fulfill({ json: {
+        job_id: PUBLISH_JOB, app_id: "1479", app: "dramawave", status: "done", status_label: "已完成",
+        drama_name: "Publish detail job", content_id: "content", episode_start: 1, episode_end: 2,
+        outputs: { concat_video: true }, output_video_url: "https://media.example.test/video.mp4",
+        output_video_no_bgm_url: "", output_random_template_url: "", cover_16x9_url: "",
+        short_links: [], youtube_publish_tasks: publishTasks,
       } });
       return;
     }
@@ -119,4 +149,21 @@ test("recipe audit renders hostile values as visible text without DOM injection"
   await expect(audit).toContainText('\" onmouseover="window.__recipeXss=3');
   await expect(audit.locator("img,script")).toHaveCount(0);
   expect(await page.evaluate(() => window.__recipeXss)).toBe(0);
+});
+
+test("successful YouTube enqueue returns to detail with a visible queued publish record", async ({ page }) => {
+  await openFakePage(page);
+  await page.evaluate(jobId => window.viewJob(jobId), PUBLISH_JOB);
+  await page.getByRole("button", { name: "发布到 YouTube", exact: true }).click();
+  await expect(page.locator("#youtubePublishModal")).toBeVisible();
+  await page.locator("#youtubeTitle").fill("本次发布标题");
+  await page.locator("#youtubeDescription").fill("本次发布描述");
+  await page.locator("#youtubePublishSubmit").click();
+  const record = page.locator('[data-youtube-publish-record="42"]');
+  await expect(record).toBeVisible();
+  await expect(record).toContainText("本次发布 #42");
+  await expect(record.locator("[data-youtube-publish-status]")).toHaveText("排队中");
+  await expect(record).toContainText("视频：排队中 · 评论：未要求评论 · 记录同步：待同步");
+  await expect(record.locator("[data-youtube-publish-status]")).toHaveText("发布成功", { timeout: 5000 });
+  await expect(record).toContainText("视频：已发布 · 评论：未要求评论 · 记录同步：已同步");
 });
