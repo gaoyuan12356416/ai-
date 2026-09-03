@@ -176,6 +176,24 @@ class ApiClientTests(unittest.TestCase):
 
 
 class SourceAndWriteContractTests(unittest.TestCase):
+    def test_mysql_cli_places_execute_after_overridden_port(self):
+        provider = lambda: [
+            "mysql",
+            "-hdb.example",
+            "-uuser",
+            "-psecret",
+            "-N",
+            "-B",
+            "-e",
+        ]
+        with mock.patch.object(sync, "_MYSQL_COMMAND_PROVIDER", provider):
+            command, env, secrets = sync.mysql_cli_command(sync.READ_PORT)
+        self.assertEqual(["-P", "63350", "-e"], command[-3:])
+        self.assertEqual(1, command.count("-e"))
+        self.assertNotIn("secret", " ".join(command))
+        self.assertEqual("secret", env["MYSQL_PWD"])
+        self.assertEqual(("secret",), secrets)
+
     def test_failed_request_state_round_trips_without_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "failed.json")

@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | 单表 DDL 与索引 | Codex | `001_create_ads_tiktok_minis_bid_protection_daily.sql` | 已完成 |
 | 动态范围、API 分批、金额校验与 upsert | Codex | 同步脚本 | 已完成 |
-| 幂等、失败隔离和脱敏测试 | Codex/QA | 测试模块 | 已完成（本地 19/19） |
+| 幂等、失败隔离和脱敏测试 | Codex/QA | 测试模块 | 已完成（本地 20/20） |
 | root cron、独立锁/日志与运维说明 | Codex | crontab、README | 已完成 |
 | Token 安全轮换、建表、发布和 60 天回填 | Codex | CPU `43.166.187.96` | 待部署 |
 | 生产读回与 `2026-09-02` 样本核对 | Codex/QA | `ads_ai`、脱敏日志 | 待部署 |

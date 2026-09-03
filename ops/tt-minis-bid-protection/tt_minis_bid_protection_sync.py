@@ -204,6 +204,9 @@ def mysql_cli_command(port=READ_PORT):
         if arg.startswith("--port=") or (arg.startswith("-P") and len(arg) > 2):
             index += 1
             continue
+        if arg in ("-e", "--execute") or arg.startswith("--execute="):
+            index += 1
+            continue
         safe.append(arg)
         index += 1
     inherited = env.get("MYSQL_PWD")
@@ -211,9 +214,7 @@ def mysql_cli_command(port=READ_PORT):
         secrets.append(inherited)
     if secrets:
         env["MYSQL_PWD"] = secrets[-1]
-    safe.extend(["-P", str(int(port))])
-    if "-e" not in safe and "--execute" not in safe:
-        safe.append("-e")
+    safe.extend(["-P", str(int(port)), "-e"])
     return safe, env, tuple(secret for secret in secrets if secret)
 
 
