@@ -231,6 +231,59 @@ class SourceAndWriteContractTests(unittest.TestCase):
             self.assertNotIn("%s = VALUES" % key, update_clause)
         self.assertIn("credit_amount = VALUES(credit_amount)", update_clause)
 
+    def test_target_write_commits_each_bounded_batch(self):
+        class FakeCursor(object):
+            def __init__(self):
+                self.calls = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def executemany(self, sql, values):
+                self.calls.append((sql, list(values)))
+
+        class FakeConnection(object):
+            def __init__(self):
+                self.cursor_value = FakeCursor()
+                self.commits = 0
+                self.rollbacks = 0
+
+            def cursor(self):
+                return self.cursor_value
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                self.rollbacks += 1
+
+            def close(self):
+                pass
+
+        connection = FakeConnection()
+        module = mock.Mock()
+        module.connect.return_value = connection
+        row = sample_candidate()
+        row.update(
+            protection_status="TARGET_MET",
+            status_detail="",
+            credit_amount_scaled=Decimal("0"),
+            credit_amount=Decimal("0.00000"),
+            currency="",
+        )
+        with mock.patch.object(sync.importlib, "import_module", return_value=module), mock.patch.object(
+            sync,
+            "mysql_connection_settings",
+            return_value={"host": "db", "port": 63353, "user": "u", "password": "p"},
+        ), mock.patch.object(sync, "WRITE_BATCH_SIZE", 2):
+            self.assertEqual(3, sync.write_history_rows([row, row, row]))
+        self.assertEqual(2, connection.commits)
+        self.assertEqual(0, connection.rollbacks)
+        self.assertEqual(sync.WRITE_MAX_STATEMENT_BYTES, connection.cursor_value.max_stmt_length)
+
     def test_merge_is_idempotent_on_business_key(self):
         old = sample_candidate()
         new = dict(old)

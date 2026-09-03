@@ -44,7 +44,7 @@ python3 tt_minis_bid_protection_sync.py --start-date 2026-09-02 --dry-run
 python3 tt_minis_bid_protection_sync.py --backfill-days 60
 ```
 
-Manual ranges use `--start-date YYYY-MM-DD` with optional `--end-date YYYY-MM-DD`. The normal root cron runs `--daily` once per day at `09:25 Asia/Shanghai` and uses its own `flock` lock and log. A partial API failure preserves successful upserts and exits with code `2` so operations do not confuse missing rows with zero compensation.
+Manual ranges use `--start-date YYYY-MM-DD` with optional `--end-date YYYY-MM-DD`. The normal root cron runs `--daily` once per day at `09:25 Asia/Shanghai` and uses its own `flock` lock and log. A partial API failure preserves successful upserts and exits with code `2` so operations do not confuse missing rows with zero compensation. Target writes keep one `63353` connection, use bounded multi-value statements, and commit each logical batch so completed progress survives a later write failure.
 
 ```cron
 25 9 * * * /usr/bin/flock -xn /tmp/tt_minis_bid_protection_sync.lock -c "cd /mnt/data-disk/tt-minis-bid-protection/current && /usr/bin/python3 tt_minis_bid_protection_sync.py --daily" >> /mnt/data-disk/tt-minis-bid-protection/logs/tt_minis_bid_protection_sync.log 2>&1

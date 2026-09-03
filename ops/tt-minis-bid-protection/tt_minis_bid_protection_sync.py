@@ -35,7 +35,8 @@ READ_PORT = 63350
 WRITE_PORT = 63353
 API_BATCH_SIZE = 200
 SOURCE_METADATA_CHUNK_SIZE = 2000
-WRITE_BATCH_SIZE = 500
+WRITE_BATCH_SIZE = 10000
+WRITE_MAX_STATEMENT_BYTES = 4 * 1024 * 1024
 DEFAULT_WORKERS = 6
 DEFAULT_TIMEOUT = 45
 DEFAULT_BACKFILL_DAYS = 60
@@ -736,11 +737,13 @@ def write_history_rows(rows):
         charset="utf8mb4",
         autocommit=False,
         connect_timeout=5,
-        read_timeout=60,
-        write_timeout=60,
+        read_timeout=300,
+        write_timeout=300,
     )
+    written = 0
     try:
         with conn.cursor() as cursor:
+            cursor.max_stmt_length = WRITE_MAX_STATEMENT_BYTES
             for part in chunks(rows, WRITE_BATCH_SIZE):
                 values = []
                 for row in part:
@@ -763,13 +766,17 @@ def write_history_rows(rows):
                         )
                     )
                 cursor.executemany(UPSERT_SQL, values)
-        conn.commit()
+                # Keep one connection but commit each bounded multi-value
+                # statement.  This avoids a day-sized undo transaction and
+                # preserves completed batches if a later batch fails.
+                conn.commit()
+                written += len(part)
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
-    return len(rows)
+    return written
 
 
 def sync_candidates(client, candidates, workers=DEFAULT_WORKERS, dry_run=False):

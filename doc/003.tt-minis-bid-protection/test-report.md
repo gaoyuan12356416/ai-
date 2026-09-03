@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-本地阶段通过，生产阶段进行中。需求、SA/QA 评审、DDL 静态检查及 20 项自动化测试已通过；生产回填及样本核对结果将在实际执行后补录，当前不作发布通过声明。
+本地阶段通过，生产阶段进行中。需求、SA/QA 评审、DDL 静态检查及 21 项自动化测试已通过；生产回填及样本核对结果将在实际执行后补录，当前不作发布通过声明。
 
 ## 测试范围
 
@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | 文档/设计评审 | 2 | 2 | 0 | 0 |
 | DDL 静态评审 | 3 | 3 | 0 | 0 |
-| 自动化测试 | 20 | 20 | 0 | 0 |
+| 自动化测试 | 21 | 21 | 0 | 0 |
 | 生产验收 | 0 | 0 | 0 | 0 |
 
 ## 缺陷情况
@@ -30,7 +30,7 @@
 - SA 测试评审：`sa-test-review.md`。
 - DDL 评审：`sa-code-review.md`。
 - `python -m py_compile`：同步脚本与 Token 轮换脚本通过。
-- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：20 项全部通过。
+- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：21 项全部通过。
 - DDL 静态检查：18 列、1 个唯一键、5 个二级索引、ASCII 注释全部通过。
 - `git diff --check`：通过。
 - 生产 SQL 读回、root cron 状态和样本结果待实际执行后补充。

@@ -26,6 +26,6 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：通过。
-- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：20/20 通过。
+- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：21/21 通过。
 - DDL 静态检查：18 列、1 个唯一键、5 个二级索引，注释全部 ASCII。
 - `git diff --check`：通过；生产读回待部署后补录。
