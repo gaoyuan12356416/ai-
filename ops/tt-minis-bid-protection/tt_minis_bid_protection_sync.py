@@ -35,8 +35,8 @@ READ_PORT = 63350
 WRITE_PORT = 63353
 API_BATCH_SIZE = 200
 SOURCE_METADATA_CHUNK_SIZE = 2000
-WRITE_BATCH_SIZE = 10000
-WRITE_MAX_STATEMENT_BYTES = 4 * 1024 * 1024
+WRITE_BATCH_SIZE = 500
+WRITE_MAX_STATEMENT_BYTES = 256 * 1024
 DEFAULT_WORKERS = 6
 DEFAULT_TIMEOUT = 45
 DEFAULT_BACKFILL_DAYS = 60
@@ -693,6 +693,9 @@ def fetch_history_task(client, task):
     return rows, [], len(set(candidate_map) - returned_ids)
 
 
+# Keep every item in the VALUES tuple as a parameter placeholder.  PyMySQL
+# otherwise falls back to one network round trip per row instead of a
+# multi-value INSERT, which is prohibitively slow across the production gate.
 UPSERT_SQL = """
 INSERT INTO ads_ai.ads_tiktok_minis_bid_protection_daily (
   record_date, product_id, product_name, minis_id,
@@ -703,7 +706,7 @@ INSERT INTO ads_ai.ads_tiktok_minis_bid_protection_daily (
   %s, %s, %s, %s,
   %s, %s, %s, %s, %s,
   %s, %s, %s,
-  %s, %s, NOW()
+  %s, %s, %s
 )
 ON DUPLICATE KEY UPDATE
   product_id = VALUES(product_id),
@@ -741,6 +744,7 @@ def write_history_rows(rows):
         write_timeout=300,
     )
     written = 0
+    sync_at = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     try:
         with conn.cursor() as cursor:
             cursor.max_stmt_length = WRITE_MAX_STATEMENT_BYTES
@@ -763,6 +767,7 @@ def write_history_rows(rows):
                             row["credit_amount_scaled"],
                             row["credit_amount"],
                             row["currency"],
+                            sync_at,
                         )
                     )
                 cursor.executemany(UPSERT_SQL, values)

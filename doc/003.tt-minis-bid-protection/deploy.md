@@ -52,12 +52,31 @@ crontab -l
 - `SUM(credit_amount_scaled) / 100000 = SUM(credit_amount)` 按币种成立。
 - 产品集合包含 3346、3380、3416；两个 `data_level` 分开计数。
 - `2026-09-02` DramaWaveMinis 仅以 Campaign 层按币种汇总，另输出明细和失败账户数。
-- `journalctl` 与进程 argv 不含新旧 Token、数据库密码或完整鉴权头。
+- 独立 cron 日志与进程 argv 不含新旧 Token、数据库密码或完整鉴权头。
+
+## 2026-09-03 实际部署记录
+
+已完成：
+
+- GitHub 精确 release：`223500167e17edbdc1a8c727c7a6851eaeb7495e`；旧 release `8ede1c8` 保留作为代码回滚点。
+- 自动化回归：22 项测试全部通过。
+- 生产 DDL：只读入口读回 18 列、1 个业务唯一键和 5 个二级索引，结构与版本库 DDL 一致。
+- Token 轮换：全量兼容 canary 覆盖产品 3346 的 356 个账户、3380 的 68 个账户、3416 的 148 个账户，共 572 个账户；Bid Protection status、history 和现有 Native Growth 在写入前后均通过。
+- SQLite 一致性备份：`/mnt/data-disk/tt-minis-bid-protection/backups/token/tt_business_api_tokens.sqlite3.20260903T041332Z.before_bid_protection`。
+- 两次旧写入性能试跑均已安全终止，随后确认目标表仍为 0 行；未留下半批数据。第二次试跑定位到 `NOW()` 使 PyMySQL `executemany` 退化为逐行写入，已改成全参数占位的 500 行批量提交实现。
+
+尚未完成：
+
+- 最近 60 天首次回填。
+- 同范围重复运行的幂等读回。
+- 三产品、Campaign/Ad Group 两层的最终落表覆盖检查。
+- 每日 `09:25` root cron 安装与自然触发。
+- DramaWaveMinis `2026-09-02` 金额、Campaign 明细及失败账户数输出。
 
 ## 回滚方案
 
 1. 先从 root crontab 删除且仅删除本任务的精确一行，并确认没有本任务进程持锁，不影响其他 TT 任务。
-2. 将 `current` 软链切回部署前精确提交并读回软链目标。
+2. 将 `current` 软链切回已保留的旧 release `8ede1c8` 并读回软链目标；当前 release 为 `223500167e17edbdc1a8c727c7a6851eaeb7495e`。
 3. Token 新值不可用时，仅用备份值/旧哈希做单行 CAS 恢复并重跑三类只读 canary；不得用整库覆盖，以免丢失并发更新。
 4. 已写赔付明细为可追溯事实，代码回滚默认保留表和数据，不执行 `DROP TABLE` 或批量删除。
 5. 记录备份目录、回滚提交、Token 哈希（非值）、服务状态和验证结果。

@@ -231,6 +231,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
             self.assertNotIn("%s = VALUES" % key, update_clause)
         self.assertIn("credit_amount = VALUES(credit_amount)", update_clause)
 
+    def test_upsert_is_eligible_for_pymysql_multi_value_batching(self):
+        cursors = importlib.import_module("pymysql.cursors")
+        self.assertIsNotNone(cursors.RE_INSERT_VALUES.match(sync.UPSERT_SQL))
+
     def test_target_write_commits_each_bounded_batch(self):
         class FakeCursor(object):
             def __init__(self):
@@ -283,6 +287,7 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertEqual(2, connection.commits)
         self.assertEqual(0, connection.rollbacks)
         self.assertEqual(sync.WRITE_MAX_STATEMENT_BYTES, connection.cursor_value.max_stmt_length)
+        self.assertTrue(all(len(values[0]) == 15 for _, values in connection.cursor_value.calls))
 
     def test_merge_is_idempotent_on_business_key(self):
         old = sample_candidate()

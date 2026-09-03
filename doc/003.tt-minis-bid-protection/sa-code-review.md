@@ -2,7 +2,7 @@
 
 ## 结论
 
-本地静态评审通过，未发现阻塞问题；生产 DDL 读回和真实接口结果仍须在部署阶段验收。
+本地静态评审通过；生产 DDL 读回和共享 Token 全量兼容 canary 已通过。首次数据回填及查询验收尚未执行。
 
 ## 评审范围
 
@@ -22,10 +22,14 @@
 | CR-007 | 高 | 历史 API 失败 | 无表内记录的失败对象不会进入待结算回刷 | 数据盘保存脱敏失败候选，后续 `--daily` 自动重试 | 已解决 |
 | CR-008 | 高 | Token 权限覆盖 | 每产品单账户 canary 不能证明共享 Token 无缩权 | 冻结旧 Token Native Growth 成功账户全集，新 Token 对全集执行三接口校验 | 已解决 |
 | CR-009 | 中 | 并发回滚 | 仅按 Token 哈希回滚可能覆盖并发元数据更新 | 更新与回滚都比较完整预期行，且只恢复本次修改字段 | 已解决 |
+| CR-010 | 高 | 生产写入性能 | 旧实现提交粒度过细，首次试跑不能在可接受时间内完成 | 安全终止且确认表为 0 行后，改为批量提交并重新发布 | 已解决 |
 
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：通过。
-- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：21/21 通过。
+- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：22/22 通过。
 - DDL 静态检查：18 列、1 个唯一键、5 个二级索引，注释全部 ASCII。
-- `git diff --check`：通过；生产读回待部署后补录。
+- `git diff --check`：通过。
+- 生产 DDL 读回：18 列、1 个业务唯一键、5 个二级索引，与版本库 DDL 一致。
+- Token 全量兼容 canary：3346/356 账户、3380/68 账户、3416/148 账户，共 572 账户；status/history/Native Growth 写前与写后均通过。
+- 生产 release：`223500167e17edbdc1a8c727c7a6851eaeb7495e`；旧 release `8ede1c8` 已保留。
