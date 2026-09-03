@@ -52,5 +52,10 @@
 - 线上修复备份状态：`/mnt/data-disk/drama-synthesis-cpu/backups/20260903T142000+0800-runtime-js-missing-pre-7ac4b55a402c90a590610505d2280f5aec6c6afc`（修复前目标为 `absent`）。
 - 运行时 SHA-256：`b2723e89478e30159800799cc186b0fb406828bff18df6ac342a6787e88cbf99`；GitHub release、服务静态目录、Nginx 静态目录和公网响应一致。
 - 永久防复发：`deploy/live_feature_guard.json` 将该脚本加入 `drama_synthesis` 必备候选及必备公网文件。
+- 防复发提交：`c7920b42c298954dca4d74d3a8451e148da04e2e`，已推送 GitHub 并从该精确提交同步生产守卫清单。
+- 守卫清单 SHA-256：`dcb4701453f3e4801c067dbe86abe21b3ea92bc8c9ea3180d0c09320264ed8b3`；release 与生产服务目录一致。
+- 生产守卫：`LIVE FEATURE GUARD PASSED: 1 feature(s), 5 file rule(s)`。
+- 服务复核：`drama-material-api.service`、`drama-youtube-publish-worker.service` 均为 `active/running`，`NRestarts=0`；`/api/ui/topbar` 返回 HTTP 200。
+- 守卫清单备份：`/mnt/data-disk/drama-synthesis-cpu/backups/20260903T144000+0800-runtime-guard-pre-c7920b4/live_feature_guard.json`。
 
 回滚：从上述备份目录分别恢复 `root-static/*.html` 到 `/root/drama_material_service/static/`，恢复 `nginx-html/*.html` 到 `/usr/share/nginx/html/`，再校验备份 `SHA256SUMS` 与公网 HTTP 200；无需恢复数据库或重启服务。

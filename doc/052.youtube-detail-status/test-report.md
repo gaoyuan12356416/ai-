@@ -42,3 +42,4 @@ BUG-001、BUG-002 已修复并关闭。
 - 公网响应 SHA-256 与 GitHub release、服务器四个静态文件一致。
 - API 与 YouTube Worker 均保持 `active`，队列为 0，未发生测试发布。
 - 遗漏运行时脚本导致的空白壳页面已补发修复；公网运行时返回 HTTP 200，SHA-256 与精确 GitHub release 一致。
+- 生产 `drama_synthesis` 守卫校验通过 5 条文件规则；API 顶栏接口返回 HTTP 200，API 与 YouTube Worker 均为 `active/running` 且无重启。
