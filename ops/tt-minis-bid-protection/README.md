@@ -1,6 +1,6 @@
 # TT Minis bid protection sync
 
-This module imports TikTok Bid Protection daily history for every dynamically discovered TT Minis product into one table:
+This module imports TikTok Bid Protection Campaign history for the operator-approved TT Minis account pool into one table:
 
 `ads_ai.ads_tiktok_minis_bid_protection_daily`
 
@@ -9,11 +9,21 @@ It does not provide a web page, an internal HTTP API, Feishu delivery, or curren
 ## Data contract
 
 - Grain: `record_date + advertiser_id + data_level + query_id`.
-- Levels: `CAMPAIGN` and `ADGROUP` are stored separately and must never be added together.
+- Level: only `CAMPAIGN` is requested and stored. `query_id` and `campaign_id` are the same TikTok Campaign ID; `adgroup_id` stays `NULL`.
 - Amount: `credit_amount_scaled` is the raw API integer; `credit_amount` is exactly the raw value divided by `100000`.
 - Currency: kept as returned by TikTok; an empty value is allowed when TikTok returns no currency for zero credit.
-- Product scope: starts from every positive-spend object for the day, then proves membership through `auto_created_data.publish_queue_id -> queue` using a numeric `product_id` and non-empty `minis_id`. `show_name` is only a saved snapshot and is never a filter. Current expected products are 3346, 3380, and 3416; later valid TT Minis products require no code change.
-- Refresh: the previous day plus `UNDER_PROTECTION` and `CONFIRMING` rows still inside the 60-day API window.
+- Account scope: exactly the distinct account IDs returned by the approved SQL below. There is no Campaign-product or publish-queue filter.
+
+  ```sql
+  SELECT DISTINCT account_id
+  FROM kunlunads_dev.ads_accounts_setting
+  WHERE account_stats like '%minis_id%'
+  and platform_id='3';
+  ```
+
+- Required Campaign IDs: TikTok rejects a history request without `query_ids`. For each date the script therefore enumerates positive-spend Campaign IDs only inside the approved account pool from `ads_tiktok_insights category=0`, then sends those IDs in bounded per-account API batches. They are transport parameters, not product-scope filters.
+- Product metadata: account `account_stats.minis_id` maps to DramaWaveMinis `3346`, BestReelsMinis `3380`, or MyShort `3416`. Product `1479` is not a TT mini-program product and is never used. An unknown or conflicting `minis_id` fails the run instead of silently excluding an account.
+- Refresh: `--daily` rebuilds the latest 14 completed Beijing calendar days. Existing terminal rows (`INELIGIBLE`, `PAYMENT_COMPLETE`, `TARGET_MET`) are not requested again; non-terminal rows are refreshed.
 - Sparse history: a successful history response may omit requested objects; those objects are counted as `not_applicable` for that date and do not form a dead retry queue. Only failed API/DB batches go to the mode-0600 data-disk retry state. The status endpoint is used for Token compatibility validation, not to reinterpret a past day's sparse history. Successful facts are never deleted.
 
 The DDL is in `001_create_ads_tiktok_minis_bid_protection_daily.sql`. Apply it once through the approved `ads_ai` write entry and validate it through the read-only entry before running the sync.
@@ -37,17 +47,17 @@ python3 -m py_compile ops/tt-minis-bid-protection/tt_minis_bid_protection_sync.p
 python3 -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'
 ```
 
-Run a read-only manual date first, then perform the initial 60-day backfill:
+Run a read-only manual date first, then perform the initial 30-day backfill:
 
 ```bash
 python3 tt_minis_bid_protection_sync.py --start-date 2026-09-02 --dry-run
-python3 tt_minis_bid_protection_sync.py --backfill-days 60
+python3 tt_minis_bid_protection_sync.py --backfill-days 30
 ```
 
-Manual ranges use `--start-date YYYY-MM-DD` with optional `--end-date YYYY-MM-DD`. The normal root cron runs `--daily` once per day at `09:25 Asia/Shanghai` and uses its own `flock` lock and log. A partial API failure preserves successful upserts and exits with code `2` so operations do not confuse missing rows with zero compensation. Target writes keep one `63353` connection, use bounded multi-value statements, and commit each logical batch so completed progress survives a later write failure.
+Manual ranges use `--start-date YYYY-MM-DD` with optional `--end-date YYYY-MM-DD` and are limited to 30 completed days. The root cron runs `--daily` at `09:25` and `21:25 Asia/Shanghai`, using one `flock` lock and log. A partial API failure preserves successful upserts and exits with code `2` so operations do not confuse missing rows with zero compensation. Target writes keep one `63353` connection, use bounded multi-value statements, and commit each logical batch so completed progress survives a later write failure.
 
 ```cron
-25 9 * * * /usr/bin/flock -xn /tmp/tt_minis_bid_protection_sync.lock -c "cd /mnt/data-disk/tt-minis-bid-protection/current && /usr/bin/python3 tt_minis_bid_protection_sync.py --daily" >> /mnt/data-disk/tt-minis-bid-protection/logs/tt_minis_bid_protection_sync.log 2>&1
+25 9,21 * * * /usr/bin/flock -xn /tmp/tt_minis_bid_protection_sync.lock -c "cd /mnt/data-disk/tt-minis-bid-protection/current && /usr/bin/python3 tt_minis_bid_protection_sync.py --daily" >> /mnt/data-disk/tt-minis-bid-protection/logs/tt_minis_bid_protection_sync.log 2>&1
 ```
 
 ## Query examples
@@ -92,7 +102,7 @@ Pending records due for a refresh:
 SELECT record_date, advertiser_id, data_level, query_id
 FROM ads_ai.ads_tiktok_minis_bid_protection_daily
 WHERE protection_status IN ('UNDER_PROTECTION', 'CONFIRMING')
-  AND record_date >= CURRENT_DATE - INTERVAL 60 DAY
+  AND record_date >= CURRENT_DATE - INTERVAL 14 DAY
 ORDER BY record_date, advertiser_id, data_level, query_id;
 ```
 
@@ -101,4 +111,4 @@ Failed request candidates are retained in `/mnt/data-disk/tt-minis-bid-protectio
 
 ## Rollback
 
-Remove only this exact cron line, switch `current` back to the previous commit, and keep the fact table and imported facts. If token rollback is needed, restore only the `native_growth_default` row with a compare-and-swap transaction and re-run Bid Protection status/history plus Native Growth read-only canaries; never overwrite the entire SQLite database.
+Remove only this exact cron line, restore the saved crontab, switch `current` back to the previous release, and restore the pre-rebuild table export only if the replacement dataset itself must be rolled back. If token rollback is needed, restore only the `native_growth_default` row with a compare-and-swap transaction and re-run Bid Protection status/history plus Native Growth read-only canaries; never overwrite the entire SQLite database.

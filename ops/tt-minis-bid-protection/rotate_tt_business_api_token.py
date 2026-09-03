@@ -146,7 +146,7 @@ def candidate_pool(day):
         if product_id not in by_product:
             continue
         key = (product_id, row["advertiser_id"])
-        if key in seen or not str(row.get("source_adgroup_id") or "").isdigit():
+        if key in seen:
             continue
         seen.add(key)
         by_product[product_id].append(row)

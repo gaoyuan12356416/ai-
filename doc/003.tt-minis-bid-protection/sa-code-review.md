@@ -2,7 +2,7 @@
 
 ## 结论
 
-本地静态评审通过；生产 DDL 读回和共享 Token 全量兼容 canary 已通过。首次数据回填及查询验收尚未执行。
+修订版本地静态评审通过；生产 DDL 读回和共享 Token 全量兼容 canary 已通过。30 天数据重建及查询验收尚未执行。
 
 ## 评审范围
 
@@ -24,13 +24,18 @@
 | CR-009 | 中 | 并发回滚 | 仅按 Token 哈希回滚可能覆盖并发元数据更新 | 更新与回滚都比较完整预期行，且只恢复本次修改字段 | 已解决 |
 | CR-010 | 高 | 生产写入性能 | 旧实现提交粒度过细，首次试跑不能在可接受时间内完成 | 安全终止且确认表为 0 行后，改为批量提交并重新发布 | 已解决 |
 | CR-011 | 中 | 终态重复请求 | fresh/retry 范围可能再次包含已落表终态键 | 每日按完整业务键读回终态并在调用 API 前排除，同时清理相同 retry 键 | 已解决 |
+| CR-012 | 高 | 账户级请求 | TikTok 历史接口是否允许省略 Campaign ID 未验证 | 生产探测确认 `query_ids` 必填且无 `ADVERTISER` 层，保留最小 Campaign 枚举兼容层 | 已解决 |
+| CR-013 | 高 | 范围收缩 | 旧发布队列/产品过滤可能与用户确认的账户 SQL 不一致 | 账户 SQL 作为唯一业务范围，候选 SQL 仅在该账户集合内取得 API 必填 Campaign ID | 已解决 |
+| CR-014 | 中 | 产品字段 | 账户级范围没有直接提供内部产品 ID | 由 `account_stats.minis_id` 映射 3346/3380/3416，排除 1479，未知或冲突值失败关闭 | 已解决 |
+| CR-015 | 中 | 调度边界 | `--daily` 旧语义仅处理昨天 | 改为最近 14 个完整北京时间自然日，并新增固定时钟单测 | 已解决 |
 
 ## 编译 / 验证结果
 
 - `python -m py_compile ...`：通过。
-- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：24/24 通过。
+- `python -m unittest discover -s ops/tt-minis-bid-protection -p 'test_*.py'`：27/27 通过。
 - DDL 静态检查：18 列、1 个唯一键、5 个二级索引，注释全部 ASCII。
 - `git diff --check`：通过。
 - 生产 DDL 读回：18 列、1 个业务唯一键、5 个二级索引，与版本库 DDL 一致。
 - Token 全量兼容 canary：3346/356 账户、3380/68 账户、3416/148 账户，共 572 账户；status/history/Native Growth 写前与写后均通过。
 - 生产 release：`8668e31373e592b34538fc911d88fa14caa2fa28`；旧 release `2235001` 与 `8ede1c8` 已保留。
+- 生产只读 API 契约探测：省略 `query_ids` 返回 40002、空数组返回 52404、`ADVERTISER` 层被拒绝且提示只允许 `CAMPAIGN/ADGROUP`。

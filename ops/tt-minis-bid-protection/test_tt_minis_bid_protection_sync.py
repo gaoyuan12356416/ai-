@@ -111,19 +111,18 @@ class AmountAndContractTests(unittest.TestCase):
     def test_201_ids_split_200_plus_1(self):
         self.assertEqual([200, 1], [len(part) for part in sync.chunks(list(range(201)), 200)])
 
-    def test_history_tasks_never_mix_advertisers_or_levels(self):
+    def test_history_tasks_never_mix_advertisers(self):
         rows = []
         for advertiser in ("1", "2"):
-            for level in ("CAMPAIGN", "ADGROUP"):
-                for index in range(3):
-                    item = sample_candidate(level, str(index + 1))
-                    item["advertiser_id"] = advertiser
-                    rows.append(item)
+            for index in range(3):
+                item = sample_candidate("CAMPAIGN", str(index + 1))
+                item["advertiser_id"] = advertiser
+                rows.append(item)
         tasks = sync.history_tasks(rows)
-        self.assertEqual(4, len(tasks))
+        self.assertEqual(2, len(tasks))
         for day, advertiser, level, items in tasks:
             self.assertEqual({advertiser}, {item["advertiser_id"] for item in items})
-            self.assertEqual({level}, {item["data_level"] for item in items})
+            self.assertEqual("CAMPAIGN", level)
             self.assertEqual({day}, {item["record_date"] for item in items})
 
 
@@ -201,7 +200,7 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertEqual(1, len(loaded))
         self.assertEqual(("2026-09-02", "900", "CAMPAIGN", "100"), sync.candidate_key(loaded[0]))
 
-    def test_insight_query_keeps_product_date_index_prefix(self):
+    def test_insight_query_uses_exact_account_scope_and_campaign_only(self):
         captured = []
 
         def fake_query(sql, timeout=0):
@@ -209,21 +208,53 @@ class SourceAndWriteContractTests(unittest.TestCase):
             return []
 
         with mock.patch.object(sync, "run_mysql_query", side_effect=fake_query):
-            sync.fetch_insight_candidates("2026-09-02", "CAMPAIGN")
+            sync.fetch_insight_candidates(
+                "2026-09-02",
+                "CAMPAIGN",
+                {"900": sync.MINIS_PRODUCT_MAP["mn1yi38ikcrqhitt"]},
+            )
         sql = captured[0]
         self.assertIn("FORCE INDEX (dt)", sql)
         self.assertNotIn("product IN", sql)
-        self.assertIn("category = 0", sql)
-        self.assertIn("dt = '2026-09-02'", sql)
-        self.assertIn("HAVING SUM(stat_cost) > 0", sql)
+        self.assertIn("i.category = 0", sql)
+        self.assertIn("i.dt = '2026-09-02'", sql)
+        self.assertIn("SELECT DISTINCT account_id", sql)
+        self.assertIn("account_stats like '%minis_id%'", sql)
+        self.assertIn("platform_id='3'", sql)
+        self.assertIn("HAVING SUM(i.stat_cost) > 0", sql)
 
-    def test_metadata_query_is_as_of_day_and_index_bounded(self):
-        sql = sync.scope_metadata_sql(["100", "101"], "2026-09-02", "CAMPAIGN")
-        self.assertIn("FORCE INDEX (campaign_id)", sql)
-        self.assertIn("ac.campaign_id IN ('100','101')", sql)
-        self.assertIn("ac.created_at < '2026-09-03'", sql)
-        self.assertIn("q.minis_id", sql)
-        self.assertNotIn("CAST(ac.campaign_id AS CHAR) =", sql)
+    def test_account_scope_statement_matches_operator_sql(self):
+        normalized = " ".join(sync.TARGET_ACCOUNT_SQL.split()).lower()
+        self.assertEqual(
+            "select distinct account_id from kunlunads_dev.ads_accounts_setting "
+            "where account_stats like '%minis_id%' and platform_id='3'",
+            normalized,
+        )
+
+    def test_target_account_metadata_maps_all_scoped_accounts(self):
+        with mock.patch.object(
+            sync,
+            "run_mysql_query",
+            side_effect=[
+                [["900"], ["901"]],
+                [
+                    ["900", "mn1yi38ikcrqhitt"],
+                    ["901", "mnuh3eucymp1wqwt"],
+                ],
+            ],
+        ):
+            metadata = sync.fetch_target_account_metadata()
+        self.assertEqual(3346, metadata["900"]["product_id"])
+        self.assertEqual(3380, metadata["901"]["product_id"])
+
+    def test_unknown_minis_id_fails_closed(self):
+        with mock.patch.object(
+            sync,
+            "run_mysql_query",
+            side_effect=[[["900"]], [["900", "unknown-minis"]]],
+        ):
+            with self.assertRaises(sync.SyncError):
+                sync.fetch_target_account_metadata()
 
     def test_unique_upsert_never_changes_business_key(self):
         update_clause = sync.UPSERT_SQL.split("ON DUPLICATE KEY UPDATE", 1)[1]
@@ -340,6 +371,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
         with mock.patch.object(
             sync, "beijing_today", return_value=sync.parse_day("2026-09-03")
         ), mock.patch.object(sync, "load_access_token", return_value="unit-test-secret"), mock.patch.object(
+            sync,
+            "fetch_target_account_metadata",
+            return_value={"900": sync.MINIS_PRODUCT_MAP["mn1yi38ikcrqhitt"]},
+        ), mock.patch.object(
             sync, "build_day_candidates", return_value=[candidate]
         ), mock.patch.object(
             sync, "fetch_terminal_candidate_keys", return_value={sync.candidate_key(candidate)}
@@ -352,6 +387,42 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertEqual([], call.call_args.args[1])
         complete = [fields for event, fields in events if event == "sync_complete"][0]
         self.assertEqual(1, complete["terminal_skipped"])
+
+    def test_daily_mode_refreshes_latest_14_completed_days(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = mock.Mock(
+                daily=True,
+                backfill_days=None,
+                start_date=None,
+                end_date=None,
+                token_db="unused",
+                token_key="unused",
+                api_timeout=1,
+                workers=1,
+                dry_run=True,
+                retry_state=os.path.join(directory, "failed.json"),
+            )
+            dates = []
+
+            def build(day, data_level, metadata):
+                dates.append(day)
+                return []
+
+            with mock.patch.object(
+                sync, "beijing_today", return_value=sync.parse_day("2026-09-03")
+            ), mock.patch.object(
+                sync, "load_access_token", return_value="unit-test-secret"
+            ), mock.patch.object(
+                sync,
+                "fetch_target_account_metadata",
+                return_value={"900": sync.MINIS_PRODUCT_MAP["mn1yi38ikcrqhitt"]},
+            ), mock.patch.object(
+                sync, "build_day_candidates", side_effect=build
+            ), mock.patch.object(sync, "emit"):
+                self.assertEqual(0, sync.run_sync(args))
+        self.assertEqual(14, len(dates))
+        self.assertEqual("2026-08-20", dates[0])
+        self.assertEqual("2026-09-02", dates[-1])
 
     def test_partial_api_failure_is_logged_and_exits_nonzero(self):
         args = mock.Mock(
@@ -377,6 +448,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
         events = []
         with mock.patch.object(sync, "beijing_today", return_value=sync.parse_day("2026-09-03")), mock.patch.object(
             sync, "load_access_token", return_value="unit-test-secret"
+        ), mock.patch.object(
+            sync,
+            "fetch_target_account_metadata",
+            return_value={"900": sync.MINIS_PRODUCT_MAP["mn1yi38ikcrqhitt"]},
         ), mock.patch.object(sync, "build_day_candidates", return_value=[sample_candidate()]), mock.patch.object(
             sync,
             "sync_candidates",
@@ -415,6 +490,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
             with mock.patch.object(
                 sync, "beijing_today", return_value=sync.parse_day("2026-09-03")
             ), mock.patch.object(sync, "load_access_token", return_value="unit-test-secret"), mock.patch.object(
+                sync,
+                "fetch_target_account_metadata",
+                return_value={"900": sync.MINIS_PRODUCT_MAP["mn1yi38ikcrqhitt"]},
+            ), mock.patch.object(
                 sync, "build_day_candidates", return_value=[sample_candidate()]
             ), mock.patch.object(sync, "fetch_terminal_candidate_keys", return_value=set()), mock.patch.object(
                 sync, "sync_candidates", side_effect=sync.SyncError("write failed")

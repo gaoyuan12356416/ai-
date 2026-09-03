@@ -15,8 +15,8 @@
 
 - 鉴权通过请求头 `Access-Token` 传递；任何日志、示例或错误不得包含其值。
 - `advertiser_id` 为必填广告账户 ID。
-- `data_level` 仅使用 `CAMPAIGN` 或 `ADGROUP`。
-- `query_ids` 必须全部属于同一个 `advertiser_id`。
+- 本任务的 `data_level` 仅使用 `CAMPAIGN`。
+- `query_ids` 必填且必须全部属于同一个 `advertiser_id`。生产只读探测确认：省略该参数返回 `40002`，空数组返回 `52404`；接口不接受 `ADVERTISER` 层级。
 
 ### 状态接口
 
@@ -26,13 +26,13 @@
 ### 历史接口
 
 - 请求包含 `advertiser_id`、`data_level`、`query_ids`、`start_date`、`end_date`。
-- 仅允许查询最近 60 天；任务按单日调用。批量必须满足 `query_ids` 数量乘以日期天数不超过 200。
+- TikTok 接口能力窗口仍可达到最近 60 天，但本任务策略限制为最近 30 个完整自然日，并按单日调用；单批最多 200 个 Campaign ID。
 - 明细字段映射：
 
 | TikTok 字段 | 落表字段 | 处理 |
 | --- | --- | --- |
 | `record_date` | `record_date` | 按接口自然日保存 |
-| `data_level` | `data_level` | 仅 `CAMPAIGN` / `ADGROUP` |
+| `data_level` | `data_level` | 仅 `CAMPAIGN` |
 | `query_id` | `query_id` | 原样字符串保存 |
 | `bid_protection_daily_status` | `protection_status` | 原样枚举保存 |
 | `status_detail` | `status_detail` | 原样文本保存，可为空 |
@@ -56,5 +56,5 @@
 
 - 状态枚举当前包括 `UNDER_PROTECTION`、`CONFIRMING`、`INELIGIBLE`、`PAYMENT_COMPLETE`、`TARGET_MET`；未知新枚举拒绝写入并报错，待契约评审后再支持，避免误判待结算状态。
 - `credit_amount` 的 `100000` 缩放是接口契约，不受币种小数位影响。
-- 上游按日更新，历史记录可能延迟转为终态；同步任务只主动回刷明确的两个待结算状态。
+- 上游按日更新，历史记录可能延迟转为终态；每天两次的任务在最近 14 天窗口内回刷明确的两个待结算状态。
 - TikTok 修改字段或窗口限制时，先更新契约测试再调整同步逻辑。

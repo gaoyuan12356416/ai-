@@ -34,22 +34,31 @@ DEFAULT_RETRY_STATE = "/mnt/data-disk/tt-minis-bid-protection/state/failed_reque
 READ_PORT = 63350
 WRITE_PORT = 63353
 API_BATCH_SIZE = 200
-SOURCE_METADATA_CHUNK_SIZE = 2000
 WRITE_BATCH_SIZE = 500
 WRITE_MAX_STATEMENT_BYTES = 256 * 1024
 DEFAULT_WORKERS = 6
 DEFAULT_TIMEOUT = 45
-DEFAULT_BACKFILL_DAYS = 60
+DEFAULT_BACKFILL_DAYS = 30
+DEFAULT_REFRESH_DAYS = 14
 
 NON_TERMINAL_STATUSES = ("UNDER_PROTECTION", "CONFIRMING")
 TERMINAL_STATUSES = ("INELIGIBLE", "PAYMENT_COMPLETE", "TARGET_MET")
 VALID_DAILY_STATUSES = set(NON_TERMINAL_STATUSES + TERMINAL_STATUSES)
-VALID_DATA_LEVELS = ("CAMPAIGN", "ADGROUP")
+VALID_DATA_LEVELS = ("CAMPAIGN",)
 RETRYABLE_API_CODES = {40016, 40100, 40133, 50000, 50002, 60001}
-LEVEL_CONFIG = {
-    "CAMPAIGN": {"category": 0, "object_column": "campaign_id", "index": "campaign_id"},
-    "ADGROUP": {"category": 1, "object_column": "adset_id", "index": "adset_id"},
+MINIS_PRODUCT_MAP = {
+    "mn1yi38ikcrqhitt": {"product_id": 3346, "product_name": "DramaWaveMinis"},
+    "mnuh3eucymp1wqwt": {"product_id": 3380, "product_name": "BestReelsMinis"},
+    "mncipqycpde6px0l": {"product_id": 3416, "product_name": "MyShort"},
 }
+
+# Keep this statement byte-for-byte aligned with the operator-approved scope.
+TARGET_ACCOUNT_SQL = """
+SELECT DISTINCT account_id
+FROM kunlunads_dev.ads_accounts_setting
+WHERE account_stats like '%minis_id%'
+and platform_id='3'
+"""
 
 _MYSQL_COMMAND_PROVIDER = None
 _THREAD_LOCAL = threading.local()
@@ -287,189 +296,133 @@ def mysql_connection_settings(port=WRITE_PORT):
     return settings
 
 
-def fetch_insight_candidates(day, data_level):
+def account_metadata_sql(account_ids):
+    return """
+    SELECT
+      CAST(account_id AS CHAR) AS advertiser_id,
+      COALESCE(JSON_UNQUOTE(JSON_EXTRACT(account_stats, '$.minis_id')), '') AS minis_id
+    FROM kunlunads_dev.ads_accounts_setting
+    WHERE account_id IN {account_ids}
+      AND account_stats like '%minis_id%'
+      AND platform_id='3'
+    ORDER BY account_id
+    """.format(account_ids=sql_in(account_ids))
+
+
+def fetch_target_account_metadata():
+    """Return the exact operator-approved account scope with minis metadata."""
+    account_ids = sorted(
+        {
+            normalize_id(row[0], "account_id")
+            for row in run_mysql_query(TARGET_ACCOUNT_SQL, timeout=180)
+            if row and str(row[0]).strip()
+        }
+    )
+    if not account_ids:
+        raise SyncError("the approved TT Minis account query returned no accounts")
+
+    minis_by_account = collections.defaultdict(set)
+    for part in chunks(account_ids, 2000):
+        for row in run_mysql_query(account_metadata_sql(part), timeout=180):
+            if len(row) != 2:
+                continue
+            advertiser_id = normalize_id(row[0], "advertiser_id")
+            minis_id = str(row[1] or "").strip()
+            if minis_id and minis_id.upper() != "NULL":
+                minis_by_account[advertiser_id].add(minis_id)
+
+    missing = [account_id for account_id in account_ids if not minis_by_account.get(account_id)]
+    conflicts = {
+        account_id: sorted(values)
+        for account_id, values in minis_by_account.items()
+        if len(values) != 1
+    }
+    unknown = sorted(
+        {
+            next(iter(values))
+            for values in minis_by_account.values()
+            if len(values) == 1 and next(iter(values)) not in MINIS_PRODUCT_MAP
+        }
+    )
+    if missing or conflicts or unknown:
+        raise SyncError(
+            "TT Minis account metadata is incomplete: missing=%d conflicts=%d unknown_minis=%s"
+            % (len(missing), len(conflicts), ",".join(unknown) or "<none>")
+        )
+
+    metadata = {}
+    for account_id in account_ids:
+        minis_id = next(iter(minis_by_account[account_id]))
+        product = MINIS_PRODUCT_MAP[minis_id]
+        metadata[account_id] = {
+            "product_id": int(product["product_id"]),
+            "product_name": product["product_name"],
+            "minis_id": minis_id,
+        }
+    return metadata
+
+
+def fetch_insight_candidates(day, data_level="CAMPAIGN", account_metadata=None):
+    """Enumerate only the Campaign IDs TikTok requires for scoped accounts."""
     level = str(data_level).upper()
-    if level not in VALID_DATA_LEVELS:
-        raise SyncError("unsupported data level: %s" % data_level)
+    if level != "CAMPAIGN":
+        raise SyncError("only CAMPAIGN data level is supported")
     parse_day(day)
-    category = LEVEL_CONFIG[level]["category"]
-    adgroup_select = "CAST(adgroup_id AS CHAR)" if level == "ADGROUP" else "''"
-    adgroup_group = ", adgroup_id" if level == "ADGROUP" else ""
-    adgroup_filter = "AND adgroup_id <> 0" if level == "ADGROUP" else ""
+    metadata = account_metadata if account_metadata is not None else fetch_target_account_metadata()
+    if not metadata:
+        raise SyncError("target account metadata is empty")
     sql = """
     SELECT
-      CAST(advertiser_id AS CHAR) AS advertiser_id,
-      CAST(campaign_id AS CHAR) AS campaign_id,
-      {adgroup_select} AS adgroup_id,
-      ROUND(SUM(stat_cost), 6) AS spend
-    FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX (dt)
-    WHERE dt = {day}
-      AND category = {category}
-      AND advertiser_id <> ''
-      AND campaign_id <> 0
-      {adgroup_filter}
-    GROUP BY advertiser_id, campaign_id{adgroup_group}
-    HAVING SUM(stat_cost) > 0
-    """.format(
-        adgroup_select=adgroup_select,
-        category=category,
-        day=sql_quote(day),
-        adgroup_filter=adgroup_filter,
-        adgroup_group=adgroup_group,
-    )
+      CAST(i.advertiser_id AS CHAR) AS advertiser_id,
+      CAST(i.campaign_id AS CHAR) AS campaign_id,
+      ROUND(SUM(i.stat_cost), 6) AS spend
+    FROM kunlunads_dev.ads_tiktok_insights i FORCE INDEX (dt)
+    STRAIGHT_JOIN (
+      SELECT DISTINCT account_id
+      FROM kunlunads_dev.ads_accounts_setting
+      WHERE account_stats like '%minis_id%'
+        AND platform_id='3'
+    ) target_accounts
+      ON CAST(target_accounts.account_id AS CHAR) = i.advertiser_id
+    WHERE i.dt = {day}
+      AND i.category = 0
+      AND i.advertiser_id <> ''
+      AND i.campaign_id <> 0
+    GROUP BY i.advertiser_id, i.campaign_id
+    HAVING SUM(i.stat_cost) > 0
+    """.format(day=sql_quote(day))
     candidates = []
     for row in run_mysql_query(sql, timeout=300):
-        if len(row) != 4:
+        if len(row) != 3:
             continue
-        advertiser_id, campaign_id, adgroup_id, spend = row
+        advertiser_id, campaign_id, spend = row
         try:
             advertiser_id = normalize_id(advertiser_id, "advertiser_id")
             campaign_id = normalize_id(campaign_id, "campaign_id")
-            if level == "ADGROUP":
-                adgroup_id = normalize_id(adgroup_id, "adgroup_id")
         except SyncError:
             continue
-        candidates.append(
-            {
-                "record_date": day,
-                "advertiser_id": advertiser_id,
-                "data_level": level,
-                "query_id": campaign_id if level == "CAMPAIGN" else adgroup_id,
-                "campaign_id": campaign_id,
-                "adgroup_id": adgroup_id if level == "ADGROUP" else None,
-                "source_adgroup_id": adgroup_id or "",
-                "spend": str(spend or "0"),
-            }
-        )
+        account = metadata.get(advertiser_id)
+        if not account:
+            raise SyncError("insight query returned an account outside the approved scope")
+        candidate = {
+            "record_date": day,
+            "advertiser_id": advertiser_id,
+            "data_level": "CAMPAIGN",
+            "query_id": campaign_id,
+            "campaign_id": campaign_id,
+            "adgroup_id": None,
+            "source_adgroup_id": "",
+            "spend": str(spend or "0"),
+        }
+        candidate.update(account)
+        candidates.append(candidate)
     return candidates
 
 
-def scope_metadata_sql(object_ids, day, data_level):
-    level = str(data_level).upper()
-    config = LEVEL_CONFIG[level]
-    object_column = config["object_column"]
-    index_hint = config["index"]
-    cutoff = format_day(parse_day(day) + timedelta(days=1))
-    return """
-    SELECT
-      CAST(ac.ad_account_id AS CHAR) AS advertiser_id,
-      CAST(ac.campaign_id AS CHAR) AS campaign_id,
-      CAST(ac.adset_id AS CHAR) AS adgroup_id,
-      CAST(ac.product_id AS CHAR) AS product_id,
-      COALESCE(NULLIF(TRIM(q.show_name), ''), CONCAT('product_', CAST(ac.product_id AS CHAR))) AS product_name,
-      TRIM(q.minis_id) AS minis_id
-    FROM kunlunads_dev.ads_tiktok_auto_created_data ac FORCE INDEX ({index_hint})
-    STRAIGHT_JOIN kunlunads_dev.tiktok_publish_template_queue q
-     ON q.id = ac.publish_queue_id
-     AND q.minis_id IS NOT NULL
-     AND TRIM(q.minis_id) <> ''
-     AND TRIM(q.product) REGEXP '^[0-9]+$'
-     AND CAST(TRIM(q.product) AS UNSIGNED) = ac.product_id
-    WHERE ac.{object_column} IN {object_ids}
-      AND ac.{object_column} IS NOT NULL
-      AND ac.created_at < {cutoff}
-    ORDER BY ac.ad_account_id, ac.{object_column}, ac.created_at DESC, ac.id DESC
-    """.format(
-        object_column=object_column,
-        index_hint=index_hint,
-        object_ids=sql_in(object_ids),
-        cutoff=sql_quote(cutoff),
-    )
-
-
-def attach_minis_metadata(candidates, day, data_level, metadata_cache=None):
-    if not candidates:
-        return []
-    cache = metadata_cache if metadata_cache is not None else {}
-    unresolved = [
-        row
-        for row in candidates
-        if (data_level, row["advertiser_id"], row["query_id"]) not in cache
-    ]
-    object_ids = sorted({row["query_id"] for row in unresolved})
-    for part in chunks(object_ids, SOURCE_METADATA_CHUNK_SIZE):
-        for raw in run_mysql_query(scope_metadata_sql(part, day, data_level), timeout=180):
-            if len(raw) != 6:
-                continue
-            advertiser_id, campaign_id, adgroup_id, product_id, product_name, minis_id = raw
-            try:
-                advertiser_id = normalize_id(advertiser_id, "advertiser_id")
-                campaign_id = normalize_id(campaign_id, "campaign_id")
-                adgroup_id = normalize_id(adgroup_id, "adgroup_id")
-                if not str(product_id).isdigit() or not str(minis_id).strip():
-                    continue
-            except SyncError:
-                continue
-            query_id = campaign_id if data_level == "CAMPAIGN" else adgroup_id
-            cache.setdefault((data_level, advertiser_id, query_id), {
-                "product_id": int(product_id),
-                "product_name": safe_text(product_name, 128),
-                "minis_id": safe_text(minis_id, 64),
-                "campaign_id": campaign_id,
-                "source_adgroup_id": adgroup_id,
-            })
-    # Object ownership is immutable in TikTok.  Cache negative lookups for this
-    # run as well so a 60-day backfill does not repeatedly re-scan unrelated
-    # non-Minis campaigns and ad groups.
-    for candidate in unresolved:
-        cache.setdefault((data_level, candidate["advertiser_id"], candidate["query_id"]), None)
-    scoped = []
-    for candidate in candidates:
-        meta = cache.get((data_level, candidate["advertiser_id"], candidate["query_id"]))
-        if not meta:
-            continue
-        item = dict(candidate)
-        item.update(meta)
-        item["adgroup_id"] = item["query_id"] if data_level == "ADGROUP" else None
-        scoped.append(item)
-    return scoped
-
-
-def build_day_candidates(day, data_level, metadata_cache=None, metadata_as_of=None):
-    raw = fetch_insight_candidates(day, data_level)
-    return attach_minis_metadata(raw, metadata_as_of or day, data_level, metadata_cache)
-
-
-def fetch_pending_candidates(start_date, end_date):
-    sql = """
-    SELECT
-      DATE_FORMAT(record_date, '%Y-%m-%d'),
-      CAST(product_id AS CHAR), product_name, minis_id,
-      advertiser_id, data_level, query_id,
-      COALESCE(campaign_id, ''), COALESCE(adgroup_id, '')
-    FROM {table}
-    WHERE record_date BETWEEN {start_date} AND {end_date}
-      AND protection_status IN ('UNDER_PROTECTION', 'CONFIRMING')
-    ORDER BY record_date, advertiser_id, data_level, query_id
-    """.format(
-        table=TARGET_TABLE,
-        start_date=sql_quote(start_date),
-        end_date=sql_quote(end_date),
-    )
-    out = []
-    for row in run_mysql_query(sql, timeout=180):
-        if len(row) != 9:
-            continue
-        record_date, product_id, product_name, minis_id, advertiser_id, data_level, query_id, campaign_id, adgroup_id = row
-        if data_level not in VALID_DATA_LEVELS:
-            continue
-        try:
-            item = {
-                "record_date": format_day(parse_day(record_date)),
-                "product_id": int(product_id),
-                "product_name": safe_text(product_name, 128),
-                "minis_id": safe_text(minis_id, 64),
-                "advertiser_id": normalize_id(advertiser_id, "advertiser_id"),
-                "data_level": data_level,
-                "query_id": normalize_id(query_id, "query_id"),
-                "campaign_id": normalize_id(campaign_id, "campaign_id") if campaign_id else None,
-                "adgroup_id": normalize_id(adgroup_id, "adgroup_id") if adgroup_id else None,
-                "source_adgroup_id": adgroup_id or "",
-            }
-        except (SyncError, ValueError):
-            continue
-        out.append(item)
-    return out
+def build_day_candidates(day, data_level="CAMPAIGN", metadata_cache=None, metadata_as_of=None):
+    del metadata_as_of
+    metadata = metadata_cache if metadata_cache is not None else fetch_target_account_metadata()
+    return fetch_insight_candidates(day, data_level, metadata)
 
 
 def fetch_terminal_candidate_keys(day):
@@ -868,11 +821,12 @@ def run_sync(args):
     today = beijing_today()
     yesterday = today - timedelta(days=1)
     if args.daily:
-        start_date = end_date = format_day(yesterday)
+        end_date = format_day(yesterday)
+        start_date = format_day(yesterday - timedelta(days=DEFAULT_REFRESH_DAYS - 1))
     elif args.backfill_days:
         count = int(args.backfill_days)
-        if count < 1 or count > 60:
-            raise SyncError("backfill days must be between 1 and 60")
+        if count < 1 or count > DEFAULT_BACKFILL_DAYS:
+            raise SyncError("backfill days must be between 1 and %d" % DEFAULT_BACKFILL_DAYS)
         end_date = format_day(yesterday)
         start_date = format_day(yesterday - timedelta(days=count - 1))
     else:
@@ -880,30 +834,35 @@ def run_sync(args):
         end_date = format_day(parse_day(args.end_date or args.start_date))
     if parse_day(end_date) >= today:
         raise SyncError("current-day bid-protection amounts are not accepted as final data")
-    if (parse_day(end_date) - parse_day(start_date)).days >= 60:
-        raise SyncError("date range exceeds the 60-day API window")
+    if (parse_day(end_date) - parse_day(start_date)).days >= DEFAULT_BACKFILL_DAYS:
+        raise SyncError("date range exceeds the 30-day synchronization window")
 
     access_token = load_access_token(args.token_db, args.token_key)
     client = TikTokBidProtectionClient(access_token, timeout=args.api_timeout)
     emit(
         "sync_start",
-        mode="daily" if args.daily else "backfill",
+        mode="rolling_14_days" if args.daily else "backfill",
         start_date=start_date,
         end_date=end_date,
         dry_run=bool(args.dry_run),
     )
 
-    retry_start = format_day(yesterday - timedelta(days=DEFAULT_BACKFILL_DAYS - 1))
-    retry_rows = load_retry_candidates(args.retry_state, retry_start, format_day(yesterday))
+    retry_rows = load_retry_candidates(args.retry_state, start_date, end_date)
     retry_by_day = collections.defaultdict(list)
     for item in retry_rows:
         retry_by_day[item["record_date"]].append(item)
     retry_state = {candidate_key(item): item for item in retry_rows}
 
-    pending_by_day = collections.defaultdict(list)
-    if args.daily and not args.skip_pending:
-        for item in fetch_pending_candidates(retry_start, format_day(yesterday)):
-            pending_by_day[item["record_date"]].append(item)
+    account_metadata = fetch_target_account_metadata()
+    product_counts = collections.Counter(
+        metadata["product_id"] for metadata in account_metadata.values()
+    )
+    emit(
+        "account_scope",
+        accounts=len(account_metadata),
+        product_counts={str(key): product_counts[key] for key in sorted(product_counts)},
+        data_level="CAMPAIGN",
+    )
 
     totals = {
         "days": 0,
@@ -915,18 +874,11 @@ def run_sync(args):
         "not_applicable": 0,
         "failures": [],
     }
-    metadata_cache = {}
     days = list(each_day(start_date, end_date))
-    if args.daily:
-        days = sorted(set(days) | set(pending_by_day) | set(retry_by_day))
     for day in days:
-        fresh = []
-        if start_date <= day <= end_date:
-            for level in VALID_DATA_LEVELS:
-                level_rows = build_day_candidates(day, level, metadata_cache, end_date)
-                fresh.extend(level_rows)
-                emit("source_scope", record_date=day, data_level=level, candidates=len(level_rows))
-        merged_candidates = merge_candidates(retry_by_day.get(day, []), pending_by_day.get(day, []), fresh)
+        fresh = build_day_candidates(day, "CAMPAIGN", account_metadata)
+        emit("source_scope", record_date=day, data_level="CAMPAIGN", candidates=len(fresh))
+        merged_candidates = merge_candidates(retry_by_day.get(day, []), fresh)
         terminal_keys = fetch_terminal_candidate_keys(day) if merged_candidates else set()
         candidates = [item for item in merged_candidates if candidate_key(item) not in terminal_keys]
         terminal_skipped = len(merged_candidates) - len(candidates)
@@ -992,11 +944,14 @@ def run_sync(args):
 def build_parser():
     parser = argparse.ArgumentParser(description="Sync TT mini-program bid-protection daily history")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--daily", action="store_true", help="sync yesterday and refresh non-terminal rows")
-    mode.add_argument("--backfill-days", type=int, help="backfill N completed days, maximum 60")
+    mode.add_argument(
+        "--daily",
+        action="store_true",
+        help="refresh the latest 14 completed Beijing calendar days",
+    )
+    mode.add_argument("--backfill-days", type=int, help="backfill N completed days, maximum 30")
     mode.add_argument("--start-date", help="manual start date, YYYY-MM-DD")
     parser.add_argument("--end-date", help="manual end date, defaults to start date")
-    parser.add_argument("--skip-pending", action="store_true", help="do not refresh non-terminal rows in daily mode")
     parser.add_argument("--dry-run", action="store_true", help="call read APIs but do not write ads_ai")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--api-timeout", type=int, default=DEFAULT_TIMEOUT)
