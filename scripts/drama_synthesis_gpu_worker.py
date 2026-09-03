@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Loopback-only HK media worker surface; it never exposes CPU/YouTube routes."""
+"""Loopback-only HK media worker with a credential-free YouTube data plane."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -23,6 +24,10 @@ from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
 from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, safe_error  # noqa: E402
 from features.drama_synthesis.youtube import YouTubeHTTPError  # noqa: E402
 from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  # noqa: E402
+from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
+from features.drama_synthesis.gpu_compositor import (  # noqa: E402
+    KERNEL_TEMPLATE, compositor_filter_threads, compositor_lanes, runtime_identity,
+)
 
 
 def render_concurrency(environ=None):
@@ -30,13 +35,23 @@ def render_concurrency(environ=None):
     try:
         value = int(env.get("DRAMA_GPU_MAX_CONCURRENCY", "1"))
     except (TypeError, ValueError):
-        raise ValueError("DRAMA_GPU_MAX_CONCURRENCY must be 1") from None
-    if value != 1:
-        raise ValueError("DRAMA_GPU_MAX_CONCURRENCY must be 1")
+        raise ValueError("DRAMA_GPU_MAX_CONCURRENCY must be 1 or 2") from None
+    if value not in {1, 2}:
+        raise ValueError("DRAMA_GPU_MAX_CONCURRENCY must be 1 or 2")
+    if env.get("DRAMA_GPU_COMPOSITOR_BACKEND") == "opencl_fused_v2" and value != 1:
+        raise ValueError("opencl_fused_v2 requires DRAMA_GPU_MAX_CONCURRENCY=1")
     return value
 
 
-RENDER_SLOTS = threading.BoundedSemaphore(render_concurrency())
+RENDER_CONCURRENCY = render_concurrency()
+COMPOSITOR_BACKEND = os.environ.get("DRAMA_GPU_COMPOSITOR_BACKEND", "legacy_cpu")
+COMPOSITOR_CHUNK_SECONDS = int(os.environ.get("DRAMA_GPU_CHUNK_SECONDS", "120"))
+COMPOSITOR_LANES = compositor_lanes()
+COMPOSITOR_FILTER_THREADS = compositor_filter_threads()
+RELEASE_SHA = os.environ.get("DRAMA_GPU_RELEASE_SHA", "")
+RUNTIME_IDENTITY = runtime_identity()
+KERNEL_TEMPLATE_SHA256 = hashlib.sha256(KERNEL_TEMPLATE.read_bytes()).hexdigest()
+RENDER_SLOTS = threading.BoundedSemaphore(RENDER_CONCURRENCY)
 RUNTIME = None
 RUNTIME_LOCK = threading.Lock()
 YOUTUBE_MEDIA = None
@@ -60,6 +75,7 @@ def get_runtime():
                 root, drama_app.handle_gpu_video_render, cache, sync_cached_result=sync_cache,
                 can_resume=getattr(drama_app, "gpu_video_resume_ready", None),
                 render_slots=RENDER_SLOTS, queue_limit=limit,
+                dispatcher_workers=RENDER_CONCURRENCY,
             )
         return RUNTIME
 
@@ -126,7 +142,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            self._reply(200, {"ok": True, "role": "media-only"})
+            self._reply(200, {
+                "ok": True,
+                "role": "media-only",
+                "render_concurrency": RENDER_CONCURRENCY,
+                "compositor_backend": COMPOSITOR_BACKEND,
+                "compositor_chunk_seconds": COMPOSITOR_CHUNK_SECONDS,
+                "compositor_lanes": COMPOSITOR_LANES,
+                "compositor_filter_threads": COMPOSITOR_FILTER_THREADS,
+                "renderer_profile": RENDERER_PROFILE,
+                "kernel_template_sha256": KERNEL_TEMPLATE_SHA256,
+                "release_sha": RELEASE_SHA,
+                "runtime_identity": RUNTIME_IDENTITY,
+            })
             return
         if self.path.startswith("/api/gpu-video/jobs/"):
             if not self._authorized():

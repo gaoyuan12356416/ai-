@@ -94,6 +94,12 @@ ERROR_MESSAGES = {
     "drama_random_render_timeout": "随机模板渲染超过制作时限，已保留素材，请核查执行记录",
     "drama_random_duration_mismatch": "随机模板成片时长与源视频不一致，已阻止上传",
     "drama_random_output_contract_invalid": "随机模板成片规格不符合要求",
+    "drama_composition_invalid": "随机模板场景配置无效",
+    "drama_gpu_compositor_unavailable": "GPU合成引擎不可用",
+    "drama_render_chunk_failed": "随机模板视频分片制作失败，已保留完成分片",
+    "drama_render_chunk_timeout": "随机模板视频分片制作超时，已保留完成分片",
+    "drama_render_join_failed": "随机模板视频分片合并失败，已保留完成分片",
+    "drama_render_audio_mux_failed": "随机模板视频音频封装失败，已保留完成分片",
     "drama_upload_checkpoint_unverified": "上传记录暂时无法校验，已保留成片和分片",
     "drama_upload_checkpoint_conflict": "上传记录与当前成片或目标不一致，已停止上传",
     "drama_upload_source_changed": "待上传成片发生变化，已停止上传并保留分片",
@@ -469,9 +475,11 @@ def clear_process(pid):
 class AsyncRuntime:
     def __init__(self, root, execute, cached_result, *, sync_cached_result=None, can_resume=None,
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
-                 clock=time.time, process_probe=process_state, autostart=True):
+                 dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
+        if type(dispatcher_workers) is not int or not 1 <= dispatcher_workers <= 8:
+            raise ValueError("dispatcher_workers must be an integer in 1..8")
         self.root = Path(root).absolute() / ".runtime"
         try:
             # The first accepted job is only durable if every newly-created
@@ -487,6 +495,7 @@ class AsyncRuntime:
         self.can_resume = can_resume
         self.fingerprint, self.clock, self.process_probe = fingerprint, clock, process_probe
         self.render_slots = render_slots or threading.BoundedSemaphore(1)
+        self.dispatcher_workers = dispatcher_workers
         self.queue_limit, self.instance = queue_limit, uuid.uuid4().hex
         self._mutex = threading.RLock()
         self._wake = threading.Event()
@@ -494,7 +503,7 @@ class AsyncRuntime:
         self._accepting = True
         self._healthy = True
         self._records, self._submission_locks = {}, {}
-        self._dispatcher = self._heartbeat = None
+        self._dispatchers, self._heartbeat = [], None
         self._owner = _FileLock(self.root / "owner.lock")
         if not self._owner.acquire():
             raise runtime_error("gpu_runtime_unavailable")
@@ -919,11 +928,17 @@ class AsyncRuntime:
                 self._save(record)
 
     def start(self):
-        if self._dispatcher is not None:
+        if self._dispatchers:
             return
-        self._dispatcher = threading.Thread(target=self._dispatch, name="drama-gpu-dispatch", daemon=True)
+        self._dispatchers = [
+            threading.Thread(
+                target=self._dispatch, name="drama-gpu-dispatch-%d" % (index + 1), daemon=True
+            )
+            for index in range(self.dispatcher_workers)
+        ]
         self._heartbeat = threading.Thread(target=self._heartbeats, name="drama-gpu-heartbeat", daemon=True)
-        self._dispatcher.start()
+        for dispatcher in self._dispatchers:
+            dispatcher.start()
         self._heartbeat.start()
 
     def _dispatch(self):
@@ -978,9 +993,10 @@ class AsyncRuntime:
         self.stop_intake()
         self._stop.set()
         self._wake.set()
-        if self._dispatcher is not None:
-            self._dispatcher.join(timeout=timeout)
-            if self._dispatcher.is_alive():
+        deadline = time.monotonic() + timeout
+        for dispatcher in self._dispatchers:
+            dispatcher.join(timeout=max(0, deadline - time.monotonic()))
+            if dispatcher.is_alive():
                 return False  # keep the process owner lock until process exit
         if self._heartbeat is not None:
             self._heartbeat.join(timeout=1)

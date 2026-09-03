@@ -1,6 +1,6 @@
 # 051 剧集合成可靠性与性能优化
 
-更新：2026-08-28。用户已批准实施；设计依据见 [accepted-design.md](accepted-design.md)。本文记录需求及当前实现，不代替生产验收。
+更新：2026-08-31。用户已批准实施；设计依据见 [accepted-design.md](accepted-design.md)。最终运行候选为 `a1519413b23d20acab035853b0f5aeebee53e9ac`（tree `2bc83028916e6bc3a6cd7a4cd6cf5f8bc07735ec`），已推送并完成远端回读；本文记录需求及当前实现，不代替Linux、媒体、COS、真实API重启或生产验收。
 
 ## 背景与目标
 
@@ -47,6 +47,8 @@ R1～R5分别对应执行可靠性、CPU对账、页面进度、媒体检查点�
 - 下载显示集数/字节/可用速度，标准化显示已处理段数，模板使用FFmpeg原生媒体时间、帧与速度，上传显示实际传输量。
 - 百分比只代表当前阶段；缺少分母时不显示推测百分比。封面完成单列说明，不覆盖视频主阶段。
 - UTC时间落库，北京时间显示；活动任务耗时持续更新，断连和重连不归零。心跳时间与最后实际进展分开。
+- 同一stage、同一generation内，`out_time_seconds`、`frame`、`bytes`和`percent`等推进指标只取数值高水位；迟到或乱序packet不能让页面、sidecar或持久快照倒退。`fps`、`speed`及分母等非推进指标允许更新；切换stage时按新阶段重新开始本阶段进度。
+- 随机模板的初始截止按冻结整片的 `ffprobe format.duration`、最低0.10x处理速度、25%余量和1800秒收尾时间计算，同时保持12小时下限及24小时硬上限。严格增加的FFmpeg媒体时间或帧数都属于真实推进并重置stall；只有当前批次正向增加的媒体时间可用于估算剩余时长和延长既有deadline，包括小于1毫秒的正向微增量。deadline planning信号在300秒资格判断前即被消费，不能让早期out_time被后续frame-only或空批次复用；frame-only推进只刷新stall，不猜测或延长预算。相等值、倒退值、单独fps/speed变化或队列中的重复packet既不续stall，也不延长deadline。轮询在判定stall/deadline前再次drain进度队列，避免把poll期间刚到达的推进误判为停滞；任何进度更新都不能缩短已授予时间，默认1800秒没有真实媒体推进时触发stall保护。
 
 ### R4：安全下载、流水化和成片检查点
 
@@ -55,6 +57,8 @@ R1～R5分别对应执行可靠性、CPU对账、页面进度、媒体检查点�
 - 直拼兼容性必须比较完整且可重复的音视频流签名，包括codec/profile/level/pix_fmt、尺寸与显示比例、场序/色彩、帧率/time_base、H.264 extradata，以及AAC profile/sample_fmt/sample rate/channels/layout/tag/bits/extradata；缺失字段不能被视为兼容。发现不兼容后，用单个标准化执行器和下载重叠处理；全部兼容时继续直接拼接，输出仍按原始集序且片头在前。标准化以第1集冻结偶数画布，按源SAR等比缩放并补黑边，不拉伸或裁切；显式把已知源色彩转换成BT.709 limited，已知隔行场序用固定parity去隔行。已有短音轨补齐到视频，无音轨补48k双声道静音，均以视频时长为界。源色彩/场序缺失或不支持时失败关闭。所有标准化产物（包括检查点重放）必须重新probe并证明目标签名完整且同批相同，才可交给concat demuxer。
 - 标准化检查点必须绑定源SHA/大小、片段顺序、profile及完整转换plan；旧同步入口也不能再用“文件非空”复用历史标准化片段。片头当前只接受可证明无ICC/Adobe覆盖的JFIF/sRGB输入合同，执行真实矩阵、范围与传递函数转换后写BT.709 VUI；PNG、WebP或不满足合同的JPEG在启动FFmpeg前明确拒绝，不能猜测色彩。上线前必须用本案实际封面验证该合同，未通过时扩展受验证的格式支持，不能删片头绕过。
 - 已验证的标准化段、concat成片、去BGM成片和模板成片都保留绑定冻结输入、上游产物/有序片段、处理profile、大小和SHA的持久检查点，并且必须在任何上传请求前完成提交。上传失败或公开副本丢失时先校验工作区成片；有效记录只恢复副本并续传，不能再次concat、Demucs或模板渲染。已有成片却没有完成记录，以及记录损坏、身份冲突或写入失败，都必须保留产物并停止自动制作/上传，不能当成普通缓存未命中而覆盖。
+- 模板渲染timeout、stall、非零/信号退出和原生Popen启动异常须按job与generation写入私有0600原子诊断sidecar；文件有固定字段及64KiB上限，只保留脱敏安全码、时长/预算/进度高水位、returncode/signal和stderr字节数、SHA256及静态错误标签，不保留stderr原文、命令、路径、URL、请求头、异常原文或凭据。sidecar不是完成检查点，不能触发partial提升、上传或复用。
+- 清理必须以真实子进程状态为门禁：`clear_process`只有确认stopped才删除持久进程身份，alive/unknown或probe异常都保留记录并阻止恢复；进度reader仍存活时不能伪报清理完成。已知失败须先写诊断并确认子进程退出，才清理本次partial/未完成guard；诊断写入或退出确认失败时保留guard/partial并转人工恢复。通过校验的partial必须先形成durable prepared，再提升并提交最终记录；最终提交成功后，收尾异常不能删除或反转已提交成片。
 - 媒体验收launcher只接受固定case、动作和参数，并统一以 `-I -S -B` 运行。候选work-tree、祖先、递归目录、全部tracked文件、`.git`入口和实际gitdir必须root-owned且不可组/其他写；显式绑定work-tree并逐文件无过滤核对完整HEAD，拒绝ignored、index隐藏位、symlink/submodule、replace、filters及候选变化。每批次用不可覆盖的 `long-source.json` 绑定完整长源SHA/大小/文件身份；prepare/render/decode前后都复核。systemd提交前持久化intent，结果未知时禁止同批次重放；媒体子进程在任意BaseException下也必须kill+wait。每个动作结束时复核同一cgroup的failcnt/memsw/swap/under_oom/oom_kill并保存完成证据。
 - 真实COS验收必须使用全新私有前缀和非敏感样本，证明分片及Complete成功响应丢失后仍复用同一UploadId/完成记录。候选checkout须全清洁且运行时隔离：tracked工作树改动、staged改动、untracked和ignored均为空，拒绝skip-worktree/assume-unchanged，禁用replace refs与本地fsmonitor执行，并逐字节核对关键文件与候选Git blob。固定Python须以 `-I -S -B` 启动；Git、ffprobe、COS SDK及requests/urllib3/certifi等实际HTTP/TLS依赖都来自root-owned且不可组写/他写的单一运行时，导入前递归拒绝symlink、`.pth`、`.pyc/.pyo`和`.egg-link`。ffprobe的stdout/stderr在进程运行期间分别有硬上限；中断或读线程异常必须kill并wait回收，不能先无限读入内存。上述门禁均在读取凭据前完成。Create和Complete前通知配置均须为空，匿名访问须两次返回403，对象ACL须只有Owner的FULL_CONTROL。任一结果不明均保留检查点、对象和分片，不执行delete/abort或换前缀自动重试。
 
@@ -75,11 +79,11 @@ R1～R5分别对应执行可靠性、CPU对账、页面进度、媒体检查点�
 
 | 门禁 | 必须满足 | 本次文档更新时状态 |
 | --- | --- | --- |
-| 本地可靠性 | 超四小时、丢响应、重复提交、重启、旧代次、通知失败、下载及检查点故障均有测试 | 最终候选核心六模块457/457、FB隔离16/16通过；不代表生产通过 |
+| 本地可靠性 | 超四小时、丢响应、重复提交、重启、旧代次、通知失败、动态预算/stall、进度高水位、失败诊断、下载及检查点故障均有测试 | 最终候选六模块478/478、0跳过（85/111/16/30/68/168），FB隔离16/16通过；frame/deadline修复后两轮独立增量终审P0/P1/P2均为0；不代表生产通过 |
 | 静态页面回归 | 两个列表、耗时与输出选项回归 | 25/25通过，组件浏览器已检查；真实认证/API和用户视觉待验 |
-| Linux隔离故障 | 真实/proc身份、进程组、重启、目录权限、磁盘失败、回填和上传恢复 | dc0bad8已完成CPU/HK新私有目录、精确blob/权限及严格无网络445+13回归；未操作原正式任务，真实接口/重启链路仍待独立验收 |
+| Linux隔离故障 | 真实/proc身份、进程组、重启、目录权限、磁盘失败、回填和上传恢复 | 历史候选dc0bad8已完成CPU/HK严格无网络445+13；最终候选a151941按冻结排除12+3后预期运行466+13，尚待新的书面窗口，不能写PASS；真实接口/重启链路仍待独立验收 |
 | 媒体验收 | 固定配方短样＋约90分钟长片；完整解码、音画、片头、集边界、模板动画及资源曲线 | 待验 |
-| 媒体资源保护 | 先运行无媒体16GiB guard-only；prepare/render/decode均由固定launcher验证memsw、Nice、Tasks、身份、能力、锁和进程回收 | 媒体149/149、升级85/85、FB16/16本地通过；真实16GiB unit未运行 |
+| 媒体资源保护 | 先运行无媒体16GiB guard-only；prepare/render/decode均由固定launcher验证memsw、Nice、Tasks、身份、能力、锁和进程回收 | 媒体168/168、升级85/85、FB16/16本地通过；真实16GiB unit未运行 |
 | COS恢复与私有性 | 精确SDK、固定3600秒、clean/isolated runtime、空通知配置、双403、owner-only ACL、同UploadId恢复、零写重放及完整GET SHA | cache111/111通过，固定MinGit2.27与socket connect/connect_ex硬拒绝下均111/111；真实COS未写入 |
 | 参数/换源收益 | 下载并发、候选域名和CPU组合分别提供受控对照证据 | CDN样本已有记录但结果分化，默认不变；并发/CPU/长片结论待验 |
 | 生产发布 | 原任务自然结束并对账，备份后GPU先CPU后，版本与健康回读 | 未切换 |
@@ -89,3 +93,5 @@ R1～R5分别对应执行可靠性、CPU对账、页面进度、媒体检查点�
 `/data`当前仍在根文件系统，不无限保留素材；运行账本和检查点不得随工作目录清理。未知旧进程必须先核查，不能强制清锁。上线、回滚与验收证据按 [deploy.md](deploy.md)、[test-cases.md](test-cases.md) 执行，最终状态以 [test-report.md](test-report.md) 为准。
 
 2026-08-28：据已批准方案补齐本期需求、显式代次恢复、开关默认关闭、候选域名实测门禁及分层验收状态。
+
+2026-08-31：补齐动态渲染预算、严格推进与poll二次drain、stall、诊断sidecar、进程/reader清理、失败清理先partial后guard、成功路径prepared→final持久提交及页面高水位合同。合同终审发现83aec118仍会让frame-only复用既有out_time规划deadline；a151941已按本批次out_time门控并消费早期pending，补齐两种混合序列回归。本地478项及修复后两轮增量终审通过，并把dc0bad8历史Linux结果与最终候选待执行门禁分开。

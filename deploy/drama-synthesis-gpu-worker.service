@@ -13,18 +13,18 @@ Environment=DRAMA_GPU_HOST=127.0.0.1
 Environment=DRAMA_GPU_PORT=8787
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONNOUSERSITE=1
-ExecStartPre=/data/drama-synthesis-gpu/runtime/current/bin/python /data/drama-synthesis-gpu/current/scripts/check_drama_synthesis_gpu_runtime.py
+ExecStartPre=/data/drama-synthesis-gpu/runtime/current/bin/python /data/drama-synthesis-gpu/current/scripts/check_drama_synthesis_gpu_runtime.py --check-app-import
 ExecStart=/data/drama-synthesis-gpu/runtime/current/bin/python /data/drama-synthesis-gpu/current/scripts/drama_synthesis_gpu_worker.py
 Restart=always
 RestartSec=5
-TimeoutStartSec=120
+TimeoutStartSec=300
 TimeoutStopSec=14400
 UMask=0077
-Nice=10
-CPUQuota=200%
-TasksMax=128
+Nice=0
+CPUQuota=800%
+TasksMax=512
 IOSchedulingClass=best-effort
-IOSchedulingPriority=7
+IOSchedulingPriority=4
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

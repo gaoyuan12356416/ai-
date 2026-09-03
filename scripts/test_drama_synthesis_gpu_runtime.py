@@ -36,7 +36,13 @@ def load_fake_worker(fake_app):
     )
     module = importlib.util.module_from_spec(spec)
     with mock.patch.dict(sys.modules, {"app": fake_app}), mock.patch.dict(
-        os.environ, {"DRAMA_GPU_MAX_CONCURRENCY": "1"}
+        os.environ, {
+            "DRAMA_GPU_MAX_CONCURRENCY": "1",
+            "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
+            "DRAMA_GPU_COMPOSITOR_LANES": "4",
+            "DRAMA_GPU_FILTER_THREADS": "2",
+            "DRAMA_GPU_CHUNK_SECONDS": "120",
+        }
     ):
         spec.loader.exec_module(module)
     return module
@@ -185,6 +191,39 @@ class RuntimePackageTests(unittest.TestCase):
             self.assertFalse(runtime.path_in_root(Path(str(root) + "-other") / "work", root))
             self.assertFalse(runtime.path_in_root("relative/path", root))
 
+    def test_release_identity_binds_code_root_to_exact_release_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            sha = "d" * 40
+            release = base / "releases" / sha
+            release.mkdir(parents=True)
+            self.assertEqual(
+                runtime.release_identity_issues(
+                    {"DRAMA_GPU_RELEASE_SHA": sha}, code_root=release, base=base
+                ), []
+            )
+            self.assertEqual(
+                runtime.release_identity_issues(
+                    {"DRAMA_GPU_RELEASE_SHA": sha}, code_root=base, base=base
+                ), ["release_identity_mismatch"]
+            )
+
+    def test_storage_gate_binds_writable_paths_to_available_filesystem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = {}
+            for key in runtime.WRITABLE_DIRECTORY_KEYS:
+                path = root / key.lower()
+                path.mkdir()
+                env[key] = str(path)
+            self.assertEqual(
+                runtime.storage_issues(env, base=root, minimum_free_bytes=1), []
+            )
+            self.assertEqual(
+                runtime.storage_issues(env, base=root, minimum_free_bytes=2 ** 63),
+                ["isolated_storage_low_space"],
+            )
+
     def test_empty_environment_fails_closed_without_disclosing_values(self):
         issues = runtime.validate_environment({"GPU_VIDEO_WORKER_TOKEN": "fake-private-value"})
         self.assertIn("invalid:DEMUCS_REQUIRE_LOCAL_MODELS", issues)
@@ -202,6 +241,7 @@ class RuntimePackageTests(unittest.TestCase):
             for key in runtime.REQUIRED_VALUES:
                 if not env[key]:
                     env[key] = "fake-test-value"
+            env["DRAMA_GPU_RELEASE_SHA"] = "c" * 40
             env["DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256"] = "a" * 64
             for key in runtime.DIRECTORY_KEYS:
                 Path(env[key]).mkdir(parents=True, exist_ok=True)
@@ -210,8 +250,94 @@ class RuntimePackageTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fake binary for path validation only")
                 path.chmod(0o700)
-            self.assertEqual(runtime.validate_environment(env, root=root), [])
+            with mock.patch.object(runtime, "valid_nvidia_smi", return_value=True):
+                self.assertEqual(runtime.validate_environment(env, root=root), [])
             self.assertFalse(Path(env["DRAMA_JOB_DB_PATH"]).exists())
+
+    def test_compositor_capability_check_uses_opencl_and_nvenc_without_media_output(self):
+        runner = mock.Mock(return_value=SimpleNamespace(returncode=0))
+        env = {
+            "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
+            "DRAMA_FFMPEG": "/isolated/ffmpeg",
+            "DRAMA_GPU_OPENCL_DEVICE": "0.0",
+        }
+        self.assertEqual(runtime.compositor_capability_issues(env, runner), [])
+        command = runner.call_args.args[0]
+        self.assertIn("opencl=ocl:0.0", command)
+        self.assertIn("h264_nvenc", command)
+        self.assertEqual(command[-2:], ["null", "-"])
+        runner.return_value.returncode = 1
+        self.assertEqual(
+            runtime.compositor_capability_issues(env, runner),
+            ["gpu_compositor_capability_check_failed"],
+        )
+
+    def test_compositor_pipeline_check_exercises_five_inputs_and_strict_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            categories = {}
+            for category, media_type in (
+                ("border", "image/png"), ("opacity_video", "video/webm"),
+                ("corners", "video/webm"), ("tint", "image/png"),
+            ):
+                path = root / (category + (".png" if media_type == "image/png" else ".webm"))
+                path.write_bytes(category.encode())
+                categories[category] = ({
+                    "media_type": media_type, "name": path.name, "sha256": "a" * 64,
+                    "size": path.stat().st_size, "path": path,
+                },)
+            asset_set = {"manifest_sha256": "b" * 64, "categories": categories}
+            commands = []
+
+            def runner(command, **_kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"media")
+                return SimpleNamespace(returncode=0)
+
+            def probe(_ffprobe, path):
+                path = Path(path)
+                if path.suffix == ".webm":
+                    return {"duration": 5.0, "has_audio": False, "video": {"codec_name": "vp9"}}
+                if path.name == "source.mp4":
+                    return {
+                        "duration": 1.0, "has_audio": False,
+                        "video": {"codec_name": "mpeg4", "width": 720, "height": 1280},
+                    }
+                return {
+                    "duration": 1.0, "has_audio": False, "audio": None,
+                    "first_packet_keyframe": True,
+                    "video": {
+                        "codec_name": "h264", "profile": "High", "width": 720, "height": 1280,
+                        "pix_fmt": "yuv420p", "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+                        "nb_frames": "30", "level": 31, "time_base": "1/15360",
+                        "codec_tag_string": "avc1", "extradata_size": 45,
+                        "extradata_hash": "SHA256:" + "d" * 64, "is_avc": "true",
+                        "nal_length_size": "4", "color_range": "tv",
+                        "color_space": "bt709", "color_transfer": "bt709",
+                        "color_primaries": "bt709", "chroma_location": "left",
+                        "field_order": "progressive", "has_b_frames": 0,
+                    },
+                }
+
+            env = {
+                "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
+                "DRAMA_FFMPEG": "/isolated/ffmpeg", "DRAMA_FFPROBE": "/isolated/ffprobe",
+                "DRAMA_GPU_OPENCL_DEVICE": "0.0", "TMPDIR": str(root),
+            }
+            self.assertEqual(
+                runtime.compositor_pipeline_issues(env, asset_set, runner=runner, probe=probe), []
+            )
+            self.assertEqual(len(commands), 2)
+            graph = commands[1][commands[1].index("-filter_complex") + 1]
+            self.assertIn("program_opencl=inputs=5", graph)
+            self.assertIn("h264_nvenc", commands[1])
+
+    def test_legacy_backend_skips_gpu_capability_probe(self):
+        runner = mock.Mock()
+        self.assertEqual(runtime.compositor_capability_issues({
+            "DRAMA_GPU_COMPOSITOR_BACKEND": "legacy_cpu",
+        }, runner), [])
+        runner.assert_not_called()
 
     def test_publication_and_unified_sync_require_explicit_zero(self):
         for key in ("YOUTUBE_LIVE_ENABLED", "DRAMA_YOUTUBE_UNIFIED_SYNC_ENABLED"):
@@ -277,6 +403,12 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn(f"DEMUCS_PYTHON={python}", env)
         self.assertIn("ProtectHome=yes", unit)
         self.assertIn("DRAMA_GPU_MAX_CONCURRENCY=1", env)
+        self.assertIn("DRAMA_GPU_COMPOSITOR_BACKEND=opencl_fused_v2", env)
+        self.assertIn("DRAMA_GPU_COMPOSITOR_LANES=2", env)
+        self.assertIn("DRAMA_GPU_FILTER_THREADS=2", env)
+        self.assertIn("DRAMA_GPU_COMPOSITOR_CACHE_ROOT=/data/drama-synthesis-gpu/work/compositor-cache", env)
+        self.assertIn("CPUQuota=800%", unit)
+        self.assertIn("TasksMax=512", unit)
         self.assertIn("DEMUCS_REQUIRE_LOCAL_MODELS=1", env)
         self.assertNotIn("/usr/bin/python3.9", unit)
         self.assertNotIn("/root/", unit + env)
@@ -337,7 +469,17 @@ class WorkerHTTPTests(unittest.TestCase):
             self.assertEqual((status, payload["code"]), (503, "gpu_render_busy"))
             self.fake_app.handle_gpu_video_render.assert_not_called()
             self.assertEqual(self.request("POST", "/api/gpu-video/cover", {"job_id": "a" * 32})[0], 200)
-            self.assertEqual(self.request("GET", "/healthz")[0], 200)
+            status, health = self.request("GET", "/healthz")
+            self.assertEqual(status, 200)
+            self.assertEqual(health["compositor_backend"], "opencl_fused_v2")
+            self.assertEqual(health["compositor_chunk_seconds"], 120)
+            self.assertEqual(health["compositor_lanes"], 4)
+            self.assertEqual(health["compositor_filter_threads"], 2)
+            self.assertEqual(health["render_concurrency"], 1)
+            self.assertEqual(health["renderer_profile"], "drama-opencl-fused-h264-720x1280-v4-fullbleed")
+            self.assertRegex(health["kernel_template_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(health["release_sha"], "")
+            self.assertEqual(health["runtime_identity"], "ffmpeg-opencl-nvenc-runtime-v1")
             self.assertEqual(self.request("GET", "/api/gpu-video/random-overlay/catalog")[0], 200)
         finally:
             self.worker.RENDER_SLOTS.release()
@@ -403,7 +545,15 @@ class WorkerHTTPTests(unittest.TestCase):
 
     def test_concurrency_bounds_fail_closed(self):
         self.assertEqual(self.worker.render_concurrency({}), 1)
-        for value in ("0", "2", "8", "9", "NaN", "", "1.5"):
+        self.assertEqual(self.worker.render_concurrency({"DRAMA_GPU_MAX_CONCURRENCY": "2"}), 2)
+        self.assertEqual(self.worker.render_concurrency({
+            "DRAMA_GPU_MAX_CONCURRENCY": "1", "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
+        }), 1)
+        with self.assertRaises(ValueError):
+            self.worker.render_concurrency({
+                "DRAMA_GPU_MAX_CONCURRENCY": "2", "DRAMA_GPU_COMPOSITOR_BACKEND": "opencl_fused_v2",
+            })
+        for value in ("0", "3", "8", "9", "NaN", "", "1.5"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.worker.render_concurrency({"DRAMA_GPU_MAX_CONCURRENCY": value})
 
@@ -599,6 +749,43 @@ class AsyncRuntimeTests(unittest.TestCase):
         self.assertNotIn("private-source", json.dumps(value.get(payload["job_id"])))
         self.assertNotIn("_payload", first)
         value.execute.assert_not_called()
+
+    def test_two_dispatchers_execute_distinct_queued_jobs_in_parallel(self):
+        mutex = threading.Lock()
+        release = threading.Event()
+        simultaneous = threading.Event()
+        active = 0
+        maximum = 0
+
+        def execute(payload):
+            nonlocal active, maximum
+            with mutex:
+                active += 1
+                maximum = max(maximum, active)
+                if active == 2:
+                    simultaneous.set()
+            if not release.wait(3):
+                raise RuntimeError("parallel fixture timed out")
+            with mutex:
+                active -= 1
+            return result_for(payload)
+
+        value = self.runtime(
+            execute=execute,
+            render_slots=threading.BoundedSemaphore(2),
+            dispatcher_workers=2,
+        )
+        first = render_payload("parallel-one")
+        second = render_payload("parallel-two")
+        value.submit(first)
+        value.submit(second)
+        try:
+            self.assertTrue(simultaneous.wait(2))
+        finally:
+            release.set()
+        wait_for(lambda: value.get(first["job_id"])["status"] == "completed")
+        wait_for(lambda: value.get(second["job_id"])["status"] == "completed")
+        self.assertEqual(maximum, 2)
 
     def test_concurrent_duplicate_submits_execute_exactly_once(self):
         entered, finish = threading.Event(), threading.Event()

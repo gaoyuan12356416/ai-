@@ -1,16 +1,16 @@
 # 剧集合成媒体验收操作手册
 
-更新：2026-08-31。**短片、CPU参数对照、完整解码及约90分钟长片验收均未执行；本文不是上线或性能通过证明。** 所有媒体动作必须使用同一精确GitHub候选内的 `scripts/run_drama_media_acceptance.py`；不得直接运行benchmark的render子命令或复制旧systemd模板。发布、备份和回滚见 [deploy.md](deploy.md)，实际结果写入 [test-report.md](test-report.md)。
+更新：2026-08-31。最终候选为 `a1519413b23d20acab035853b0f5aeebee53e9ac`、tree `2bc83028916e6bc3a6cd7a4cd6cf5f8bc07735ec`。**短片、CPU参数对照、完整解码及约90分钟长片验收均未执行；本文不是上线或性能通过证明。** 所有媒体动作必须使用同一精确GitHub候选内的 `scripts/run_drama_media_acceptance.py`；不得直接运行benchmark的render子命令或复制旧systemd模板。发布、备份和回滚见 [deploy.md](deploy.md)，实际结果写入 [test-report.md](test-report.md)。
 
 ## 1. 执行前提与当前阻塞
 
 当前不能启动媒体。旧正式渲染已在2026-08-28约17:36:51自行退出，17:41核对没有视频成片；GPU服务未重启、没有OOM证据。退出时间与旧10800秒限时吻合，但原异常未保留，超时原因仍是证据支持的推断，见 [原任务证据](evidence/original-case-outcome-20260828.json)。没有终止旧任务，也不把CPU的failed状态改成done。
 
-2026-08-31只读基线再次确认HK无ffmpeg/ffprobe、GPU空闲且剧集/FB服务未重启，见 [恢复基线](evidence/resume-baseline-20260831.json)；这是时间点快照，不是测试许可。远端窗口继续由迁移任务 `gpu-service-migration-20260828T1502` 协调；新候选dc0bad8的一次性CPU/HK无媒体隔离许可已执行完毕并关闭，结果见 [双端无媒体证据](evidence/linux-no-media-regression-dc0bad8-20260831.json)，仍未释放**本轮新的HK媒体/COS窗口**。旧候选1367dd4的许可、旧排空记录和旧窗口均不能复用，无媒体许可也不能升级使用。
+2026-08-31只读基线再次确认HK无ffmpeg/ffprobe、GPU空闲且剧集/FB服务未重启，见 [恢复基线](evidence/resume-baseline-20260831.json)；这是时间点快照，不是测试许可。远端窗口继续由迁移任务 `gpu-service-migration-20260828T1502` 协调；历史候选dc0bad8的一次性CPU/HK无媒体隔离许可已执行完毕并关闭，结果见 [双端无媒体证据](evidence/linux-no-media-regression-dc0bad8-20260831.json)。最终候选a151941的Linux无媒体466+13、HK媒体/COS和API重启均须取得新的书面窗口；旧许可、旧排空记录和旧窗口均不能复用，无媒体许可也不能升级使用。
 
 启动验收必须同时满足：
 
-1. 候选已审查、提交并推送GitHub，记录完整40位SHA；HK使用从GitHub取得的全新干净checkout。生产 `current`、正式unit和环境文件保持不变。
+1. 候选已审查、提交并推送GitHub，记录完整40位SHA及tree；当前只允许a151941/tree 2bc8302及其 [17项code/static运行变更overlay＋4个验收工具清单](evidence/runtime-file-manifest-a151941.json)。该清单不是可独立运行的部署包；HK必须使用从GitHub取得的全新干净checkout。生产 `current`、正式unit和环境文件保持不变。
 2. 与“统计GPU服务器运行任务”取得本轮书面窗口许可，并确认其共享目录、端口和GPU资源变更已停止。CPU公共目录/主API或HK剧集部署另行协调。
 3. 通过已批准流程停止新的正式drama制作入口，并复核队列、租约、ffmpeg/ffprobe和GPU制作进程排空。页面空闲、旧PID退出或删除账本都不能替代排空。
 4. 同机FB服务保持配置与优先级；不停止FB、不降低其配额，也不做真实FB发布测试。正式重制作并发仍为1。
@@ -118,20 +118,22 @@ launcher在调用 `systemd-run` 前先持久化提交意图，确认systemd接�
 
 对其余组合只替换固定的config/trial枚举。decode证据必须为新文件并绑定render unit、decode unit、成片SHA/大小、显式退出码0和持续时间；完整解码前后都要重新读取并核对成片SHA及文件身份。非零、缺少应有音频、SHA/identity变化或cleanup不明均失败。不要用手写systemd-run、任意路径ffmpeg或已存在decode证据替代。
 
-保存每个精确unit的 `systemctl show` 非敏感字段和journal；结合launcher guard、benchmark `evidence.json`、`process-samples.jsonl`、decode证据、主机MemAvailable及FB自然负载判定。不得输出环境文件、Token、源URL、COS凭据或完整进程命令。
+保存每个精确unit的 `systemctl show` 非敏感字段和journal；结合launcher guard、benchmark `evidence.json`、`process-samples.jsonl`、decode证据、主机MemAvailable及FB自然负载判定。独立媒体验收没有AsyncRuntime job/generation上下文，模板失败时核对输出目录内 `.<result文件名>.render.failure.json`；该fallback只承诺安全码、静态预算/上下文、returncode/signal及stderr字节/SHA，不把它当作进度高水位来源，实际推进以 `process-samples.jsonl` 为准。生产异步worker才使用owner-only `.runtime/diagnostics/<job_id>/generation-XXXXXXXX.random-render.json` 并记录生产runner的进度高水位与最终deadline。两种sidecar均须0600、原子、≤64KiB，不得包含环境文件、Token、源URL、COS凭据、stderr原文、异常原文或完整进程命令。
 
 | 检查 | 通过 / 停止规则 |
 | --- | --- |
 | 身份与编码 | 候选SHA、长/短源SHA、recipeSHA、素材manifest和二进制SHA冻结；实际片头封面必须通过JFIF/sRGB合同并验证BT.709 limited输出，若为PNG/WebP/ICC/Adobe JPEG则停止而非跳过片头；标准化段须证明等比scale+pad、显式场序转换及短/缺音轨不截视频；最终成片保持H.264 High、720×1280、yuv420p、30fps及原音频语义，不删模板或改变滤镜/编码质量 |
 | 时长与完整性 | 视频流、容器时长与源时长差均不超过既有0.15秒；完整decode退出0且成片SHA/大小不变；ffprobe成功不能代替完整解码 |
 | 真实渲染 | `ok=true`、`rendered_processes=1`、`sample_count>0`、实际子进程已reap；out_time/frame持续前进，输出文件存在不等于通过 |
+| 预算、stall与高水位 | `evidence.json`记录配置下限、按冻结时长计算的初始planned budget及24小时内部硬上限，render unit的systemd外层为25小时；`process-samples.jsonl`记录实际out_time/frame推进。standalone fallback不冒充最终动态deadline；生产异步sidecar才核对该字段。严格增加的out_time/frame均刷新stall，只有本批次正向out_time创建deadline plan；pending在300秒资格判断前消费，frame-only不能复用旧out_time或猜测预算；poll判定前须二次drain。同stage/generation内out_time/frame/bytes/percent不倒退，fps/speed可刷新；stage变化可重置本阶段进度 |
+| 清理与提交 | progress reader已结束且进程确认为stopped后才clear；alive/unknown或reader仍活须保留进程身份、partial和guard；诊断写失败须保留partial和guard并人工恢复，但不要求恢复已清理的stopped进程身份。有效partial先durable prepared再final commit；final已提交后cleanup异常不得删除或反转成片 |
 | 线程 | FFmpeg采样峰值建议不超过112，保护阈值为大于120立即停止；TasksMax128，不用提高上限掩盖增长 |
 | RSS与cgroup | 建议FFmpeg RSS峰值不超过12GiB，采样达到14GiB立即停止；memory与memsw均为17179869184、swappiness0，主机可用内存不低于8GiB。每个prepare/render/decode必须在同一cgroup内记录动作前后 `memory.failcnt`、`memory.memsw.failcnt`、`total_swap`、`under_oom` 和 `oom_kill`；计数增长、swap非零、压力证据缺失或cgroup身份变化均失败 |
 | 长片RSS曲线 | 去除预热后按媒体进度25～50%、50～75%、75～100%分窗计算RSS中位数；最后窗相对前窗增长超过 `max(512MiB, 5%)` 或后段持续增长未形成平台，标记待查，不以“未OOM”放行 |
 | FB影响 | 不改FB配置；FB自然负载出现时记录。争抢或明显延迟即停止本次精确unit并延期，不降低FB优先级换取提速 |
 | 人工视觉/音频 | 播放片头、首个切集、中段至少两个集边界及结尾；检查字幕、画面适配、色罩/边框/角标/动画、黑帧、重复/缺帧和音画同步。记录时间点和验收人 |
 
-停止异常试验只使用本轮完整unit名并确认其cgroup和子进程全部停止。不得用通配符、`pkill ffmpeg`、重启生产服务、删检查点或操作原正式任务。失败输出、提交意图、start/prepared记录和日志全部保留；修复后使用新批次。
+停止异常试验只使用本轮完整unit名并确认其cgroup和子进程全部停止。不得用通配符、`pkill ffmpeg`、重启生产服务、删检查点或操作原正式任务。失败输出、0600诊断sidecar、提交意图、start/prepared/final记录和日志全部保留；回滚/备份同样保留diagnostics，修复后使用新批次。
 
 下面是short/2c2t/r1 render的完整停止示例。`TASK_SUBMIT_JSON` 必须是该次apply返回并原样保存的单行JSON；从其中提取精确unit，禁止按SHA/run/config手拼：
 
@@ -193,4 +195,4 @@ done
 
 每个样本记录：候选GitHub SHA、批次、operation/unit、实际配额/Nice/memsw/Tasks/身份、源/配方/素材/运行时SHA、launcher与benchmark原始JSON、进程曲线、完整解码、FB观察、人工视觉/音频结果，以及失败原因或参数决定。原始证据保存在私有验收根；未经确认不上传COS、不回填正式任务、不代替用户接受。
 
-当前状态：长片硬链接已保留，源SHA待计算，GPU固定配方副本待窗口内核对；媒体launcher已作为dc0bad8候选推送，CPU/HK目标Linux无媒体回归已通过。**16GiB guard-only、短源prepare、六组短片render/decode、约90分钟长片、完整解码及人工效果验收均未执行；新的HK媒体/COS窗口也未释放，不能沿用无媒体许可。** 本手册不替代异步API重启/故障、下载1/2/4/8、真实COS恢复或页面业务验收，最终状态以 [test-report.md](test-report.md) 为准。
+当前状态：长片硬链接已保留，源SHA待计算，GPU固定配方副本待窗口内核对；最终候选a151941及媒体launcher已推送并远端回读，本地478/478、FB16/16、页面25/25和frame/deadline修复后两轮独立增量终审通过。dc0bad8的CPU/HK 445+13只作历史证据；a151941 Linux 466+13尚未执行。**16GiB guard-only、短源prepare、六组短片render/decode、约90分钟长片、完整解码、真实COS/API重启及人工效果验收均未执行；新的HK媒体/COS窗口也未释放。** 本手册不替代异步API重启/故障、下载1/2/4/8、真实COS恢复或页面业务验收，最终状态以 [test-report.md](test-report.md) 为准。

@@ -526,7 +526,7 @@ class ConcatSignatureTests(unittest.TestCase):
                 del changed["streams"][stream_index][field]
                 self.assertIsNone(media.concat_signature(changed))
 
-    def test_frozen_normalization_plan_uses_even_episode0_geometry_and_rejects_missing_color(self):
+    def test_frozen_normalization_plan_uses_even_episode0_geometry_and_rejects_unsafe_missing_color(self):
         reference = stream_info(width=361, height=641)
         source = stream_info(width=720, height=1280, audio=False, sample_aspect_ratio="2:1")
         plan = media.freeze_concat_normalization_plan(reference, source, 1)
@@ -536,6 +536,9 @@ class ConcatSignatureTests(unittest.TestCase):
         self.assertEqual(plan["source"]["sample_aspect_ratio"], "2:1")
         self.assertEqual(plan["source"]["field_order"], "progressive")
         self.assertEqual(plan["source"]["scan_mode"], "progressive")
+        self.assertEqual(plan["version"], 3)
+        self.assertEqual(plan["color_policy"], "ffmpeg-colorspace-explicit-input-to-bt709-limited-v1")
+        self.assertNotIn("color_inference", plan)
         self.assertIn("bwdif", plan["profile"])
         self.assertIn("apad", plan["profile"])
         self.assertIsNotNone(media.validate_normalized_concat_info(normalized_stream_info(plan), plan))
@@ -548,6 +551,61 @@ class ConcatSignatureTests(unittest.TestCase):
         del missing["streams"][0]["color_transfer"]
         with self.assertRaises(DramaSynthesisError) as caught:
             media.freeze_concat_normalization_plan(reference, missing, 1)
+        self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+
+    def test_frozen_normalization_plan_infers_only_missing_hd_8bit_sdr_color_tags(self):
+        reference = stream_info(width=1080, height=1920)
+        source = stream_info(width=1080, height=1920, video_updates={
+            "color_range": None, "color_space": None, "color_transfer": None,
+            "color_primaries": None,
+        })
+        plan = media.freeze_concat_normalization_plan(reference, source, 9)
+        self.assertEqual(plan["version"], 4)
+        self.assertEqual(plan["color_policy"], "ffmpeg-colorspace-infer-missing-hd-sdr-to-bt709-v1")
+        self.assertEqual(
+            plan["color_inference"]["missing_fields"],
+            ["color_space", "color_transfer", "color_primaries", "color_range"],
+        )
+        self.assertEqual(plan["color_inference"]["codec_name"], "h264")
+        self.assertEqual(plan["color_inference"]["pix_fmt"], "yuv420p")
+        self.assertEqual(
+            {name: plan["source"][name] for name in (
+                "color_space", "color_transfer", "color_primaries", "color_range",
+            )},
+            {"color_space": "bt709", "color_transfer": "bt709", "color_primaries": "bt709", "color_range": "tv"},
+        )
+        self.assertIsNotNone(media.validate_normalized_concat_info(normalized_stream_info(plan), plan))
+
+        full_range = stream_info(width=1080, height=1920, video_updates={
+            "pix_fmt": "yuvj420p", "color_range": None, "color_transfer": None,
+        })
+        full_range_plan = media.freeze_concat_normalization_plan(reference, full_range, 10)
+        self.assertEqual(full_range_plan["source"]["color_range"], "pc")
+        self.assertEqual(full_range_plan["source"]["color_transfer"], "bt709")
+        self.assertEqual(
+            full_range_plan["color_inference"]["missing_fields"],
+            ["color_transfer", "color_range"],
+        )
+
+    def test_missing_color_inference_rejects_hdr_10bit_unknown_codec_and_low_resolution(self):
+        reference = stream_info(width=1080, height=1920)
+        cases = {
+            "known-hdr": {"color_space": "bt2020nc", "color_transfer": "smpte2084",
+                          "color_primaries": "bt2020", "color_range": None},
+            "ten-bit": {"pix_fmt": "yuv420p10le", "color_transfer": None},
+            "unknown-codec": {"codec_name": "unknown", "color_transfer": None},
+        }
+        for name, updates in cases.items():
+            with self.subTest(name=name), self.assertRaises(DramaSynthesisError) as caught:
+                media.freeze_concat_normalization_plan(
+                    reference, stream_info(width=1080, height=1920, video_updates=updates), 1,
+                )
+            self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
+
+        with self.assertRaises(DramaSynthesisError) as caught:
+            media.freeze_concat_normalization_plan(
+                reference, stream_info(width=360, height=640, video_updates={"color_transfer": None}), 1,
+            )
         self.assertEqual(caught.exception.code, "drama_concat_normalization_source_unsupported")
 
     def test_scan_policy_preserves_progressive_deinterlaces_known_orders_and_rejects_unknown(self):
