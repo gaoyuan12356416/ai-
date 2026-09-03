@@ -685,26 +685,11 @@ def fetch_history_task(client, task):
     records = client.fetch_history(advertiser_id, data_level, list(candidate_map), day)
     rows = normalize_history_records(records, candidate_map, day, data_level)
     returned_ids = {row["query_id"] for row in rows}
-    missing_ids = sorted(set(candidate_map) - returned_ids)
-    if not missing_ids:
-        return rows, [], 0
-
-    # History is sparse for objects where Bid Protection does not apply.  Use
-    # the status endpoint to separate a normal sparse response from an object
-    # whose known protection status still lacks its requested daily history.
-    status_records = client.fetch_status(advertiser_id, data_level, missing_ids)
-    status_ids = set()
-    for record in status_records:
-        query_id = normalize_id(record.get("query_id"), "status response query_id")
-        if query_id not in candidate_map:
-            raise SyncError("status response contained an unrequested query_id")
-        response_level = str(record.get("data_level") or data_level).upper()
-        if response_level != data_level:
-            raise SyncError("status response data_level differs from request")
-        status_ids.add(query_id)
-    retry_candidates = [candidate_map[query_id] for query_id in sorted(status_ids)]
-    not_applicable = len(missing_ids) - len(status_ids)
-    return rows, retry_candidates, not_applicable
+    # The history endpoint is intentionally sparse: a successful response does
+    # not promise one record per requested object.  Current protection status
+    # cannot classify a past day's omission, so code=0 omissions are counted as
+    # not applicable for that day.  Only request exceptions enter retry state.
+    return rows, [], len(set(candidate_map) - returned_ids)
 
 
 UPSERT_SQL = """
@@ -810,17 +795,7 @@ def sync_candidates(client, candidates, workers=DEFAULT_WORKERS, dry_run=False):
                 task_rows, task_retries, task_not_applicable = future.result()
                 rows.extend(task_rows)
                 not_applicable += task_not_applicable
-                if task_retries:
-                    retry_candidates.extend(task_retries)
-                    failures.append(
-                        {
-                            "record_date": task[0],
-                            "advertiser_id": task[1],
-                            "data_level": task[2],
-                            "id_count": len(task_retries),
-                            "error": "status-known object is missing requested daily history",
-                        }
-                    )
+                retry_candidates.extend(task_retries)
             except Exception as exc:
                 retry_candidates.extend(task[3])
                 failures.append(
@@ -838,7 +813,7 @@ def sync_candidates(client, candidates, workers=DEFAULT_WORKERS, dry_run=False):
         "requests": len(tasks),
         "rows": len(rows),
         "failures": failures,
-        "missing": max(0, len(candidates) - len(rows)),
+        "missing": len(retry_candidates),
         "not_applicable": not_applicable,
         "retry_candidates": retry_candidates,
     }

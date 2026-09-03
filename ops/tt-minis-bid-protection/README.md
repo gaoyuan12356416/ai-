@@ -14,7 +14,7 @@ It does not provide a web page, an internal HTTP API, Feishu delivery, or curren
 - Currency: kept as returned by TikTok; an empty value is allowed when TikTok returns no currency for zero credit.
 - Product scope: starts from every positive-spend object for the day, then proves membership through `auto_created_data.publish_queue_id -> queue` using a numeric `product_id` and non-empty `minis_id`. `show_name` is only a saved snapshot and is never a filter. Current expected products are 3346, 3380, and 3416; later valid TT Minis products require no code change.
 - Refresh: the previous day plus `UNDER_PROTECTION` and `CONFIRMING` rows still inside the 60-day API window.
-- Sparse history: an omitted history ID is checked once through the status endpoint. Status-known omissions and failed API/DB batches go to the mode-0600 data-disk retry state; objects omitted by both successful endpoints are counted as `not_applicable` and do not form a dead retry queue. Successful facts are never deleted.
+- Sparse history: a successful history response may omit requested objects; those objects are counted as `not_applicable` for that date and do not form a dead retry queue. Only failed API/DB batches go to the mode-0600 data-disk retry state. The status endpoint is used for Token compatibility validation, not to reinterpret a past day's sparse history. Successful facts are never deleted.
 
 The DDL is in `001_create_ads_tiktok_minis_bid_protection_daily.sql`. Apply it once through the approved `ads_ai` write entry and validate it through the read-only entry before running the sync.
 

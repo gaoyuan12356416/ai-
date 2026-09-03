@@ -158,21 +158,20 @@ class ApiClientTests(unittest.TestCase):
     def test_empty_api_response_creates_no_rows(self):
         client = mock.Mock()
         client.fetch_history.return_value = []
-        client.fetch_status.return_value = []
         result = sync.sync_candidates(client, [sample_candidate()], workers=1, dry_run=True)
         self.assertEqual(0, result["rows"])
-        self.assertEqual(1, result["missing"])
+        self.assertEqual(0, result["missing"])
         self.assertEqual(1, result["not_applicable"])
         self.assertEqual([], result["failures"])
+        client.fetch_status.assert_not_called()
 
-    def test_status_known_history_omission_is_retryable_partial(self):
+    def test_successful_sparse_history_is_not_retried(self):
         client = mock.Mock()
         client.fetch_history.return_value = []
-        client.fetch_status.return_value = [{"query_id": "100", "data_level": "CAMPAIGN"}]
         result = sync.sync_candidates(client, [sample_candidate()], workers=1, dry_run=True)
-        self.assertEqual(1, len(result["failures"]))
-        self.assertEqual(1, len(result["retry_candidates"]))
-        self.assertEqual(0, result["not_applicable"])
+        self.assertEqual([], result["failures"])
+        self.assertEqual([], result["retry_candidates"])
+        self.assertEqual(1, result["not_applicable"])
 
 
 class SourceAndWriteContractTests(unittest.TestCase):
