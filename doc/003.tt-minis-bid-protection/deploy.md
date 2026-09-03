@@ -59,27 +59,26 @@ crontab -l
 
 已完成：
 
-- GitHub 精确 release：`8668e31373e592b34538fc911d88fa14caa2fa28`；旧 release `2235001` 与 `8ede1c8` 均保留作为代码回滚点。
-- 自动化回归：24 项测试全部通过。
+- GitHub 精确生产 release：`838b1c6cba12939f6307b1424f51335d67cf9722`；`current` 指向其 `ops/tt-minis-bid-protection` 目录，上一 release `8668e31373e592b34538fc911d88fa14caa2fa28` 保留作为代码回滚点。
+- 自动化回归：27 项测试全部通过；生产源查询字符集缺陷 `BUG-001` 已在清表前修复并关闭。
 - 生产 DDL：只读入口读回 18 列、1 个业务唯一键和 5 个二级索引，结构与版本库 DDL 一致。
 - Token 轮换：全量兼容 canary 覆盖产品 3346 的 356 个账户、3380 的 68 个账户、3416 的 148 个账户，共 572 个账户；Bid Protection status、history 和现有 Native Growth 在写入前后均通过。
 - SQLite 一致性备份：`/mnt/data-disk/tt-minis-bid-protection/backups/token/tt_business_api_tokens.sqlite3.20260903T041332Z.before_bid_protection`。
 - 两次旧写入性能试跑均已安全终止，随后确认目标表仍为 0 行；未留下半批数据。第二次试跑定位到 `NOW()` 使 PyMySQL `executemany` 退化为逐行写入，已改成全参数占位的 500 行批量提交实现。
-
-原方案暂停时尚未完成：
-
-- 最近 60 天首次回填（已被 30 天重建方案替代）。
-- 同范围重复运行的幂等读回。
-- 三产品、Campaign/Ad Group 两层的最终落表覆盖检查（已改为 Campaign 单层）。
-- 每日 `09:25` root cron 安装与自然触发（已改为 `09:25/21:25`）。
-- DramaWaveMinis `2026-09-02` 金额、Campaign 明细及失败账户数输出。
+- 清表前数据备份：`/mnt/data-disk/tt-minis-bid-protection/backups/data/20260903T074850Z`，301,746 行，gzip 校验通过，SHA-256 `a669b43ec1ea2a319d665805e51fe08d71aa02dd6d604808e8f20c4d9f7fa185`。
+- 正式重建：`2026-08-04..2026-09-02` 共 30 天，449,022 行；13,199 次账户请求，失败账户 0，重试积压 0。
+- 数据验收：仅 `CAMPAIGN`；Ad Group 非空 0、Campaign/query ID 不一致 0、缩放错误 0、重复键 0、越界账户 0、产品 1479 行数 0。
+- 幂等验收：复跑 `2026-09-02` 后总行数仍为 449,022、当日仍为 22,304，重复键仍为 0。
+- 样本验收：DramaWaveMinis `2026-09-02` 共 18,992 条 Campaign 记录，当前实际赔付合计为 0，无非零 Campaign 明细，失败账户 0；待结算状态由后续 14 天滚动窗口继续回刷。
+- cron 已安装且唯一，备份为 `/mnt/data-disk/tt-minis-bid-protection/backups/cron/20260903T083436Z/root.crontab.before`；`crond` active/enabled，日志权限 `0600`。
+- 代码切换前备份：`/mnt/data-disk/tt-minis-bid-protection/backups/deploy/20260903T074258Z`。
 
 ## 回滚方案
 
 1. 先从 root crontab 删除且仅删除本任务的精确一行，并确认没有本任务进程持锁，不影响其他 TT 任务。
-2. 将 `current` 软链切回已保留的上一 release `223500167e17edbdc1a8c727c7a6851eaeb7495e` 并读回软链目标；当前 release 为 `8668e31373e592b34538fc911d88fa14caa2fa28`。
+2. 将 `current` 软链切回已保留的上一 release `8668e31373e592b34538fc911d88fa14caa2fa28` 并读回软链目标；当前生产 release 为 `838b1c6cba12939f6307b1424f51335d67cf9722`。
 3. Token 新值不可用时，仅用备份值/旧哈希做单行 CAS 恢复并重跑三类只读 canary；不得用整库覆盖，以免丢失并发更新。
-4. 若需要回滚本次数据重建，从本次清表前 gzip 备份恢复目标表；不得影响其他 `ads_ai` 表。
+4. 若需要回滚本次数据重建，只从 `/mnt/data-disk/tt-minis-bid-protection/backups/data/20260903T074850Z/ads_tiktok_minis_bid_protection_daily.jsonl.gz` 恢复目标表；恢复前校验上述 SHA-256，不得影响其他 `ads_ai` 表。
 5. 记录备份目录、回滚提交、Token 哈希（非值）、服务状态和验证结果。
 
 ## 注意事项
