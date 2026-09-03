@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | 单表 DDL 与索引 | Codex | `001_create_ads_tiktok_minis_bid_protection_daily.sql` | 已完成 |
 | 动态范围、API 分批、金额校验与 upsert | Codex | 同步脚本 | 已完成 |
-| 幂等、失败隔离和脱敏测试 | Codex/QA | 测试模块 | 已完成（本地 22/22） |
+| 幂等、失败隔离和脱敏测试 | Codex/QA | 测试模块 | 已完成（本地 24/24） |
 | root cron、独立锁/日志与运维说明 | Codex | crontab、README | 配置已完成，待安装 |
 | Token 安全轮换、建表和精确 release 发布 | Codex | CPU `43.166.187.96` | 已完成 |
 | 最近 60 天首次回填与幂等复跑 | Codex | CPU `43.166.187.96`、`ads_ai` | 待执行 |
@@ -34,4 +34,4 @@ git diff --check
 ## 完成记录
 
 - 2026-09-03：需求/SA/QA 文档、单表 DDL、同步/轮换脚本与本地测试完成；生产部署与验收结果在完成后更新。
-- 2026-09-03：release `223500167e17edbdc1a8c727c7a6851eaeb7495e` 已部署；生产 DDL 读回和 572 账户 Token 写前/写后兼容 canary 通过。首次 60 天回填、幂等、落表覆盖、cron 和样本查询待完成。
+- 2026-09-03：release `8668e31373e592b34538fc911d88fa14caa2fa28` 已部署；生产 DDL 读回和 572 账户 Token 写前/写后兼容 canary 通过。首次 60 天回填、幂等、落表覆盖、cron 和样本查询待完成。

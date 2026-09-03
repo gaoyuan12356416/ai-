@@ -297,6 +297,62 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertEqual(1, len(merged))
         self.assertEqual("dramawaveminis", merged[0]["product_name"])
 
+    def test_terminal_candidate_keys_use_full_business_key(self):
+        captured = []
+
+        def fake_query(sql, timeout=0):
+            captured.append(sql)
+            return [["2026-09-02", "900", "CAMPAIGN", "100"]]
+
+        with mock.patch.object(sync, "run_mysql_query", side_effect=fake_query):
+            keys = sync.fetch_terminal_candidate_keys("2026-09-02")
+        self.assertEqual({("2026-09-02", "900", "CAMPAIGN", "100")}, keys)
+        self.assertIn("CAST(record_date AS CHAR)", captured[0])
+        self.assertNotIn("%%", captured[0])
+        self.assertIn("record_date = '2026-09-02'", captured[0])
+        for status in sync.TERMINAL_STATUSES:
+            self.assertIn(status, captured[0])
+
+    def test_run_sync_skips_existing_terminal_candidate(self):
+        args = mock.Mock(
+            daily=False,
+            backfill_days=None,
+            start_date="2026-09-02",
+            end_date=None,
+            token_db="unused",
+            token_key="unused",
+            api_timeout=1,
+            workers=1,
+            dry_run=True,
+            skip_pending=False,
+            retry_state="",
+        )
+        candidate = sample_candidate()
+        events = []
+        empty_result = {
+            "requests": 0,
+            "rows": 0,
+            "failures": [],
+            "missing": 0,
+            "not_applicable": 0,
+            "retry_candidates": [],
+        }
+        with mock.patch.object(
+            sync, "beijing_today", return_value=sync.parse_day("2026-09-03")
+        ), mock.patch.object(sync, "load_access_token", return_value="unit-test-secret"), mock.patch.object(
+            sync, "build_day_candidates", return_value=[candidate]
+        ), mock.patch.object(
+            sync, "fetch_terminal_candidate_keys", return_value={sync.candidate_key(candidate)}
+        ), mock.patch.object(
+            sync, "sync_candidates", return_value=empty_result
+        ) as call, mock.patch.object(
+            sync, "emit", side_effect=lambda event, **fields: events.append((event, fields))
+        ):
+            self.assertEqual(0, sync.run_sync(args))
+        self.assertEqual([], call.call_args.args[1])
+        complete = [fields for event, fields in events if event == "sync_complete"][0]
+        self.assertEqual(1, complete["terminal_skipped"])
+
     def test_partial_api_failure_is_logged_and_exits_nonzero(self):
         args = mock.Mock(
             daily=False,
@@ -332,7 +388,9 @@ class SourceAndWriteContractTests(unittest.TestCase):
                 "not_applicable": 0,
                 "retry_candidates": [sample_candidate()],
             },
-        ), mock.patch.object(sync, "emit", side_effect=lambda event, **fields: events.append((event, fields))):
+        ), mock.patch.object(sync, "fetch_terminal_candidate_keys", return_value=set()), mock.patch.object(
+            sync, "emit", side_effect=lambda event, **fields: events.append((event, fields))
+        ):
             self.assertEqual(2, sync.run_sync(args))
         self.assertIn(("request_failed", failure), events)
         complete = [fields for event, fields in events if event == "sync_complete"][0]
@@ -358,8 +416,9 @@ class SourceAndWriteContractTests(unittest.TestCase):
                 sync, "beijing_today", return_value=sync.parse_day("2026-09-03")
             ), mock.patch.object(sync, "load_access_token", return_value="unit-test-secret"), mock.patch.object(
                 sync, "build_day_candidates", return_value=[sample_candidate()]
-            ), mock.patch.object(sync, "sync_candidates", side_effect=sync.SyncError("write failed")), mock.patch.object(
-                sync, "emit"
+            ), mock.patch.object(sync, "fetch_terminal_candidate_keys", return_value=set()), mock.patch.object(
+                sync, "sync_candidates", side_effect=sync.SyncError("write failed")
+            ), mock.patch.object(sync, "emit"
             ):
                 with self.assertRaises(sync.SyncError):
                     sync.run_sync(args)

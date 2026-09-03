@@ -472,6 +472,39 @@ def fetch_pending_candidates(start_date, end_date):
     return out
 
 
+def fetch_terminal_candidate_keys(day):
+    parse_day(day)
+    sql = """
+    SELECT
+      CAST(record_date AS CHAR),
+      advertiser_id, data_level, query_id
+    FROM {table}
+    WHERE record_date = {day}
+      AND protection_status IN {statuses}
+    ORDER BY advertiser_id, data_level, query_id
+    """.format(
+        table=TARGET_TABLE,
+        day=sql_quote(day),
+        statuses=sql_in(TERMINAL_STATUSES),
+    )
+    out = set()
+    for row in run_mysql_query(sql, timeout=180):
+        if len(row) != 4 or row[2] not in VALID_DATA_LEVELS:
+            continue
+        try:
+            out.add(
+                (
+                    format_day(parse_day(row[0])),
+                    normalize_id(row[1], "advertiser_id"),
+                    row[2],
+                    normalize_id(row[3], "query_id"),
+                )
+            )
+        except SyncError:
+            continue
+    return out
+
+
 def merge_candidates(*candidate_sets):
     merged = {}
     for candidate_set in candidate_sets:
@@ -875,6 +908,7 @@ def run_sync(args):
     totals = {
         "days": 0,
         "candidates": 0,
+        "terminal_skipped": 0,
         "requests": 0,
         "rows": 0,
         "missing": 0,
@@ -892,7 +926,12 @@ def run_sync(args):
                 level_rows = build_day_candidates(day, level, metadata_cache, end_date)
                 fresh.extend(level_rows)
                 emit("source_scope", record_date=day, data_level=level, candidates=len(level_rows))
-        candidates = merge_candidates(retry_by_day.get(day, []), pending_by_day.get(day, []), fresh)
+        merged_candidates = merge_candidates(retry_by_day.get(day, []), pending_by_day.get(day, []), fresh)
+        terminal_keys = fetch_terminal_candidate_keys(day) if merged_candidates else set()
+        candidates = [item for item in merged_candidates if candidate_key(item) not in terminal_keys]
+        terminal_skipped = len(merged_candidates) - len(candidates)
+        for key in terminal_keys:
+            retry_state.pop(key, None)
         try:
             result = sync_candidates(client, candidates, workers=args.workers, dry_run=args.dry_run)
         except Exception:
@@ -912,6 +951,7 @@ def run_sync(args):
             save_retry_candidates(args.retry_state, list(retry_state.values()))
         totals["days"] += 1
         totals["candidates"] += len(candidates)
+        totals["terminal_skipped"] += terminal_skipped
         totals["requests"] += result["requests"]
         totals["rows"] += result["rows"]
         totals["missing"] += result["missing"]
@@ -923,6 +963,7 @@ def run_sync(args):
             "day_complete",
             record_date=day,
             candidates=len(candidates),
+            terminal_skipped=terminal_skipped,
             requests=result["requests"],
             rows=result["rows"],
             missing=result["missing"],
