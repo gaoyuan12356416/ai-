@@ -19,6 +19,14 @@ Never retry after a partial failure without inspecting the receipt and exact
 `exchanged` means the old copy may remain at the swap path; `complete` means
 the verified data-disk target is the live compatible path. No broad cleanup.
 
+The historical weekly cache failed pre-migration quick_check (out-of-order
+rowids / child page depth mismatch). Its untouched source and copy hashes match.
+After auditing that pre-existing condition, the narrowly scoped
+`--archive-invalid-weekly-cache --resume-verified-copy` preserves its exact bytes
+and original-path symlink, records the failure in its receipt, and treats it
+only as an invalid historical archive. It does NOT repair it, certify it as a
+healthy database, or let other invalid/live databases bypass validation.
+
 Cold rollback: confirm root capacity, quiesce relevant writers, rsync the
 receipt destination to a new sibling of source, compare hashes/metadata,
 atomically exchange that sibling with the source symlink, retain the data-disk

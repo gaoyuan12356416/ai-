@@ -92,7 +92,7 @@ def receipt(path, value):
     os.replace(temp, path)
 
 
-def run(source, apply):
+def run(source, apply, resume=False, archive_invalid=False):
     destination = BASE + '/data' + source
     if os.path.islink(source):
         if os.path.realpath(source) != destination:
@@ -113,23 +113,28 @@ def run(source, apply):
         return
     verify(ROOT, max(5 * 1024 ** 3, size * 2))
     os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-    if os.path.lexists(destination):
+    if os.path.lexists(destination) and not resume:
         raise RuntimeError('destination exists, inspect before resuming: ' + destination)
-    subprocess.check_call(['rsync', '-aHAX', '--numeric-ids', source, os.path.dirname(destination) + '/'])
+    if not os.path.lexists(destination):
+        subprocess.check_call(['rsync', '-aHAX', '--numeric-ids', source, os.path.dirname(destination) + '/'])
     copied = manifest(destination)
     if copied != before or manifest(source) != before or open_users(source):
         raise RuntimeError('source changed or copy verification failed')
+    integrity = None
     if source.endswith('.sqlite3'):
         conn = sqlite3.connect('file:' + destination + '?mode=ro&immutable=1', uri=True)
         try:
-            if conn.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+            integrity = conn.execute('PRAGMA quick_check(3)').fetchall()
+            if integrity != [('ok',)] and not (archive_invalid and source == COLD[0]):
                 raise RuntimeError('SQLite quick_check failed')
         finally:
             conn.close()
     audit = BASE + '/audit/' + source.strip('/').replace('/', '_') + '.json'
     os.makedirs(os.path.dirname(audit), mode=0o700, exist_ok=True)
     record = {'source': source, 'destination': destination, 'bytes': size,
-              'manifest': before, 'time': datetime.datetime.now().isoformat(), 'phase': 'verified_copy'}
+              'manifest': before, 'sqlite_quick_check': integrity,
+              'archived_invalid_database': integrity is not None and integrity != [('ok',)],
+              'time': datetime.datetime.now().isoformat(), 'phase': 'verified_copy'}
     receipt(audit, record)
     staged = source + '.migration-swap-20260904'
     if os.path.lexists(staged):
@@ -160,6 +165,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--attachments', action='store_true')
+    parser.add_argument('--resume-verified-copy', action='store_true')
+    parser.add_argument('--archive-invalid-weekly-cache', action='store_true',
+                        help='Preserve byte-identical historical TT cache as invalid archive; never repair it')
     args = parser.parse_args()
     verify(ROOT)
     import fcntl
@@ -174,7 +182,7 @@ def main():
     else:
         sources = COLD
     for source in sources:
-        run(source, args.apply)
+        run(source, args.apply, args.resume_verified_copy, args.archive_invalid_weekly_cache)
 
 
 if __name__ == '__main__':
