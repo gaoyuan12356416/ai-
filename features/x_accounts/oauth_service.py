@@ -1545,11 +1545,11 @@ def _x_posts_api():
 
 def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False):
     """Refresh before each upload request without releasing the outer lock."""
-    def current_token():
+    def current_token(*, verify_now=False):
         XPostError, _store, _publish = _x_posts_api()
         try:
             verify_account(
-                account_id, actor, "all", only_refresh_required=True,
+                account_id, actor, "all", only_refresh_required=not verify_now,
                 preserve_transient_status=True, require_publish_approved=True,
             )
             with publish_credentials(account_id, actor, "all") as (account, token):

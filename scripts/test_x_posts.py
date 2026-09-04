@@ -1123,6 +1123,36 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(http.requests, [])
         provider.assert_called_once()
 
+    def test_media_401_reverifies_and_retries_only_exact_request_once(self):
+        http = ScriptedHttpClient([response(401), response(200, {'data': {'ok': True}})])
+        provider = mock.Mock(side_effect=['old-token', 'verified-token'])
+        api = service.XApiClient(http_client=http, sleeper=lambda _: None, access_token_provider=provider)
+        api._request('POST', '/2/media/upload/m1/append', 'unused', b'frozen-segment', 'multipart/form-data')
+        self.assertEqual(provider.call_args_list, [mock.call(), mock.call(verify_now=True)])
+        self.assertEqual(len(http.requests), 2)
+        self.assertEqual(http.requests[0]['url'], http.requests[1]['url'])
+        self.assertEqual(http.requests[0]['body'], http.requests[1]['body'])
+        self.assertEqual(http.requests[1]['headers']['Authorization'], 'Bearer verified-token')
+
+    def test_media_401_with_rejected_identity_never_retries(self):
+        http = ScriptedHttpClient([response(401)])
+        provider = mock.Mock(side_effect=['token', service.XPostError('x_identity_mismatch', 'identity mismatch', 409)])
+        api = service.XApiClient(http_client=http, access_token_provider=provider)
+        with self.assertRaises(service.XPostError):
+            api._request('GET', '/2/media/upload?media_id=m1&command=STATUS', 'unused')
+        self.assertEqual(len(http.requests), 1)
+
+    def test_media_repeated_401_stops_and_post_401_never_retries(self):
+        for path,method,count in [('/2/media/upload/initialize','POST',2),('/2/tweets','POST',1),('/2/users/1/retweets','POST',1)]:
+            with self.subTest(path=path):
+                http = ScriptedHttpClient([response(401)] * count)
+                api = service.XApiClient(http_client=http, sleeper=lambda _: None, access_token_provider=mock.Mock(return_value='token'))
+                with self.assertRaises(service.XPostError) as caught:
+                    api._request(method, path, 'unused', unknown=not path.startswith('/2/media/'))
+                self.assertEqual(caught.exception.code, 'x_token_invalid')
+                self.assertFalse(caught.exception.unknown_outcome)
+                self.assertEqual(len(http.requests), count)
+
     def test_x_v2_image_upload_uses_tweet_image_category(self):
         media = self.root / "image.png"
         media.write_bytes(b"image")

@@ -11,6 +11,10 @@ No Post or Repost request receives an automatic retry.
 An HTTP 401 now identifies its operation instead of claiming that every case
 requires login. An upload can fail with a recently renewed token, so expiry must
 not be assumed without timing evidence.
+For a media-only HTTP 401, verify identity with X again and retry that exact
+media request once only after verification succeeds. A second 401 stops. This
+does not restart the upload or retry any Post/Repost creation, and an identity,
+scope, membership or authorization failure prevents the media retry.
 
 `scripts/x_post_gap_recovery.py` contains explicit operator actions, read-only by
 default. Execute them only after backup, quiescence and the shared runner lock:

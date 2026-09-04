@@ -18571,6 +18571,23 @@ class XApiClient:
                 method, X_API_BASE_URL + path, headers=headers, body=body, timeout=self.timeout,
                 stream=False, max_response_bytes=MAX_HTTP_RESPONSE_BYTES,
             )
+            if (
+                response.status == 401 and self.access_token_provider is not None
+                and path.startswith("/2/media/") and not unknown
+            ):
+                # A media-only 401 cannot have created a Post. Verify identity
+                # with X before one exact request retry; never apply this to
+                # tweets or Reposts, and never restart the whole upload.
+                verified_token = self.access_token_provider(verify_now=True)
+                if not verified_token:
+                    raise XPostError("x_token_invalid", "X Token校验未通过", 409)
+                headers["Authorization"] = "Bearer " + str(verified_token)
+                self.sleeper(1)
+                response = self.http.request(
+                    method, X_API_BASE_URL + path, headers=headers, body=body,
+                    timeout=self.timeout, stream=False,
+                    max_response_bytes=MAX_HTTP_RESPONSE_BYTES,
+                )
         except XPostError as exc:
             if unknown:
                 raise XPostError("x_post_outcome_unknown", str(exc), exc.status, True) from None

@@ -1304,10 +1304,12 @@ class XAccountsTestCase(unittest.TestCase):
             with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
                 conn.execute("UPDATE x_authorized_account SET access_expires_at='2000-01-01T00:00:00Z' WHERE id=?", (item['id'],))
                 conn.commit()
-            with mock.patch.object(service, 'token_request', return_value=fresh) as refresh, mock.patch.object(service, 'user_request', return_value=profile):
+            with mock.patch.object(service, 'token_request', return_value=fresh) as refresh, mock.patch.object(service, 'user_request', return_value=profile) as identity:
                 self.assertEqual(provider(), 'rotated-access')
                 self.assertEqual(provider(), 'rotated-access')
+                self.assertEqual(provider(verify_now=True), 'rotated-access')
                 refresh.assert_called_once()
+                self.assertEqual(identity.call_count, 2)
         self.assertEqual(json.loads(service.token_path(item['x_user_id']).read_text())['refresh_token'], 'rotated-refresh')
 
     def test_upload_provider_rechecks_language_and_membership(self):
