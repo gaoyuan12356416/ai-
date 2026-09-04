@@ -49,11 +49,12 @@ only the attribution web service, check `/healthz`, then restore the timer.
 Its existing ExecStartPost automatically prewarms the cache. Validate real
 queries and `/proc/<pid>/fd` SQLite temp destinations during prewarm/refresh.
 
-Unit rollback: stop refresh timer, drain the running refresh, remove only new
-`90-data-disk-temp.conf` drop-ins (or restore exact backed-up versions), restore
-prior guard symlink, `systemctl daemon-reload`, restart
-`dramawave-attribution-comparison.service`, check `/healthz`, restore prior timer
-state. Keep cold migrated data and audit records; these are independent.
+Unit rollback: `bash /opt/cpu-root-storage-current/rollback_attribution.sh --apply`.
+It checks ownership of both drop-ins, stops the timer, drains refresh, removes
+only the storage overrides, reloads systemd, restarts only attribution, checks
+health and restores the timer. It intentionally keeps TimeoutStartSec=10min:
+the pre-existing warm-up now exceeds the original 90-second startup limit.
+Application code, cold migrated data, guard artifact and audit are retained.
 
 Tests: `python3 -m unittest discover -s ops/cpu-root-storage -v`; Linux is
 required for the atomic rename-exchange test. No deliberate disk filling,
