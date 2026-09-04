@@ -18504,7 +18504,7 @@ def _json_response(response, expected_status, operation, unknown_on_success_shap
     if response.status == 401:
         raise XPostError(
             "x_token_invalid",
-            "Token失效，请重新登陆",
+            "%s返回HTTP 401：Token校验未通过" % operation,
             409,
             False,
         )
@@ -18549,14 +18549,18 @@ class XApiClient:
     def __init__(
         self, http_client=None, sleeper=None, timeout=30, chunk_bytes=DEFAULT_CHUNK_BYTES,
         max_status_polls=60,
+        access_token_provider=None,
     ):
         self.http = http_client or UrllibHttpClient()
         self.sleeper = sleeper or time.sleep
         self.timeout = max(1, min(int(timeout), 120))
         self.chunk_bytes = max(1, min(int(chunk_bytes), 16 * 1024 * 1024))
         self.max_status_polls = max(1, min(int(max_status_polls), 120))
+        self.access_token_provider = access_token_provider
 
     def _request(self, method, path, access_token, body=None, content_type=None, expected=200, operation="X API", unknown=False):
+        if self.access_token_provider is not None:
+            access_token = self.access_token_provider()
         if not access_token:
             raise XPostError("x_token_invalid", "Token失效，请重新登陆", 409)
         headers = {"Authorization": "Bearer " + str(access_token), "Accept": "application/json"}
@@ -18733,6 +18737,7 @@ def publish_canary(
     allowed_media_hosts, http_client=None, sleeper=None, timeout=30,
     max_media_bytes=DEFAULT_MAX_MEDIA_BYTES,
     storage_guard=None, durable_storage=None, prepared_media=None,
+    access_token_provider=None,
 ):
     """Publish one queued canary. Must run inside the sidecar account lock."""
     if not isinstance(account, dict):
@@ -18983,7 +18988,10 @@ def publish_canary(
         if callable(storage_guard):
             storage_guard()
         store.mark_publishing(log["id"])
-        x_client = XApiClient(http_client=http_client, sleeper=sleeper, timeout=timeout)
+        x_client = XApiClient(
+            http_client=http_client, sleeper=sleeper, timeout=timeout,
+            access_token_provider=access_token_provider,
+        )
         uploaded = x_client.upload_media(
             access_token,
             media["path"],

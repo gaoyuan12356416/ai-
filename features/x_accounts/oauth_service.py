@@ -730,7 +730,9 @@ def read_token_file(x_user_id):
 def account_lock(account_id):
     key = str(account_id)
     with _ACCOUNT_LOCKS_LOCK:
-        return _ACCOUNT_LOCKS.setdefault(key, threading.Lock())
+        # A long upload refreshes credentials on the same thread between X
+        # requests while retaining exclusion against disable/refresh threads.
+        return _ACCOUNT_LOCKS.setdefault(key, threading.RLock())
 
 
 def actor_from_state(state_row):
@@ -1539,6 +1541,29 @@ def _x_posts_api():
     except (ImportError, ModuleNotFoundError):
         raise ServiceError("x_posts_unavailable", "X发布服务暂不可用", 503) from None
     return XPostError, XPostStore, publish_canary
+
+
+def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False):
+    """Refresh before each upload request without releasing the outer lock."""
+    def current_token():
+        XPostError, _store, _publish = _x_posts_api()
+        try:
+            verify_account(
+                account_id, actor, "all", only_refresh_required=True,
+                preserve_transient_status=True, require_publish_approved=True,
+            )
+            with publish_credentials(account_id, actor, "all") as (account, token):
+                if frozen_language and not same_drama_language(account.get("drama_language"), frozen_language):
+                    raise ServiceError("x_post_account_language_mismatch", "X account language changed during upload", 409)
+                if require_premium and (
+                    not account.get("long_video_publish_eligible") or account.get("protected") is not False
+                ):
+                    raise ServiceError("x_post_premium_relay_unavailable", "Long-video account is no longer eligible", 409)
+                return token
+        except ServiceError as exc:
+            # No publish request has been sent by this credential check.
+            raise XPostError(exc.code, str(exc), exc.status) from None
+    return current_token
 
 
 def _raise_x_post_error(exc, secrets_to_redact=()):
@@ -2940,6 +2965,10 @@ def publish_queue_request(
                         queue_id=int(queue["id"]),
                         account=account,
                         access_token=access_token,
+                        access_token_provider=publishing_token_provider(
+                            source_account_id, actor, frozen_drama_language,
+                            require_premium=relay_delivery or duration > 140.0,
+                        ),
                         public_root=POST_PUBLIC_ROOT,
                         short_base_url=POST_SHORT_BASE_URL,
                         allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,

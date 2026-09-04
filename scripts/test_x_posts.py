@@ -490,7 +490,7 @@ class XPostsTests(unittest.TestCase):
                 "expired-token", "url\ndesc", "media1"
             )
         self.assertEqual(caught.exception.code, "x_token_invalid")
-        self.assertEqual(str(caught.exception), "Token失效，请重新登陆")
+        self.assertEqual(str(caught.exception), "X Post创建返回HTTP 401：Token校验未通过")
         self.assertEqual(caught.exception.status, 409)
         self.assertFalse(caught.exception.unknown_outcome)
 
@@ -1096,6 +1096,32 @@ class XPostsTests(unittest.TestCase):
         self.assertIn("/2/media/upload?media_id=media123&command=STATUS", client.requests[4]["url"])
         post_payload = json.loads(client.requests[5]["body"].decode("utf-8"))
         self.assertEqual(post_payload["media"]["media_ids"], ["media123"])
+
+    def test_long_upload_resolves_credentials_before_every_request(self):
+        media = self.root / "refresh.mp4"
+        media.write_bytes(b"ab")
+        http = ScriptedHttpClient([
+            response(200, {"data": {"id": "m1"}}), response(200), response(200),
+            response(200, {"data": {"processing_info": {"state": "pending"}}}),
+            response(200, {"data": {"processing_info": {"state": "succeeded"}}}),
+            response(201, {"data": {"id": "190002"}}),
+        ])
+        provider = mock.Mock(side_effect=['before', 'before', 'rotated', 'rotated', 'rotated', 'rotated'])
+        api = service.XApiClient(http_client=http, sleeper=lambda _: None, chunk_bytes=1, access_token_provider=provider)
+        uploaded = api.upload_media('stale', media)
+        api.create_post('stale', 'text', uploaded['media_id'])
+        self.assertEqual(provider.call_count, 6)
+        self.assertEqual([r['headers']['Authorization'] for r in http.requests], ['Bearer before'] * 2 + ['Bearer rotated'] * 4)
+
+    def test_refresh_failure_before_post_is_known_and_never_retried(self):
+        http = ScriptedHttpClient([])
+        provider = mock.Mock(side_effect=service.XPostError('x_token_revoked', 'renewal rejected', 409))
+        api = service.XApiClient(http_client=http, access_token_provider=provider)
+        with self.assertRaises(service.XPostError) as caught:
+            api.create_post('stale', 'text', 'm1')
+        self.assertFalse(caught.exception.unknown_outcome)
+        self.assertEqual(http.requests, [])
+        provider.assert_called_once()
 
     def test_x_v2_image_upload_uses_tweet_image_category(self):
         media = self.root / "image.png"

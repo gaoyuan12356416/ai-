@@ -1294,6 +1294,32 @@ class XAccountsTestCase(unittest.TestCase):
         saved = json.loads((service.TOKENS_DIR / "123456789.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["refresh_token"], "new-refresh-secret")
 
+    def test_upload_refreshes_inside_outer_account_lock(self):
+        item = self.complete(username='upload_owner', account_fields={'subscription_type': 'Premium', 'protected': False})
+        fresh = {'access_token': 'rotated-access', 'refresh_token': 'rotated-refresh', 'expires_in': 7200, 'scope': ' '.join(service.SCOPES)}
+        profile = {'data': {'id': item['x_user_id'], 'username': item['username'], 'subscription_type': 'Premium', 'protected': False}}
+        provider = service.publishing_token_provider(item['id'], self.admin, 'en', True)
+        with service.publish_credentials(item['id'], self.admin, 'all'):
+            self.assertEqual(provider(), 'access-secret')
+            with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+                conn.execute("UPDATE x_authorized_account SET access_expires_at='2000-01-01T00:00:00Z' WHERE id=?", (item['id'],))
+                conn.commit()
+            with mock.patch.object(service, 'token_request', return_value=fresh) as refresh, mock.patch.object(service, 'user_request', return_value=profile):
+                self.assertEqual(provider(), 'rotated-access')
+                self.assertEqual(provider(), 'rotated-access')
+                refresh.assert_called_once()
+        self.assertEqual(json.loads(service.token_path(item['x_user_id']).read_text())['refresh_token'], 'rotated-refresh')
+
+    def test_upload_provider_rechecks_language_and_membership(self):
+        item = self.complete(username='guarded_upload', account_fields={'subscription_type': 'none', 'protected': False})
+        from features.x_posts.service import XPostError
+        with self.assertRaises(XPostError) as premium:
+            service.publishing_token_provider(item['id'], self.admin, 'en', True)()
+        self.assertEqual(premium.exception.code, 'x_post_premium_relay_unavailable')
+        with self.assertRaises(XPostError) as language:
+            service.publishing_token_provider(item['id'], self.admin, 'ja')()
+        self.assertEqual(language.exception.code, 'x_post_account_language_mismatch')
+
     def test_expired_access_token_without_refresh_token_requires_reauthorization(self):
         item = self.complete(username="refresh_missing")
         token = json.loads(
