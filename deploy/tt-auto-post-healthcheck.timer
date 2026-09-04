@@ -1,0 +1,11 @@
+[Unit]
+Description=Check TT automatic publishing readiness every minute, including maintenance
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=tt-auto-post-healthcheck.service
+
+[Install]
+WantedBy=timers.target

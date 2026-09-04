@@ -238,6 +238,12 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
             [VIDEO_TEMPLATE_RANDOM_OVERLAY, VIDEO_TEMPLATE_DIRECT_OUTRO],
         )
 
+    def test_health_reports_stopped_automation_as_unhealthy(self):
+        service, _ = self.service(gates=AutoLiveGates(True, True, True))
+        service.automation_probe = lambda: {"ready": False, "problems": ["scheduler:inactive"]}
+        self.assertFalse(service.health()["ok"])
+        self.assertTrue(service.health()["gates"]["is_open"])
+
     def test_startup_rejects_documented_placeholder_bearer_before_storage(self):
         with self.assertRaises(AutoPostServiceError) as caught:
             build_service_from_env(

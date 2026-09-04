@@ -1,0 +1,14 @@
+[Unit]
+Description=Check TT automatic publishing readiness independently of publishing timers
+After=network.target
+
+[Service]
+Type=oneshot
+User=tt-post
+Group=tt-post
+ExecStart=/usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_post_healthcheck.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+TimeoutStartSec=15

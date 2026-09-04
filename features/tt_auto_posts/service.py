@@ -24,6 +24,7 @@ from features.tt_posts.service import (
 )
 from features.x_posts.selector import connect_read_only
 
+from .automation_health import probe_automation
 from .client import (
     TT_AUTO_ADMIN_PREFIX,
     contains_sensitive_key,
@@ -214,9 +215,11 @@ class TTAutoPostService:
         *,
         now_fn=lambda: datetime.now(UTC),
         runner_kick_path: Any = "/run/tt-auto-post/manual-kick",
+        automation_probe=None,
         schedule_grace_seconds: int = 600,
         prepare_ahead_seconds: int = 0,
     ):
+        self.automation_probe = automation_probe
         self.store = store
         self.legacy_reader = legacy_reader
         self.account_repository = account_repository
@@ -241,6 +244,8 @@ class TTAutoPostService:
             )
 
     def health(self) -> Dict[str, Any]:
+        automation = (self.automation_probe() if self.automation_probe else
+                      {"ready": True, "problems": [], "units": {}, "mode": "in_process"})
         summaries = getattr(self.executor, "video_template_summaries", None)
         video_templates = (
             summaries()
@@ -256,7 +261,8 @@ class TTAutoPostService:
             ]
         )
         return {
-            "ok": True,
+            "ok": automation["ready"],
+            "automation": automation,
             "service": "tt-auto-post",
             "gates": self.executor.gates.as_dict(),
             "profile": self.executor.media_profile_version,
@@ -1368,6 +1374,7 @@ def build_service_from_env(
         account_repository,
         selector,
         executor,
+        automation_probe=probe_automation,
         runner_kick_path=str(
             source.get(
                 "TT_AUTO_POST_RUNNER_KICK_PATH",
@@ -1473,7 +1480,8 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         service = self.server.tt_auto_service
         if self.command == "GET" and path == "/health":
-            return 200, service.health()
+            health = service.health()
+            return (200 if health["ok"] else 503), health
         if not self._authorized():
             return 403, {
                 "ok": False,
