@@ -4582,6 +4582,24 @@ def create_post_schedule_plan_request(payload):
         trusted.append(item)
     # Schedule queues download and probe one media file at a time. Reserve
     # capacity for that serialized working set, not the whole frozen batch.
+    account_languages = None
+    if source_type == "drama":
+        frozen = store.query_schedule_plan(
+            source_type, payload.get("run_date"), payload.get("publish_time")
+        )
+        configured_ids = (
+            frozen["run"]["account_ids"] if frozen.get("found")
+            else store.get_schedule_config(source_type)["account_ids"]
+        )
+        # Reservation must replay the same language-aware selection as the
+        # available-pool endpoint, including eligible accounts omitted by
+        # candidate-local preflight. Request fields cannot supply this map.
+        account_languages = {
+            int(account_id): canonical_drama_language(
+                find_account(int(account_id)).get("drama_language")
+            )
+            for account_id in configured_ids
+        }
     preflight_post_storage_request(1)
     try:
         result = store.create_schedule_plan(
@@ -4598,6 +4616,7 @@ def create_post_schedule_plan_request(payload):
             ],
             fifo_capacity_skips=fifo_capacity_skips,
             material_language_capacities=material_language_capacities,
+            account_languages=account_languages,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)

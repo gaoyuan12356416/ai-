@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.x_posts import service
+from scripts.x_post_locked_drama_repost_recover import recover as recover_locked_repost
 
 
 def compliance():
@@ -2596,6 +2597,107 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.publish_queue(confirmed, 1, "confirmed-after-lock")
         self.assertEqual(self.store.schedule_account_blockers([2]), {})
         self.assertEqual(self._queue_log_snapshot([held["id"]]), before)
+
+    def test_drama_reservation_preserves_mixed_language_selection_and_affinity(self):
+        self.save_schedule("drama", [2, 3, 4], ["09:00", "10:00"])
+        en_pool = self.add_drama("EN_BOUND", free_episode_count=3)
+        first = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2,
+            [self.drama_candidate(en_pool, 2, 1)],
+        )
+        self.publish_queue(first["queues"][0], 1, "en-first")
+        ja_pool = self.add_drama("JA_NEW", free_episode_count=3)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE x_post_drama_pool SET language='ja' WHERE id=?", (ja_pool["id"],))
+        languages = {2: "en", 3: "ja", 4: "en"}
+        available = self.store.available_drama_pool_items(
+            account_ids=[2, 3, 4], account_languages=languages,
+        )
+        self.assertEqual([(x["id"], x["candidate_account_id"]) for x in available],
+                         [(en_pool["id"], 2), (ja_pool["id"], 3)])
+        ja_candidate = self.drama_candidate(ja_pool, 3, 1)
+        ja_candidate.update(material_language="jp", account_drama_language="ja")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "10:00", 2,
+            [self.drama_candidate(en_pool, 2, 2), ja_candidate],
+            account_languages=languages,
+        )
+        self.assertEqual([x["account_id"] for x in plan["queues"]], [2, 3])
+        self.assertEqual(plan["queues"][1]["account_drama_language"], "ja")
+
+    def test_drama_reservation_language_change_rejects_before_queue_creation(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama("JA_CHANGED")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE x_post_drama_pool SET language='ja' WHERE id=?", (pool["id"],))
+        candidate = self.drama_candidate(pool, 2, 1)
+        candidate.update(material_language="ja", account_drama_language="ja")
+        with self.assertRaises(service.XPostError) as raised:
+            self.store.create_schedule_plan(
+                "drama", "2026-07-27", "09:00", 2, [candidate], account_languages={2: "en"},
+            )
+        self.assertEqual(raised.exception.code, "x_post_drama_assignment_conflict")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_queue").fetchone()[0], 0)
+
+    def _locked_drama_for_recovery(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama("LOCKED_DRAMA", free_episode_count=3)
+        candidate = self.drama_candidate(pool, 2, 1)
+        candidate.update(preflight_duration=180.0, delivery_mode="premium_relay_repost",
+                         relay_account_id=9, relay_account_username="premium9")
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2, [candidate],
+            premium_relay_accounts=[{"id": 9, "username": "premium9", "drama_language": "en"}],
+        )
+        queue = plan["queues"][0]
+        log = self._prepare_account_test_log(queue)
+        self.store.mark_publishing(log["id"])
+        self.store.mark_media_uploaded(log["id"], "relay-media")
+        self.store.mark_relay_source_published(log["id"], "relay-media", "123456789", "https://x.com/premium9/status/123456789")
+        self.store.mark_reposting(queue["id"])
+        self.store.mark_repost_failed(queue["id"], "x_upstream_error", "HTTP 403: Your account is temporarily locked.")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("CREATE TABLE x_authorized_account(id INTEGER PRIMARY KEY,x_user_id TEXT,status TEXT,publish_approved INTEGER,drama_language TEXT)")
+            conn.execute("INSERT INTO x_authorized_account VALUES(2,'9002','active',1,'en')")
+        return queue, log, pool
+
+    def test_locked_drama_repost_recovery_is_once_and_keeps_source_and_progress(self):
+        queue, log, pool = self._locked_drama_for_recovery()
+        args = (self.db_path, queue["id"], "9002", "123456789")
+        before = self._queue_log_snapshot([queue["id"]])
+        result = recover_locked_repost(*args, actor="operator", confirm_unlocked=True)
+        self.assertFalse(result["x_write_attempted"])
+        self.assertEqual(self._queue_log_snapshot([queue["id"]]), before)
+        recover_locked_repost(*args, actor="operator", confirm_unlocked=True, apply=True)
+        self.assertEqual(self.store.get_log(log["id"])["status"], "source_published")
+        self.assertEqual(self.store.get_repost_ledger(queue["id"])["source_attempt_count"], 1)
+        with self.assertRaises(ValueError):
+            recover_locked_repost(*args, actor="operator", confirm_unlocked=True, apply=True)
+        self.store.mark_reposting(queue["id"])
+        with mock.patch.object(service, "utc_now", return_value="2099-01-01T00:00:00Z"):
+            self.store.mark_reposted(queue["id"])
+        self.assertEqual(self.store.schedule_account_blockers([2]), {})
+        relay = self.store.get_repost_ledger(queue["id"])
+        self.assertEqual((relay["source_attempt_count"], relay["repost_attempt_count"]), (1, 2))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT next_sub_number,last_error_code FROM x_post_drama_pool WHERE id=?", (pool["id"],)).fetchone(), (2, ""))
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_queue").fetchone()[0], 1)
+            audit = json.loads(conn.execute("SELECT previous_state_json FROM x_post_locked_drama_repost_recovery_audit").fetchone()[0])
+            self.assertEqual(audit["log"]["status"], "failed")
+            self.assertIn("temporarily locked", audit["log"]["error_message"])
+
+    def test_locked_drama_repost_recovery_rejects_identity_and_unknown_outcomes(self):
+        queue, log, _pool = self._locked_drama_for_recovery()
+        before = self._queue_log_snapshot([queue["id"]])
+        for user_id, post_id, confirmed in [("9003", "123456789", True), ("9002", "999", True), ("9002", "123456789", False)]:
+            with self.assertRaises(ValueError):
+                recover_locked_repost(self.db_path, queue["id"], user_id, post_id, actor="operator", confirm_unlocked=confirmed, apply=True)
+        self.assertEqual(self._queue_log_snapshot([queue["id"]]), before)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE x_post_publish_log SET unknown_outcome=1 WHERE id=?", (log["id"],))
+        with self.assertRaises(ValueError):
+            recover_locked_repost(self.db_path, queue["id"], "9002", "123456789", actor="operator", confirm_unlocked=True, apply=True)
 
     def test_material_fifo_replay_rejects_stale_skip_evidence(self):
         self.assertFalse(

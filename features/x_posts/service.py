@@ -12073,6 +12073,7 @@ class XPostStore:
         premium_relay_accounts=None,
         fifo_capacity_skips=None,
         material_language_capacities=None,
+        account_languages=None,
     ):
         source_type = _schedule_source_type(source_type)
         run_date = _date_value(run_date, "run_date")
@@ -12712,6 +12713,10 @@ class XPostStore:
                     conn,
                     current_eligible_ids,
                     1000,
+                    account_languages=account_languages or {
+                        int(item["account_id"]): item["account_drama_language"]
+                        for item in prepared
+                    },
                     premium_account_ids=premium_account_ids,
                     configured_account_ids=account_ids,
                 )
