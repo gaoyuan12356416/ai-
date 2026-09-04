@@ -156,3 +156,52 @@ def rearm_today_assignment_failure(db_path, run_id, *, actor, deployed_commit, a
             # Preserve the frozen date, account scope, slot and body template.
             c.execute("UPDATE x_post_schedule_run SET status='claimed',error_code='',error_message='',started_at='',finished_at='',lease_heartbeat_at='',plan_attempted_at='',updated_at=? WHERE id=?", (utc_now(), run_id))
         return {'run_id': run_id, 'applied': apply, 'x_write_attempted': False}
+
+
+def create_today_material_gap_child(db_path, parent_id, publish_time, *, actor, deployed_commit, apply=False):
+    """Compensate only accounts with no queue in one completed same-day batch."""
+    action = 'same_day_skipped_material_accounts_v1'
+    current = shanghai_now()
+    if not re.fullmatch(r'[a-f0-9]{40}', deployed_commit) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', publish_time) or publish_time > current.strftime('%H:%M'):
+        raise ValueError('Deployed commit and an already due same-day time required')
+    with transaction(db_path, action, parent_id, actor, apply) as c:
+        parent = c.execute('SELECT * FROM x_post_schedule_run WHERE id=?', (parent_id,)).fetchone()
+        if (not parent or parent['source_type'] != 'material' or parent['status'] != 'completed'
+            or parent['run_date'] != current.date().isoformat() or parent['failed_count'] or parent['unknown_count']):
+            raise ValueError('Only a completed same-day material parent can receive a child')
+        rows = c.execute('SELECT q.id,q.account_id,q.status,l.status AS log_status,l.unknown_outcome,l.x_post_id FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.schedule_run_id=?', (parent_id,)).fetchall()
+        if (not rows or len(rows) != parent['expected_count'] or len(rows) != parent['published_count']
+            or any(r['status'] != 'published' or r['log_status'] != 'published' or r['unknown_outcome'] or not r['x_post_id'] for r in rows)):
+            raise ValueError('Every parent queue must have confirmed final delivery')
+        configured = json.loads(parent['account_ids_json'])
+        plan = c.execute("SELECT * FROM x_post_schedule_random_plan WHERE source_type='material' AND run_date=?", (parent['run_date'],)).fetchone()
+        if (not plan or configured != json.loads(plan['account_ids_json'])
+            or parent['publish_time'] not in json.loads(plan['publish_times_json'])
+            or parent['config_version'] != plan['config_version']):
+            raise ValueError('Parent must belong to the original frozen daily plan')
+        occupied = {r['account_id'] for r in rows}
+        missing = [aid for aid in configured if aid not in occupied]
+        if not occupied.issubset(set(configured)) or not missing:
+            raise ValueError('No exact missing account scope')
+        settings = c.execute("SELECT enabled,account_ids_json FROM x_post_schedule_config WHERE source_type='material'").fetchone()
+        if not settings or not settings['enabled'] or not set(missing).issubset(set(json.loads(settings['account_ids_json']))):
+            raise ValueError('Missing accounts are no longer configured')
+        for aid in missing:
+            account = c.execute('SELECT status,publish_approved,access_expires_at FROM x_authorized_account WHERE id=?', (aid,)).fetchone()
+            if not account or account['status'] != 'active' or not account['publish_approved'] or account['access_expires_at'] <= utc_now():
+                raise ValueError('Missing account is not currently verified')
+        if c.execute('SELECT 1 FROM x_post_schedule_run WHERE run_date=? AND publish_time=?', (parent['run_date'], publish_time)).fetchone():
+            raise ValueError('Compensation time is already occupied')
+        for plan_row in c.execute('SELECT publish_times_json FROM x_post_schedule_random_plan WHERE run_date=?', (parent['run_date'],)):
+            if publish_time in json.loads(plan_row['publish_times_json']):
+                raise ValueError('Compensation time collides with a frozen schedule')
+        child_id = None
+        if apply:
+            now = utc_now()
+            cursor = c.execute("INSERT INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,schedule_mode,body_template,status,expected_count,created_at,updated_at) VALUES(?,'material',?,?,?,?,?,?,?,'claimed',?,?,?)", (
+                'xpost:schedule:material-gap:v1:%s' % parent_id, parent['run_date'], publish_time,
+                parent['timezone'], parent['config_version'], json.dumps(missing), parent['schedule_mode'],
+                parent['body_template'], len(missing), now, now))
+            child_id = cursor.lastrowid
+            audit(c, action, parent_id, actor, dict(parent), {'deployed_commit': deployed_commit, 'child_run_id': child_id, 'missing_account_ids': missing, 'parent_queue_ids': [r['id'] for r in rows]})
+        return {'parent_run_id': parent_id, 'child_run_id': child_id, 'missing_account_ids': missing, 'publish_time': publish_time, 'applied': apply, 'x_write_attempted': False}

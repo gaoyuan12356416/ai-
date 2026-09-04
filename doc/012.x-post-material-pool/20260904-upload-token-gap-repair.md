@@ -24,6 +24,11 @@ default. Execute them only after backup, quiescence and the shared runner lock:
 - Rearm a same-day zero-queue drama assignment transaction rejection after the
   language-map fix. Preserve its frozen slot, date, scope and body. The audit
   retains the old attempt marker before clearing it for exactly one new plan.
+- Compensate a completed same-day material batch only for its frozen accounts
+  that have no queue. Use one separately audited child per original batch, with
+  normal pool selection and full current preflight; preserve the parent and its
+  original daily plan. Failed or ambiguous existing queues cannot enter this
+  missing-account scope. Do not collide with any frozen schedule time.
 
 All actions have unique audit identities and reject repeat recovery. Unknown
 outcomes are never converted into retryable failures. Historical skipped slots
