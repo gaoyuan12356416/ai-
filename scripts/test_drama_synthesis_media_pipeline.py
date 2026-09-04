@@ -1262,7 +1262,10 @@ class AppConcatCompatibilityTests(unittest.TestCase):
     def test_intro_command_converts_image_pixels_and_writes_canonical_bt709_streams(self):
         output = self.root / "intro.mp4"
         cover = self.root / "cover.jpg"
-        original_cover = jfif_jpeg()
+        from PIL import Image
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (32, 18), (180, 70, 30)).save(image_bytes, "JPEG")
+        original_cover = image_bytes.getvalue()
         cover.write_bytes(original_cover)
         frozen_sources = []
 
@@ -1293,7 +1296,9 @@ class AppConcatCompatibilityTests(unittest.TestCase):
         env["render_intro"](str(cover), str(output), reference_path="episode0.mp4")
         command = runner.call_args.args[0]
         self.assertEqual(len(frozen_sources), 1)
-        self.assertEqual(frozen_sources[0][1], original_cover)
+        with Image.open(io.BytesIO(frozen_sources[0][1])) as frozen_image:
+            self.assertEqual(frozen_image.size, (32, 18))
+            self.assertLess(max(abs(a-b) for a, b in zip(frozen_image.getpixel((0, 0)), (180, 70, 30))), 5)
         self.assertFalse(frozen_sources[0][0].exists())
         self.assertEqual(list(self.root.glob(".intro-cover-*.jpg")), [])
         video_filter = command[command.index("-vf") + 1]
@@ -1319,8 +1324,9 @@ class AppConcatCompatibilityTests(unittest.TestCase):
         unsupported = self.root / "cover.png"
         unsupported.write_bytes(b"\x89PNG\r\n\x1a\n")
         runner.reset_mock()
-        with self.assertRaisesRegex(RuntimeError, "intro cover color contract unsupported"):
+        with self.assertRaises(DramaSynthesisError) as caught:
             env["render_intro"](str(unsupported), str(self.root / "unsupported.mp4"))
+        self.assertEqual(caught.exception.code, "drama_intro_cover_invalid")
         runner.assert_not_called()
 
     def test_intro_jpeg_parser_rejects_fake_comment_icc_and_adobe_markers(self):

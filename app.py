@@ -68592,6 +68592,7 @@ def validate_intro_cover_color_contract(cover_path):
 
 def freeze_intro_cover_source(cover_path, private_directory):
     """Copy a stable cover into a private random file and bind its exact bytes."""
+    from features.drama_synthesis.intro_cover import canonicalize_frozen_cover, cover_error
     before = file_fingerprint(cover_path)
     fd, frozen_path = tempfile.mkstemp(prefix=".intro-cover-", suffix=".jpg", dir=private_directory)
     opened_fd = fd
@@ -68604,7 +68605,9 @@ def freeze_intro_cover_source(cover_path, private_directory):
         after = file_fingerprint(cover_path)
         frozen_fingerprint = file_fingerprint(frozen_path)
         if before != after or before != frozen_fingerprint:
-            raise RuntimeError("intro cover changed during freeze")
+            raise cover_error("drama_intro_cover_source_changed")
+        canonicalize_frozen_cover(frozen_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
         color = validate_intro_cover_color_contract(frozen_path)
         return frozen_path, frozen_fingerprint, color
     except BaseException:

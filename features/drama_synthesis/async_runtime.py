@@ -52,6 +52,9 @@ ADVANCEMENT_METRICS = METRICS - {
 }
 TERMINAL = frozenset({"completed", "failed"})
 ERROR_MESSAGES = {
+    "drama_intro_cover_invalid": "片头封面无法解码或尺寸超限，请检查封面图片",
+    "drama_intro_cover_color_unsupported": "片头封面的色彩信息无法转换为 sRGB，请更换封面",
+    "drama_intro_cover_source_changed": "片头封面在读取时发生变化，已停止制作，请重试",
     "gpu_job_input_conflict": "任务制作参数与已保存的执行不一致，已停止重复制作",
     "gpu_job_not_found": "未找到制作记录",
     "gpu_queue_full": "制作等待队列已满，请稍后重试",
