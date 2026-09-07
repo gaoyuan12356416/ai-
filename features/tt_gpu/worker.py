@@ -58,6 +58,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
+from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight
+
 from .random_overlay import (
     RandomOverlayError,
     derive_recipe,
@@ -566,6 +568,7 @@ class WorkerConfig:
     profile: str = PROFILE
     fixed_outro_sha256: str = ""
     logo_sha256: str = ""
+    compositor_backend: str = LEGACY
     random_overlay_root: Path = Path("/")
     random_overlay_manifest_sha256: str = ""
     random_overlay_assets: object = field(
@@ -1018,6 +1021,7 @@ class WorkerConfig:
             logo_path=logo_path,
             font_file=font_file,
             allowed_source_hosts=allowed_source_hosts,
+            compositor_backend=backend(os.environ.get("TT_POST_GPU_COMPOSITOR_BACKEND", LEGACY)),
             ffmpeg_bin=ffmpeg,
             ffprobe_bin=ffprobe,
             video_encoder=encoder,
@@ -2410,6 +2414,8 @@ def build_random_overlay_command(
             str(output_path),
         ]
     )
+    if config.compositor_backend == BACKEND:
+        return fuse_command(command, recipe, output_path)
     return command
 
 
@@ -4868,6 +4874,8 @@ class TTPostGPUProcessor:
                     "random_overlay_recipe"
                 ]
             manifest = {
+                "compositor_backend": (self.config.compositor_backend
+                    if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE else "not_applicable"),
                 "completed_at": _utc_now(),
                 "object_reused": bool(reused),
                 "request": request_fingerprint,
@@ -5396,6 +5404,8 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                     )
                     == 32
                 ),
+                "compositor_backend": (self.server.processor.config.compositor_backend
+                    if self.server.processor.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE else "not_applicable"),
                 "media_mode": self.server.processor.config.media_mode,
                 "random_overlay_asset_set_sha256": (
                     self.server.processor.config
@@ -5674,6 +5684,8 @@ def _media_cleanup_loop(processor, stop_event):
 
 def serve():
     config = WorkerConfig.from_env()
+    if config.media_mode == RANDOM_OVERLAY_MEDIA_MODE and config.compositor_backend == BACKEND:
+        preflight(config.ffmpeg_bin, config.video_encoder, config.work_root)
     processor = TTPostGPUProcessor(config)
     control_server = TTPostGPUHTTPServer(
         (config.host, config.port),
