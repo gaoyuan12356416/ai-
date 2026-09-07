@@ -50,11 +50,13 @@ class CompositorTests(unittest.TestCase):
                     paths = lambda cmd: [cmd[i + 1] for i, value in enumerate(cmd) if value == "-i"]
                     self.assertEqual(paths(old), paths(new))
                     graph = new[new.index("-filter_complex") + 1]
-                    self.assertIn("program_opencl=inputs=5", graph)
+                    self.assertIn("program_opencl=inputs=6", graph)
                     self.assertEqual(graph.count("fps=30:start_time=0"), 5)
                     self.assertNotIn("fps=", graph.split("program_opencl", 1)[1])
                     self.assertNotIn("PTS-STARTPTS", graph)
                     self.assertNotIn("rotate=", graph)
+                    self.assertEqual(new[new.index("-reinit_filter") + 1], "0")
+                    self.assertIn("eval=frame", graph)
                     self.assertTrue(list(root.glob("compositor-*.cl")))
                     self.assertFalse(list(root.glob(".compositor-*")))
 

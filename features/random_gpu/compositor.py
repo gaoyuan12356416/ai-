@@ -70,21 +70,29 @@ def fuse_command(command, recipe, output):
     input_number = 0
     for value in prefix[1:]:
         if value == "-i":
+            if input_number == 0:
+                inputs.extend(["-reinit_filter", "0"])
             inputs.extend(["-threads", "2"])
             if input_number in (1, 4):
                 inputs.extend(["-framerate", "30"])
             input_number += 1
         inputs.append(value)
-    # All five inputs use the same zero-based 30 fps clock before framesync.
-    # Do not run a second fps filter after program_opencl: its output inherits
-    # source PTS and must not have its first frame dropped/reindexed.
-    graph = []
-    labels = ("source", "border", "opacity", "corners", "tint")
-    for index, label in enumerate(labels):
-        # FFmpeg's input timestamp offset already rebases video and audio.
-        # PTS-STARTPTS here would reset on mid-stream resolution changes.
+    # Stabilize source geometry before upload so an in-stream resolution/SAR
+    # change does not rebuild framesync and discard buffered frames. Source fit
+    # remains CPU work; rotation, zoom and the four asset layers are GPU work.
+    # Decoder timestamps remain shared with audio, including a delayed first
+    # video frame. CFR pads this initial gap instead of advancing video alone.
+    graph = [
+        "[0:v]fps=30:start_time=0,split=2[backraw][mainraw]",
+        "[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos:eval=frame,"
+        "crop=720:1280,setsar=1,format=rgba,hwupload[source]",
+        "[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos:eval=frame,"
+        "format=rgba,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame,"
+        "setsar=1,hwupload[main]",
+    ]
+    for index, label in enumerate(("border", "opacity", "corners", "tint"), start=1):
         graph.append("[%d:v]fps=30:start_time=0,settb=1/30,format=rgba,hwupload[%s]" % (index, label))
-    graph.append("[source][border][opacity][corners][tint]program_opencl=inputs=5:"
+    graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:"
                  "size=720x1280:source='%s':kernel=compose_random_overlay_v2:"
                  "shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,"
                  "format=yuv420p[v]" % _escape(target))
@@ -102,8 +110,8 @@ def preflight(ffmpeg, encoder, work_root):
         path = Path(tmp) / "preflight.cl"
         path.write_text(kernel_source({"rotation_millidegrees": 0, "scale_bp": 10000,
                                        "tint_opacity_bp": 100}), encoding="utf-8")
-        graph = ("format=rgba,hwupload,split=5[a][b][c][d][e];"
-                 "[a][b][c][d][e]program_opencl=inputs=5:size=720x1280:"
+        graph = ("format=rgba,hwupload,split=6[a][b][c][d][e][f];"
+                 "[a][b][c][d][e][f]program_opencl=inputs=6:size=720x1280:"
                  "source='%s':kernel=compose_random_overlay_v2,hwdownload,"
                  "format=rgba,format=yuv420p[v]" % _escape(path))
         subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-filter_complex_threads", "2",
