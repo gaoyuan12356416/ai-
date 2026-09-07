@@ -14,23 +14,6 @@ float4 over(float4 bottom, float4 top)
     return (float4)(clamp(rgb, 0.0f, 1.0f), 1.0f);
 }
 
-float4 sample_cover(__read_only image2d_t source, float2 canvas_uv)
-{
-    float source_aspect = (float)get_image_width(source) / (float)get_image_height(source);
-    float canvas_aspect = (float)SCENE_WIDTH / (float)SCENE_HEIGHT;
-    float2 uv = canvas_uv;
-    if (source_aspect > canvas_aspect) {
-        float visible = canvas_aspect / source_aspect;
-        uv.x = (1.0f - visible) * 0.5f + uv.x * visible;
-    } else {
-        float visible = source_aspect / canvas_aspect;
-        uv.y = (1.0f - visible) * 0.5f + uv.y * visible;
-    }
-    float4 pixel = read_imagef(source, linear_edge, uv);
-    pixel.w = 1.0f;
-    return pixel;
-}
-
 float4 sample_main(__read_only image2d_t source, float2 canvas_uv)
 {
     // Clean profile: inverse-map each output pixel directly into the centered
@@ -51,22 +34,9 @@ float4 sample_main(__read_only image2d_t source, float2 canvas_uv)
         scaled.y < 0.0f || scaled.y >= (float)SCENE_MAIN_HEIGHT)
         return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
 
-    // TT/FB keep the entire main image (contain), over a cover background.
-    // Only rotation-canvas clipping from the old rotw(iw)/roth(ih) typo is removed.
     float2 uv = scaled / (float2)((float)SCENE_MAIN_WIDTH, (float)SCENE_MAIN_HEIGHT);
-    float source_aspect = (float)get_image_width(source) / (float)get_image_height(source);
-    float canvas_aspect = (float)SCENE_WIDTH / (float)SCENE_HEIGHT;
-    if (source_aspect > canvas_aspect) {
-        float occupied = canvas_aspect / source_aspect;
-        uv.y = (uv.y - 0.5f) / occupied + 0.5f;
-    } else {
-        float occupied = source_aspect / canvas_aspect;
-        uv.x = (uv.x - 0.5f) / occupied + 0.5f;
-    }
-    if (uv.x < 0.0f || uv.x >= 1.0f || uv.y < 0.0f || uv.y >= 1.0f)
-        return (float4)(0.0f, 0.0f, 0.0f, 0.0f);
-    float4 pixel = read_imagef(source, linear_edge, uv);
-    pixel.w = 1.0f;
+    // Main is a stable RGBA contain plane. Its letterbox regions keep alpha=0.
+    float4 pixel = read_imagef(source, linear_clear, uv);
     return pixel;
 }
 
@@ -74,6 +44,7 @@ __kernel void compose_random_overlay_v2(
     __write_only image2d_t destination,
     unsigned int frame_index,
     __read_only image2d_t source,
+    __read_only image2d_t main,
     __read_only image2d_t border,
     __read_only image2d_t opacity_video,
     __read_only image2d_t corners,
@@ -85,8 +56,9 @@ __kernel void compose_random_overlay_v2(
         return;
     float2 uv = ((convert_float2(coordinate)) + (float2)(0.5f, 0.5f)) /
                 (float2)((float)SCENE_WIDTH, (float)SCENE_HEIGHT);
-    float4 value = sample_cover(source, uv);
-    value = over(value, sample_main(source, uv));
+    float4 value = read_imagef(source, linear_edge, uv);
+    value.w = 1.0f;
+    value = over(value, sample_main(main, uv));
     float4 tint_pixel = read_imagef(tint, linear_clear, uv);
     tint_pixel.w *= SCENE_TINT_OPACITY;
     value = over(value, tint_pixel);
