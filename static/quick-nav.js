@@ -381,7 +381,8 @@
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
-  const collapsedGroups = new Set();
+  // Start every page with groups collapsed; retain explicit toggles across renders.
+  const expandedGroups = new Set();
 
   function injectStyle() {
     if (styleInjected) return;
@@ -814,9 +815,7 @@
   }
 
   function renderGroup(group, items, activeKey) {
-    const activeInGroup = items.some(item => item.key === activeKey || item.view === activeKey);
-    if (activeInGroup) collapsedGroups.delete(group.key);
-    const collapsed = collapsedGroups.has(group.key) ? " collapsed" : "";
+    const collapsed = expandedGroups.has(group.key) ? "" : " collapsed";
     return `<div class="nav-group${collapsed}" data-quick-nav-group="${escapeHtml(group.key)}"><button class="nav-parent" type="button" data-quick-nav-toggle="${escapeHtml(group.key)}">${escapeHtml(group.label || "")}</button><div class="nav-children">${items.map(item => renderItem(item, activeKey)).join("")}</div></div>`;
   }
 
@@ -835,9 +834,6 @@
     root.querySelectorAll(".nav-item").forEach(item => {
       item.classList.toggle("active", item.dataset.quickNavKey === activeKey);
     });
-    const activeItem = Array.from(root.querySelectorAll(".nav-item"))
-      .find(item => item.dataset.quickNavKey === activeKey);
-    activeItem?.closest(".nav-group")?.classList.remove("collapsed");
   }
 
   function bindEvents(container, config, options) {
@@ -845,9 +841,9 @@
       const toggle = event.target.closest("[data-quick-nav-toggle]");
       if (toggle && container.contains(toggle)) {
         const key = toggle.dataset.quickNavToggle || "";
-        if (collapsedGroups.has(key)) collapsedGroups.delete(key);
-        else collapsedGroups.add(key);
-        toggle.closest(".nav-group")?.classList.toggle("collapsed", collapsedGroups.has(key));
+        if (expandedGroups.has(key)) expandedGroups.delete(key);
+        else expandedGroups.add(key);
+        toggle.closest(".nav-group")?.classList.toggle("collapsed", !expandedGroups.has(key));
         return;
       }
       const link = event.target.closest("a.nav-item");
