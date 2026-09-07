@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 import requests
+from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
@@ -31,7 +32,7 @@ def _origin(value):
 
 @dataclass(frozen=True)
 class WorkerConfig:
-    host:str; port:int; token:str; work_root:Path; asset_root:Path; asset_manifest_sha256:str; allowed_source_hosts:tuple[str,...]; cos_secret_id:str; cos_secret_key:str; cos_bucket:str; cos_region:str; cos_domain:str; cos_prefix:str; ffmpeg:str; ffprobe:str; max_source_bytes:int=2*1024*1024*1024; timeout:int=9000; failed_job_retention_seconds:int=172800; cleanup_max_jobs:int=100; cos_timeout_seconds:int=120
+    host:str; port:int; token:str; work_root:Path; asset_root:Path; asset_manifest_sha256:str; allowed_source_hosts:tuple[str,...]; cos_secret_id:str; cos_secret_key:str; cos_bucket:str; cos_region:str; cos_domain:str; cos_prefix:str; ffmpeg:str; ffprobe:str; max_source_bytes:int=2*1024*1024*1024; timeout:int=9000; failed_job_retention_seconds:int=172800; cleanup_max_jobs:int=100; cos_timeout_seconds:int=120; compositor_backend:str=LEGACY
     @classmethod
     def from_env(cls,env=None):
         source=os.environ if env is None else env; host=str(source.get("FB_PAGE_GPU_HOST","127.0.0.1")); port=int(source.get("FB_PAGE_GPU_PORT","8836")); token=str(source.get("FB_PAGE_GPU_INTERNAL_TOKEN", ""))
@@ -50,7 +51,7 @@ class WorkerConfig:
         if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix!="fb-page-random-overlay-h264-v3": raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
         retention=int(source.get("FB_PAGE_GPU_FAILED_JOB_RETENTION_SECONDS","172800")); cleanup_max=int(source.get("FB_PAGE_GPU_CLEANUP_MAX_JOBS","100")); cos_timeout=int(source.get("FB_PAGE_GPU_COS_TIMEOUT","120"))
         if not 86400<=retention<=604800 or not 1<=cleanup_max<=1000 or not 30<=cos_timeout<=600: raise PrepareWorkerError("invalid_configuration","cleanup or COS timeout policy invalid",500)
-        return cls(host,port,token,_absolute(source.get("FB_PAGE_GPU_WORK_ROOT"),"work root"),_absolute(source.get("FB_PAGE_GPU_RANDOM_OVERLAY_ROOT"),"asset root"),manifest,hosts,secret_id,secret_key,bucket,region,domain,prefix,str(source.get("FB_PAGE_GPU_FFMPEG_BIN","/usr/bin/ffmpeg")),str(source.get("FB_PAGE_GPU_FFPROBE_BIN","/usr/bin/ffprobe")),int(source.get("FB_PAGE_GPU_MAX_SOURCE_BYTES",str(2*1024*1024*1024))),int(source.get("FB_PAGE_GPU_PREPARE_TIMEOUT","9000")),retention,cleanup_max,cos_timeout)
+        return cls(host,port,token,_absolute(source.get("FB_PAGE_GPU_WORK_ROOT"),"work root"),_absolute(source.get("FB_PAGE_GPU_RANDOM_OVERLAY_ROOT"),"asset root"),manifest,hosts,secret_id,secret_key,bucket,region,domain,prefix,str(source.get("FB_PAGE_GPU_FFMPEG_BIN","/usr/bin/ffmpeg")),str(source.get("FB_PAGE_GPU_FFPROBE_BIN","/usr/bin/ffprobe")),int(source.get("FB_PAGE_GPU_MAX_SOURCE_BYTES",str(2*1024*1024*1024))),int(source.get("FB_PAGE_GPU_PREPARE_TIMEOUT","9000")),retention,cleanup_max,cos_timeout,backend(source.get("FB_PAGE_GPU_COMPOSITOR_BACKEND",LEGACY)))
 
 def cleanup_stale_failed_jobs(config,*,now_fn=time.time):
     jobs=(config.work_root/"jobs").resolve(); jobs.mkdir(mode=0o700,parents=True,exist_ok=True); removed=0; now=float(now_fn())
@@ -89,7 +90,9 @@ def build_command(config,source,output,info,recipe,assets):
     if not info["has_audio"]: command += ["-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000"]
     audio="0:a:0" if info["has_audio"] else "5:a:0"
     graph=("[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,format=rgba,scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,rotate=%.6f*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];[4:v]scale=720:1280:flags=lanczos,format=rgba,colorchannelmixer=aa=%.4f,fps=30,setpts=PTS-STARTPTS[tint];[2:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[opacity];[1:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[border];[3:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[corners];[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,format=yuv420p[v]")%(scale,scale,rotation,opacity)
-    return command+["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-shortest","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
+    command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-shortest","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
+    return fuse_command(command,recipe,output) if config.compositor_backend==BACKEND else command
+
 
 class CosObjectStore:
     def __init__(self,config,client=None):
@@ -174,14 +177,16 @@ class PrepareProcessor:
                     download_tmp.unlink(missing_ok=True); raise
             source_info=_probe(self.config,source)
             recipe=derive_recipe(job_id=job,content_id=request["content_id"],profile=PROFILE,source_url_sha256=hashlib.sha256(request["source_url"].encode()).hexdigest(),asset_set=self.assets); output=root/"output.tmp.mp4"; output.unlink(missing_ok=True)
+            render_started=time.monotonic()
             try:
                 try: self.runner(build_command(self.config,source,output,source_info,recipe,selected_asset_paths(recipe,self.assets)),capture_output=True,text=True,timeout=self.config.timeout,check=True)
                 except Exception: raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
+                render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
                 if video.get("codec_name")!="h264" or str(video.get("profile") or "").lower()!="high" or int(video.get("width") or 0)!=720 or int(video.get("height") or 0)!=1280: raise PrepareWorkerError("fb_gpu_output_contract_invalid","H264 output contract invalid",502)
                 output_sha,size=sha256_file(output); stored=self.object_store.upload(output,job,output_sha,size)
                 result={"job_id":job,"content_id":request["content_id"],"profile":PROFILE,"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready"}
-                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
+                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":self.config.compositor_backend,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
             finally: output.unlink(missing_ok=True)
 
 class Server(ThreadingHTTPServer):
@@ -195,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
         try: loopback=ipaddress.ip_address(self.client_address[0]).is_loopback
         except ValueError: loopback=False
         if not loopback: self._json(404,{"ok":False,"code":"not_found"}); return
-        if self.path==HEALTH_PATH: self._json(200,{"ok":True,"service":"fb-page-prepare-gpu","profile":PROFILE,"prepare_only":True})
+        if self.path==HEALTH_PATH: self._json(200,{"ok":True,"service":"fb-page-prepare-gpu","profile":PROFILE,"prepare_only":True,"compositor_backend":self.server.processor.config.compositor_backend})
         else: self._json(404,{"ok":False,"code":"not_found"})
     def do_POST(self):
         try: loopback=ipaddress.ip_address(self.client_address[0]).is_loopback
@@ -211,6 +216,8 @@ class Handler(BaseHTTPRequestHandler):
         except PrepareWorkerError as exc: self._json(exc.status,{"ok":False,"code":exc.code,"message":str(exc)})
         except Exception: self._json(500,{"ok":False,"code":"fb_gpu_internal_error","message":"prepare worker internal error"})
 def serve(env=None):
-    config=WorkerConfig.from_env(env); processor=PrepareProcessor(config); Server((config.host,config.port),processor,config.token).serve_forever()
+    config=WorkerConfig.from_env(env)
+    if config.compositor_backend==BACKEND: preflight(config.ffmpeg,"h264_nvenc",config.work_root)
+    processor=PrepareProcessor(config); Server((config.host,config.port),processor,config.token).serve_forever()
 
 __all__=["PROFILE","Handler","PrepareProcessor","PrepareWorkerError","Server","WorkerConfig","build_command","cleanup_stale_failed_jobs","serve","validate_request"]
