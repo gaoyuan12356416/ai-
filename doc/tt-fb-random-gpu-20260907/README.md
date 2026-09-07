@@ -41,3 +41,11 @@ Windows 本地 TT 95 项、FB 19 项通过。香港 T4 上两套引擎各通过 
 回滚须先重新暂停入口并排空：删除此次新增的两个 `75-random-compositor.conf`；FB current 原子恢复到 `/opt/fb-page-random-overlay/releases/59b42e24cd1e57b1209cb7addde3de7a8c98568b`；TT 原 current 一直保持 `/data/tt-post-gpu/releases/d05adad41a28383a5c9685e6b75c1c8581a2aa49`，移除 drop-in 后自然恢复该入口。daemon-reload，再启动两路 worker/隧道并恢复 CPU 原触发状态。只回滚代码和单位，不覆盖发布账本或新制作记录。
 
 本次基线另发现 CPU TT readiness 对 systemd 的 `1month` 时间格式解析失败（automation_probe_unavailable），但实际触发器 active 且持续运行。它在 GPU 变更前已存在，本次不以 GPU 优化掩盖此独立问题。
+
+## 生产切换结果（2026-09-07 16:59 核验）
+
+两路 worker 与反向隧道已启动，CPU 原 18830/18836 隧道验证 backend/profile 通过。TT PID 3694381、FB PID 3694366，均 active / NRestarts=0 / CPUQuota=300%。TT 七个触发器和 FB prepare.timer 全部恢复；TT 维护日志 restored=true，gate 已解除。TT 片尾、短剧、X 的 PID 未变化。
+
+TT 制作 manifest 926、发布账本文件 866、FB manifest 912，切换前后数量和聚合 SHA-256 完全一致。核验时新后端自然完成任务 0；未创建测试帖子或回放历史队列。固定源帧对齐的 SSIM 为 TT 0.9793、FB 0.9850，抽帧目视通过，成片不是像素级等价。
+
+已部署 unit 模板来自 TT 634d297 / FB 06e8da3。运行代码仍为上文已验证的 ed76d7d / 28ef0a1。GPU 证据在 /data/random-overlay-gpu/verification.json，CPU 触发器备份在 /mnt/data-disk/random-overlay-gpu/backups/20260907-before-fused。技能上下文已更新。
