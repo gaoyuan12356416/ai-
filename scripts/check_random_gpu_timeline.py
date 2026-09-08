@@ -5,6 +5,7 @@ Only creates local synthetic media. No worker API, upload or publishing calls.
 from __future__ import annotations
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +48,14 @@ def main():
          "-auto-alt-ref", "0", str(root / "clear.webm")])
     assets = {key: root / ("clear.webm" if key in ("opacity_video", "corners") else "clear.png")
               for key in ("border", "opacity_video", "corners", "tint")}
+    if os.environ.get('RANDOM_GPU_ASSET_CACHE_ROOT'):
+        # The acceptance fixtures have their own cache; never mix test assets
+        # into the production cache or invoke the online worker.
+        from scripts.build_random_gpu_asset_cache import build as build_cache
+        cache = root / 'fixture-cache'; cache.mkdir(exist_ok=True)
+        for source in set(assets.values()):
+            build_cache(args.ffmpeg, source, cache, 16 * 1024**3)
+        os.environ['RANDOM_GPU_ASSET_CACHE_ROOT'] = str(cache)
     recipe = {"rotation_millidegrees": 0, "scale_bp": 10000, "tint_opacity_bp": 100}
     cfg = SimpleNamespace(ffmpeg=args.ffmpeg, ffmpeg_bin=args.ffmpeg, video_encoder="hevc_nvenc", compositor_backend=BACKEND)
     def gray(path, duration):
