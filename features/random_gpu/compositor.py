@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from .asset_cache import replace_asset_inputs
 
 BACKEND = "opencl_fused_contain_v1"
 LEGACY = "cpu_legacy"
@@ -50,7 +51,7 @@ def _escape(path):
 def fuse_command(command, recipe, output):
     """Keep the existing delivery arguments and replace the CPU composition."""
     graph_index = command.index("-filter_complex")
-    prefix = list(command[:graph_index])
+    prefix = replace_asset_inputs(list(command[:graph_index]))
     source_indices = [index for index, value in enumerate(prefix) if value == "-i"]
     if len(source_indices) not in (5, 6):
         raise ValueError("random compositor requires source plus four assets")
@@ -68,12 +69,12 @@ def fuse_command(command, recipe, output):
         temporary.unlink(missing_ok=True)
     inputs = []
     input_number = 0
-    for value in prefix[1:]:
+    for position, value in enumerate(prefix[1:], start=1):
         if value == "-i":
             if input_number == 0:
                 inputs.extend(["-reinit_filter", "0"])
             inputs.extend(["-threads", "2"])
-            if input_number in (1, 4):
+            if input_number in (1, 4) and not prefix[position + 1].endswith('.nut'):
                 inputs.extend(["-framerate", "30"])
             input_number += 1
         inputs.append(value)
