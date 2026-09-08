@@ -2033,6 +2033,50 @@ def ensure_storage(db_path: Any) -> None:
                             "ALTER TABLE %s ADD COLUMN %s %s"
                             % (table_name, column_name, definition)
                         )
+            # Reporting-only history: capture schedule changes atomically with
+            # their existing writes, including failures before a run is made.
+            # Existing rows are baselined now, never backdated as history.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tt_post_daily_schedule_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tt_post_daily_schedule_audit
+                ON tt_post_daily_schedule_audit(account_id,created_at,id)
+            """)
+            audit_snapshot_sql = """json_object(
+                'account_id',{p}account_id,'enabled',{p}enabled,
+                'version',{p}version,'schedule_mode',{p}schedule_mode,
+                'publish_times_json',{p}publish_times_json,
+                'random_daily_count',{p}random_daily_count,
+                'random_effective_date',{p}random_effective_date,
+                'updated_at',{p}updated_at)
+            """
+            conn.execute("""
+                INSERT INTO tt_post_daily_schedule_audit(
+                    account_id,created_at,snapshot_json)
+                SELECT s.account_id,strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'),%s
+                FROM tt_post_daily_schedule s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tt_post_daily_schedule_audit a
+                    WHERE a.account_id=s.account_id)
+            """ % audit_snapshot_sql.format(p="s."))
+            for audit_operation in ("INSERT", "UPDATE"):
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS tt_post_schedule_audit_%s
+                    AFTER %s ON tt_post_daily_schedule
+                    BEGIN
+                        INSERT INTO tt_post_daily_schedule_audit(
+                            account_id,created_at,snapshot_json)
+                        VALUES(NEW.account_id,
+                            strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'),%s);
+                    END
+                """ % (audit_operation.lower(), audit_operation,
+                       audit_snapshot_sql.format(p="NEW.")))
             pending_language_rows = conn.execute(
                 """
                 SELECT id,material_language

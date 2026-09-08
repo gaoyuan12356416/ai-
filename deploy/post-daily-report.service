@@ -1,0 +1,22 @@
+[Unit]
+Description=AI backend TT FB X daily Post report to Feishu
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/post-daily-report/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/post-daily-report/current/scripts/post_daily_report.py --send
+TimeoutStartSec=240
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/post-daily-report

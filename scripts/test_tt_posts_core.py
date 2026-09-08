@@ -227,6 +227,7 @@ class StorageTests(CoreTestCase):
                 "tt_post_event",
                 "tt_post_account_setting",
                 "tt_post_daily_schedule",
+                "tt_post_daily_schedule_audit",
                 "tt_post_auto_publish_config",
                 "tt_post_random_daily_plan",
                 "tt_post_recurring_pool",
