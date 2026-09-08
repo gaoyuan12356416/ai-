@@ -98,6 +98,17 @@ def replace_file(source, target):
     os.replace(temp, target)
 
 
+def fb_health():
+    import urllib.request
+    for _ in range(10):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:18835/health", timeout=3) as response:
+                if json.load(response).get("ok") is True: return True
+        except Exception: pass
+        time.sleep(1)
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
@@ -137,6 +148,7 @@ def main():
     manifest["x_business_counts"] = apply_audit("x")
     paused = manifest["timers_active"]
     switched_fb = False
+    resume_timers = True
     try:
         if paused: subprocess.check_call(["systemctl", "stop"] + paused)
         deadline = time.monotonic() + 45
@@ -148,31 +160,31 @@ def main():
             if digest(item["target"]) != item["old_sha256"]: raise RuntimeError("live_changed_after_backup")
         for item in verified:
             replace_file(ROOT / item["relative"], item["target"])
-            if item["relative"].startswith("features/fb_auto_posts/"): switched_fb = True
+            if item["relative"].startswith("features/fb_auto_posts/"):
+                switched_fb = True
+                resume_timers = False
         subprocess.check_call(["systemctl", "restart", "fb-auto-post-service.service"])
-        health_ok = False
-        for _ in range(10):
-            try:
-                import urllib.request
-                with urllib.request.urlopen("http://127.0.0.1:18835/health", timeout=3) as response:
-                    health = json.load(response)
-                if health.get("ok") is True: health_ok = True; break
-            except Exception: pass
-            time.sleep(1)
-        if not health_ok: raise RuntimeError("fb_health_failed")
+        if not fb_health(): raise RuntimeError("fb_health_failed")
         with ro(DEFAULT_PATHS["fb"]) as db:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='fb_auto_due_target_snapshot'").fetchone():
                 raise RuntimeError("fb_audit_schema_missing")
         for item in verified:
             if digest(item["target"]) != item["new_sha256"]: raise RuntimeError("installed_hash_mismatch")
+        resume_timers = True
     except Exception:
         if switched_fb:
+            resume_timers = False
+            manifest["status"] = "rollback_requires_health_verification"
             item = verified[-1]
             replace_file(item["backup"], item["target"])
             subprocess.check_call(["systemctl", "restart", "fb-auto-post-service.service"])
+            if not fb_health(): raise RuntimeError("fb_rollback_unhealthy_timers_kept_paused")
+            resume_timers = True
+            manifest["status"] = "rolled_back_fb_healthy"
         raise
     finally:
-        if paused: subprocess.check_call(["systemctl", "start"] + paused)
+        if paused and resume_timers: subprocess.check_call(["systemctl", "start"] + paused)
+        manifest["timers_restored"] = resume_timers
         (backup / "manifest.json").write_text(json.dumps(manifest, indent=2))
     opt = Path("/opt/post-daily-report");opt.mkdir(exist_ok=True)
     temp_link = opt / "current.new"
