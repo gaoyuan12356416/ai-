@@ -1444,6 +1444,47 @@ def _material_fifo_selection_matches(
     )
 
 
+# Additive reporting migration. These literal statements can also be applied in
+# one online transaction, so already-running publishers need no restart.
+# Bootstrap timestamps reflect observation time, never a claimed historical state.
+SCHEDULE_CONFIG_AUDIT_DDL = (
+    "CREATE TABLE IF NOT EXISTS x_post_schedule_config_audit ("
+    "source_type TEXT NOT NULL,config_version INTEGER NOT NULL,"
+    "snapshot_json TEXT NOT NULL,created_at TEXT NOT NULL,"
+    "PRIMARY KEY(source_type,config_version))",
+    "CREATE TRIGGER IF NOT EXISTS trg_x_post_schedule_config_audit_insert "
+    "AFTER INSERT ON x_post_schedule_config BEGIN "
+    "INSERT OR IGNORE INTO x_post_schedule_config_audit "
+    "(source_type,config_version,snapshot_json,created_at) VALUES "
+    "(NEW.source_type,NEW.version,json_object("
+    "'source_type',NEW.source_type,'enabled',NEW.enabled,"
+    "'timezone',NEW.timezone,'account_ids_json',NEW.account_ids_json,"
+    "'publish_times_json',NEW.publish_times_json,'schedule_mode',NEW.schedule_mode,"
+    "'random_daily_count',NEW.random_daily_count,"
+    "'random_effective_date',NEW.random_effective_date,'version',NEW.version),"
+    "strftime('%Y-%m-%dT%H:%M:%SZ','now')); END",
+    "CREATE TRIGGER IF NOT EXISTS trg_x_post_schedule_config_audit_update "
+    "AFTER UPDATE ON x_post_schedule_config BEGIN "
+    "INSERT OR IGNORE INTO x_post_schedule_config_audit "
+    "(source_type,config_version,snapshot_json,created_at) VALUES "
+    "(NEW.source_type,NEW.version,json_object("
+    "'source_type',NEW.source_type,'enabled',NEW.enabled,"
+    "'timezone',NEW.timezone,'account_ids_json',NEW.account_ids_json,"
+    "'publish_times_json',NEW.publish_times_json,'schedule_mode',NEW.schedule_mode,"
+    "'random_daily_count',NEW.random_daily_count,"
+    "'random_effective_date',NEW.random_effective_date,'version',NEW.version),"
+    "strftime('%Y-%m-%dT%H:%M:%SZ','now')); END",
+    "INSERT OR IGNORE INTO x_post_schedule_config_audit "
+    "(source_type,config_version,snapshot_json,created_at) "
+    "SELECT source_type,version,json_object("
+    "'source_type',source_type,'enabled',enabled,'timezone',timezone,"
+    "'account_ids_json',account_ids_json,'publish_times_json',publish_times_json,"
+    "'schedule_mode',schedule_mode,'random_daily_count',random_daily_count,"
+    "'random_effective_date',random_effective_date,'version',version),"
+    "strftime('%Y-%m-%dT%H:%M:%SZ','now') FROM x_post_schedule_config",
+)
+
+
 def ensure_storage(db_path):
     """Create and migrate the additive X Post ledger.
 
@@ -2598,6 +2639,8 @@ def ensure_storage(db_path):
                 "AND drama_replay_generation=0"
             )
             migration_timestamp = utc_now()
+            for statement in SCHEDULE_CONFIG_AUDIT_DDL:
+                conn.execute(statement)
             for source_type in sorted(SCHEDULE_SOURCE_TYPES):
                 conn.execute(
                     "INSERT OR IGNORE INTO x_post_schedule_config("
