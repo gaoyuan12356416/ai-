@@ -95,7 +95,7 @@ class RandomOverlayTests(unittest.TestCase):
                 load_asset_set(root, manifest_sha)
 
     def test_ffmpeg_command_stacks_four_layers_and_keeps_full_audio(self):
-        config = SimpleNamespace(ffmpeg_bin="ffmpeg", video_encoder="hevc_nvenc")
+        config = SimpleNamespace(ffmpeg_bin="ffmpeg", video_encoder="hevc_nvenc", compositor_backend="cpu_legacy")
         paths = {
             "border": Path("border.png"),
             "opacity_video": Path("opacity.webm"),
