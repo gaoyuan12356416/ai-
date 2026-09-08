@@ -21,3 +21,28 @@ python scripts/test_x_post_material_pool_selector.py (20 tests)
 python scripts/test_x_auto_post_selector.py (22 tests)
 python scripts/test_x_post_drama_selector.py (20 tests)
 All 66 tests passed; git diff --check passed.
+
+
+## Production result (2026-09-08 14:57:58 Beijing)
+
+Code commit aeb516c643d18674cd80ab42980b5238eb3caa76 was fetched from GitHub and deployed on 43.166.187.96 at /mnt/data-disk/x-post-automation/releases/aeb516c643d18674cd80ab42980b5238eb3caa76, referenced by /opt/x-post-automation/current. The main selector is /root/drama_material_service/features/x_posts/selector.py. Both selectors passed exact-ID live read-only source validation for 5267611, rGeTmo317Q, ja. All 66 tests passed on the server too.
+
+Initial deployment verification used the unsupported main /health path (404), triggering a successful rollback. The corrected deployment verified sidecar /health=200 and main /api/admin/x-posts/material-pool=401 without a Cookie, proving the real route and authentication gate. Both services and all three prior active poll timers are active.
+
+After source validation, a guarded SQLite transaction cleared only row 936's old drama_mapping_ambiguous evidence. The production store query returned status=unpublished, availability=available, queue_id=null, last_error_code empty. Queue and publish-log counts were unchanged by this transaction. This restores normal scheduled eligibility; it is not proof of publication or a bypass of final account/media checks.
+
+Backup and audit: /mnt/data-disk/x-post-automation/backups/20260908-drama-label-mapping-aeb516c/ (manifest.json, accounts.sqlite3, accounts-retry.sqlite3, main-selector.py, release-selector.py, service.py, deployment-result.json, revalidation-audit.json).
+
+Exact code rollback procedure on the CPU server (only after checking workers have drained):
+
+```bash
+systemctl stop x-post-schedule.timer x-post-schedule-claim.timer x-post-manual.timer
+# If any of these workers is active, wait for completion before proceeding:
+systemctl is-active x-post-schedule.service x-post-schedule-claim.service x-post-manual.service x-post-daily.service
+cp -p /mnt/data-disk/x-post-automation/backups/20260908-drama-label-mapping-aeb516c/main-selector.py /root/drama_material_service/features/x_posts/selector.py
+ln -sfn /mnt/data-disk/x-post-automation/releases/c6cf7124f0b7a64000a84362729dbec0193a7533 /opt/x-post-automation/current
+systemctl restart x-post-automation.service drama-material-api.service
+systemctl start x-post-schedule.timer x-post-schedule-claim.timer x-post-manual.timer
+```
+
+Keep all new ledger state; never restore the entire SQLite snapshot over newer publications.
