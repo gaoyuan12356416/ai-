@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
 from features.x_posts.drama_selector import (  # noqa: E402
     DRAMAWAVE_APP_ID,
     DramaPoolRejection,
+    DramaPoolProgressChanged,
     DramaQueryError,
     DramaSelectionError,
     select_drama_pool_episodes,
@@ -1110,6 +1111,32 @@ class ScheduleSidecarClient(SidecarClient):
             previous_load = load
         return normalized
 
+    def sync_drama_pool_progress(self, pool, free_episode_count, language):
+        result = self.post(
+            "/internal/posts/drama-pool/sync-progress",
+            {
+                "pool_item_id": pool["id"],
+                "content_id": pool["content_id"],
+                "expected": {
+                    key: pool[key] for key in (
+                        "free_episode_count", "next_sub_number",
+                        "published_episode_count", "assigned_account_id",
+                        "replay_generation",
+                    )
+                },
+                "free_episode_count": free_episode_count,
+                "language": language,
+            },
+            write_may_have_happened=True,
+        )
+        item = result.get("item") if isinstance(result, dict) else None
+        if not isinstance(item, dict) or item.get("validated_count") != 1:
+            raise SidecarError(
+                "x_post_drama_progress_sync_conflict",
+                "短剧免费集数同步结果未确认", 409,
+            )
+        return item
+
     def record_drama_pool_checks(
         self,
         path,
@@ -1815,9 +1842,10 @@ def _drama_candidates(
 
     try:
         rejected_ids = set()
+        synced_ids = set()
         refresh_accounts = False
         relay_accounts = {}
-        while len(rejected_ids) < config.scan_limit:
+        while len(rejected_ids) + len(synced_ids) < config.scan_limit:
             if refresh_accounts:
                 accounts = _verify_accounts(sidecar, account_ids)
                 refresh_accounts = False
@@ -1848,6 +1876,23 @@ def _drama_candidates(
                             app_id=config.drama_app_id,
                         )
                     )
+                except DramaPoolProgressChanged as exc:
+                    pool_id = int(pool_item["id"])
+                    if (
+                        pool_id in synced_ids
+                        or exc.pool_item_id != pool_id
+                        or exc.content_id != pool_item["content_id"]
+                    ):
+                        raise ScheduleRunError(
+                            "短剧免费集数在预检期间反复变化",
+                            "x_post_drama_progress_sync_conflict",
+                        ) from None
+                    sidecar.sync_drama_pool_progress(
+                        pool_item, exc.free_episode_count, exc.language
+                    )
+                    synced_ids.add(pool_id)
+                    refill_required = True
+                    break
                 except DramaPoolRejection as exc:
                     if (
                         int(exc.pool_item_id or 0) != int(pool_item.get("id") or 0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -448,6 +449,17 @@ class TwoStageSelectionTests(unittest.TestCase):
         selected = selector(source, FakeMetricStore([])).select_and_reserve(request())
         self.assertEqual(selected.drama.content_id, "C1")
         self.assertEqual(selected.material.source.material_id, "102")
+
+    def test_source_http_url_is_upgraded_in_memory_before_existing_guards(self):
+        original = replace(material("101", "C1"), media_url="http://media.example.test/101.mp4")
+        source = FakeSource([drama("C1")], {"C1": [original]})
+        selected = selector(source, FakeMetricStore([])).select_and_reserve(request())
+        self.assertEqual(selected.material.source.media_url, "https://media.example.test/101.mp4")
+        self.assertEqual(original.media_url, "http://media.example.test/101.mp4")
+        for url in ("http://user:password@media.example.test/a.mp4", "http://media.example.test:80/a.mp4",
+                    "//media.example.test/a.mp4", "ftp://media.example.test/a.mp4"):
+            with self.subTest(url=url), self.assertRaises(NoEligibleMaterial):
+                selector(FakeSource([drama("C1")], {"C1": [replace(original, media_url=url)]}), FakeMetricStore([])).select_and_reserve(request())
 
     def test_duplicate_material_identity_is_fully_excluded(self):
         source = FakeSource(

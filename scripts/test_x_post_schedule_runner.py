@@ -2786,6 +2786,22 @@ class ScheduleRunnerTests(unittest.TestCase):
             "failure", [call[0] for call in sidecar.calls]
         )
 
+    def test_tail_capacity_proof_still_requires_current_exact_source_evidence(self):
+        selected = {"id": 3, "material_id": "103", "last_error_code": ""}
+        tail = {"id": 2, "material_id": "102", "last_error_code": "", "last_checked_at": "",
+                "source_material_language": "ja", "source_hydrated_at": "2026-07-27T01:00:01Z"}
+        candidate = {"pool_item_id": 3, "account_id": 2, "material_language": "ja", "preflight_duration": 30}
+        proof = {"pool_item_id": 2, "material_id": "102", "material_language": "ja", "reason": "language_capacity_full"}
+        options = {"validation_cutoff": "2026-07-27T01:00:00Z", "capacity_skips": [proof],
+                   "material_language_capacities": {"ja": 1, "en": 1}}
+        self.assertTrue(_material_fifo_selection_matches([selected, tail], [candidate], [2, 3], [], **options))
+        for changes in ({"source_hydrated_at": "2026-07-26T01:00:00Z"},
+                        {"source_material_language": "en"}, {"material_id": "999"},
+                        {"last_error_code": "drama_mapping_ambiguous"}):
+            with self.subTest(changes=changes):
+                self.assertFalse(_material_fifo_selection_matches([selected, {**tail, **changes}], [candidate], [2, 3], [], **options))
+        self.assertFalse(_material_fifo_selection_matches([selected], [candidate], [2, 3], [], **options))
+
     def test_live_345_fifo_replay_accepts_exact_full_ja_capacity_boundary(self):
         selected = [
             (848, "6354576"),

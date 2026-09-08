@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import (
@@ -74,9 +74,22 @@ class CandidateRejected(SelectionError):
 class NoEligibleMaterial(SelectionError):
     def __init__(self, rejection_counts: Mapping[str, int]):
         self.rejection_counts = dict(rejection_counts)
+        labels = {
+            "drama_hard_gate": "剧上线时间或基础条件不符",
+            "drama_d0_roas": "剧ROAS不达标", "drama_spend": "剧消耗不达标",
+            "material_hard_gate": "素材地址、时长或基础条件不符",
+            "material_d0_roas": "素材ROAS不达标", "material_spend": "素材消耗不达标",
+            "material_history_seen": "素材已有发布记录", "material_auto_seen": "素材已被预占",
+            "material_strict_rejected": "素材预检未通过",
+            "account_duration_limit": "素材超过账号时长上限",
+        }
+        summary = "；".join(
+            "%s %s" % (labels.get(key, key), count)
+            for key, count in sorted(self.rejection_counts.items())
+        )
         super().__init__(
             "x_auto_no_eligible_material",
-            "no eligible X material matched the template",
+            "没有符合模板条件的素材" + ("：" + summary if summary else ""),
             409,
         )
 
@@ -804,6 +817,11 @@ class TwoStageSelector:
             if identity_counts[material_id] != 1:
                 self._reject(rejection_counts, "material_identity_ambiguous")
                 continue
+            # The source library also stores absolute HTTP URLs. Match pool
+            # selection by upgrading only the scheme in memory; the existing
+            # URL and full media preflight guards still apply.
+            if str(row.media_url).lower().startswith("http://"):
+                row = replace(row, media_url="https://" + row.media_url[7:])
             if (
                 row.content_id != drama.content_id
                 or row.language != language

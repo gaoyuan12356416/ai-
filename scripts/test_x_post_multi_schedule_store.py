@@ -1896,6 +1896,28 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(row[0], "material_not_video")
         self.assertEqual(queue_count, 0)
 
+    def test_partial_material_batch_accepts_valid_capacity_proofs_after_last_selection(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        pools = self.store.add_pool_materials(
+            ["401", "402", "403"], actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": v, "error_code": ""} for v in ("401", "402", "403")],
+        )["items"]
+        self.store.due_schedule_slots(datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ))
+        skips = [{"pool_item_id": p["id"], "material_id": p["material_id"],
+                  "material_language": "ja", "reason": "language_capacity_full"} for p in pools[:2]]
+        self.store.record_pool_checks([
+            {**p, "proof_reason": p["reason"], "error_code": ""} for p in skips
+        ])
+        candidate = self.material_candidate(pools[2], 3)
+        candidate["material_language"] = "ja"
+        result = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2, [candidate],
+            fifo_capacity_skips=skips, material_language_capacities={"en": 1, "ja": 1},
+        )
+        self.assertEqual(len(result["queues"]), 1)
+        self.assertEqual(result["queues"][0]["pool_item_id"], pools[2]["id"])
+        self.assertEqual(len(self.store.available_pool_items(100)), 2)
+
     def test_material_fifo_accepts_only_exact_clean_language_capacity_proof(self):
         self.save_schedule("material", [2, 3], ["09:00"])
         pools = self.store.add_pool_materials(
@@ -3470,6 +3492,94 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             rejected.exception.code,
             "x_post_storage_conflict",
         )
+
+    def _progress_sync_fixture(self, published=1):
+        self.save_schedule("drama", [2], ["09:00", "10:00", "11:00"])
+        pool = self.add_drama("RANGE", free_episode_count=3)
+        for episode in range(1, published + 1):
+            plan = self.store.create_schedule_plan(
+                "drama", "2026-07-27", "%02d:00" % (8 + episode), 2,
+                [self.drama_candidate(pool, 2, episode)],
+            )
+            self.publish_queue(plan["queues"][0], episode)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            current = dict(conn.execute("SELECT * FROM x_post_drama_pool WHERE id=?", (pool["id"],)).fetchone())
+        return {
+            "pool_item_id": pool["id"], "content_id": "RANGE", "language": "en",
+            "free_episode_count": 1,
+            "expected": {k: current[k] for k in ("free_episode_count", "next_sub_number",
+                "published_episode_count", "assigned_account_id", "replay_generation")},
+        }
+
+    def test_source_range_sync_releases_completed_binding_and_preserves_history(self):
+        payload = self._progress_sync_fixture()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            before = conn.execute("SELECT * FROM x_post_publish_log").fetchall()
+        self.assertEqual(self.store.sync_drama_pool_progress({**payload, "validate_only": True})["updated_count"], 0)
+        self.assertEqual(self.store.sync_drama_pool_progress(payload)["updated_count"], 1)
+        self.assertEqual(self.store.sync_drama_pool_progress(payload)["updated_count"], 0)
+        next_pool = self.add_drama("NEXT", free_episode_count=1)
+        available = self.store.available_drama_pool_items(10, [2])
+        self.assertEqual(available[0]["id"], next_pool["id"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT * FROM x_post_publish_log").fetchall(), before)
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_drama_progress_sync_audit").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT status,free_episode_count,next_sub_number,published_episode_count,assigned_account_id FROM x_post_drama_pool WHERE id=?", (payload["pool_item_id"],)).fetchone(), ("completed", 1, 2, 1, 2))
+
+    def test_source_range_below_published_progress_preserves_confirmed_episodes(self):
+        payload = self._progress_sync_fixture(published=2)
+        self.assertTrue(self.store.sync_drama_pool_progress(payload)["completed"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT next_sub_number,published_episode_count FROM x_post_drama_pool").fetchone(), (3, 2))
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_publish_log WHERE status='published'").fetchone()[0], 2)
+
+    def test_source_range_increase_keeps_existing_affinity(self):
+        payload = self._progress_sync_fixture()
+        payload["free_episode_count"] = 4
+        self.assertFalse(self.store.sync_drama_pool_progress(payload)["completed"])
+        available = self.store.available_drama_pool_items(10, [2])
+        self.assertEqual((available[0]["id"], available[0]["free_episode_count"], available[0]["next_sub_number"]), (payload["pool_item_id"], 4, 2))
+
+    def test_runner_syncs_finished_source_range_and_refills_same_account(self):
+        from types import SimpleNamespace
+        from scripts.x_post_schedule_runner import _drama_candidates
+        from scripts.test_x_post_drama_selector import FakeConnection, episode_row
+        payload = self._progress_sync_fixture()
+        next_pool = self.add_drama("NEXT", free_episode_count=1)
+        connection = FakeConnection()
+        connection.rows_by_content = {
+            content: [episode_row(1, unlocked=1, content_id=content)]
+            for content in ("RANGE", "NEXT")
+        }
+        store = self.store
+        class Sidecar:
+            def available_drama_pool(self, path, limit, accounts):
+                return store.available_drama_pool_items(limit, accounts)
+            def sync_drama_pool_progress(self, pool, count, language):
+                return store.sync_drama_pool_progress({**payload, "free_episode_count": count, "language": language})
+        planned = _drama_candidates(
+            SimpleNamespace(scan_limit=10, drama_pool_path="available", mysql_database="ads_ai",
+                            drama_app_id=1479, drama_duration_routing_enabled=True),
+            Sidecar(), [{"id": 2, "username": "example", "display_name": "Example", "x_user_id": "9002", "drama_language": "en"}],
+            source_date="2026-07-26", connection_factory=lambda config: connection,
+            downloader=None, prober=None, repair_client=None, timestamp=1,
+        )
+        self.assertEqual([(p["account_id"], p["drama_pool_item_id"]) for p in planned], [(2, next_pool["id"])])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_queue").fetchone()[0], 1)
+
+    def test_source_range_sync_rejects_stale_identity_and_unfinished_queue(self):
+        payload = self._progress_sync_fixture()
+        for changes in ({"next_sub_number": 1}, {"assigned_account_id": 3}, {"replay_generation": 2}):
+            with self.subTest(changes=changes), self.assertRaises(service.XPostError):
+                self.store.sync_drama_pool_progress({**payload, "expected": {**payload["expected"], **changes}})
+        pool = self.store.available_drama_pool_items(10, [2])[0]
+        self.store.create_schedule_plan("drama", "2026-07-27", "10:00", 2, [self.drama_candidate(pool, 2, 2)])
+        with self.assertRaises(service.XPostError):
+            self.store.sync_drama_pool_progress(payload)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_drama_progress_sync_audit").fetchone()[0], 0)
 
     def test_completed_drama_releases_account_to_newest_unassigned_drama(self):
         self.save_schedule("drama", [2], ["09:00", "10:00"])

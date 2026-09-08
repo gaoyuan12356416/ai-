@@ -3014,6 +3014,7 @@ class XAutoPostStore:
         updates: Optional[Mapping[str, Any]] = None,
         event_type: Any = "task_status_changed",
         message: Any = "",
+        details: Optional[Mapping[str, Any]] = None,
     ) -> TaskRecord:
         normalized_id = _positive_int(task_id, "task id")
         target = str(to_status or "").strip()
@@ -3222,6 +3223,7 @@ class XAutoPostStore:
                 from_status=current,
                 to_status=target,
                 message=message,
+                details=details,
             )
             result = conn.execute("SELECT * FROM x_auto_task WHERE id=?", (normalized_id,)).fetchone()
         assert result is not None

@@ -943,6 +943,9 @@ class AutoPostExecutor:
             claim_token=(claim_token if current.status == task.status else None),
             updates=terminal_updates,
             event_type="task_x_no_candidate" if target == "no_candidate" else "task_x_failed",
+            message=message,
+            details=({"rejection_counts": exc.rejection_counts}
+                     if isinstance(exc, NoEligibleMaterial) else None),
         )
 
     def _update_run(self, run_id: int) -> None:

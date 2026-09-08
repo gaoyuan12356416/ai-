@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from features.x_posts.drama_selector import (  # noqa: E402
     DramaPoolRejection,
+    DramaPoolProgressChanged,
     DramaQueryError,
     DramaSelectionError,
     audit_drama,
@@ -385,6 +386,20 @@ class DramaSelectorTests(unittest.TestCase):
         )
         self.assertEqual(selected[0]["episode_key"], "DRAMA-A:replay2:1")
         self.assertEqual(selected[0]["drama_replay_generation"], 2)
+
+    def test_audited_source_range_drift_requires_sync_before_selecting_or_skipping(self):
+        for count, start in ((3, 2), (3, 4), (1, 3)):
+            with self.subTest(count=count, start=start):
+                pool = pool_row(10, "DRAMA-A", "2026-07-27T01:00:00Z", 2,
+                                assigned_account_id=2, next_sub_number=start)
+                pool["free_episode_count"] = count
+                with self.assertRaises(DramaPoolProgressChanged) as caught:
+                    select_drama_pool_episodes(
+                        FakeConnection([episode_row(i, unlocked=2) for i in (1, 2)]),
+                        [pool], account_ids=[2],
+                    )
+                self.assertEqual(caught.exception.free_episode_count, 2)
+                self.assertEqual(caught.exception.pool_item_id, 10)
 
     def test_query_error_stops_the_complete_selection(self):
         connection = FakeConnection([episode_row(1, unlocked=1)])

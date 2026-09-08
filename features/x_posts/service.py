@@ -1327,9 +1327,15 @@ def _material_fifo_selection_matches(
     selected_language_counts = {}
     cutoff = str(validation_cutoff or "")
     for pool in pool_rows:
-        if len(selected_pool_ids) == len(actual_by_pool):
-            break
         pool_id = int(pool["id"])
+        if len(selected_pool_ids) == len(actual_by_pool):
+            # A partial mixed-language batch can have capacity proofs after
+            # its last selected item. Validate those proofs too; unrelated
+            # older rows are outside the selected FIFO prefix.
+            if consumed_capacity_skips == set(capacity_skip_by_pool):
+                break
+            if pool_id not in capacity_skip_by_pool:
+                continue
         values = actual_by_pool.get(pool_id)
         if values is not None:
             account_id = int(values["account_id"])
@@ -2641,6 +2647,15 @@ def ensure_storage(db_path):
             migration_timestamp = utc_now()
             for statement in SCHEDULE_CONFIG_AUDIT_DDL:
                 conn.execute(statement)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS x_post_drama_progress_sync_audit ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,pool_item_id INTEGER NOT NULL,"
+                "content_id TEXT NOT NULL,replay_generation INTEGER NOT NULL,"
+                "from_free_episode_count INTEGER NOT NULL,to_free_episode_count INTEGER NOT NULL,"
+                "next_sub_number INTEGER NOT NULL,published_episode_count INTEGER NOT NULL,"
+                "assigned_account_id INTEGER NOT NULL,previous_status TEXT NOT NULL,"
+                "new_status TEXT NOT NULL,created_at TEXT NOT NULL)"
+            )
             for source_type in sorted(SCHEDULE_SOURCE_TYPES):
                 conn.execute(
                     "INSERT OR IGNORE INTO x_post_schedule_config("
@@ -7902,6 +7917,98 @@ class XPostStore:
                 key=lambda value: (counts.get(value, 0), value),
             )
         ]
+
+    def sync_drama_pool_progress(self, payload):
+        """Sync an audited source range without changing frozen delivery facts."""
+        if not isinstance(payload, dict) or not isinstance(payload.get("expected"), dict):
+            raise XPostError("invalid_request", "短剧进度同步缺少原始快照", 400)
+        pool_id = _positive_int(payload.get("pool_item_id"), "pool_item_id")
+        content_id = _drama_content_id(payload.get("content_id"))
+        count = _positive_int(payload.get("free_episode_count"), "free_episode_count")
+        if count > 10000:
+            raise XPostError("invalid_request", "免费集数超出范围", 400)
+        try:
+            language = canonical_drama_language(payload.get("language"))
+        except ValueError:
+            raise XPostError("invalid_request", "短剧语言无效", 400) from None
+        expected = {}
+        for field in (
+            "free_episode_count", "next_sub_number", "published_episode_count",
+            "assigned_account_id", "replay_generation",
+        ):
+            value = payload["expected"].get(field)
+            if field in {"published_episode_count", "assigned_account_id"} and value == 0 and not isinstance(value, bool):
+                expected[field] = 0
+            else:
+                expected[field] = _positive_int(value, field)
+        validate_only = payload.get("validate_only", False)
+        if not isinstance(validate_only, bool):
+            raise XPostError("invalid_request", "validate_only必须为布尔值", 400)
+
+        def conflict(message):
+            raise XPostError("x_post_drama_progress_sync_conflict", message, 409)
+
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM x_post_drama_pool WHERE id=?", (pool_id,)).fetchone()
+            if not row or row["content_id"] != content_id or not same_drama_language(row["language"], language):
+                conflict("短剧进度同步身份或语言不匹配")
+            for field, value in expected.items():
+                if field != "free_episode_count" and int(row[field]) != value:
+                    conflict("短剧发布进度或绑定已变化，未同步免费集数")
+            if int(row["free_episode_count"]) == count:
+                return {"updated_count": 0, "validated_count": 1, "validate_only": validate_only,
+                        "completed": row["status"] == "completed"}
+            if int(row["free_episode_count"]) != expected["free_episode_count"] or row["status"] not in {"active", "pending"}:
+                conflict("短剧免费集数或状态已变化，未同步")
+            queues = conn.execute(
+                "SELECT q.episode_number,q.account_id,q.status,l.status AS log_status,"
+                "l.x_post_id,l.unknown_outcome FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND q.drama_replay_generation=?",
+                (pool_id, expected["replay_generation"]),
+            ).fetchall()
+            if any(
+                q["status"] != "published" or q["log_status"] != "published"
+                or not q["x_post_id"] or q["unknown_outcome"]
+                or q["account_id"] != expected["assigned_account_id"]
+                for q in queues
+            ):
+                conflict("短剧仍有未完成或待核对的发布，未同步免费集数")
+            published = expected["published_episode_count"]
+            if (published != expected["next_sub_number"] - 1 or len(queues) != published
+                    or sorted(q["episode_number"] for q in queues) != list(range(1, published + 1))):
+                conflict("短剧已发布集数与账本不一致，未同步免费集数")
+            if conn.execute(
+                "SELECT 1 FROM x_post_queue q LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND (q.status<>'published' "
+                "OR COALESCE(r.unknown_outcome,0)<>0 OR (r.id IS NOT NULL AND r.status<>'reposted')) LIMIT 1",
+                (pool_id,),
+            ).fetchone():
+                conflict("短剧仍有待完成的转发，未同步免费集数")
+            completed = expected["next_sub_number"] > count
+            status = "completed" if completed else row["status"]
+            if not validate_only:
+                conn.execute(
+                    "INSERT INTO x_post_drama_progress_sync_audit("
+                    "pool_item_id,content_id,replay_generation,from_free_episode_count,"
+                    "to_free_episode_count,next_sub_number,published_episode_count,"
+                    "assigned_account_id,previous_status,new_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (pool_id,content_id,expected["replay_generation"],expected["free_episode_count"],
+                     count,expected["next_sub_number"],published,expected["assigned_account_id"],
+                     row["status"],status,timestamp),
+                )
+                conn.execute(
+                    "UPDATE x_post_drama_pool SET free_episode_count=?,status=?,"
+                    "completed_at=?,last_checked_at=?,updated_at=? WHERE id=?",
+                    (count,status,timestamp if completed else row["completed_at"],timestamp,timestamp,pool_id),
+                )
+                conn.commit()
+            else:
+                conn.rollback()
+        return {"updated_count": 0 if validate_only else 1, "validated_count": 1,
+                "validate_only": validate_only, "completed": completed}
 
     def record_drama_pool_checks(self, checks, validate_only=False):
         if not isinstance(checks, list) or not checks or len(checks) > 100:

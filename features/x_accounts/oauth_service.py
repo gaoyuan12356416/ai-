@@ -4059,6 +4059,14 @@ def record_post_drama_pool_checks_request(payload):
         _raise_x_post_error(exc)
 
 
+def sync_post_drama_pool_progress_request(payload):
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).sync_drama_pool_progress(payload)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
 def _safe_schedule_queue(queue):
     if not isinstance(queue, dict):
         raise ServiceError(
@@ -5116,6 +5124,7 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/schedule-runs/record-failure",
             "/internal/posts/drama-pool/available",
             "/internal/posts/drama-pool/check",
+            "/internal/posts/drama-pool/sync-progress",
             "/internal/posts/premium-relay/accounts",
         }
         manual_worker_exact_paths = {
@@ -5530,6 +5539,9 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {"item": record_post_drama_pool_checks_request(payload)},
                 )
+                return
+            if parsed.path == "/internal/posts/drama-pool/sync-progress":
+                self.send_json(200, {"item": sync_post_drama_pool_progress_request(payload)})
                 return
             if parsed.path == "/internal/posts/drama-pool/batch-delete":
                 self.send_json(

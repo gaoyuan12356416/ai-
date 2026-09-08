@@ -49,6 +49,19 @@ class DramaPoolRejection(DramaSelectionError):
         super().__init__(str(message or "drama is not publishable")[:240])
 
 
+class DramaPoolProgressChanged(DramaPoolRejection):
+    """A fully audited source range differs from the current pool snapshot."""
+
+    def __init__(self, pool, audit):
+        super().__init__(
+            "x_post_drama_free_range_changed",
+            "短剧免费集数已变化，需要先同步发布进度",
+            pool["id"], pool["content_id"],
+        )
+        self.free_episode_count = audit["free_episode_count"]
+        self.language = audit["language"]
+
+
 def _text(
     value,
     label,
@@ -565,6 +578,10 @@ class DramawaveDramaSelector:
                     "replay_generation": replay_generation,
                     "assigned_account_id": assigned_account_id,
                     "candidate_account_id": candidate_account_id,
+                    "free_episode_count": (
+                        _positive_int(raw["free_episode_count"], "free_episode_count")
+                        if "free_episode_count" in raw else None
+                    ),
                 }
             )
 
@@ -579,6 +596,11 @@ class DramawaveDramaSelector:
                     pool["id"],
                     pool["content_id"],
                 ) from None
+            if (
+                pool["free_episode_count"] is not None
+                and pool["free_episode_count"] != audit["free_episode_count"]
+            ):
+                raise DramaPoolProgressChanged(pool, audit)
             labels = _label_values(audit["labels"])
             primary_tag = labels[0] if labels else audit["drama_name"]
             start = pool["next_sub_number"]

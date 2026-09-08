@@ -321,6 +321,20 @@ class XAutoPostPublisherTests(unittest.TestCase):
             )
         )
 
+    def test_no_candidate_persists_rejection_counts_without_publish_or_reservation(self):
+        claim = self.store.claim_next_executable_task(worker_id="no-candidate", lease_seconds=120, now=self.clock())
+        task = self.store.get_task(self.task.id)
+        bridge = FakeBridge(task)
+        counts = {"drama_d0_roas": 12, "material_d0_roas": 9}
+        result = self._executor(bridge)._retry_or_fail(task, "prepare", NoEligibleMaterial(counts), claim.reveal_claim_token())
+        self.assertEqual(result.status, "no_candidate")
+        self.assertIn("剧ROAS不达标 12", result.error_message)
+        events = self.store.list_events(task_id=task.id)
+        self.assertEqual(events[-1]["details"]["rejection_counts"], counts)
+        self.assertEqual(bridge.publish_calls, 0)
+        self.assertFalse(result.material_id)
+        self.assertFalse(result.publish_id)
+
     def test_failure_record_outage_keeps_task_and_material_retryable(self):
         token, task = self._preparing()
         bridge = FakeBridge(task)
