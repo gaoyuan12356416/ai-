@@ -249,6 +249,25 @@ class XPostMaterialPoolTests(unittest.TestCase):
             ["103", "102"],
         )
 
+    def test_mapping_error_can_be_rescanned_without_becoming_valid(self):
+        item = self.add("199")[0]
+        check = {"pool_item_id": item["id"],
+                 "error_code": "drama_mapping_ambiguous",
+                 "error_message": "conflicting current source identities"}
+        for _ in range(2):
+            self.store.record_pool_checks([check])
+            # Repeated current ambiguity remains visibly failed, but is
+            # retriable by the selector when the upstream mapping is fixed.
+            self.assertEqual(
+                [r["material_id"] for r in self.store.available_pool_items(10)],
+                ["199"],
+            )
+            row = self.store.query_pool({"material_id": "199"})["items"][0]
+            self.assertEqual(row["availability"], "validation_failed")
+            self.assertEqual(row["last_error_code"], "drama_mapping_ambiguous")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
+
     def test_pool_plan_is_atomic_fifo_and_success_only_marks_published(self):
         items = self.add("201", "202", "203", "204")
         out_of_order_candidates = [

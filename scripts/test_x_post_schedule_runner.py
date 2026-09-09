@@ -2795,9 +2795,14 @@ class ScheduleRunnerTests(unittest.TestCase):
         options = {"validation_cutoff": "2026-07-27T01:00:00Z", "capacity_skips": [proof],
                    "material_language_capacities": {"ja": 1, "en": 1}}
         self.assertTrue(_material_fifo_selection_matches([selected, tail], [candidate], [2, 3], [], **options))
+        # A fresh exact source proof may cover corrected historical ambiguity;
+        # the error itself remains stored until full media preflight succeeds.
+        recovered_tail = {**tail, "last_error_code": "drama_mapping_ambiguous"}
+        self.assertTrue(_material_fifo_selection_matches([selected, recovered_tail], [candidate], [2, 3], [], **options))
+        self.assertFalse(_material_fifo_selection_matches([selected, {**recovered_tail, "source_hydrated_at": "2026-07-26T01:00:00Z"}], [candidate], [2, 3], [], **options))
         for changes in ({"source_hydrated_at": "2026-07-26T01:00:00Z"},
                         {"source_material_language": "en"}, {"material_id": "999"},
-                        {"last_error_code": "drama_mapping_ambiguous"}):
+                        {"last_error_code": "drama_mapping_invalid"}):
             with self.subTest(changes=changes):
                 self.assertFalse(_material_fifo_selection_matches([selected, {**tail, **changes}], [candidate], [2, 3], [], **options))
         self.assertFalse(_material_fifo_selection_matches([selected], [candidate], [2, 3], [], **options))

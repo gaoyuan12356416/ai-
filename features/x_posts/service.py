@@ -452,13 +452,17 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
         # selector must reread deploy_time and may clear it only while the
         # successfully prepared queue is frozen.
         "drama_not_yet_deliverable",
+        # Source mappings can be corrected after admission. Revisit the exact
+        # material with the current selector; this never treats ambiguity as
+        # valid or clears the stored error before successful full preflight.
+        "drama_mapping_ambiguous",
         "material_not_found_or_ineligible",
         "material_not_video",
         "material_inactive",
         # Media-only failures are safe to revisit. The current source metadata
         # and final publish-time download/probe decide whether the item is now
-        # usable; identity, mapping, source-tag and unknown-result errors are
-        # deliberately excluded from this list.
+        # usable; other identity/mapping and unknown-result errors remain
+        # excluded from this list.
         "media_download_failed",
         "media_download_incomplete",
         "media_download_length_mismatch",

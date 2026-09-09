@@ -1681,6 +1681,43 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(revalidated["last_error_code"], "")
         self.assertEqual(revalidated["last_error_message"], "")
 
+    def test_material_schedule_atomically_clears_revalidated_mapping_error(self):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["211"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {
+                    "material_id": "211",
+                    "error_code": "drama_mapping_ambiguous",
+                    "error_message": "old source mapping was ambiguous",
+                }
+            ],
+        )["items"][0]
+
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.material_candidate(pool, 2)],
+        )
+
+        self.assertTrue(plan["created"])
+        self.assertEqual(len(plan["queues"]), 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            revalidated = conn.execute(
+                "SELECT last_checked_at,last_error_code,last_error_message "
+                "FROM x_post_material_pool WHERE id=?",
+                (pool["id"],),
+            ).fetchone()
+        self.assertTrue(revalidated["last_checked_at"])
+        self.assertEqual(revalidated["last_error_code"], "")
+        self.assertEqual(revalidated["last_error_message"], "")
+        # Queue binding still fences all later automatic selection.
+        self.assertEqual(self.store.available_pool_items(10), [])
+
     def test_material_schedule_atomically_clears_due_delivery_defer(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(
