@@ -381,8 +381,9 @@
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
-  // Start every page with groups collapsed; retain explicit toggles across renders.
+  // Open the current page's group on entry; retain explicit toggles across renders.
   const expandedGroups = new Set();
+  const activeKeys = new WeakMap();
 
   function injectStyle() {
     if (styleInjected) return;
@@ -811,7 +812,7 @@
   function renderItem(item, activeKey) {
     const active = item.key === activeKey || item.view === activeKey;
     const description = item.description ? `<span>${escapeHtml(item.description)}</span>` : "";
-    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" data-quick-nav-view="${escapeHtml(item.view || "")}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
   }
 
   function renderGroup(group, items, activeKey) {
@@ -832,8 +833,20 @@
     const root = typeof container === "string" ? document.querySelector(container) : container;
     if (!root) return;
     root.querySelectorAll(".nav-item").forEach(item => {
-      item.classList.toggle("active", item.dataset.quickNavKey === activeKey);
+      item.classList.toggle("active", item.dataset.quickNavKey === activeKey || (!!activeKey && item.dataset.quickNavView === activeKey));
     });
+    const activeGroup = root.querySelector(".nav-item.active")?.closest(".nav-group");
+    const previous = activeKeys.get(root);
+    if (activeGroup) {
+      const groupKey = activeGroup.dataset.quickNavGroup;
+      if (!previous || previous.key !== activeKey || previous.group !== groupKey) {
+        expandedGroups.add(groupKey);
+        activeGroup.classList.remove("collapsed");
+      }
+      activeKeys.set(root, { key: activeKey, group: groupKey });
+    } else {
+      activeKeys.delete(root);
+    }
   }
 
   function bindEvents(container, config, options) {
@@ -864,10 +877,12 @@
     const initialOptions = renderOptions(options);
     const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
     container.innerHTML = buildNavHtml(initialConfig, initialOptions);
+    setActive(container, initialOptions.activeKey);
     bindEvents(container, initialConfig, initialOptions);
     const config = await loadConfig();
     const finalOptions = renderOptions(options);
     container.innerHTML = buildNavHtml(config, finalOptions);
+    setActive(container, finalOptions.activeKey);
     bindEvents(container, config, finalOptions);
   }
 

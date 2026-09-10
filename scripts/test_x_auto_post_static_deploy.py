@@ -50,6 +50,11 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
         for page_name, script_name in page_scripts.items():
             with self.subTest(page=page_name):
                 source = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+                script_version = (
+                    "20260910save1"
+                    if script_name == "x-auto-publish-template.js"
+                    else ASSET_VERSION
+                )
                 self.assertIn(
                     f'href="/x-auto-publish.css?v={ASSET_VERSION}"', source
                 )
@@ -57,7 +62,7 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
                     f'src="/x-auto-publish-common.js?v={ASSET_VERSION}"', source
                 )
                 self.assertIn(
-                    f'src="/{script_name}?v={ASSET_VERSION}"', source
+                    f'src="/{script_name}?v={script_version}"', source
                 )
                 self.assertIn(
                     '<meta http-equiv="Cache-Control" content="no-store, max-age=0"',

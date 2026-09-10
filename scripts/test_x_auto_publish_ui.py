@@ -368,7 +368,7 @@ class XAutoPublishUiTest(unittest.TestCase):
         source = SCRIPTS["template"]
         self.assertIn('method: "POST"', source)
         self.assertIn("payload.expected_version = state.version", source)
-        self.assertIn('ui.readItem(response, ["template", "item"])', source)
+        self.assertIn('location.href = "/x-auto-publish-templates.html"', source)
         self.assertIn('ui.readItems(payload, ["accounts", "items"])', source)
         self.assertIn("language,", source)
         self.assertIn("body_template: bodyTemplate", source)

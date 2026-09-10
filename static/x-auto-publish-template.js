@@ -555,14 +555,12 @@
     ui.byId("formStatus").className = "status-line";
     try {
       const path = templateId ? `${ui.API_BASE}/templates/${templateId}` : `${ui.API_BASE}/templates`;
-      const response = await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
-      const saved = ui.readItem(response, ["template", "item"]);
-      const savedId = ui.positiveId(saved.id || saved.template_id || response.template_id || templateId);
+      await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
       state.dirty = false;
       ui.setText(ui.byId("formStatus"), "模板已保存。", "");
       ui.byId("formStatus").className = "status-line success";
       ui.showToast("模板已保存；新模板默认保持关闭。", false);
-      location.href = savedId ? `/x-auto-publish-template.html?id=${encodeURIComponent(savedId)}` : "/x-auto-publish-templates.html";
+      location.href = "/x-auto-publish-templates.html";
     } catch (error) {
       ui.setText(ui.byId("formStatus"), error.message || "模板保存失败。", "");
       ui.byId("formStatus").className = "status-line error";
