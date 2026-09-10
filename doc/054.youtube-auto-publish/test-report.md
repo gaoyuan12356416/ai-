@@ -53,3 +53,5 @@ BUG-008定位为轮询重建DOM重复播放动画。旧版两轮6秒轮询触发
 ## 2026-09-10 失败处理补丁
 
 本地后端184项：service43、engine43、HTTP17、reference workflow9、reference runtime25、image/runtime21、独立通知11、通知DTO13、平台错误2；183通过，1项Windows符号链接跳过。实际损坏PNG与正常V1/V2对照通过且样本未修改。浏览器专项31及原发布34共65项通过，包含真实6秒poll节点/滚动/无入场动画重播。3张1440×1000截图已目视检查。live feature guard通过5 feature/22规则。生产调用仍待精确版本部署验收，不能将离线通过说成真实公开视频成功。
+
+生产验收通过：CPU184用例中1真实样本路径skip已以生产只读3样本补验；公网字节/鉴权GET/独立通知回执/未重复视频及首评/SQL与短链不变均确认。精确记录见failure-handling.md。

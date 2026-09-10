@@ -45,3 +45,5 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b29ac4725301f9a19e58
 ## 2026-09-10 失败诊断与通知展示
 
 失败诊断与通知展示补丁部署使用scripts/deploy_youtube_failure_handling.py；复用a292b352已上线worker和通知库。先精确基线与空闲检查，备份两个SQLite，只更新补丁清单。回滚保留通知回执与所有视频身份，见failure-handling.md。
+
+本补丁已于19:22上线，运行提交`fd386ad6f4f4a2f9d72e651e1d579eb0779dd8f8`，备份`/mnt/data-disk/deploy/youtube-auto-publish/backups/failure-handling-20260910-192224-fd386ad6f4f4`。11文件校验、三服务重启和只读验收通过，统一writer/HK不重启；精确回滚命令见failure-handling.md末尾，禁止恢复旧数据库。

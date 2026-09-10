@@ -21,3 +21,22 @@
 所有新增自动化使用离线fixture或浏览器mock。真实图片损坏样本仅只读校验，正常V1/V2作对照。不调用真实生图、不创建测试视频/评论、不重复飞书消息。
 部署脚本scripts/deploy_youtube_failure_handling.py核对GitHub exact commit、全部live SHA、已有通知worker SHA和SQL SHA。仅8个源/静态文件及3份公网静态文件；API、旧publisher、新publisher在空闲后重启，统一writer和HK不重启。备份现有文件、SQLite和独立通知库；回滚只恢复代码，保留发布账本、通知回执及资产。
 实际发布提交、备份、回读结果完成后追加。
+
+
+## 2026-09-10 19:22 上线验收
+
+运行提交 `fd386ad6f4f4a2f9d72e651e1d579eb0779dd8f8`，分支 `codex/youtube-failure-handling-20260910`；GitHub push及CPU fetch exact SHA核对成功，归档SHA256 e883e7cee55bdc13509e674ae0c2d3e6102a0bda661aa6b7267d26d37f1786b8。8个源/静态文件及3份公网文件全部与GitHub归档一致。备份 `/mnt/data-disk/deploy/youtube-auto-publish/backups/failure-handling-20260910-192224-fd386ad6f4f4`，含主SQLite及既有独立通知库。
+
+CPU Python3.9运行184项用例，183通过，真实样本路径fixture因未放入测试目录跳过1项；随后直接以生产只读路径补查真实失败PNG=generated_cover_corrupt、有效V1/审核V2均通过，全部SHA保持不变。API、旧publisher、新publisher按空闲保护重启后active/NRestarts0；统一writer PID2994555保持不变，HK不重启。
+
+公网HTML/JS/CSS全部200并匹配提交字节；cachebuster20260910-failure-v1。匿名API401。复用创建者现存会话只读核验：真正轻量bootstrap参数include_channels=0，HTTP200/4ms且未加载频道；任务列表200/8ms、详情200/5ms，全部no-store。此前lite=1不是页面使用参数，对应完整bootstrap耗时2735ms，不作为轻量页面性能证据。工具连接器此前不可用，本次为实际鉴权HTTP与本地mock浏览器验收，非登录线上浏览器实测。
+
+当前任务详情failure_notification.sent/is_current=true，event_key仍为feefc4292a82c7b8d0c76599e051b216a5c31ac7e2be56865318b241609491e4；飞书回执仍为om_x100b651d4dca04a0de7047f91de0bd7，共1条，未重发。cover_preview为审核V2、is_current=true。账本12保持unknown/thumbnail，video_id=c68YK2Xm0Yk、video_attempt_count=1、comment_attempt_count=0、can_retry=false。7条发布账本及7条短链数量、两条准备任务、素材SQL SHA均保持。
+
+恢复当前视频仍未执行：当前owner API未返回该视频，原上传回执只能证明上传曾完成。不得把本补丁上线说成该视频公开成功。需平台侧确认视频可访问后再核验同一ID与频道，才能恢复安全的原步骤。
+
+精确代码回滚（保留两个数据库、图片、视频ID与飞书回执；有后续文件漂移或活动任务会拒绝覆盖）：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/fd386ad6f4f4a2f9d72e651e1d579eb0779dd8f8/scripts/deploy_youtube_failure_handling.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/failure-handling-20260910-192224-fd386ad6f4f4
+```
