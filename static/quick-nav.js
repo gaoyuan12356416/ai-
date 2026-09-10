@@ -223,7 +223,7 @@
           label: "FB Page 自动发布模板",
           description: "按Page池维护视频选材和发布时间模板",
           kind: "page",
-          href: "/fb-auto-publish-templates.html",
+          href: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
           module: "fb_page_posts",
           adminOnly: false,
           enabled: true,
@@ -381,7 +381,9 @@
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
-  const collapsedGroups = new Set();
+  // Open the current page's group on entry; retain explicit toggles across renders.
+  const expandedGroups = new Set();
+  const activeKeys = new WeakMap();
 
   function injectStyle() {
     if (styleInjected) return;
@@ -504,7 +506,7 @@
     ttPostPool: "/tt-post-pool.html",
     ttAutoPublishTemplates: "/tt-auto-publish-templates.html",
     ttAutoPublishRuns: "/tt-publish-logs.html",
-    fbAutoPublishTemplates: "/fb-auto-publish-templates.html",
+    fbAutoPublishTemplates: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
     fbAutoPublishRuns: "/fb-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
@@ -637,7 +639,7 @@
         label: "FB Page 自动发布模板",
         description: "按Page池维护视频选材和发布时间模板",
         kind: "page",
-        href: "/fb-auto-publish-templates.html",
+        href: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
         module: "fb_page_posts",
         adminOnly: false,
         enabled: true,
@@ -810,13 +812,11 @@
   function renderItem(item, activeKey) {
     const active = item.key === activeKey || item.view === activeKey;
     const description = item.description ? `<span>${escapeHtml(item.description)}</span>` : "";
-    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" data-quick-nav-view="${escapeHtml(item.view || "")}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
   }
 
   function renderGroup(group, items, activeKey) {
-    const activeInGroup = items.some(item => item.key === activeKey || item.view === activeKey);
-    if (activeInGroup) collapsedGroups.delete(group.key);
-    const collapsed = collapsedGroups.has(group.key) ? " collapsed" : "";
+    const collapsed = expandedGroups.has(group.key) ? "" : " collapsed";
     return `<div class="nav-group${collapsed}" data-quick-nav-group="${escapeHtml(group.key)}"><button class="nav-parent" type="button" data-quick-nav-toggle="${escapeHtml(group.key)}">${escapeHtml(group.label || "")}</button><div class="nav-children">${items.map(item => renderItem(item, activeKey)).join("")}</div></div>`;
   }
 
@@ -833,11 +833,20 @@
     const root = typeof container === "string" ? document.querySelector(container) : container;
     if (!root) return;
     root.querySelectorAll(".nav-item").forEach(item => {
-      item.classList.toggle("active", item.dataset.quickNavKey === activeKey);
+      item.classList.toggle("active", item.dataset.quickNavKey === activeKey || (!!activeKey && item.dataset.quickNavView === activeKey));
     });
-    const activeItem = Array.from(root.querySelectorAll(".nav-item"))
-      .find(item => item.dataset.quickNavKey === activeKey);
-    activeItem?.closest(".nav-group")?.classList.remove("collapsed");
+    const activeGroup = root.querySelector(".nav-item.active")?.closest(".nav-group");
+    const previous = activeKeys.get(root);
+    if (activeGroup) {
+      const groupKey = activeGroup.dataset.quickNavGroup;
+      if (!previous || previous.key !== activeKey || previous.group !== groupKey) {
+        expandedGroups.add(groupKey);
+        activeGroup.classList.remove("collapsed");
+      }
+      activeKeys.set(root, { key: activeKey, group: groupKey });
+    } else {
+      activeKeys.delete(root);
+    }
   }
 
   function bindEvents(container, config, options) {
@@ -845,9 +854,9 @@
       const toggle = event.target.closest("[data-quick-nav-toggle]");
       if (toggle && container.contains(toggle)) {
         const key = toggle.dataset.quickNavToggle || "";
-        if (collapsedGroups.has(key)) collapsedGroups.delete(key);
-        else collapsedGroups.add(key);
-        toggle.closest(".nav-group")?.classList.toggle("collapsed", collapsedGroups.has(key));
+        if (expandedGroups.has(key)) expandedGroups.delete(key);
+        else expandedGroups.add(key);
+        toggle.closest(".nav-group")?.classList.toggle("collapsed", !expandedGroups.has(key));
         return;
       }
       const link = event.target.closest("a.nav-item");
@@ -868,10 +877,12 @@
     const initialOptions = renderOptions(options);
     const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
     container.innerHTML = buildNavHtml(initialConfig, initialOptions);
+    setActive(container, initialOptions.activeKey);
     bindEvents(container, initialConfig, initialOptions);
     const config = await loadConfig();
     const finalOptions = renderOptions(options);
     container.innerHTML = buildNavHtml(config, finalOptions);
+    setActive(container, finalOptions.activeKey);
     bindEvents(container, config, finalOptions);
   }
 
