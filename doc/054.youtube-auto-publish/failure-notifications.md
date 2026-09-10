@@ -23,4 +23,14 @@
 
 分支codex/youtube-publish-failure-alerts-20260910，基于224ea51。GitHub准确提交归档后使用scripts/deploy_youtube_failure_alerts.py，只安装新模块和worker脚本。部署前要求无活动生成/上传；使用SIGTERM请求worker在当前迭代结束后退出，由已有Restart=always重新加载，不启用systemd stop超时杀任务。不重启API/旧发布worker/统一writer，不改变SQL和主SQLite。
 
-精确运行提交、备份、实际消息回执和回滚命令在上线后追加。回滚保留失败通知outbox以防再次启用时重复提醒。
+2026-09-10 19:10上线，准确运行提交`a292b352cd0633f8b8b96eb853a6ea735f1671d4`。CPU再次通过11项专项和43项引擎测试、准确基线及空闲检查。备份`/mnt/data-disk/deploy/youtube-auto-publish/backups/failure-alerts-20260910-191028-a292b352cd06`；worker平滑退出后PID3078069→3112993，其余API/旧发布worker/统一writer的PID及启动时间不变。service/runtime/engine和SQL摘要不变，账本12的status、video_id、video_attempt_count、error_code、updated_at_utc完全不变。
+
+当前真实失败通知已发送：outbox仅1条sent，message_id=`om_x100b651d4dca04a0de7047f91de0bd7`，event_key=`feefc4292a82c7b8d0c76599e051b216a5c31ac7e2be56865318b241609491e4`。这是飞书接口成功回执，不代表收件人已读。未创建测试消息，未重新上传、设置封面、公开或评论。
+
+准确回滚命令（保留失败通知outbox以防重新启用时重复提醒）：
+
+```sh
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/a292b352cd0633f8b8b96eb853a6ea735f1671d4/scripts/deploy_youtube_failure_alerts.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/failure-alerts-20260910-191028-a292b352cd06
+```
+
+上线前后证据保存在该release的`.failure-alert-before.json`及`.failure-alert-verified.json`。后续若主线程改动worker入口，须保留failure notification调用；不要覆盖整个旧版本worker。发送unknown需先核查，禁止清空outbox盲目补发。
