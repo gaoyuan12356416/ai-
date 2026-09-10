@@ -70,8 +70,9 @@ def main():
     expected=json.loads((stage/'deploy/youtube-auto-live-baseline.json').read_text())
     for name,record in expected.items():
         if digest(ROOT/name)!=record['sha256']:raise RuntimeError('Live file changed since baseline: '+name)
-    for name in ('navigation.json','quick-nav.js'):
-        if (PUBLIC/name).read_bytes().replace(b'\r\n',b'\n')!=(ROOT/'static'/name).read_bytes().replace(b'\r\n',b'\n'):
+    public_expected=json.loads((stage/'deploy/youtube-auto-public-baseline.json').read_text())
+    for name,sha in public_expected.items():
+        if digest(PUBLIC/name)!=sha:
             raise RuntimeError('Public static file has independent changes: '+name)
     writer=Path('/opt/drama-youtube-unified-writer/current').resolve()
     for name in ('unified_youtube.py','unified_youtube_rpc.py'):
@@ -101,7 +102,9 @@ def main():
     try:
         for name in FILES:install(stage/name,ROOT/name)
         for name in FILES:
-            if name.startswith('static/'):install(stage/name,PUBLIC/Path(name).name)
+            if name.startswith('static/'):
+                source=stage/'deploy/youtube-auto-public-navigation.json' if name=='static/navigation.json' else stage/name
+                install(source,PUBLIC/Path(name).name)
         for name in ('unified_youtube.py','unified_youtube_rpc.py'):
             install(stage/'features/drama_synthesis'/name,writer/'features/drama_synthesis'/name)
         storage=Path('/mnt/data-disk/youtube-auto-publish')
