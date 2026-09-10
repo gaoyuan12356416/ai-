@@ -4,8 +4,9 @@ async (page) => {
   const results = [], calls = [], errors = [];
   const check = (name,condition) => { if (!condition) throw new Error(name); results.push(name); };
   const fixture = {name:'qa-cover.png',mimeType:'image/png',buffer:await page.screenshot({type:'png'})};
-  const cover = 'http://127.0.0.1:8877/qa-cover.png';
-  const material = {id:'material-1',name:'QA 素材',macro_name:'QA 剧名',macro_desc:'A story <script>window.bad=1</script>',macro_url:'',long_url:'https://www.dramawavew2a.com/ads/101/2284/view?af_dp=qa&c=ai_youtube&af_channel=ai_youtube&af_c_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',source_job_id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',content_id:'qa',url:'',thumbnail_url:cover,language:'英语',duration:'12:30',size:'80 MB'};
+  const origin = page.url().match(/^http:\/\/127\.0\.0\.1:\d+/)?.[0] || 'http://127.0.0.1:8877';
+  const cover = origin + '/qa-cover.png';
+  const material = {id:'material-1',name:'QA 素材',drama_cover_url:cover,drama_cover_status:'available',drama_cover_message:'',macro_name:'QA 剧名',macro_desc:'A story <script>window.bad=1</script>',macro_url:'',long_url:'https://www.dramawavew2a.com/ads/101/2284/view?af_dp=qa&c=ai_youtube&af_channel=ai_youtube&af_c_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',source_job_id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',content_id:'qa',url:'',thumbnail_url:cover,language:'英语',duration:'12:30',size:'80 MB'};
   const channel = {id:'channel-1',name:'QA 频道',language:'英语',eligible:true};
   let configured = false, stale = false, forceCreateFailure = false, count = 0, featureEnabled = true, loggedIn = true, permissionDenied = false;
   let defaultDescription = '{desc}\nWatch now: {url}';
@@ -38,7 +39,7 @@ async (page) => {
     return respond(route,{error:{message:'Unexpected route '+p}},404);
   });
   await page.setViewportSize({width:1440,height:1000});
-  await page.goto('http://127.0.0.1:8877/youtube-publish.html');
+  await page.goto(origin + '/youtube-publish.html');
   await page.locator('#task-table tr').first().waitFor();
   check('production no demo action',await page.getByRole('button',{name:/模拟飞书提醒|重置演示|空态/}).count()===0);
   check('shared authenticated topbar',await page.locator('#userCard').innerText().then(t=>t.includes('QA 用户')));
@@ -128,7 +129,7 @@ async (page) => {
   await page.locator('.close-modal').click();
   for(const width of [1366,1920]) { await page.setViewportSize({width,height:900}); check('desktop '+width+' no horizontal body overflow',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)); }
   tasks.unshift(task('deep-link',{current_version:2,versions:[{number:1,url:cover,feedback:'首次生成'},{number:2,url:cover,feedback:'修改后生成'}]}));
-  await page.goto('http://127.0.0.1:8877/youtube-publish.html?task_id=deep-link&version=1');
+  await page.goto(origin + '/youtube-publish.html?task_id=deep-link&version=1');
   await page.getByRole('heading',{name:'审核封面',exact:true}).waitFor();
   check('Feishu deep link opens requested history',await page.locator('.version-item.selected').innerText().then(t=>t.includes('V1')));
   check('historical cover cannot be approved',await page.locator('[data-action="approve"]').isDisabled());
@@ -137,15 +138,15 @@ async (page) => {
   await page.getByRole('heading',{name:'发布任务详情',exact:true}).waitFor();
   check('explicit latest version deep-link approval',calls.some(x=>x.path.endsWith('/deep-link/review')&&x.body.version===2));
   featureEnabled=false;
-  await page.goto('http://127.0.0.1:8877/youtube-publish.html');
+  await page.goto(origin + '/youtube-publish.html');
   await page.locator('#page-content:not(.hidden)').waitFor();
   check('feature disabled prevents new submissions',await page.locator('#new-publish').isDisabled());
   loggedIn=false;
-  await page.goto('http://127.0.0.1:8877/youtube-publish.html');
+  await page.goto(origin + '/youtube-publish.html');
   await page.locator('#page-message').getByText('请先登录',{exact:true}).waitFor();
   check('unauthenticated workspace gated',await page.locator('#page-content').isHidden());
   loggedIn=true;permissionDenied=true;
-  await page.goto('http://127.0.0.1:8877/youtube-publish.html');
+  await page.goto(origin + '/youtube-publish.html');
   await page.locator('#page-message').getByText('暂无 YouTube 自动发布权限',{exact:true}).waitFor();
   check('server permission denial gated',await page.locator('#page-content').isHidden());
   check('no browser exceptions',errors.length===0);

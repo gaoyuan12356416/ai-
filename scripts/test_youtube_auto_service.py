@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -103,18 +104,24 @@ class WorkflowCase(unittest.TestCase):
             self.sql_calls.append(sql)
             match = re.search(r"CAST\(pool.id AS CHAR\)='(\d+)'", sql)
             return [] if match and match[1] != '1' else [(json.dumps(self.material).encode().hex(),)]
-        self.source = MaterialSource(str(self.sql_file), query)
+        self.material.update(drama_cover_url='https://static-v1.mydramawave.com/covers/test.jpg',drama_cover_status='available',drama_cover_message='')
+        def enrich(rows):
+            for row in rows:
+                row.update({k:self.material.get(k,'') for k in ('drama_cover_url','drama_cover_status','drama_cover_message')})
+            return rows
+        self.source = MaterialSource(str(self.sql_file), query,drama_resolver=enrich)
         self.channel = dict(id='channel-1', name='Test channel', channel_id='UCtest',
                             youtube_account_id='account-secret-id', language='en', eligible=True,
                             comment_eligible=True, scopes=['youtube.force-ssl'])
         self.channels = Mock(side_effect=lambda actor:[copy.deepcopy(self.channel)])
         self.short_link = Mock(return_value='https://example.invalid/short-for-tests')
         self.generate = Mock(return_value=png())
+        self.fetch_reference = Mock(return_value=png(400,600))
         self.notify = Mock(return_value='mock-message-id')
         self.store = EngineStore()
         self.service = YouTubeWorkflow(self.root/'jobs.sqlite3', self.root/'assets', self.source,
                                        self.channels, self.short_link, self.store,
-                                       generate=self.generate, notify=self.notify,
+                                       generate=self.generate, notify=self.notify,fetch_reference_cover=self.fetch_reference,
                                        public_base='https://example.invalid')
         self.sequence = 0
 
@@ -568,10 +575,16 @@ class RuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code,'replica_required')
 
     def test_generator_adapter_sanitizes_env_and_requires_actual_raster_file(self):
-        task={'id':'test-task','material':{'macro_name':'Test drama','macro_desc':'Synopsis'},'requirements':'Cinema','versions':[{'feedback':'Improve contrast'}]}
+        task={'id':'a'*32,'material':{'macro_name':'Test drama','macro_desc':'Synopsis'},'requirements':'Cinema','versions':[{'feedback':'Improve contrast'}]}
         with tempfile.TemporaryDirectory() as root:
+            asset_dir=Path(root)/'assets';asset_dir.mkdir()
+            original=io.BytesIO();Image.new('RGB',(400,600),'blue').save(original,'JPEG');original=original.getvalue()
+            (asset_dir/('b'*32+'.jpg')).write_bytes(original)
+            task['reference_cover']={'asset_id':'b'*32,'sha256':hashlib.sha256(original).hexdigest()}
             def run(command,**kwargs):
                 work=Path(command[command.index('-C')+1])
+                reference=Path(command[command.index('--image')+1])
+                self.assertEqual(reference.read_bytes(),original)
                 (work/'cover.png').write_bytes(png(1536,864))
                 return SimpleNamespace(returncode=0)
             with patch.dict(os.environ,{'MYSQL_PASSWORD':'not-for-generator','FEISHU_SECRET':'not-for-generator'}), patch('features.youtube_auto_publish.runtime.subprocess.run',side_effect=run) as process:

@@ -19,12 +19,15 @@ def encoded(*values):
     return [(json.dumps(value).encode().hex(),) for value in values]
 
 
+DRAMA_COVER = 'https://cdn.usrgrow.com/storage/icons/drama-cover.jpg'
+
+
 class MetadataCase(unittest.TestCase):
     def material(self, **changes):
         return dict(dict(content_id='dramaA', language='zh-TW', macro_name='filename', macro_desc='old'), **changes)
 
     def resource(self, **changes):
-        return dict(dict(content_id='dramaA', language='zh-tw', name='繁體劇名', desc='繁體劇情簡介'), **changes)
+        return dict(dict(content_id='dramaA', language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER), **changes)
 
     def test_duplicate_episode_records_resolve_same_localized_metadata(self):
         query = Mock(return_value=encoded(self.resource(), self.resource()))
@@ -32,18 +35,22 @@ class MetadataCase(unittest.TestCase):
         DramaMetadataResolver(query)(materials)
         self.assertTrue(all(m['drama_status'] == 'matched' and m['macro_name'] == '繁體劇名'
                             and m['macro_desc'] == '繁體劇情簡介' for m in materials))
+        self.assertTrue(all(m['drama_cover_status'] == 'available' and m['drama_cover_url'] == DRAMA_COVER
+                            for m in materials))
         query.assert_called_once()
         sql = query.call_args.args[0]
         self.assertIn('SELECT DISTINCT HEX(JSON_OBJECT', sql)
         self.assertIn('FORCE INDEX (content_id)', sql)
         self.assertIn('LIMIT 1001', sql)
         self.assertIn('COLLATE utf8mb4_unicode_ci', sql)
+        self.assertIn("'cover',TRIM(COALESCE(r.cover,''))", sql)
 
     def test_language_or_exact_content_id_mismatch_does_not_guess(self):
         query = Mock(return_value=encoded(self.resource(language='en'), self.resource(content_id='dramaa')))
         result = DramaMetadataResolver(query)([self.material()])[0]
         self.assertEqual(result['drama_status'], 'missing')
         self.assertEqual((result['macro_name'], result['macro_desc']), ('', ''))
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('missing', ''))
 
     def test_conflicting_metadata_is_visible_and_not_randomly_selected(self):
         query = Mock(return_value=encoded(self.resource(), self.resource(desc='Different description')))
@@ -51,6 +58,67 @@ class MetadataCase(unittest.TestCase):
         self.assertEqual(result['drama_status'], 'ambiguous')
         self.assertIn('冲突', result['drama_message'])
         self.assertEqual(result['macro_desc'], '')
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('available', DRAMA_COVER))
+
+    def test_each_language_gets_only_its_exact_drama_cover(self):
+        english_cover = 'https://cdn.usrgrow.com/storage/icons/english.jpg'
+        query = Mock(return_value=encoded(self.resource(), self.resource(language='en', name='English', cover=english_cover)))
+        result = DramaMetadataResolver(query)([self.material(), self.material(language=' EN ')])
+        self.assertEqual([m['drama_cover_url'] for m in result], [DRAMA_COVER, english_cover])
+        self.assertEqual([m['macro_name'] for m in result], ['繁體劇名', 'English'])
+        query.assert_called_once()
+
+    def test_equivalent_cover_hosts_and_blank_episodes_do_not_conflict(self):
+        canonical = 'https://static-v1.mydramawave.com/covers/drama.jpg'
+        query = Mock(return_value=encoded(
+            self.resource(cover=' https://static.mydramawave.com/covers/drama.jpg '),
+            self.resource(cover=canonical), self.resource(cover='http://static.mydramawave.com/covers/drama.jpg'),
+            self.resource(cover=''), self.resource(cover=None)))
+        result = DramaMetadataResolver(query)([self.material()])[0]
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('available', canonical))
+        self.assertEqual(result['drama_cover_message'], '')
+        self.assertEqual(result['drama_status'], 'matched')
+
+    def test_different_cover_versions_do_not_break_text_macros(self):
+        query = Mock(return_value=encoded(self.resource(), self.resource(cover=DRAMA_COVER + '?version=2')))
+        result = DramaMetadataResolver(query)([self.material()])[0]
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('ambiguous', ''))
+        self.assertTrue(result['drama_cover_message'])
+        self.assertEqual((result['drama_status'], result['macro_name'], result['macro_desc']),
+                         ('matched', '繁體劇名', '繁體劇情簡介'))
+
+    def test_empty_episode_covers_are_missing_and_clear_stale_cover_fields(self):
+        query = Mock(return_value=encoded(self.resource(cover=''), self.resource(cover=None), self.resource(cover='  ')))
+        material = self.material(drama_cover_status='available', drama_cover_url=DRAMA_COVER, drama_cover_message='old')
+        result = DramaMetadataResolver(query)([material])[0]
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('missing', ''))
+        self.assertNotEqual(result['drama_cover_message'], 'old')
+        self.assertEqual(result['drama_status'], 'matched')
+
+    def test_invalid_cover_urls_are_reported_without_changing_text_match(self):
+        for cover in ('https://untrusted.invalid/cover.jpg', 'http://untrusted.invalid/cover.jpg',
+                      'file:///tmp/cover.jpg', 'https://user@cdn.usrgrow.com/cover.jpg',
+                      'https://cdn.usrgrow.com:8080/cover.jpg'):
+            with self.subTest(cover=cover):
+                query = Mock(return_value=encoded(self.resource(cover=cover)))
+                result = DramaMetadataResolver(query)([self.material()])[0]
+                self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('invalid', ''))
+                self.assertTrue(result['drama_cover_message'])
+                self.assertEqual(result['drama_status'], 'matched')
+
+    def test_valid_and_invalid_covers_never_silently_select_the_valid_one(self):
+        for reverse in (False, True):
+            resources = [self.resource(), self.resource(cover='https://untrusted.invalid/cover.jpg')]
+            query = Mock(return_value=encoded(*(list(reversed(resources)) if reverse else resources)))
+            result = DramaMetadataResolver(query)([self.material()])[0]
+            self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('invalid', ''))
+            self.assertEqual(result['drama_status'], 'matched')
+
+    def test_invalid_cover_for_different_identity_does_not_taint_exact_match(self):
+        query = Mock(return_value=encoded(self.resource(), self.resource(language='en', cover='bad'),
+                                         self.resource(content_id='dramaa', cover='bad')))
+        result = DramaMetadataResolver(query)([self.material()])[0]
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('available', DRAMA_COVER))
 
     def test_empty_identity_does_not_query(self):
         query = Mock()
@@ -78,7 +146,7 @@ class AssociationWorkflowCase(unittest.TestCase):
     def setUp(self):
         WorkflowCase.setUp(self)
         self.material.update(source_job_id='', source_kind='', macro_name='video filename', macro_desc='', language='zh-TW')
-        self.drama = dict(content_id=self.material['content_id'], language='zh-tw', name='繁體劇名', desc='繁體劇情簡介')
+        self.drama = dict(content_id=self.material['content_id'], language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER)
         self.drama_query = Mock(side_effect=lambda sql: encoded(self.drama))
         self.source.drama_resolver = DramaMetadataResolver(self.drama_query)
 

@@ -22,4 +22,6 @@
 
 频道前端缓存仅用于选择界面，有效期60秒；创建任务仍由服务器重新校验当前频道资格。页面不等待导航网络请求才展示工作台，任务列表有独立加载状态。前端GET请求12秒、POST请求45秒超时，覆盖响应正文读取；POST超时视为结果未知，保留草稿与operation_id，不自动重复提交。
 
+素材DTO新增`drama_cover_url`、`drama_cover_status`（available/missing/ambiguous/invalid）、`drama_cover_message`，与视频缩略图thumbnail_url分开。AI提交必须有唯一可用原剧封面，校验失败409；客户端传入reference_cover或图片地址均不能覆盖服务器解析。参考图由worker首次生成前读取并保存，任务DTO的`reference_cover`为null或`{url,drama_name,frozen:true}`；url继续使用既有鉴权`/covers/{id}`，不返回磁盘路径或内部SHA。后续版本复用原参考图。缺少新字段的历史任务在重做前仅按相同剧集ID/语言补查封面，不改冻结文案、链接或视频身份。
+
 依赖契约：[YouTube thumbnails.set](https://developers.google.com/youtube/v3/docs/thumbnails/set)、[videos.update](https://developers.google.com/youtube/v3/docs/videos/update)、[processingDetails](https://developers.google.com/youtube/v3/docs/videos#processingDetails.processingStatus)、[飞书消息发送](https://open.feishu.cn/document/server-docs/im-v1/message/create)。

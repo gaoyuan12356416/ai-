@@ -23,10 +23,11 @@ def uid(): return uuid.uuid4().hex
 
 
 class YouTubeWorkflow:
-    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, public_base='https://ai.yingliangads.com', enabled=True):
+    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, fetch_reference_cover=None, public_base='https://ai.yingliangads.com', enabled=True):
         self.db_path=str(db_path); self.root=Path(asset_root).resolve()
         self.source,self.channels,self.short_link,self.engine_store=source,channels,short_link,engine_store
         self.generate,self.notify,self.public_base,self.enabled=generate,notify,public_base.rstrip('/'),bool(enabled)
+        self.fetch_reference_cover=fetch_reference_cover
         self.root.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
@@ -98,19 +99,20 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
     @staticmethod
     def asset_url(asset_id):return '/api/youtube-auto-publish/covers/'+str(asset_id)
 
-    def _store_image(self,actor,data,*,generated=False):
-        if not isinstance(data,bytes) or not data or len(data)>(32*1024*1024 if generated else MAX_IMAGE):
+    def _store_image(self,actor,data,*,generated=False,reference=False):
+        if not isinstance(data,bytes) or not data or len(data)>(8*1024*1024 if reference else 32*1024*1024 if generated else MAX_IMAGE):
+            if reference:raise WorkflowError('reference_cover_size','原剧封面超过 8 MB，无法用作参考图',409)
             raise WorkflowError('cover_size','封面图片不能超过 2 MB')
         try:
             with Image.open(io.BytesIO(data)) as image:
-                if image.format not in ('JPEG','PNG') or image.width*image.height>25000000 or getattr(image,'n_frames',1)!=1:
+                if image.format not in (('JPEG','PNG','WEBP') if reference else ('JPEG','PNG')) or image.width*image.height>25000000 or getattr(image,'n_frames',1)!=1:
                     raise ValueError('format')
                 image.verify()
             with Image.open(io.BytesIO(data)) as image:
                 image=ImageOps.exif_transpose(image)
                 if generated and abs(image.width/image.height-16/9)>.03:
                     raise ValueError('ratio')
-                if image.width<320 or image.height<180:raise ValueError('size')
+                if image.width<(64 if reference else 320) or image.height<(64 if reference else 180):raise ValueError('size')
                 # Flatten alpha and remove metadata; immutable JPEG is safe for thumbnails.set.
                 background=Image.new('RGB',image.size,'white')
                 if image.mode in ('RGBA','LA') or 'transparency' in image.info:
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     if len(result)<=MAX_IMAGE:break
                 if len(result)>MAX_IMAGE:raise ValueError('size')
         except Exception:
+            if reference:raise WorkflowError('reference_cover_invalid','原剧封面无法读取，请检查剧集封面或选择本地上传',409) from None
             raise WorkflowError('cover_invalid','请上传有效 JPG/PNG 封面；AI 封面必须为 16:9',400) from None
         tenant,owner=self._actor(actor);asset_id=uid();path=self.root/(asset_id+'.jpg')
         fd=os.open(str(path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -140,6 +143,41 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         try:data=base64.b64decode(raw,validate=True)
         except Exception:raise WorkflowError('cover_invalid','图片数据无效') from None
         return {'asset':self._store_image(actor,data)}
+
+    @staticmethod
+    def _check_reference(material):
+        from .reference import normalize_reference_url
+        status=material.get('drama_cover_status','missing')
+        if status!='available' or not normalize_reference_url(material.get('drama_cover_url')):
+            code='reference_cover_'+(status if status in ('missing','ambiguous','invalid') else 'missing')
+            raise WorkflowError(code,material.get('drama_cover_message') or '未找到可用的原剧封面，请检查剧集资料或选择本地上传',409)
+
+    def _prepare_reference(self,body):
+        """Freeze an owner-scoped original once; every revision uses the same bytes."""
+        reference=body.get('reference_cover') or {}
+        if reference.get('asset_id'):
+            with self.db() as c:asset=self._asset(c,reference['asset_id'],body['creator'])
+            if asset['sha256']!=reference.get('sha256'):
+                raise WorkflowError('reference_cover_changed','原剧参考图校验失败，不能继续生成',409)
+            return reference,body['material']
+        material=dict(body['material'])
+        # Older pending/rejected tasks predate cover metadata. Resolve the same
+        # material again, without changing frozen copy or its publishing identity.
+        if 'drama_cover_status' not in material:
+            fresh=self.source.get(str(material['id']))
+            if (str(fresh.get('content_id','')).strip(),str(fresh.get('language','')).strip().casefold())!=(str(material.get('content_id','')).strip(),str(material.get('language','')).strip().casefold()):
+                raise WorkflowError('reference_drama_changed','素材所属剧集已变化，请重新创建发布任务',409)
+            for field in ('drama_cover_url','drama_cover_status','drama_cover_message'):
+                material[field]=fresh.get(field,'')
+        self._check_reference(material)
+        if self.fetch_reference_cover is None:
+            raise WorkflowError('reference_loader_unconfigured','原剧封面读取服务尚未配置',503)
+        data=self.fetch_reference_cover(material['drama_cover_url'])
+        created=self._store_image(body['creator'],data,reference=True)
+        with self.db() as c:asset=self._asset(c,created['id'],body['creator'])
+        return {'asset_id':asset['id'],'sha256':asset['sha256'],'source_url':material['drama_cover_url'],
+                'drama_name':material.get('macro_name',''),'content_id':material.get('content_id',''),
+                'language':material.get('language','')},material
 
     def settings(self,actor):
         tenant,_=self._actor(actor)
@@ -173,6 +211,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         value=json.loads(encode(body))
         value.pop('creator',None);value.pop('request',None);value.pop('lease_token',None)
         value['channel']={k:v for k,v in value['channel'].items() if k not in ('scopes','youtube_account_id')}
+        reference=body.get('reference_cover') or {}
+        value['reference_cover']=({'url':self.asset_url(reference['asset_id']),'drama_name':reference.get('drama_name',''),'frozen':True}
+                                  if reference.get('asset_id') else None)
         ledger=None
         if body.get('publish_id'):
             ledger=self.engine_store.youtube_task(int(body['publish_id']))
@@ -267,6 +308,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         # Resolve required drama metadata before a short-link side effect.
         needs_url=any('{url}' in str(request[field+'_template']) for field in ('title','description','comment'))
         if needs_url and not has_link_source(material):raise WorkflowError('source_association_missing',material.get('drama_message') or '使用 {url} 需要有效的剧集关联',409)
+        if cover_source=='ai':self._check_reference(material)
         # Stable per owner/operation, including retries before the preparation is saved.
         # This is the new publishing identity, never a fabricated synthesis job ID.
         task_id=hashlib.sha256(encode(['youtube-auto-preparation-v1',tenant,owner,op]).encode()).hexdigest()[:32]
@@ -282,7 +324,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         created=now()
         body=dict(resolved,id=task_id,operation_id=op,material=material,channel=channel,creator=dict(actor),request=request,
                   title_template=request['title_template'],description_template=request['description_template'],comment_template=request['comment_template'],
-                  cover_source=cover_source,requirements=requirements,created_at=created,updated_at=created,current_version=1,versions=[],publish_id=None,error={},phase='cover',notification={})
+                  cover_source=cover_source,requirements=requirements,reference_cover=None,created_at=created,updated_at=created,current_version=1,versions=[],publish_id=None,error={},phase='cover',notification={})
         state='queued_generation' if cover_source=='ai' else 'enqueue_pending'
         body['versions']=[{'number':1,'asset_id':asset['id'] if cover_source=='local' else '', 'feedback':'','created_at':created,'source':cover_source,'approved':cover_source=='local'}]
         body['status']=state
@@ -363,6 +405,13 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             try:
                 if generation:
                     if self.generate is None:raise WorkflowError('generator_unconfigured','封面生图服务尚未配置',503)
+                    reference,material=self._prepare_reference(body)
+                    with self.db(True) as c:
+                        row,current=self._row(c,task_id)
+                        if row['lease_token']!=token or row['state']!='generating' or row['version']!=version:return {'claimed':True,'stale':True}
+                        current['reference_cover']=reference;current['material']=material
+                        self._save(c,current)
+                        body=current
                     output=self.generate(body,body['versions'][-1])
                     data=output if isinstance(output,bytes) else Path(output).read_bytes()
                     asset=self._store_image(body['creator'],data,generated=True)

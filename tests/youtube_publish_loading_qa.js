@@ -5,7 +5,7 @@ async (page) => {
   const check=(name,value)=>{if(!value)throw new Error(name);checks.push(name);};
   const respond=(route,data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
   const origin='http://127.0.0.1:8877';
-  const material={id:'1',name:'测试素材',macro_name:'测试剧名',macro_desc:'测试简介',macro_url:'',long_url:'https://example.invalid/drama',source_job_id:'a'.repeat(32),content_id:'drama-1',url:'',thumbnail_url:'',language:'en',duration:'12:30'};
+  const material={drama_cover_status:'available',drama_cover_url:origin+'/qa-reference.png',drama_cover_message:'',id:'1',name:'测试素材',macro_name:'测试剧名',macro_desc:'测试简介',macro_url:'',long_url:'https://example.invalid/drama',source_job_id:'a'.repeat(32),content_id:'drama-1',url:'',thumbnail_url:'',language:'en',duration:'12:30'};
   const channel={id:'1',name:'测试频道',language:'en',eligible:true,comment_eligible:true};
   const auth={authenticated:true,user:{name:'测试用户',role:'admin',is_admin:true,tenant_key:'test',permissions:{youtube_auto_publish:true}}};
   let holdNavigation=true,holdTasks=true,holdChannels=true,holdAuth=false,failBootstrap=false,holdPost=false;
