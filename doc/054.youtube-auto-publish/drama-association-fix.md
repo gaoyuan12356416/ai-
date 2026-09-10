@@ -30,8 +30,26 @@
 
 ## 集成与发布注意
 
-本修复使用独立 worktree，已基于主任务加载优化提交 `e958789` 集成并重新验证服务与浏览器。HTML script 版本为 `20260910-loading-drama-v1`。新增 `features/youtube_auto_publish/drama.py` 必须随包发布。侧会话未修改主任务工作目录、生产代码、配置和服务状态；当前为可合并发布的独立修复分支。
+本修复使用独立 worktree，已基于主任务加载优化提交 `e958789` 集成并重新验证服务与浏览器。HTML script 版本为 `20260910-loading-drama-v1`。新增 `features/youtube_auto_publish/drama.py` 必须随包发布。未修改主任务工作目录；用户再次要求完成修复后，已按下面记录发布生产。
 
 既有 `deploy_youtube_auto_publish.py` 为首次部署脚本，本次不可重新跑首次部署，也不能覆盖已启用的 SQL。发布只更新本修复 Python/页面文件，事前校验当前线上文件与已确认基线一致、备份文件与 SQLite，确认没有正在上传/评论的任务后重启受影响服务。回滚只还原代码，不删除短链或准备任务账本，不回放真实发布。
 
-共享个人 skill 上下文暂未修改，避免与主任务同时写入；此文件记录可集成的完整行为与证据。
+共享个人 skill 的 YouTube 参考文档已更新当前关联规则和上线记录。
+
+## 生产发布完成（2026-09-10 17:38）
+
+- GitHub/服务器归档提交：`1c3f4b172646e1758a817ceacbe4385f5997da71`，分支 `codex/youtube-drama-association-20260910`。服务器独立镜像 fetch 后校验 FETCH_HEAD 与提交一致，再从该提交归档；未使用本地散文件覆盖生产。
+- 发布器：`scripts/deploy_youtube_drama_association.py`。上线前逐文件匹配加载优化基线、SQL 摘要、数据盘 UUID、空闲账本、feature guard。生产 Python 3.9 重跑专项14/服务43/HTTP17/引擎43，117 项通过。
+- 更新 8 个源文件及 2 份 Nginx 页面文件。短暂停止/启动主 API、原 YouTube worker、新封面审核 worker；统一 writer 未重启。发布后四服务 active，NRestarts=0。
+- 备份：`/mnt/data-disk/deploy/youtube-auto-publish/backups/association-20260910-173818-1c3f4b172646`，包含文件清单、SHA、SQLite 在线备份和结果。已有五条发布账本、五条短链及零准备任务均保持不变。
+- 使用当前操作者既有有效会话对运行中的 HTTP 服务执行只读 GET，未创建会话或改变权限。`bootstrap?include_channels=0` 返回200，30ms；搜索 `6617770` 返回200，matched/link_ready=true、繁体剧名及109字简介；全部素材返回3条 matched/link_ready=true（韩语146、繁体109、日语173字）。冷查询分别约4.54/4.48秒。
+- 公网 HTML/JS 均200，内容字节与运行源文件一致，版本 `20260910-loading-drama-v1`；匿名素材API继续401。原SQL SHA `c301d02c6bfad8fa62b86cc2befe83176a38616c4d42c9e385bfb78e0e838e01` 不变。
+- 未执行真实生图、飞书提醒、视频或评论测试；原有加载优化保留。浏览器连接本轮不可用，线上验证采用真实鉴权 HTTP 返回与公网静态字节核验；此前本地真实浏览器11项交互已通过。
+
+回滚仅还原该补丁文件并保留账本、SQL与短链：
+
+```sh
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/1c3f4b172646e1758a817ceacbe4385f5997da71/scripts/deploy_youtube_drama_association.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/association-20260910-173818-1c3f4b172646
+```
+
+回滚器会先确认当前文件仍属于本补丁且没有正在发布/生成的任务，发现后续代码变更会拒绝覆盖。
