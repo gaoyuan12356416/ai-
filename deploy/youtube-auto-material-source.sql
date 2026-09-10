@@ -1,6 +1,6 @@
 SELECT
   s.id AS id,
-  COALESCE(s.name, '') AS name,
+  COALESCE(s.name, '') COLLATE utf8mb4_general_ci AS name,
   CASE WHEN s.url LIKE 'http://advertising-1306474899.cos.ap-hongkong.myqcloud.com/%'
     THEN CONCAT('https://', SUBSTRING(s.url, 8)) ELSE COALESCE(s.url, '') END AS url,
   CASE WHEN s.cover LIKE 'http://advertising-1306474899.cos.ap-hongkong.myqcloud.com/%'
