@@ -55,6 +55,7 @@ def rollback(backup):
         elif target.exists():target.unlink()
     run('systemctl','daemon-reload')
     for unit in SERVICES:run('systemctl','restart',unit)
+    run('nginx','-t');run('systemctl','reload','nginx')
     healthy();print(json.dumps({'rollback':'complete','backup':str(backup),'database':'retained'}))
 
 def main():
@@ -91,7 +92,8 @@ def main():
     targets=[ROOT/name for name in FILES]+[PUBLIC/Path(name).name for name in FILES if name.startswith('static/')]
     targets += [writer/'features/drama_synthesis/unified_youtube.py',writer/'features/drama_synthesis/unified_youtube_rpc.py',
                 Path('/etc/systemd/system')/NEW,Path('/etc/systemd/system/drama-material-api.service.d/96-youtube-auto-publish.conf'),
-                Path('/etc/youtube-auto-publish.env'),Path('/etc/youtube-auto-publish/material-source.sql')]
+                Path('/etc/youtube-auto-publish.env'),Path('/etc/youtube-auto-publish/material-source.sql'),
+                Path('/etc/nginx/default.d/youtube-auto-publish.conf')]
     for target in targets:backup_one(target,backup,records)
     manifest={'commit':a.commit,'files':records,'writer_root':str(writer),'ledger_counts_before':counts,'stage':str(stage)}
     write_json(backup/'manifest.json',manifest)
@@ -116,6 +118,8 @@ def main():
         install(stage/'deploy/youtube-auto-material-source.sql.example',sql,0o600)
         install(stage/'deploy/youtube-auto-publish-api.conf','/etc/systemd/system/drama-material-api.service.d/96-youtube-auto-publish.conf')
         install(stage/'deploy/youtube-auto-publish-worker.service',Path('/etc/systemd/system')/NEW)
+        install(stage/'deploy/youtube-auto-publish-nginx.conf','/etc/nginx/default.d/youtube-auto-publish.conf')
+        run('nginx','-t')
         guard=run('/usr/bin/python3',str(ROOT/'scripts/verify_live_feature_guard.py'),'--root',str(ROOT),'--public-root',str(PUBLIC))
         (backup/'feature-guard.txt').write_text(guard)
         run('systemctl','daemon-reload')
@@ -125,6 +129,7 @@ def main():
             except Exception:time.sleep(1)
         else:raise RuntimeError('API did not become healthy')
         run('systemctl','enable','--now',NEW)
+        run('systemctl','reload','nginx')
         time.sleep(4)
         states={unit:run('systemctl','is-active',unit) for unit in SERVICES+[NEW]}
         if any(value!='active' for value in states.values()):raise RuntimeError('Service not active')
