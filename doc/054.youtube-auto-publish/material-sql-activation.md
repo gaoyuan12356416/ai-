@@ -10,4 +10,16 @@
 
 此前缺日期下限的SQL触发MySQL3024超时；最新用户提供的日期条件解决了当前查询性能问题，该旧诊断不再构成本次启用阻塞。
 
-生产启用后的配置摘要、备份路径与接口读取结果将在执行后追加。
+## 生产执行结果
+
+配置提交 `136c42e744daef4c9cea778f9a91c0417c9dc677` 已推送并在CPU由GitHub取回。生产SQL摘要 `c301d02c6bfad8fa62b86cc2befe83176a38616c4d42c9e385bfb78e0e838e01`。配置读回configured=true，素材3条，按ID6617751搜索返回1条，按Dragon搜索返回3条，频道25个。没有重启服务，没有新增发布/通知测试。
+
+原配置备份：`/mnt/data-disk/deploy/youtube-auto-publish/backups/material-sql-20260910-164158/material-source.sql`。
+
+仅回滚本次筛选配置（不涉及应用/数据库）：
+
+```bash
+cp -p /mnt/data-disk/deploy/youtube-auto-publish/backups/material-sql-20260910-164158/material-source.sql /etc/youtube-auto-publish/material-source.sql
+```
+
+页面重新加载后读取新配置，20秒素材缓存以配置文本为key自动失效。
