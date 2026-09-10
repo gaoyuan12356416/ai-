@@ -64,11 +64,11 @@ def healthy():
     raise RuntimeError('API health check failed')
 
 
-def idle_snapshot():
+def idle_snapshot(require_idle=True):
     with sqlite3.connect('file:' + str(DB) + '?mode=ro', uri=True) as db:
         active = db.execute("SELECT count(*) FROM drama_youtube_publish WHERE status NOT IN ('published','failed','unknown','partial_failed','cancelled') OR comment_status='publishing'").fetchone()[0]
         preparations = db.execute("SELECT count(*) FROM youtube_auto_preparation WHERE state IN ('queued_generation','generating','enqueue_pending') OR lease_until>strftime('%s','now')").fetchone()[0]
-        if active or preparations:
+        if require_idle and (active or preparations):
             raise RuntimeError('Publishing or generation is active; leave running work untouched')
         return {'publishing': db.execute('SELECT workflow,status,comment_status,count(*) FROM drama_youtube_publish GROUP BY workflow,status,comment_status').fetchall(),
                 'preparations': db.execute('SELECT state,count(*) FROM youtube_auto_preparation GROUP BY state').fetchall(),
@@ -170,8 +170,8 @@ def main():
         stopped = False
         changed = False
         try:
-            stop()
             stopped = True
+            stop()
             check_baseline()
             before = idle_snapshot()
             with sqlite3.connect(DB) as src, sqlite3.connect(backup / 'jobs.sqlite3') as dst:
@@ -195,7 +195,7 @@ def main():
                 start()
             raise
         result = {'commit': args.commit, 'backup': str(backup), 'services': {u: run('systemctl', 'is-active', u) for u in UNITS},
-                  'ledger_before': before, 'ledger_after': idle_snapshot(), 'material_sql_sha256': sha(SQL),
+                  'ledger_before': before, 'ledger_after': idle_snapshot(require_idle=False), 'material_sql_sha256': sha(SQL),
                   'sha256': {str(target): sha(target) for _, target, _ in inputs}}
         (backup / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result))
