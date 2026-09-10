@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image, ImageOps
-from .templates import DEFAULT_DESCRIPTION, WorkflowError, long_url, render
+from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
 
 MAX_IMAGE = 2 * 1024 * 1024
 
@@ -266,14 +266,20 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             with self.db() as c:asset=self._asset(c,request['cover_asset_id'],actor)
         # Resolve required drama metadata before a short-link side effect.
         needs_url=any('{url}' in str(request[field+'_template']) for field in ('title','description','comment'))
-        if needs_url and not long_url(material):raise WorkflowError('source_association_missing','使用 {url} 需要有效的剧集 ID 和来源合成任务 ID',409)
+        if needs_url and not has_link_source(material):raise WorkflowError('source_association_missing',material.get('drama_message') or '使用 {url} 需要有效的剧集关联',409)
+        # Stable per owner/operation, including retries before the preparation is saved.
+        # This is the new publishing identity, never a fabricated synthesis job ID.
+        task_id=hashlib.sha256(encode(['youtube-auto-preparation-v1',tenant,owner,op]).encode()).hexdigest()[:32]
+        if needs_url:
+            material['link_job_id']=material.get('source_job_id') or task_id
+            material['long_url']=long_url(material)
         preflight=dict(material,macro_url='{url}')
         for field in ('title','description','comment'):
             render(request[field+'_template'],preflight,field)
         if needs_url:
             material['macro_url']=str(self.short_link(material))
         resolved={field:render(request[field+'_template'],material,field) for field in ('title','description','comment')}
-        task_id=uid();created=now()
+        created=now()
         body=dict(resolved,id=task_id,operation_id=op,material=material,channel=channel,creator=dict(actor),request=request,
                   title_template=request['title_template'],description_template=request['description_template'],comment_template=request['comment_template'],
                   cover_source=cover_source,requirements=requirements,created_at=created,updated_at=created,current_version=1,versions=[],publish_id=None,error={},phase='cover',notification={})
@@ -374,7 +380,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     m=body['material'];ch=body['channel']
                     ledger=self.engine_store.enqueue_reviewed_youtube(
                         preparation_id=task_id,source_material_id=m['id'],approved_cover_path=asset['path'],approved_cover_sha256=asset['sha256'],
-                        operation_id='youtube-auto-'+task_id,job_id=m.get('source_job_id') or task_id,content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
+                        operation_id='youtube-auto-'+task_id,job_id=m.get('source_job_id') or m.get('link_job_id') or task_id,content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
                         channel_local_id=str(ch['id']),channel_id=ch['channel_id'],youtube_account_id=ch['youtube_account_id'],source_kind='custom_source',source_url=m['url'],title=body['title'],
                         description_template=body['description_template'],description_rendered=body['description'],comment_text=body['comment'],duplicate_confirmed=False,
                         scopes=ch['scopes'],operator_user_id=body['creator']['user_id'],operator_name=body['creator'].get('name',''))

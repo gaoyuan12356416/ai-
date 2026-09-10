@@ -19,6 +19,7 @@ FILES=['app.py','features/drama_synthesis/core.py','features/drama_synthesis/you
        'features/drama_synthesis/unified_youtube.py','features/drama_synthesis/unified_youtube_rpc.py',
        'features/youtube_auto_publish/__init__.py','features/youtube_auto_publish/templates.py',
        'features/youtube_auto_publish/source.py','features/youtube_auto_publish/service.py',
+       'features/youtube_auto_publish/drama.py',
        'features/youtube_auto_publish/runtime.py','features/youtube_auto_publish/engine.py',
        'static/navigation.json','static/quick-nav.js','static/youtube-publish.html',
        'static/youtube-publish.css','static/youtube-publish.js','scripts/youtube_auto_publish_worker.py',

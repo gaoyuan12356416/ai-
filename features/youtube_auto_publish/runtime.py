@@ -105,7 +105,9 @@ def build_service(app):
         raise WorkflowError('storage_unavailable','发布数据盘未挂载',503)
     reader=readonly_runner(app)
     hosts=tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS',','.join(DEFAULT_HOSTS)).split(',') if x.strip())
-    source=MaterialSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE',''),reader,allowed_hosts=hosts)
+    from .drama import DramaMetadataResolver
+    source=MaterialSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE',''),reader,allowed_hosts=hosts,
+                          drama_resolver=DramaMetadataResolver(reader))
     repository=YouTubeCredentialRepository(reader,schema=app.DB_NAME)
     def channels(actor):
         # Credential objects stay server-only; no refresh token or client configuration reaches a DTO.
@@ -120,10 +122,11 @@ def build_service(app):
                            'comment_eligible':credential.capabilities['comment_eligible'],'scopes':sorted(credential.scopes)})
         return values
     def short_link(material):
-        kind=material.get('source_kind') or ''
-        if kind not in ('concat_video','no_bgm_video','random_template'):
-            raise WorkflowError('source_kind_required','使用 {url} 需要关联原合成视频类型',409)
-        value=app.DRAMA_SYNTHESIS_STORE.ensure_short_link(material['source_job_id'],kind,material['content_id'],app.DRAMA_SHORT_LINK_PUBLISHER)
+        kind=(material.get('source_kind') or '') if material.get('source_job_id') else 'custom_source'
+        if kind not in ('concat_video','no_bgm_video','random_template','custom_source'):
+            raise WorkflowError('source_kind_required','使用 {url} 需要有效的视频素材类型',409)
+        job_id=material.get('source_job_id') or material.get('link_job_id') or ''
+        value=app.DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id,kind,material['content_id'],app.DRAMA_SHORT_LINK_PUBLISHER)
         return value['short_url']
     return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,
                            generate=generate_cover_factory(root),notify=notify_factory(app),public_base=app.PUBLIC_BASE_URL.split('/drama-materials')[0],

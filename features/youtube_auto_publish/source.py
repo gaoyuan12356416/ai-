@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-from .templates import WorkflowError, long_url
+from .templates import WorkflowError, has_link_source, long_url
 
 COLUMNS = ('id','name','url','thumbnail_url','content_id','source_job_id','source_kind','macro_name','macro_desc','language','duration','size','app_id')
 DEFAULT_HOSTS = ('advertising-1306474899.cos.ap-hongkong.myqcloud.com','ai.yingliangads.com','gy.g2flow.com','socialkit-cdn.yingliang.tech')
@@ -28,9 +28,10 @@ def validate_sql(sql):
 
 
 class MaterialSource:
-    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS):
+    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None):
         self.sql_file, self.query_runner = str(sql_file or ''), query_runner
         self.allowed_hosts = tuple(allowed_hosts)
+        self.drama_resolver = drama_resolver
         self.lock = threading.Lock()
         self.cache = None
 
@@ -73,11 +74,15 @@ class MaterialSource:
                 if not safe_url(item['thumbnail_url'],self.allowed_hosts): item['thumbnail_url']=''
                 item['macro_name'] = item['macro_name'] or item['name']
                 item['macro_url'] = ''
-                item['long_url'] = long_url(item)
                 items.append(item)
             ids=[item['id'] for item in items]
             if len(ids)!=len(set(ids)):
                 raise WorkflowError('material_source_ambiguous','素材查询存在重复 ID，请管理员调整 SQL',503)
+            if self.drama_resolver:
+                items = self.drama_resolver(items)
+            for item in items:
+                item['long_url'] = long_url(item)
+                item['link_ready'] = has_link_source(item)
             return items
         except WorkflowError:
             raise

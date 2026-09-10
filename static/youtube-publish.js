@@ -80,8 +80,8 @@
     if (field !== 'comment' && !r.value.trim()) return `请填写${field === 'title' ? '视频标题' : '视频描述'}。`;
     if (!settings && source) {
       const required = r.missing.filter(key => key !== 'url');
-      if (required.length) return `所选素材缺少 ${required.map(k => `{${k}}`).join('、')}，请更换素材。`;
-      if (r.missing.includes('url') && !source.long_url && !(source.source_job_id && source.content_id)) return '素材缺少生成跳转链接所需的源剧集关联，请更换素材。';
+      if (required.length) return source.drama_message || `所选素材缺少 ${required.map(k => `{${k}}`).join('、')}，请更换素材。`;
+      if (r.missing.includes('url') && !(source.link_ready ?? Boolean(source.long_url || (source.source_job_id && source.content_id)))) return source.drama_message || '素材缺少生成跳转链接所需的剧集关联，请更换素材。';
     }
     if (!r.missing.length && count(field,r.value) > limit(field)) return `替换后的${field === 'title' ? '标题' : field === 'description' ? '描述' : '首评'}不能超过 ${limit(field)} ${field === 'description' ? 'UTF-8 字节' : '字符'}。`;
     return '';
@@ -97,7 +97,7 @@
     const id = settings ? 'default-description' : `draft-${field}`;
     return `<div class="macro-toolbar"><span>插入宏参数</span>${['url','desc','name'].map(key => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="${id}" data-macro="${key}">{${key}}</button>`).join('')}</div><span class="macro-source">{url} 剧集跳转链接 · {desc} 剧情简介 · {name} 剧名</span>${macroPreview(field,template,settings ? null : draft?.material,settings)}`;
   }
-  function linkHelp(m) { return `<details class="macro-link-help"><summary>查看 {url} 链接规则与长链</summary><div class="macro-link-details"><p>{url} 沿用剧集合成中 YouTube 发布的长链及跳转链接生成规则。</p>${m ? `<span class="field-hint">发布文案中的链接</span><code class="macro-link-value">${esc(m.macro_url || '提交时生成跳转链接')}</code><span class="field-hint">目标长链</span><code class="macro-link-value">${esc(m.long_url || '提交时由服务端根据源剧集关联生成')}</code><div class="macro-link-meta"><span>源剧集 ID</span><code>${esc(m.content_id || '未关联')}</code><span>源合成任务 ID</span><code>${esc(m.source_job_id || '未关联')}</code></div>` : '<p class="field-hint">选择素材后查看对应链接与来源关联。</p>'}</div></details>`; }
+  function linkHelp(m) { return `<details class="macro-link-help"><summary>查看 {url} 链接规则与长链</summary><div class="macro-link-details"><p>{url} 沿用剧集合成中 YouTube 发布的长链及跳转链接生成规则。</p>${m ? `<span class="field-hint">发布文案中的链接</span><code class="macro-link-value">${esc(m.macro_url || '提交时生成跳转链接')}</code><span class="field-hint">目标长链</span><code class="macro-link-value">${esc(m.long_url || '提交时由服务端根据剧集关联生成')}</code><div class="macro-link-meta"><span>源剧集 ID</span><code>${esc(m.content_id || '未关联')}</code><span>关联剧名</span><code>${esc(m.macro_name || m.drama_message || '未关联')}</code><span>源合成任务 ID</span><code>${esc(m.source_job_id || '独立素材（无需合成任务）')}</code><span>链接归因任务 ID</span><code>${esc(m.source_job_id || m.link_job_id || '提交时生成本次发布任务 ID')}</code></div>` : '<p class="field-hint">选择素材后查看对应链接与来源关联。</p>'}</div></details>`; }
   function refreshPreview(field, settings = false) { const input = $('#' + (settings ? 'default-description' : 'draft-' + field)); const el = $(`[data-macro-preview="${settings ? 'settings' : field}"]`); if (input && el) el.outerHTML = macroPreview(field,input.value,settings ? null : draft?.material,settings); }
   function upsert(t, mutation = false) { if (!t?.id) throw new Error('服务端未返回有效任务，请刷新任务列表确认。'); const key = String(t.id); taskCache.set(key,t); if (mutation) taskRevisions.set(key,(taskRevisions.get(key) || 0) + 1); const i = state.tasks.findIndex(x => String(x.id) === key); if (i >= 0) state.tasks[i] = t; return t; }
   function showSource() { const source = state.source || state.bootstrap?.source; const el = $('#source-message'); el.classList.toggle('hidden',source?.configured !== false); el.innerHTML = source?.configured === false ? '<strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后即可选择视频素材。</span>' : ''; }

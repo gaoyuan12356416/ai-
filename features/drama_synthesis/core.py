@@ -624,7 +624,7 @@ class DramaSynthesisStore:
                 conn.close()
 
     def ensure_short_link(self, job_id: str, material_kind: str, content_id: str, publisher: Optional[ImmutableFilesystemPublisher]) -> Dict[str, Any]:
-        if material_kind not in {"concat_video", "no_bgm_video", "random_template"}:
+        if material_kind not in {"concat_video", "no_bgm_video", "random_template", "custom_source"}:
             raise DramaSynthesisError("drama_short_link_material_invalid", "短链只支持视频素材")
         body = render_wrapper_html(job_id, content_id)
         long_url = build_long_url(job_id, content_id)

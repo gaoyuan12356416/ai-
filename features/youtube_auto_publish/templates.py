@@ -16,9 +16,16 @@ FIELDS = {'url': 'macro_url', 'desc': 'macro_desc', 'name': 'macro_name'}
 
 def long_url(material):
     try:
-        return build_long_url(str(material.get('source_job_id') or ''), str(material.get('content_id') or ''))
+        return build_long_url(str(material.get('source_job_id') or material.get('link_job_id') or ''), str(material.get('content_id') or ''))
     except Exception:
         return ''
+
+
+def has_link_source(material):
+    if material.get('source_job_id'):
+        return bool(long_url(material))
+    content_id = str(material.get('content_id') or '').strip()
+    return material.get('drama_status') == 'matched' and 0 < len(content_id) <= 256
 
 
 def render(template, material, field, *, allow_unresolved=False):
@@ -35,7 +42,7 @@ def render(template, material, field, *, allow_unresolved=False):
             return token
         value = str(material.get(FIELDS[key]) or '').strip()
         if not value or (key == 'url' and not long_url(material)):
-            raise WorkflowError('macro_source_missing', '素材缺少 %s 的值或有效剧集/来源合成任务关联' % token, 409)
+            raise WorkflowError('macro_source_missing', '素材缺少 %s 的值或有效剧集关联' % token, 409)
         return value
     value = TOKENS.sub(replace, template).strip()
     if field != 'comment' and not value:

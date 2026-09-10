@@ -2,6 +2,8 @@
 -- Provide these aliases: id, name, url, thumbnail_url, content_id, source_job_id,
 -- source_kind, macro_name, macro_desc, language, duration, size, app_id.
 -- app_id must be 1479. id must be a unique positive decimal ads_custom_source id.
--- source_job_id/content_id/source_kind refer to the original drama synthesis job
--- when {url} is used; never replace them with the new publishing task id.
+-- Map data_source_id to content_id and retain the actual material language.
+-- Runtime resolves macro_name/macro_desc from ads_drama_resource by content_id + language.
+-- Preserve source_job_id/source_kind for actual synthesis outputs; leave both empty
+-- for standalone materials. Runtime allocates a separate link_job_id when submitting.
 -- Do not activate the provisional ads_custom_source WHERE clause yet.
