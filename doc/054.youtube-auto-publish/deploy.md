@@ -36,3 +36,7 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b29ac4725301f9a19e58
 ```
 
 最终SQL替换前还需核对别名/原合成关联；此时才有业务素材可供正常提交。没有执行真实生图、飞书发送、YouTube视频或评论测试。
+
+## 当前增量版本（2026-09-10 18:17）
+
+上述为空态首发历史。素材SQL已按用户五条件启用；剧集关联、加载修复已上线。当前原剧参考生图运行提交`69327e8b6723239fc86666aa55e253aa35b70c60`，对应备份`/mnt/data-disk/deploy/youtube-auto-publish/backups/reference-20260910-181726-69327e8b6723`，部署及精确回滚命令见`reference-cover.md`。回滚此补丁不要使用首发全量回滚，不得重置已启用SQL或恢复旧数据库。
