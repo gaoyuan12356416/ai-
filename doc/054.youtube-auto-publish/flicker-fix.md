@@ -14,4 +14,18 @@ Playwright CLI独立本机mock API，先运行69327e8旧版，再运行补丁；
 
 部署前18:30只读快照：HTML faddceb3c861ac44b1cd6794102a93c6f3f0c781185a7e1a3630065973ef06c3，JS a3e1df0d87f749598a1190f806463bc0c6d8731d546746a21a4ac7cfec325d68。五服务active/0重启，账本6、短链7，有1条用户任务生成中。SQL SHA c301d02c6bfad8fa62b86cc2befe83176a38616c4d42c9e385bfb78e0e838e01。
 
-准确运行提交、备份、公网回读及回滚命令在切换后追加。新JS版本20260910-flicker-v1。
+## 上线记录（2026-09-10 18:39:48 CST）
+
+运行提交`52ebaaa0175f1694545e6b088c77371a4bb8732e`已推送GitHub，CPU fetch准确提交并核验FETCH_HEAD后归档。--check通过，正式部署4文件通过，feature guard 5功能/22条规则通过。备份`/mnt/data-disk/deploy/youtube-auto-publish/backups/flicker-20260910-183948-52ebaaa0175f`。
+
+公网HTML/JS均HTTP200，内容与GitHub blob逐字节一致，版本20260910-flicker-v1；匿名API401。HTML SHA256为72a01f2e392362ab1ecca1b4074b212be3e1c97018be5e40bc922ef99d9a332d，JS为3f9c6b8c5cffee3213ea8fb4f586289683b9759907f83ec05571c19170932142。没有重启服务或修改数据库/SQL。
+
+18:41:18只读回读：API、旧/新worker、统一writer、Nginx五服务active，PID/启动时间/NRestarts=0与18:30基线完全相同。SQL SHA不变，账本6/短链7不变；准备状态generating1、uploading1为现有用户工作。对比报告output/flicker-deployment/postdeployment-comparison-20260910.json。AI后台技能上下文已更新本次故障模式和回滚入口。
+
+本轮无法通过桌面浏览器连接器连接用户现有登录标签（request-header policy加载失败）；不把本机mock浏览器结果标为线上登录浏览器实测。线上证据为实际公网代码字节/版本、服务状态和匿名路由，本机已对同一代码完整复现并验证。
+
+回滚只恢复这4个静态文件，不还原数据库、不重启服务；任何后续文件摘要漂移均拒绝覆盖：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/52ebaaa0175f1694545e6b088c77371a4bb8732e/scripts/deploy_youtube_flicker_fix.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/flicker-20260910-183948-52ebaaa0175f
+```
