@@ -1,0 +1,28 @@
+[Unit]
+Description=YouTube Approved Cover Publishing Worker
+After=network-online.target drama-material-api.service drama-youtube-publish-worker.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=-/root/drama_material_service/.env
+EnvironmentFile=/etc/drama-synthesis/cpu.env
+EnvironmentFile=/etc/youtube-auto-publish.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/youtube_auto_publish_worker.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/youtube-auto-publish /mnt/data-disk/drama-youtube-short-links /root/drama_material_service/data /root/.codex
+
+[Install]
+WantedBy=multi-user.target

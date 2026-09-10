@@ -299,6 +299,11 @@ def load_database_credential_file(path_text: str, *, expected_user: str = WRITER
 def _record(kind: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     serialized = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     record = dict(payload)
+    # Reviewed provenance lives in the immutable JSON envelope. The existing
+    # three-table schema and its strict column/grant preflight stay unchanged.
+    if record.get("workflow") == "reviewed_thumbnail" and kind in {"video", "publish_log"}:
+        for key in ("workflow", "source_material_id", "preparation_id"):
+            record.pop(key, None)
     record["canary_operation_id"] = str(payload.get("canary_operation_id") or "")
     record["payload_json"] = serialized
     record["payload_sha256"] = hashlib.sha256(serialized.encode("utf-8")).hexdigest()

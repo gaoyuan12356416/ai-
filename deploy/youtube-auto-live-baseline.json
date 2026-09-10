@@ -1,0 +1,34 @@
+{
+  "app.py": {
+    "base_matches": true,
+    "sha256": "33aeca26da31a2df4963dd5d5dc57457ca29fe4a0425dd84374696c2141865b6"
+  },
+  "features/drama_synthesis/core.py": {
+    "base_matches": true,
+    "sha256": "bb19fa2b8a730de7d7fb814a7e2f8addaa24736a5bbfce4ef92b27686c8d468c"
+  },
+  "features/drama_synthesis/youtube.py": {
+    "base_matches": true,
+    "sha256": "da59edfc053faeda39a35440c2219d713b4c0ee94138509c202684b4af54b0fb"
+  },
+  "features/drama_synthesis/unified_youtube.py": {
+    "base_matches": true,
+    "sha256": "492987488a5bd62645c37eef8da89c59b79797fff14a14f8caaf607c3fb868cd"
+  },
+  "features/drama_synthesis/unified_youtube_rpc.py": {
+    "base_matches": true,
+    "sha256": "9726eea090a68cbc1231c3418c785e4c4ba258adff78b637f0d4e0d4bd31618e"
+  },
+  "static/navigation.json": {
+    "base_matches": true,
+    "sha256": "06f3283e3c92f7bc31a5c52b571fc019560bc97f8762dd1a3f254dadd768fa2b"
+  },
+  "static/quick-nav.js": {
+    "base_matches": true,
+    "sha256": "79908d7664cb88ac46e4ea1c160442c0ebd3b813077cb3913d0e15c825f22cfe"
+  },
+  "deploy/live_feature_guard.json": {
+    "base_matches": true,
+    "sha256": "dcb4701453f3e4801c067dbe86abe21b3ea92bc8c9ea3180d0c09320264ed8b3"
+  }
+}

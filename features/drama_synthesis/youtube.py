@@ -210,6 +210,8 @@ class YouTubeHTTPError(RuntimeError):
 
 
 class YouTubeHTTPClient:
+    allowed_upload_privacy = frozenset({"public", "unlisted"})
+
     def __init__(self, *, session_factory=requests.Session, timeout: int = 120):
         self.session_factory = session_factory
         self.timeout = max(30, min(int(timeout), 600))
@@ -347,10 +349,10 @@ class YouTubeHTTPClient:
         return total
 
     def begin_resumable(self, token: str, *, title: str, description: str, size: int, privacy_status: str = "public") -> str:
-        if privacy_status not in {"public", "unlisted"}:
+        if privacy_status not in self.allowed_upload_privacy:
             raise YouTubeHTTPError("youtube_privacy_invalid", "YouTube视频隐私设置无效", status=400)
         query = {"uploadType": "resumable", "part": "snippet,status"}
-        if privacy_status == "unlisted":
+        if privacy_status in {"unlisted", "private"}:
             query["notifySubscribers"] = "false"
         params = urlencode(query)
         body = {"snippet": {"title": title, "description": description}, "status": {"privacyStatus": privacy_status}}
@@ -872,6 +874,18 @@ class YouTubePublishEngine:
                 return None
             raise
 
+    def _initial_privacy(self, task: Mapping[str, Any]) -> str:
+        return "unlisted" if is_youtube_canary(task) else "public"
+
+    def _before_begin_upload(self, task: Mapping[str, Any], worker_id: str, *, size: int) -> Mapping[str, Any]:
+        return task
+
+    def _source_fingerprint_frozen(self, task: Mapping[str, Any]) -> bool:
+        return bool(task.get("resumable_session_uri"))
+
+    def _reconcile_unknown_upload(self, session_uri: str, size: int) -> Dict[str, Any]:
+        return self.client.query_upload(session_uri, size)
+
     def _publish_video(self, task: Mapping[str, Any], token: str, worker_id: str) -> Dict[str, Any]:
         task_id = int(task["id"])
         lease_generation = int(task["lease_generation"])
@@ -921,7 +935,7 @@ class YouTubePublishEngine:
                 raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败") from None
         if duration_ms <= 0:
             raise YouTubeHTTPError("youtube_source_probe_failed", "视频素材校验失败")
-        if task.get("resumable_session_uri") and (
+        if self._source_fingerprint_frozen(task) and (
             frozen_sha256 != digest_hex or frozen_size != size
         ):
             code = "youtube_canary_source_changed" if canary else "youtube_media_source_changed"
@@ -964,7 +978,12 @@ class YouTubePublishEngine:
                 task = self.store.mark_canary_upload_intent(task_id, worker_id=worker_id, lease_generation=lease_generation)
                 session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size, privacy_status="unlisted")
             else:
-                session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size)
+                task = self._before_begin_upload(task, worker_id, size=size)
+                privacy = self._initial_privacy(task)
+                if privacy == "public":
+                    session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size)
+                else:
+                    session_uri = self.client.begin_resumable(token, title=task["title"], description=task["description_rendered"], size=size, privacy_status=privacy)
             self.store.set_upload_session(
                 task_id,
                 session_uri,
@@ -989,7 +1008,7 @@ class YouTubePublishEngine:
             if not exc.unknown:
                 raise
             task = self._renew(task, worker_id)
-            result = self.client.query_upload(session_uri, size)
+            result = self._reconcile_unknown_upload(session_uri, size)
             if canary and result.get("state") != "submitted":
                 raise YouTubeHTTPError("youtube_canary_reconcile_inconclusive", "内部测试原上传会话尚无法确认，禁止重传", unknown=True)
         if result["state"] == "submitted":

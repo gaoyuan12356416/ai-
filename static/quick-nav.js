@@ -327,6 +327,24 @@
       ],
     },
     {
+      key: "youtube_platform",
+      label: "YouTube 社媒",
+      order: 45,
+      module: "youtube_auto_publish",
+      items: [
+        {
+          key: "youtubeAutoPublish",
+          label: "YouTube 自动发布",
+          description: "选择视频素材、审核封面并发布到 YouTube",
+          kind: "page",
+          href: "/youtube-publish.html",
+          module: "youtube_auto_publish",
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
       key: "system",
       label: "设置",
       order: 90,

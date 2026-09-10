@@ -3674,6 +3674,7 @@ MODULE_PERMISSIONS = {
     "x_accounts": "X账号授权管理",
     "tt_posts": "TikTok 社媒发布",
     "fb_page_posts": "Facebook Page 自动发布",
+    "youtube_auto_publish": "YouTube 自动发布",
 
 
 
@@ -3731,6 +3732,7 @@ DEFAULT_USER_PERMISSIONS = {
     "x_accounts": False,
     "tt_posts": False,
     "fb_page_posts": False,
+    "youtube_auto_publish": False,
     "settings": False,
 }
 
@@ -41453,6 +41455,23 @@ from features.fb_auto_posts.client import (
     parse_admin_query as fb_auto_posts_query_params,
     request_admin as fb_auto_post_service_request,
 )
+
+
+_YOUTUBE_AUTO_SERVICE = None
+_YOUTUBE_AUTO_SERVICE_LOCK = threading.Lock()
+
+
+def get_youtube_auto_service():
+    """Do not initialize storage/adapters when legacy workers import app."""
+    global _YOUTUBE_AUTO_SERVICE
+    if _YOUTUBE_AUTO_SERVICE is None:
+        with _YOUTUBE_AUTO_SERVICE_LOCK:
+            if _YOUTUBE_AUTO_SERVICE is None:
+                import sys
+                from features.youtube_auto_publish.runtime import build_service
+
+                _YOUTUBE_AUTO_SERVICE = build_service(sys.modules[__name__])
+    return _YOUTUBE_AUTO_SERVICE
 
 
 def fb_auto_post_actor_scope(session):
@@ -94152,6 +94171,145 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _youtube_auto_actor(self):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "youtube_auto_publish"):
+            json_response(self, 403, {"error": "permission_denied", "module": "youtube_auto_publish"}, no_store=True)
+            return None
+        try:
+            access = navigation_item_access(session, "youtubeAutoPublish", load_navigation_config())
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": "youtubeAutoPublish"}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
+    def _youtube_auto_json(self, max_bytes):
+        """Bound body reads before parsing; reject ambiguous HTTP framing."""
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+            self.close_connection = True
+            json_response(self, 411, {"error": "valid_content_length_required"}, no_store=True)
+            return None
+        # Bound digit length before int() as well as the eventual body allocation.
+        if len(lengths[0]) > 9 or int(lengths[0]) > max_bytes:
+            self.close_connection = True
+            json_response(self, 413, {"error": "request_too_large"}, no_store=True)
+            return None
+        if int(lengths[0]) < 2:
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        source = str(self.headers.get("Origin") or self.headers.get("Referer") or "").strip()
+        try:
+            valid_source = urlparse(source).scheme.lower() in ("https", "http")
+        except ValueError:
+            valid_source = False
+        if not valid_source or str(self.headers.get("Sec-Fetch-Site", "")).lower() == "cross-site":
+            self.close_connection = True
+            json_response(self, 403, {"error": "same_origin_required"}, no_store=True)
+            return None
+        if not self._require_same_origin_json():
+            self.close_connection = True
+            return None
+        length = int(lengths[0])
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("short request")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("object required")
+        except (ValueError, UnicodeError):
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        # Ownership and privilege come exclusively from the loaded session.
+        for key in ("actor", "creator", "tenant_key", "user_id", "open_id", "role", "is_admin"):
+            payload.pop(key, None)
+        return payload
+
+    def _dispatch_youtube_auto_publish(self, parsed):
+        actor = self._youtube_auto_actor()
+        if actor is None:
+            self.close_connection = True
+            return
+        prefix = "/api/youtube-auto-publish"
+        path = parsed.path[len(prefix):]
+        task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry))?", path)
+        cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
+        get_route = path in ("/bootstrap", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
+        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings") or (task and task.group(2))
+        if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
+            self.close_connection = True
+            json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
+        payload = None
+        if self.command == "POST":
+            payload = self._youtube_auto_json(3 * 1024 * 1024 if path in ("/covers", "/covers/upload") else 32 * 1024)
+            if payload is None:
+                return
+        from features.youtube_auto_publish.templates import WorkflowError
+        try:
+            service = get_youtube_auto_service()
+            if self.command == "GET":
+                query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
+                if path == "/bootstrap":
+                    result = service.bootstrap(actor)
+                elif path == "/materials":
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200])
+                elif path == "/tasks":
+                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
+                elif path == "/settings":
+                    result = service.settings(actor)
+                elif task:
+                    result = service.get_task(actor, task.group(1))
+                else:
+                    asset = service.asset(actor, cover.group(1))
+                    with open(asset["path"], "rb") as handle:
+                        data = handle.read(2 * 1024 * 1024 + 1)
+                    if len(data) > 2 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != asset["sha256"]:
+                        raise WorkflowError("cover_changed", "封面文件已变化，请重新上传", 409)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "private, no-store, max-age=0")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            elif path == "/tasks":
+                result = service.create_task(actor, payload)
+            elif path in ("/covers", "/covers/upload"):
+                result = service.upload_cover(actor, payload)
+            elif path == "/settings":
+                result = service.save_settings(actor, payload)
+            elif task.group(2) == "review":
+                result = service.review(actor, task.group(1), payload)
+            else:
+                result = service.retry(actor, task.group(1))
+            json_response(self, 200, result, no_store=True)
+        except (WorkflowError, DramaSynthesisError) as exc:
+            json_response(self, exc.status, {"error": exc.code, "message": str(exc)}, no_store=True)
+        except ValueError:
+            json_response(self, 400, {"error": "invalid_request", "message": "请求参数无效"}, no_store=True)
+        except Exception:
+            # Runtime/adapter errors may contain credentials or private filesystem paths.
+            json_response(self, 503, {"error": "youtube_auto_unavailable", "message": "YouTube 自动发布暂不可用，请稍后重试"}, no_store=True)
+
     def _dispatch_ad_control_v3(self, parsed):
         """Lazily dispatch the isolated V3 surface after its prefix matched."""
         try:
@@ -94773,6 +94931,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
 
         if parsed.path == "/api/gpu-video/random-overlay/catalog":
             auth = self.headers.get("Authorization", "")
@@ -98479,6 +98641,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
 
         fb_auto_template_match = re.fullmatch(
             re.escape(FB_AUTO_ADMIN_PREFIX)

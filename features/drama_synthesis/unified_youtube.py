@@ -35,6 +35,7 @@ VIDEO_PAYLOAD_KEYS = frozenset(
         "description_rendered", "privacy_status", "published_at_utc",
     }
 )
+REVIEWED_PAYLOAD_KEYS = frozenset({"workflow", "source_material_id", "preparation_id"})
 ENTITY_PAYLOAD_KEYS = {
     "video": VIDEO_PAYLOAD_KEYS,
     "comment": frozenset(
@@ -147,13 +148,20 @@ def _validate_video_payload(payload: Mapping[str, Any]) -> None:
     title = payload.get("title")
     description = payload.get("description_rendered")
     content_id = payload.get("content_id")
+    reviewed = payload.get("workflow") == "reviewed_thumbnail"
+    valid_source = (payload.get("source_kind") == "custom_source" and reviewed
+        and payload.get("privacy_status") == "public" and "canary_operation_id" not in payload
+        and all(type(payload.get(key)) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", payload[key])
+                for key in ("source_material_id", "preparation_id"))) if reviewed else (
+        payload.get("source_kind") in {"concat_video", "no_bgm_video", "random_template"}
+        and not REVIEWED_PAYLOAD_KEYS.intersection(payload))
     if not (
         _valid_int(payload.get("app_id"), low=1)
         and _valid_int(payload.get("channel_local_id"), low=1)
         and _valid_operator_user_id(payload.get("operator_user_id"), canary="canary_operation_id" in payload)
         and type(payload.get("job_id")) is str and JOB_ID_RE.fullmatch(payload["job_id"])
         and type(content_id) is str and 1 <= len(content_id) <= 256
-        and payload.get("source_kind") in {"concat_video", "no_bgm_video", "random_template"}
+        and valid_source
         and valid_url
         and type(title) is str and 1 <= len(title) <= 100
         and type(description) is str and bool(description) and len(description.encode("utf-8")) <= 5000
@@ -203,6 +211,10 @@ def _expected_external_id(entity_kind: str, payload: Mapping[str, Any]) -> str:
 
 def validate_entity_payload(entity_kind: str, external_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     required = ENTITY_PAYLOAD_KEYS.get(entity_kind)
+    if required is not None and isinstance(payload, Mapping) and REVIEWED_PAYLOAD_KEYS.intersection(payload):
+        if entity_kind not in {"video", "publish_log"} or payload.get("workflow") != "reviewed_thumbnail" or "canary_operation_id" in payload:
+            raise DramaSynthesisError("youtube_sync_contract_invalid", "YouTube统一记录合同无效", 409)
+        required = required | REVIEWED_PAYLOAD_KEYS
     if required is not None and isinstance(payload, Mapping) and "canary_operation_id" in payload:
         required = required | {"canary_operation_id"}
         if payload.get("canary_operation_id") != CANARY_OPERATION_ID:

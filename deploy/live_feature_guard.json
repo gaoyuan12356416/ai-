@@ -173,6 +173,52 @@
           ]
         }
       ]
+    },
+    {
+      "id": "youtube_auto_publish",
+      "description": "Independent reviewed-cover YouTube publishing",
+      "required": [
+        {
+          "path": "app.py",
+          "contains": [
+            "youtube_auto_publish",
+            "_dispatch_youtube_auto_publish",
+            "get_youtube_auto_service"
+          ]
+        },
+        {
+          "path": "features/youtube_auto_publish/engine.py",
+          "contains": [
+            "ReviewedYouTubePublishEngine",
+            "set_thumbnail",
+            "make_video_public"
+          ]
+        },
+        {
+          "path": "features/youtube_auto_publish/service.py",
+          "contains": [
+            "youtube_auto_preparation",
+            "enqueue_reviewed_youtube",
+            "_notify_once"
+          ]
+        },
+        {
+          "path": "static/youtube-publish.html",
+          "public_path": "youtube-publish.html",
+          "contains": [
+            "youtube-publish.js",
+            "ui-topbar.js"
+          ]
+        },
+        {
+          "path": "static/quick-nav.js",
+          "public_path": "quick-nav.js",
+          "contains": [
+            "youtubeAutoPublish",
+            "youtube-publish.html"
+          ]
+        }
+      ]
     }
   ]
 }
