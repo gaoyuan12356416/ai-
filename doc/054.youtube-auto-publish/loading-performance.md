@@ -31,4 +31,18 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/<本次40位SHA>/scr
 - `C:/Users/gaoyu/Documents/New project/output/playwright/youtube-production-frontend/loading-fixed-workspace-1440.png`
 - `C:/Users/gaoyu/Documents/New project/output/playwright/youtube-production-frontend/loading-fixed-channel-pending-1440.png`
 
-具体版本、备份路径及生产测量在部署后追加。所有测试均不触发真实发布、生图、评论或飞书消息。
+## 生产执行记录
+
+2026-09-10 17:07，提交 `e958789ba57617552c95f8d9799ec62317af4997` 已推送GitHub，CPU `43.166.187.96` fetch后核对FETCH_HEAD一致，再从GitHub archive部署到 `/root/drama_material_service` 和 `/usr/share/nginx/html`。源和公共静态共8个文件摘要与发布目录完全一致。生产Python3.9重新运行service 43项、HTTP 17项，全部通过。
+
+备份：`/mnt/data-disk/deploy/youtube-auto-publish/backups/loading-20260910-170743-e958789ba576`，含manifest、原文件摘要及result。仅重启主API和依赖它的旧YouTube worker；新worker与统一writer未重启，四服务active、NRestarts=0。API健康检查和公共功能guard通过。
+
+公网HTML、JS、CSS均200、SHA256与GitHub发布字节一致，HTML引用`v=20260910-loading-v1`；轻量bootstrap和新channels匿名均401。使用真实生产适配器、独立只读actor进行函数计时：bootstrap_lite 1.50 ms、任务列表1.19 ms、频道3398.23 ms（25个）、素材2106.61 ms（3条）。该计时不含浏览器、网络和真实Cookie鉴权；未取得用户登录浏览器的整页耗时，不能宣称整页1.5 ms。
+
+SQL摘要仍为`c301d02c6bfad8fa62b86cc2befe83176a38616c4d42c9e385bfb78e0e838e01`。准备/资产/通知仍零条；既有账本published/published2、published/skipped1、unknown/queued2保持不变。所有测试均未触发真实发布、生图、评论或飞书消息。
+
+本次准确回滚命令（保留当前SQL和数据库）：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/e958789ba57617552c95f8d9799ec62317af4997/scripts/deploy_youtube_loading_fix.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/loading-20260910-170743-e958789ba576
+```
