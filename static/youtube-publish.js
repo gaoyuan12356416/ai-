@@ -28,6 +28,59 @@
   const top = () => stack.at(-1);
   const versions = t => Array.isArray(t.versions) ? t.versions : [];
   const currentCover = t => t.cover_url || versions(t).find(v => Number(v.number) === Number(t.current_version))?.url || t.material?.thumbnail_url;
+  // Keep mounted layers and media alive. Polling only patches changed markup;
+  // it must not restart entrance animations or replace a playing preview.
+  const renderedMarkup = new WeakMap();
+  function domKey(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const tag = node.localName;
+    if (node.hasAttribute('data-modal-key')) return 'modal:' + node.getAttribute('data-modal-key');
+    if (node.hasAttribute('data-task-id')) return 'task:' + node.getAttribute('data-task-id');
+    if (node.id) return tag + '#' + node.id;
+    if (['img','video','audio'].includes(tag)) return tag + ':' + node.getAttribute('src');
+    if (tag === 'option') return 'option:' + node.getAttribute('value');
+    if (node.hasAttribute('data-action')) return tag + ':' + ['data-action','data-id','data-target','data-macro'].map(name => node.getAttribute(name) || '').join(':');
+    return '';
+  }
+  function compatibleNode(current, next) {
+    return current.nodeType === next.nodeType && (current.nodeType !== Node.ELEMENT_NODE || (current.localName === next.localName && current.namespaceURI === next.namespaceURI && domKey(current) === domKey(next)));
+  }
+  function syncNode(current, next) {
+    if (current.nodeType !== Node.ELEMENT_NODE) { if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue; return; }
+    // An expanded link-rules panel belongs to the reader, not to the poll DTO.
+    const keepAttribute = name => current.localName === 'details' && name === 'open';
+    for (const attribute of [...current.attributes]) if (!keepAttribute(attribute.name) && !next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+    for (const attribute of [...next.attributes]) if (!keepAttribute(attribute.name) && current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name,attribute.value);
+    if (current.localName === 'textarea') { if (current.value !== next.value) current.value = next.value; return; }
+    syncChildren(current,next);
+    if (current.localName === 'input' && current.type !== 'file') {
+      if (current.value !== next.value) current.value = next.value;
+      if (current.checked !== next.checked) current.checked = next.checked;
+    }
+    if (current.localName === 'select' && current.value !== next.value) current.value = next.value;
+  }
+  function syncChildren(parent, nextParent) {
+    const previous = [...parent.childNodes], used = new Set();
+    let cursor = parent.firstChild;
+    for (const next of [...nextParent.childNodes]) {
+      const key = domKey(next);
+      const current = cursor && !used.has(cursor) && compatibleNode(cursor,next) ? cursor : previous.find(node => !used.has(node) && compatibleNode(node,next) && (key || !domKey(node)));
+      const node = current || next.cloneNode(true);
+      if (node !== cursor) parent.insertBefore(node,cursor);
+      if (current) { used.add(current); syncNode(current,next); }
+      cursor = node.nextSibling;
+    }
+    for (const node of previous) if (!used.has(node)) node.remove();
+  }
+  function syncMarkup(root, html, variant = '') {
+    const previous = renderedMarkup.get(root);
+    if (previous?.html === html && previous.variant === variant) return false;
+    const template = document.createElement('template'); template.innerHTML = html;
+    syncChildren(root,template.content);
+    renderedMarkup.set(root,{html,variant});
+    return true;
+  }
+  const setText = (node,value) => { if (node.textContent !== String(value)) node.textContent = value; };
   async function api(path, options = {}) {
     const isPost = String(options.method || 'GET').toUpperCase() === 'POST';
     const controller = new AbortController(), timeoutMs = isPost ? 45000 : 12000;
@@ -103,18 +156,16 @@
   function showSource() { const source = state.source || state.bootstrap?.source; const el = $('#source-message'); el.classList.toggle('hidden',source?.configured !== false); el.innerHTML = source?.configured === false ? '<strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后即可选择视频素材。</span>' : ''; }
   function renderList() {
     const c = state.counts || {}, all = Number(c.all ?? state.total ?? 0), reviewed = Number(c.review ?? 0), published = Number(c.published ?? 0), failed = Number(c.failed ?? 0);
-    $('#stats').innerHTML = [['全部发布任务',all,'video','blue','当前权限范围内的全部任务'],['待审核封面',reviewed,'image','amber','确认封面后自动进入发布'],['视频已公开',published,'check','green','包含视频已公开、首评待处理'],['需要处理',failed,'warning','red','按失败阶段单独处理']].map(([label,n,glyph,color,caption]) => `<div class="stat-card"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-icon stat-icon-${color}">${icon(glyph)}</span></div><div class="stat-number">${n}</div><div class="stat-caption">${caption}</div></div>`).join('');
-    $('#task-tabs').innerHTML = [['all','全部任务',all],['review','待审核',reviewed],['running','进行中',Number(c.running || 0)],['published','已发布',published],['failed','异常任务',failed]].map(([id,label,n]) => `<button class="tab ${state.tab === id ? 'active' : ''}" type="button" data-action="tab" data-id="${id}" role="tab" aria-selected="${state.tab === id}">${label}<span>${n}</span></button>`).join('');
-    $('#task-table').setAttribute('aria-busy',String(state.listLoading));
+    syncMarkup($('#stats'),[['全部发布任务',all,'video','blue','当前权限范围内的全部任务'],['待审核封面',reviewed,'image','amber','确认封面后自动进入发布'],['视频已公开',published,'check','green','包含视频已公开、首评待处理'],['需要处理',failed,'warning','red','按失败阶段单独处理']].map(([label,n,glyph,color,caption]) => `<div class="stat-card"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-icon stat-icon-${color}">${icon(glyph)}</span></div><div class="stat-number">${state.listLoaded ? n : '—'}</div><div class="stat-caption">${caption}</div></div>`).join(''));
+    syncMarkup($('#task-tabs'),[['all','全部任务',all],['review','待审核',reviewed],['running','进行中',Number(c.running || 0)],['published','已发布',published],['failed','异常任务',failed]].map(([id,label,n]) => `<button class="tab ${state.tab === id ? 'active' : ''}" type="button" data-action="tab" data-id="${id}" role="tab" aria-selected="${state.tab === id}">${label}<span>${state.listLoaded ? n : '—'}</span></button>`).join(''));
+    if ($('#task-table').getAttribute('aria-busy') !== String(state.listLoading)) $('#task-table').setAttribute('aria-busy',String(state.listLoading));
     if (!state.listLoaded) {
-      $('#stats').querySelectorAll('.stat-number').forEach(el => { el.textContent = '—'; });
-      $('#task-tabs').querySelectorAll('.tab span').forEach(el => { el.textContent = '—'; });
-      $('#task-count').textContent = state.listError ? '任务加载失败' : '正在加载任务…'; $('#footer-total').textContent = '等待任务数据';
-      if (!state.listError) { $('#task-table').innerHTML = '<tr><td colspan="6"><div class="empty-state task-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载发布任务</h3><p>可以先新建发布，任务数据将在加载完成后展示。</p></div></td></tr>'; return; }
+      setText($('#task-count'),state.listError ? '任务加载失败' : '正在加载任务…'); setText($('#footer-total'),'等待任务数据');
+      if (!state.listError) { syncMarkup($('#task-table'),'<tr><td colspan="6"><div class="empty-state task-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载发布任务</h3><p>可以先新建发布，任务数据将在加载完成后展示。</p></div></td></tr>'); return; }
     }
-    if (state.listLoaded) { $('#task-count').textContent = state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`; $('#footer-total').textContent = `已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`; }
-    if (state.listError) { $('#task-table').innerHTML = `<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`; return; }
-    $('#task-table').innerHTML = state.tasks.length ? state.tasks.map(t => `<tr><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(currentCover(t),'任务封面')}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div></td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`;
+    if (state.listLoaded) { setText($('#task-count'),state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`); setText($('#footer-total'),`已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`); }
+    if (state.listError) { syncMarkup($('#task-table'),`<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`); return; }
+    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(currentCover(t),'任务封面')}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div></td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
   }
   async function loadTasks(quiet = false) {
     const serial = ++listSerial;
@@ -201,16 +252,23 @@
   }
   function settingsView(v) { return shell(v,'默认描述设置','新建发布时自动带入，已提交任务不会受影响。',`<div class="field">${label('默认视频描述',true,'default-description')}<textarea id="default-description" class="textarea" rows="6">${esc(v.value)}</textarea><span class="field-hint">当前租户共用的默认文案。支持宏参数，发布时按所选素材替换并校验最终长度。</span>${macroControls('description',v.value,true)}</div>`,'<button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="save-settings">保存默认描述</button>'); }
   function renderModals(focus = false) {
-    const root = $('#modal-root'); if (!stack.length) { root.innerHTML = ''; document.body.style.overflow = ''; return; }
-    const offsets = [...root.querySelectorAll('.modal-body')].map(el => el.scrollTop), activeId = document.activeElement?.id;
-    let selection; try { selection = [document.activeElement.selectionStart,document.activeElement.selectionEnd]; } catch (_) {}
+    const root = $('#modal-root');
+    if (!stack.length) { syncMarkup(root,''); document.body.style.overflow = ''; return; }
+    const active = document.activeElement, activeId = active?.id;
+    const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
+    let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
     const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView};
-    root.innerHTML = stack.map(v => views[v.type](v)).join(''); document.body.style.overflow = 'hidden';
-    root.querySelectorAll('.modal-body').forEach((el,i) => { el.scrollTop = offsets[i] || 0; });
+    const changed = syncMarkup(root,stack.map(v => views[v.type](v)).join(''),String(busy));
+    document.body.style.overflow = 'hidden';
+    if (!changed && !focus) return;
     if (busy) root.querySelectorAll('button,input,textarea,select').forEach(el => { el.disabled = true; });
     if (draft?.pendingPayload && top()?.type === 'publish') root.lastElementChild.querySelectorAll('input,textarea,select,button:not([data-action="submit-publish"]):not([data-action="close-modal"])').forEach(el => { el.disabled = true; });
-    if (activeId && $('#' + activeId)) { const el = $('#' + activeId); el.focus({preventScroll:true}); if (selection && typeof selection[0] === 'number') { try { el.setSelectionRange(...selection); } catch (_) {} } }
-    else if (focus) (root.lastElementChild.querySelector('input:not([type=file]),textarea,select,button:not(.close-modal):not([disabled])') || root.lastElementChild.querySelector('.modal'))?.focus({preventScroll:true});
+    const retained = active?.isConnected && root.lastElementChild.contains(active) ? active : activeId ? root.lastElementChild.querySelector('#' + CSS.escape(activeId)) : null;
+    if (retained && !retained.disabled) {
+      if (document.activeElement !== retained) retained.focus({preventScroll:true});
+      if (selection && typeof selection[0] === 'number' && (retained.selectionStart !== selection[0] || retained.selectionEnd !== selection[1] || retained.selectionDirection !== selection[2])) { try { retained.setSelectionRange(...selection); } catch (_) {} }
+    } else if (focus) (root.lastElementChild.querySelector('input:not([type=file]):not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not(.close-modal):not([disabled])') || root.lastElementChild.querySelector('.modal'))?.focus({preventScroll:true});
+    offsets.forEach(({node,top,left}) => { if (node.isConnected) { if (node.scrollTop !== top) node.scrollTop = top; if (node.scrollLeft !== left) node.scrollLeft = left; } });
   }
   async function readFile(file,kind) {
     if (!file || busy) return; const view = top();
