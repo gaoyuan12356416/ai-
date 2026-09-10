@@ -19,3 +19,20 @@
 
 ## 回滚
 停止并禁用新worker；恢复本次变更的API/旧publisher/writer/静态文件和drop-in；重启受影响三个既有服务。保留新的SQLite表、审核图片、notification与发布账本；不能用旧DB备份覆盖已发生的发布状态。若有已上传video/session，先记录并人工核对，不清空或重新提交。SQL空态上线没有产生实际发布。部署执行证据将在本文件追加。
+
+
+## 2026-09-10 执行记录
+
+运行提交 `b29ac4725301f9a19e586e509a21eef4da480239` 已推送GitHub并由CPU通过SSH fetch exact commit取回。主功能源文件从6fb2f12安装；b29ac47保持这些文件字节完全一致，并补齐Nginx代理。
+
+备份：`/mnt/data-disk/deploy/youtube-auto-publish/backups/20260910-161318-6fb2f12cda88`，含SQLite online backup、文件摘要及原配置存在状态。线上6个既有导航组全部保留，仅追加YouTube组。源文件18项摘要读回与GitHub版本一致。Nginx `-t` 通过后窄范围reload。
+
+四项服务（API、旧publisher、新publisher、统一writer）active/running、NRestarts=0。数据盘UUID一致。页面HTML/CSS/JS外网200且摘要一致；新API经公网返回真实Cookie401。真实配置服务读回enabled=true、configured=false、materials=0；新准备/资产/通知均0，原账本仍为published/published2、published/skipped1、unknown/queued2。
+
+完整回滚命令（不恢复旧数据库）：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b29ac4725301f9a19e586e509a21eef4da480239/scripts/deploy_youtube_auto_publish.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/20260910-161318-6fb2f12cda88
+```
+
+最终SQL替换前还需核对别名/原合成关联；此时才有业务素材可供正常提交。没有执行真实生图、飞书发送、YouTube视频或评论测试。
