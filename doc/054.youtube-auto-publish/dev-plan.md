@@ -10,3 +10,8 @@
 验证命令：`python scripts/test_youtube_auto_engine.py`、`python scripts/test_youtube_auto_service.py`、HTTP 集成测试、现有 synthesis/YouTube 回归；`python -m py_compile` 新旧变更模块；`node --check static/youtube-publish.js`；`python scripts/verify_live_feature_guard.py --root .`。浏览器用 `tests/youtube_publish_browser_qa.js` 进行 mock API 行为验证。
 
 2026-09-10原剧参考封面：基于已部署剧集关联分支建立codex/youtube-cover-reference-20260910；同批资料查询增加原剧cover，worker异步下载并冻结私有参考资产，生成器用真实--image附件和image_gen参考路径；UI补参考图对照。新增runtime/workflow/浏览器专项，独立单图验收之后从GitHub候选部署。使用deploy_youtube_cover_reference.py的基线/idle gate，旧用户生成/上传结束后再切换，保留SQL和所有账本。
+
+
+## 2026-09-10 失败诊断与通知展示
+
+实现images.py严格解码、runtime错误分类/审计、service cover_preview/只读通知DTO、engine安全错误描述、前端历史封面与通知显示。保留已上线worker调用及独立outbox。仅精确清单部署与代码回滚。

@@ -56,6 +56,24 @@ def approved_cover_bytes(task: Mapping[str, Any], root: Path) -> tuple[bytes, st
 class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
     allowed_upload_privacy = frozenset({"private"})
 
+    @staticmethod
+    def _safe_error_detail(response):
+        # Never persist Google's free-form message, request body or credentials.
+        explanations = {'forbidden':'YouTube 拒绝此操作，请核对频道权限',
+            'videoNotFound':'YouTube 当前未找到此视频', 'quotaExceeded':'YouTube API 配额已用尽',
+            'rateLimitExceeded':'YouTube 请求频率受限', 'invalidImage':'YouTube 无法识别封面图片',
+            'mediaBodyRequired':'请求缺少图片内容', 'authError':'频道授权无效',
+            'insufficientPermissions':'频道授权权限不足', 'uploadTooLarge':'图片超过平台大小限制'}
+        try:
+            payload = response.json()
+            errors = payload.get('error',{}).get('errors',[])
+            reasons = [x.get('reason') for x in errors if isinstance(x,Mapping)]
+        except (ValueError,AttributeError,TypeError):
+            reasons = []
+        known = list(dict.fromkeys(reason for reason in reasons if isinstance(reason,str) and reason in explanations))
+        suffix = '；'.join(explanations[reason]+' ('+reason+')' for reason in known)
+        return 'HTTP '+str(response.status_code)+('；'+suffix if suffix else '')
+
     def begin_resumable(self, *args: Any, **kwargs: Any) -> str:
         try:
             return super().begin_resumable(*args, **kwargs)
@@ -85,8 +103,10 @@ class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
         except ValueError:
             payload = {}
         items = payload.get("items") if isinstance(payload, Mapping) else None
+        if response.status_code == 200 and items == []:
+            raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube 当前未返回此视频，无法确认是否仍可访问；已保留原视频 ID，禁止重新上传", unknown=True)
         if response.status_code != 200 or not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
-            raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认", unknown=True)
+            raise YouTubeHTTPError("youtube_video_reconcile_unknown", "YouTube视频状态无法确认（"+self._safe_error_detail(response)+"）", unknown=True)
         item = items[0]
         snippet, status, processing = item.get("snippet"), item.get("status"), item.get("processingDetails")
         if (item.get("id") != video_id or not isinstance(snippet, Mapping) or snippet.get("channelId") != expected_channel_id
@@ -124,7 +144,7 @@ class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
         except ValueError:
             payload = {}
         if response.status_code != 200 or not isinstance(payload, Mapping) or not payload.get("items"):
-            raise YouTubeHTTPError("youtube_thumbnail_set_failed", "YouTube封面设置失败", status=response.status_code)
+            raise YouTubeHTTPError("youtube_thumbnail_set_failed", "YouTube封面设置失败（"+self._safe_error_detail(response)+"）", status=response.status_code)
 
     def make_video_public(self, token: str, *, video_id: str, preserved_status: Mapping[str, Any]) -> None:
         if not VIDEO_ID_RE.fullmatch(str(video_id)):
@@ -147,7 +167,7 @@ class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
         if response.status_code >= 500:
             raise YouTubeHTTPError("youtube_public_update_unknown", "视频公开设置结果未知，需核验原视频", unknown=True)
         if response.status_code != 200:
-            raise YouTubeHTTPError("youtube_public_update_failed", "YouTube视频公开设置失败", status=response.status_code)
+            raise YouTubeHTTPError("youtube_public_update_failed", "YouTube视频公开设置失败（"+self._safe_error_detail(response)+"）", status=response.status_code)
 
 
 class ReviewedYouTubePublishEngine(YouTubePublishEngine):

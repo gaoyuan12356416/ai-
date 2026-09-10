@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from PIL import Image, ImageOps
+from .images import decode_cover
 from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
 
 MAX_IMAGE = 2 * 1024 * 1024
@@ -23,11 +23,12 @@ def uid(): return uuid.uuid4().hex
 
 
 class YouTubeWorkflow:
-    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, fetch_reference_cover=None, public_base='https://ai.yingliangads.com', enabled=True):
+    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, failure_status=None, fetch_reference_cover=None, public_base='https://ai.yingliangads.com', enabled=True):
         self.db_path=str(db_path); self.root=Path(asset_root).resolve()
         self.source,self.channels,self.short_link,self.engine_store=source,channels,short_link,engine_store
         self.generate,self.notify,self.public_base,self.enabled=generate,notify,public_base.rstrip('/'),bool(enabled)
         self.fetch_reference_cover=fetch_reference_cover
+        self.failure_status=failure_status
         self.root.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
@@ -102,32 +103,17 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
     def _store_image(self,actor,data,*,generated=False,reference=False):
         if not isinstance(data,bytes) or not data or len(data)>(8*1024*1024 if reference else 32*1024*1024 if generated else MAX_IMAGE):
             if reference:raise WorkflowError('reference_cover_size','原剧封面超过 8 MB，无法用作参考图',409)
+            if generated:raise WorkflowError('generated_cover_size','AI 生图输出为空或超过 32 MB，请重新生成',503)
             raise WorkflowError('cover_size','封面图片不能超过 2 MB')
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                if image.format not in (('JPEG','PNG','WEBP') if reference else ('JPEG','PNG')) or image.width*image.height>25000000 or getattr(image,'n_frames',1)!=1:
-                    raise ValueError('format')
-                image.verify()
-            with Image.open(io.BytesIO(data)) as image:
-                image=ImageOps.exif_transpose(image)
-                if generated and abs(image.width/image.height-16/9)>.03:
-                    raise ValueError('ratio')
-                if image.width<(64 if reference else 320) or image.height<(64 if reference else 180):raise ValueError('size')
-                # Flatten alpha and remove metadata; immutable JPEG is safe for thumbnails.set.
-                background=Image.new('RGB',image.size,'white')
-                if image.mode in ('RGBA','LA') or 'transparency' in image.info:
-                    rgba=image.convert('RGBA');background.paste(rgba,mask=rgba.getchannel('A'))
-                else:background=image.convert('RGB')
-                if max(background.size)>3840:background.thumbnail((3840,2160))
-                result=b''
-                for quality in (90,82,72):
-                    out=io.BytesIO();background.save(out,format='JPEG',quality=quality,optimize=True)
-                    result=out.getvalue()
-                    if len(result)<=MAX_IMAGE:break
-                if len(result)>MAX_IMAGE:raise ValueError('size')
-        except Exception:
-            if reference:raise WorkflowError('reference_cover_invalid','原剧封面无法读取，请检查剧集封面或选择本地上传',409) from None
-            raise WorkflowError('cover_invalid','请上传有效 JPG/PNG 封面；AI 封面必须为 16:9',400) from None
+        background=decode_cover(data,generated=generated,reference=reference)
+        if max(background.size)>3840:background.thumbnail((3840,2160))
+        result=b''
+        for quality in (90,82,72):
+            out=io.BytesIO();background.save(out,format='JPEG',quality=quality,optimize=True)
+            result=out.getvalue()
+            if len(result)<=MAX_IMAGE:break
+        if len(result)>MAX_IMAGE:
+            raise WorkflowError('cover_size','封面转换后仍超过 2 MB，请减少图片尺寸或复杂度')
         tenant,owner=self._actor(actor);asset_id=uid();path=self.root/(asset_id+'.jpg')
         fd=os.open(str(path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(fd,'wb') as f:f.write(result)
@@ -237,6 +223,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         value['versions']=[dict(v,url=self.asset_url(v['asset_id'])) for v in value.get('versions',[]) if v.get('asset_id')]
         current=next((v for v in value['versions'] if v['number']==body['current_version']),None)
         value['cover_url']=current['url'] if current else ''
+        preview=current or max(value['versions'],key=lambda v:int(v['number']),default=None)
+        value['cover_preview']=({'url':preview['url'],'version':preview['number'],'is_current':preview['number']==body['current_version']} if preview else None)
+        value['failure_notification']=self.failure_status(body,ledger) if self.failure_status else None
         with self.db() as c:n=c.execute('SELECT state,message FROM youtube_auto_notification WHERE task_id=? AND version=?',(body['id'],body['current_version'])).fetchone()
         value['notification']={'status':n['state'],'message':n['message']} if n else {'status':'none','message':''}
         phases=['upload','thumbnail','processing','public','comment']
@@ -386,7 +375,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             # A interrupted generator is made visible for explicit retry; never silently make another paid generation.
             expired=c.execute("SELECT * FROM youtube_auto_preparation WHERE state='generating' AND lease_until<?",(time.time(),)).fetchall()
             for row in expired:
-                body=json.loads(row['body']);body['error']={'code':'generation_interrupted','message':'封面生成中断，请重试'};self._save(c,body,'generation_failed')
+                body=json.loads(row['body']);body['error']={'code':'generation_interrupted','message':'封面生成中断，请重试'}
+                self._save(c,body,'generation_failed')
             c.execute("UPDATE youtube_auto_notification SET state='unknown',message='提醒发送结果待核查，可从任务列表审核' WHERE state='sending' AND lease_until<?",(time.time(),))
             row=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','enqueue_pending') AND lease_until<? ORDER BY created_at LIMIT 1",(time.time(),)).fetchone()
             if not row:return None

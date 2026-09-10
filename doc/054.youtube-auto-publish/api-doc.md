@@ -25,3 +25,8 @@
 素材DTO新增`drama_cover_url`、`drama_cover_status`（available/missing/ambiguous/invalid）、`drama_cover_message`，与视频缩略图thumbnail_url分开。AI提交必须有唯一可用原剧封面，校验失败409；客户端传入reference_cover或图片地址均不能覆盖服务器解析。参考图由worker首次生成前读取并保存，任务DTO的`reference_cover`为null或`{url,drama_name,frozen:true}`；url继续使用既有鉴权`/covers/{id}`，不返回磁盘路径或内部SHA。后续版本复用原参考图。缺少新字段的历史任务在重做前仅按相同剧集ID/语言补查封面，不改冻结文案、链接或视频身份。
 
 依赖契约：[YouTube thumbnails.set](https://developers.google.com/youtube/v3/docs/thumbnails/set)、[videos.update](https://developers.google.com/youtube/v3/docs/videos/update)、[processingDetails](https://developers.google.com/youtube/v3/docs/videos#processingDetails.processingStatus)、[飞书消息发送](https://open.feishu.cn/document/server-docs/im-v1/message/create)。
+
+
+## 2026-09-10 失败诊断与通知展示
+
+任务DTO新增cover_preview:{url,version,is_current}|null，以及failure_notification:{event_id,status,message,stage,error_code,is_current}|null。后者只读现有独立通知库，不触发消息发送；cover_url仍仅表示当前成功版本。

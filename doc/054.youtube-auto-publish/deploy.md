@@ -40,3 +40,8 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b29ac4725301f9a19e58
 ## 当前增量版本（2026-09-10 18:17）
 
 上述为空态首发历史。素材SQL已按用户五条件启用；剧集关联、加载修复已上线。当前原剧参考生图运行提交`69327e8b6723239fc86666aa55e253aa35b70c60`，对应备份`/mnt/data-disk/deploy/youtube-auto-publish/backups/reference-20260910-181726-69327e8b6723`，部署及精确回滚命令见`reference-cover.md`。回滚此补丁不要使用首发全量回滚，不得重置已启用SQL或恢复旧数据库。
+
+
+## 2026-09-10 失败诊断与通知展示
+
+失败诊断与通知展示补丁部署使用scripts/deploy_youtube_failure_handling.py；复用a292b352已上线worker和通知库。先精确基线与空闲检查，备份两个SQLite，只更新补丁清单。回滚保留通知回执与所有视频身份，见failure-handling.md。

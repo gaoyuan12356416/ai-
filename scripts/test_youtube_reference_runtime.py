@@ -312,7 +312,7 @@ class GeneratorReferenceCase(unittest.TestCase):
         with patch('features.youtube_auto_publish.runtime.subprocess.run', side_effect=corrupt_reference):
             with self.assertRaises(WorkflowError) as ctx:
                 generate_cover_factory(self.root)(self.task, {'number':1})
-        self.assertEqual(ctx.exception.code, 'cover_generation_failed')
+        self.assertEqual(ctx.exception.code, 'reference_cover_changed')
 
 
 if __name__ == '__main__':
