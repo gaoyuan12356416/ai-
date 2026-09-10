@@ -23,7 +23,7 @@ from features.drama_synthesis.core import DramaSynthesisError
 PREFIX = "/api/youtube-auto-publish"
 TASK_ID = "a" * 32
 COVER_ID = "b" * 32
-GET_PATHS = ["/bootstrap", "/materials", "/tasks", "/settings", "/tasks/" + TASK_ID, "/covers/" + COVER_ID]
+GET_PATHS = ["/bootstrap", "/bootstrap?include_channels=0", "/channels", "/materials", "/tasks", "/settings", "/tasks/" + TASK_ID, "/covers/" + COVER_ID]
 POST_PATHS = ["/tasks", "/covers", "/covers/upload", "/settings", "/tasks/" + TASK_ID + "/review", "/tasks/" + TASK_ID + "/retry"]
 
 
@@ -71,6 +71,13 @@ class ServiceSpy:
 
 
 class YouTubeHttpTests(unittest.TestCase):
+    def test_light_bootstrap_and_channels_contract(self):
+        self.assertEqual(self.request('GET','/bootstrap?include_channels=0').status,200)
+        self.assertEqual(self.service.calls[-1][2],{'include_channels':False})
+        self.assertEqual(self.request('GET','/bootstrap').status,200)
+        self.assertEqual(self.service.calls[-1][2],{'include_channels':True})
+        self.assertEqual(self.request('GET','/channels').status,200)
+        self.assertEqual(self.service.calls[-1][0],'channel_options')
     @classmethod
     def setUpClass(cls):
         cls.contract = load_contract()
@@ -208,10 +215,11 @@ class YouTubeHttpTests(unittest.TestCase):
         self.assertFalse(self.service.calls)
 
     def test_route_dispatch_and_server_actor_projection(self):
-        expected_get = ["bootstrap", "list_materials", "list_tasks", "settings", "get_task", "asset"]
+        expected_get = ["bootstrap", "bootstrap", "channel_options", "list_materials", "list_tasks", "settings", "get_task", "asset"]
         expected_post = ["create_task", "upload_cover", "upload_cover", "save_settings", "review", "retry"]
         body = json.dumps({"actor": {"role": "admin", "user_id": "attacker"}, "creator": "fake", "role": "admin", "user_id": "fake", "is_admin": True, "title": "Allowed"}).encode()
         for method, paths, names in [("GET", GET_PATHS, expected_get), ("POST", POST_PATHS, expected_post)]:
+            self.assertEqual(len(paths), len(names))
             for path, name in zip(paths, names):
                 self.assertEqual(self.request(method, path, body=body).status, 200)
                 call_name, args, _ = self.service.calls[-1]

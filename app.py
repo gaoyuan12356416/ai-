@@ -94250,7 +94250,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         path = parsed.path[len(prefix):]
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry))?", path)
         cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
-        get_route = path in ("/bootstrap", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
+        get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
         post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings") or (task and task.group(2))
         if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
             self.close_connection = True
@@ -94267,7 +94267,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if self.command == "GET":
                 query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
                 if path == "/bootstrap":
-                    result = service.bootstrap(actor)
+                    result = service.bootstrap(actor, include_channels=query.get("include_channels", ["1"])[0] != "0")
+                elif path == "/channels":
+                    result = service.channel_options(actor)
                 elif path == "/materials":
                     result = service.list_materials(actor, search=query.get("search", [""])[0][:200])
                 elif path == "/tasks":

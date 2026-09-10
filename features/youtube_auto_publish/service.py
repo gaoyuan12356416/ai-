@@ -155,11 +155,16 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             c.execute('INSERT INTO youtube_auto_setting VALUES(?,?,?) ON CONFLICT(tenant) DO UPDATE SET description=excluded.description,updated_at=excluded.updated_at',(tenant,text.strip(),now()))
         return {'settings':self.settings(actor)}
 
-    def bootstrap(self,actor):
+    def channel_options(self,actor):
         self._actor(actor);_,state=self.source.configuration()
         channels=self.channels(actor) if state['configured'] else []
         safe=[{k:v for k,v in row.items() if k not in ('scopes','youtube_account_id')} for row in channels]
-        return {'settings':self.settings(actor),'source':state,'channels':safe,'can_manage_settings':actor.get('role')=='admin','enabled':self.enabled}
+        return {'channels':safe}
+
+    def bootstrap(self,actor,*,include_channels=True):
+        self._actor(actor);_,state=self.source.configuration()
+        channels=self.channel_options(actor)['channels'] if include_channels else []
+        return {'settings':self.settings(actor),'source':state,'channels':channels,'channels_loaded':bool(include_channels),'can_manage_settings':actor.get('role')=='admin','enabled':self.enabled}
 
     def list_materials(self,actor,search=''):
         self._actor(actor);return self.source.list(search)

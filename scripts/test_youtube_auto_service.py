@@ -63,6 +63,25 @@ class EngineStore:
 
 
 class WorkflowCase(unittest.TestCase):
+    def test_light_bootstrap_never_queries_channels_or_materials(self):
+        self.channels.side_effect=AssertionError('slow external dependency must not gate workspace')
+        result=self.service.bootstrap(self.actor,include_channels=False)
+        self.assertTrue(result['source']['configured'])
+        self.assertEqual(result['channels'],[])
+        self.assertFalse(result['channels_loaded'])
+        self.assertEqual(self.sql_calls,[])
+        self.channels.assert_not_called()
+
+    def test_channel_options_are_separate_safe_and_create_revalidates(self):
+        options=self.service.channel_options(self.actor)
+        self.assertEqual(len(options['channels']),1)
+        self.assertNotIn('scopes',options['channels'][0])
+        self.assertNotIn('youtube_account_id',options['channels'][0])
+        self.assertEqual(self.channels.call_count,1)
+        self.channels.reset_mock()
+        self.create()
+        self.channels.assert_called_once_with(self.actor)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='youtube-workflow-test-')
         self.addCleanup(self.tmp.cleanup)

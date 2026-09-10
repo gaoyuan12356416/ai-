@@ -20,7 +20,8 @@ async (page) => {
     const request=route.request(),p=request.url().replace(/^https?:\/\/[^/]+/,'').split('?')[0],body=request.postDataJSON();
     calls.push({path:p,method:request.method(),body});
     if(p==='/api/ui/topbar')return respond(route,{authenticated:loggedIn,user:loggedIn?{name:'QA 用户',role:'admin',is_admin:true,tenant_key:'qa',permissions:{youtube_auto_publish:true}}:null});
-    if(p.endsWith('/bootstrap'))return permissionDenied?respond(route,{error:{message:'当前用户没有此模块权限'}},403):respond(route,{settings:{default_description:defaultDescription},channels:[channel],source:{configured},can_manage_settings:true,enabled:featureEnabled});
+    if(p.endsWith('/bootstrap'))return permissionDenied?respond(route,{error:{message:'当前用户没有此模块权限'}},403):respond(route,{settings:{default_description:defaultDescription},channels:[],channels_loaded:false,source:{configured},can_manage_settings:true,enabled:featureEnabled});
+    if(p.endsWith('/channels'))return respond(route,{channels:[channel]});
     if(p.endsWith('/materials'))return respond(route,{configured,items:configured?[material]:[]});
     if(p.endsWith('/covers'))return respond(route,{asset:{id:'asset-1',url:cover}});
     if(p.endsWith('/settings')){defaultDescription=body.default_description;return respond(route,{settings:{default_description:defaultDescription}});}
