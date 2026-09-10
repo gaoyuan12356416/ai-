@@ -30,8 +30,8 @@ def run(*args):return subprocess.check_output(args,text=True,stderr=subprocess.S
 def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def write_json(path,value):path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
 def healthy():
-    with urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=8) as response:
-        if response.status!=200:raise RuntimeError('API health failed')
+    with urllib.request.urlopen('http://127.0.0.1:8787/api/auth/status',timeout=8) as response:
+        if response.status!=200 or not isinstance(json.load(response),dict):raise RuntimeError('API health failed')
 
 def backup_one(path,backup,records):
     path=Path(path);exists=path.exists();saved=backup/'files'/str(path).lstrip('/')
