@@ -94248,7 +94248,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
         prefix = "/api/youtube-auto-publish"
         path = parsed.path[len(prefix):]
-        task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry))?", path)
+        task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
         cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
         get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
         post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
@@ -94303,6 +94303,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = service.save_settings(actor, payload)
             elif task.group(2) == "review":
                 result = service.review(actor, task.group(1), payload)
+            elif task.group(2) == "schedule":
+                result = service.schedule(actor, task.group(1), payload)
             else:
                 result = service.retry(actor, task.group(1))
             json_response(self, 200, result, no_store=True)

@@ -18,7 +18,7 @@ import stat
 import tempfile
 import threading
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
 from urllib.parse import quote, urlencode, urlsplit
@@ -82,6 +82,27 @@ def is_youtube_canary(row: Mapping[str, Any]) -> bool:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS = 60
+
+
+def normalize_youtube_publish_at(value: Any, *, require_future: bool = False) -> str:
+    """UTC seconds on disk; reject ambiguous wall-clock timestamps."""
+    if value is None or value == "":
+        return ""
+    try:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError()
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError()
+        normalized = parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (ValueError, TypeError, OverflowError):
+        raise DramaSynthesisError("youtube_schedule_invalid", "定时发布时间无效，请选择带时区的日期和时间", 400) from None
+    if require_future and normalized <= utc_now():
+        raise DramaSynthesisError("youtube_schedule_past", "定时发布时间必须晚于当前时间", 400)
+    return normalized
 
 
 def _bounded_decimal(value: Any, *, low: int = 0, high: int = 2_147_483_647) -> int:
@@ -547,9 +568,16 @@ class DramaSynthesisStore:
                         ("source_material_id", ""), ("approved_cover_path", ""),
                         ("approved_cover_sha256", ""), ("reviewed_phase", "upload"),
                         ("thumbnail_status", "pending"), ("processing_status", "pending"),
-                        ("public_status", "pending")):
+                        ("public_status", "pending"), ("publish_at", ""), ("initial_publish_at", ""),
+                        ("schedule_status", "none"), ("schedule_command", ""),
+                        ("schedule_command_status", ""), ("schedule_operation_id", ""),
+                        ("schedule_requested_publish_at", ""),
+                        ("schedule_event_at", ""), ("schedule_write_action", ""),
+                        ("schedule_confirmed_publish_at", ""), ("schedule_next_check_at", "")):
                     if name not in columns:
                         conn.execute("ALTER TABLE drama_youtube_publish ADD COLUMN %s TEXT NOT NULL DEFAULT '%s'" % (name, default))
+                if "schedule_version" not in columns:
+                    conn.execute("ALTER TABLE drama_youtube_publish ADD COLUMN schedule_version INTEGER NOT NULL DEFAULT 0")
                 conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_reviewed_preparation ON drama_youtube_publish(preparation_id) WHERE workflow='reviewed_thumbnail'")
                 conn.commit()
             finally:
@@ -711,19 +739,20 @@ class DramaSynthesisStore:
         """Public/UI callers can never select the internal privacy lane."""
         if (
             request.get("operation_id") == CANARY_OPERATION_ID
-            or any(key in request for key in ("privacy_status", "_privacy_status", "canary_operation_id", "_workflow", "workflow", "_reviewed"))
+            or any(key in request for key in ("privacy_status", "_privacy_status", "canary_operation_id", "_workflow", "workflow", "_reviewed", "_publish_at", "_schedule_version", "publish_at", "schedule_version"))
         ):
             raise DramaSynthesisError("youtube_canary_internal_only", "内部测试不可通过正式发布入口创建", 403)
         return self._enqueue_youtube(**request)
 
     def enqueue_reviewed_youtube(self, *, preparation_id: str, source_material_id: str,
-                                 approved_cover_path: str, approved_cover_sha256: str, **request: Any) -> Dict[str, Any]:
+                                 approved_cover_path: str, approved_cover_sha256: str,
+                                 publish_at: str = "", schedule_version: int = 0, **request: Any) -> Dict[str, Any]:
         """Internal handoff after the preparation service freezes an approved cover.
 
         Both workflows allocate IDs from this table because the shared HK media
         executor caches task-{publish_id}; separate counters would mix videos.
         """
-        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed")):
+        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version")):
             raise DramaSynthesisError("youtube_reviewed_request_invalid", "审核发布请求无效", 400)
         if (not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(preparation_id or ""))
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(source_material_id or ""))
@@ -735,7 +764,8 @@ class DramaSynthesisStore:
             raise DramaSynthesisError("youtube_thumbnail_scope_missing", "频道授权缺少封面及公开设置权限", 409)
         request["scopes"] = scopes
         return self._enqueue_youtube(_workflow=REVIEWED_WORKFLOW,
-            _reviewed=(str(preparation_id), str(source_material_id), str(approved_cover_path), approved_cover_sha256), **request)
+            _reviewed=(str(preparation_id), str(source_material_id), str(approved_cover_path), approved_cover_sha256),
+            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version, **request)
 
     def enqueue_youtube_canary(
         self, *, job_id: str, content_id: str, source_kind: str, source_url: str,
@@ -776,7 +806,11 @@ class DramaSynthesisStore:
         _privacy_status: str = "public",
         _workflow: str = "legacy",
         _reviewed: tuple[str, str, str, str] = ("", "", "", ""),
+        _publish_at: str = "",
+        _schedule_version: int = 0,
     ) -> Dict[str, Any]:
+        if type(_schedule_version) is not int or _schedule_version < 0:
+            raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
         app_id, channel_local_id, youtube_account_id = str(app_id), str(channel_local_id), str(youtube_account_id)
         # Feishu user IDs are opaque strings, not numeric advertiser IDs.
         # Preserve them exactly; empty remains the historical unknown actor.
@@ -829,7 +863,8 @@ class DramaSynthesisStore:
                     stored = tuple(existing[key] for key in ("job_id", "content_id", "app_id", "channel_local_id", "channel_id", "youtube_account_id", "source_kind", "source_url", "title", "description_template", "description_rendered", "comment_text", "privacy_status"))
                     if (immutable != stored or existing["workflow"] != _workflow
                             or (_workflow == REVIEWED_WORKFLOW and tuple(existing[key] for key in
-                                ("preparation_id", "source_material_id", "approved_cover_path", "approved_cover_sha256")) != _reviewed)):
+                                ("preparation_id", "source_material_id", "approved_cover_path", "approved_cover_sha256")) != _reviewed)
+                            or (_workflow == REVIEWED_WORKFLOW and existing["initial_publish_at"] != _publish_at)):
                         raise DramaSynthesisError("youtube_operation_conflict", "发布操作ID已用于不同请求", 409)
                     conn.commit()
                     return dict(existing)
@@ -852,13 +887,14 @@ class DramaSynthesisStore:
                         operation_id,job_id,content_id,app_id,channel_local_id,channel_id,youtube_account_id,
                         source_kind,source_url,title,description_template,description_rendered,comment_text,duplicate_confirmed,
                         operator_user_id,operator_name,privacy_status,status,video_state,comment_status,sync_status,created_at_utc,updated_at_utc,
-                        workflow,preparation_id,source_material_id,approved_cover_path,approved_cover_sha256
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        workflow,preparation_id,source_material_id,approved_cover_path,approved_cover_sha256,
+                        publish_at,initial_publish_at,schedule_version,schedule_status
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         operation_id, job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id,
                         source_kind, source_url, title, description_template, description_rendered, comment_text, int(bool(duplicate_confirmed)),
                         operator_user_id, str(operator_name)[:128], _privacy_status, "queued", "queued", comment_status, "pending", now, now,
-                        _workflow, *_reviewed,
+                        _workflow, *_reviewed, _publish_at, _publish_at, _schedule_version, "pending" if _publish_at else "none",
                     ),
                 )
                 task_id = int(cursor.lastrowid)
@@ -879,6 +915,130 @@ class DramaSynthesisStore:
             conn = self._connect()
             try:
                 return self._row(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def get_reviewed_youtube_by_preparation(self, preparation_id: str) -> Optional[Dict[str, Any]]:
+        """Recover an enqueue commit before the preparation row saved its ID."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                return self._row(conn.execute("SELECT * FROM drama_youtube_publish WHERE workflow=? AND preparation_id=?",
+                    (REVIEWED_WORKFLOW, str(preparation_id))).fetchone())
+            finally:
+                conn.close()
+
+    def request_reviewed_youtube_schedule(self, task_id: int, *, action: str, publish_at: str = "",
+                                         expected_version: int, operation_id: str) -> Dict[str, Any]:
+        """CAS desired state. Platform writes belong to the leased engine only."""
+        if action not in {"reschedule", "immediate", "cancel"} or not OPERATION_ID_RE.fullmatch(str(operation_id or "")):
+            raise DramaSynthesisError("youtube_schedule_request_invalid", "发布时间操作无效", 400)
+        target = normalize_youtube_publish_at(publish_at)
+        if (action == "reschedule") != bool(target):
+            raise DramaSynthesisError("youtube_schedule_request_invalid", "重新定时需填写时间，其他操作不能携带时间", 400)
+        if type(expected_version) is not int or expected_version < 0:
+            raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND workflow=?", (int(task_id), REVIEWED_WORKFLOW)).fetchone()
+                if row is None:
+                    raise DramaSynthesisError("youtube_publish_not_found", "YouTube发布任务不存在", 404)
+                if row["schedule_operation_id"] == operation_id:
+                    if row["schedule_command"] != action or row["schedule_requested_publish_at"] != target:
+                        raise DramaSynthesisError("youtube_operation_conflict", "此操作ID已用于不同发布时间操作", 409)
+                    conn.commit()
+                    return dict(row)
+                if int(row["schedule_version"]) != expected_version:
+                    raise DramaSynthesisError("youtube_schedule_version_conflict", "发布时间已被修改，请刷新后再操作", 409)
+                if target and target <= now:
+                    raise DramaSynthesisError("youtube_schedule_past", "定时发布时间必须晚于当前时间", 400)
+                if row["video_state"] == "published" or row["public_status"] == "succeeded" or row["schedule_status"] == "cancelled":
+                    raise DramaSynthesisError("youtube_schedule_terminal", "视频已公开或任务已取消，不能修改发布时间", 409)
+                if (row["lease_owner"] or row["schedule_status"] in {"arming", "control_pending", "control_running", "reconciling"}
+                        or int(row["unknown_outcome"]) or row["public_status"] in {"running", "unknown"}):
+                    raise DramaSynthesisError("youtube_schedule_busy", "发布或原操作结果正在核验，请稍后刷新再操作", 409)
+                # Do not race a platform deadline with a private status write.
+                limit = (datetime.fromisoformat(now.replace("Z", "+00:00")) + timedelta(seconds=YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS)).isoformat().replace("+00:00", "Z")
+                if target and target <= limit:
+                    raise DramaSynthesisError("youtube_schedule_too_close", "预约时间过近，请选择至少一分钟后的时间", 409)
+                if row["schedule_confirmed_publish_at"] and row["schedule_confirmed_publish_at"] <= limit:
+                    raise DramaSynthesisError("youtube_schedule_too_close", "预约已临近，暂时不能修改，请等待平台公开状态核验", 409)
+                if row["status"] in {"failed", "unknown"} and row["schedule_status"] != "missed":
+                    raise DramaSynthesisError("youtube_schedule_failed_task", "请先处理当前发布失败，再修改发布时间", 409)
+                platform = bool(row["video_id"])
+                schedule_state = "control_pending" if platform else ("cancelled" if action == "cancel" else ("pending" if target else "none"))
+                status = "schedule_pending" if platform else ("cancelled" if action == "cancel" else "queued")
+                # Keep the existing resumable session and frozen video facts.
+                conn.execute("""UPDATE drama_youtube_publish SET publish_at=?,schedule_version=schedule_version+1,
+                    schedule_command=?,schedule_command_status=?,schedule_operation_id=?,schedule_requested_publish_at=?,schedule_status=?,schedule_event_at=?,schedule_next_check_at='',
+                    status=?,video_state=CASE WHEN video_id='' THEN 'queued' ELSE video_state END,
+                    error_code='',error_message='',unknown_outcome=0,updated_at_utc=? WHERE id=?""",
+                    (target, action, "pending" if platform else "confirmed", operation_id, target, schedule_state, now, status, now, int(task_id)))
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), "schedule", "requested" if platform else "confirmed", action + ":" + target, now))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def advance_reviewed_schedule(self, task_id: int, state: str, *, worker_id: str, lease_generation: int,
+                                  release: bool = False, command_status: Optional[str] = None,
+                                  confirmed_publish_at: Optional[str] = None, publish_at: Optional[str] = None, wait_seconds: int = 60,
+                                  write_action: Optional[str] = None,
+                                  error_code: str = "", error_message: str = "") -> Dict[str, Any]:
+        """Persist intent before PUT and confirmation only after owner readback."""
+        if state not in {"none", "pending", "arming", "armed", "control_pending", "control_running", "reconciling", "missed", "cancelled", "published"}:
+            raise ValueError("invalid schedule state")
+        if command_status is not None and command_status not in {"", "pending", "running", "unknown", "confirmed", "failed"}:
+            raise ValueError("invalid schedule command status")
+        if write_action is not None and write_action not in {"", "reschedule", "immediate", "cancel"}:
+            raise ValueError("invalid schedule write action")
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND workflow=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), REVIEWED_WORKFLOW, worker_id, int(lease_generation))).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                values: Dict[str, Any] = dict(schedule_status=state, reviewed_phase="schedule", updated_at_utc=now,
+                    error_code=error_code, error_message=error_message, unknown_outcome=int(state == "reconciling"))
+                if row["schedule_status"] != state or not row["schedule_event_at"]:
+                    values["schedule_event_at"] = now
+                if write_action is not None:
+                    values["schedule_write_action"] = write_action
+                elif state in {"none", "pending", "armed", "missed", "published", "cancelled"}:
+                    values["schedule_write_action"] = ""
+                if command_status is not None:
+                    values["schedule_command_status"] = command_status
+                if confirmed_publish_at is not None:
+                    values["schedule_confirmed_publish_at"] = normalize_youtube_publish_at(confirmed_publish_at)
+                if publish_at is not None:
+                    values["publish_at"] = normalize_youtube_publish_at(publish_at)
+                if release:
+                    values.update(lease_owner="", lease_expires_at_utc="")
+                    values["status"] = {"armed": "scheduled", "missed": "schedule_missed", "cancelled": "cancelled", "reconciling": "unknown"}.get(state, "processing")
+                    delay = max(1, min(int(wait_seconds), 300))
+                    values["schedule_next_check_at"] = (datetime.fromisoformat(now.replace("Z", "+00:00")) + timedelta(seconds=delay)).isoformat().replace("+00:00", "Z") if state in {"pending", "armed", "reconciling"} else ""
+                else:
+                    values["schedule_next_check_at"] = ""
+                conn.execute("UPDATE drama_youtube_publish SET " + ",".join(key + "=?" for key in values) + " WHERE id=?", (*values.values(), int(task_id)))
+                # Polling leaves one stable intent/confirmation event per state.
+                if row["schedule_status"] != state or (command_status is not None and row["schedule_command_status"] != command_status):
+                    conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                        (int(task_id), "schedule", state, error_code or str(row["publish_at"]), now))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
             finally:
                 conn.close()
 
@@ -926,6 +1086,13 @@ class DramaSynthesisStore:
         scope = "workflow='reviewed_thumbnail' AND privacy_status='public' AND operation_id<>?" if reviewed else "workflow='legacy' AND privacy_status='public' AND operation_id<>?"
         params: tuple[Any, ...] = (CANARY_OPERATION_ID, utc_now())
         unknown_reconcile = "0"
+        cadence = "1"
+        schedule_queue = "0"
+        if reviewed:
+            cadence = "(schedule_next_check_at='' OR schedule_next_check_at<=?)"
+            params += (utc_now(),)
+            schedule_queue = "status IN ('scheduled','schedule_pending')"
+            unknown_reconcile = "(unknown_outcome=1 AND video_id<>'' AND comment_status<>'unknown' AND schedule_status='reconciling')"
         if canary_task_id is not None:
             scope = "workflow='legacy' AND id=? AND privacy_status='unlisted' AND operation_id=? AND app_id=? AND channel_local_id=? AND channel_id=? AND youtube_account_id=?"
             params = (int(canary_task_id), CANARY_OPERATION_ID, CANARY_APP_ID, CANARY_CHANNEL_LOCAL_ID, CANARY_CHANNEL_ID, CANARY_ACCOUNT_ID, utc_now())
@@ -938,9 +1105,10 @@ class DramaSynthesisStore:
                     f"""SELECT * FROM drama_youtube_publish
                        WHERE {scope}
                          AND (lease_owner='' OR lease_expires_at_utc='' OR lease_expires_at_utc<?)
+                         AND {cadence}
                          AND ((unknown_outcome=0 AND (status IN ('queued','validating','downloading','uploading','submitted','processing')
-                              OR (status='published' AND comment_status IN ('queued','retry','publishing')))) OR {unknown_reconcile})
-                       ORDER BY id LIMIT 1""", params
+                              OR {schedule_queue} OR (status='published' AND comment_status IN ('queued','retry','publishing')))) OR {unknown_reconcile})
+                       ORDER BY CASE WHEN schedule_status IN ('armed','control_pending','control_running','arming','reconciling') THEN 0 ELSE 1 END,id LIMIT 1""", params
                 ).fetchone()
                 if row is None:
                     conn.commit()
@@ -976,6 +1144,8 @@ class DramaSynthesisStore:
                     conn.commit()
                     return None
                 next_status = "validating" if row["status"] == "queued" else row["status"]
+                if reviewed and next_status in {"scheduled", "schedule_pending"}:
+                    next_status = "processing"
                 if int(row["unknown_outcome"]):
                     next_status = "processing" if row["video_id"] else "uploading"
                 next_comment = "publishing" if row["video_state"] == "published" and row["comment_status"] in {"queued", "retry", "publishing"} else row["comment_status"]
@@ -1094,7 +1264,7 @@ class DramaSynthesisStore:
 
     def advance_reviewed_youtube(self, task_id: int, phase: str, *, worker_id: str,
                                  lease_generation: int, **states: str) -> Dict[str, Any]:
-        if phase not in {"upload", "thumbnail", "processing", "public", "comment", "complete"}:
+        if phase not in {"upload", "thumbnail", "processing", "schedule", "public", "comment", "complete"}:
             raise ValueError("invalid reviewed phase")
         if any(key not in {"thumbnail_status", "processing_status", "public_status"}
                or value not in {"pending", "running", "succeeded", "failed", "unknown"} for key, value in states.items()):

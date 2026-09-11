@@ -5,7 +5,7 @@
 
 <title>YouTube 自动发布 · AI自动后台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%232457ff'/%3E%3Ctext x='24' y='33' text-anchor='middle' fill='white' font-size='29'%3E剧%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/youtube-publish.css?v=20260911-channel-cache-v1">
+<link rel="stylesheet" href="/youtube-publish.css?v=20260911-scheduled-publish-v1">
 <link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
 </head><body>
   <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -43,8 +43,8 @@
         <button class="btn btn-secondary" id="settings-button" hidden><svg><use href="#i-settings"/></svg>默认描述设置</button>
         <button class="btn btn-primary" id="new-publish"><svg><use href="#i-plus"/></svg>新建发布</button>
       </div></div>
-      <div class="list-toolbar"><div id="task-tabs" class="tabs" role="tablist" aria-label="任务状态"></div><div class="list-filters"><label class="search-input"><svg><use href="#i-search"/></svg><input id="task-search" placeholder="搜索标题、素材或任务 ID" aria-label="搜索发布任务"></label><select id="status-filter" class="select" aria-label="更多状态筛选"><option value="all">所有状态</option><option value="review">待审核</option><option value="generating">生成中</option><option value="uploading">发布中</option><option value="published">已发布</option><option value="generation_failed">生成失败</option><option value="thumbnail_failed">封面设置失败</option><option value="comment_failed">首评失败</option></select></div></div>
-        <div class="table-scroll"><table class="task-list"><thead><tr><th>视频 / 素材</th><th>发布频道</th><th>封面来源</th><th>状态</th><th>创建时间</th><th class="action-column">操作</th></tr></thead><tbody id="task-table"></tbody></table></div>
+      <div class="list-toolbar"><div id="task-tabs" class="tabs" role="tablist" aria-label="任务状态"></div><div class="list-filters"><label class="search-input"><svg><use href="#i-search"/></svg><input id="task-search" placeholder="搜索标题、素材或任务 ID" aria-label="搜索发布任务"></label><select id="status-filter" class="select" aria-label="更多状态筛选"><option value="all">所有状态</option><option value="review">待审核</option><option value="generating">生成中</option><option value="uploading">发布中</option><option value="published">已发布</option><option value="scheduled">已预约</option><option value="schedule_missed">已错过预约时间</option><option value="schedule_pending">预约变更待确认</option><option value="cancelled">已取消发布</option><option value="generation_failed">生成失败</option><option value="thumbnail_failed">封面设置失败</option><option value="comment_failed">首评失败</option></select></div></div>
+        <div class="table-scroll"><table class="task-list"><thead><tr><th>视频 / 素材</th><th>发布频道</th><th>封面来源</th><th>状态</th><th>创建 / 预约时间</th><th class="action-column">操作</th></tr></thead><tbody id="task-table"></tbody></table></div>
         <div class="table-footer"><span>每个任务对应一条素材、一个频道</span><div><span id="footer-total">共 0 条</span></div></div>
       </section>
 
@@ -57,5 +57,5 @@
 <div id="modal-root"></div><div id="toast-root" aria-live="polite" aria-atomic="true"></div>
 <script src="/quick-nav.js?v=20260910-1"></script>
 <script src="/ui-topbar.js?v=20260903-1"></script>
-<script src="/youtube-publish.js?v=20260911-channel-cache-v1"></script>
+<script src="/youtube-publish.js?v=20260911-scheduled-publish-v1"></script>
 </body></html>

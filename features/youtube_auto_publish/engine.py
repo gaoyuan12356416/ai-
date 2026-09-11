@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlencode
@@ -17,7 +18,10 @@ from urllib.parse import urlencode
 import requests
 from PIL import Image
 
-from features.drama_synthesis.core import DramaSynthesisError, REVIEWED_SCOPES, REVIEWED_WORKFLOW
+from features.drama_synthesis.core import (
+    DramaSynthesisError, REVIEWED_SCOPES, REVIEWED_WORKFLOW, YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS,
+    normalize_youtube_publish_at, utc_now,
+)
 from features.drama_synthesis.youtube import (
     VIDEO_ID_RE, VIDEOS_URL, YouTubeHTTPClient, YouTubeHTTPError, YouTubePublishEngine,
 )
@@ -170,6 +174,50 @@ class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
         if response.status_code != 200:
             raise YouTubeHTTPError("youtube_public_update_failed", "YouTube视频公开设置失败（"+self._safe_error_detail(response)+"）", status=response.status_code)
 
+    def set_video_schedule(self, token: str, *, video_id: str, publish_at: str,
+                           preserved_status: Mapping[str, Any]) -> None:
+        target = normalize_youtube_publish_at(publish_at)
+        limit = (datetime.fromisoformat(utc_now().replace("Z", "+00:00"))
+                 + timedelta(seconds=YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS)).isoformat().replace("+00:00", "Z")
+        # Google treats a past publishAt as an immediate publish. Bound this
+        # request to 30s and require twice that headroom at the last write gate.
+        if not target or target <= limit:
+            raise YouTubeHTTPError("youtube_schedule_too_close", "预约已临近，未能安全提交，请重新定时", status=409)
+        self._set_private_schedule(token, video_id=video_id, publish_at=target, preserved_status=preserved_status)
+
+    def cancel_video_schedule(self, token: str, *, video_id: str, preserved_status: Mapping[str, Any]) -> None:
+        self._set_private_schedule(token, video_id=video_id, publish_at="", preserved_status=preserved_status)
+
+    def _set_private_schedule(self, token: str, *, video_id: str, publish_at: str,
+                              preserved_status: Mapping[str, Any]) -> None:
+        if not VIDEO_ID_RE.fullmatch(str(video_id)):
+            raise YouTubeHTTPError("youtube_video_identity_invalid", "YouTube视频身份无效")
+        if preserved_status.get("privacyStatus") != "private":
+            raise YouTubeHTTPError("youtube_schedule_privacy_invalid", "原视频已不再是私密状态，禁止修改预约", unknown=True)
+        original_time = normalize_youtube_publish_at(preserved_status.get("publishAt", ""))
+        limit = (datetime.fromisoformat(utc_now().replace("Z", "+00:00"))
+                 + timedelta(seconds=YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS)).isoformat().replace("+00:00", "Z")
+        if original_time and original_time <= limit:
+            raise YouTubeHTTPError("youtube_schedule_too_close", "原预约已临近，不能安全修改，请等待平台状态核验", status=409)
+        status = {key: preserved_status[key] for key in ("embeddable", "license", "publicStatsViewable",
+                  "selfDeclaredMadeForKids", "containsSyntheticMedia") if key in preserved_status}
+        status["privacyStatus"] = "private"
+        if publish_at:
+            status["publishAt"] = publish_at
+        session = self.session_factory()
+        session.trust_env = False
+        try:
+            response = session.put(VIDEOS_URL + "?part=status", json={"id": video_id, "status": status},
+                headers={"Authorization": "Bearer " + token}, timeout=min(self.timeout, 30), allow_redirects=False)
+        except requests.RequestException:
+            raise YouTubeHTTPError("youtube_schedule_update_unknown", "预约设置结果未知，正在核验原视频", unknown=True) from None
+        finally:
+            session.close()
+        if response.status_code >= 500 or response.status_code == 408:
+            raise YouTubeHTTPError("youtube_schedule_update_unknown", "预约设置结果未知，正在核验原视频", unknown=True)
+        if response.status_code != 200:
+            raise YouTubeHTTPError("youtube_schedule_update_failed", "YouTube预约设置失败（"+self._safe_error_detail(response)+"）", status=response.status_code)
+
 
 class ReviewedYouTubePublishEngine(YouTubePublishEngine):
     def __init__(self, *args: Any, approved_cover_root: str | Path, **kwargs: Any):
@@ -230,6 +278,135 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
         raise YouTubeHTTPError("youtube_public_readback_unknown",
             "已提交公开设置，多次核验后" + detail + "；保留原视频，暂停首评，可核验原视频后重试", unknown=True)
 
+    def _schedule(self, task: Mapping[str, Any], worker_id: str, state: str, **changes: Any) -> dict[str, Any]:
+        self._renew(task, worker_id)
+        return self.store.advance_reviewed_schedule(int(task["id"]), state, worker_id=worker_id,
+            lease_generation=int(task["lease_generation"]), **changes)
+
+    @staticmethod
+    def _remote_schedule(state: Mapping[str, Any]) -> str:
+        try:
+            return normalize_youtube_publish_at(state.get("preserved_status", {}).get("publishAt", ""))
+        except DramaSynthesisError:
+            raise YouTubeHTTPError("youtube_schedule_readback_invalid", "平台预约时间无法确认，继续核验原视频", unknown=True) from None
+
+    @staticmethod
+    def _schedule_close(publish_at: str) -> bool:
+        limit = (datetime.fromisoformat(utc_now().replace("Z", "+00:00"))
+                 + timedelta(seconds=YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS)).isoformat().replace("+00:00", "Z")
+        return bool(publish_at and publish_at <= limit)
+
+    @staticmethod
+    def _schedule_poll_seconds(publish_at: str) -> int:
+        delta = (datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
+                 - datetime.fromisoformat(utc_now().replace("Z", "+00:00"))).total_seconds()
+        return max(15, min(300, int(delta)))
+
+    def _scheduled_public(self, task: Mapping[str, Any], state: Mapping[str, Any], worker_id: str,
+                          *, command_status: str = "confirmed") -> dict[str, Any]:
+        if (state["state"] != "succeeded" or task["thumbnail_status"] != "succeeded"
+                or task["processing_status"] != "succeeded"):
+            raise YouTubeHTTPError("youtube_reviewed_early_public", "预约视频在准备确认完成前已公开，需人工核验", unknown=True)
+        # An explicitly requested immediate command has no future-time fence.
+        if task.get("publish_at") and task["publish_at"] > utc_now():
+            raise YouTubeHTTPError("youtube_reviewed_early_public", "视频早于预约时间公开，已暂停后续操作，需人工核验", unknown=True)
+        task = self._schedule(task, worker_id, "published", command_status=command_status,
+                              confirmed_publish_at="")
+        task = self._phase(task, worker_id, "comment" if task["comment_text"] else "complete", public_status="succeeded")
+        return self.store.video_published(int(task["id"]), task["video_id"], worker_id=worker_id,
+                                         lease_generation=int(task["lease_generation"]))
+
+    def _reconcile_schedule(self, task: Mapping[str, Any], token: str, worker_id: str,
+                            *, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """One read per tick; a running/unknown intent can never issue a PUT."""
+        state = state or self._read(task, token, worker_id)
+        action = task.get("schedule_write_action") or "reschedule"
+        if state["visibility"] == "public":
+            return self._scheduled_public(task, state, worker_id, command_status="failed" if action == "cancel" else "confirmed")
+        if state["visibility"] != "private":
+            raise YouTubeHTTPError("youtube_reviewed_privacy_mismatch", "视频隐私状态异常，继续核验原视频", unknown=True)
+        remote = self._remote_schedule(state)
+        if action == "cancel" and not remote:
+            return self._schedule(task, worker_id, "cancelled", release=True, command_status="confirmed", confirmed_publish_at="")
+        if action != "immediate" and task.get("publish_at") and remote == task["publish_at"]:
+            if state["state"] != "succeeded":
+                raise YouTubeHTTPError("youtube_processing_unconfirmed", "已预约视频处理状态发生变化，继续核验原视频", unknown=True)
+            command_status = "failed" if task.get("schedule_command_status") == "failed" else "confirmed"
+            return self._schedule(task, worker_id, "armed", release=True, command_status=command_status,
+                confirmed_publish_at=remote, wait_seconds=self._schedule_poll_seconds(remote),
+                error_code=task.get("error_code", "") if command_status == "failed" else "",
+                error_message=task.get("error_message", "") if command_status == "failed" else "")
+        return self._schedule(task, worker_id, "reconciling", release=True,
+            command_status="unknown" if task.get("schedule_write_action") else task.get("schedule_command_status", ""),
+            error_code="youtube_schedule_readback_unknown", error_message="预约操作尚未获得平台确认，保留原视频并继续只读核验")
+
+    def _schedule_rejected(self, task: Mapping[str, Any], worker_id: str, state: Mapping[str, Any],
+                           exc: YouTubeHTTPError) -> dict[str, Any]:
+        """A definite refusal keeps a previously armed platform schedule visible."""
+        if task.get("schedule_write_action") == "immediate" and task.get("public_status") == "running":
+            task = self._phase(task, worker_id, "schedule", public_status="failed")
+        remote = self._remote_schedule(state)
+        if remote:
+            return self._schedule(task, worker_id, "armed", release=True, command_status="failed",
+                publish_at=remote, confirmed_publish_at=remote, wait_seconds=self._schedule_poll_seconds(remote),
+                error_code=exc.code, error_message=str(exc))
+        if exc.code == "youtube_schedule_too_close":
+            return self._schedule(task, worker_id, "missed", release=True, command_status="failed",
+                confirmed_publish_at="", error_code=exc.code, error_message=str(exc))
+        self._schedule(task, worker_id, "pending" if task.get("publish_at") else "none",
+                       command_status="failed", error_code=exc.code, error_message=str(exc))
+        raise exc
+
+    def _write_schedule(self, task: Mapping[str, Any], token: str, worker_id: str,
+                        state: Mapping[str, Any], *, action: str = "reschedule") -> dict[str, Any]:
+        remote = self._remote_schedule(state)
+        if (action == "reschedule" and self._schedule_close(task["publish_at"])) or (remote and self._schedule_close(remote)):
+            return self._schedule_rejected(task, worker_id, state, YouTubeHTTPError(
+                "youtube_schedule_too_close", "预约已临近，未能安全提交，请重新定时", status=409))
+        marker = "control_running" if task.get("schedule_status") == "control_pending" else "arming"
+        task = self._schedule(task, worker_id, marker, command_status="running", write_action=action)
+        try:
+            if action == "cancel":
+                self.client.cancel_video_schedule(token, video_id=task["video_id"], preserved_status=state["preserved_status"])
+            elif action == "immediate":
+                # One public PUT clears publishAt. Its persisted command fence
+                # makes all timeout/crash recovery read-only.
+                task = self._phase(task, worker_id, "schedule", public_status="running")
+                self.client.make_video_public(token, video_id=task["video_id"], preserved_status=state["preserved_status"])
+            else:
+                self.client.set_video_schedule(token, video_id=task["video_id"], publish_at=task["publish_at"], preserved_status=state["preserved_status"])
+        except YouTubeHTTPError as exc:
+            if not exc.unknown:
+                return self._schedule_rejected(task, worker_id, state, exc)
+            # Both HTTP 200 and unknown writes require a matching owner read.
+        return self._reconcile_schedule(task, token, worker_id)
+
+    def _handle_platform_schedule(self, task: Mapping[str, Any], token: str, worker_id: str) -> dict[str, Any]:
+        state = self._read(task, token, worker_id)
+        if task["schedule_status"] != "control_pending":
+            return self._reconcile_schedule(task, token, worker_id, state=state)
+        action = task["schedule_command"]
+        if state["visibility"] == "public":
+            # The platform beat the accepted command. Never privatize a video
+            # that has already become public, or claim cancellation succeeded.
+            if task["schedule_confirmed_publish_at"]:
+                task = self._schedule(task, worker_id, "control_pending", publish_at=task["schedule_confirmed_publish_at"])
+            return self._scheduled_public(task, state, worker_id, command_status="failed")
+        if state["visibility"] != "private":
+            raise YouTubeHTTPError("youtube_reviewed_privacy_mismatch", "视频隐私状态异常，已阻断预约操作", unknown=True)
+        remote = self._remote_schedule(state)
+        if action == "cancel":
+            if not remote:
+                return self._schedule(task, worker_id, "cancelled", release=True, command_status="confirmed", confirmed_publish_at="")
+            return self._write_schedule(task, token, worker_id, state, action=action)
+        ready = task["thumbnail_status"] == task["processing_status"] == "succeeded" and state["state"] == "succeeded"
+        if not remote and (not ready or action == "immediate"):
+            # Changing desired time before platform arming needs no API write.
+            return self._schedule(task, worker_id, "pending" if task["publish_at"] else "none", command_status="confirmed", confirmed_publish_at="")
+        if not ready:
+            raise YouTubeHTTPError("youtube_schedule_preflight_unknown", "已预约视频的封面或处理状态尚未确认，暂停操作", unknown=True)
+        return self._write_schedule(task, token, worker_id, state, action=action)
+
     def run_once(self, worker_id: str) -> dict[str, Any]:
         task = self.store.claim_reviewed_youtube(str(worker_id), self._lease_expiry())
         if task is None:
@@ -239,6 +416,13 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
         try:
             if task.get("workflow") != REVIEWED_WORKFLOW:
                 raise YouTubeHTTPError("youtube_workflow_invalid", "发布流程不匹配")
+            if (task.get("publish_at") and task["publish_at"] <= utc_now()
+                    and task.get("schedule_status") == "pending"):
+                task = self._schedule(task, worker_id, "missed", release=True,
+                    error_code="youtube_schedule_missed", error_message="已错过预约时间，请重新定时或选择立即发布")
+                return {"ok": False, "status": task["status"], "task_id": task_id, "claimed": True}
+            if task.get("schedule_status") in {"arming", "armed", "control_pending", "control_running", "reconciling"}:
+                stage = "schedule"
             try:
                 credential = self.credentials.credential(app_id=task["app_id"], channel_local_id=task["channel_local_id"],
                     account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"])
@@ -257,6 +441,12 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
             token = self.client.refresh_access_token(credential)
             task = self._renew(task, worker_id)
             self.client.verify_channel_identity(token, task["channel_id"])
+            if task.get("video_id") and task.get("schedule_status") in {"arming", "armed", "control_pending", "control_running", "reconciling"}:
+                task = self._handle_platform_schedule(task, token, worker_id)
+                if not task["lease_owner"]:
+                    if task["status"] in {"cancelled", "published"}:
+                        self._cleanup_terminal(task_id)
+                    return {"ok": task["status"] not in {"unknown", "failed", "schedule_missed"}, "status": task["status"], "task_id": task_id, "claimed": True}
             if not task.get("video_id"):
                 stage = "upload"
                 task = self._phase(task, worker_id, stage)
@@ -283,14 +473,22 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
                     raise YouTubeHTTPError("youtube_processing_failed", "YouTube视频处理失败，保留原视频记录")
                 if state["state"] == "processing":
                     task = self._phase(task, worker_id, stage, processing_status="running")
+                    if task.get("publish_at"):
+                        task = self._schedule(task, worker_id, "pending", release=True, wait_seconds=30)
+                        return {"ok": True, "status": "processing", "task_id": task_id, "claimed": True}
                     task = self.store.video_processing(task_id, worker_id=worker_id, lease_generation=generation)
                     return {"ok": True, "status": "processing", "task_id": task_id, "claimed": True}
                 if state["state"] != "succeeded":
                     raise YouTubeHTTPError("youtube_processing_unconfirmed", "YouTube视频处理完成状态尚未确认", retryable=True)
                 task = self._phase(task, worker_id, stage, processing_status="succeeded")
+                if task.get("publish_at"):
+                    stage = "schedule"
+                    task = self._write_schedule(task, token, worker_id, state)
+                    return {"ok": task["status"] not in {"unknown", "failed", "schedule_missed"}, "status": task["status"], "task_id": task_id, "claimed": True}
                 stage = "public"
+                public_attempted = task["public_status"] in {"running", "unknown"}
                 task = self._phase(task, worker_id, stage, public_status="running")
-                if state["visibility"] == "private":
+                if state["visibility"] == "private" and not public_attempted:
                     self._renew(task, worker_id)
                     try:
                         self.client.make_video_public(token, video_id=task["video_id"], preserved_status=state["preserved_status"])
@@ -333,6 +531,15 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
             if stage == "thumbnail" and current.get("video_id"):
                 unknown = False  # Same approved bytes replace the same thumbnail safely.
         try:
+            if stage == "schedule" and code == "youtube_reviewed_early_public":
+                self.store.advance_reviewed_schedule(task_id, "pending", worker_id=worker_id,
+                    lease_generation=generation, command_status="failed", error_code=code, error_message=message)
+            if (stage == "schedule" and (unknown or retryable)
+                    and code != "youtube_reviewed_early_public"):
+                command_status = "unknown" if current.get("schedule_write_action") else current.get("schedule_command_status", "")
+                failed = self.store.advance_reviewed_schedule(task_id, "reconciling", worker_id=worker_id,
+                    lease_generation=generation, release=True, command_status=command_status, error_code=code, error_message=message)
+                return {"ok": False, "status": failed["status"], "task_id": task_id, "claimed": True}
             updates = {stage + "_status": "unknown" if unknown else "failed"} if stage in {"thumbnail", "processing", "public"} else {}
             self.store.advance_reviewed_youtube(task_id, stage, worker_id=worker_id, lease_generation=generation, **updates)
             failed = self.store.fail_youtube(task_id, worker_id=worker_id, lease_generation=generation,

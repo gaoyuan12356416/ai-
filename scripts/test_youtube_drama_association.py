@@ -227,7 +227,7 @@ class AssociationWorkflowCase(unittest.TestCase):
             engine.ensure_short_link(results[0]['id'], 'custom_source', 'another-drama', publisher)
 
     def test_runtime_short_link_adapter_accepts_standalone_and_synthesis(self):
-        app = Mock(PUBLIC_BASE_URL='https://example.invalid', DB_NAME='kunlunads_dev')
+        app = Mock(PUBLIC_BASE_URL='https://example.invalid', DB_NAME='kunlunads_dev', JOB_DB_PATH=str(self.root / 'jobs.sqlite3'))
         app.DRAMA_SYNTHESIS_STORE.ensure_short_link.return_value = {'short_url': 'https://example.invalid/short'}
         with patch('features.youtube_auto_publish.runtime.YouTubeWorkflow') as workflow, patch.dict('os.environ', {'YOUTUBE_AUTO_STORAGE_ROOT': str(self.root)}):
             build_service(app)

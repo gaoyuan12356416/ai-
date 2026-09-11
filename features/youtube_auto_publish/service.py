@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .images import decode_cover
 from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
+from .scheduling import normalize_publish_at, is_due
 
 MAX_IMAGE = 2 * 1024 * 1024
 
@@ -208,9 +209,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         reference=body.get('reference_cover') or {}
         value['reference_cover']=({'url':self.asset_url(reference['asset_id']),'drama_name':reference.get('drama_name',''),'frozen':True}
                                   if reference.get('asset_id') else None)
-        ledger=None
-        if body.get('publish_id'):
-            ledger=self.engine_store.youtube_task(int(body['publish_id']))
+        ledger=self._ledger(body)
         phase=value.get('phase','cover');status=value['status'];error=value.get('error',{})
         if ledger:
             phase=ledger.get('reviewed_phase') or ledger.get('status')
@@ -218,7 +217,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             if ls=='published':
                 status='published' if ledger.get('comment_status') in ('published','skipped') else 'uploading'
                 if status=='uploading':phase='comment'
-            elif ls in ('failed','unknown','partial_failed'):
+            elif ls in ('failed','unknown','partial_failed','schedule_missed'):
                 status='comment_failed' if phase=='comment' or ls=='partial_failed' else 'thumbnail_failed' if phase=='thumbnail' else 'publish_failed'
                 error={'code':ledger.get('error_code') or ledger.get('video_error_code') or 'publish_failed','message':ledger.get('error_message') or ledger.get('video_error_message') or ledger.get('comment_error_message') or '发布未完成，请查看阶段状态'}
             else:status='uploading'
@@ -227,7 +226,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             value['can_retry']=(ls in ('failed','partial_failed') and not value['unknown_outcome']) or (ls=='unknown' and phase=='public' and bool(ledger.get('video_id')) and ledger.get('comment_status')!='unknown')
         else:value['can_retry']=status in ('generation_failed','enqueue_failed')
         value.update(status=status,phase=phase,error=error)
-        value['can_review']=body['status']=='review' and not body.get('publish_id')
+        self._schedule_dto(value,body,ledger)
+        status=value['status'];error=value['error']
+        value['can_review']=(body['status']=='review' or (body['status']=='schedule_missed' and body.get('schedule_resume_state')=='review')) and not ledger
         value['versions']=[dict(v,url=self.asset_url(v['asset_id'])) for v in value.get('versions',[]) if v.get('asset_id')]
         current=next((v for v in value['versions'] if v['number']==body['current_version']),None)
         value['cover_url']=current['url'] if current else ''
@@ -246,6 +247,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 elif key=='thumbnail' and ledger.get('thumbnail_status') in ('succeeded','complete','set','published'):state='complete';message='封面设置成功'
                 elif key=='processing' and ledger.get('processing_status') in ('succeeded','complete'):state='complete';message='视频处理完成'
                 elif key=='public' and ledger.get('video_state')=='published':state='complete';message='视频已公开'
+                elif key=='public' and status=='scheduled':state='active';message='YouTube 已确认预约，等待到点公开'
+                elif key=='public' and status=='schedule_pending':state='active';message='正在核验发布安排'
+                elif key=='public' and status=='schedule_missed':state='error';message=error.get('message') or '已错过预约时间'
                 elif key=='comment' and ledger.get('comment_status')=='skipped':state='skipped';message='未填写，已跳过'
                 elif key=='comment' and ledger.get('comment_status')=='published':state='complete';message='首评已发送'
                 elif status=='published':state='complete';message='已完成'
@@ -259,21 +263,68 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         with self.db() as c:_,body=self._row(c,task_id,actor)
         return {'task':self._dto(body,actor)}
 
+    def _ledger(self,body,c=None):
+        # Production shares this SQLite DB with the engine. Read in the current
+        # transaction to avoid lock inversion and the enqueue handoff crash gap.
+        if c is not None and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='drama_youtube_publish'").fetchone():
+            row=c.execute("SELECT * FROM drama_youtube_publish WHERE preparation_id=? AND workflow='reviewed_thumbnail'",(body['id'],)).fetchone()
+            return dict(row) if row else None
+        if body.get('publish_id'):
+            return self.engine_store.youtube_task(int(body['publish_id']))
+        lookup=getattr(self.engine_store,'get_reviewed_youtube_by_preparation',None)
+        return lookup(body['id']) if callable(lookup) else None
+
+    def _schedule_dto(self,value,body,ledger):
+        value['publish_at']=body.get('publish_at','')
+        value['schedule_version']=body.get('schedule_version',0)
+        control=body.get('schedule_control') or {}
+        value['schedule_control']={k:control[k] for k in ('action','state','message','publish_at') if k in control} or None
+        value['schedule_state']=body.get('schedule_state','none')
+        value['can_schedule']=body['status']!='cancelled'
+        if ledger:
+            ss=ledger.get('schedule_status','none')
+            cs=ledger.get('schedule_command_status','')
+            value['schedule_state']=ss
+            value['schedule_version']=ledger.get('schedule_version',0)
+            value['publish_at']=ledger.get('publish_at','')
+            if cs in ('pending','running','unknown') or ss in ('arming','control_pending','control_running','reconciling'):
+                value['publish_at']=ledger.get('schedule_confirmed_publish_at') or body.get('publish_at','')
+                value['schedule_control']={'action':ledger.get('schedule_command') or 'reschedule', 'state':cs if cs in ('pending','running','unknown') else 'unknown',
+                    'publish_at':ledger.get('publish_at',''),'message':'发布安排正在与 YouTube 核对，请勿重复提交'}
+            elif cs:
+                value['schedule_control']={'action':ledger.get('schedule_command',''),'state':cs,
+                    'publish_at':ledger.get('publish_at',''),'message':'发布安排已确认' if cs=='confirmed' else '发布安排未完成，请查看错误原因'}
+                if cs=='failed' and ledger.get('error_code'):
+                    value['error']={'code':ledger['error_code'],'message':ledger.get('error_message') or '发布安排未完成'}
+            value['can_schedule']=(ledger.get('video_state')!='published' and ledger.get('status')!='cancelled'
+                and not ledger.get('unknown_outcome') and cs not in ('pending','running','unknown')
+                and ss not in ('arming','control_pending','control_running','reconciling')
+                and not ledger.get('lease_owner') and (ledger.get('status') not in ('failed','unknown','partial_failed') or ss=='missed'))
+            confirmed=ledger.get('schedule_confirmed_publish_at')
+            if confirmed and datetime.fromisoformat(confirmed.replace('Z','+00:00')).timestamp()<=time.time()+60:value['can_schedule']=False
+            if ss=='armed':value['status']='scheduled'
+            elif ss=='missed':value['status']='schedule_missed';value['can_retry']=False
+            elif ss=='cancelled':value['status']='cancelled';value['can_retry']=False
+            elif cs in ('pending','running','unknown') or ss in ('arming','control_pending','control_running','reconciling'):value['status']='schedule_pending';value['can_retry']=False
+        elif body.get('schedule_state')=='missed':
+            value['status']='schedule_missed';value['can_retry']=False
+        if value['status']=='cancelled':value['can_review']=False;value['can_schedule']=False;value['can_retry']=False
+
     def list_tasks(self,actor,search='',status='all'):
         tenant,owner=self._actor(actor)
         with self.db() as c:
             rows=c.execute('SELECT body FROM youtube_auto_preparation WHERE tenant=?'+('' if actor.get('role')=='admin' else ' AND owner=?')+' ORDER BY created_at DESC LIMIT 200',(tenant,) if actor.get('role')=='admin' else (tenant,owner)).fetchall()
         items=[self._dto(json.loads(row['body']),actor) for row in rows]
-        counts={'all':len(items),'review':0,'running':0,'published':0,'failed':0}
+        counts={'all':len(items),'review':0,'running':0,'published':0,'failed':0,'cancelled':0}
         for item in items:
-            key='review' if item['status']=='review' else 'published' if item['status']=='published' else 'failed' if item['status'].endswith('_failed') else 'running'
+            key='cancelled' if item['status']=='cancelled' else 'review' if item['status']=='review' else 'published' if item['status']=='published' else 'failed' if item['status'].endswith('_failed') or item['status']=='schedule_missed' else 'running'
             counts[key]+=1
             if item['status']=='comment_failed':counts['published']+=1
         search=str(search or '').casefold()[:200]
         selected=[]
         for item in items:
             if search and search not in (item['title']+' '+item['id']+' '+item['material']['name']).casefold():continue
-            if status not in ('all','',item['status']) and not (status=='published' and item['status']=='comment_failed') and not (status=='running' and item['status'] in ('generating','queued_generation','enqueue_pending','uploading')) and not (status=='failed' and item['status'].endswith('_failed')):continue
+            if status not in ('all','',item['status']) and not (status=='published' and item['status']=='comment_failed') and not (status=='running' and item['status'] in ('generating','queued_generation','enqueue_pending','uploading','scheduled','schedule_pending')) and not (status=='failed' and (item['status'].endswith('_failed') or item['status']=='schedule_missed')):continue
             selected.append(item)
         return {'items':selected,'total':len(selected),'counts':counts,'limit':200,'bounded':len(items)==200}
 
@@ -284,12 +335,17 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         op=str(payload.get('operation_id') or '')
         if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}',op):raise WorkflowError('operation_id_required','缺少有效提交标识，请刷新页面')
         allowed=('material_id','channel_id','title_template','description_template','comment_template','cover_source','requirements','cover_asset_id')
-        request={key:payload.get(key,'') for key in allowed};digest=hashlib.sha256(encode(request).encode()).hexdigest()
+        request={key:payload.get(key,'') for key in allowed}
+        publish_at=normalize_publish_at(payload.get('publish_at',''))
+        # Omitted and blank retain old idempotency hashes for existing clients.
+        if publish_at:request['publish_at']=publish_at
+        digest=hashlib.sha256(encode(request).encode()).hexdigest()
         with self.db() as c:
             previous=c.execute('SELECT * FROM youtube_auto_preparation WHERE tenant=? AND owner=? AND operation_id=?',(tenant,owner,op)).fetchone()
         if previous:
             if previous['request_sha']!=digest:raise WorkflowError('idempotency_conflict','同一提交标识的内容已变化，请重新提交',409)
             return {'task':self._dto(json.loads(previous['body']),actor)}
+        normalize_publish_at(publish_at,future=True)
         material=self.source.get(str(request['material_id']))
         if self.channel_directory is not None:
             channel=self.channel_directory.validate(actor,str(request['channel_id']),comment=bool(request['comment_template']))
@@ -324,7 +380,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         created=now()
         body=dict(resolved,id=task_id,operation_id=op,material=material,channel=channel,creator=dict(actor),request=request,
                   title_template=request['title_template'],description_template=request['description_template'],comment_template=request['comment_template'],
-                  cover_source=cover_source,requirements=requirements,reference_cover=None,created_at=created,updated_at=created,current_version=1,versions=[],publish_id=None,error={},phase='cover',notification={})
+                  cover_source=cover_source,requirements=requirements,reference_cover=None,created_at=created,updated_at=created,current_version=1,versions=[],publish_id=None,error={},phase='cover',notification={},
+                  publish_at=publish_at,schedule_version=0,schedule_state='pending' if publish_at else 'none',schedule_control=None)
         state='queued_generation' if cover_source=='ai' else 'enqueue_pending'
         body['versions']=[{'number':1,'asset_id':asset['id'] if cover_source=='local' else '', 'feedback':'','created_at':created,'source':cover_source,'approved':cover_source=='local'}]
         body['status']=state
@@ -344,7 +401,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             row,body=self._row(c,task_id,actor)
             try:version=int(payload.get('version'))
             except (TypeError,ValueError):raise WorkflowError('version_required','请刷新后审核当前版本') from None
-            if row['state']!='review' or version!=row['version'] or body.get('publish_id'):
+            reviewable=row['state']=='review' or (row['state']=='schedule_missed' and body.get('schedule_resume_state')=='review')
+            if not reviewable or version!=row['version'] or self._ledger(body,c):
                 raise WorkflowError('review_conflict','当前版本已处理或已更新，请刷新后查看',409)
             current=body['versions'][-1]
             if action=='reject':
@@ -368,8 +426,59 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 else:self._asset(c,current['asset_id'],body['creator'])
                 current.update(approved=True,reviewer_user_id=str(actor['user_id']),approved_at=now())
                 state='enqueue_pending'
-            body['error']={};self._save(c,body,state)
+            if is_due(body.get('publish_at')):
+                self._mark_schedule_missed(c,body,state)
+            else:
+                body['error']={};self._save(c,body,state)
         return {'task':self._dto(body,actor)}
+
+    def schedule(self,actor,task_id,payload):
+        action=payload.get('action')
+        if action not in ('reschedule','immediate','cancel'):raise WorkflowError('invalid_schedule_action','发布安排操作无效')
+        op=payload.get('operation_id','')
+        if not isinstance(op,str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}',op):raise WorkflowError('operation_id_required','缺少有效提交标识')
+        expected=payload.get('schedule_version')
+        if not isinstance(expected,int) or isinstance(expected,bool) or expected<0:raise WorkflowError('schedule_version_required','请刷新后修改发布安排',409)
+        at=normalize_publish_at(payload.get('publish_at','')) if action=='reschedule' else ''
+        if action=='reschedule' and not at:raise WorkflowError('publish_at_required','请选择预约时间')
+        digest=hashlib.sha256(encode([action,at]).encode()).hexdigest()
+        with self.db(True) as c:
+            row,body=self._row(c,task_id,actor)
+            ledger=self._ledger(body,c)
+            previous=body.get('schedule_control') or {}
+            if previous.get('operation_id')==op:
+                if previous.get('request_sha')!=digest:raise WorkflowError('idempotency_conflict','同一操作标识内容已变化',409)
+                ledger_id=None
+            elif ledger:
+                # Release this preparation DB transaction before taking the store's writer lock.
+                ledger_id=int(ledger['id'])
+            else:
+                if previous.get('operation_id')==op:
+                    if previous.get('request_sha')!=digest:raise WorkflowError('idempotency_conflict','同一操作标识内容已变化',409)
+                else:
+                    if expected!=body.get('schedule_version',0):raise WorkflowError('schedule_conflict','发布安排已变化，请刷新后重试',409)
+                    if row['state']=='cancelled':raise WorkflowError('schedule_unavailable','任务已取消',409)
+                    if row['state']=='enqueue_pending' and row['lease_until']>time.time():raise WorkflowError('schedule_busy','正在提交视频，请稍后修改发布安排',409)
+                    if action=='reschedule':normalize_publish_at(at,future=True)
+                    body['publish_at']=at;body['schedule_version']=expected+1
+                    body['schedule_state']='cancelled' if action=='cancel' else 'pending' if at else 'none'
+                    body['schedule_control']={'action':action,'state':'confirmed','publish_at':at,'operation_id':op,'request_sha':digest,'message':'发布安排已保存'}
+                    state='cancelled' if action=='cancel' else body.get('schedule_resume_state',body['status']) if body['status']=='schedule_missed' else body['status']
+                    body.pop('schedule_resume_state',None)
+                    if body.get('error',{}).get('code')=='schedule_missed':body['error']={}
+                    self._save(c,body,state)
+                    if action=='cancel':c.execute("UPDATE youtube_auto_preparation SET lease_token='',lease_until=0 WHERE id=?",(task_id,))
+                ledger_id=None
+        if ledger_id is not None:
+            self.engine_store.request_reviewed_youtube_schedule(ledger_id,action=action,publish_at=at,expected_version=expected,operation_id=op)
+        return self.get_task(actor,task_id)
+
+    def _mark_schedule_missed(self,c,body,resume_state):
+        previous=body.get('error') or {}
+        body['schedule_state']='missed';body['schedule_resume_state']=resume_state
+        body['error']={'code':'schedule_missed','message':'已错过预约时间，请重新定时或选择立即发布',
+                       'missed_at':previous.get('missed_at') or now()}
+        self._save(c,body,'schedule_missed')
 
     def retry(self,actor,task_id):
         with self.db(True) as c:
@@ -383,6 +492,10 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
 
     def _claim(self):
         with self.db(True) as c:
+            pending=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','review','enqueue_pending') AND lease_until<?",(time.time(),)).fetchall()
+            for row in pending:
+                body=json.loads(row['body'])
+                if is_due(body.get('publish_at')) and not self._ledger(body,c):self._mark_schedule_missed(c,body,row['state'])
             # A interrupted generator is made visible for explicit retry; never silently make another paid generation.
             expired=c.execute("SELECT * FROM youtube_auto_preparation WHERE state='generating' AND lease_until<?",(time.time(),)).fetchall()
             for row in expired:
@@ -420,7 +533,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                         row,current=self._row(c,task_id)
                         if row['lease_token']!=token or row['state']!='generating' or row['version']!=version:return {'claimed':True,'stale':True}
                         current['versions'][-1]['asset_id']=asset['id'];current['versions'][-1]['created_at']=now();current['error']={}
-                        self._save(c,current,'review')
+                        if is_due(current.get('publish_at')):self._mark_schedule_missed(c,current,'review')
+                        else:self._save(c,current,'review')
                         c.execute('UPDATE youtube_auto_preparation SET lease_token=?,lease_until=0 WHERE id=?',('',task_id))
                         c.execute("INSERT OR IGNORE INTO youtube_auto_notification(task_id,version,state) VALUES(?,?,'pending')",(task_id,version))
                 else:
@@ -430,12 +544,13 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     m=body['material'];ch=body['channel']
                     if self.channel_directory is not None:
                         ch=self.channel_directory.validate(body['creator'],str(ch['id']),comment=bool(body['comment']),expected=ch)
-                    ledger=self.engine_store.enqueue_reviewed_youtube(
+                    ledger=self._ledger(body) or self.engine_store.enqueue_reviewed_youtube(
                         preparation_id=task_id,source_material_id=m['id'],approved_cover_path=asset['path'],approved_cover_sha256=asset['sha256'],
                         operation_id='youtube-auto-'+task_id,job_id=m.get('source_job_id') or m.get('link_job_id') or task_id,content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
                         channel_local_id=str(ch['id']),channel_id=ch['channel_id'],youtube_account_id=ch['youtube_account_id'],source_kind='custom_source',source_url=m['url'],title=body['title'],
                         description_template=body['description_template'],description_rendered=body['description'],comment_text=body['comment'],duplicate_confirmed=False,
-                        scopes=ch['scopes'],operator_user_id=body['creator']['user_id'],operator_name=body['creator'].get('name',''))
+                        scopes=ch['scopes'],operator_user_id=body['creator']['user_id'],operator_name=body['creator'].get('name',''),
+                        publish_at=body.get('publish_at',''),schedule_version=body.get('schedule_version',0))
                     with self.db(True) as c:
                         row,current=self._row(c,task_id)
                         if row['lease_token']!=token:return {'claimed':True,'stale':True}

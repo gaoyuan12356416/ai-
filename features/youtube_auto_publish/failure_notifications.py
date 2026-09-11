@@ -12,19 +12,23 @@ import requests
 
 
 PHASES = {'cover': '生成封面', 'enqueue': '提交发布', 'upload': '上传视频',
-          'thumbnail': '设置封面', 'processing': '视频处理', 'public': '公开视频', 'comment': '发送首评'}
+          'thumbnail': '设置封面', 'processing': '视频处理', 'public': '公开视频', 'comment': '发送首评', 'schedule':'定时发布'}
 
 
 def _failure_event_fields(task_id, version, state, updated_at, error, ledger):
     """Keep the deployed observer's event identity byte-for-byte compatible."""
-    preparation = state in ('generation_failed', 'enqueue_failed')
+    preparation = state in ('generation_failed', 'enqueue_failed', 'schedule_missed')
     ledger = ledger or {}
-    if not preparation and ledger.get('status') not in ('failed', 'unknown', 'partial_failed') and ledger.get('comment_status') not in ('failed', 'unknown'):
+    if not preparation and ledger.get('status') not in ('failed', 'unknown', 'partial_failed', 'schedule_missed') and ledger.get('comment_status') not in ('failed', 'unknown'):
         return None
-    phase = ('cover' if state == 'generation_failed' else 'enqueue') if preparation else ledger.get('reviewed_phase') or 'upload'
+    phase = ('schedule' if state=='schedule_missed' else 'cover' if state == 'generation_failed' else 'enqueue') if preparation else ledger.get('reviewed_phase') or 'upload'
     code = str(error.get('code', state)) if preparation else str(ledger.get('error_code') or 'publish_failed')
     message = str(error.get('message') or '任务准备失败') if preparation else str(ledger.get('error_message') or '发布阶段执行失败')
     event_time = updated_at if preparation else ledger.get('updated_at_utc')
+    if not preparation and phase=='schedule':event_time=ledger.get('schedule_event_at') or event_time
+    if state=='schedule_missed':
+        event_time=error.get('missed_at') or event_time
+        version=0  # One event per missed appointment, independent of cover reviews.
     identity = [task_id, version, phase, code, event_time]
     event_key = hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
     return {'event_key': event_key, 'phase': phase, 'code': code, 'message': message, 'time': event_time}
@@ -95,19 +99,21 @@ class FailureNotifications:
         # Never claim/retry/update a publish task while observing its failures.
         with closing(sqlite3.connect(self.source_db.as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
             db.row_factory = sqlite3.Row
+            columns={row[1] for row in db.execute('PRAGMA table_info(drama_youtube_publish)')}
+            schedule_event='l.schedule_event_at' if 'schedule_event_at' in columns else "'' AS schedule_event_at"
             rows = db.execute('''SELECT p.id,p.version,p.body,p.state,p.updated_at,
                 l.status AS publish_status,l.comment_status,l.reviewed_phase,l.error_code,
-                l.error_message,l.updated_at_utc,l.video_id
+                l.error_message,l.updated_at_utc,l.video_id,'''+schedule_event+'''
                 FROM youtube_auto_preparation p LEFT JOIN drama_youtube_publish l
                   ON l.preparation_id=p.id AND l.workflow='reviewed_thumbnail'
-                WHERE p.state IN ('generation_failed','enqueue_failed')
-                   OR l.status IN ('failed','unknown','partial_failed')
+                WHERE p.state IN ('generation_failed','enqueue_failed','schedule_missed')
+                   OR l.status IN ('failed','unknown','partial_failed','schedule_missed')
                    OR l.comment_status IN ('failed','unknown')
                 ORDER BY p.created_at DESC LIMIT 200''').fetchall()
         result = []
         for row in rows:
             body = json.loads(row['body'])
-            preparation = row['state'] in ('generation_failed', 'enqueue_failed')
+            preparation = row['state'] in ('generation_failed', 'enqueue_failed', 'schedule_missed')
             ledger = dict(row, status=row['publish_status'])
             event = _failure_event_fields(row['id'], row['version'], row['state'], row['updated_at'], body.get('error') or {}, ledger)
             creator = body.get('creator') or {}
