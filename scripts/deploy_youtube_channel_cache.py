@@ -208,10 +208,25 @@ def main():
                 check_baseline()
                 os.kill(worker_pid,signal.SIGSTOP)
                 paused = True
+                deadline=time.monotonic()+2
+                while not any(line.startswith('State:') and line.split()[1]=='T' for line in Path('/proc/%s/status'%worker_pid).read_text().splitlines()):
+                    if time.monotonic()>deadline:raise RuntimeError('Worker did not stop before replacement')
+                    time.sleep(.01)
+                with sqlite3.connect('file:'+str(DB)+'?mode=ro',uri=True,timeout=1) as probe:
+                    generating=probe.execute("SELECT count(*) FROM youtube_auto_preparation WHERE state='generating' AND lease_until>?",(time.time(),)).fetchone()[0]
+                children=Path('/proc/%s/task/%s/children'%(worker_pid,worker_pid)).read_text().split()
+                image_child=False
+                for child in children:
+                    try:image_child=image_child or b'codex' in Path('/proc/'+child+'/cmdline').read_bytes().lower()
+                    except FileNotFoundError:pass
+                if not generating or not image_child:
+                    raise RuntimeError('Worker is not inside active generation; resume and use an idle deployment')
                 # Never back up a DB while its paused owner holds a write lock.
-                with sqlite3.connect(DB,timeout=1) as probe:
-                    probe.execute('BEGIN IMMEDIATE')
-                    probe.rollback()
+                for database in (DB,Path('/mnt/data-disk/youtube-auto-publish/failure-notifications.sqlite3')):
+                    if database.is_file():
+                        with sqlite3.connect(database,timeout=1) as probe:
+                            probe.execute('BEGIN IMMEDIATE')
+                            probe.rollback()
             check_baseline()
             before = idle_snapshot()
             with sqlite3.connect(DB) as src, sqlite3.connect(backup / 'jobs.sqlite3') as dst:

@@ -12,3 +12,5 @@
 
 
 滚动竞态修正：停API/legacy后仅SIGSTOP旧Python MainPID，子进程继续；验证无Watchdog、PID不变及SQLite写锁可获得后再备份/替换。此时旧主进程不能领取下一项。成功后先排队SIGTERM再SIGCONT，只完成当前项后自动重启。任何失败恢复代码/服务后均SIGCONT，绝不遗留冻结进程；若暂停瞬间持有SQLite锁则拒绝部署并恢复进程，不进行备份以免死锁。
+
+SIGSTOP后另验证/proc主进程State=T、有效generating lease以及直接Codex子进程；不满足则恢复进程并拒绝此次drain。jobs和failure outbox两份数据库均探测写锁，避免暂停状态下的备份死锁。
