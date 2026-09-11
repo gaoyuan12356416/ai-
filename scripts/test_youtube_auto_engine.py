@@ -125,6 +125,8 @@ class Client:
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
+        self.sleep = mock.patch('features.youtube_auto_publish.engine.time.sleep').start()
+        self.addCleanup(mock.patch.stopall)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -374,13 +376,64 @@ class EngineTests(unittest.TestCase):
         self.enqueue()
         self.tick()
         self.client.public_takes_effect = False
-        self.assertEqual(self.tick()["status"], "failed")
-        self.assertEqual(self.row()["error_code"], "youtube_public_readback_failed")
+        self.assertEqual(self.tick()["status"], "unknown")
+        self.assertEqual(self.row()["error_code"], "youtube_public_readback_unknown")
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(5), mock.call(10)])
+        self.assertEqual(self.tick()["status"], "no_pending")
         self.assertFalse(self.client.comments)
         self.client.visibility = "public"
         self.store.retry_reviewed_youtube(1)
         self.assertEqual(self.tick()["status"], "published")
         self.assertEqual(len(self.client.publications), 1)
+
+    def test_public_propagation_delay_recovers_without_duplicate_writes(self):
+        self.enqueue()
+        self.tick()
+        original = self.client.read_reviewed_video_state
+        reads_after_write = []
+        def delayed(*args, **kwargs):
+            state = original(*args, **kwargs)
+            if self.client.publications:
+                reads_after_write.append(1)
+                if len(reads_after_write) <= 2:
+                    state['visibility'] = 'private'
+            return state
+        with mock.patch.object(self.client, 'read_reviewed_video_state', side_effect=delayed):
+            self.assertEqual(self.tick()['status'], 'published')
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(5)])
+        self.assertEqual(len(self.client.publications), 1)
+        self.assertEqual(len(self.client.comments), 1)
+        self.assertEqual(self.media.uploaded, [1])
+
+    def test_transient_read_failure_after_public_update_is_read_only_retried(self):
+        self.enqueue()
+        self.tick()
+        original = self.client.read_reviewed_video_state
+        failures = []
+        def transient(*args, **kwargs):
+            if self.client.publications and not failures:
+                failures.append(1)
+                raise YouTubeHTTPError('youtube_processing_check_failed', 'temporary', retryable=True)
+            return original(*args, **kwargs)
+        with mock.patch.object(self.client, 'read_reviewed_video_state', side_effect=transient):
+            self.assertEqual(self.tick()['status'], 'published')
+        self.assertEqual(len(self.client.publications), 1)
+        self.assertEqual(len(self.client.comments), 1)
+
+    def test_missing_video_after_update_stays_fenced_without_polling_or_comment(self):
+        self.enqueue()
+        self.tick()
+        original = self.client.read_reviewed_video_state
+        def missing(*args, **kwargs):
+            if self.client.publications:
+                raise YouTubeHTTPError('youtube_video_reconcile_unknown', 'missing', unknown=True)
+            return original(*args, **kwargs)
+        with mock.patch.object(self.client, 'read_reviewed_video_state', side_effect=missing):
+            self.assertEqual(self.tick()['status'], 'unknown')
+        self.assertEqual(self.tick()['status'], 'no_pending')
+        self.assertFalse(self.client.comments)
+        self.sleep.assert_not_called()
+        self.assertEqual(self.media.uploaded, [1])
 
     def test_stale_worker_cannot_commit_thumbnail_receipt(self):
         self.enqueue()

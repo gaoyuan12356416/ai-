@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlencode
@@ -204,6 +205,31 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
         self._renew(task, worker_id)
         return self.client.read_reviewed_video_state(token, task["video_id"], expected_channel_id=task["channel_id"])
 
+    def _confirm_public(self, task: Mapping[str, Any], token: str, worker_id: str) -> None:
+        # A successful update can precede visibility propagation. Only reread
+        # this frozen video; never repeat a write or release the comment fence.
+        state = {}
+        for delay in (0, 2, 5, 10):
+            if delay:
+                self._renew(task, worker_id)
+                time.sleep(delay)
+            try:
+                state = self._read(task, token, worker_id)
+            except YouTubeHTTPError as exc:
+                if not exc.retryable:
+                    raise  # Missing video/identity conflict remains unknown.
+                state = {}
+                continue
+            if state["visibility"] == "public" and state["state"] == "succeeded":
+                return
+            if state["state"] == "failed":
+                raise YouTubeHTTPError("youtube_processing_failed", "YouTube视频处理失败，保留原视频记录")
+            if state["visibility"] not in {"private", "public"}:
+                raise YouTubeHTTPError("youtube_reviewed_privacy_mismatch", "视频隐私状态异常，已阻断公开", unknown=True)
+        detail = "仍为私享" if state.get("visibility") == "private" else "公开及处理状态未确认"
+        raise YouTubeHTTPError("youtube_public_readback_unknown",
+            "已提交公开设置，多次核验后" + detail + "；保留原视频，暂停首评，可核验原视频后重试", unknown=True)
+
     def run_once(self, worker_id: str) -> dict[str, Any]:
         task = self.store.claim_reviewed_youtube(str(worker_id), self._lease_expiry())
         if task is None:
@@ -271,13 +297,10 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
                     except YouTubeHTTPError as exc:
                         if not exc.unknown:
                             raise
-                        state = self._read(task, token, worker_id)
-                        if state["visibility"] != "public" or state["state"] != "succeeded":
-                            raise exc
+                        # An uncertain update gets the same bounded read-only
+                        # reconciliation as HTTP 200; no replacement PUT.
                 # An API write response alone is never a publication receipt.
-                state = self._read(task, token, worker_id)
-                if state["visibility"] != "public" or state["state"] != "succeeded":
-                    raise YouTubeHTTPError("youtube_public_readback_failed", "视频公开状态未确认，已暂停首评")
+                self._confirm_public(task, token, worker_id)
                 task = self._phase(task, worker_id, "comment" if task["comment_text"] else "complete", public_status="succeeded")
                 task = self.store.video_published(task_id, task["video_id"], worker_id=worker_id, lease_generation=generation)
             if task["comment_status"] in {"queued", "retry", "publishing"}:
