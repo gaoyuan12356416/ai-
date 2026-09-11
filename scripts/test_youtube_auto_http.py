@@ -24,7 +24,7 @@ PREFIX = "/api/youtube-auto-publish"
 TASK_ID = "a" * 32
 COVER_ID = "b" * 32
 GET_PATHS = ["/bootstrap", "/bootstrap?include_channels=0", "/channels", "/materials", "/tasks", "/settings", "/tasks/" + TASK_ID, "/covers/" + COVER_ID]
-POST_PATHS = ["/tasks", "/covers", "/covers/upload", "/settings", "/tasks/" + TASK_ID + "/review", "/tasks/" + TASK_ID + "/retry"]
+POST_PATHS = ["/channels/verify-thumbnail", "/tasks", "/covers", "/covers/upload", "/settings", "/tasks/" + TASK_ID + "/review", "/tasks/" + TASK_ID + "/retry"]
 
 
 def load_contract():
@@ -216,7 +216,7 @@ class YouTubeHttpTests(unittest.TestCase):
 
     def test_route_dispatch_and_server_actor_projection(self):
         expected_get = ["bootstrap", "bootstrap", "channel_options", "list_materials", "list_tasks", "settings", "get_task", "asset"]
-        expected_post = ["create_task", "upload_cover", "upload_cover", "save_settings", "review", "retry"]
+        expected_post = ["verify_channel_thumbnail", "create_task", "upload_cover", "upload_cover", "save_settings", "review", "retry"]
         body = json.dumps({"actor": {"role": "admin", "user_id": "attacker"}, "creator": "fake", "role": "admin", "user_id": "fake", "is_admin": True, "title": "Allowed"}).encode()
         for method, paths, names in [("GET", GET_PATHS, expected_get), ("POST", POST_PATHS, expected_post)]:
             self.assertEqual(len(paths), len(names))
@@ -231,7 +231,7 @@ class YouTubeHttpTests(unittest.TestCase):
 
     def test_queries_are_forwarded_with_bounds(self):
         self.request("GET", "/materials?search=hello%20world")
-        self.assertEqual(self.service.calls[-1][2], {"search": "hello world"})
+        self.assertEqual(self.service.calls[-1][2], {"search": "hello world", "refresh": False})
         self.request("GET", "/tasks?search=" + "x" * 240 + "&status=review")
         self.assertEqual(self.service.calls[-1][2], {"search": "x" * 200, "status": "review"})
         self.assertEqual(self.request("GET", "/tasks?" + "&".join("q%d=x" % x for x in range(10))).status, 400)

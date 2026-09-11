@@ -23,12 +23,13 @@ def uid(): return uuid.uuid4().hex
 
 
 class YouTubeWorkflow:
-    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, failure_status=None, fetch_reference_cover=None, public_base='https://ai.yingliangads.com', enabled=True):
+    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, failure_status=None, fetch_reference_cover=None, channel_directory=None, public_base='https://ai.yingliangads.com', enabled=True):
         self.db_path=str(db_path); self.root=Path(asset_root).resolve()
         self.source,self.channels,self.short_link,self.engine_store=source,channels,short_link,engine_store
         self.generate,self.notify,self.public_base,self.enabled=generate,notify,public_base.rstrip('/'),bool(enabled)
         self.fetch_reference_cover=fetch_reference_cover
         self.failure_status=failure_status
+        self.channel_directory=channel_directory
         self.root.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
@@ -179,8 +180,10 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             c.execute('INSERT INTO youtube_auto_setting VALUES(?,?,?) ON CONFLICT(tenant) DO UPDATE SET description=excluded.description,updated_at=excluded.updated_at',(tenant,text.strip(),now()))
         return {'settings':self.settings(actor)}
 
-    def channel_options(self,actor):
+    def channel_options(self,actor,*,refresh=False):
         self._actor(actor);_,state=self.source.configuration()
+        if self.channel_directory is not None and state['configured']:
+            return self.channel_directory.options(actor,refresh=refresh)
         channels=self.channels(actor) if state['configured'] else []
         safe=[{k:v for k,v in row.items() if k not in ('scopes','youtube_account_id')} for row in channels]
         return {'channels':safe}
@@ -190,8 +193,13 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         channels=self.channel_options(actor)['channels'] if include_channels else []
         return {'settings':self.settings(actor),'source':state,'channels':channels,'channels_loaded':bool(include_channels),'can_manage_settings':actor.get('role')=='admin','enabled':self.enabled}
 
-    def list_materials(self,actor,search=''):
-        self._actor(actor);return self.source.list(search)
+    def list_materials(self,actor,search='',*,refresh=False):
+        self._actor(actor);return self.source.list(search,refresh=refresh)
+
+    def verify_channel_thumbnail(self,actor,payload):
+        self._actor(actor)
+        if self.channel_directory is None:raise WorkflowError('channel_check_unavailable','频道鉴权暂不可用',503)
+        return self.channel_directory.verify_thumbnail(actor,payload)
 
     def _dto(self,body,actor):
         value=json.loads(encode(body))
@@ -283,8 +291,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             if previous['request_sha']!=digest:raise WorkflowError('idempotency_conflict','同一提交标识的内容已变化，请重新提交',409)
             return {'task':self._dto(json.loads(previous['body']),actor)}
         material=self.source.get(str(request['material_id']))
-        channels=self.channels(actor)
-        channel=next((x for x in channels if str(x['id'])==str(request['channel_id'])),None)
+        if self.channel_directory is not None:
+            channel=self.channel_directory.validate(actor,str(request['channel_id']),comment=bool(request['comment_template']))
+        else:
+            channels=self.channels(actor)
+            channel=next((x for x in channels if str(x['id'])==str(request['channel_id'])),None)
         if channel is None or not channel.get('eligible'):raise WorkflowError('channel_unavailable','请选择授权有效且支持封面设置的频道',409)
         if request['comment_template'] and not channel.get('comment_eligible'):raise WorkflowError('comment_scope_required','该频道尚未获得首评权限',409)
         # Validate all syntax/required fields before allocating a short link.
@@ -417,6 +428,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     if not approved.get('approved'):raise WorkflowError('cover_not_approved','封面尚未审核',409)
                     with self.db() as c:asset=self._asset(c,approved['asset_id'],body['creator'])
                     m=body['material'];ch=body['channel']
+                    if self.channel_directory is not None:
+                        ch=self.channel_directory.validate(body['creator'],str(ch['id']),comment=bool(body['comment']),expected=ch)
                     ledger=self.engine_store.enqueue_reviewed_youtube(
                         preparation_id=task_id,source_material_id=m['id'],approved_cover_path=asset['path'],approved_cover_sha256=asset['sha256'],
                         operation_id='youtube-auto-'+task_id,job_id=m.get('source_job_id') or m.get('link_job_id') or task_id,content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',

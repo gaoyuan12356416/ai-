@@ -24,6 +24,8 @@
   let draft = null, stack = [], modalSerial = 0, lastFocus = null, busy = false, openingTask = false, listSerial = 0, listAbort = null, materialSerial = 0, pollTimer = null, searchTimer = null, materialTimer = null, channelPromise = null, channelSerial = 0, initSerial = 0, initBusy = false, pollInFlight = false;
   const carets = new Map();
   const taskCache = new Map(), taskRevisions = new Map(), taskReads = new Map();
+  const materialCache = new Map(), materialReads = new Map(), materialRefreshes = new Map();
+  let channelPollTimer = null, channelPollUntil = 0, materialPollTimer = null;
   const task = id => taskCache.get(String(id)) || state.tasks.find(t => String(t.id) === String(id));
   const top = () => stack.at(-1);
   const versions = t => Array.isArray(t.versions) ? t.versions : [];
@@ -207,28 +209,88 @@
     finally { if (serial === listSerial) { state.listLoading = false; if (!quiet || !state.listLoaded || !state.listError) renderList(); } }
   }
   function channelsValid() { return state.channels.loaded && !state.channels.loading && !state.channels.error; }
-  async function loadChannels(force = false) {
-    if (channelPromise) return channelPromise;
-    if (!force && state.channels.loaded && Date.now() - state.channels.loadedAt < 60000) return state.channels.items;
+  async function loadChannels(force = false, polling = false) {
+    if (channelPromise) return force ? channelPromise.then(() => loadChannels(true)) : channelPromise;
+    if (!force && !polling && !state.channels.checking && state.channels.loaded && Date.now() - state.channels.loadedAt < 60000) return state.channels.items;
+    clearTimeout(channelPollTimer);
+    if (!polling) channelPollUntil = Date.now() + 90000;
     const serial = ++channelSerial;
-    state.channels.loading = true; state.channels.error = ''; state.channels.loaded = false; renderModals();
+    state.channels.loading = !polling; state.channels.error = ''; renderModals();
     channelPromise = (async () => {
-      try { const data = await api('/channels'); if (serial !== channelSerial) return; if (!Array.isArray(data.channels)) throw new Error('频道数据格式无效，请重试。'); state.channels.items = data.channels; state.channels.loaded = true; state.channels.loadedAt = Date.now(); state.bootstrap.channels = data.channels; return data.channels; }
+      try {
+        const data = await api('/channels' + (force ? '?refresh=1' : ''));
+        if (serial !== channelSerial) return;
+        if (!Array.isArray(data.channels)) throw new Error('频道数据格式无效，请重试。');
+        if (data.error) {
+          // A background failure may accompany a 200 response and an empty DTO.
+          // Retain the last visible inventory, but never permit stale selection.
+          if (data.channels.length) state.channels.items = data.channels;
+          state.channels.checking = false;
+          throw new Error(typeof data.error === 'string' ? data.error : data.error.message || '频道列表更新失败，请重试。');
+        }
+        Object.assign(state.channels,{items:data.channels,loaded:true,loadedAt:Date.now(),checking:data.checking === true,checkedAt:data.checked_at,pollExpired:false});
+        state.bootstrap.channels = data.channels;
+        if (draft?.channelId && !data.channels.some(c => String(c.id) === String(draft.channelId) && c.eligible === true)) draft.channelId = '';
+        if (state.channels.checking && stack.some(v => v.type === 'publish')) {
+          if (Date.now() < channelPollUntil) channelPollTimer = setTimeout(() => { if (stack.some(v => v.type === 'publish')) void loadChannels(false,true); },2000);
+          else state.channels.pollExpired = true;
+        }
+        return data.channels;
+      }
       catch (error) { if (serial === channelSerial) { state.channels.error = error.message; state.channels.loaded = false; } }
       finally { if (serial === channelSerial) { state.channels.loading = false; channelPromise = null; renderModals(); } }
     })();
     return channelPromise;
   }
   async function loadTask(id) { const key = String(id), revision = taskRevisions.get(key) || 0, serial = (taskReads.get(key) || 0) + 1; taskReads.set(key,serial); const data = await api('/tasks/' + encodeURIComponent(id)); if ((taskRevisions.get(key) || 0) !== revision || taskReads.get(key) !== serial) { if (taskCache.has(key)) return taskCache.get(key); } return upsert(data.task); }
-  async function loadMaterials(view) {
-    const serial = ++materialSerial; view.loading = true; view.error = ''; renderModals();
-    try { const data = await api('/materials?' + new URLSearchParams({search:view.search || ''})); if (serial !== materialSerial || !stack.includes(view)) return; state.materials = Array.isArray(data.items) ? data.items : []; state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource(); renderModals(); }
-    catch (error) { if (serial !== materialSerial || !stack.includes(view)) return; view.loading = false; view.error = error.message; renderModals(); }
+  function readMaterials(search, force = false) {
+    if (materialRefreshes.has(search)) return materialRefreshes.get(search);
+    const pending = materialReads.get(search);
+    if (pending) {
+      if (!force || pending.force) return pending.promise;
+      // All force callers share exactly one refresh after the ordinary read,
+      // including when that ordinary read fails. Never recursively queue it.
+      const refresh = pending.promise.catch(() => {}).then(() => startMaterialRead(search,true)).finally(() => materialRefreshes.delete(search));
+      materialRefreshes.set(search,refresh); return refresh;
+    }
+    const cached = materialCache.get(search), ttl = Math.min(60000,Math.max(0,Number(cached?.data.cache?.ttl_seconds ?? 60) - Number(cached?.data.cache?.age_seconds || 0)) * 1000);
+    if (!force && cached && !cached.data.cache?.refreshing && !cached.data.cache?.stale && Date.now() - cached.at < ttl) return Promise.resolve(cached.data);
+    return startMaterialRead(search,force);
+  }
+  function startMaterialRead(search, force) {
+    const query = new URLSearchParams({search}); if (force) query.set('refresh','1');
+    const request = api('/materials?' + query).then(data => {
+      if (!Array.isArray(data.items)) throw new Error('素材数据格式无效，请重试。');
+      materialCache.delete(search); materialCache.set(search,{data,at:Date.now()});
+      if (materialCache.size > 20) materialCache.delete(materialCache.keys().next().value);
+      return data;
+    }).finally(() => materialReads.delete(search));
+    materialReads.set(search,{promise:request,force}); return request;
+  }
+  async function loadMaterials(view, force = false, polling = false) {
+    const search = view.search || '', serial = ++materialSerial;
+    clearTimeout(materialPollTimer);
+    if (!polling) view.pollUntil = Date.now() + 90000;
+    view.loading = true; view.error = ''; view.pollExpired = false;
+    const cached = materialCache.get(search);
+    if (view.loadedSearch !== search) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
+    renderModals();
+    try {
+      const data = await readMaterials(search,force);
+      if (serial !== materialSerial || !stack.includes(view) || view.search !== search) return;
+      state.materials = data.items; view.items = data.items; view.cache = data.cache; view.cacheAt = materialCache.get(search)?.at || Date.now(); view.loadedSearch = search;
+      state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource();
+      if (data.cache?.refreshing) {
+        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && view.search === search) void loadMaterials(view,false,true); },2000);
+        else view.pollExpired = true;
+      }
+      renderModals();
+    } catch (error) { if (serial !== materialSerial || !stack.includes(view) || view.search !== search) return; view.loading = false; view.error = error.message; renderModals(); }
   }
   function newDraft() { return {operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
   function releaseCover(cover) { if (cover?.preview) URL.revokeObjectURL(cover.preview); }
-  function closeModal() { if (busy) return; const v = stack.pop(); if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) lastFocus?.focus(); }
+  function closeModal() { if (busy) return; const v = stack.pop(); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) lastFocus?.focus(); }
   function closeAll() { stack.forEach(v => releaseCover(v.manualCover)); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
   function shell(v,title,subtitle,body,footer = '',large = false) { return `<div class="modal-overlay${top() !== v ? ' modal-behind' : ''}" data-modal-key="${v.key}" ${top() !== v ? 'inert aria-hidden="true"' : ''}><section class="modal${large ? ' modal-lg' : ''}" role="dialog" aria-modal="${top() === v}" aria-labelledby="modal-title-${v.key}" tabindex="-1"><header class="modal-header"><div><h2 class="modal-title" id="modal-title-${v.key}">${title}</h2><p class="modal-subtitle">${subtitle}</p></div><button class="icon-btn close-modal" data-action="close-modal" aria-label="关闭弹窗">${icon('x')}</button></header><div class="modal-body">${v.error ? `<div class="note-box note-error inline-error" role="alert">${esc(v.error)}</div>` : ''}${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`; }
   const label = (text,required = false,id = '') => `<label class="field-label"${id ? ` for="${id}"` : ''}>${text}${required ? '<span class="required">*</span>' : ''}</label>`;
@@ -248,20 +310,43 @@
     return `<div class="note-box note-amber drama-reference-empty" role="status"><strong>原剧封面暂不可用</strong><span>${esc(dramaCoverMessage(material))}</span><span>暂无法使用 AI 生成，请更换素材或选择「本地上传」。</span></div>`;
   }
   const taskReference = t => safeUrl(t.reference_cover?.url) ? referenceCard(t.reference_cover.url,t.reference_cover.drama_name,t.reference_cover.frozen === true) : '';
+  function thumbnailRecovery(channel) {
+    if (channel.auth_status !== 'blocked' || channel.thumbnail_permission !== 'denied') return '';
+    return state.bootstrap?.can_manage_settings === true ? `<button type="button" class="btn btn-secondary btn-sm" data-action="verify-thumbnail" data-id="${esc(channel.id)}">已核验封面权限</button>` : '<span>请联系管理员在 YouTube Studio 核验自定义缩略图权限。</span>';
+  }
+  function verifyThumbnailView(v) {
+    return shell(v,'确认频道封面权限','仅在已完成 YouTube Studio 核验后确认。',`<div class="note-box note-amber"><strong>${esc(v.channel.name)}</strong><span>请在对应频道的 YouTube Studio 中确认自定义缩略图功能已可用。</span><span>确认会记录管理员核验结果，并重新检查频道授权。后续如再次被 YouTube 拒绝，该频道仍会禁选。</span></div><label class="thumbnail-confirm"><input type="checkbox" id="studio-thumbnail-confirm" ${v.confirmed ? 'checked' : ''}/>我已在「${esc(v.channel.name)}」的 YouTube Studio 确认自定义缩略图可用。</label>`,`<div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-thumbnail" ${!v.confirmed ? 'disabled' : ''}>确认核验并重新鉴权</button></div>`);
+  }
+  async function verifyThumbnail(v) {
+    if (v?.type !== 'verifyThumbnail' || !v.confirmed || state.bootstrap?.can_manage_settings !== true || busy) return;
+    busy = true; v.error = ''; renderModals();
+    try {
+      await post('/channels/verify-thumbnail',{channel_id:v.channel.id,failure_at:v.channel.failure_at,confirmation:'studio_thumbnail_verified'});
+      busy = false; closeModal(); toast('已记录管理员核验，正在重新检查频道授权。');
+      await loadChannels(true);
+    } catch (error) { v.error = error.message; if (error.uncertain) v.error += ' 系统不会自动重新提交，请先刷新频道核对结果。'; }
+    finally { busy = false; renderModals(); }
+  }
   function publishView(v) {
-    const m = draft.material, channels = channelsValid() ? state.channels.items : [];
+    const m = draft.material, channels = state.channels.items;
     const channelPlaceholder = state.channels.loading ? '正在加载频道…' : state.channels.error ? '频道加载失败，请重试' : '请选择 YouTube 频道';
-    const channelHint = state.channels.loading ? '<span class="field-hint channel-loading" role="status"><span class="loading-spinner small" aria-hidden="true"></span>正在读取已授权频道，其他内容可继续填写。</span>' : state.channels.error ? `<div id="channel-state" class="channel-error" role="alert"><span>${esc(state.channels.error)}</span><button class="btn btn-secondary btn-sm" type="button" data-action="retry-channels">重试加载频道</button></div>` : `<span class="field-hint">${channels.length ? '频道授权与可发布状态由服务端校验' : '暂无已授权频道，请联系管理员完成频道授权'}</span>`;
+    const selectedChannel = channels.find(c => String(c.id) === String(draft.channelId));
+    const channelDetails = channels.length ? `<details class="channel-auth-details"><summary>查看全部频道鉴权详情</summary>${channels.map(c => `<div class="channel-auth-row"><strong>${esc(c.name)} · ${esc(c.eligible === true ? '鉴权通过' : ({pending:'待鉴权',checking:'鉴权中',blocked:'不可发布',unknown:'结果未知'}[c.auth_status]) || '未通过鉴权')}</strong><span>${esc(c.reason || '尚未完成发布权限检查')}</span><span>鉴权时间：${esc(time(c.checked_at))}</span>${thumbnailRecovery(c)}</div>`).join('')}</details>` : '';
+    const checking = state.channels.loading || state.channels.checking;
+    const channelHint = `<div class="channel-check-status" role="status">${state.channels.error ? `<div id="channel-state" class="channel-error" role="alert"><span>${esc(state.channels.error)}</span></div>` : `<span class="field-hint">${state.channels.pollExpired ? '鉴权仍未完成，已暂停自动查询，请手动刷新。' : checking ? '正在检查频道授权，其他内容可继续填写。' : channels.length ? '仅预检通过的频道可选，最终发布结果以 YouTube 返回为准。' : '暂无已授权频道，请联系管理员完成频道授权。'}</span>`}<div class="channel-check-actions"><span class="field-hint">鉴权时间：${esc(time(selectedChannel?.checked_at || state.channels.checkedAt))}</span><button class="btn btn-secondary btn-sm" type="button" data-action="retry-channels" ${state.channels.loading ? 'disabled' : ''}>${state.channels.error ? '重试加载频道' : '刷新频道鉴权'}</button></div>${selectedChannel?.reason ? `<span class="field-hint">${esc(selectedChannel.reason)}</span>` : ''}</div>`;
     const fields = ['title','description','comment'].map(field => {
       const title = {title:'视频标题',description:'视频描述',comment:'首条评论 <span class="optional-label">选填</span>'}[field];
       return `<div class="field span-2">${label(title,field !== 'comment','draft-' + field)}${field === 'title' ? `<input id="draft-title" class="input ${draft.errors.title ? 'invalid' : ''}" data-field="title" value="${esc(draft.title)}" placeholder="例如：{name} | Watch the full story"/>` : `<textarea id="draft-${field}" class="textarea ${draft.errors[field] ? 'invalid' : ''}" data-field="${field}" rows="${field === 'description' ? 3 : 2}" placeholder="${field === 'comment' ? '可填写互动引导文案，留空则不发送首评' : '请输入视频描述'}">${esc(draft[field])}</textarea>`}${fieldError(field)}${field === 'description' ? '<span class="field-hint">已带入默认描述，可为本次发布单独修改。</span>' : field === 'comment' ? '<span class="field-hint">视频公开后自动发送；留空会跳过此步骤。</span>' : ''}${macroControls(field,draft[field])}</div>`;
     });
-    const body = `${draft.pendingPayload ? '<div class="note-box note-amber inline-error">上次提交结果待确认。请重新点击提交，系统会使用同一操作标识核对，不会重复创建任务。</div>' : ''}<div class="form-grid"><div class="field">${label('发布素材',true)}<button class="selection-summary ${draft.errors.material ? 'invalid' : ''}" data-action="choose-material">${m ? `${image(m.thumbnail_url,'素材缩略图','mini-cover')}<span><strong>${esc(m.name)}</strong><small>${esc(m.language || '—')} · ${esc(m.duration || '—')}</small></span><span class="selection-link">更换</span>` : `<span class="selection-icon">${icon('folder')}</span><span>选择一条视频素材</span>${icon('chevron')}`}</button>${fieldError('material')}<span class="field-hint">${state.source?.configured === false ? '素材筛选规则待配置' : '仅展示符合筛选范围的素材'}</span></div><div class="field">${label('发布频道',true,'draft-channel')}<select id="draft-channel" class="select ${draft.errors.channelId ? 'invalid' : ''}" data-field="channelId" ${!channelsValid() ? 'disabled' : ''} aria-busy="${state.channels.loading}"><option value="">${channelPlaceholder}</option>${channels.map(c => `<option value="${esc(c.id)}" ${String(draft.channelId) === String(c.id) ? 'selected' : ''} ${c.eligible === false ? 'disabled' : ''}>${esc(c.name)}${c.language ? ' · ' + esc(c.language) : ''}${c.eligible === false ? '（' + esc(c.reason || '当前不可发布') + '）' : ''}</option>`).join('')}</select>${fieldError('channelId')}${channelHint}</div><div class="field span-2">${linkHelp(m)}</div>${fields[0]}<div class="field span-2">${label('封面来源',true)}<div class="source-options">${[['ai','AI 生成','参考原剧封面生成，审核后发布','spark'],['local','本地上传','使用已准备好的封面图片','upload']].map(([value,title,desc,glyph]) => `<button class="source-option ${draft.coverSource === value ? 'selected' : ''}" data-action="cover-source" data-id="${value}" aria-pressed="${draft.coverSource === value}"><span class="source-option-icon">${icon(glyph)}</span><span><strong>${title}</strong><small>${desc}</small></span><span class="source-radio"></span></button>`).join('')}</div></div>${draft.coverSource === 'ai' ? `<div class="field span-2 drama-reference-field">${materialReference(m)}${fieldError('reference')}</div><div class="field span-2 ai-prompt-field">${label('封面要求',true,'draft-requirements')}<textarea id="draft-requirements" class="textarea ${draft.errors.requirements ? 'invalid' : ''}" data-field="requirements" rows="3" maxlength="2000" placeholder="请描述人物、场景、风格、文字及构图要求，系统将生成 16:9 横版封面。">${esc(draft.requirements)}</textarea>${fieldError('requirements')}<span class="field-hint">生成封面后发送飞书审核提醒，最终确认后才会上传视频。</span></div>` : `<div class="field span-2">${label('封面图片',true)}${coverInput(draft.cover,'draft')}${fieldError('cover')}</div>`}${fields[1]}${fields[2]}</div>`;
+    const body = `${draft.pendingPayload ? '<div class="note-box note-amber inline-error">上次提交结果待确认。请重新点击提交，系统会使用同一操作标识核对，不会重复创建任务。</div>' : ''}<div class="form-grid"><div class="field">${label('发布素材',true)}<button class="selection-summary ${draft.errors.material ? 'invalid' : ''}" data-action="choose-material">${m ? `${image(m.thumbnail_url,'素材缩略图','mini-cover')}<span><strong>${esc(m.name)}</strong><small>${esc(m.language || '—')} · ${esc(m.duration || '—')}</small></span><span class="selection-link">更换</span>` : `<span class="selection-icon">${icon('folder')}</span><span>选择一条视频素材</span>${icon('chevron')}`}</button>${fieldError('material')}<span class="field-hint">${state.source?.configured === false ? '素材筛选规则待配置' : '仅展示符合筛选范围的素材'}</span></div><div class="field">${label('发布频道',true,'draft-channel')}<select id="draft-channel" class="select ${draft.errors.channelId ? 'invalid' : ''}" data-field="channelId" ${!channelsValid() ? 'disabled' : ''} aria-busy="${state.channels.loading}"><option value="">${channelPlaceholder}</option>${channels.map(c => `<option value="${esc(c.id)}" ${String(draft.channelId) === String(c.id) ? 'selected' : ''} ${c.eligible !== true ? 'disabled' : ''}>${esc(c.name)}${c.language ? ' · ' + esc(c.language) : ''}（${esc(c.eligible === true ? '鉴权通过' : c.reason || ({pending:'待鉴权',checking:'鉴权中',blocked:'不可发布',unknown:'鉴权结果未知'}[c.auth_status]) || '尚未通过鉴权')}）</option>`).join('')}</select>${fieldError('channelId')}${channelHint}${channelDetails}</div><div class="field span-2">${linkHelp(m)}</div>${fields[0]}<div class="field span-2">${label('封面来源',true)}<div class="source-options">${[['ai','AI 生成','参考原剧封面生成，审核后发布','spark'],['local','本地上传','使用已准备好的封面图片','upload']].map(([value,title,desc,glyph]) => `<button class="source-option ${draft.coverSource === value ? 'selected' : ''}" data-action="cover-source" data-id="${value}" aria-pressed="${draft.coverSource === value}"><span class="source-option-icon">${icon(glyph)}</span><span><strong>${title}</strong><small>${desc}</small></span><span class="source-radio"></span></button>`).join('')}</div></div>${draft.coverSource === 'ai' ? `<div class="field span-2 drama-reference-field">${materialReference(m)}${fieldError('reference')}</div><div class="field span-2 ai-prompt-field">${label('封面要求',true,'draft-requirements')}<textarea id="draft-requirements" class="textarea ${draft.errors.requirements ? 'invalid' : ''}" data-field="requirements" rows="3" maxlength="2000" placeholder="请描述人物、场景、风格、文字及构图要求，系统将生成 16:9 横版封面。">${esc(draft.requirements)}</textarea>${fieldError('requirements')}<span class="field-hint">生成封面后发送飞书审核提醒，最终确认后才会上传视频。</span></div>` : `<div class="field span-2">${label('封面图片',true)}${coverInput(draft.cover,'draft')}${fieldError('cover')}</div>`}${fields[1]}${fields[2]}</div>`;
     return shell(v,`${icon('video')}新建发布`,'选择素材与频道，准备好这条视频的发布信息。',body,`<span class="footer-hint">${icon('info')}${draft.coverSource === 'ai' ? 'AI 封面需审核后发布' : '确认后进入上传发布流程'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="submit-publish">${icon(draft.coverSource === 'ai' ? 'spark' : 'upload')}${draft.coverSource === 'ai' ? '提交并生成封面' : '确认并上传'}</button></div>`,true);
   }
   function pickerView(v) {
-    const configured = state.source?.configured !== false;
-    const body = `<div class="picker-toolbar"><div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div></div>${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${v.loading ? '<div class="empty-state material-empty">正在加载素材…</div>' : state.materials.length ? state.materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请修改关键词或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    const configured = state.source?.configured !== false, materials = v.items || [];
+    const cacheStatus = v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
+    const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
+    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>`;
+    const body = `<div class="picker-toolbar"><div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请修改关键词或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
     return shell(v,'选择发布素材','每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.loading ? 'disabled' : ''}>确认选择</button></div>`,true);
   }
   function previewView(v) { const m = v.material; return shell(v,'素材预览',esc(m.name),`${safeUrl(m.url) ? `<video class="material-video" controls preload="metadata" ${safeUrl(m.thumbnail_url) ? `poster="${esc(safeUrl(m.thumbnail_url))}"` : ''} src="${esc(safeUrl(m.url))}"></video>` : '<div class="note-box note-amber">该素材暂无可用的视频预览链接。</div>'}<div class="summary-grid"><div class="summary-item"><span>素材名称</span><strong>${esc(m.name)}</strong></div><div class="summary-item"><span>素材 ID</span><strong>${esc(m.id)}</strong></div><div class="summary-item"><span>时长 / 大小</span><strong>${esc(m.duration || '—')} / ${esc(m.size || '—')}</strong></div><div class="summary-item"><span>语言</span><strong>${esc(m.language || '—')}</strong></div></div>`,'<button class="btn btn-secondary" data-action="close-modal">返回素材列表</button>',true); }
@@ -289,7 +374,7 @@
     const active = document.activeElement, activeId = active?.id;
     const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
     let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
-    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView};
+    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView};
     const changed = syncMarkup(root,stack.map(v => views[v.type](v)).join(''),String(busy));
     document.body.style.overflow = 'hidden';
     if (!changed && !focus) return;
@@ -326,7 +411,7 @@
     const e = {};
     if (!draft.material || state.source?.configured === false) e.material = state.source?.configured === false ? '素材筛选规则待配置，暂无法发布。' : '请选择一条视频素材。';
     if (!channelsValid()) e.channelId = state.channels.loading ? '频道正在加载，请加载完成后选择频道。' : '请先成功加载并选择发布频道。';
-    else if (!draft.channelId || !state.channels.items.some(c => String(c.id) === String(draft.channelId) && c.eligible !== false)) e.channelId = '请选择可发布的 YouTube 频道。';
+    else if (!draft.channelId || !state.channels.items.some(c => String(c.id) === String(draft.channelId) && c.eligible === true)) e.channelId = '请选择可发布的 YouTube 频道。';
     ['title','description','comment'].forEach(f => { const error = validateText(f,draft[f],draft.material); if (error) e[f] = error; });
     const selectedChannel = state.channels.items.find(c => String(c.id) === String(draft.channelId));
     if (draft.comment.trim() && selectedChannel?.comment_eligible === false) e.comment = '该频道尚未获得首评权限，请留空首评或完成频道授权。';
@@ -394,15 +479,17 @@
     const action = b.dataset.action, id = b.dataset.id, v = top();
     if (action === 'retry-init') init();
     else if (action === 'retry-channels') void loadChannels(true);
+    else if (action === 'verify-thumbnail') { const channel = state.channels.items.find(c => String(c.id) === String(id)); if (state.bootstrap?.can_manage_settings === true && channel?.auth_status === 'blocked' && channel?.thumbnail_permission === 'denied') openModal('verifyThumbnail',{channel:{...channel},confirmed:false}); }
+    else if (action === 'confirm-thumbnail') void verifyThumbnail(v);
     else if (action === 'close-modal') closeModal();
     else if (action === 'tab') { state.tab = id; state.status = 'all'; $('#status-filter').value = 'all'; loadTasks(); }
     else if (action === 'reload-tasks') loadTasks();
-    else if (action === 'reload-materials') loadMaterials(v);
+    else if (action === 'reload-materials') loadMaterials(v,true);
     else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
     else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',loading:true}); loadMaterials(top()); }
-    else if (action === 'select-material') { v.selected = state.materials.find(m => String(m.id) === String(id)); renderModals(); }
+    else if (action === 'select-material') { v.selected = (v.items || state.materials).find(m => String(m.id) === String(id)); renderModals(); }
     else if (action === 'confirm-material') { draft.material = v.selected; if (!draft.title.trim()) draft.title = '{name}'; delete draft.errors.material; delete draft.errors.reference; closeModal(); }
-    else if (action === 'preview-material') { const material = state.materials.find(m => String(m.id) === String(id)); if (material) openModal('preview',{material}); }
+    else if (action === 'preview-material') { const material = (v.items || state.materials).find(m => String(m.id) === String(id)); if (material) openModal('preview',{material}); }
     else if (action === 'cover-source') { draft.coverSource = id; renderModals(); }
     else if (action === 'upload-draft') $('#draft-cover-file')?.click();
     else if (action === 'upload-manual') $('#manual-cover-file')?.click();
@@ -418,8 +505,8 @@
     else if (action === 'retry') retryTask();
     else if (action === 'save-settings') saveSettings();
   });
-  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
-  document.addEventListener('change', event => { const el = event.target; if (el.dataset.field && draft) draft[el.dataset.field] = el.value; if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
+  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
+  document.addEventListener('change', event => { const el = event.target; if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') renderModals(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
   ['keyup','mouseup','select','focusout'].forEach(name => document.addEventListener(name,event => rememberCaret(event.target)));
   document.addEventListener('keydown', event => {
     if (!stack.length) return; if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
@@ -428,7 +515,7 @@
     if (!elements.length) { event.preventDefault(); return; } const first = elements[0], last = elements.at(-1);
     if (event.shiftKey && (document.activeElement === first || !elements.includes(document.activeElement))) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && (document.activeElement === last || !elements.includes(document.activeElement))) { event.preventDefault(); first.focus(); }
   });
-  $('#new-publish').addEventListener('click', () => { if (!state.ready || busy || state.bootstrap.enabled === false) return; draft = newDraft(); openModal('publish'); void loadChannels(); });
+  $('#new-publish').addEventListener('click', () => { if (!state.ready || busy || state.bootstrap.enabled === false) return; draft = newDraft(); openModal('publish'); void loadChannels(); void readMaterials('').catch(() => {}); });
   $('#settings-button').addEventListener('click', () => { if (state.bootstrap?.can_manage_settings && !busy) openModal('settings',{value:state.bootstrap.settings?.default_description || ''}); });
   $('#task-search').addEventListener('input', event => { state.search = event.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(() => loadTasks(),300); });
   $('#status-filter').addEventListener('change', event => { state.status = event.target.value; state.tab = 'all'; loadTasks(); });
@@ -443,6 +530,8 @@
     clearTimeout(pollTimer); listAbort?.abort();
     $('#page-message').className = 'note-box note-blue'; $('#page-message').textContent = '正在加载发布工作台…';
     try {
+      // Both endpoints enforce permissions; render the workspace only after both succeed.
+      const bootstrapRead = api('/bootstrap?include_channels=0').then(data => ({data}),error => ({error}));
       state.auth = await api('/api/ui/topbar');
       if (serial !== initSerial) return;
       UiTopbar.render({auth:state.auth,userCard:'#userCard',authButton:'#authButton',refreshButton:'#refreshPage'});
@@ -450,7 +539,10 @@
       // QuickNav paints its cached/default menu synchronously. Its refresh is independent.
       try { void Promise.resolve(QuickNav.render({container:'#quickNav',auth:state.auth,activeKey:'youtubeAutoPublish'})).catch(() => {}); } catch (_) {}
       if (!state.auth.authenticated) { $('#page-message').innerHTML = '<strong>请先登录</strong><span>使用飞书登录后查看 YouTube 发布任务。</span>'; return; }
-      const bootstrap = await api('/bootstrap?include_channels=0');
+      void loadTasks();
+      const bootstrapResult = await bootstrapRead;
+      if (bootstrapResult.error) throw bootstrapResult.error;
+      const bootstrap = bootstrapResult.data;
       if (serial !== initSerial) return;
       if (!bootstrap.settings || !bootstrap.source) throw new Error('工作台配置响应不完整，请重试。');
       state.bootstrap = bootstrap; state.source = bootstrap.source; state.ready = true;
@@ -458,12 +550,11 @@
       $('#new-publish').disabled = state.bootstrap.enabled === false;
       if (state.bootstrap.enabled === false) $('#new-publish').title = 'YouTube 自动发布暂未启用';
       $('#page-message').classList.add('hidden'); $('#page-content').classList.remove('hidden'); $('#settings-button').hidden = !state.bootstrap.can_manage_settings; showSource();
-      void loadTasks();
       const params = new URLSearchParams(location.search); if (params.get('task_id')) void openTask(params.get('task_id'),'review',Number(params.get('version')) || null);
       schedulePoll();
     } catch (error) { if (serial !== initSerial) return; $('#page-message').className = 'note-box note-error'; $('#page-message').innerHTML = `<strong>${error.status === 403 ? '暂无 YouTube 自动发布权限' : '发布工作台加载失败'}</strong><span>${esc(error.message)}</span><button type="button" class="btn btn-secondary btn-sm boot-retry" data-action="retry-init">重新加载工作台</button>`; }
     finally { if (serial === initSerial) initBusy = false; }
   }
-  window.addEventListener('pagehide', () => { clearTimeout(pollTimer); releaseCover(draft?.cover); stack.forEach(v => releaseCover(v.manualCover)); });
+  window.addEventListener('pagehide', () => { clearTimeout(pollTimer); clearTimeout(channelPollTimer); clearTimeout(materialPollTimer); clearTimeout(materialTimer); releaseCover(draft?.cover); stack.forEach(v => releaseCover(v.manualCover)); });
   init();
 })();

@@ -69,6 +69,9 @@ async (page) => {
   await page.locator('#draft-title').fill('保留文字与输入位置');
   await page.locator('[data-action="choose-material"]').click();
   await page.locator('.material-card').first().waitFor();
+  // A prefetched result mounts immediately, before its first animation frame.
+  // Measure later search updates after the intentional entrance has completed.
+  await page.waitForTimeout(300);
   await page.evaluate(()=>{const p=window.__flicker;p.form=document.querySelector('#draft-title');p.publish=document.querySelectorAll('.modal')[0];p.picker=document.querySelectorAll('.modal')[1];p.search=document.querySelector('#material-search');p.animations=[];});
   await page.locator('#material-search').fill('测试');
   await page.locator('#material-search').evaluate(el=>el.setSelectionRange(0,1));

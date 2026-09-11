@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from .templates import WorkflowError, has_link_source, long_url
+from .cache import ReadCache
 
 COLUMNS = ('id','name','url','thumbnail_url','content_id','source_job_id','source_kind','macro_name','macro_desc','language','duration','size','app_id')
 DEFAULT_HOSTS = ('advertising-1306474899.cos.ap-hongkong.myqcloud.com','ai.yingliangads.com','gy.g2flow.com','socialkit-cdn.yingliang.tech')
@@ -28,12 +29,13 @@ def validate_sql(sql):
 
 
 class MaterialSource:
-    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None):
+    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None, async_cache=False):
         self.sql_file, self.query_runner = str(sql_file or ''), query_runner
         self.allowed_hosts = tuple(allowed_hosts)
         self.drama_resolver = drama_resolver
         self.lock = threading.Lock()
         self.cache = None
+        self.read_cache = ReadCache() if async_cache else None
 
     def configuration(self):
         if not self.sql_file:
@@ -89,13 +91,16 @@ class MaterialSource:
         except Exception:
             raise WorkflowError('material_query_failed','素材查询失败，请联系管理员检查筛选配置',503) from None
 
-    def list(self, search=''):
+    def list(self, search='', *, refresh=False):
         sql, state = self.configuration()
         if not sql: return dict(state,items=[])
         search=str(search or '').strip().casefold()[:200]
         cache_key=(sql,search)
+        if self.read_cache is not None:
+            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search), refresh=refresh)
+            return dict(state,items=rows,cache=metadata)
         with self.lock:
-            if not self.cache or self.cache[0]!=cache_key or time.monotonic()-self.cache[1]>20:
+            if refresh or not self.cache or self.cache[0]!=cache_key or time.monotonic()-self.cache[1]>20:
                 self.cache=(cache_key,time.monotonic(),self._read(sql,search=search))
             rows=[dict(row) for row in self.cache[2]]
         return dict(state,items=rows)

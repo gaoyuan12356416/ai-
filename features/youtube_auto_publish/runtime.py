@@ -16,6 +16,7 @@ from .templates import WorkflowError
 from .failure_notifications import failure_notification_status
 from .engine import reviewed_scope_eligible
 from features.drama_synthesis.youtube import YouTubeCredentialRepository
+from .channels import ChannelDirectory, ChannelFailures
 
 READ_LIMIT = threading.BoundedSemaphore(2)
 
@@ -149,8 +150,9 @@ def build_service(app):
     hosts=tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS',','.join(DEFAULT_HOSTS)).split(',') if x.strip())
     from .drama import DramaMetadataResolver
     source=MaterialSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE',''),reader,allowed_hosts=hosts,
-                          drama_resolver=DramaMetadataResolver(reader))
+                          drama_resolver=DramaMetadataResolver(reader),async_cache=True)
     repository=YouTubeCredentialRepository(reader,schema=app.DB_NAME)
+    directory=ChannelDirectory(repository,failures=ChannelFailures(app.JOB_DB_PATH,root/'failure-notifications.sqlite3'))
     def channels(actor):
         # Credential objects stay server-only; no refresh token or client configuration reaches a DTO.
         values=[];seen=set()
@@ -171,6 +173,6 @@ def build_service(app):
         value=app.DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id,kind,material['content_id'],app.DRAMA_SHORT_LINK_PUBLISHER)
         return value['short_url']
     return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,
-                           generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),
+                           generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,
                            notify=notify_factory(app),failure_status=lambda body,ledger:failure_notification_status(root/'failure-notifications.sqlite3',body,ledger),public_base=app.PUBLIC_BASE_URL.split('/drama-materials')[0],
                            enabled=os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1')

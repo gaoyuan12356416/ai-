@@ -94251,7 +94251,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry))?", path)
         cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
         get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
-        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings") or (task and task.group(2))
+        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
         if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
             self.close_connection = True
             json_response(self, 404, {"error": "not_found"}, no_store=True)
@@ -94269,9 +94269,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 if path == "/bootstrap":
                     result = service.bootstrap(actor, include_channels=query.get("include_channels", ["1"])[0] != "0")
                 elif path == "/channels":
-                    result = service.channel_options(actor)
+                    result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
                 elif path == "/materials":
-                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200])
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1")
                 elif path == "/tasks":
                     result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
                 elif path == "/settings":
@@ -94295,6 +94295,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     return
             elif path == "/tasks":
                 result = service.create_task(actor, payload)
+            elif path == "/channels/verify-thumbnail":
+                result = service.verify_channel_thumbnail(actor, payload)
             elif path in ("/covers", "/covers/upload"):
                 result = service.upload_cover(actor, payload)
             elif path == "/settings":
