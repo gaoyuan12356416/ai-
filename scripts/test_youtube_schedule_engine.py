@@ -2,9 +2,11 @@
 """Offline contracts for native scheduling and leased, readback-confirmed controls."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -368,8 +370,27 @@ class ScheduleTests(unittest.TestCase):
         self.tick()
         before = self.row()
         new_columns = [name for name in before if name.startswith("schedule_") or name in {"publish_at", "initial_publish_at"}]
-        for name in new_columns:
-            self.sql("ALTER TABLE drama_youtube_publish DROP COLUMN " + name)
+        # Rebuild the fixture as the pre-scheduling table. Older production
+        # SQLite supports ADD COLUMN, but does not support DROP COLUMN.
+        # Keep the original schema text so its PK/AUTOINCREMENT/UNIQUE and
+        # default constraints survive, along with all explicit indexes.
+        with closing(sqlite3.connect(self.store.db_path)) as conn, conn:
+            schema = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='drama_youtube_publish'").fetchone()[0]
+            indexes = [row[0] for row in conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='drama_youtube_publish' AND sql IS NOT NULL")]
+            for name in new_columns:
+                schema, removed = re.subn(r",\s*" + re.escape(name) + r"\s+(?:TEXT|INTEGER)\s+NOT NULL\s+DEFAULT\s+(?:'[^']*'|[0-9]+)", "", schema)
+                self.assertEqual(removed, 1, name)
+            prefix = "CREATE TABLE drama_youtube_publish("
+            self.assertTrue(schema.startswith(prefix))
+            schema = schema.replace(prefix, "CREATE TABLE drama_youtube_publish_before_schedule(", 1)
+            retained_columns = ",".join('"' + name + '"' for name in before if name not in new_columns)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(schema)
+            conn.execute("INSERT INTO drama_youtube_publish_before_schedule (" + retained_columns + ") SELECT " + retained_columns + " FROM drama_youtube_publish")
+            conn.execute("DROP TABLE drama_youtube_publish")
+            conn.execute("ALTER TABLE drama_youtube_publish_before_schedule RENAME TO drama_youtube_publish")
+            for index in indexes:
+                conn.execute(index)
         self.store.ensure_storage()
         restored = self.row()
         self.assertEqual(restored["publish_at"], "")
