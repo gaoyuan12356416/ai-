@@ -25,3 +25,19 @@
 `scripts/deploy_youtube_cover_crop.py --commit <完整SHA> --check` 后去掉 `--check` 部署；必须从 CPU 的 GitHub 镜像 fetch 对应提交、归档到数据盘 release 并写入 `.github-verified-commit`。脚本验证两个线上模块基线 SHA，先备份再按依赖顺序原子替换，仅向自动发布 worker 的 MainPID 发 SIGTERM。它在当前迭代完成后自然退出并由 Restart=always 载入新代码。无 API、旧 worker、统一 writer、HK 服务重启。
 
 确认新 worker PID、active 状态、线上模块 SHA、真实样本解码和账本/短链状态。不会恢复数据库或替换任何现有资产。回滚使用同 release 的 `python3 scripts/deploy_youtube_cover_crop.py --rollback <backup>`；先恢复旧 runtime 再恢复 images，检测后续修改与备份摘要，保留数据库、通知与图片，再让 worker 平滑加载旧代码。
+
+## 2026-09-11 上线记录
+
+- 分支 `codex/youtube-cover-crop-20260911`，运行提交 `eeb4c162e994e8aeef02e1dd8fd9bec51c09646e`。GitHub push 与 CPU 镜像 fetch/FETCH_HEAD 完整 SHA 均验证。
+- 目标 `43.166.187.96:/root/drama_material_service`，仅更新 `features/youtube_auto_publish/images.py` 和 `runtime.py`。
+- 本地共 96 项：95 通过、1 Windows 符号链接权限跳过；CPU 共 96 项：95 通过、1 历史图片 fixture 路径不可用跳过。另对 CPU 已有真实 1672×941 生图样本完成独立验证：裁为 1664×936，所有保留像素与原图选区逐字节相同，原图 SHA 不变。
+- 14:47:47 备份部署，worker 于 14:47:57 从 PID 3658132 自然切换到 3783816，active/running。API、旧 worker、统一 writer PID 不变，API 健康 HTTP 200。
+- 生图原始输出 SHA `5c3e9e903dc7a66d1ca43325ba31f1544256595c4074d697b9ef8c83e15a8440`；裁后 SHA `df61b3005b042135b0f2779a167f495d477b9c383a24ad88c3c18609ca4ff536`。验证仅在内存处理既有样本，没有新建生产生成任务或修改历史资产。
+- 两模块线上 SHA 分别为 `52fdd16019641a7f4d56d6510eb39e0caa51fcc7c181a2b755375414ee97cb87` 和 `196e481a1abde507c49baf84a1bb7407e7fbe52cd8e1164b48e44262a2c517ea`，匹配 release。10 条发布账本、10 条短链和状态分布不变，无真实生图、消息或平台发布测试。
+- 备份 `/mnt/data-disk/deploy/youtube-auto-publish/backups/cover-crop-20260911-144747-eeb4c162e994`；回滚预检 `--check` 已通过。
+
+在 CPU 执行以下单条命令可回滚本补丁（保留所有数据库和资产）：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/eeb4c162e994e8aeef02e1dd8fd9bec51c09646e/scripts/deploy_youtube_cover_crop.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-crop-20260911-144747-eeb4c162e994
+```
