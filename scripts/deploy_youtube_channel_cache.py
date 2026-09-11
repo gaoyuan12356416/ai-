@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import py_compile
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -27,6 +28,7 @@ LEGACY = 'drama-youtube-publish-worker.service'
 WORKER = 'youtube-auto-publish-worker.service'
 UNITS = [API, LEGACY, WORKER, 'drama-youtube-unified-writer.service']
 DB = ROOT / 'data/drama_material_jobs.sqlite3'
+DRAIN_GENERATOR = False
 
 
 def run(*args):
@@ -61,7 +63,7 @@ def idle_snapshot(require_idle=True):
     with sqlite3.connect('file:' + str(DB) + '?mode=ro', uri=True) as db:
         active = db.execute("SELECT count(*) FROM drama_youtube_publish WHERE status NOT IN ('published','failed','unknown','partial_failed','cancelled') OR comment_status='publishing'").fetchone()[0]
         preparations = db.execute("SELECT count(*) FROM youtube_auto_preparation WHERE state IN ('queued_generation','generating','enqueue_pending') OR lease_until>strftime('%s','now')").fetchone()[0]
-        if require_idle and (active or preparations):
+        if require_idle and (active or (preparations and not DRAIN_GENERATOR)):
             raise RuntimeError('Publishing or generation is active; leave running work untouched')
         return {'publishing': db.execute('SELECT workflow,status,comment_status,count(*) FROM drama_youtube_publish GROUP BY workflow,status,comment_status').fetchall(),
                 'preparations': db.execute('SELECT state,count(*) FROM youtube_auto_preparation GROUP BY state').fetchall(),
@@ -69,13 +71,13 @@ def idle_snapshot(require_idle=True):
 
 
 def stop():
-    run('systemctl', 'stop', LEGACY, WORKER, API)
+    run('systemctl', 'stop', *([LEGACY, API] if DRAIN_GENERATOR else [LEGACY, WORKER, API]))
 
 
 def start():
     run('systemctl', 'start', API)
     healthy()
-    run('systemctl', 'start', LEGACY, WORKER)
+    run('systemctl', 'start', *([LEGACY] if DRAIN_GENERATOR else [LEGACY, WORKER]))
     for unit in UNITS:
         if run('systemctl', 'is-active', unit) != 'active':
             raise RuntimeError('Inactive service: ' + unit)
@@ -95,11 +97,23 @@ def restore(backup, manifest):
 
 
 def main():
+    global DRAIN_GENERATOR
     parser = argparse.ArgumentParser()
     parser.add_argument('--commit')
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--drain-generator', action='store_true', help='Keep current generation running, then gracefully load installed worker code')
     parser.add_argument('--rollback', type=Path)
     args = parser.parse_args()
+    DRAIN_GENERATOR = args.drain_generator
+    worker_pid = int(run('systemctl','show',WORKER,'-p','MainPID','--value'))
+    if DRAIN_GENERATOR:
+        if args.rollback:raise RuntimeError('Drain mode is only for forward rolling deployment')
+        if run('systemctl','show',WORKER,'-p','Restart','--value')!='always' or worker_pid<=0:
+            raise RuntimeError('Automatic worker restart contract missing')
+        for prop in ('Requires','BindsTo','PartOf'):
+            if API in run('systemctl','show',WORKER,'-p',prop,'--value').split():
+                raise RuntimeError('Worker depends on API lifecycle; cannot preserve generation')
+
     if run('findmnt', '-n', '-o', 'UUID', '/mnt/data-disk') != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
         raise RuntimeError('Data mount mismatch')
     with (BASE / 'channel-cache-deploy.lock').open('a') as lock:
@@ -151,6 +165,8 @@ def main():
         inputs += [(stage / name, PUBLIC / Path(name).name, expected) for name, expected in EXPECTED.items() if name.startswith('static/')]
         inputs.append((generated,ROOT/'app.py',sha(ROOT/'app.py')))
         def check_baseline():
+            if DRAIN_GENERATOR and int(run('systemctl','show',WORKER,'-p','MainPID','--value'))!=worker_pid:
+                raise RuntimeError('Worker changed during rolling deployment')
             if sha(ROOT/'scripts/youtube_auto_publish_worker.py') != '409f7196bbc6193c0c712dbda32d59bcf2bafe37ee72c40a77d0f8234a0632d4':
                 raise RuntimeError('Existing failure observer worker changed')
             if sha(SQL) != SQL_SHA:
@@ -214,7 +230,14 @@ def main():
             if stopped:
                 start()
             raise
-        result = {'commit': args.commit, 'backup': str(backup), 'services': {u: run('systemctl', 'is-active', u) for u in UNITS},
+        if DRAIN_GENERATOR:
+            # Signal only the Python main process, never its Codex/image subprocess.
+            # Its existing handler sets STOP and returns after the current work item.
+            # All files and API health are verified before requesting the restart.
+            if int(run('systemctl','show',WORKER,'-p','MainPID','--value'))!=worker_pid:
+                raise RuntimeError('Worker identity changed; do not signal a replacement')
+            os.kill(worker_pid,signal.SIGTERM)
+        result = {'draining_worker_pid': worker_pid if DRAIN_GENERATOR else None, 'commit': args.commit, 'backup': str(backup), 'services': {u: run('systemctl', 'is-active', u) for u in UNITS},
                   'ledger_before': before, 'ledger_after': idle_snapshot(require_idle=False), 'material_sql_sha256': sha(SQL),
                   'sha256': {str(target): sha(target) for _, target, _ in inputs}}
         (backup / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
