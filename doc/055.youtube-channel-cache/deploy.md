@@ -28,3 +28,5 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b3679d355758d6f318fc
 12文件安装/两份静态SHA匹配；app仅替换YouTube handler；API和legacy worker已重启active，统一writer PID2994555保持不变。旧auto worker MainPID3119019仍在完成既有生图，安装窗口只冻结主进程，Codex子进程未收到信号；安装后已排队SIGTERM+SIGCONT，当前项返回后systemd自动采用新版本。11:20核验其仍active，切换尚未发生。
 
 切换前后发布账本8条（published4/unknown4）、准备任务5条（enqueue_pending1/generating1/uploading3）、短链10条相同；素材SQL摘要不变。无真实测试视频/首评/封面写入/人工核验确认。
+
+11:25终验：旧worker于11:24:47正常退出，systemd于11:24:57自动启动新PID3658132（NRestarts=1）；API、legacy、auto worker和统一writer均active。原生图任务318d428a...本轮于11:24:45达到原有20分钟上限，不可变失败通知code=cover_generation_timeout；未向生图子进程发送部署信号。11:25:38任务又处于generating，为线上业务后续活动，本次验收未触发重试。原待入队任务2968aba...由新worker正常接续处理，后续业务变化不能算作部署测试。
