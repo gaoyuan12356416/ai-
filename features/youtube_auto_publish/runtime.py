@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 import requests
 from .service import YouTubeWorkflow
+from .images import normalize_generated_cover
 from .source import MaterialSource,DEFAULT_HOSTS
 from .reference import fetch_reference_cover_factory, frozen_reference_bytes
 from .templates import WorkflowError
@@ -72,7 +73,10 @@ def generate_cover_factory(root):
         audit_fd=os.open(work/'generation-request.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(audit_fd,'w',encoding='utf-8') as audit_file:json.dump(audit,audit_file,ensure_ascii=False,indent=2)
         prompt=('Use the built-in image_gen tool to create one YouTube drama thumbnail based on the attached original drama cover. '
-                'Generate a coherent cinematic 16:9 horizontal image, exactly 1536x864 or 1920x1080. '
+                'Generate a coherent cinematic horizontal image as close to 16:9 as the image tool supports. '
+                'Native output sizes such as 1672x941 are acceptable: always save the actual generated image even when dimensions are not exact. '
+                'The backend will validate pixels and apply a minimal centered crop to exact 16:9. Do not crop or resize the image yourself. '
+                'Keep all titles, faces and essential subjects at least 3 percent inside every edge so a tiny edge crop preserves the composition. '
                 'The mandatory reference image is '+str(reference_path)+'. First inspect this local image with view_image. '
                 'Then call image_gen with referenced_image_paths containing that exact local image path. '
                 'Do not provide num_last_images_to_include when referenced_image_paths is used. '
@@ -107,7 +111,15 @@ def generate_cover_factory(root):
                 raise WorkflowError('cover_generation_output_size','AI 生成的封面文件超过 32 MB，请重新生成',503)
             if reference_path.is_symlink() or reference_path.read_bytes()!=reference or frozen_reference_bytes(root,task['reference_cover'])!=reference:
                 raise WorkflowError('reference_cover_changed','原剧参考封面在生成过程中发生变化，已停止使用本次结果',409)
-            return output.read_bytes()
+            normalized, output_audit = normalize_generated_cover(output.read_bytes())
+            if len(normalized)>32*1024*1024:
+                raise WorkflowError('cover_generation_output_size','AI 生成的封面文件超过 32 MB，请重新生成',503)
+            if output_audit['cropped']:
+                fd=os.open(work/'cover-normalized.png',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                with os.fdopen(fd,'wb') as normalized_file:normalized_file.write(normalized)
+            fd=os.open(work/'generation-output.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(fd,'w',encoding='utf-8') as output_audit_file:json.dump(output_audit,output_audit_file,indent=2)
+            return normalized
         except subprocess.TimeoutExpired:
             raise WorkflowError('cover_generation_timeout','AI 封面生成超过 20 分钟，已结束本次尝试；请重试或手动上传封面',503) from None
         except WorkflowError:raise

@@ -1,4 +1,5 @@
 """Strict raster decoding shared by generated, uploaded and reference covers."""
+import hashlib
 import io
 import struct
 import warnings
@@ -162,3 +163,35 @@ def decode_cover(data, *, generated=False, reference=False):
         'ratio':subject+'宽高比例不符合 16:9，请按 16:9 要求重新生成。',
     }[kind]
     raise WorkflowError(prefix+'_'+kind, message, status) from None
+
+
+def normalize_generated_cover(data):
+    """Crop decoded pixels to exact 16:9, allowing only small balanced edge loss.
+
+    Keep decode_cover read-only: previews and historical approved assets must not
+    change. This helper is called only for a newly completed AI generation.
+    """
+    image = decode_cover(data, generated=True)
+    width, height = image.size
+    scale = min(width // 16, height // 9)
+    target_width, target_height = 16 * scale, 9 * scale
+    removed_width, removed_height = width-target_width, height-target_height
+    if (target_width < 320 or target_height < 180 or
+            removed_width * 100 > width * 2 or removed_height * 100 > height * 2 or
+            (width * height - target_width * target_height) * 100 > width * height * 3):
+        raise WorkflowError('generated_cover_crop_excessive',
+            'AI 封面裁成 16:9 需要移除过多画面，可能影响人物或标题；请重新生成。', 503)
+    left, top = removed_width // 2, removed_height // 2
+    box = (left, top, left + target_width, top + target_height)
+    cropped = bool(removed_width or removed_height)
+    result = data
+    if cropped:
+        out = io.BytesIO()
+        image.crop(box).save(out, format='PNG')
+        result = out.getvalue()
+    audit = {'policy': 'center_crop_16_9_v1', 'cropped': cropped,
+             'source_size': [width, height], 'output_size': [target_width, target_height],
+             'crop_box': list(box), 'removed_edges': [left, top, removed_width-left, removed_height-top],
+             'source_sha256': hashlib.sha256(data).hexdigest(),
+             'output_sha256': hashlib.sha256(result).hexdigest()}
+    return result, audit
