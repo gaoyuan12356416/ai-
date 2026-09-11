@@ -9,3 +9,6 @@
 ## 保留当前生图的滚动切换
 
 --drain-generator 只允许向前部署，仍拒绝活动发布账本，但允许生图/准备任务。已核对新worker只有After API，无Requires/BindsTo/PartOf，Restart=always；其SIGTERM handler仅设置STOP，当前subprocess.run完成后才退出。此模式只停止API和legacy worker，保持自动worker PID、子进程、任务lease；安装/健康验证全部通过后只给原Python MainPID发SIGTERM（不向cgroup或Codex子进程发信号）。当前工作自然完成后，systemd等待10秒自动以新代码重启。回滚仍使用默认保护且保留全部业务数据。
+
+
+滚动竞态修正：停API/legacy后仅SIGSTOP旧Python MainPID，子进程继续；验证无Watchdog、PID不变及SQLite写锁可获得后再备份/替换。此时旧主进程不能领取下一项。成功后先排队SIGTERM再SIGCONT，只完成当前项后自动重启。任何失败恢复代码/服务后均SIGCONT，绝不遗留冻结进程；若暂停瞬间持有SQLite锁则拒绝部署并恢复进程，不进行备份以免死锁。

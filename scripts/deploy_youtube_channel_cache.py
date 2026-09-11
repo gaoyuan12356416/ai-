@@ -108,7 +108,7 @@ def main():
     worker_pid = int(run('systemctl','show',WORKER,'-p','MainPID','--value'))
     if DRAIN_GENERATOR:
         if args.rollback:raise RuntimeError('Drain mode is only for forward rolling deployment')
-        if run('systemctl','show',WORKER,'-p','Restart','--value')!='always' or worker_pid<=0:
+        if run('systemctl','show',WORKER,'-p','Restart','--value')!='always' or worker_pid<=0 or run('systemctl','show',WORKER,'-p','WatchdogUSec','--value')!='0':
             raise RuntimeError('Automatic worker restart contract missing')
         for prop in ('Requires','BindsTo','PartOf'):
             if API in run('systemctl','show',WORKER,'-p',prop,'--value').split():
@@ -200,9 +200,18 @@ def main():
         (backup / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         stopped = False
         changed = False
+        paused = False
         try:
             stopped = True
             stop()
+            if DRAIN_GENERATOR:
+                check_baseline()
+                os.kill(worker_pid,signal.SIGSTOP)
+                paused = True
+                # Never back up a DB while its paused owner holds a write lock.
+                with sqlite3.connect(DB,timeout=1) as probe:
+                    probe.execute('BEGIN IMMEDIATE')
+                    probe.rollback()
             check_baseline()
             before = idle_snapshot()
             with sqlite3.connect(DB) as src, sqlite3.connect(backup / 'jobs.sqlite3') as dst:
@@ -224,20 +233,27 @@ def main():
             if sha(SQL) != SQL_SHA:
                 raise RuntimeError('Material SQL unexpectedly changed')
         except BaseException:
-            if changed:
-                stop()
-                restore(backup, manifest)
-            if stopped:
-                start()
+            try:
+                if changed:
+                    stop()
+                    restore(backup, manifest)
+                if stopped:
+                    start()
+            finally:
+                if paused:
+                    # Resume the original code after rollback; never leave it frozen.
+                    os.kill(worker_pid,signal.SIGCONT)
+                    paused = False
             raise
-        if DRAIN_GENERATOR:
-            # Signal only the Python main process, never its Codex/image subprocess.
-            # Its existing handler sets STOP and returns after the current work item.
-            # All files and API health are verified before requesting the restart.
-            if int(run('systemctl','show',WORKER,'-p','MainPID','--value'))!=worker_pid:
-                raise RuntimeError('Worker identity changed; do not signal a replacement')
-            os.kill(worker_pid,signal.SIGTERM)
-        result = {'draining_worker_pid': worker_pid if DRAIN_GENERATOR else None, 'commit': args.commit, 'backup': str(backup), 'services': {u: run('systemctl', 'is-active', u) for u in UNITS},
+        finally:
+            if paused:
+                # The main process alone was frozen during replacement. Child image
+                # generation continued. Queue graceful STOP before allowing new claims.
+                try:
+                    os.kill(worker_pid,signal.SIGTERM)
+                finally:
+                    os.kill(worker_pid,signal.SIGCONT)
+        result = {'draining_worker_pid': worker_pid if DRAIN_GENERATOR else None, 'commit': args.commit, 'backup': str(backup), 'services': {u: run('systemctl', 'show', u, '-p', 'ActiveState', '--value') for u in UNITS},
                   'ledger_before': before, 'ledger_after': idle_snapshot(require_idle=False), 'material_sql_sha256': sha(SQL),
                   'sha256': {str(target): sha(target) for _, target, _ in inputs}}
         (backup / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
