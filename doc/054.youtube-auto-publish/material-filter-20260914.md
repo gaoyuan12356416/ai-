@@ -27,3 +27,26 @@ and check service PIDs. Do not deploy the rest of this branch as an application 
 Rollback restores only the SQL from the deployment backup to the configuration path;
 no database or asset restoration and no service restart are required. Exact production
 backup and post-deployment results are appended after verification.
+
+## Production verification
+
+Deployed SQL commit: `738819e27b59e097a10157ea3e2a33d22b474cf8` (pushed to GitHub,
+then fetched and verified on CPU). Installed SQL SHA256:
+`2c37b57fc45e2f01baee1fe87bcdc87a932dacad62c9a3ad2cc7f347bb9ae356`.
+Backup: `/mnt/data-disk/deploy/youtube-auto-publish/backups/material-filter-20260914-164744`.
+
+After replacement, the deployed adapter read the configured path successfully:
+6 materials, all 6 link_ready, list in 4.768 seconds; exact get-by-ID passed.
+Material IDs: 6667528, 6667657, 6667658, 6667662, 6667663, 6667803.
+All four API/publishing services remained active with unchanged PIDs.
+Evidence: `manifest.json` and `verification.json` in the backup directory.
+
+Exact SQL-only rollback:
+
+```bash
+cp -p /mnt/data-disk/deploy/youtube-auto-publish/backups/material-filter-20260914-164744/material-source.sql /etc/youtube-auto-publish/material-source.sql.rollback
+mv -f /etc/youtube-auto-publish/material-source.sql.rollback /etc/youtube-auto-publish/material-source.sql
+```
+
+This configuration rollout requires no application restart. Do not restore any
+database, publishing ledger, or media assets when rolling back this SQL.
