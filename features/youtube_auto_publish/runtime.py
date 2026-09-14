@@ -46,7 +46,7 @@ def readonly_runner(app):
 
 def generate_cover_factory(root):
     root=Path(root).resolve()
-    def generate(task,version):
+    def generate_attempt(task,version,timeout):
         # Both first generation and every revision use the same immutable drama
         # original. Missing/changed bytes must never fall back to text-only art.
         reference=frozen_reference_bytes(root,task.get('reference_cover'))
@@ -91,6 +91,7 @@ def generate_cover_factory(root):
                 'Generate actual image pixels, never HTML, SVG, scripted drawings or placeholder artwork. '
                 'Never alter PNG IHDR, chunk lengths, checksums, dimensions headers or metadata to make invalid output appear valid. '
                 'Do not rewrite generated image bytes to bypass format or aspect-ratio validation; retain the real generated dimensions. '
+                'Save the tool-returned original binary file with a filesystem copy. Never reconstruct image bytes from displayed text, truncated tool output or manually transcribed base64. Verify the saved file fully decodes before reporting completion. '
                 'Copy only the selected final generated raster image to '+str(output)+'. Do not run any other workflow. '
                 'Reply with a short completion message. Artistic input:\n'+json.dumps(facts,ensure_ascii=False))
         cmd=[os.environ.get('YOUTUBE_AUTO_CODEX_BIN','/usr/bin/codex'),'-a','never','exec','--skip-git-repo-check','--ephemeral','--image',str(reference_path),
@@ -98,7 +99,7 @@ def generate_cover_factory(root):
         # Do not expose application/MySQL/Feishu/Google environment secrets to the generator.
         env={key:os.environ[key] for key in ('PATH','HOME','USER','LANG','LC_ALL','TMPDIR','CODEX_HOME') if key in os.environ}
         try:
-            p=subprocess.run(cmd,input=prompt,env=env,capture_output=True,text=True,timeout=1200)
+            p=subprocess.run(cmd,input=prompt,env=env,capture_output=True,text=True,timeout=timeout)
             if p.returncode:
                 raise WorkflowError('cover_generation_failed','AI 生图进程执行失败，请重试生成或手动上传封面',503)
             if output.is_symlink():
@@ -111,7 +112,14 @@ def generate_cover_factory(root):
                 raise WorkflowError('cover_generation_output_size','AI 生成的封面文件超过 32 MB，请重新生成',503)
             if reference_path.is_symlink() or reference_path.read_bytes()!=reference or frozen_reference_bytes(root,task['reference_cover'])!=reference:
                 raise WorkflowError('reference_cover_changed','原剧参考封面在生成过程中发生变化，已停止使用本次结果',409)
-            normalized, output_audit = normalize_generated_cover(output.read_bytes())
+            raw=output.read_bytes()
+            try:
+                normalized, output_audit = normalize_generated_cover(raw)
+            except WorkflowError as error:
+                fd=os.open(work/'generation-failure.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                with os.fdopen(fd,'w',encoding='utf-8') as audit_file:
+                    json.dump({'code':error.code,'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()},audit_file)
+                raise
             if len(normalized)>32*1024*1024:
                 raise WorkflowError('cover_generation_output_size','AI 生成的封面文件超过 32 MB，请重新生成',503)
             if output_audit['cropped']:
@@ -126,6 +134,17 @@ def generate_cover_factory(root):
         except Exception:
             # Model output and tool traces may contain sensitive context; do not relay them to UI/logs.
             raise WorkflowError('cover_generation_failed','AI 封面生成执行异常，请重试生成或手动上传封面',503) from None
+    def generate(task,version):
+        # Successful CLI exit is not proof of complete image pixels. Each
+        # attempt has a separate workspace; no platform writes are retried.
+        retryable={'generated_cover_corrupt','cover_generation_output_missing'}
+        deadline=time.monotonic()+1200
+        for attempt in range(2):
+            try:
+                return generate_attempt(task,version,max(1,deadline-time.monotonic()))
+            except WorkflowError as error:
+                if error.code not in retryable or attempt == 1 or time.monotonic() >= deadline:
+                    raise
     return generate
 
 

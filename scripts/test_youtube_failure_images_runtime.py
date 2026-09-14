@@ -147,6 +147,26 @@ class GenerationFailureCase(unittest.TestCase):
         self.assertEqual(ctx.exception.code,code)
         self.assertNotIn('private-trace-secret',str(ctx.exception))
 
+    def test_corrupt_output_retries_once_with_separate_workspace(self):
+        calls=[]
+        def run(command,**kwargs):
+            work=Path(command[command.index('-C')+1]);calls.append(work)
+            (work/'cover.png').write_bytes(picture()[:-40] if len(calls)==1 else picture())
+            return SimpleNamespace(returncode=0)
+        self.assertTrue(self.run_generator(run))
+        self.assertEqual(len(calls),2)
+        self.assertNotEqual(calls[0],calls[1])
+        self.assertTrue((calls[0]/'generation-failure.json').is_file())
+
+    def test_repeated_corruption_stops_after_two_attempts(self):
+        calls=[]
+        def run(command,**kwargs):
+            calls.append(command)
+            (Path(command[command.index('-C')+1])/'cover.png').write_bytes(picture()[:-40])
+            return SimpleNamespace(returncode=0)
+        self.assert_failure(run,'generated_cover_corrupt')
+        self.assertEqual(len(calls),2)
+
     def test_timeout_has_specific_error(self):
         def timeout(*args,**kwargs):raise subprocess.TimeoutExpired(args[0],1200,output='private-trace-secret')
         self.assert_failure(timeout,'cover_generation_timeout')

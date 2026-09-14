@@ -413,6 +413,39 @@ class WorkflowCase(unittest.TestCase):
         self.assertEqual(self.store.enqueues,[])
         self.assert_error('review_conflict',lambda:self.service.review(self.actor,value['id'],{'action':'approve','version':1}),409)
 
+    def failed_cover(self):
+        value=self.create()
+        self.generate.side_effect=WorkflowError('generated_cover_corrupt','bad image',503)
+        self.service.run_once()
+        return self.service.get_task(self.actor,value['id'])['task']
+
+    def test_failed_generation_manual_cover_and_duplicate_guard(self):
+        value=self.failed_cover();asset=self.cover()
+        self.assertTrue(value['can_upload_cover']);self.assertFalse(value['can_review'])
+        payload={'action':'manual','version':1,'cover_asset_id':asset['id']}
+        self.assert_error('review_conflict',lambda:self.service.review(self.actor,value['id'],{'action':'approve','version':1}),409)
+        result=self.service.review(self.actor,value['id'],payload)['task']
+        self.assertEqual(result['current_version'],2)
+        with self.service.db() as c:
+            _,saved=self.service._row(c,value['id'],self.actor)
+        self.assertEqual(saved['versions'][0]['asset_id'],'')
+        self.assertEqual(result['versions'][-1]['source'],'manual')
+        self.assertTrue(result['versions'][-1]['approved'])
+        self.assertFalse(result['can_upload_cover'])
+        self.assert_error('review_conflict',lambda:self.service.review(self.actor,value['id'],payload),409)
+        self.assertEqual(self.store.enqueues,[])
+
+    def test_failed_cover_manual_expired_schedule_waits(self):
+        value=self.failed_cover();asset=self.cover()
+        with self.service.db(True) as c:
+            _,body=self.service._row(c,value['id'],self.actor)
+            body['publish_at']='2020-01-01T00:00:00Z'
+            self.service._save(c,body,'generation_failed')
+        result=self.service.review(self.actor,value['id'],{'action':'manual','version':1,'cover_asset_id':asset['id']})['task']
+        self.assertEqual(result['status'],'schedule_missed')
+        self.assertEqual(self.store.enqueues,[])
+        self.assertTrue(result['versions'][-1]['approved'])
+
     def test_manual_replacement_preserves_ai_history_and_approves_new_version(self):
         value=self.ready()
         asset=self.cover(data=png(1600,900))

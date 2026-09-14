@@ -231,7 +231,8 @@ class GeneratorReferenceCase(unittest.TestCase):
         self.assertIn(str(Path(cmd[cmd.index('--image')+1])), prompt)
         self.assertIn('Never generate from text alone', prompt)
         self.assertIn('16:9', prompt)
-        self.assertEqual(kwargs['timeout'], 1200)
+        self.assertGreater(kwargs['timeout'],1190)
+        self.assertLessEqual(kwargs['timeout'],1200)
 
     def test_redo_reuses_identical_original_and_all_revision_feedback(self):
         self.generate()

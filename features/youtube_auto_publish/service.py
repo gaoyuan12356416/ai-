@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         self._schedule_dto(value,body,ledger)
         status=value['status'];error=value['error']
         value['can_review']=(body['status']=='review' or (body['status']=='schedule_missed' and body.get('schedule_resume_state')=='review')) and not ledger
+        value['can_upload_cover']=not ledger and (value['can_review'] or body['status']=='generation_failed')
         value['versions']=[dict(v,url=self.asset_url(v['asset_id'])) for v in value.get('versions',[]) if v.get('asset_id')]
         current=next((v for v in value['versions'] if v['number']==body['current_version']),None)
         value['cover_url']=current['url'] if current else ''
@@ -402,7 +403,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             try:version=int(payload.get('version'))
             except (TypeError,ValueError):raise WorkflowError('version_required','请刷新后审核当前版本') from None
             reviewable=row['state']=='review' or (row['state']=='schedule_missed' and body.get('schedule_resume_state')=='review')
-            if not reviewable or version!=row['version'] or self._ledger(body,c):
+            if not (reviewable or (action=='manual' and row['state']=='generation_failed')) or version!=row['version'] or self._ledger(body,c):
                 raise WorkflowError('review_conflict','当前版本已处理或已更新，请刷新后查看',409)
             current=body['versions'][-1]
             if action=='reject':
