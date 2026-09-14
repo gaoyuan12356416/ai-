@@ -15,8 +15,5 @@ SELECT
   '' AS size,
   '1479' AS app_id
 FROM `kunlunads_dev`.`ads_custom_source` s
-WHERE s.data_source='6'
-  AND s.task_id='-2'
-  AND s.product='dramawave'
-  AND s.designer='789'
-  AND s.created_at>='2026-09-10'
+WHERE s.product='Drama-社媒专用素材'
+  AND s.category='dramawave_post'
