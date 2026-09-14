@@ -9,3 +9,14 @@ Failed-generation task details expose Upload cover. Selection is local and previ
 Validation: targeted backend suites, browser selection/preview/confirmation with mocked API, and isolated production image-generation validation. No test video, comment or Feishu message is sent.
 
 Deploy scripts/deploy_youtube_cover_recovery.py from an exact GitHub release. It checks live file baselines, data mount, SQL and idle state; backs up code/SQLite/outbox; installs only runtime.py, service.py and page HTML/JS to API/Nginx roots; restarts API and its affected YouTube workers. Unified writer stays running. Rollback: run the same script with --rollback BACKUP; current databases and assets are retained.
+
+## Production verification, 2026-09-14
+
+Runtime release f7e4fe078732e3921111f33d951e781fbab1e70f (code 98b400e494c1953afe42856e271a41c2dd69e586), CPU /root/drama_material_service. Local and CPU each ran 132 targeted backend tests: 131 passed, 1 environment fixture skipped. Chromium desktop/mobile recovery checks: 8 passed, zero JS exceptions. Public HTML/JS HTTP 200 and hashes exactly match deployed bytes; anonymous API 401; original task owner-authenticated GET 200 with can_upload_cover=true. API and two affected workers restarted and active with NRestarts=0, unified writer retained. All publishing/preparation counts and 21 short links unchanged.
+
+Backup: /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-recovery-20260914-101036-f7e4fe078732
+
+Exact rollback:
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/f7e4fe078732e3921111f33d951e781fbab1e70f/scripts/deploy_youtube_cover_recovery.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-recovery-20260914-101036-f7e4fe078732
+```
