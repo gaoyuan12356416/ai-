@@ -24,13 +24,14 @@ def uid(): return uuid.uuid4().hex
 
 
 class YouTubeWorkflow:
-    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, failure_status=None, fetch_reference_cover=None, channel_directory=None, public_base='https://ai.yingliangads.com', enabled=True):
+    def __init__(self, db_path, asset_root, source, channels, short_link, engine_store, *, generate=None, notify=None, failure_status=None, fetch_reference_cover=None, channel_directory=None, attribution_links=None, public_base='https://ai.yingliangads.com', enabled=True):
         self.db_path=str(db_path); self.root=Path(asset_root).resolve()
         self.source,self.channels,self.short_link,self.engine_store=source,channels,short_link,engine_store
         self.generate,self.notify,self.public_base,self.enabled=generate,notify,public_base.rstrip('/'),bool(enabled)
         self.fetch_reference_cover=fetch_reference_cover
         self.failure_status=failure_status
         self.channel_directory=channel_directory
+        self.attribution_links=attribution_links
         self.root.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
@@ -210,6 +211,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         value['reference_cover']=({'url':self.asset_url(reference['asset_id']),'drama_name':reference.get('drama_name',''),'frozen':True}
                                   if reference.get('asset_id') else None)
         ledger=self._ledger(body)
+        if ledger and ledger.get('reviewed_phase')=='attribution_pending':ledger=None
         phase=value.get('phase','cover');status=value['status'];error=value.get('error',{})
         if ledger:
             phase=ledger.get('reviewed_phase') or ledger.get('status')
@@ -376,7 +378,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         for field in ('title','description','comment'):
             render(request[field+'_template'],preflight,field)
         if needs_url:
-            material['macro_url']=str(self.short_link(material))
+            if self.attribution_links is not None:
+                material=self.attribution_links.prepare(material,channel,actor,task_id)
+            else:material['macro_url']=str(self.short_link(material))
         resolved={field:render(request[field+'_template'],material,field) for field in ('title','description','comment')}
         created=now()
         body=dict(resolved,id=task_id,operation_id=op,material=material,channel=channel,creator=dict(actor),request=request,
@@ -547,14 +551,22 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                         ch=self.channel_directory.validate(body['creator'],str(ch['id']),comment=bool(body['comment']),expected=ch)
                     ledger=self._ledger(body) or self.engine_store.enqueue_reviewed_youtube(
                         preparation_id=task_id,source_material_id=m['id'],approved_cover_path=asset['path'],approved_cover_sha256=asset['sha256'],
-                        operation_id='youtube-auto-'+task_id,job_id=m.get('source_job_id') or m.get('link_job_id') or task_id,content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
+                        operation_id='youtube-auto-'+task_id,job_id=(task_id if m.get('attribution') else m.get('source_job_id') or m.get('link_job_id') or task_id),content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
                         channel_local_id=str(ch['id']),channel_id=ch['channel_id'],youtube_account_id=ch['youtube_account_id'],source_kind='custom_source',source_url=m['url'],title=body['title'],
                         description_template=body['description_template'],description_rendered=body['description'],comment_text=body['comment'],duplicate_confirmed=False,
                         scopes=ch['scopes'],operator_user_id=body['creator']['user_id'],operator_name=body['creator'].get('name',''),
-                        publish_at=body.get('publish_at',''),schedule_version=body.get('schedule_version',0))
+                        publish_at=body.get('publish_at',''),schedule_version=body.get('schedule_version',0),
+                        **({'attribution_pending':True} if m.get('attribution') else {}))
+                    if m.get('attribution'):
+                        if self.attribution_links is None:raise WorkflowError('attribution_unavailable','归因服务不可用',503)
+                        m=self.attribution_links.finalize(dict(m),ledger)
                     with self.db(True) as c:
                         row,current=self._row(c,task_id)
                         if row['lease_token']!=token:return {'claimed':True,'stale':True}
+                        if m.get('attribution'):
+                            current['material']=m
+                            changed=c.execute("UPDATE drama_youtube_publish SET reviewed_phase='upload' WHERE id=? AND preparation_id=? AND reviewed_phase='attribution_pending' AND status='queued' AND video_attempt_count=0 AND unknown_outcome=0 AND video_id='' AND resumable_session_uri='' AND lease_owner=''",(ledger['id'],task_id)).rowcount
+                            if not changed and ledger.get('reviewed_phase')=='attribution_pending':raise WorkflowError('attribution_conflict','发布记录状态已变化',409)
                         current['publish_id']=ledger['id'];current['phase']='upload';current['error']={};self._save(c,current,'uploading')
                         c.execute('UPDATE youtube_auto_preparation SET lease_token=?,lease_until=0 WHERE id=?',('',task_id))
             except Exception as exc:

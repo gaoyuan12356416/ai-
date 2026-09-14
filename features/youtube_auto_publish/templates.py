@@ -15,6 +15,8 @@ FIELDS = {'url': 'macro_url', 'desc': 'macro_desc', 'name': 'macro_name'}
 
 
 def long_url(material):
+    if material.get('attribution'):
+        return str(material.get('long_url') or '')
     try:
         return build_long_url(str(material.get('source_job_id') or material.get('link_job_id') or ''), str(material.get('content_id') or ''))
     except Exception:
@@ -41,7 +43,7 @@ def render(template, material, field, *, allow_unresolved=False):
         if allow_unresolved:
             return token
         value = str(material.get(FIELDS[key]) or '').strip()
-        if not value or (key == 'url' and not long_url(material)):
+        if not value or (key == 'url' and not (long_url(material) or (material.get('attribution') and material.get('link_job_id') and material.get('content_id')))):
             raise WorkflowError('macro_source_missing', '素材缺少 %s 的值或有效剧集关联' % token, 409)
         return value
     value = TOKENS.sub(replace, template).strip()

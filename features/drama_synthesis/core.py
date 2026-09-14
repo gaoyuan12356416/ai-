@@ -331,8 +331,8 @@ def build_long_url(job_id: str, content_id: str) -> str:
     return target
 
 
-def render_wrapper_html(job_id: str, content_id: str) -> bytes:
-    target = build_long_url(job_id, content_id)
+def render_wrapper_html(job_id: str, content_id: str, *, target: str = "") -> bytes:
+    target = target or build_long_url(job_id, content_id)
     escaped = html.escape(target, quote=True)
     document = (
         "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
@@ -651,11 +651,17 @@ class DramaSynthesisStore:
             finally:
                 conn.close()
 
-    def ensure_short_link(self, job_id: str, material_kind: str, content_id: str, publisher: Optional[ImmutableFilesystemPublisher]) -> Dict[str, Any]:
+    def ensure_short_link(self, job_id: str, material_kind: str, content_id: str, publisher: Optional[ImmutableFilesystemPublisher], *, attribution_url: str = "") -> Dict[str, Any]:
+        if attribution_url:
+            from features.youtube_auto_publish.attribution import BASE_URL
+            parsed = urlsplit(attribution_url)
+            if (material_kind != "custom_source" or attribution_url.split("?", 1)[0] != BASE_URL
+                    or parsed.fragment or parsed.username or parsed.password):
+                raise DramaSynthesisError("attribution_invalid", "YouTube归因长链无效", 409)
         if material_kind not in {"concat_video", "no_bgm_video", "random_template", "custom_source"}:
             raise DramaSynthesisError("drama_short_link_material_invalid", "短链只支持视频素材")
-        body = render_wrapper_html(job_id, content_id)
-        long_url = build_long_url(job_id, content_id)
+        long_url = attribution_url or build_long_url(job_id, content_id)
+        body = render_wrapper_html(job_id, content_id, target=long_url)
         body_sha = hashlib.sha256(body).hexdigest()
         now = utc_now()
         with self._lock:
@@ -663,6 +669,12 @@ class DramaSynthesisStore:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute("SELECT * FROM drama_material_short_link WHERE job_id=? AND material_kind=?", (job_id, material_kind)).fetchone()
+                if attribution_url:
+                    from features.youtube_auto_publish.attribution import build_url
+                    reserved = conn.execute("SELECT context FROM youtube_link_attribution WHERE task_id=?", (job_id,)).fetchone()
+                    ledger = conn.execute("SELECT * FROM drama_youtube_publish WHERE preparation_id=? AND workflow='reviewed_thumbnail'", (job_id,)).fetchone()
+                    if not row or not reserved or not ledger or build_url(json.loads(reserved['context']), dict(ledger)) != attribution_url:
+                        raise DramaSynthesisError("attribution_conflict", "归因长链与冻结发布记录不一致", 409)
                 if row is None:
                     cursor = conn.execute(
                         "INSERT INTO drama_material_short_link(job_id,material_kind,content_id,long_url,wrapper_sha256,publish_state,created_at_utc) VALUES(?,?,?,?,?,?,?)",
@@ -670,6 +682,12 @@ class DramaSynthesisStore:
                     )
                     link_id = int(cursor.lastrowid)
                 else:
+                    if attribution_url and row["publish_state"] == "pending" and not row["long_url"] and not row["wrapper_sha256"]:
+                        reserved = conn.execute("SELECT context FROM youtube_link_attribution WHERE task_id=? AND link_id=?", (job_id, row["id"])).fetchone()
+                        if not reserved or row["content_id"] != content_id:
+                            raise DramaSynthesisError("attribution_conflict", "归因短链预留身份不一致", 409)
+                        conn.execute("UPDATE drama_material_short_link SET long_url=?,wrapper_sha256=? WHERE id=?", (long_url, body_sha, row["id"]))
+                        row = conn.execute("SELECT * FROM drama_material_short_link WHERE id=?", (row["id"],)).fetchone()
                     if row["content_id"] != content_id or row["long_url"] != long_url or row["wrapper_sha256"] != body_sha:
                         raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链目标已冻结且不一致", 409)
                     link_id = int(row["id"])
@@ -746,13 +764,13 @@ class DramaSynthesisStore:
 
     def enqueue_reviewed_youtube(self, *, preparation_id: str, source_material_id: str,
                                  approved_cover_path: str, approved_cover_sha256: str,
-                                 publish_at: str = "", schedule_version: int = 0, **request: Any) -> Dict[str, Any]:
+                                 publish_at: str = "", schedule_version: int = 0, attribution_pending: bool = False, **request: Any) -> Dict[str, Any]:
         """Internal handoff after the preparation service freezes an approved cover.
 
         Both workflows allocate IDs from this table because the shared HK media
         executor caches task-{publish_id}; separate counters would mix videos.
         """
-        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version")):
+        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version", "_attribution_pending")):
             raise DramaSynthesisError("youtube_reviewed_request_invalid", "审核发布请求无效", 400)
         if (not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(preparation_id or ""))
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(source_material_id or ""))
@@ -765,7 +783,7 @@ class DramaSynthesisStore:
         request["scopes"] = scopes
         return self._enqueue_youtube(_workflow=REVIEWED_WORKFLOW,
             _reviewed=(str(preparation_id), str(source_material_id), str(approved_cover_path), approved_cover_sha256),
-            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version, **request)
+            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version, _attribution_pending=attribution_pending, **request)
 
     def enqueue_youtube_canary(
         self, *, job_id: str, content_id: str, source_kind: str, source_url: str,
@@ -808,6 +826,7 @@ class DramaSynthesisStore:
         _reviewed: tuple[str, str, str, str] = ("", "", "", ""),
         _publish_at: str = "",
         _schedule_version: int = 0,
+        _attribution_pending: bool = False,
     ) -> Dict[str, Any]:
         if type(_schedule_version) is not int or _schedule_version < 0:
             raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
@@ -898,6 +917,10 @@ class DramaSynthesisStore:
                     ),
                 )
                 task_id = int(cursor.lastrowid)
+                if _attribution_pending:
+                    if _workflow != REVIEWED_WORKFLOW:
+                        raise DramaSynthesisError("attribution_invalid", "归因仅支持审核发布流程", 409)
+                    conn.execute("UPDATE drama_youtube_publish SET reviewed_phase='attribution_pending' WHERE id=?", (task_id,))
                 conn.execute(
                     "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
                     (task_id, "enqueue", "accepted", "", now),
@@ -1089,7 +1112,7 @@ class DramaSynthesisStore:
         cadence = "1"
         schedule_queue = "0"
         if reviewed:
-            cadence = "(schedule_next_check_at='' OR schedule_next_check_at<=?)"
+            cadence = "reviewed_phase<>'attribution_pending' AND (schedule_next_check_at='' OR schedule_next_check_at<=?)"
             params += (utc_now(),)
             schedule_queue = "status IN ('scheduled','schedule_pending')"
             unknown_reconcile = "(unknown_outcome=1 AND video_id<>'' AND comment_status<>'unknown' AND schedule_status='reconciling')"

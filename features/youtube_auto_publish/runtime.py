@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
+from contextlib import closing
 import subprocess
 import threading
 import time
@@ -18,8 +20,46 @@ from .failure_notifications import failure_notification_status
 from .engine import reviewed_scope_eligible
 from features.drama_synthesis.youtube import YouTubeCredentialRepository
 from .channels import ChannelDirectory, ChannelFailures
+from .attribution import AttributionLinks, mapped_user_id
 
 READ_LIMIT = threading.BoundedSemaphore(2)
+
+
+def attribution_user_resolver(app):
+    def resolve(actor):
+        # The authenticated actor can omit email; use its tenant-scoped account.
+        with closing(sqlite3.connect('file:' + str(app.JOB_DB_PATH) + '?mode=ro', uri=True)) as c:
+            users = c.execute('SELECT email FROM drama_admin_user WHERE user_id=? AND tenant_key=? LIMIT 2',
+                             (actor['user_id'], actor['tenant_key'])).fetchall()
+        if len(users) != 1 or not str(users[0][0] or '').strip():
+            raise WorkflowError('attribution_email_missing', '发布用户缺少唯一的邮箱信息，请先完善用户资料', 409)
+        email = str(users[0][0]).strip().lower()
+        database = str(app.ADMIN_MAPPING_MYSQL_DATABASE)
+        if (str(app.ADMIN_MAPPING_MYSQL_HOST) != '101.32.56.53' or str(app.ADMIN_MAPPING_MYSQL_PORT) != '63350'
+                or not re.fullmatch(r'[A-Za-z0-9_]+', database)):
+            raise WorkflowError('attribution_mapping_unavailable', '用户映射只读数据库配置无效', 503)
+        if not READ_LIMIT.acquire(timeout=2):
+            raise WorkflowError('attribution_mapping_busy', '用户映射查询繁忙，请稍后重试', 503)
+        try:
+            sql = ('SELECT DISTINCT sub_user_id FROM `' + database + '`.admin_user_group '
+                   'WHERE BINARY LOWER(TRIM(email))=BINARY CONVERT(0x' + email.encode('utf-8').hex() + ' USING utf8mb4) LIMIT 2')
+            env = os.environ.copy()
+            env['MYSQL_PWD'] = app.ADMIN_MAPPING_MYSQL_PASSWORD
+            cmd = ['mysql', '-h', '101.32.56.53', '-P', '63350', '-u', str(app.ADMIN_MAPPING_MYSQL_USER),
+                   '-N', '-B', '--default-character-set=utf8mb4', '--connect-timeout=3', '-e',
+                   'SET SESSION MAX_EXECUTION_TIME=8000; START TRANSACTION READ ONLY; SELECT @@read_only; ' + sql + '; COMMIT;']
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=25, check=True)
+            rows = [line.split('\t') for line in result.stdout.splitlines() if line.strip()]
+            if not rows or rows.pop(0) != ['1']:
+                raise WorkflowError('attribution_mapping_unavailable', '用户映射必须使用只读副本', 503)
+            return mapped_user_id(rows)
+        except WorkflowError:
+            raise
+        except Exception:
+            raise WorkflowError('attribution_mapping_unavailable', '用户邮箱映射查询失败，请稍后重试', 503) from None
+        finally:
+            READ_LIMIT.release()
+    return resolve
 
 
 def readonly_runner(app):
@@ -203,7 +243,8 @@ def build_service(app):
         job_id=material.get('source_job_id') or material.get('link_job_id') or ''
         value=app.DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id,kind,material['content_id'],app.DRAMA_SHORT_LINK_PUBLISHER)
         return value['short_url']
-    return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,
+    links=AttributionLinks(app.JOB_DB_PATH,app.DRAMA_SYNTHESIS_STORE,app.DRAMA_SHORT_LINK_PUBLISHER,attribution_user_resolver(app))
+    return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,attribution_links=links,
                            generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,
                            notify=notify_factory(app),failure_status=lambda body,ledger:failure_notification_status(root/'failure-notifications.sqlite3',body,ledger),public_base=app.PUBLIC_BASE_URL.split('/drama-materials')[0],
                            enabled=os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1')
