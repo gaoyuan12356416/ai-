@@ -20,3 +20,5 @@ Exact rollback:
 ```bash
 python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/f7e4fe078732e3921111f33d951e781fbab1e70f/scripts/deploy_youtube_cover_recovery.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-recovery-20260914-101036-f7e4fe078732
 ```
+
+Same frozen reference and requirements validated in isolated production scratch: generation succeeded in 209.7 seconds, 2,334,334-byte PNG, SHA256 be359efc249d99777cad5ca13bc81694851a64255ddd5d7b0d43f20e7eaf0c6b. Validation root /mnt/data-disk/deploy/youtube-auto-publish/validation/cover-recovery-20260914-98b400e. No production task/ledger, video, comment or notification was changed by this check. The new image is available as a local delivery artifact for manual use; the original expired reservation remains unchanged.
