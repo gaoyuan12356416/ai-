@@ -357,6 +357,8 @@
     .badge.deferred { color: #925d00; background: #fff4d9; }
     .badge.validation_failed, .badge.failed { color: #ad2f3b; background: #ffedef; }
     .badge.unknown, .badge.needs_review { color: #925d00; background: #fff4d9; }
+    .badge.repaired_pending, .badge.batch_blocked { color: #925d00; background: #fff4d9; }
+    .badge.published_elsewhere { color: #08734f; background: #e8f8f1; }
     .badge.other { color: #56657b; background: #edf1f6; }
     .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .error { max-width: 320px; color: #a62f3a; line-height: 1.45; word-break: break-word; }
@@ -406,7 +408,7 @@
       <header class="topbar">
         <div class="title">
           <h1>X Post 素材池</h1>
-          <p>手动加入自定义素材 ID；定时任务按加入时间从早到晚选择未发布且未占用的素材。</p>
+          <p>手动加入自定义素材 ID；定时任务按加入时间从新到旧选择未发布且未占用的素材，并按语言匹配账号。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -422,10 +424,11 @@
         <section class="stats">
           <article class="stat"><span>池内素材</span><strong id="totalCount">—</strong></article>
           <article class="stat"><span>未发布</span><strong id="unpublishedCount">—</strong></article>
-          <article class="stat"><span>可供发布</span><strong id="availableCount">—</strong></article>
+          <article class="stat"><span>未占用（待排期预检）</span><strong id="availableCount">—</strong></article>
           <article class="stat"><span>待可投放</span><strong id="deferredCount">—</strong></article>
           <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
         </section>
+        <p id="poolStatusSummary" class="helper" role="status">未发布包含历史占用、失败和待核查素材，不等于当前排期可用数量。</p>
 
         <section class="panel">
           <div class="section-head">
@@ -490,7 +493,7 @@
             <div class="field">
               <label for="materialIds">自定义素材 ID</label>
               <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。X 发布不查询违规历史记录；仍会检查素材、色情/暴力来源标签、短剧映射和媒体条件，长视频在排期预检时按账号会员资格路由。</span>
+              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。检查素材身份、短剧映射、语言和媒体条件；长视频在排期预检时按账号会员资格路由。</span>
             </div>
             <div class="add-actions">
               <button id="manualPublish" class="button danger" type="button">手动发布</button>
@@ -526,6 +529,9 @@
               <option value="deferred">待可投放</option>
               <option value="validation_failed">不可用</option>
               <option value="occupied">已被队列占用</option>
+              <option value="repaired_pending">媒体已修复，待安排发布</option>
+              <option value="batch_blocked">批次暂停，本条未执行</option>
+              <option value="published_elsewhere">历史已手动发布</option>
               <option value="failed">发布失败（不重发）</option>
               <option value="needs_review">结果待核查（不重发）</option>
               <option value="published">已发布</option>
@@ -624,7 +630,7 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js"></script>
-  <script>
+  <script data-version="20260914-unpublished-status">
     (() => {
       const state = {
         auth: null,
@@ -1681,6 +1687,9 @@
           available: "可供发布",
           deferred: "待可投放",
           occupied: "已被队列占用",
+          repaired_pending: "媒体已修复，待安排发布",
+          batch_blocked: "批次暂停，本条未执行",
+          published_elsewhere: "历史已手动发布",
           published: "已发布",
           validation_failed: "不可用",
           failed: "发布失败（不重发）",
@@ -1739,7 +1748,8 @@
         link.href = href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        setText(link, "预览 Post");
+        setText(link, item.delivery_mode === "premium_relay_repost" && mainStatus(item).value !== "published"
+          ? "中转原帖（目标未完成）" : "预览 Post");
         cell.appendChild(link);
       }
       function renderRows(items) {
@@ -1773,7 +1783,9 @@
           appendCell(
             row,
             item.queue_id ? `队列 ${item.queue_id}` : "—",
-            item.queue_status ? `状态：${item.queue_status}` : ""
+            item.queue_status
+              ? `状态：${item.queue_status}${item.schedule_run_id ? `；批次 ${item.schedule_run_id}：${item.batch_status || "未知"}` : ""}`
+              : ""
           );
           const accountName = item.account_username
             ? `@${String(item.account_username).replace(/^@/, "")}`
@@ -1789,16 +1801,16 @@
           row.appendChild(previewCell);
 
           const errorCode =
-            item.last_error_code || item.publish_error_code || item.error_code || "";
+            item.last_error_code || item.publish_error_code || item.error_code || item.batch_error_code || "";
           const errorMessage =
-            item.last_error_message || item.publish_error_message || item.error_message || "";
+            item.last_error_message || item.publish_error_message || item.error_message || item.batch_error_message || "";
           const isDeferred = available.value === "deferred";
           const errorCell = appendCell(
             row,
-            isDeferred ? "等待短剧可投放时间" : (errorCode || "—"),
+            isDeferred ? "等待短剧可投放时间" : (item.status_hint ? available.label : (errorCode || "—")),
             isDeferred
               ? `${errorMessage || "当前尚未到可投放时间"}；系统将在到点后的下一次自然排期自动复检。`
-              : errorMessage
+              : [item.status_hint, errorMessage].filter(Boolean).join(" ")
           );
           if (isDeferred) {
             errorCell.className = "deferred-info";
@@ -1844,29 +1856,19 @@
         });
         return params.toString();
       }
-      async function countFor(params) {
-        const query = new URLSearchParams(Object.assign({ page: "1", page_size: "1" }, params || {}));
-        const result = await api(`/api/admin/x-posts/material-pool?${query.toString()}`);
-        return extractPagination(result).total;
-      }
-      async function loadStats() {
-        const results = await Promise.allSettled([
-          countFor({}),
-          countFor({ status: "unpublished" }),
-          countFor({ availability: "available" }),
-          countFor({ availability: "deferred" }),
-          countFor({ status: "published" }),
-        ]);
-        const targets = ["totalCount", "unpublishedCount", "availableCount", "deferredCount", "publishedCount"];
-        results.forEach((result, index) => {
-          setText(byId(targets[index]), result.status === "fulfilled" ? result.value : "—");
-        });
+      function renderStats(summary) {
+        const fields = {totalCount: "total", unpublishedCount: "unpublished", availableCount: "available", deferredCount: "deferred", publishedCount: "published"};
+        Object.entries(fields).forEach(([id, key]) => setText(byId(id), summary?.[key] ?? "—"));
+        setText(byId("poolStatusSummary"), summary
+          ? `池内未发布 ${summary.unpublished} 个中，已有队列或预约占用 ${summary.occupied} 个；其中媒体已修复待安排 ${summary.repaired_pending ?? "—"} 个、批次暂停 ${summary.batch_blocked ?? "—"} 个、发布失败 ${summary.failed ?? "—"} 个、结果待核查 ${summary.needs_review ?? "—"} 个、历史已手动发布 ${summary.published_elsewhere ?? "—"} 个。未占用素材仍需通过语言、账号和媒体预检。`
+          : "统计暂不可用，请刷新重试；未发布不等于当前排期可用数量。");
       }
       async function loadPool() {
         setEmpty("正在加载…");
         try {
           const result = await api(`/api/admin/x-posts/material-pool?${queryString()}`);
           const items = Array.isArray(result.items) ? result.items : [];
+          if (result.summary) renderStats(result.summary);
           const pagination = extractPagination(result);
           state.total = pagination.total;
           state.page = pagination.page;
@@ -1878,6 +1880,7 @@
           byId("nextPage").disabled = state.page >= pages;
         } catch (error) {
           setEmpty(`加载失败：${error.message}`);
+          renderStats(null);
         }
       }
       function parseMaterialIds(maxCount = 100, actionLabel = "加入素材池") {
@@ -1940,7 +1943,7 @@
             );
           }
           showToast(`${messages.join("；")}。`, false);
-          await Promise.all([loadPool(), loadStats()]);
+          await Promise.all([loadPool()]);
         } catch (error) {
           showToast(`添加失败：${error.message}`, true);
         } finally {
@@ -1960,7 +1963,7 @@
             body: "{}",
           });
           showToast(`素材 ${materialId || poolId} 已从素材池删除。`, false);
-          await Promise.all([loadPool(), loadStats()]);
+          await Promise.all([loadPool()]);
           const lastPage = Math.max(1, Math.ceil(state.total / state.pageSize));
           if (state.page > lastPage) {
             state.page = lastPage;
@@ -2003,7 +2006,7 @@
           return;
         }
         byId("pageRoot").classList.remove("hidden");
-        await Promise.all([loadPool(), loadStats(), loadScheduleSettings()]);
+        await Promise.all([loadPool(), loadScheduleSettings()]);
         await resumeManualRunTracking();
       }
 

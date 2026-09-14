@@ -7149,11 +7149,20 @@ class XPostStore:
         availability_sql = (
             "CASE "
             "WHEN p.status='published' THEN 'published' "
+            "WHEN q.pool_item_id IS NULL AND l.status='published' "
+            "AND l.x_post_id<>'' AND l.unknown_outcome=0 THEN 'published_elsewhere' "
             "WHEN q.id IS NOT NULL AND "
-            "(COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')) "
+            "(COALESCE(l.unknown_outcome,0)=1 OR COALESCE(rl.unknown_outcome,0)=1 "
+            "OR l.status IN ('post_creating','repost_creating')) "
             "THEN 'needs_review' "
             "WHEN q.id IS NOT NULL AND COALESCE(l.status,q.status)='failed' "
             "THEN 'failed' "
+            "WHEN q.status='queued' AND sr.status='stopped' "
+            "AND sr.error_code='operator_repaired_pending_publish' "
+            "THEN 'repaired_pending' "
+            "WHEN q.status='queued' AND COALESCE(sr.status,mr.status,dr.status) "
+            "IN ('needs_review','stopped','failed','failed_preflight',"
+            "'completed','completed_with_errors') THEN 'batch_blocked' "
             "WHEN q.id IS NOT NULL THEN 'occupied' "
             "WHEN r.id IS NOT NULL THEN 'occupied' "
             "WHEN p.last_error_code IN %s THEN 'deferred' "
@@ -7182,6 +7191,9 @@ class XPostStore:
                 "occupied",
                 "failed",
                 "needs_review",
+                "repaired_pending",
+                "batch_blocked",
+                "published_elsewhere",
                 "published",
             }:
                 raise XPostError("invalid_request", "availability筛选值无效", 400)
@@ -7199,6 +7211,10 @@ class XPostStore:
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
             " LEFT JOIN x_post_manual_material_reservation r "
             "ON r.material_key=p.material_key AND r.state='active'"
+            " LEFT JOIN x_post_schedule_run sr ON sr.id=q.schedule_run_id"
+            " LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
+            " LEFT JOIN x_post_daily_run dr ON dr.id=q.run_id"
+            " LEFT JOIN x_post_repost_ledger rl ON rl.queue_id=q.id"
         )
         select_sql = (
             "SELECT p.id,p.material_key,p.material_id,p.status,p.published_at,"
@@ -7206,6 +7222,12 @@ class XPostStore:
             "p.created_by_user_id,p.created_by_name,p.created_at,p.updated_at,"
             "q.id AS queue_id,q.run_id,q.run_date,q.account_id,"
             "q.account_username,q.status AS queue_status,"
+            "q.schedule_run_id,q.manual_run_id,q.delivery_mode,"
+            "COALESCE(sr.status,mr.status,dr.status,'') AS batch_status,"
+            "COALESCE(sr.error_code,mr.error_code,dr.error_code,'') AS batch_error_code,"
+            "COALESCE(sr.error_message,mr.error_message,dr.error_message,'') AS batch_error_message,"
+            "COALESCE(rl.status,'') AS repost_status,"
+            "COALESCE(rl.source_post_url,'') AS source_post_url,"
             "COALESCE(l.status,'') AS publish_status,"
             "COALESCE(l.unknown_outcome,0) AS unknown_outcome,"
             "COALESCE(l.x_post_url,'') AS preview_url,"
@@ -7243,10 +7265,15 @@ class XPostStore:
                 "THEN 1 ELSE 0 END) AS deferred,"
                 "SUM(CASE WHEN p.status='unpublished' "
                 "AND (q.id IS NOT NULL OR r.id IS NOT NULL) "
-                "THEN 1 ELSE 0 END) AS occupied"
+                "THEN 1 ELSE 0 END) AS occupied,"
                 % (
                     _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                     _DEFERRED_MATERIAL_VALIDATION_SQL,
+                )
+                + ",".join(
+                    "SUM(CASE WHEN (%s)='%s' THEN 1 ELSE 0 END) AS %s"
+                    % (availability_sql, state, state)
+                    for state in ('repaired_pending', 'batch_blocked', 'failed', 'needs_review', 'validation_failed', 'published_elsewhere')
                 )
                 + join_sql
             ).fetchone()
@@ -7258,6 +7285,27 @@ class XPostStore:
             item["publish_error_message"] = redact_text(
                 item["publish_error_message"], 500
             )
+            item["batch_error_message"] = redact_text(item["batch_error_message"], 500)
+            state = item["availability"]
+            item["status_hint"] = ""
+            if state == "repaired_pending":
+                item["status_hint"] = "媒体已修复；原批次已停止，等待操作员安排发布。当前不会自动补发。"
+            elif state == "published_elsewhere":
+                item["status_hint"] = "该素材已通过独立手动任务发布；保留素材池原记录，不再供自动排期选取。"
+            elif state == "batch_blocked":
+                item["status_hint"] = (
+                    "本条尚未开始发布；同批次有待核对结果，批次暂停。"
+                    if item["batch_status"] == "needs_review"
+                    else "本条尚未开始发布；所属批次已停止或结束，需要单独安排。"
+                )
+            elif state == "occupied" and item["queue_id"]:
+                item["status_hint"] = (
+                    "当前批次正在执行，按队列顺序处理。"
+                    if item["batch_status"] == "running"
+                    else "素材已绑定队列，不再供新排期选取。"
+                )
+            elif state in {"failed", "needs_review"} and item["source_post_url"]:
+                item["status_hint"] = "中转原帖已发布；目标账号转发尚未确认成功，不能计为目标发布完成。"
             items.append(item)
         return {
             "items": items,
@@ -7270,6 +7318,12 @@ class XPostStore:
                     "available",
                     "deferred",
                     "occupied",
+                    "repaired_pending",
+                    "batch_blocked",
+                    "failed",
+                    "needs_review",
+                    "validation_failed",
+                    "published_elsewhere",
                 )
             },
             "pagination": {

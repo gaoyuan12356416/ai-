@@ -69,6 +69,42 @@ class XPostMaterialPoolTests(unittest.TestCase):
             validation_checks=checks,
         )["items"]
 
+    def test_stopped_batch_is_explained_without_releasing_material(self):
+        from scripts.test_x_post_multi_schedule_store import XPostMultiScheduleStoreTests
+        fixture = XPostMultiScheduleStoreTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        plan, queue, log = fixture._failed_schedule_run_with_queue(with_log=True)
+        run_id = plan["id"]
+        with contextlib.closing(sqlite3.connect(fixture.db_path)) as conn:
+            conn.execute("UPDATE x_post_schedule_run SET status='stopped',error_code='operator_repaired_pending_publish' WHERE id=?", (run_id,))
+            conn.commit()
+        before = fixture.db_path.read_bytes()
+        result = fixture.store.query_pool({"availability": "repaired_pending"})
+        self.assertEqual(result["pagination"]["total"], 1)
+        item = result["items"][0]
+        self.assertEqual(item["queue_status"], "queued")
+        self.assertEqual(item["status"], "unpublished")
+        self.assertIn("不会自动补发", item["status_hint"])
+        self.assertEqual(result["summary"]["available"], 0)
+        self.assertEqual(result["summary"]["occupied"], 1)
+        self.assertEqual(result["summary"]["repaired_pending"], 1)
+        self.assertEqual(fixture.db_path.read_bytes(), before)
+        with contextlib.closing(sqlite3.connect(fixture.db_path)) as conn:
+            conn.execute("UPDATE x_post_schedule_run SET status='needs_review',error_code='' WHERE id=?", (run_id,))
+            conn.commit()
+        blocked = fixture.store.query_pool({"availability": "batch_blocked"})
+        self.assertEqual(blocked["pagination"]["total"], 1)
+        self.assertIn("本条尚未开始发布", blocked["items"][0]["status_hint"])
+        self.assertFalse(blocked["items"][0]["unknown_outcome"])
+        self.assertEqual(blocked["summary"]["needs_review"], 0)
+        with contextlib.closing(sqlite3.connect(fixture.db_path)) as conn:
+            conn.execute("UPDATE x_post_publish_log SET unknown_outcome=1 WHERE id=?", (log["id"],))
+            conn.commit()
+        unknown = fixture.store.query_pool({"availability": "needs_review"})
+        self.assertEqual(unknown["pagination"]["total"], 1)
+        self.assertEqual(unknown["summary"]["batch_blocked"], 0)
+
     def test_unchecked_add_is_fail_closed_until_x_validation_finishes(self):
         result = self.store.add_pool_materials(["91"], self.actor)
         self.assertEqual(result["available_count"], 0)
@@ -566,6 +602,18 @@ class XPostMaterialPoolTests(unittest.TestCase):
         with self.assertRaises(service.XPostError) as occupied:
             self.store.delete_pool_material(pool_item_id)
         self.assertEqual(occupied.exception.code, "x_post_pool_item_occupied")
+
+        log = self.store.reserve_log(queried["queue_id"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_post_publish_log SET status='published',x_post_id='12345',x_post_url='https://x.com/account2/status/12345',unknown_outcome=0 WHERE id=?", (log["id"],))
+            conn.execute("UPDATE x_post_queue SET status='published' WHERE id=?", (queried["queue_id"],))
+            conn.commit()
+        historical = self.store.query_pool({"availability": "published_elsewhere"})
+        self.assertEqual(historical["pagination"]["total"], 1)
+        self.assertEqual(historical["items"][0]["status"], "unpublished")
+        self.assertEqual(historical["summary"]["available"], 0)
+        self.assertEqual(historical["summary"]["published_elsewhere"], 1)
+        self.assertEqual(self.store.available_pool_items(10), [])
 
     def test_daily_plan_requires_pool_when_enforced(self):
         payloads = []
