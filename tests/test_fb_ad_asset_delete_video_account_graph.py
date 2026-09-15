@@ -257,6 +257,129 @@ class AccountVideoReconcileTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
 
+class AccountVideoInvalidIdTests(unittest.TestCase):
+    client = AccountVideoGraphTests.client
+
+    @staticmethod
+    def invalid_id(message="(#100) Param video_id is not a valid video ID", code=100, status=400):
+        return Response({"error": dict(code=code, message=message, error_subcode=0,
+            type="OAuthException", fbtrace_id="trace-invalid-video",
+            error_user_msg="Rejected source-user-secret", is_transient=False)}, status)
+
+    def test_explicit_invalid_id_is_already_deleted_only_after_complete_absence(self):
+        client, transport, provider = self.client([self.invalid_id(), Response({"data": []})])
+        obj = video("failed")
+        prepared = client.prepare_video_account_delete(obj, "444")
+        state, result = client.delete_video_account(obj, "444", prepared=prepared)
+        self.assertEqual(state, "already_deleted")
+        self.assertEqual([call["method"] for call in transport.calls], ["DELETE", "GET"])
+        self.assertTrue(all(call["url"].endswith("/act_444/advideos") for call in transport.calls))
+        self.assertEqual(transport.calls[0]["params"], {"video_id": "301"})
+        self.assertEqual(transport.calls[1]["params"], {"fields": "id", "limit": "100"})
+        self.assertTrue(all(call["headers"]["Authorization"] == "Bearer source-user-secret" for call in transport.calls))
+        provider.assert_called_once_with(obj, "444")
+        self.assertTrue(result["confirmed_absent"])
+        self.assertEqual(result["proof"], dict(account_id="444", video_id="301", complete=True, pages=1, items=0))
+        self.assertEqual(result["verification"]["status"], "already_deleted")
+        self.assertEqual(result["delete_error"]["code"], "100")
+        self.assertEqual(result["delete_error"]["detail"]["fbtrace_id"], "trace-invalid-video")
+        self.assertEqual(result["delete_error"]["detail"]["http_status"], 400)
+        self.assertNotIn("source-user-secret", json.dumps(result))
+
+    def test_all_pages_keep_the_prepared_token_even_when_provider_changes(self):
+        provider = Mock(side_effect=[credential(), credential(token="different-user-secret")])
+        first = Response({"data": [{"id": "800"}], "paging": {"next": "https://untrusted.invalid/next", "cursors": {"after": "next-page"}}})
+        client, transport, _ = self.client([self.invalid_id(), first, Response({"data": [{"id": "801"}]})], provider)
+        state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual(state, "already_deleted")
+        self.assertEqual(result["proof"]["pages"], 2)
+        self.assertEqual([call["method"] for call in transport.calls], ["DELETE", "GET", "GET"])
+        self.assertEqual(provider.call_count, 1)
+        self.assertTrue(all(call["headers"]["Authorization"] == "Bearer source-user-secret" for call in transport.calls))
+        self.assertTrue(all(call["url"].endswith("/act_444/advideos") for call in transport.calls))
+        self.assertEqual(transport.calls[2]["params"]["after"], "next-page")
+
+    def test_target_on_later_page_keeps_the_original_explicit_delete_failure(self):
+        first = Response({"data": [{"id": "800"}], "paging": {"next": "next", "cursors": {"after": "a"}}})
+        client, transport, _ = self.client([self.invalid_id(), first, Response({"data": [{"id": "301"}]})])
+        state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual((state, result["code"]), ("failed", "100"))
+        self.assertEqual(result["verification"]["code"], "account_video_present")
+        self.assertEqual(result["delete_error"]["message"], "(#100) Param video_id is not a valid video ID")
+        self.assertIn(result["verification"]["message"], result["message"])
+        self.assertIn("删除后核实", result["message"])
+        self.assertFalse(result.get("confirmed_absent", False))
+        self.assertEqual(sum(call["method"] == "DELETE" for call in transport.calls), 1)
+
+    def test_unreadable_or_incomplete_library_never_confirms_the_id_was_deleted(self):
+        followups = [Response({"error": {"code": 200, "message": "Missing permission source-user-secret"}}, 400),
+            Response({"error": {"code": 100, "error_subcode": 33, "message": "Unsupported get request"}}, 400),
+            requests.Timeout(), Response({}), Response({"data": [{}]}),
+            Response({"data": [], "paging": {"next": "next"}}), Response({"data": [], "paging": []})]
+        for followup in followups:
+            with self.subTest(followup=type(followup).__name__):
+                client, transport, provider = self.client([self.invalid_id(), followup])
+                state, result = client.delete_video_account(video("failed"), "444")
+                self.assertEqual((state, result["code"]), ("failed", "100"))
+                self.assertEqual(result["verification"]["status"], "unknown")
+                self.assertFalse(result.get("confirmed_absent", False))
+                self.assertFalse(result["verification"].get("confirmed_absent", False))
+                self.assertEqual([call["method"] for call in transport.calls], ["DELETE", "GET"])
+                self.assertEqual(provider.call_count, 1)
+                self.assertNotIn("source-user-secret", json.dumps(result))
+
+    def test_partial_inventory_followed_by_failure_cannot_prove_absence(self):
+        first = Response({"data": [{"id": "800"}], "paging": {"next": "next", "cursors": {"after": "a"}}})
+        client, transport, _ = self.client([self.invalid_id(), first, requests.Timeout()])
+        state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual(state, "failed")
+        self.assertEqual(result["verification"]["code"], "read_unavailable")
+        self.assertFalse(result.get("confirmed_absent", False))
+        self.assertEqual([call["method"] for call in transport.calls], ["DELETE", "GET", "GET"])
+
+    def test_inventory_limit_remains_failed_and_bounds_each_read_timeout(self):
+        client, transport, _ = self.client([self.invalid_id(), Response({"data": [{"id": "800"}, {"id": "801"}]})], max_inventory=1)
+        state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual((state, result["verification"]["code"]), ("failed", "account_video_read_limit"))
+        self.assertEqual(transport.calls[0]["timeout"], 20)
+        self.assertLessEqual(transport.calls[1]["timeout"], 5)
+
+    def test_post_failure_read_budget_exhaustion_stays_failed_without_late_get(self):
+        client, transport, _ = self.client([self.invalid_id()])
+        with patch("features.fb_ad_asset_delete.graph.time.monotonic", side_effect=[0, 11]):
+            state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual((state, result["verification"]["code"]), ("failed", "account_video_read_limit"))
+        self.assertEqual([call["method"] for call in transport.calls], ["DELETE"])
+
+    def test_generic_code_100_permissions_and_different_parameter_errors_do_not_get(self):
+        errors = [self.invalid_id("Unsupported post request or missing permissions"),
+            self.invalid_id("Param ad_id is not a valid video ID"),
+            self.invalid_id("Param video_id is not a valid video ID or missing permissions"),
+            self.invalid_id(code=200)]
+        for error in errors:
+            with self.subTest(message=error.body["error"]["message"]):
+                client, transport, _ = self.client([error])
+                state, result = client.delete_video_account(video("failed"), "444")
+                self.assertEqual(state, "failed")
+                self.assertNotIn("verification", result)
+                self.assertEqual([call["method"] for call in transport.calls], ["DELETE"])
+
+    def test_uncertain_delete_with_invalid_id_message_stays_unknown_without_get(self):
+        client, transport, _ = self.client([self.invalid_id(status=503)])
+        state, result = client.delete_video_account(video("failed"), "444")
+        self.assertEqual(state, "unknown")
+        self.assertNotIn("verification", result)
+        self.assertEqual([call["method"] for call in transport.calls], ["DELETE"])
+
+    def test_known_failure_read_does_not_prevent_next_video_request(self):
+        client, transport, _ = self.client([self.invalid_id(), requests.Timeout(), Response({"success": True})])
+        first = client.delete_video_account(video("failed"), "444")
+        second = client.delete_video_account(dict(video("pending"), object_id="302"), "444")
+        self.assertEqual((first[0], second[0]), ("failed", "deleted"))
+        writes = [call for call in transport.calls if call["method"] == "DELETE"]
+        self.assertEqual([call["params"] for call in writes], [{"video_id": "301"}, {"video_id": "302"}])
+
+
 class AccountVideoBridgeTests(unittest.TestCase):
     def test_production_bridge_wires_new_account_provider(self):
         app = {"MYSQL_HOST": "101.32.56.53", "MYSQL_PORT": "63350", "MYSQL_BASE_CMD": ["fake-mysql"],

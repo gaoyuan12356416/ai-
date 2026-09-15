@@ -1,0 +1,7 @@
+# SA代码评审
+
+根因在Service._run_video_accounts：states为set，TERMINAL_SUCCESS为tuple，states <= TERMINAL_SUCCESS抛TypeError。成功和明确失败分支均触发；unknown分支先短路，但下一正常Video仍触发。改为issubset接受可迭代成功状态，保持原汇总含义。
+
+独立Graph实现及评审完成：严格code100+精确无效video_id文案，失败后同一prepared凭证、10秒调度预算，完整缺失才already_deleted。主消息追加无法确认的具体核实原因，原错误独立保存。没有DELETE前GET或重复DELETE。所有credential字段、proof账户/Video保持固定，Store无需改动。
+
+293项模块回归通过，三个新增回归在旧代码均失败，修复后通过。新回滚脚本暂停两个Video写入口，保留原始备份；对应guard和Ad兼容测试通过。无P0/P1未解决项。

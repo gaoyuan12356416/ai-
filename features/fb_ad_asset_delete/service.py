@@ -392,7 +392,7 @@ class Service:
             self.store.finish_video_account(job_id, key, run_id, aid, claim["account_attempt_id"], state, result)
         results = self.store.video_account_results(job_id, key)
         states = {item["status"] for item in results}
-        state = "unknown" if states & {"unknown", "in_progress"} else "deleted" if results and states <= TERMINAL_SUCCESS else "failed"
+        state = "unknown" if states & {"unknown", "in_progress"} else "deleted" if results and states.issubset(TERMINAL_SUCCESS) else "failed"
         return state, dict(delete_mode="ad_account_video", delete_scope="ad_account_video", video_id=video_id,
             account_results=results, success=state == "deleted", checked_at=now(),
             message="所列广告账户的视频素材已删除" if state == "deleted" else "部分账户尚未完成，请查看逐账户结果")

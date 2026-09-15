@@ -471,7 +471,7 @@ class GraphClient:
 
     def delete_video_account(self, obj, account_id, prepared=None):
         """One DELETE of the frozen (account, video), without token rotation."""
-        context = {}
+        context, delete_sent = {}, False
         try:
             vid, aid = self._video_account_target(obj, account_id)
             token, context = prepared if prepared is not None else self.prepare_video_account_delete(obj, aid)
@@ -481,15 +481,35 @@ class GraphClient:
                     context.get("delete_endpoint") != endpoint or context.get("credential_kind") != "user"):
                 raise GraphError("prepared_account_mismatch", "已审计凭证与目标广告账户不一致")
             result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
+            delete_sent = True
             data = self.request("DELETE", endpoint, token, {"video_id": vid})
             if data is True or isinstance(data, dict) and data.get("success") is True:
                 return "deleted", dict(result, success=True, checked_at=now())
             return "unknown", dict(result, code="unconfirmed_delete_response", message="Meta 未明确确认账户视频删除结果，需要核实", checked_at=now())
         except AssetError as exc:
             state = "unknown" if getattr(exc, "uncertain", False) else "failed"
-            return state, dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
+            result = dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
                 delete_mode="ad_account_video", delete_scope="ad_account_video", code=exc.code,
                 message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
+            if delete_sent and self._invalid_account_video_id(exc):
+                # A rejected ID may have been removed manually. The DELETE
+                # error itself is not proof: read the complete account library
+                # with this exact prepared credential, without another DELETE.
+                delete_error = {key: deepcopy(result[key]) for key in ("code", "message", "detail", "checked_at")}
+                verified_state, verification = self._read_video_account_absence(vid, aid, (token, context), seconds=10)
+                evidence = dict(verification, status=verified_state)
+                if verified_state == "already_deleted":
+                    return verified_state, dict(verification, delete_error=delete_error, verification=evidence,
+                        message="Meta 拒绝此 Video ID；完整读取该账户视频库后确认已无此 Video")
+                result.update(delete_error=delete_error, verification=evidence,
+                    message=redact(result["message"] + "；删除后核实：" + verification["message"]))
+            return state, result
+
+    @staticmethod
+    def _invalid_account_video_id(exc):
+        """Match the explicit parameter error, never a generic code 100 denial."""
+        return (isinstance(exc, GraphError) and not exc.uncertain and exc.code == "100" and
+            re.fullmatch(r"(?:\(#100\)\s*)?Param video_id is not a valid video ID\.?", exc.message.strip(), re.IGNORECASE) is not None)
 
     def reconcile_video_account(self, obj, account_id):
         """Only a complete account-library read can prove this pair is absent."""
@@ -497,9 +517,19 @@ class GraphClient:
         try:
             vid, aid = self._video_account_target(obj, account_id)
             token, context = self.prepare_video_account_delete(obj, aid)
-            result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
+            return self._read_video_account_absence(vid, aid, (token, context))
+        except AssetError as exc:
+            return "unknown", dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
+                delete_mode="ad_account_video", delete_scope="ad_account_video", code=exc.code,
+                message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
+
+    def _read_video_account_absence(self, vid, aid, prepared, seconds=30):
+        """GET only; retain the caller's credential and bounded account proof."""
+        token, context = prepared
+        result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
+        try:
             params, seen, cursors, pages = {"fields": "id", "limit": "100"}, set(), set(), 0
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + seconds
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -513,7 +543,7 @@ class GraphClient:
                     if not ident or ident in seen:
                         raise GraphError("account_video_read_incomplete", "账户视频列表含无法核实或重复的记录")
                     if ident == vid:
-                        return "unknown", dict(result, code="account_video_present", message="该账户下仍能读取此 Video，保持待核实且不自动重试", checked_at=now())
+                        return "unknown", dict(result, code="account_video_present", message="该账户下仍能读取此 Video，不能确认该账户视频已移除", checked_at=now())
                     seen.add(ident)
                     if len(seen) > self.max_inventory:
                         raise GraphError("account_video_read_limit", "账户视频列表超过完整核实上限")
@@ -530,9 +560,13 @@ class GraphClient:
                 cursors.add(after)
                 params["after"] = after
         except AssetError as exc:
-            return "unknown", dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
-                delete_mode="ad_account_video", delete_scope="ad_account_video", code=exc.code,
+            return "unknown", dict(result, code=exc.code,
                 message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
+        except Exception:
+            # A failed follow-up read cannot replace an explicit DELETE failure
+            # with a new unknown write outcome or interrupt later objects.
+            return "unknown", dict(result, code="account_video_read_incomplete",
+                message="账户视频读取未完整结束，不能确认该账户已无此 Video", checked_at=now())
 
     def delete(self, obj, prepared=None):
         """Call only after a durable attempt has been claimed by the service."""

@@ -1,0 +1,9 @@
+# 部署与回滚
+
+基线d4953ad479b2d8259dee5a9c43662918e46537a3。新脚本scripts/deploy_meta_video_delete_continue.py只部署Graph/Service两个模块；前端资源保持20260915-meta-video-account-delete并核对双份哈希。任务SQLite在线备份且不迁移。
+
+按GitHub先行：提交后服务器精确检出、Python3.9.6回归与编译、保存原active timer状态和预览参数、等publisher自然空闲、确认无删除run/重核、主API停止后标记已确认需要重跑的预览、prepare/apply、worker-aware窄重启、finally恢复timer、原会话GET和全部旧台账对比、按原参数重新预览。
+
+回滚使用本release的新脚本rollback BACKUP，再同样窄重启。保留当前SQLite和全部账户回执/unknown锁，不恢复备份台账。回滚到旧runner时暂停账户Video及旧节点Video两个写入口，防止操作人重新遇到已知中断问题；原始备份完整保留。恢复本版用同一备份apply，可接受该备份记录的精确guard hash。
+
+运行提交、备份路径、服务PID及验收待回填。

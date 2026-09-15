@@ -1,0 +1,5 @@
+# SA测试评审
+
+旧测试仅覆盖一个Video的多个账户，且主要检查对象最终状态；恢复逻辑恰好将对象落成失败/成功，掩盖run意外interrupted。新用例必须同时断言三个独立对象的请求序列、各对象结果及run最终状态。
+
+已核查Graph错误分类和同凭证后置读取用例；补真实Graph→Service→Store集成，覆盖proof、delete_error、verification、账户receipt和再次执行的跳过行为。权限撤销与台账失败仍需中断，不能为了继续而吞掉这些错误。

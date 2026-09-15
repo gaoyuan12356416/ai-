@@ -13,16 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 try:
     from deploy_meta_video_account_delete import guard_video_rollback, rollout
+    from deploy_meta_video_delete_continue import guard_video_rollback as guard_continue_rollback
 finally:
     sys.path.pop(0)
 
 
 class AccountRollbackTests(unittest.TestCase):
-    def guarded_client(self):
+    def guarded_client(self, guard=guard_video_rollback):
         source = (ROOT / "features/fb_ad_asset_delete/graph.py").read_text(encoding="utf-8")
         module = types.ModuleType("features.fb_ad_asset_delete.rollback_verification")
         module.__package__ = "features.fb_ad_asset_delete"
-        exec(compile(guard_video_rollback(source), "rollback_verification.py", "exec"), module.__dict__)
+        exec(compile(guard(source), "rollback_verification.py", "exec"), module.__dict__)
         client = module.GraphClient(lambda users: "fake-secret")
         client.request = Mock(return_value=True)
         client.credential = lambda obj: "fake-secret"
@@ -45,6 +46,22 @@ class AccountRollbackTests(unittest.TestCase):
     def test_guard_refuses_an_unrecognized_adapter(self):
         with self.assertRaises(AssertionError):
             guard_video_rollback("class Different: pass\n")
+
+    def test_continue_fix_rollback_pauses_both_video_write_entries(self):
+        module, client = self.guarded_client(guard_continue_rollback)
+        obj = {"kind": "video", "object_id": "301", "account_ids": ["444"]}
+        with self.assertRaises(module.GraphError):
+            client.delete_video_account(obj, "444")
+        with self.assertRaises(module.GraphError):
+            client.delete(obj)
+        client.request.assert_not_called()
+        state, _ = client.delete({"kind": "ad", "object_id": "101"})
+        self.assertEqual(state, "deleted")
+        client.request.assert_called_once_with("DELETE", "101", "fake-secret")
+
+    def test_continue_fix_guard_refuses_missing_account_entry(self):
+        with self.assertRaises(AssertionError):
+            guard_continue_rollback("    def delete(self, obj, prepared=None):\n        pass\n")
 
     def test_reapply_accepts_only_the_recorded_guard_after_rollback(self):
         with tempfile.TemporaryDirectory() as folder:

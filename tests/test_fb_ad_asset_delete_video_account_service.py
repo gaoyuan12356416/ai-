@@ -74,6 +74,86 @@ class VideoAccountServiceTests(unittest.TestCase):
     def writes(self):
         return [event for event in self.state.events if event[0] == "DELETE_ACCOUNT"]
 
+    def independent_video_preview(self):
+        self.source.ads = [dict(ad(index=i + 1, videos=[str(301 + i)]), account_id="444", row_id=str(7 + i))
+                           for i in range(3)]
+        self.state.creative_videos = {str(201 + i): [str(301 + i)] for i in range(3)}
+        result = self.service.preview(SESSION, {"input_type": "content_id", "ids": ["100"], "product_ids": ["1"]})
+        self.workers.run_next()
+        self.state.job_id = result["job_id"]
+        self.state.events.clear()
+        return self.store.get_job(result["job_id"])
+
+    def test_independent_videos_continue_after_explicit_failure_and_run_finishes(self):
+        job = self.independent_video_preview()
+        self.state.account_outcomes[("444", "301")] = ("failed", {"code": "100", "message": "Param video_id is not a valid video ID"})
+        final = self.execute(job)
+        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "444", str(301 + i)) for i in range(3)])
+        self.assertEqual([o["status"] for o in final["objects"] if o["kind"] == "video"], ["failed", "deleted", "deleted"])
+        self.assertEqual(final["runs"][-1]["status"], "partial")
+        self.assertEqual(final["runs"][-1]["summary"]["phase_results"]["video"]["total"], 3)
+
+    def test_independent_videos_continue_after_success_and_run_finishes(self):
+        final = self.execute(self.independent_video_preview())
+        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "444", str(301 + i)) for i in range(3)])
+        self.assertEqual([o["status"] for o in final["objects"] if o["kind"] == "video"], ["deleted"] * 3)
+        self.assertEqual(final["runs"][-1]["status"], "completed")
+
+    def test_independent_videos_continue_after_unknown_without_retrying_it(self):
+        job = self.independent_video_preview()
+        self.state.account_outcomes[("444", "301")] = ("unknown", {"code": "timeout"})
+        final = self.execute(job)
+        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "444", str(301 + i)) for i in range(3)])
+        self.assertEqual([o["status"] for o in final["objects"] if o["kind"] == "video"], ["unknown", "deleted", "deleted"])
+        self.assertEqual(final["runs"][-1]["status"], "partial")
+        self.assertEqual(final["runs"][-1]["summary"]["phase_results"]["video"]["total"], 3)
+        self.execute(job)
+        self.assertEqual(len(self.writes()), 3)
+
+    def test_real_graph_manual_removal_is_saved_and_later_videos_finish(self):
+        job = self.independent_video_preview()
+        events, retried = [], [False]
+        store = self.store
+
+        class Transport:
+            def request(inner, method, url, **kwargs):
+                params = kwargs["params"]
+                events.append((method, url.rsplit("/", 2)[-2], dict(params)))
+                self.assertEqual(kwargs["headers"]["Authorization"], "Bearer publishing-user-token")
+                status, data = 200, {"success": True}
+                if method == "GET":
+                    self.assertEqual(params, {"fields": "id", "limit": "100"})
+                    data = {"data": [{"id": "302"}, {"id": "303"}]}
+                else:
+                    target = params["video_id"]
+                    self.assertEqual(store.video_account_results(job["job_id"], "video:" + target)[0]["status"], "in_progress")
+                    if target == "301":
+                        status, data = 400, {"error": {"code": 100, "message": "(#100) Param video_id is not a valid video ID"}}
+                    elif target == "303" and not retried[0]:
+                        status, data = 403, {"error": {"code": 200, "message": "Permission denied"}}
+                return type("Response", (), {"status_code": status, "json": lambda inner: data})()
+
+        self.service.graph_factory = lambda: GraphClient(lambda users: "publishing-user-token", transport=Transport(),
+            video_account_credential_provider=lambda obj, aid: dict(token="publishing-user-token", credential_kind="user",
+                credential_user_id="803", credential_relation="ad_source_user"))
+        final = self.execute(job)
+        first = next(o for o in final["objects"] if o["key"] == "video:301")
+        child = first["video_account_results"][0]
+        self.assertEqual(child["status"], "already_deleted")
+        self.assertTrue(child["result"]["proof"]["complete"])
+        self.assertEqual(child["result"]["delete_error"]["code"], "100")
+        self.assertEqual(child["result"]["verification"]["status"], "already_deleted")
+        self.assertEqual([e[0] for e in events], ["DELETE", "GET", "DELETE", "DELETE"])
+        self.assertEqual(final["runs"][-1]["status"], "partial")
+        with store._transaction() as conn:
+            self.assertIsNotNone(conn.execute("SELECT 1 FROM fb_asset_delete_v2_receipts WHERE object_key='video_account:444:301'").fetchone())
+            self.assertIsNone(conn.execute("SELECT 1 FROM fb_asset_delete_v2_receipts WHERE object_key='video:301'").fetchone())
+        retried[0] = True
+        final = self.execute(job)
+        self.assertEqual([e[2]["video_id"] for e in events if e[0] == "DELETE"], ["301", "302", "303", "303"])
+        self.assertEqual(final["runs"][-1]["status"], "completed")
+        self.assertNotIn(b"publishing-user-token", Path(store.path).read_bytes())
+
     def test_preview_keeps_exact_source_account_pairs_on_shared_video(self):
         obj = self.video(self.preview())
         self.assertEqual(obj["account_ids"], ["444", "555"])
