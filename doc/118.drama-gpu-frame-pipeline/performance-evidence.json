@@ -1,0 +1,394 @@
+{
+  "final_30s": {
+    "mode": "native",
+    "candidate_sha": "a93b541335ca4ba0183a8cc6ad7b46a7eb31233d",
+    "source_sha256": "66ef7cd6233b27514e962140a8fbca099fe2896b343c93d189e9fe7a1fdd9240",
+    "recipe_sha256": "88ef90b77a3768948e61cebd625d0a12aaf743f1dd3bdc5b23ec2f69593c5011",
+    "seconds": 30,
+    "start": 0,
+    "elapsed_seconds": 8.4,
+    "cpu_seconds": 8.007,
+    "average_cpu_cores": 0.953,
+    "exit_code": 0,
+    "realtime": 3.571,
+    "output_contract": true,
+    "max_gpu_memory_mib": 200,
+    "p50_gpu_utilization": 22,
+    "output_sha256": "df9f8a887e7969ee85cd95a1868243bd4a6644211bfcee290b0f15d79d5866b0",
+    "output_bytes": 20357789
+  },
+  "experiments": {
+    "native-mixed-final-first-report.json": {
+      "asset_manifest_sha256": "028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f",
+      "candidate_sha": "a93b541335ca4ba0183a8cc6ad7b46a7eb31233d",
+      "child_cpu_seconds": 36.324,
+      "child_max_rss_kib": 664204,
+      "clip_duration_seconds": 129.988984,
+      "compositor_filter_threads": 2,
+      "compositor_lanes": 2,
+      "confirmed_stopped_recovery": false,
+      "elapsed_seconds": 63.077,
+      "frame_pipeline": "cuda",
+      "gpu_samples": 120,
+      "kernel_template_sha256": "5e107f7a093ca39752b2532afb8a4204ddb2510f8e39405d721fb3e8b6a51c4d",
+      "max_child_rss_limit_kib": 16777216,
+      "max_gpu_memory_limit_mib": 15000,
+      "max_gpu_memory_mib": 522,
+      "max_gpu_utilization_percent": 43,
+      "minimum_realtime": 1.0,
+      "mode": "offline-no-upload",
+      "ok": true,
+      "output_contract": {
+        "codec": "h264",
+        "frame_rate": "30/1",
+        "has_audio": true,
+        "height": 1280,
+        "pixel_format": "yuv420p",
+        "profile": "High",
+        "width": 720
+      },
+      "output_contract_ok": true,
+      "output_duration_seconds": 130.0,
+      "output_sha256": "b528c8fcb5574f2639be6f82a474171c0eabd0ec963f7a1d524aa5a5b9b8dde4",
+      "output_size": 77444003,
+      "p50_gpu_memory_mib": 164,
+      "p50_gpu_utilization_percent": 12,
+      "p95_gpu_memory_mib": 360,
+      "p95_gpu_utilization_percent": 29,
+      "realtime_multiplier": 2.061,
+      "renderer_backend": "opencl_fused_v2",
+      "renderer_profile": "drama-opencl-fused-h264-720x1280-v4-fullbleed",
+      "runtime_identity": "nvdec-cuda-nvenc-rgba-demux-v2",
+      "swap_delta_bytes": 0,
+      "swap_peak_used_bytes": 411992064,
+      "swap_used_after_bytes": 411992064,
+      "swap_used_before_bytes": 411992064
+    },
+    "native-frame-qa-nv12-final.json": {
+      "ok": true,
+      "errors": [],
+      "source": "mixed-130.mp4",
+      "start": 0,
+      "decoded_frames": 3250,
+      "samples": [
+        {
+          "frame": 0,
+          "seconds": 0.021015625,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.76638
+        },
+        {
+          "frame": 1,
+          "seconds": 0.061015625,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.77421
+        },
+        {
+          "frame": 2,
+          "seconds": 0.101015625,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.77976
+        },
+        {
+          "frame": 250,
+          "seconds": 10.021015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.81908
+        },
+        {
+          "frame": 251,
+          "seconds": 10.061015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.81914
+        },
+        {
+          "frame": 502,
+          "seconds": 20.101015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 2.05784
+        },
+        {
+          "frame": 753,
+          "seconds": 30.141015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.74521
+        },
+        {
+          "frame": 1004,
+          "seconds": 40.181015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.46303
+        },
+        {
+          "frame": 1255,
+          "seconds": 50.221015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.05675
+        },
+        {
+          "frame": 1506,
+          "seconds": 60.261015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.97032
+        },
+        {
+          "frame": 1757,
+          "seconds": 70.311015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.81596
+        },
+        {
+          "frame": 2008,
+          "seconds": 80.351015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 2.06669
+        },
+        {
+          "frame": 2259,
+          "seconds": 90.391015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.74628
+        },
+        {
+          "frame": 2510,
+          "seconds": 100.431015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.47428
+        },
+        {
+          "frame": 2761,
+          "seconds": 110.471015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.05641
+        },
+        {
+          "frame": 3012,
+          "seconds": 120.511015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 1.63279
+        }
+      ],
+      "assets": [
+        {
+          "category": "opacity_video",
+          "phase": 14.534,
+          "frames": 90,
+          "all_pixel_hashes_match_ffmpeg": true
+        },
+        {
+          "category": "corners",
+          "phase": 30.0,
+          "frames": 90,
+          "all_pixel_hashes_match_ffmpeg": true
+        }
+      ]
+    },
+    "native-frame-qa-seek120.json": {
+      "ok": true,
+      "errors": [],
+      "source": "mixed-130.mp4",
+      "start": 120.0,
+      "decoded_frames": 250,
+      "samples": [
+        {
+          "frame": 0,
+          "seconds": 0.031015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.95902
+        },
+        {
+          "frame": 1,
+          "seconds": 0.071015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.96129
+        },
+        {
+          "frame": 2,
+          "seconds": 0.111015625,
+          "shape": [
+            1280,
+            720
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 0.96401
+        }
+      ],
+      "assets": []
+    },
+    "native-frame-qa-30fps.json": {
+      "ok": true,
+      "errors": [],
+      "source": "landscape-30.mp4",
+      "start": 0,
+      "decoded_frames": 300,
+      "samples": [
+        {
+          "frame": 0,
+          "seconds": 0.0,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.76631
+        },
+        {
+          "frame": 1,
+          "seconds": 0.03333333333333333,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.7718
+        },
+        {
+          "frame": 2,
+          "seconds": 0.06666666666666667,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.77849
+        },
+        {
+          "frame": 251,
+          "seconds": 8.366666666666667,
+          "shape": [
+            720,
+            1280
+          ],
+          "nv12_max_error": 0,
+          "pyav_rgb_diagnostic_mae": 5.85515
+        }
+      ],
+      "assets": []
+    },
+    "final-30s-comparison.json": {
+      "baseline": "frame-baseline-20260915-01",
+      "final": "frame-native-final-30s-20260915",
+      "ssim_all": 0.991991,
+      "cpu_reduction_percent": 90.894,
+      "wall_reduction_percent": 57.417
+    },
+    "final-audio-and-decode.json": {
+      "ok": true,
+      "decoded_video_frames": 3900,
+      "audio_samples_source": 1040726,
+      "audio_samples_output": 1040043,
+      "audio_checks": [
+        {
+          "start_seconds": 10,
+          "lag_seconds": 0.0,
+          "correlation": 0.999803
+        },
+        {
+          "start_seconds": 60,
+          "lag_seconds": 0.0,
+          "correlation": 0.999892
+        },
+        {
+          "start_seconds": 115,
+          "lag_seconds": 0.0,
+          "correlation": 0.999934
+        }
+      ]
+    }
+  },
+  "sandbox_preflight": {
+    "ok": true,
+    "issues": [],
+    "cuda_tested": true,
+    "compositor_pipeline_checked": true,
+    "asset_cache_verified_count": 18,
+    "app_import_checked": true
+  },
+  "deployed_health": {
+    "ok": true,
+    "role": "media-only",
+    "render_concurrency": 1,
+    "compositor_backend": "opencl_fused_v2",
+    "compositor_chunk_seconds": 120,
+    "compositor_lanes": 2,
+    "compositor_filter_threads": 2,
+    "asset_cache_enabled": true,
+    "frame_pipeline": "cuda",
+    "renderer_profile": "drama-opencl-fused-h264-720x1280-v4-fullbleed",
+    "kernel_template_sha256": "5e107f7a093ca39752b2532afb8a4204ddb2510f8e39405d721fb3e8b6a51c4d",
+    "release_sha": "a93b541335ca4ba0183a8cc6ad7b46a7eb31233d",
+    "runtime_identity": "nvdec-cuda-nvenc-rgba-demux-v2"
+  }
+}
