@@ -6,6 +6,8 @@
 
 备份脚本核对1b86d2af基线，保存5个Feature模块和双份HTML/JS/CSS（11目标）、最新SQLite及哈希；无schema变更、无源库写入。新版本20260915-meta-video-page-credentials。
 
+首次prepare检测到同期退役部署d697e30生成的HTML导航版本变更，正确拒绝覆盖，未创建备份或修改运行文件。核对两处HTML仅quick-nav版本改为20260915retired；本次源码已保留该变更，并将该生成HTML的SHA256（7ad4ce404ec8c9f9e06afaee61ac47c2e4480c729dd9a3bd6f1322315295c088）设为唯一允许的逐文件基线。其他10个目标仍严格匹配1b86d2af，不重启或恢复已退役模块。
+
 回滚先同样排空，执行本次release下scripts/deploy_meta_video_credentials.py rollback BACKUP，再systemctl restart drama-material-api.service。恢复原active timer并检查哈希/健康。保留现有台账、凭证秘密、回执、unknown锁，不恢复备份SQLite。
 
 实际提交/release/备份/测试/只读验收部署后回填。

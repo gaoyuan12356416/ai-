@@ -11,6 +11,7 @@ import subprocess
 from deploy_meta_asset_delete import LIVE, PUBLIC, DISK, ROOT, atomic_copy, digest, validate_disk
 
 BASE = "e18d88fc3f87a039f7a6511443d95d1ca95c8a42"
+BASELINE_HASHES = {}  # Exact overrides for reviewed, generated live assets.
 FILES = ["features/fb_ad_asset_delete/" + x + ".py" for x in ("bridge", "graph", "service", "source", "store", "video_index")]
 FILES += ["static/fb-post-ad-delete." + ext for ext in ("html", "js", "css")]
 
@@ -33,7 +34,7 @@ def prepare(release):
     files = []
     for rel in FILES:
         old = subprocess.run(["git", "show", BASE+":"+rel], cwd=release, capture_output=True)
-        before = hashlib.sha256(old.stdout).hexdigest() if old.returncode == 0 else None
+        before = BASELINE_HASHES.get(rel, hashlib.sha256(old.stdout).hexdigest() if old.returncode == 0 else None)
         targets = [(LIVE/rel, "code/"+rel)]
         if rel.startswith("static/"):
             targets.append((PUBLIC/Path(rel).name, "public/"+Path(rel).name))
