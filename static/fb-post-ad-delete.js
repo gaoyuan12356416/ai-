@@ -24,8 +24,8 @@
     auth: null, permitted: false, products: [], productsLoaded: false, selectedProducts: new Set(),
     job: null, activeJobId: null, jobs: [], formGeneration: 0, boundGeneration: -1,
     query: { page: 1, kind: "", status: "" }, displayedQuery: { page: 1, kind: "", status: "" }, detailSeq: 0, detailBusy: false,
-    previewBusy: false, executing: false, reconciling: false, historyBusy: false,
-    poll: null, pollErrors: 0, confirmation: null, blockedSeq: 0, pendingAction: null, storageKey: "",
+    previewBusy: false, executing: false, reconciling: false, rechecking: false, historyBusy: false,
+    poll: null, pollErrors: 0, confirmation: null, blockedSeq: 0, pendingAction: null, pendingRecheck: null, storageKey: "",
   };
   const htmlCache = new Map();
   let toastTimer;
@@ -103,12 +103,18 @@
   function eligible(kind, job = state.job) { const result = phaseResult(kind, job); return num(result.pending) + num(result.failed); }
   function selectedEligible(job = state.job, selected = phases()) { return selected.reduce((count, kind) => count + eligible(kind, job), 0); }
   function legacy(job = state.job) { return !!job && (job.read_only === true || !job.preview_id); }
-  function jobBusy(job = state.job) { return !!job && ["previewing", "running"].includes(job.status); }
+  function recheckRunning(job = state.job) { return !!job && !legacy(job) && !!job.recheck && job.recheck.status === "running"; }
+  function jobBusy(job = state.job) { return !!job && (["previewing", "running"].includes(job.status) || recheckRunning(job)); }
   function dirty() { return !!state.job && state.formGeneration !== state.boundGeneration; }
-  function actionBusy() { return state.previewBusy || state.executing || state.reconciling || state.detailBusy; }
+  function actionBusy() { return state.previewBusy || state.executing || state.reconciling || state.rechecking || state.detailBusy; }
   function canExecute() {
-    return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !state.pendingAction &&
+    return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() && !state.pendingAction && !state.pendingRecheck &&
       state.activeJobId === state.job.job_id && EXECUTABLE_STATES.has(state.job.status) && phases().length > 0 && selectedEligible() > 0;
+  }
+  function canRecheck() {
+    return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() &&
+      !state.pendingAction && !state.pendingRecheck && state.activeJobId === state.job.job_id &&
+      EXECUTABLE_STATES.has(state.job.status) && num(state.job.summary && state.job.summary.blocked) > 0;
   }
   function productById(id, job = state.job) {
     return state.products.find(item => str(item.id) === str(id)) ||
@@ -152,29 +158,37 @@
   function updateControls() {
     const busy = actionBusy();
     const selected = phases();
-    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || state.previewBusy || state.executing || !!state.pendingAction;
+    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || busy || jobBusy() || !!state.pendingAction || !!state.pendingRecheck;
     $("previewBtn").textContent = state.previewBusy ? "正在提交预览…" : "预览匹配对象 →";
     $("executeBtn").disabled = !canExecute();
     $("executeBtn").textContent = state.executing ? "正在提交…" : state.job && ["partial", "interrupted", "completed"].includes(state.job.status) ? "继续或重试所选阶段" : "执行所选阶段";
     $("executeBtn").title = dirty() ? "输入范围已变更，请重新预览" : !selected.length ? "请至少选择一个阶段" : !selectedEligible() ? "所选阶段没有待执行或明确失败项" : "";
     $("phaseOrder").textContent = selected.length ? selected.map(kind => PHASE_NAMES[kind]).join(" → ") : "请选择至少一个删除阶段";
-    all("[data-phase]").forEach(input => { input.disabled = state.executing || state.reconciling || jobBusy(); });
+    all("[data-phase]").forEach(input => { input.disabled = state.executing || state.reconciling || state.rechecking || jobBusy() || !!state.pendingRecheck; });
     show("staleNotice", dirty() && !legacy());
+    show("recheckBtn", !!state.job && !legacy() && num(state.job.summary && state.job.summary.blocked) > 0);
+    $("recheckBtn").disabled = !canRecheck();
+    $("recheckBtn").textContent = state.rechecking || recheckRunning() ? "正在重新核验…" : "重新核验阻止项";
+    $("recheckBtn").title = dirty() ? "输入范围已变更，请重新预览" : "重新核验原任务中的阻止项，保留固定对象清单；不会执行删除";
     show("reconcileBtn", !legacy() && num(state.job && state.job.summary && state.job.summary.unknown) > 0);
-    $("reconcileBtn").disabled = busy || jobBusy() || !!state.pendingAction;
+    $("reconcileBtn").disabled = !state.permitted || legacy() || dirty() || busy || jobBusy() || !!state.pendingAction || !!state.pendingRecheck;
     $("reconcileBtn").textContent = state.reconciling ? "正在核实…" : "核实待确认结果";
     $("refreshJobBtn").disabled = !state.job || busy;
     $("refreshJobsBtn").disabled = state.historyBusy;
-    $("resolveRequestBtn").disabled = state.executing;
+    $("resolveRequestBtn").disabled = !state.permitted || busy || !!state.pendingRecheck || recheckRunning();
     $("resolveRequestBtn").textContent = state.executing ? "正在核对…" : "核对执行请求";
     show("requestNotice", !!state.pendingAction);
     $("requestNoticeText").textContent = state.pendingAction ? "任务 " + state.pendingAction.job_id + "。将使用同一请求编号核对已确认的执行操作。" : "";
+    show("recheckRequestNotice", !!state.pendingRecheck);
+    $("recheckRequestText").textContent = state.pendingRecheck ? "任务 " + state.pendingRecheck.job_id + "。可先刷新任务查看进度，或使用同一请求编号核对。本操作仅重新核验，不会执行删除。" : "";
+    $("resolveRecheckRequestBtn").disabled = !state.permitted || busy || !!state.pendingAction || jobBusy();
+    $("resolveRecheckRequestBtn").textContent = state.rechecking ? "正在核对…" : "核对核验请求";
     const resultPages = Math.max(1, Math.ceil(num(state.job && state.job.total) / 50));
     $("prevPageBtn").disabled = !state.job || state.detailBusy || state.query.page <= 1;
     $("nextPageBtn").disabled = !state.job || state.detailBusy || state.query.page >= resultPages;
     $("kindFilter").disabled = !state.job || state.detailBusy;
     $("statusFilter").disabled = !state.job || state.detailBusy;
-    all("[data-job]").forEach(button => { button.disabled = state.executing || state.reconciling || state.previewBusy; });
+    all("[data-job]").forEach(button => { button.disabled = state.executing || state.reconciling || state.rechecking || state.previewBusy; });
     if (state.confirmation) {
       $("confirmExecuteBtn").disabled = state.executing || !state.confirmation.blockedReady || !canExecute();
       $("confirmExecuteBtn").textContent = state.executing ? "正在提交…" : "确认删除 " + selectedEligible(state.confirmation.job, state.confirmation.phases) + " 个对象";
@@ -208,6 +222,28 @@
     if (result.error && typeof result.error.message === "string") return result.error.message;
     return "";
   }
+  function diagnosticDetails(item) {
+    const result = item.result && typeof item.result === "object" ? item.result : {};
+    const detail = result.detail && typeof result.detail === "object" ? result.detail : {};
+    const account = result.account_diagnostic || detail.account_diagnostic || {};
+    // Render only supported, server-sanitized scalar fields, never raw responses.
+    const scalar = value => ["string", "number", "boolean"].includes(typeof value) ? str(value) : "";
+    const code = scalar(detail.code == null ? result.code : detail.code);
+    const subcode = scalar(detail.error_subcode == null ? result.error_subcode : detail.error_subcode);
+    const accountStatus = scalar(account.account_status == null ? account.status : account.account_status);
+    const rows = [
+      ["Meta 提示", scalar(detail.error_user_title)],
+      ["处理建议", scalar(detail.error_user_msg)],
+      ["错误码 / 子码", [code, subcode].filter(Boolean).join(" / ")],
+      ["请求追踪 ID", scalar(detail.fbtrace_id || result.fbtrace_id)],
+      ["账户状态", [accountStatus, scalar(account.account_state)].filter(Boolean).join(" · ")],
+      ["账户诊断", scalar(account.message)],
+      ["凭证用户", scalar(result.credential_user_id || detail.credential_user_id)],
+    ].filter(row => row[1] !== "");
+    if (!rows.length) return "";
+    return '<details class="object-diagnostic"><summary>查看诊断详情</summary><dl>' +
+      rows.map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl></details>";
+  }
   function renderObjects(job) {
     const objects = list(job.objects);
     const total = num(job.total);
@@ -218,7 +254,7 @@
         return "<div>" + esc(product.name) + '<span class="cell-sub">ID ' + esc(id) + (product.kind ? " · " + esc(product.kind) : "") + "</span></div>";
       }).join("");
       const content = '<span class="mono">' + esc(list(item.content_ids).join("、") || "—") + '</span><span class="cell-sub">资源 ' + esc(list(item.series_codes).join("、") || "—") + '</span><span class="cell-sub">语言 ' + esc(list(item.languages).join("、") || "—") + "</span>";
-      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + badge(item.status, OBJECT_STATES) + '<span class="cell-reason">' + esc(safeReason(item)) + "</span></td></tr>";
+      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + badge(item.status, OBJECT_STATES) + '<span class="cell-reason">' + esc(safeReason(item)) + "</span>" + diagnosticDetails(item) + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="empty">' + (job.status === "previewing" ? "正在解析剧集并核查 Meta 对象，请稍候…" : "当前范围下没有匹配对象") + "</td></tr>");
     const pages = Math.max(1, Math.ceil(total / 50));
     $("pageText").textContent = "第 " + state.query.page + " / " + pages + " 页";
@@ -232,7 +268,7 @@
     show("legacySummary", legacy(job));
     show("stats", !legacy(job));
     show("dramaDetails", !legacy(job));
-    html("jobStatus", badge(job.status, JOB_STATES) + (legacy(job) ? ' <span class="tag neutral">历史只读</span>' : ""));
+    html("jobStatus", (recheckRunning(job) ? '<span class="tag info">正在重新核验</span>' : badge(job.status, JOB_STATES)) + (legacy(job) ? ' <span class="tag neutral">历史只读</span>' : ""));
     $("jobStatus").className = "";
     $("jobMeta").textContent = "任务 " + str(job.job_id) + " · 更新于 " + time(job.updated_at || job.updated_at_utc || job.created_at || job.created_at_utc) + "（北京时间）";
     const summary = job.summary || {};
@@ -270,6 +306,7 @@
     else if (job.status !== "previewing" && !legacy(job) && !num(summary.total)) notice = "当前产品及剧集范围未匹配到 Meta 广告资产，可核对输入后重新预览。";
     message("jobNotice", notice);
     $("jobNotice").className = "notice " + tone + (notice ? "" : " hidden");
+    renderRecheck(job);
     if (legacy(job)) {
       const logs = list(job.legacy_logs).slice(-20).map(entry => '<li><span class="mono">' + esc(time(entry.ts || entry.created_at)) + "</span> · " + esc(typeof entry === "string" ? entry : entry.message || "—") + "</li>").join("");
       html("legacySummary", "<strong>历史范围：</strong>" + esc(list(job.series_ids || job.ids).join("、") || "未记录") + "<br>Ad " + num(summary.ads) + " · Post " + num(summary.post_objects) + " · Campaign " + num(summary.campaigns) + "<br>历史阶段：" + esc(job.phase || "—") + "。历史任务不支持继续执行。" + (logs ? '<details class="scope-details"><summary>最近 20 条历史日志</summary><ul class="blocker-list">' + logs + "</ul></details>" : ""));
@@ -278,13 +315,38 @@
     updateForm();
   }
 
+  function renderRecheck(job) {
+    const check = !legacy(job) && job.recheck;
+    const visible = !!check && ["running", "completed", "interrupted"].includes(check.status);
+    show("recheckNotice", visible);
+    if (!visible) return;
+    const checked = num(check.checked);
+    const total = num(check.total);
+    const running = check.status === "running";
+    const interrupted = check.status === "interrupted";
+    $("recheckNotice").className = "notice recheck-notice " + (interrupted || check.error && (check.error.code || check.error.message) ? "warning" : "info");
+    $("recheckTitle").textContent = running ? "正在重新核验" : interrupted ? "重新核验已中断" : "重新核验已完成";
+    $("recheckStep").textContent = typeof check.step === "string" ? check.step : "";
+    $("recheckSummary").textContent = "已核验 " + checked + " / " + total + " 个对象" +
+      (check.updated_at ? " · " + time(check.updated_at) + "（北京时间）" : "") + "。" +
+      (running ? "保留原任务的固定对象清单，页面会自动更新。" : interrupted ? "已保存核验进度，可手动重新核验阻止项。" : "请查看最新对象状态，可删除的阻止项已转为待执行。") +
+      "本操作不会执行删除，删除仍需另行确认。";
+    const progress = $("recheckProgress");
+    progress.max = total || 1;
+    if (total) progress.value = Math.min(checked, total);
+    else progress.removeAttribute("value");
+    show("recheckProgress", running);
+    const error = check.error || {};
+    $("recheckError").textContent = [typeof error.message === "string" ? error.message : "", typeof error.code === "string" ? "（" + error.code + "）" : ""].filter(Boolean).join(" ");
+  }
+
   function stopPolling() { if (state.poll) clearTimeout(state.poll); state.poll = null; }
   function schedulePoll() {
     stopPolling();
     if (!jobBusy() || state.activeJobId !== state.job.job_id) return;
     state.poll = setTimeout(async () => {
       state.poll = null;
-      if (document.hidden || state.executing || state.detailBusy) { schedulePoll(); return; }
+      if (document.hidden || state.executing || state.rechecking || state.detailBusy) { schedulePoll(); return; }
       try { await loadJob(state.activeJobId, { polling: true }); state.pollErrors = 0; }
       catch (error) {
         state.pollErrors += 1;
@@ -313,6 +375,7 @@
     const seq = ++state.detailSeq;
     const generation = state.formGeneration;
     const previousStatus = state.job && state.job.job_id === jobId ? state.job.status : null;
+    const previousRecheckStatus = state.job && state.job.job_id === jobId && state.job.recheck ? state.job.recheck.status : null;
     stopPolling();
     if (options.hydrate) {
       closeConfirmation(true);
@@ -330,9 +393,12 @@
       else if (options.hydrate) state.boundGeneration = -1;
       state.query.page = num(job.page) || state.query.page;
       state.displayedQuery = { ...state.query };
+      const pending = state.pendingRecheck;
+      if (pending && pending.job_id === job.job_id && pending.payload.preview_id === job.preview_id &&
+          job.recheck && job.recheck.operation_id && job.recheck.operation_id !== pending.previous_operation_id) persistRecheck(null);
       renderJob(job);
       if (!options.polling) message("actionError", "");
-      if (previousStatus && previousStatus !== job.status) loadJobs().catch(() => {});
+      if ((previousStatus && previousStatus !== job.status) || previousRecheckStatus !== (job.recheck && job.recheck.status || null)) loadJobs().catch(() => {});
     } catch (error) {
       if (seq === state.detailSeq) {
         state.activeJobId = state.job ? state.job.job_id : null;
@@ -402,7 +468,7 @@
         const products = list(job.products).map(product => str(product.name || product.id)).join("、");
         const isLegacy = legacy(job);
         const count = isLegacy ? "Ad " + num(summary.ads) + " / Post " + num(summary.post_objects) : num(summary.total) + " 个对象";
-        return '<button type="button" class="job-card' + (state.job && state.job.job_id === job.job_id ? " active" : "") + '" data-job="' + esc(job.job_id) + '"><div><strong title="' + esc(input) + '">' + (isLegacy ? "历史任务 · " : job.input_type === "series_code" ? "资源 ID · " : "剧 ID · ") + esc(input) + '</strong><small>' + esc(products || "产品范围见任务详情") + " · " + esc(time(job.created_at || job.created_at_utc)) + '</small></div><div class="job-right">' + (isLegacy ? '<span class="tag neutral">历史只读</span>' : badge(job.status, JOB_STATES)) + '<span class="job-quantity">' + count + "</span></div></button>";
+        return '<button type="button" class="job-card' + (state.job && state.job.job_id === job.job_id ? " active" : "") + '" data-job="' + esc(job.job_id) + '"><div><strong title="' + esc(input) + '">' + (isLegacy ? "历史任务 · " : job.input_type === "series_code" ? "资源 ID · " : "剧 ID · ") + esc(input) + '</strong><small>' + esc(products || "产品范围见任务详情") + " · " + esc(time(job.created_at || job.created_at_utc)) + '</small></div><div class="job-right">' + (isLegacy ? '<span class="tag neutral">历史只读</span>' : recheckRunning(job) ? '<span class="tag info">正在重新核验</span>' : badge(job.status, JOB_STATES)) + '<span class="job-quantity">' + count + "</span></div></button>";
       }).join("") || '<div class="empty">暂无任务。预览后会在这里保留记录。</div>');
     } catch (error) {
       if (!state.jobs.length) html("jobsBox", '<div class="empty">任务记录加载失败：' + esc(error.message) + "</div>");
@@ -489,6 +555,14 @@
     } catch (_) { /* The server also fences every object and request ID. */ }
     updateControls();
   }
+  function persistRecheck(action) {
+    state.pendingRecheck = action;
+    try {
+      if (action) sessionStorage.setItem(state.storageKey + ":recheck", JSON.stringify(action));
+      else sessionStorage.removeItem(state.storageKey + ":recheck");
+    } catch (_) { /* The server also deduplicates this read-only request. */ }
+    updateControls();
+  }
   function restorePending() {
     try {
       const value = JSON.parse(sessionStorage.getItem(state.storageKey) || "null");
@@ -496,6 +570,11 @@
           /^[a-f0-9-]{36}$/i.test(value.payload.request_id) && list(value.payload.phases).length &&
           value.payload.phases.every(kind => PHASES.includes(kind))) state.pendingAction = value;
     } catch (_) { /* An unreadable local hint never authorizes execution. */ }
+    try {
+      const value = JSON.parse(sessionStorage.getItem(state.storageKey + ":recheck") || "null");
+      if (value && typeof value.job_id === "string" && value.payload && typeof value.payload.preview_id === "string" &&
+          /^[a-f0-9-]{36}$/i.test(value.payload.request_id)) state.pendingRecheck = value;
+    } catch (_) { /* A missing hint does not change server-side task state. */ }
     updateControls();
   }
   async function sendExecution(action) {
@@ -572,6 +651,59 @@
     finally { state.reconciling = false; updateControls(); }
   }
 
+  async function sendRecheck(action) {
+    if (state.rechecking || state.executing || state.reconciling || !state.permitted) return;
+    state.rechecking = true;
+    stopPolling();
+    closeConfirmation(true);
+    persistRecheck(action);
+    message("actionError", "");
+    let accepted;
+    let failure = "";
+    let uncertainFailure = false;
+    try {
+      accepted = await post(API + "/jobs/" + encodeURIComponent(action.job_id) + "/recheck", action.payload);
+      const operationId = accepted.operation_id || accepted.recheck && accepted.recheck.operation_id;
+      if (str(accepted.job_id) !== action.job_id || !operationId || accepted.read_only !== true) {
+        const error = new Error("重新核验响应不完整，请刷新任务核实进度。");
+        error.uncertain = true;
+        throw error;
+      }
+      persistRecheck(null);
+      if (state.job && state.job.job_id === action.job_id) {
+        // Recheck has its own state: keep the execution status and frozen IDs.
+        renderJob({ ...state.job, recheck: { ...(accepted.recheck || {}), operation_id: operationId,
+          status: "running", checked: 0, total: num(state.job.summary && state.job.summary.blocked),
+          step: "正在读取重新核验进度" } });
+      }
+      toast(accepted.duplicate ? "已核对到同一次重新核验请求。" : "已开始重新核验阻止项，不会执行删除。");
+    } catch (error) {
+      failure = error.message;
+      uncertainFailure = !!error.uncertain;
+      if (!error.uncertain) persistRecheck(null);
+      else failure += " 本次请求编号已保留，将先刷新任务核实进度。";
+    } finally { state.rechecking = false; updateControls(); }
+    try { await loadJob(action.job_id, { hydrate: state.activeJobId !== action.job_id }); }
+    catch (_) { schedulePoll(); }
+    if (failure && (!uncertainFailure || state.pendingRecheck)) message("actionError", failure);
+    loadJobs().catch(() => {});
+  }
+  async function recheck() {
+    if (!canRecheck()) return;
+    const jobId = state.job.job_id;
+    try { await loadJob(jobId); } catch (_) { return; }
+    if (!canRecheck()) { toast("任务状态已更新，请重新核对阻止项。"); return; }
+    if (!window.crypto || typeof window.crypto.randomUUID !== "function") {
+      message("actionError", "当前浏览器无法生成安全请求编号，请使用新版浏览器通过 HTTPS 访问后台。");
+      return;
+    }
+    await sendRecheck({
+      job_id: jobId,
+      previous_operation_id: state.job.recheck && state.job.recheck.operation_id || "",
+      payload: { preview_id: state.job.preview_id, request_id: window.crypto.randomUUID() },
+    });
+  }
+
   function bindEvents() {
     const authAction = () => window.UiTopbar.handleAuthAction({ auth: state.auth || {}, api }).catch(error => toast(error.message));
     $("authBtn").addEventListener("click", authAction);
@@ -607,6 +739,7 @@
     $("previewBtn").addEventListener("click", preview);
     $("phaseChoices").addEventListener("change", () => { closeConfirmation(true); updateControls(); });
     $("executeBtn").addEventListener("click", () => openConfirmation().catch(error => message("actionError", error.message)));
+    $("recheckBtn").addEventListener("click", recheck);
     $("reconcileBtn").addEventListener("click", reconcile);
     $("refreshJobBtn").addEventListener("click", () => loadJob(state.activeJobId).catch(() => {}));
     $("refreshJobsBtn").addEventListener("click", () => loadJobs().catch(() => {}));
@@ -623,7 +756,8 @@
     ["closeConfirmBtn", "cancelConfirmBtn"].forEach(id => $(id).addEventListener("click", () => closeConfirmation()));
     $("confirmDialog").addEventListener("cancel", event => { event.preventDefault(); closeConfirmation(); });
     $("confirmExecuteBtn").addEventListener("click", confirmExecution);
-    $("resolveRequestBtn").addEventListener("click", () => { if (state.pendingAction) sendExecution(state.pendingAction); });
+    $("resolveRequestBtn").addEventListener("click", () => { if (state.pendingAction && !$("resolveRequestBtn").disabled) sendExecution(state.pendingAction); });
+    $("resolveRecheckRequestBtn").addEventListener("click", () => { if (state.pendingRecheck && !$("resolveRecheckRequestBtn").disabled) sendRecheck(state.pendingRecheck); });
     $("confirmBlockedKind").addEventListener("change", () => { if (state.confirmation) { state.confirmation.blockedPage = 1; loadConfirmationBlocked(); } });
     $("confirmBlockedPrev").addEventListener("click", () => { if (state.confirmation && !$("confirmBlockedPrev").disabled) { state.confirmation.blockedPage -= 1; loadConfirmationBlocked(); } });
     $("confirmBlockedNext").addEventListener("click", () => { if (state.confirmation && !$("confirmBlockedNext").disabled) { state.confirmation.blockedPage += 1; loadConfirmationBlocked(); } });
@@ -674,6 +808,7 @@
       updateForm();
       await Promise.allSettled([loadProducts(), loadJobs()]);
       if (state.pendingAction) await loadJob(state.pendingAction.job_id, { hydrate: true }).catch(error => message("actionError", error.message));
+      else if (state.pendingRecheck) await loadJob(state.pendingRecheck.job_id, { hydrate: true }).catch(error => message("actionError", error.message));
     } catch (error) {
       show("loadingGate", false);
       show("loadErrorGate", true);

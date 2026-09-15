@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light" />
   <title>Meta 剧集广告删除 - AI自动后台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-assets-standard-shell" />
+  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-assets-reference-recovery" />
   <link rel="stylesheet" href="/ui-topbar.css?v=20260915-meta-assets-standard-shell" />
 </head>
 <body>
@@ -37,6 +37,7 @@
       <div id="pageRoot" class="hidden" tabindex="-1">
         <div class="workflow" aria-label="操作流程"><span><b>1</b>选择剧集与产品</span><i aria-hidden="true">→</i><span><b>2</b>预览匹配对象</span><i aria-hidden="true">→</i><span><b>3</b>确认分阶段删除</span></div>
         <div id="requestNotice" class="notice warning hidden" role="status"><div><strong>执行请求的响应尚未确认</strong><p id="requestNoticeText"></p></div><button class="btn" id="resolveRequestBtn" type="button">核对执行请求</button></div>
+        <div id="recheckRequestNotice" class="notice warning hidden" role="status"><div><strong>重新核验请求的响应尚未确认</strong><p id="recheckRequestText"></p></div><button class="btn" id="resolveRecheckRequestBtn" type="button">核对核验请求</button></div>
         <section class="panel scope-panel" aria-labelledby="scopeTitle">
           <div class="panel-head"><div><h2 id="scopeTitle">查询删除范围</h2><p>只处理明确选中的投放产品，包含历史广告及已下架剧集。</p></div><span class="tag neutral">Meta 渠道</span></div>
           <div class="panel-body form-grid">
@@ -69,6 +70,7 @@
           <div class="panel-head"><div><div class="heading-with-badge"><h2 id="resultTitle">预览与执行</h2><span id="jobStatus" class="tag neutral"></span></div><p id="jobMeta" class="job-meta"></p></div><button class="btn small" id="refreshJobBtn" type="button">刷新任务</button></div>
           <div class="panel-body result-body">
             <div id="jobNotice" class="notice info hidden" role="status"></div>
+            <div id="recheckNotice" class="notice info recheck-notice hidden" role="status" aria-live="polite"><div><strong id="recheckTitle"></strong><p id="recheckStep"></p><p id="recheckSummary"></p><progress id="recheckProgress" max="1" aria-label="重新核验进度"></progress><p id="recheckError"></p></div></div>
             <div id="staleNotice" class="notice warning hidden" role="status">输入范围已变更，请重新预览后执行。下方仍展示上一次任务的结果。</div>
             <div id="legacyNotice" class="notice info hidden">此为历史任务，仅保留只读记录。请使用上方查询范围建立新任务。</div>
             <div class="stats" id="stats" aria-label="对象统计"></div>
@@ -82,7 +84,7 @@
                 <label class="phase-card"><input type="checkbox" value="ad" data-phase checked /><span class="phase-top"><span><span class="step-number">2</span>Ad</span><strong id="adCount">0</strong></span><span class="phase-subtitle">广告 · ad id</span><span class="phase-summary" id="adSummary">等待预览</span></label>
                 <label class="phase-card"><input type="checkbox" value="video" data-phase checked /><span class="phase-top"><span><span class="step-number">3</span>Video</span><strong id="videoCount">0</strong></span><span class="phase-subtitle">视频对象 · video id</span><span class="phase-summary" id="videoSummary">等待预览</span></label>
               </div>
-              <div class="execution-footer"><div><strong id="phaseOrder">Creative → Ad → Video</strong><p class="field-help" id="executionHint">单对象失败后继续其余对象与后续阶段；成功对象自动跳过。</p></div><div class="actions"><button class="btn hidden" id="reconcileBtn" type="button">核实待确认结果</button><button class="btn danger" id="executeBtn" type="button" disabled>执行所选阶段</button></div></div>
+              <div class="execution-footer"><div><strong id="phaseOrder">Creative → Ad → Video</strong><p class="field-help" id="executionHint">单对象失败后继续其余对象与后续阶段；成功对象自动跳过。重新核验仅更新阻止项，删除仍需单独确认。</p></div><div class="actions"><button class="btn hidden" id="recheckBtn" type="button">重新核验阻止项</button><button class="btn hidden" id="reconcileBtn" type="button">核实待确认结果</button><button class="btn danger" id="executeBtn" type="button" disabled>执行所选阶段</button></div></div>
             </div>
             <div class="notice error hidden" id="actionError" role="alert"></div>
           </div>
@@ -117,6 +119,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/ui-topbar.js?v=20260915-meta-assets-v2"></script>
   <script src="/quick-nav.js?v=20260915-meta-assets-v2"></script>
-  <script src="/fb-post-ad-delete.js?v=20260915-meta-assets-standard-shell"></script>
+  <script src="/fb-post-ad-delete.js?v=20260915-meta-assets-reference-recovery"></script>
 </body>
 </html>

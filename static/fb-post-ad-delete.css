@@ -97,6 +97,8 @@ summary::-webkit-details-marker { display: none; }
 .notice.error { background: #fff1ef; color: #b23427; }
 .notice strong { display: block; font-weight: 600; }
 .notice p { margin: 3px 0 0; }
+.recheck-notice > div { width: 100%; }
+.recheck-notice progress { display: block; width: min(100%, 420px); height: 7px; margin: 9px 0 5px; accent-color: var(--brand); }
 #requestNotice { margin-bottom: 18px; }
 .inline-error { color: #b23427; font-size: 12px; padding: 0 22px 15px; }
 .heading-with-badge { display: flex; align-items: center; gap: 10px; }
@@ -149,6 +151,11 @@ td strong { font-weight: 600; }
 .cell-lines { display: grid; gap: 5px; }
 .cell-sub { display: block; color: #8691a5; font-size: 10px; margin-top: 3px; }
 .cell-reason { display: block; max-width: 340px; white-space: normal; overflow-wrap: anywhere; margin-top: 6px; color: #7a869c; line-height: 1.6; }
+.object-diagnostic { margin-top: 7px; max-width: 340px; white-space: normal; overflow-wrap: anywhere; font-size: 11px; color: #65748c; line-height: 1.6; }
+.object-diagnostic > summary { cursor: pointer; color: #446393; }
+.object-diagnostic dl { margin: 7px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; }
+.object-diagnostic dt { color: #7a869c; }
+.object-diagnostic dd { margin: 0; }
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .scope-table { max-height: 250px; }
 .scope-table table { min-width: 620px; }
