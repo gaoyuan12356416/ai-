@@ -140,6 +140,7 @@ class VideoIndex:
                 CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE ads(row_id INTEGER PRIMARY KEY,ad_id TEXT,product_id TEXT,account_id TEXT);
                 CREATE TABLE refs(video_id TEXT NOT NULL,row_id INTEGER NOT NULL);
+                CREATE TABLE malformed(row_id INTEGER PRIMARY KEY,ad_id TEXT,product_id TEXT,account_id TEXT,raw TEXT);
             """)
             stream = self.stream()
             ads, refs = [], []
@@ -152,6 +153,7 @@ class VideoIndex:
                 count += 1
                 if not stored_ids_complete(raw):
                     malformed += 1
+                    conn.execute("INSERT INTO malformed VALUES (?,?,?,?,?)", (int(rid), str(aid or ""), str(product or ""), str(account or ""), str(raw)))
                 else:
                     ids = stored_ids(raw)
                     if ids:

@@ -12,6 +12,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.fb_ad_asset_delete.video_index import MysqlVideoStream, VideoIndex
+from features.fb_ad_asset_delete.core import redact
 
 
 def service_environment():
@@ -49,9 +50,12 @@ def main():
             lookup = dict(references=len(refs), lookup_seconds=round(time.monotonic()-before_lookup, 4))
         except Exception as exc:
             lookup = dict(error=getattr(exc, "code", type(exc).__name__))
+        with closing(sqlite3.connect(index.path.as_uri()+"?mode=ro", uri=True)) as conn:
+            malformed = [dict(source_row_id=r[0], ad_id=r[1], product_id=r[2], account_id=r[3], raw=redact(r[4]))
+                         for r in conn.execute("SELECT row_id,ad_id,product_id,account_id,raw FROM malformed LIMIT 20")]
         report = dict(read_only=True, source_connections=1, proof=proof,
                       elapsed_seconds=round(time.monotonic()-started, 2), index_bytes=index.path.stat().st_size,
-                      peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, targets=len(ids), **lookup)
+                      peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, targets=len(ids), malformed_examples=malformed, **lookup)
     except Exception as exc:
         report = dict(read_only=True, error=getattr(exc, "code", type(exc).__name__), elapsed_seconds=round(time.monotonic()-started, 2))
     path = ledger.parent / "reference-probe.json"
