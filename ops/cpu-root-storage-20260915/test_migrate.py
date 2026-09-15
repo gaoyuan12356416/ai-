@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import stat
 import sys
 import tempfile
 import types
@@ -54,6 +55,23 @@ class MigrationSafetyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 m.verify_disk()
             create.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, 'mknod'), 'requires Unix device metadata')
+    def test_docker_device_nodes_are_compared_without_reading(self):
+        with tempfile.TemporaryDirectory() as root:
+            docker = os.path.join(root, 'var', 'lib', 'docker')
+            os.makedirs(docker)
+            node = os.path.join(docker, 'console')
+            try:
+                os.mknod(node, stat.S_IFCHR | 0o600, os.makedev(5, 1))
+            except PermissionError:
+                self.skipTest('mknod privilege unavailable')
+            with mock.patch.object(m, 'digest', side_effect=AssertionError('must not read device')):
+                self.assertEqual(m.manifest(docker)['console']['device'], [5, 1])
+            outside = os.path.join(root, 'outside')
+            os.rename(docker, outside)
+            with self.assertRaises(RuntimeError):
+                m.manifest(outside)
 
     def test_wrong_uuid_fails_before_write_probe(self):
         with mock.patch.object(m.os.path, 'ismount', return_value=True), mock.patch.object(m.subprocess, 'check_output', return_value=b'wrong-uuid'), mock.patch.object(m.tempfile, 'mkstemp') as create:

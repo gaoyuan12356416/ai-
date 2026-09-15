@@ -105,6 +105,7 @@ def digest(path):
 def manifest(source):
     result = {}
     cache = {}
+    allow_devices = source.endswith('/var/lib/docker') or source.endswith('/var/lib/docker.root-storage-20260915-original')
     walk = [source]
     if os.path.isdir(source) and not os.path.islink(source):
         for root, dirs, files in os.walk(source, followlinks=False):
@@ -124,6 +125,10 @@ def manifest(source):
             pass
         elif stat.S_ISSOCK(s.st_mode) or stat.S_ISFIFO(s.st_mode):
             item['special'] = True
+        elif allow_devices and (stat.S_ISCHR(s.st_mode) or stat.S_ISBLK(s.st_mode)):
+            # Container rootfs/overlay entries include device and whiteout nodes.
+            # Compare metadata only: never open a device node to hash its contents.
+            item['device'] = [os.major(s.st_rdev), os.minor(s.st_rdev)]
         else:
             raise RuntimeError('unsupported device file: ' + path)
         result[key] = item
