@@ -1,0 +1,1041 @@
+{
+  "job_id": "e9d2535ee6f94a5389f15483d77b7740",
+  "deployed_commit": "00c8872380102e8ca7423f80cea48806a2d71295",
+  "operation_status": "completed",
+  "recheck": {
+    "checked": 34,
+    "operation_id": "62507b3732464bcdadf0dcfbec6a4bd7",
+    "released": 0,
+    "status": "completed",
+    "step": "核验完成：0 个通过，34 个仍阻止。执行需另行确认",
+    "total": 34,
+    "updated_at": "2026-09-15T07:48:04.137968Z"
+  },
+  "delete_attempts": 30,
+  "attempt_rows_unchanged": true,
+  "frozen_ids_and_relations_unchanged": true,
+  "success_rows_unchanged": true,
+  "mutable_fields_updated": [
+    "reason",
+    "result",
+    "updated_at"
+  ],
+  "counts": [
+    [
+      "ad",
+      "already_deleted",
+      4
+    ],
+    [
+      "ad",
+      "deleted",
+      13
+    ],
+    [
+      "creative",
+      "deleted",
+      3
+    ],
+    [
+      "creative",
+      "failed",
+      14
+    ],
+    [
+      "video",
+      "blocked",
+      34
+    ]
+  ],
+  "index_proof": {
+    "format_version": 2,
+    "generation_id": "79ba879a2c3f4b7bac24dd083cd4c75d",
+    "complete": true,
+    "snapshot_started_at": 1789458080.1460376,
+    "completed_at": 1789458424.5164998,
+    "source_rows": 4849751,
+    "relations": 4906116,
+    "malformed_rows": 81
+  },
+  "anomalies": [
+    {
+      "source_row_id": 3367966,
+      "ad_id": "23847533111730362",
+      "product_id": "52",
+      "account_id": "441352927044697",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3435414,
+      "ad_id": "23847146011620786",
+      "product_id": "9",
+      "account_id": "3596231830449606",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3617729,
+      "ad_id": "23847059887630145",
+      "product_id": "58",
+      "account_id": "371028543928509",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3686976,
+      "ad_id": "23847455054100589",
+      "product_id": "58",
+      "account_id": "1273316253085024",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3692310,
+      "ad_id": "23847665055600772",
+      "product_id": "58",
+      "account_id": "529870314686472",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3703752,
+      "ad_id": "23847612550720604",
+      "product_id": "9",
+      "account_id": "243069126828248",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3708105,
+      "ad_id": "23847878724920040",
+      "product_id": "58",
+      "account_id": "492468628752008",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3754469,
+      "ad_id": "23847977807710040",
+      "product_id": "58",
+      "account_id": "492468628752008",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3811851,
+      "ad_id": "23848239275590781",
+      "product_id": "86",
+      "account_id": "379771626897096",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3850773,
+      "ad_id": "23848177893510040",
+      "product_id": "58",
+      "account_id": "492468628752008",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 3851056,
+      "ad_id": "23848164767220514",
+      "product_id": "58",
+      "account_id": "787019338850837",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4101413,
+      "ad_id": "23848850224690406",
+      "product_id": "99",
+      "account_id": "395917922152974",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4101466,
+      "ad_id": "23848758722110389",
+      "product_id": "99",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4101475,
+      "ad_id": "23848736550140280",
+      "product_id": "99",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4169622,
+      "ad_id": "23848865157880280",
+      "product_id": "99",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4171591,
+      "ad_id": "23848865496800280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4171592,
+      "ad_id": "23848865483410280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4196125,
+      "ad_id": "23848940396640389",
+      "product_id": "99",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4199947,
+      "ad_id": "23848905047430280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4199948,
+      "ad_id": "23848904948440280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200027,
+      "ad_id": "23848941876670389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200028,
+      "ad_id": "23848941704880389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200029,
+      "ad_id": "23848941468270389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200030,
+      "ad_id": "23848940749550389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200031,
+      "ad_id": "23848940495630389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4200032,
+      "ad_id": "23848940613670389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4210328,
+      "ad_id": "23848959774540389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4211042,
+      "ad_id": "23848279768070176",
+      "product_id": "",
+      "account_id": "1225622444530934",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4220005,
+      "ad_id": "23848758074020171",
+      "product_id": "40",
+      "account_id": "257782399270892",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4220836,
+      "ad_id": "23848872458380514",
+      "product_id": "58",
+      "account_id": "787019338850837",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4221215,
+      "ad_id": "23848661488080490",
+      "product_id": "48",
+      "account_id": "778674726069703",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222110,
+      "ad_id": "23848945740350280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222111,
+      "ad_id": "23848945740330280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222112,
+      "ad_id": "23848945740310280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222580,
+      "ad_id": "23849043129980406",
+      "product_id": "",
+      "account_id": "395917922152974",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222746,
+      "ad_id": "23848979419790389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222747,
+      "ad_id": "23848979081860389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4222748,
+      "ad_id": "23848978641880389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4238470,
+      "ad_id": "23848979983650280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4238479,
+      "ad_id": "23849017697550389",
+      "product_id": "",
+      "account_id": "814045462697358",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4238623,
+      "ad_id": "23849085084160406",
+      "product_id": "",
+      "account_id": "395917922152974",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4244583,
+      "ad_id": "23849136815980527",
+      "product_id": "48",
+      "account_id": "493363131740550",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4250921,
+      "ad_id": "23849014566600567",
+      "product_id": "72",
+      "account_id": "446749819795421",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4261429,
+      "ad_id": "23849156367210406",
+      "product_id": "",
+      "account_id": "395917922152974",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4261430,
+      "ad_id": "23849156285920406",
+      "product_id": "",
+      "account_id": "395917922152974",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4342197,
+      "ad_id": "23849672232760671",
+      "product_id": "85",
+      "account_id": "2944438532464484",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4349775,
+      "ad_id": "23849224174830514",
+      "product_id": "58",
+      "account_id": "787019338850837",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4399525,
+      "ad_id": "23849356400120688",
+      "product_id": "7",
+      "account_id": "553332595663847",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4425435,
+      "ad_id": "23849509443240280",
+      "product_id": "85",
+      "account_id": "2050184898462778",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4425437,
+      "ad_id": "23849595035980656",
+      "product_id": "85",
+      "account_id": "852526399020308",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4437126,
+      "ad_id": "23849516294310040",
+      "product_id": "58",
+      "account_id": "492468628752008",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4524635,
+      "ad_id": "23850365815150049",
+      "product_id": "85",
+      "account_id": "323053946162602",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4557398,
+      "ad_id": "23849937525650643",
+      "product_id": "58",
+      "account_id": "820723342036835",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4557482,
+      "ad_id": "23849783850250040",
+      "product_id": "58",
+      "account_id": "492468628752008",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4560418,
+      "ad_id": "23849719851640514",
+      "product_id": "58",
+      "account_id": "787019338850837",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4614543,
+      "ad_id": "23849971343840370",
+      "product_id": "105",
+      "account_id": "231589079005416",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4619191,
+      "ad_id": "23849978740800370",
+      "product_id": "105",
+      "account_id": "231589079005416",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4649150,
+      "ad_id": "23850087223350280",
+      "product_id": "85",
+      "account_id": "2050184898462778",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4649172,
+      "ad_id": "23850143339810131",
+      "product_id": "85",
+      "account_id": "525844925317101",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4649179,
+      "ad_id": "23850184995510656",
+      "product_id": "85",
+      "account_id": "852526399020308",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4702019,
+      "ad_id": "23850260807920400",
+      "product_id": "9",
+      "account_id": "221783435906501",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4733063,
+      "ad_id": "23850036298620596",
+      "product_id": "68",
+      "account_id": "342963427582251",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4733081,
+      "ad_id": "23850696723850524",
+      "product_id": "56",
+      "account_id": "270126384772275",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4733090,
+      "ad_id": "23850343703130467",
+      "product_id": "68",
+      "account_id": "620770275927613",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4734372,
+      "ad_id": "23850536154800131",
+      "product_id": "85",
+      "account_id": "525844925317101",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4750611,
+      "ad_id": "23850831116260534",
+      "product_id": "4",
+      "account_id": "954877265359776",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4752711,
+      "ad_id": "23851513826980743",
+      "product_id": "4",
+      "account_id": "503523790729044",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4759463,
+      "ad_id": "23850887394900534",
+      "product_id": "4",
+      "account_id": "954877265359776",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4761562,
+      "ad_id": "23850365499030725",
+      "product_id": "150",
+      "account_id": "285236847056616",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4770088,
+      "ad_id": "23851255896750086",
+      "product_id": "4",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4773844,
+      "ad_id": "23850931037830534",
+      "product_id": "",
+      "account_id": "954877265359776",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4776709,
+      "ad_id": "23851295677060086",
+      "product_id": "4",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4778449,
+      "ad_id": "23851304219740086",
+      "product_id": "4",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4778738,
+      "ad_id": "23850730168640418",
+      "product_id": "56",
+      "account_id": "272329125109243",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4809387,
+      "ad_id": "23848919684040280",
+      "product_id": "",
+      "account_id": "619419442557409",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4835003,
+      "ad_id": "23851017139110534",
+      "product_id": "4",
+      "account_id": "954877265359776",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4867466,
+      "ad_id": "23851586296840086",
+      "product_id": "",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4894828,
+      "ad_id": "23851789084000086",
+      "product_id": "",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4906243,
+      "ad_id": "23851855442680086",
+      "product_id": "",
+      "account_id": "679700839397911",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 4944626,
+      "ad_id": "23852388205390743",
+      "product_id": "4",
+      "account_id": "503523790729044",
+      "field_length": 512
+    },
+    {
+      "source_row_id": 5021606,
+      "ad_id": "23852221507760534",
+      "product_id": "",
+      "account_id": "954877265359776",
+      "field_length": 512
+    }
+  ],
+  "integrity_check": "ok",
+  "blocked_ids": [
+    "1043279045199700",
+    "1057811747038229",
+    "1060093830079867",
+    "1070521115522450",
+    "1080212624704290",
+    "1086362183758222",
+    "1087012230588418",
+    "1101044252449315",
+    "1112865881405806",
+    "1290192783097838",
+    "1372807748274351",
+    "1449125957274736",
+    "1473831214549871",
+    "1592069255910733",
+    "1597431092027893",
+    "1605401957908290",
+    "1605780681336341",
+    "1627212032362216",
+    "1640618397486634",
+    "1684638253669367",
+    "1789018688954285",
+    "2320622912081531",
+    "2525416381253872",
+    "27865925056435955",
+    "2819799711722627",
+    "28231071959874983",
+    "2825421887856792",
+    "28334725992831513",
+    "28546637624948005",
+    "28556306813987094",
+    "2935280716840401",
+    "4033852376924441",
+    "4215689555387570",
+    "4456549357943144"
+  ],
+  "blocked_sample": {
+    "checked_at": "2026-09-15T07:47:16+00:00",
+    "code": "video_reference_unverified",
+    "detail": {
+      "cause": {
+        "account_id": "3596231830449606",
+        "code": 200,
+        "credential_probe_user_id": "631",
+        "fbtrace_id": "AxpM_v5z6asBUrdTecRCoJO",
+        "http_status": 403,
+        "message": "(#200) Ad account owner has NOT grant ads_management or ads_read permission, refer to [request URL omitted] for details.",
+        "type": "OAuthException"
+      },
+      "reference_account_id": "3596231830449606",
+      "reference_ad_id": "23847146011620786",
+      "source_row_id": 3435414,
+      "unresolved_records": 81
+    },
+    "message": "历史视频引用字段可能截断，无法核实账户 3596231830449606 的 Ad 23847146011620786。请由有权访问该账户的管理员恢复读取后重新核验（Meta/读取错误 200）"
+  },
+  "creative_readback": {
+    "read_only": true,
+    "checked_at": "2026-09-15T07:43:51Z",
+    "job_id": "e9d2535ee6f94a5389f15483d77b7740",
+    "objects": [
+      {
+        "object_id": "1031857963184239",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1043677551606534",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1058424236781031",
+        "old_code": "200",
+        "old_subcode": 2490592,
+        "meta_status": "ACTIVE",
+        "account_id": "3653322121476248",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "3653322121476248",
+          "account_status": 2,
+          "account_state": "disabled",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:49+00:00",
+          "message": "广告账户已停用（account_status=2），请由管理员核查账户限制；账户可读不代表具有对象删除权限",
+          "disable_reason": 19
+        }
+      },
+      {
+        "object_id": "1092245000123775",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1340788521600289",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1440395417906195",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1523015159596842",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1596715515200858",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1620415149878112",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1750584876168570",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "1858879708820625",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "2654040951695663",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "3166802443518971",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      },
+      {
+        "object_id": "4310112655910688",
+        "old_code": "200",
+        "old_subcode": 1487235,
+        "meta_status": "ACTIVE",
+        "account_id": "1070980995490915",
+        "credential_user_id": "631",
+        "account_diagnostic": {
+          "account_id": "1070980995490915",
+          "account_status": 1,
+          "account_state": "active",
+          "user_tasks": [
+            "ADVERTISE",
+            "ANALYZE",
+            "DRAFT"
+          ],
+          "readable": true,
+          "delete_permission": "unverified",
+          "checked_at": "2026-09-15T07:43:48+00:00",
+          "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限",
+          "disable_reason": 0
+        }
+      }
+    ]
+  },
+  "public_verification": {
+    "target_hashes": true,
+    "public": {
+      "/fb-post-ad-delete.html": {
+        "status": 200,
+        "hash_match": true
+      },
+      "/fb-post-ad-delete.js": {
+        "status": 200,
+        "hash_match": true
+      },
+      "/fb-post-ad-delete.css": {
+        "status": 200,
+        "hash_match": true
+      },
+      "/api/ui/topbar": {
+        "status": 200
+      },
+      "/api/fb-post-ad-delete/products": {
+        "status": 401
+      },
+      "/api/fb-post-ad-delete/jobs": {
+        "status": 401
+      }
+    }
+  }
+}
