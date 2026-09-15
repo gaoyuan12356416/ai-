@@ -28,7 +28,7 @@ def get_service(app):
                 raise AssetError("data_disk_unavailable", "任务数据盘不可用，停止新增操作", 503)
             if str(app["MYSQL_HOST"]) != "101.32.56.53" or str(app["MYSQL_PORT"]) != "63350":
                 raise AssetError("read_only_source_required", "业务源库必须使用配置的只读端点", 503)
-            query = lambda sql, timeout: app["ad_control_run_mysql"](sql, timeout_seconds=timeout)
+            query = lambda sql, timeout: app["ad_control_run_mysql"](sql, timeout_seconds=timeout, via_stdin=True)
             if query("SELECT @@read_only", 10) != [["1"]]:
                 raise AssetError("read_only_source_required", "无法确认业务源库只读状态", 503)
             source = SqlSource(query, schema=app["AD_CONTROL_DB_NAME"],

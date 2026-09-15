@@ -18,3 +18,15 @@ FB_AD_ASSET_DELETE_DB_PATH默认/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3�
 
 ## 回滚原则
 仅回滚代码/静态，保留当前V2台账与未知锁；不要把历史台账备份覆盖当前进度。回滚若恢复旧功能实现，应先关闭本模块入口及旧删除执行路由。精确备份路径、提交、检查结果与回滚命令在部署完成后补录。
+
+## 生产只读校验与性能边界
+- 产品目录329项；826未包含；3543是W2A、父产品3360。
+- content_id=66075322仅1个en版本；series_code=XEY271共10版本；content_id=68608322/product3543匹配11个Ad且源归属核查0阻止。
+- 指定Ad/Creative真实Meta GET均成功，Creative返回2个视频ID，预览会固定这两个节点。
+- 修复MySQL混合字符序错误1267，使用可强制转换的_utf8mb4十六进制字面量；不改变源库结构。
+- 源表全局Video引用没有合适索引，实际完整扫描超过180秒。该场景仅Video标为阻止，Creative/Ad仍可处理；不会把查询失败解释为无引用。后续视频处理需全局引用核验完整通过。本次没有新增源库索引或修改业务库。
+- Creative经Meta确认账户后按ad_account_id索引核验全部产品，兼容裸ID/act_格式。Video始终单一SELECT包含全部目标，避免多段读取伪装成一致性快照。
+
+## 可执行部署与回滚工具
+scripts/deploy_meta_asset_delete.py prepare <GitHub release目录> 生成有校验清单的代码、两处静态和在线SQLite备份；apply <backup目录>再次校验基线后切换选定文件。
+rollback <backup目录>保留当前V2台账，恢复代码/静态，同时关闭旧版三个删除入口函数。随后只重启drama-material-api.service。不会重新放开已知不安全的旧删除流程。

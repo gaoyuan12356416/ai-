@@ -219,29 +219,47 @@ class SqlSource:
                     ad["reason"] = "同一 Ad 在源记录中属于其他产品或广告账户"
         return list(ads.values()), blockers
 
-    def shared_references(self, objects):
-        """Fail closed if the global source reference check cannot complete."""
-        refs = []
+    def shared_references(self, objects, progress=None):
+        """Check all products, with one consistent SELECT per asset kind.
+
+        A verified Creative belongs to its Meta account; Videos retain a global
+        scan. All Video IDs share one statement snapshot, including concurrent
+        updates visible at statement start. Timeout never means no references.
+        """
+        refs, seen = [], set()
         by_kind = {kind: sorted({o["object_id"] for o in objects if o["kind"] == kind}) for kind in ("creative", "video")}
         for kind, ids in by_kind.items():
-            for part in chunks(ids, 250):
-                if kind == "creative":
-                    condition = "creative_id IN %s" % inside(part)
-                else:
-                    # video_id can be a scalar, CSV, or JSON array. Match complete
-                    # numeric tokens, then verify parsed IDs again in Python.
-                    regex = "(^|[^0-9])(" + "|".join(part) + ")([^0-9]|$)"
-                    condition = "video_id REGEXP %s" % q(regex)
-                rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, condition),
-                    ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60)
-                if len(rows) > 100000:
-                    raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，Creative / Video 暂不能删除")
-                for row in rows:
-                    if kind == "video" and not stored_ids_complete(row["video_ids_raw"]):
-                        raise AssetError("reference_check_incomplete", "共享视频引用记录无法完整解析，不能排除范围外引用")
-                    found = {row["creative_id"]} if kind == "creative" else set(stored_ids(row["video_ids_raw"]))
-                    for oid in found & set(part):
-                        refs.append(dict(row, key=kind + ":" + oid))
+            if not ids:
+                continue
+            relevant = [o for o in objects if o["kind"] == kind]
+            verified = kind == "creative" and all(o.get("account_verified") and len(o.get("account_ids", [])) == 1 for o in relevant)
+            if kind == "creative":
+                condition = "creative_id IN %s" % inside(ids)
+            else:
+                regex = "(^|[^0-9])(" + "|".join(ids) + ")([^0-9]|$)"
+                # Avoid expensive token matching for ordinary scalar fields.
+                condition = "(video_id IN %s OR (video_id REGEXP '[^0-9]' AND video_id REGEXP %s))" % (inside(ids), q(regex))
+            if verified:
+                accounts = {a for o in relevant for a in o["account_ids"]}
+                condition += " AND ad_account_id IN %s" % inside(sorted(accounts | {"act_" + a for a in accounts}))
+            index = "ad_account_id" if verified else "PRIMARY"
+            if progress:
+                progress(kind, 0, 1)
+            rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data FORCE INDEX (%s) WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, index, condition),
+                ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60 if verified else 180)
+            if len(rows) > 100000:
+                raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+            for row in rows:
+                if kind == "video" and not stored_ids_complete(row["video_ids_raw"]):
+                    raise AssetError("reference_check_incomplete", "共享视频引用记录无法完整解析，不能排除范围外引用")
+                found = {row["creative_id"]} if kind == "creative" else set(stored_ids(row["video_ids_raw"]))
+                for oid in found & set(ids):
+                    key = (kind + ":" + oid, str(row["ad_id"]), str(row["product_id"]), str(row["account_id"]))
+                    if key not in seen:
+                        seen.add(key)
+                        refs.append(dict(row, key=key[0]))
+            if progress:
+                progress(kind, 1, 1)
         return refs
 
     def token(self, user_ids):

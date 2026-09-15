@@ -175,6 +175,7 @@ class Service:
                                     obj["creative_ids"] = [proof["creative_id"]]
                                     add("creative", proof["creative_id"], ad)
                         if kind == "creative":
+                            obj["account_verified"] = True
                             obj["verified_video_ids"] = proof.get("video_ids", [])
                             obj["video_ids"] = sorted(set(obj["video_ids"]) | set(proof.get("video_ids", [])))
                             for ad in ads:
@@ -198,14 +199,17 @@ class Service:
             allowed_ads -= bad_ads
             assets = [o for o in objects.values() if o["kind"] != "ad" and o["status"] == "pending"]
             self.store.update_job(job_id, preview_step="核验所选范围之外的共享引用")
-            try:
-                refs = self.source.shared_references(assets)
-                for ref in refs:
-                    if ref["key"] in objects and str(ref["ad_id"]) not in allowed_ads:
-                        self._block(objects[ref["key"]], "shared_outside_scope", "源记录显示范围外 Ad %s 引用该素材" % ref["ad_id"])
-            except AssetError as exc:
-                for obj in assets:
-                    self._block(obj, "reference_check_incomplete", exc.message)
+            for asset_kind in ("creative", "video"):
+                kind_assets = [o for o in assets if o["kind"] == asset_kind]
+                try:
+                    refs = self.source.shared_references(kind_assets, progress=lambda kind, done, total:
+                        self.store.update_job(job_id, preview_step="核验 %s 共享引用：%d / %d 段" % (kind, done, total)))
+                    for ref in refs:
+                        if ref["key"] in objects and str(ref["ad_id"]) not in allowed_ads:
+                            self._block(objects[ref["key"]], "shared_outside_scope", "源记录显示范围外 Ad %s 引用该素材" % ref["ad_id"])
+                except AssetError as exc:
+                    for obj in kind_assets:
+                        self._block(obj, "reference_check_incomplete", exc.message)
             for obj in assets:
                 if obj["status"] != "pending":
                     continue
@@ -258,7 +262,8 @@ class Service:
                 if phase != "ad":
                     try:
                         phase_objects = [o for o in job["objects"] if o["kind"] == phase and o["status"] in ("pending", "failed")]
-                        refs = self.source.shared_references(phase_objects)
+                        refs = self.source.shared_references(phase_objects, progress=lambda kind, done, total:
+                            self.store.update_job(job_id, execution_step="核验 %s 共享引用：%d / %d 段" % (kind, done, total)))
                         outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
                     except AssetError as exc:
                         refs_error = exc

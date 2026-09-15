@@ -56,7 +56,7 @@ class FakeSource:
             raise self.resolve_error
         return deepcopy(self.ads), []
 
-    def shared_references(self, objects):
+    def shared_references(self, objects, progress=None):
         if self.reference_error:
             raise self.reference_error
         keys = {o["key"] for o in objects}

@@ -34528,7 +34528,7 @@ def list_ad_control_products(query="", limit=200):
     return {"items": items}
 
 
-def ad_control_run_mysql(query, timeout_seconds=None):
+def ad_control_run_mysql(query, timeout_seconds=None, via_stdin=False):
     timeout_seconds = max(3, int(timeout_seconds or AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS))
     mysql_env = os.environ.copy()
     if MYSQL_PASSWORD:
@@ -34537,7 +34537,8 @@ def ad_control_run_mysql(query, timeout_seconds=None):
     mysql_env["MYSQL_QUERY_TIMEOUT_KILL_AFTER"] = "3"
     mysql_env["MYSQL_MAX_EXECUTION_TIME_MS"] = str(timeout_seconds * 1000)
     proc = subprocess.run(
-        MYSQL_BASE_CMD + [query],
+        MYSQL_BASE_CMD[:-1] if via_stdin else MYSQL_BASE_CMD + [query],
+        input=(query + ";\n") if via_stdin else None,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

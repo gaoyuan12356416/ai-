@@ -35,6 +35,8 @@ class FixtureSource(SqlSource):
 
     def read(self, sql, columns, timeout=30):
         self.reads.append((sql, columns, timeout))
+        if columns == ("max_id",):
+            return [{"max_id": "100"}]
         if ".ads_drama_info" in sql:
             bucket = "dramas"
         elif ".ads_custom_source" in sql:
@@ -66,6 +68,8 @@ class SourceTests(unittest.TestCase):
     def test_sql_values_are_hex_encoded_and_schema_cannot_inject_sql(self):
         value = "abc' OR 1=1 -- 测试"
         literal = q(value)
+        self.assertTrue(literal.startswith("_utf8mb4 0x"))
+        self.assertNotIn("CONVERT", literal)
         self.assertNotIn(value, literal)
         self.assertEqual(bytes.fromhex(literal.split("0x", 1)[1].split(" ", 1)[0]).decode("utf-8"), value)
         with self.assertRaises(ValueError):
@@ -258,6 +262,25 @@ class SourceTests(unittest.TestCase):
         with self.assertRaises(AssetError) as error:
             source.shared_references([dict(kind="video", object_id="3001")])
         self.assertEqual(error.exception.code, "reference_check_incomplete")
+
+    def test_verified_creative_uses_account_index_without_product_filter(self):
+        source = FixtureSource(references=[])
+        source.shared_references([dict(kind="creative", object_id="2001", account_ids=["444"], account_verified=True)])
+        sql = source.reads[0][0]
+        self.assertIn("FORCE INDEX (ad_account_id)", sql)
+        self.assertIn(q("444"), sql)
+        self.assertIn(q("act_444"), sql)
+        self.assertNotIn("product IN", sql)
+
+    def test_all_video_targets_share_one_global_statement_snapshot(self):
+        source = FixtureSource(references=[])
+        source.shared_references([dict(kind="video", object_id=str(3000 + i), account_ids=["444"], account_verified=True) for i in range(501)])
+        self.assertEqual(1, len(source.reads))
+        sql, _, timeout = source.reads[0]
+        self.assertIn("FORCE INDEX (PRIMARY)", sql)
+        self.assertNotIn("ad_account_id IN", sql)
+        self.assertIn(q("3500"), sql)
+        self.assertEqual(180, timeout)
 
     def test_global_ad_identity_conflict_is_checked_outside_selected_product(self):
         for other in (dict(ad_id="1001", product_id="999", account_id="444"),
