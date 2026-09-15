@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 from features.fb_gpu.random_overlay import load_asset_set, selected_asset_paths, validate_recipe
 
+from .asset_cache import VERSION as ASSET_CACHE_VERSION, cache_root as asset_cache_root, selected_entries
+
 from .composition import (
     CANVAS_FPS,
     CANVAS_HEIGHT,
@@ -358,6 +360,7 @@ def build_opencl_chunk_command(
     chunk: Mapping[str, Any],
     kernel_path: Path,
     device: Optional[str] = None,
+    asset_cache_entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> list[str]:
     device = opencl_device(device)
     threads = compositor_filter_threads()
@@ -372,9 +375,15 @@ def build_opencl_chunk_command(
     for category in ("border", "opacity_video", "corners", "tint"):
         duration = float(asset_durations.get(category) or 0)
         phase = (start % duration) if duration > 0 else 0.0
-        command.extend(_input_arguments(
-            Path(assets[category]), asset_media_types[category], phase, threads
-        ))
+        if asset_cache_entries:
+            command.extend([
+                "-threads", str(threads), "-stream_loop", "-1", "-ss", "%.6f" % phase,
+                "-c:v", "rawvideo", "-i", str(asset_cache_entries[category]["path"]),
+            ])
+        else:
+            command.extend(_input_arguments(
+                Path(assets[category]), asset_media_types[category], phase, threads
+            ))
     # The source may switch from a 16:9 intro to portrait episodes. FFmpeg
     # reinitializes the input filter chain at that boundary, so STARTPTS would
     # reset a second time and overlap the episode with the intro. The input
@@ -852,6 +861,7 @@ def render_chunked_random_output(
     content_identity = {
         "version": 2,
         "backend": BACKEND,
+        "asset_cache_version": ASSET_CACHE_VERSION if asset_cache_root() else None,
         "renderer_profile": RENDERER_PROFILE,
         "runtime": runtime_fingerprint,
         "recipe_sha256": supplied_sha,
@@ -895,6 +905,7 @@ def render_chunked_random_output(
     if output_path.exists() or output_path.is_symlink():
         raise checkpoint_error(conflict=True)
     selected = {key: Path(value) for key, value in selected_asset_paths(fb_recipe, asset_set).items()}
+    cached_assets = selected_entries(fb_recipe)
     media_types = {key: fb_recipe["assets"][key]["media_type"] for key in selected}
     asset_durations = {}
     for key, path in selected.items():
@@ -956,6 +967,7 @@ def render_chunked_random_output(
                             asset_durations=asset_durations,
                             chunk=row,
                             kernel_path=kernel_path,
+                            asset_cache_entries=cached_assets,
                         )
                         try:
                             if runner is None:
