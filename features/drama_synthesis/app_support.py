@@ -9,6 +9,7 @@ import time
 STAGES = {
     "connecting": "正在连接制作节点", "submitting": "正在提交制作任务", "queued": "等待制作资源",
     "downloading": "下载剧集", "normalizing": "统一视频规格",
+    "prefetching": "提前下载下一任务", "prefetched": "预下载完成，等待制作",
     "concatenating": "拼接全集", "rendering": "制作随机模板", "rendering_random": "制作随机模板",
     "removing_bgm": "处理背景音乐", "waiting_cover": "等待封面",
     "uploading": "上传成片", "completed": "制作完成",
@@ -43,8 +44,8 @@ def remote_display(snapshot):
             return a, b
         return None
 
-    if stage in {"downloading", "normalizing"}:
-        if stage == "downloading":
+    if stage in {"downloading", "normalizing", "prefetching", "prefetched"}:
+        if stage != "normalizing":
             counts = ratio(metrics.get("completed_episodes"), metrics.get("total_episodes"))
         else:
             downloaded = number(metrics.get("completed_episodes"))
@@ -84,7 +85,7 @@ def remote_display(snapshot):
     elif snapshot.get("stalled") and state == "running":
         detail.append("超过15分钟未见新进展，需核对制作节点")
     status = "rendering"
-    if stage in {"queued", "connecting"}:
+    if stage in {"queued", "connecting", "prefetching", "prefetched"}:
         status = "queued"
     elif stage == "downloading":
         status = "downloading"

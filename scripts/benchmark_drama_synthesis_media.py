@@ -785,7 +785,7 @@ def main():
     download = commands.add_parser("download")
     download.add_argument("--url-file", required=True, help="Private JSON array; URL values are never printed or saved to evidence")
     download.add_argument("--output-dir", required=True)
-    download.add_argument("--workers", type=int, choices=(1, 2, 4, 8), required=True)
+    download.add_argument("--workers", type=int, choices=(1, 2, 4, 6, 8), required=True)
     download.add_argument("--bytes-per-source", type=int, default=16 * 1024 * 1024)
     download.add_argument("--four-worker-evidence")
     download.add_argument("--compare-evidence", help="Compare same-worker bounded samples, including img/accelerate same-resource paths")

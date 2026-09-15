@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -49,6 +50,13 @@ POLL_SECONDS = max(1, env_int("DRAMA_JOB_WORKER_POLL_SECONDS", 10))
 HEARTBEAT_SECONDS = max(1, env_int("DRAMA_JOB_WORKER_HEARTBEAT_SECONDS", 15))
 STALE_SECONDS = max(60, env_int("DRAMA_JOB_WORKER_STALE_SECONDS", 900))
 RECOVER_LEGACY = env_bool("DRAMA_JOB_WORKER_RECOVER_LEGACY", False)
+
+
+def observer_count():
+    value = os.environ.get("DRAMA_JOB_WORKER_OBSERVERS", "1")
+    if value not in {"1", "2"}:
+        raise ValueError("DRAMA_JOB_WORKER_OBSERVERS must be 1 or 2")
+    return int(value)
 
 
 def now_text():
@@ -166,7 +174,10 @@ def claim_next_job():
             FROM drama_material_job j
             LEFT JOIN drama_material_job_worker_lease l ON l.job_id = j.job_id
             WHERE j.status IN ({placeholders})
-            ORDER BY CASE WHEN j.status = 'queued' THEN 0 ELSE 1 END, j.updated_at ASC
+            ORDER BY CASE WHEN l.status = 'interrupted' THEN 0
+                          WHEN j.status != 'queued' THEN 1
+                          WHEN l.job_id IS NOT NULL THEN 2 ELSE 3 END,
+                     j.updated_at ASC, j.job_id ASC
             LIMIT 50
             """.format(placeholders=placeholders),
             RUNNING_JOB_STATUSES,
@@ -427,6 +438,42 @@ def handle_signal(signum, _frame):
     STOP_EVENT.set()
 
 
+def observe_jobs(*, once=False, observers=1):
+    """Keep at most one next job submitted while observing the active render.
+
+    Claims remain transactional and attempt-fenced. Each job owns its heartbeat;
+    stopping this observer pool never cancels an accepted GPU execution.
+    """
+    if type(observers) is not int or observers not in (1, 2):
+        raise ValueError("observers must be 1 or 2")
+    if once:
+        job_id = claim_next_job()
+        if job_id:
+            run_claimed_job(job_id)
+        return
+    active = {}
+    with ThreadPoolExecutor(max_workers=observers, thread_name_prefix="drama-observer") as pool:
+        while not STOP_EVENT.is_set():
+            for future in tuple(active):
+                if future.done():
+                    job_id = active.pop(future)
+                    try:
+                        future.result()
+                    except Exception:
+                        logging.exception("job observer failed: %s", job_id)
+            while len(active) < observers and not STOP_EVENT.is_set():
+                try:
+                    job_id = claim_next_job()
+                except Exception:
+                    logging.exception("queue claim failed; active observers retained")
+                    break
+                if not job_id:
+                    break
+                logging.info("observing job: %s", job_id)
+                active[pool.submit(run_claimed_job, job_id)] = job_id
+            STOP_EVENT.wait(POLL_SECONDS)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run drama synthesis jobs outside the API process.")
     parser.add_argument("--once", action="store_true", help="Process at most one available job and exit.")
@@ -449,26 +496,20 @@ def main():
     if args.init_only:
         return 0
 
+    observers = observer_count()
+    if observers > 1 and not getattr(drama_app, "DRAMA_GPU_ASYNC_ENABLED", False):
+        raise ValueError("two observers require the asynchronous GPU runtime")
+
     logging.info(
-        "drama job worker started: worker_id=%s poll=%ss heartbeat=%ss stale=%ss recover_legacy=%s",
+        "drama job worker started: worker_id=%s poll=%ss heartbeat=%ss stale=%ss recover_legacy=%s observers=%s",
         WORKER_ID,
         POLL_SECONDS,
         HEARTBEAT_SECONDS,
         STALE_SECONDS,
         RECOVER_LEGACY,
+        observers,
     )
-    while not STOP_EVENT.is_set():
-        job_id = claim_next_job()
-        if job_id:
-            logging.info("processing job: %s", job_id)
-            run_claimed_job(job_id)
-            if args.once:
-                return 0
-            continue
-        if args.once:
-            logging.info("no job available")
-            return 0
-        STOP_EVENT.wait(POLL_SECONDS)
+    observe_jobs(once=args.once, observers=observers)
     return 0
 
 

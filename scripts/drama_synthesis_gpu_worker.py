@@ -25,6 +25,7 @@ from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, 
 from features.drama_synthesis.youtube import YouTubeHTTPError  # noqa: E402
 from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  # noqa: E402
 from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
+from features.drama_synthesis.prefetch import prefetch_episodes  # noqa: E402
 from features.drama_synthesis.gpu_compositor import (  # noqa: E402
     KERNEL_TEMPLATE, compositor_filter_threads, compositor_lanes, runtime_identity,
 )
@@ -76,6 +77,8 @@ def get_runtime():
                 can_resume=getattr(drama_app, "gpu_video_resume_ready", None),
                 render_slots=RENDER_SLOTS, queue_limit=limit,
                 dispatcher_workers=RENDER_CONCURRENCY,
+                prefetch=(lambda payload, **kwargs: prefetch_episodes(payload, root, **kwargs))
+                if os.environ.get("DRAMA_GPU_PREFETCH_ENABLED", "0") == "1" else None,
             )
         return RUNTIME
 
