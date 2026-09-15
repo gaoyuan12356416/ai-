@@ -51,12 +51,20 @@ def build(ffmpeg, item, root, *, verify_only=False):
     options = ["-c:v", "libvpx-vp9"] if source.suffix == ".webm" else ["-framerate", "30"]
     frames = ["-frames:v", "1"] if source.suffix == ".png" else []
     started = time.monotonic()
+    expected = frame_hashes(ffmpeg, source, original=True)
+    durations = {row[1] for row in expected}
+    if len(durations) != 1 or not expected or expected[0][1] <= 0:
+        raise RuntimeError("drama_asset_packet_duration_unsupported")
+    # NUT reconstructs packet duration from the rate hint. Matroska's 30 fps
+    # assets actually carry 33 ms durations, not 1/30 s; retaining this hint is
+    # necessary for stream_loop to restart at the exact original timestamp.
+    rate = str(1 / expected[0][1])
     subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-filter_threads", "2", "-threads", "2",
         *options, "-i", str(source), "-map", "0:v:0", "-an", "-vf", "format=rgba",
-        "-fps_mode", "passthrough", *frames, "-enc_time_base", "demux", "-c:v", "rawvideo", "-threads", "2",
+        "-fps_mode", "passthrough", *frames, "-r", rate, "-enc_time_base", "demux", "-c:v", "rawvideo", "-threads", "2",
         "-fs", str(MAX_ITEM_BYTES), "-f", "nut", str(partial)],
         check=True, capture_output=True, timeout=600)
-    expected, actual = frame_hashes(ffmpeg, source, original=True), frame_hashes(ffmpeg, partial)
+    actual = frame_hashes(ffmpeg, partial)
     if not expected or expected != actual or sha256_file(source)[0] != key:
         raise RuntimeError("drama_asset_pixel_or_timestamp_mismatch")
     if not 0 < partial.stat().st_size <= MAX_ITEM_BYTES:
