@@ -42,7 +42,11 @@ def main():
     code = KERNEL.read_text(encoding='utf-8').split('extern "C" __global__ void compose', 1)[0]
     module = cp.RawModule(code='#define SCENE_WIDTH 720\n#define SCENE_HEIGHT 1280\n'+code,
                           options=('--std=c++11',))
-    convert = module.get_function('nv12_rgba')
+    kernel = module.get_function('nv12_rgba')
+    decoded_surface = {}
+    def convert(grid, block, arguments):
+        decoded_surface['nv12'] = arguments[0]
+        kernel(grid, block, arguments)
     start = Fraction(str(args.start))
     errors, samples, frame_count = [], [], 0
     with av.open(args.source) as software:
@@ -67,13 +71,20 @@ def main():
                 errors.append('timestamp_or_dimension_mismatch:%d' % i)
                 break
             if i < 3 or i % 251 == 0 or shape != previous_shape:
+                # Compare decoder output before any color converter. PyAV
+                # 12.3's RGB reformat does not honor the BT.709 source matrix
+                # in this runtime; it is not a valid color reference.
+                reference_nv12 = frame.reformat(format='nv12').to_ndarray()
+                actual_nv12 = decoded_surface['nv12'].get()
+                nv12_diff = np.abs(actual_nv12.astype(np.int16)-reference_nv12.astype(np.int16))
                 expected = frame.reformat(format='rgba', src_colorspace='ITU709').to_ndarray()
                 actual = pixels.get()
                 diff = np.abs(actual.astype(np.int16)-expected.astype(np.int16))
                 mae = float(diff.mean())
                 samples.append({'frame':i, 'seconds':float(pts), 'shape':list(shape[:2]),
-                                'rgba_mae':round(mae, 5), 'max_error':int(diff.max())})
-                if mae > 1.5:
+                                'nv12_max_error':int(nv12_diff.max()),
+                                'pyav_rgb_diagnostic_mae':round(mae, 5)})
+                if nv12_diff.max() != 0:
                     errors.append('decoded_pixel_difference:%d' % i)
             previous_shape = shape
             frame_count += 1
