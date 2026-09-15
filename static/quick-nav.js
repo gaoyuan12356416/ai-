@@ -774,7 +774,15 @@
       const postLogs = xPlatform.items.find(item => item && item.key === "xPostLogs");
       if (postLogs && Number(postLogs.order || 0) <= 40) postLogs.order = 50;
     }
-    return normalized;
+    // Apply after the Meta cleanup migration so legacy saved/cached navigation
+    // cannot resurrect retired groups or remove the independent cleanup page.
+    const retiredGroups = new Set(["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]);
+    const retiredModules = new Set(["ad_control_center", "ad_control_v3", "ad_material_tasks", "ad_material_test"]);
+    return normalized
+      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
+      .map(group => Object.assign({}, group, {
+        items: (group.items || []).filter(item => !retiredModules.has(item.module)),
+      }));
   }
 
   function readStoredConfig() {

@@ -766,6 +766,7 @@ from features.tt_drama_resources import (
     W2AHTMLClient,
     W2AResourceService,
 )
+from features.retired_modules import filter_navigation, retired_path, RETIRED_MESSAGE
 from features.material_status_broadcast import service as material_status_service
 from features.material_replication_broadcast import delivery as material_replication_delivery
 from features.material_replication_broadcast import service as material_replication_service
@@ -40890,6 +40891,7 @@ def generate_ad_material_demand(task_id, reason=""):
 
 
 def run_ad_material_demand_async(task_id, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_demand, args=(task_id, reason), name="ad-demand-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41043,6 +41045,7 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
 
 
 def run_ad_material_generation_async(task_id, indexes=None, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_assets, args=(task_id, indexes, reason), name="ad-assets-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41181,6 +41184,8 @@ def recover_ad_material_generation_output(task, index, min_output_at=""):
 
 
 def recover_inflight_ad_material_tasks():
+    # Retain historical tasks without restarting discontinued generation work.
+    return {"status": "retired", "recovered": 0}
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -56725,7 +56730,7 @@ def delete_session(session_token):
 
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        return json.load(handle)
+        return filter_navigation(json.load(handle))
 
 
 def navigation_item_access(session, item_key, config):
@@ -56809,7 +56814,7 @@ def validate_navigation_config(config):
 
 
 def save_navigation_config(config):
-    config = validate_navigation_config(config)
+    config = filter_navigation(validate_navigation_config(config))
     directory = os.path.dirname(NAVIGATION_CONFIG_PATH)
     os.makedirs(directory, exist_ok=True)
     temp_path = NAVIGATION_CONFIG_PATH + ".tmp"
@@ -94942,6 +94947,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         if parsed.path in {
             "/fb-post-ad-delete.html",
@@ -98652,6 +98660,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
@@ -101259,6 +101270,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
         x_post_schedule_paths = {
             "/api/admin/x-posts/material-pool/schedule",
             "/api/admin/x-posts/drama-pool/schedule",
@@ -101304,6 +101318,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         x_pool_delete_match = re.fullmatch(
             r"/api/admin/x-posts/material-pool/([0-9]+)",
@@ -101983,9 +102000,8 @@ def main():
 
     ensure_dir(SCREENSHOT_PUBLIC_ROOT)
 
-    ensure_dir(AD_MATERIAL_WORK_ROOT)
+    # Ad-material work directories are retired; keep archived files in place.
 
-    ensure_dir(AD_MATERIAL_PUBLIC_ROOT)
 
 
 
@@ -102020,9 +102036,8 @@ def main():
 
     ensure_screenshot_job_table()
 
-    ensure_ad_material_tables()
+    # Historical ad-material and ad-control tables remain available for audit.
 
-    ensure_ad_control_tables()
 
 
 
