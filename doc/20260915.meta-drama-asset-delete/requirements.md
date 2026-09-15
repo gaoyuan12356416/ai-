@@ -26,3 +26,4 @@ app.py只做路由分发，features/fb_ad_asset_delete分离core/source/graph/st
 
 ## 变更记录
 2026-09-15：用户批准实施计划；隔离工作区以真实部署文件为基线开发，生产删除仅由操作人确认触发。
+2026-09-15：按ai-backend-maintenance重新校准页面框架。移除页面对QuickNav菜单与UiTopbar用户卡的样式覆盖，恢复后台标准深色侧栏、菜单说明、用户卡尺寸及按钮样式。共用组件的CSS优先加载结果保持权威；业务删除流程不变。
