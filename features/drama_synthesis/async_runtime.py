@@ -479,7 +479,7 @@ class AsyncRuntime:
     def __init__(self, root, execute, cached_result, *, sync_cached_result=None, can_resume=None,
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
                  dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True,
-                 prefetch=None):
+                 prefetch=None, prefetch_during_download=False):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
         if type(dispatcher_workers) is not int or not 1 <= dispatcher_workers <= 8:
@@ -498,6 +498,9 @@ class AsyncRuntime:
         self.sync_cached_result = sync_cached_result or cached_result
         self.can_resume = can_resume
         self.prefetch = prefetch
+        if type(prefetch_during_download) is not bool:
+            raise ValueError("prefetch_during_download must be boolean")
+        self.prefetch_during_download = prefetch_during_download
         self._prefetcher = None
         self._prefetch_job = None
         self._prefetch_stop = threading.Event()
@@ -953,12 +956,15 @@ class AsyncRuntime:
             self._prefetcher.start()
 
     def _prefetch_allowed(self):
-        # Never compete with the current job's source downloads. This lane does
-        # no probing, normalization, rendering, uploads or completion writes.
+        # Download overlap is opt-in and separately bounded by the worker's
+        # aggregate connection budget. This lane never performs media work.
         active = [row for row in self._records.values() if row["status"] == "running"]
-        return bool(active) and all(row["stage"] in {
+        stages = {
             "concatenating", "removing_bgm", "rendering", "rendering_random", "uploading", "verifying",
-        } for row in active)
+        }
+        if self.prefetch_during_download:
+            stages.update({"downloading", "normalizing"})
+        return bool(active) and all(row["stage"] in stages for row in active)
 
     def _prefetch_loop(self):
         while not self._stop.wait(0.25):

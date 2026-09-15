@@ -26,6 +26,7 @@ from features.drama_synthesis.youtube import YouTubeHTTPError  # noqa: E402
 from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  # noqa: E402
 from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
 from features.drama_synthesis.prefetch import prefetch_episodes  # noqa: E402
+from features.drama_synthesis.media_pipeline import download_worker_count  # noqa: E402
 from features.drama_synthesis.gpu_compositor import (  # noqa: E402
     KERNEL_TEMPLATE, compositor_filter_threads, compositor_lanes, runtime_identity,
 )
@@ -59,6 +60,18 @@ YOUTUBE_MEDIA = None
 YOUTUBE_MEDIA_LOCK = threading.Lock()
 
 
+def prefetch_configuration(environ=None):
+    env = os.environ if environ is None else environ
+    enabled = env.get("DRAMA_GPU_PREFETCH_ENABLED", "0") == "1"
+    overlap = env.get("DRAMA_GPU_PREFETCH_DURING_DOWNLOAD", "0") == "1"
+    if enabled:
+        workers = int(env.get("DRAMA_GPU_PREFETCH_WORKERS", "2"))
+        foreground = download_worker_count(env.get("DRAMA_GPU_DOWNLOAD_WORKERS", "4"))
+        if workers not in (1, 2, 4) or foreground + workers > 8 or render_concurrency(env) != 1:
+            raise ValueError("prefetch requires one renderer and at most eight total download workers")
+    return enabled, overlap
+
+
 def get_runtime():
     global RUNTIME
     with RUNTIME_LOCK:
@@ -72,13 +85,15 @@ def get_runtime():
                 limit = int(os.environ.get("DRAMA_GPU_QUEUE_LIMIT", "8"))
             except ValueError:
                 raise runtime_error("gpu_runtime_unavailable") from None
+            prefetch_enabled, prefetch_overlap = prefetch_configuration()
             RUNTIME = AsyncRuntime(
                 root, drama_app.handle_gpu_video_render, cache, sync_cached_result=sync_cache,
                 can_resume=getattr(drama_app, "gpu_video_resume_ready", None),
                 render_slots=RENDER_SLOTS, queue_limit=limit,
                 dispatcher_workers=RENDER_CONCURRENCY,
                 prefetch=(lambda payload, **kwargs: prefetch_episodes(payload, root, **kwargs))
-                if os.environ.get("DRAMA_GPU_PREFETCH_ENABLED", "0") == "1" else None,
+                if prefetch_enabled else None,
+                prefetch_during_download=prefetch_overlap,
             )
         return RUNTIME
 

@@ -6,6 +6,7 @@ GPU 任务查询增加 stage：prefetching、prefetched；status 均为 queued�
 
 - DRAMA_JOB_WORKER_OBSERVERS：1/2，默认 1。
 - DRAMA_GPU_PREFETCH_ENABLED：仅 1 启用。
+- DRAMA_GPU_PREFETCH_DURING_DOWNLOAD：仅 1 允许与当前任务下载重叠，默认关闭。启用预取时总下载并发不得超过 8。
 - DRAMA_GPU_PREFETCH_WORKERS：1/2/4，默认 2。
 - DRAMA_GPU_PREFETCH_MAX_BYTES：默认 16 GiB。
 - DRAMA_GPU_PREFETCH_MIN_FREE_BYTES：默认 20 GiB。

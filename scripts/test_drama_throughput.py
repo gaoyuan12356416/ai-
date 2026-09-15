@@ -195,6 +195,39 @@ class PrefetchRuntimeTests(unittest.TestCase):
         release.set()
         self.assertTrue(value.close(3))
 
+    def test_optional_download_overlap_prepares_next_without_starting_its_render(self):
+        prepared, finish = threading.Event(), threading.Event()
+        rendered = []
+
+        def execute(payload):
+            rendered.append(payload["job_id"])
+            if payload["job_id"] == "first":
+                async_runtime.emit_progress("downloading")
+                finish.wait(3)
+            return gpu_fixtures.result_for(payload)
+
+        value = async_runtime.AsyncRuntime(self.directory.name, execute, lambda _: None,
+            prefetch=lambda _payload, **_kwargs: prepared.set(), prefetch_during_download=True)
+        self.addCleanup(value.close, 3)
+        value.submit(gpu_fixtures.render_payload("first"))
+        value.submit(gpu_fixtures.render_payload("next"))
+        self.assertTrue(prepared.wait(3))
+        self.assertEqual(rendered, ["first"])
+        self.assertEqual(value.get("next")["status"], "queued")
+        finish.set()
+        gpu_fixtures.wait_for(lambda: value.get("next")["status"] == "completed")
+
+    def test_worker_rejects_prefetch_that_exceeds_total_download_capacity(self):
+        worker = gpu_fixtures.load_fake_worker(SimpleNamespace())
+        env = {"DRAMA_GPU_PREFETCH_ENABLED": "1", "DRAMA_GPU_MAX_CONCURRENCY": "1",
+               "DRAMA_GPU_DOWNLOAD_WORKERS": "6", "DRAMA_GPU_PREFETCH_WORKERS": "2",
+               "DRAMA_GPU_PREFETCH_DURING_DOWNLOAD": "1"}
+        self.assertEqual(worker.prefetch_configuration(env), (True, True))
+        with self.assertRaises(ValueError):
+            worker.prefetch_configuration({**env, "DRAMA_GPU_DOWNLOAD_WORKERS": "8"})
+        with self.assertRaises(ValueError):
+            worker.prefetch_configuration({**env, "DRAMA_GPU_MAX_CONCURRENCY": "2"})
+
 
 class PrefetchDownloadTests(unittest.TestCase):
     def setUp(self):
