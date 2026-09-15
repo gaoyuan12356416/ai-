@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import re
 
-VERSION = "rgba-nut-v1"
+VERSION = "rgba-nut-demux-v2"
 MAX_ITEM_BYTES = 8 * 1024**3
 MAX_TOTAL_BYTES = 96 * 1024**3
 MIN_FREE_BYTES = 32 * 1024**3
@@ -85,6 +85,7 @@ def verified_entry(root, source_sha256, *, verify_digest=True):
         key = stat_key(path)
         if (info.get("version") != VERSION or info.get("source_sha256") != source_sha256
                 or info.get("rgba_frames_verified") is not True
+                or info.get("timing_basis") != "demux"
                 or not HEX.fullmatch(str(info.get("sha256")))
                 or type(info.get("size")) is not int or not 0 < info["size"] <= MAX_ITEM_BYTES
                 or info["size"] != key[2] or info.get("mtime_ns") != key[3]

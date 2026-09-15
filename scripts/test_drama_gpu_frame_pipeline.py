@@ -22,7 +22,7 @@ class CacheTests(unittest.TestCase):
         self.info = {"version": asset_cache.VERSION, "source_sha256": self.source_sha,
                      "sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
                      "size": self.path.stat().st_size, "mtime_ns": self.path.stat().st_mtime_ns,
-                     "frames": 3, "rgba_frames_verified": True}
+                     "frames": 3, "rgba_frames_verified": True, "timing_basis": "demux"}
         self.save()
 
     def save(self):
@@ -60,6 +60,12 @@ class CacheTests(unittest.TestCase):
 
     def test_unverified_pixels_rejected(self):
         self.info["rgba_frames_verified"] = False
+        self.save()
+        with self.assertRaises(asset_cache.AssetCacheError):
+            asset_cache.verified_entry(self.root, self.source_sha)
+
+    def test_rounded_timestamp_receipt_rejected(self):
+        self.info.pop("timing_basis")
         self.save()
         with self.assertRaises(asset_cache.AssetCacheError):
             asset_cache.verified_entry(self.root, self.source_sha)

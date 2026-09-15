@@ -25,7 +25,7 @@ def frame_hashes(ffmpeg, source, *, original=False):
     frames = ["-frames:v", "1"] if source.suffix == ".png" else []
     command = [ffmpeg, "-nostdin", "-v", "error", "-filter_threads", "2", "-threads", "2",
                *options, "-i", str(source), "-map", "0:v:0", "-an", "-vf", "format=rgba",
-               "-fps_mode", "passthrough", *frames, "-f", "framemd5", "-"]
+               "-fps_mode", "passthrough", *frames, "-enc_time_base", "demux", "-f", "framemd5", "-"]
     result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
     lines = result.stdout.splitlines()
     tb = Fraction(next(line.split(":", 1)[1].strip() for line in lines if line.startswith("#tb 0:")))
@@ -53,7 +53,7 @@ def build(ffmpeg, item, root, *, verify_only=False):
     started = time.monotonic()
     subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-filter_threads", "2", "-threads", "2",
         *options, "-i", str(source), "-map", "0:v:0", "-an", "-vf", "format=rgba",
-        "-fps_mode", "passthrough", *frames, "-c:v", "rawvideo", "-threads", "2",
+        "-fps_mode", "passthrough", *frames, "-enc_time_base", "demux", "-c:v", "rawvideo", "-threads", "2",
         "-fs", str(MAX_ITEM_BYTES), "-f", "nut", str(partial)],
         check=True, capture_output=True, timeout=600)
     expected, actual = frame_hashes(ffmpeg, source, original=True), frame_hashes(ffmpeg, partial)
@@ -69,6 +69,7 @@ def build(ffmpeg, item, root, *, verify_only=False):
     record = {"version": VERSION, "source_sha256": key, "sha256": sha256_file(target)[0],
               "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "frames": len(actual),
               "rgba_frames_verified": True, "build_seconds": time.monotonic()-started}
+    record["timing_basis"] = "demux"
     temporary = receipt.with_suffix(".json.tmp")
     with temporary.open("x", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2)+"\n")
