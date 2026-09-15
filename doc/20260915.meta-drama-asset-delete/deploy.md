@@ -16,7 +16,23 @@
 ## 台账
 FB_AD_ASSET_DELETE_DB_PATH默认/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3；FB_AD_ASSET_DELETE_GRAPH_VERSION默认v25.0。不可回退根盘；业务MySQL必须63350且@@read_only=1。旧台账原位置只读展示。
 
-## 已部署版本与证据
+## 后台规范样式修正（当前页面版本）
+- 2026-09-15 11:55（Asia/Shanghai）部署 `c7e01e904f08bd6735961ed10efadc99bd9d9e1f`，分支仍为 `codex/meta-drama-asset-delete-20260915`。从GitHub检出 `/mnt/data-disk/meta-ad-asset-delete/release-c7e01e904f08`。
+- 移除页面对共享QuickNav/UiTopbar的视觉覆盖，恢复标准深色侧栏、菜单说明和用户卡尺寸；页面脚本/样式引用版本为 `20260915-meta-assets-standard-shell`。
+- 仅覆盖HTML/CSS在服务static与Nginx静态目录中的4个目标。先逐文件比对9d77fec基线，再备份与切换；公网HTML/CSS的SHA256与GitHub检出文件一致。
+- 备份 `/mnt/data-disk/meta-ad-asset-delete/ui-backup-20260915T035543Z-c7e01e904f08`，包含4个原文件、切换清单、SHA256清单、当前任务台账在线备份（integrity_check=ok）及验证记录。
+- 主API保持active且PID/启动时间不变；本轮无需服务重启或Nginx重载。公网HTML/CSS200、未登录products401、`/api/auth/status`200。
+- 本机浏览器已验证标准菜单/用户卡、手动折叠、刷新恢复当前分组及根路径导航。JS语法与技能要求的8个Python入口编译通过。
+
+本轮静态回滚（会校验当前文件与备份，保留业务代码和全部当前台账）：
+
+```bash
+python3 /mnt/data-disk/meta-ad-asset-delete/release-c7e01e904f08/scripts/deploy_meta_asset_delete.py rollback /mnt/data-disk/meta-ad-asset-delete/ui-backup-20260915T035543Z-c7e01e904f08
+```
+
+回滚后核对两处HTML/CSS和公网资源，无需重启。若要执行下文整套业务版本回滚，先完成本节静态回滚，再按下文排空发布任务并回滚；不要跳过文件漂移检查。
+
+## 初次业务部署版本与证据
 - 完成时间：2026-09-15 11:43（Asia/Shanghai）。GitHub分支 `codex/meta-drama-asset-delete-20260915`，部署版本 `9d77fec3fe06492c249db3092cc91b3a496c08e5`。
 - 主API与两处静态先部署 `0077d29b3dfb0af505f953c1180ddc3b86606e87`；随后 `9d77fec` 增加 Nginx 转发，应用代码与静态内容相同。
 - GitHub服务器检出目录：`/mnt/data-disk/meta-ad-asset-delete/release-9d77fec3fe06`。19个部署目标（包括两处静态和Nginx配置）与该版本逐文件SHA256一致。
