@@ -22,7 +22,9 @@ JOB_STATUSES = frozenset(("previewing", "ready", "failed", "running", "completed
                           "partial", "interrupted"))
 SUCCESS_STATUSES = frozenset(("deleted", "already_deleted"))
 _SECRET_KEYS = frozenset(("access_token", "refresh_token", "client_secret",
-                          "app_secret", "authorization", "cookie", "password"))
+                          "app_secret", "authorization", "cookie", "password", "token", "page_access_token"))
+_CREDENTIAL_FIELDS = frozenset(("delete_mode", "credential_kind", "credential_page_id", "credential_row_id",
+    "credential_fb_user_id", "credential_user_id", "credential_relation", "credential_lookup", "credential_lookup_message"))
 _TABLE = "fb_asset_delete_v2_"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_rechecks (
@@ -484,6 +486,27 @@ class Store:
                 **({"video_direct": True, "previous": previous} if direct_video else {})})
             return dict(self._object_data(self._object(conn, job_id, key)), claimed=True)
 
+    def record_object_credential(self, job_id, key, run_id, context):
+        """Persist the selected identity before DELETE, never its secret Token."""
+        if not isinstance(context, dict) or set(context) - _CREDENTIAL_FIELDS:
+            raise StoreError("Unexpected credential audit fields", "unsafe_metadata")
+        encoded = _json(context)
+        with self._transaction() as conn:
+            row = self._object(conn, job_id, key)
+            run = self._require(conn, "runs", "run_id", run_id)
+            lock = conn.execute("SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?", (key,)).fetchone()
+            if row["run_id"] != run_id or row["status"] != "in_progress" or run["status"] != "running" or lock is None or lock["attempt_id"] != row["attempt_id"] or lock["status"] != "in_progress":
+                raise StoreError("Only the active claim may select credentials", "claim_conflict")
+            attempt = self._require(conn, "attempts", "attempt_id", row["attempt_id"])
+            if attempt["result"] != "{}":
+                if attempt["result"] == encoded:
+                    return
+                raise StoreError("A claimed attempt cannot change its selected identity", "credential_conflict")
+            conn.execute("UPDATE fb_asset_delete_v2_attempts SET result=? WHERE attempt_id=?", (encoded, row["attempt_id"]))
+            conn.execute("UPDATE fb_asset_delete_v2_objects SET result=?,updated_at=? WHERE job_id=? AND object_key=?", (encoded, _now(), job_id, key))
+            self._audit(conn, job_id, "object_credential_selected", {"key": key, "run_id": run_id,
+                "attempt_id": row["attempt_id"], "credential": context})
+
     def finish_object(self, job_id, key, run_id, status, result):
         if status not in ("deleted", "already_deleted", "failed", "blocked", "unknown"):
             raise StoreError("Invalid object outcome", "invalid_input")
@@ -556,7 +579,8 @@ class Store:
     def _fence_inflight(self, conn, run_id, reason):
         rows = conn.execute("SELECT * FROM fb_asset_delete_v2_objects WHERE run_id=? AND status='in_progress'", (run_id,)).fetchall()
         for row in rows:
-            now, encoded = _now(), _json({"reason": reason, "requires_reconciliation": True})
+            selected = {k: v for k, v in json.loads(row["result"]).items() if k in _CREDENTIAL_FIELDS}
+            now, encoded = _now(), _json(dict(selected, reason=reason, requires_reconciliation=True))
             conn.execute("UPDATE fb_asset_delete_v2_attempts SET status='unknown',finished_at=?,result=? WHERE attempt_id=? AND status='in_progress'",
                          (now, encoded, row["attempt_id"]))
             conn.execute("UPDATE fb_asset_delete_v2_objects SET status='unknown',result=?,updated_at=? WHERE job_id=? AND object_key=?",

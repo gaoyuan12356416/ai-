@@ -53,6 +53,29 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.sql("SELECT * FROM legacy_jobs"), [("historical-post",)])
         self.assertEqual(other.get_job("job1")["schema_version"], 2)
 
+    def test_credential_selection_is_durable_immutable_and_survives_interruption(self):
+        import json
+        self.job(kinds=("video",))
+        run = self.claim_run(phases=("video",))
+        self.store.claim_object("job1", "video:123", run["run_id"])
+        context = dict(delete_mode="video_id_direct", credential_kind="page", credential_page_id="444",
+                       credential_row_id="88", credential_fb_user_id="999", credential_user_id="803", credential_relation="creative_page")
+        self.store.record_object_credential("job1", "video:123", run["run_id"], context)
+        self.store.record_object_credential("job1", "video:123", run["run_id"], context)
+        self.assertEqual(json.loads(self.sql("SELECT result FROM fb_asset_delete_v2_attempts")[0][0]), context)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM fb_asset_delete_v2_audit WHERE action='object_credential_selected'")[0][0], 1)
+        with self.assertRaises(StoreError):
+            self.store.record_object_credential("job1", "video:123", run["run_id"], dict(context, credential_page_id="555"))
+        for extra in ({"token": "never-persist"}, {"page_access_token": "never-persist"}, {"credential_lookup": {"token": "never-persist"}}):
+            with self.subTest(extra=extra), self.assertRaises(StoreError):
+                self.store.record_object_credential("job1", "video:123", run["run_id"], dict(context, **extra))
+        self.store.finish_run(run["run_id"], "interrupted")
+        obj = self.store.get_job("job1")["objects"][0]
+        self.assertEqual(obj["status"], "unknown")
+        self.assertEqual(obj["result"]["credential_page_id"], "444")
+        with self.assertRaises(StoreError):
+            self.store.record_object_credential("job1", "video:123", run["run_id"], context)
+
     def test_safe_metadata_ids_and_owner_filtered_listing(self):
         job = self.job()
         self.job("job2", actor="other:actor")

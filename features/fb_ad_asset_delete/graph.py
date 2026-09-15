@@ -9,6 +9,9 @@ from .core import AssetError, account_id, creative_video_ids, meta_id, now, reda
 CREATIVE_FIELDS = "id,account_id,status,video_id,object_story_spec,asset_feed_spec"
 AD_FIELDS = "id,account_id,status,effective_status,creative{%s}" % CREATIVE_FIELDS
 ACCOUNT_FIELDS = "id,account_id,account_status,user_tasks,disable_reason"
+VIDEO_CREDENTIAL_CREATIVE_FIELDS = "id,object_story_spec,asset_feed_spec,video_id"
+VIDEO_CREDENTIAL_MAX_CREATIVES = 2
+VIDEO_CREDENTIAL_LOOKUP_SECONDS = 10
 ERROR_FIELDS = ("code", "error_subcode", "type", "fbtrace_id", "is_transient",
                 "message", "error_user_title", "error_user_msg")
 LIVE_STATUSES = ["ACTIVE", "PAUSED", "ADSET_PAUSED", "CAMPAIGN_PAUSED", "DISAPPROVED", "PENDING_REVIEW", "PREAPPROVED", "PENDING_BILLING_INFO", "WITH_ISSUES", "IN_PROCESS", "ARCHIVED"]
@@ -38,23 +41,26 @@ class GraphError(AssetError):
 
 
 class GraphClient:
-    def __init__(self, token_provider, version="v25.0", transport=None, timeout=20, max_inventory=50000):
+    def __init__(self, token_provider, version="v25.0", transport=None, timeout=20, max_inventory=50000,
+                 video_credential_provider=None):
         if not re.fullmatch(r"v[0-9]+\.[0-9]+", version):
             raise ValueError("invalid graph version")
         self.token_provider = token_provider
+        self.video_credential_provider = video_credential_provider
         self.base = "https://graph.facebook.com/" + version + "/"
         self.http = transport or requests.Session()
         self.timeout = timeout
         self.max_inventory = max_inventory
         self.tokens, self.inventory_cache, self.video_library_cache = {}, {}, {}
         self.credential_contexts = {}
+        self.video_credential_creatives = {}
 
-    def request(self, method, path, token, params=None):
+    def request(self, method, path, token, params=None, timeout=None):
         if not re.fullmatch(r"(?:act_)?[1-9][0-9]{0,31}(?:/(?:ads|advideos))?", path):
             raise GraphError("invalid_graph_path", "Meta 请求对象无效")
         try:
             response = self.http.request(method, self.base + path, params=params or {},
-                headers={"Authorization": "Bearer " + token}, timeout=self.timeout, allow_redirects=False)
+                headers={"Authorization": "Bearer " + token}, timeout=self.timeout if timeout is None else timeout, allow_redirects=False)
         except (requests.Timeout, requests.ConnectionError):
             raise GraphError("network_uncertain" if method == "DELETE" else "read_unavailable",
                 "Meta 请求超时或连接中断，删除结果需要核实" if method == "DELETE" else "Meta 读取未完成", method == "DELETE") from None
@@ -168,10 +174,153 @@ class GraphClient:
         for uid in users:
             token = self.token_provider([uid])
             if token:
-                context = {"credential_user_id": uid, "delete_mode": "video_id_direct"}
+                context = {"credential_user_id": uid, "credential_kind": "user", "delete_mode": "video_id_direct",
+                           "credential_relation": "configured_user"}
                 self.tokens[key], self.credential_contexts[key] = token, context
                 return token, deepcopy(context)
         raise GraphError("missing_token", "所配置用户没有可用的 Meta Token")
+
+    @staticmethod
+    def _identity_id(value):
+        text = str(value or "")
+        return text if re.fullmatch(r"[1-9][0-9]{0,31}", text) else ""
+
+    def _remember_video_creative(self, creative_id, data):
+        if not isinstance(data, dict) or str(data.get("id", "")) != creative_id:
+            return None
+        spec = data.get("object_story_spec")
+        relation = {"page_id": self._identity_id(spec.get("page_id")) if isinstance(spec, dict) else "",
+                    "video_ids": creative_video_ids(data)}
+        # Relation facts may be reused after the Creative stage deletes its
+        # node. Credentials themselves must be read afresh for every Video.
+        self.video_credential_creatives[creative_id] = relation
+        return relation
+
+    def _video_identity_credential(self, users, identity_id, relation):
+        credential = self.video_credential_provider(list(users), identity_id, relation)
+        if not isinstance(credential, dict):
+            return None
+        token = credential.get("token")
+        uid = self._identity_id(credential.get("credential_user_id"))
+        fbid = self._identity_id(credential.get("credential_fb_user_id"))
+        kind = credential.get("credential_kind")
+        if not isinstance(token, str) or not token.strip() or uid not in users or not fbid:
+            return None
+        context = {"delete_mode": "video_id_direct", "credential_kind": kind,
+                   "credential_user_id": uid, "credential_fb_user_id": fbid,
+                   "credential_relation": relation, "credential_lookup": "matched"}
+        if kind == "page":
+            page = self._identity_id(credential.get("credential_page_id"))
+            row = self._identity_id(credential.get("credential_row_id"))
+            if page != identity_id or not row:
+                return None
+            context.update(credential_page_id=page, credential_row_id=row)
+        elif kind != "user" or relation != "video_from" or fbid != identity_id:
+            return None
+        return token, context
+
+    def prepare_video_delete(self, obj):
+        """Resolve one credential before a durable audit and a single DELETE.
+
+        These bounded GETs only improve credential selection. Missing identity,
+        unreadable nodes, or unavailable Page credentials always keep the
+        configured User Token path; none is a Video deletion gate.
+        """
+        users = tuple(dict.fromkeys(str(x) for x in obj.get("user_ids", []) if self._identity_id(x)))
+        # This relation comes only from this ledger object's previous attempt,
+        # never from execute payload fields. A still-configured Page credential
+        # must remain usable if its linked User Token has since been cleared.
+        previous = obj.get("result")
+        if self.video_credential_provider is not None and isinstance(previous, dict):
+            page = self._identity_id(previous.get("credential_page_id"))
+            relation = previous.get("credential_relation")
+            if previous.get("credential_kind") == "page" and page and relation in ("video_from", "creative_page"):
+                try:
+                    selected = self._video_identity_credential(users, page, relation)
+                    if selected and selected[1]["credential_kind"] == "page":
+                        selected[1]["credential_lookup_message"] = (
+                            "沿用本对象历史 Video.from 身份，重新读取当前 Page 凭证" if relation == "video_from" else
+                            "沿用本对象历史 Creative 关联 Page，重新读取当前凭证；关联 Page 不代表已确认上传者")
+                        return selected
+                except Exception:
+                    pass
+        token, fallback = self.video_credential(obj)
+        if self.video_credential_provider is None:
+            return token, fallback
+        video_id = meta_id(obj["object_id"])
+        deadline = time.monotonic() + VIDEO_CREDENTIAL_LOOKUP_SECONDS
+        notes = []
+
+        def note(message):
+            if len(notes) < 8:
+                notes.append(message)
+
+        def read_identity(oid, fields):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GraphError("identity_lookup_timeout", "身份解析已达到时限")
+            data = self.request("GET", oid, token, {"fields": fields}, timeout=min(self.timeout, 3, remaining))
+            if not isinstance(data, dict) or str(data.get("id", "")) != oid:
+                raise GraphError("object_mismatch", "身份解析返回对象不匹配")
+            return data
+
+        def choose(identity_id, relation, message):
+            if time.monotonic() >= deadline:
+                return None
+            try:
+                selected = self._video_identity_credential(users, identity_id, relation)
+            except Exception:
+                # Never expose query/credential exceptions, which may contain
+                # credentials, and never turn this optional lookup into a gate.
+                note("对应身份的凭证查询未完成")
+                return None
+            if selected:
+                selected[1]["credential_lookup_message"] = message
+                return selected
+            note("对应身份没有冻结候选用户的可用凭证")
+            return None
+
+        try:
+            data = read_identity(video_id, "id,from")
+            owner = data.get("from")
+            owner_id = self._identity_id(owner.get("id")) if isinstance(owner, dict) else ""
+            if owner_id:
+                selected = choose(owner_id, "video_from", "按 Video.from 身份选择冻结候选用户的凭证")
+                if selected:
+                    return selected
+            else:
+                note("Video.from 未返回可用身份")
+        except Exception:
+            note("Video 身份读取未完成")
+
+        creatives = list(dict.fromkeys(self._identity_id(x) for x in obj.get("creative_ids", []) if self._identity_id(x)))
+        seen_pages = set()
+        for cid in creatives[:VIDEO_CREDENTIAL_MAX_CREATIVES]:
+            if time.monotonic() >= deadline:
+                note("身份解析达到时限")
+                break
+            try:
+                relation = self.video_credential_creatives.get(cid)
+                if relation is None:
+                    relation = self._remember_video_creative(cid, read_identity(cid, VIDEO_CREDENTIAL_CREATIVE_FIELDS))
+                if not relation or video_id not in relation["video_ids"]:
+                    note("Creative 未精确引用本 Video")
+                    continue
+                page_id = relation["page_id"]
+                if not page_id or page_id in seen_pages:
+                    continue
+                seen_pages.add(page_id)
+                selected = choose(page_id, "creative_page",
+                    "Creative %s 精确引用本 Video，使用其关联 Page 的凭证；关联 Page 不代表已确认上传者" % cid)
+                if selected:
+                    return selected
+            except Exception:
+                note("关联 Creative 读取未完成")
+        if len(creatives) > VIDEO_CREDENTIAL_MAX_CREATIVES:
+            note("关联 Creative 解析达到数量上限")
+        fallback.update(credential_lookup="fallback", credential_lookup_message=
+            "；".join(notes + ["使用原冻结候选用户的 User Token，继续单次删除"])[:800])
+        return token, fallback
 
     def read_node(self, obj, fields):
         token = self.credential(obj)
@@ -182,6 +331,8 @@ class GraphClient:
             raise
         if not isinstance(data, dict) or str(data.get("id", "")) != obj["object_id"]:
             raise GraphError("object_mismatch", "Meta 未返回可核验的对象 ID", detail=self.credential_context(obj))
+        if self.video_credential_provider is not None and obj.get("kind") == "creative":
+            self._remember_video_creative(obj["object_id"], data)
         return data
 
     def inventory(self, obj, account, edge="ads", fresh=False):
@@ -269,12 +420,13 @@ class GraphClient:
                 raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
         return "pending", proof
 
-    def delete(self, obj):
+    def delete(self, obj, prepared=None):
         """Call only after a durable attempt has been claimed by the service."""
         context = {"delete_mode": "video_id_direct"} if obj["kind"] == "video" else {}
         try:
             if obj["kind"] == "video":
-                token, context = self.video_credential(obj)
+                token, context = prepared if prepared is not None else self.prepare_video_delete(obj)
+                context = deepcopy(context)
             else:
                 token = self.credential(obj)
                 context = self.credential_context(obj)
@@ -294,7 +446,7 @@ class GraphClient:
         try:
             fields = "id,account_id,status,effective_status" if obj["kind"] == "ad" else "id,account_id,status" if obj["kind"] == "creative" else "id"
             if obj["kind"] == "video":
-                token, context = self.video_credential(obj)
+                token, context = self.prepare_video_delete(obj)
                 data = self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
                 if not isinstance(data, dict) or str(data.get("id", "")) != obj["object_id"]:
                     raise GraphError("object_mismatch", "Meta 未返回可核验的对象 ID")

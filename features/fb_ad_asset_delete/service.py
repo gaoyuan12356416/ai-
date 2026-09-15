@@ -299,7 +299,13 @@ class Service:
                         continue
                     try:
                         if phase == "video":
-                            state, result = graph.delete(obj)
+                            if callable(getattr(graph, "prepare_video_delete", None)):
+                                prepared = graph.prepare_video_delete(obj)
+                                self.store.record_object_credential(job_id, obj["key"], run_id, prepared[1])
+                                self._allowed(self.authorize(session), job)
+                                state, result = graph.delete(obj, prepared=prepared)
+                            else:
+                                state, result = graph.delete(obj)
                         else:
                             if refs_error:
                                 raise refs_error
@@ -308,8 +314,12 @@ class Service:
                             state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
                             if state == "pending":
                                 state, result = graph.delete(obj)
+                    except StoreError:
+                        # Failure to record the selected identity stops new
+                        # writes, including the very first request of this item.
+                        raise
                     except AssetError as exc:
-                        state, result = "blocked", self._error_result(exc)
+                        state, result = "failed" if phase == "video" else "blocked", self._error_result(exc)
                     except Exception:
                         # Unexpected adapter failure may occur after a request.
                         state, result = "unknown", {"code": "unexpected_outcome", "message": "对象处理未正常返回，需要核实", "checked_at": now()}

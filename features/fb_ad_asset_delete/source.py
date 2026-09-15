@@ -312,3 +312,51 @@ class SqlSource:
         rows = self.read("SELECT CAST(user_id AS CHAR),accessToken FROM %s.ads_facebook_info WHERE user_id IN %s AND accessToken<>''" % (self.schema, inside(candidates)), ("user_id", "token"))
         by_id = {r["user_id"]: r["token"] for r in rows}
         return next((by_id[x] for x in candidates if by_id.get(x)), "")
+
+    def video_credential(self, user_ids, identity_id, relation):
+        """Read one current credential for an exact identity and frozen users.
+
+        facebookUserID/fb_user_id are Meta identities, whereas user_id is the
+        internal candidate ID. No Page pool membership or product expansion is
+        used here. The caller keeps its User Token when this optional read fails.
+        """
+        candidates = list(dict.fromkeys(str(x) for x in user_ids if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))))
+        identity = str(identity_id or "")
+        if not candidates or not re.fullmatch(r"[1-9][0-9]{0,31}", identity) or relation not in ("video_from", "creative_page"):
+            return None
+        order = ",".join(q(x) for x in candidates)
+        rows = self.read("""SELECT CAST(f.user_id AS CHAR),CAST(f.facebookUserID AS CHAR),
+            CAST(p.id AS CHAR),CAST(p.page_id AS CHAR),CAST(p.fb_user_id AS CHAR),p.page_access_token
+            FROM {s}.ads_facebook_page_post p JOIN {s}.ads_facebook_info f
+              ON CAST(p.fb_user_id AS BINARY)=CAST(f.facebookUserID AS BINARY)
+            WHERE f.user_id IN {users} AND p.page_id={identity}
+              AND p.status<>1 AND TRIM(p.page_access_token)<>''
+            ORDER BY FIELD(CAST(f.user_id AS CHAR),{order}),p.id LIMIT 101""".format(
+                s=self.schema, users=inside(candidates), identity=q(identity), order=order),
+            ("user_id", "fb_user_id", "row_id", "page_id", "page_fb_user_id", "token"), 5)
+        pages = []
+        for row in rows:
+            uid, fbid, row_id = (str(row.get(k) or "") for k in ("user_id", "fb_user_id", "row_id"))
+            token = str(row.get("token") or "").strip()
+            if (uid in candidates and str(row.get("page_id")) == identity and
+                    fbid == str(row.get("page_fb_user_id")) and
+                    re.fullmatch(r"[1-9][0-9]{0,31}", fbid) and
+                    re.fullmatch(r"[1-9][0-9]{0,31}", row_id) and token):
+                pages.append(dict(token=token, credential_kind="page", credential_page_id=identity,
+                    credential_row_id=row_id, credential_fb_user_id=fbid, credential_user_id=uid))
+        if pages:
+            return min(pages, key=lambda item: (candidates.index(item["credential_user_id"]), int(item["credential_row_id"])))
+        if relation != "video_from":
+            return None
+        # A Video.from person can select a different *frozen* internal user.
+        # A Creative's Page association must never select a same-numbered user.
+        rows = self.read("""SELECT CAST(user_id AS CHAR),CAST(facebookUserID AS CHAR),accessToken
+            FROM {s}.ads_facebook_info WHERE user_id IN {users} AND facebookUserID={identity}
+              AND TRIM(accessToken)<>'' ORDER BY FIELD(CAST(user_id AS CHAR),{order}) LIMIT 101""".format(
+                s=self.schema, users=inside(candidates), identity=q(identity), order=order),
+            ("user_id", "fb_user_id", "token"), 5)
+        users = [dict(token=str(row.get("token") or "").strip(), credential_kind="user",
+                      credential_user_id=str(row.get("user_id") or ""), credential_fb_user_id=identity)
+                 for row in rows if str(row.get("user_id")) in candidates and str(row.get("fb_user_id")) == identity
+                 and str(row.get("token") or "").strip()]
+        return min(users, key=lambda item: candidates.index(item["credential_user_id"])) if users else None

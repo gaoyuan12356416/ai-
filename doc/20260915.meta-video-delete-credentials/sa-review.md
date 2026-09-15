@@ -1,0 +1,9 @@
+# SA需求评审
+
+采纳：使用既有Page凭证实时查询规则，避免以首个User Token通吃所有Video。精确JOIN内部user_id对应的facebookUserID与Page表fb_user_id，不将这两个ID口径混用。
+
+关联依据必须记录。Creative.page_id只能说明该广告使用的Page，不能冒充源视频真实上传身份。permalink前缀不能单独成为删除身份或新目标。
+
+保留用户要求：有限身份读取只用于改善凭证选择，任何读取失败都不阻止已有Token的单次删除。不复制发布模块的多Token重发循环。
+
+独立审查要求：Page凭证动态重读；已有可信Page关联时允许不依赖User Token；查询超时有界；每次DELETE前持久化所选身份；unknown/断进程不丢失身份。

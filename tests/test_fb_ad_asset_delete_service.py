@@ -8,7 +8,7 @@ from itertools import combinations
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 from features.fb_ad_asset_delete.core import AssetError, PHASES, actor_key
@@ -294,6 +294,37 @@ class ServiceTests(unittest.TestCase):
             self.workers.run_next()
         self.assertEqual(self.graph.deleted_keys(), ["creative:201"])
         self.assertEqual(self.statuses(job), {"creative:201": "unknown", "ad:101": "pending", "video:301": "pending"})
+        self.assertEqual(self.store.get_job(job["job_id"])["status"], "interrupted")
+
+    def test_video_identity_is_committed_before_the_one_delete_call(self):
+        import json
+        job = self.preview()
+        adapter = FakeGraph(self.graph)
+        context = dict(delete_mode="video_id_direct", credential_kind="page", credential_page_id="777", credential_user_id="803")
+        adapter.prepare_video_delete = Mock(return_value=("unit-test-secret", context))
+        def delete(obj, prepared=None):
+            self.assertEqual(prepared, ("unit-test-secret", context))
+            with self.store._transaction(False) as conn:
+                persisted = conn.execute("SELECT result FROM fb_asset_delete_v2_attempts WHERE object_key=?", (obj["key"],)).fetchone()[0]
+                self.assertEqual(json.loads(persisted), context)
+                self.assertNotIn("unit-test-secret", persisted)
+            self.graph.events.append(("DELETE", obj["key"]))
+            return "deleted", dict(context, success=True)
+        adapter.delete = delete
+        self.service.graph_factory = lambda: adapter
+        self.execute(job, ("video",))
+        adapter.prepare_video_delete.assert_called_once()
+        self.assertEqual(self.graph.deleted_keys(), ["video:301"])
+
+    def test_video_identity_audit_failure_stops_before_any_meta_delete(self):
+        job = self.preview()
+        adapter = FakeGraph(self.graph)
+        adapter.prepare_video_delete = Mock(return_value=("unit-test-secret", {"credential_kind": "page"}))
+        adapter.delete = Mock()
+        self.service.graph_factory = lambda: adapter
+        with patch.object(self.store, "record_object_credential", side_effect=StoreError("disk unavailable", "ledger_error")):
+            self.execute(job, ("video",))
+        adapter.delete.assert_not_called()
         self.assertEqual(self.store.get_job(job["job_id"])["status"], "interrupted")
 
     def test_unverified_ad_blocks_creative_but_retains_matched_video(self):

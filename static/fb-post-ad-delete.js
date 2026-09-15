@@ -231,6 +231,23 @@
     const account = result.account_diagnostic || detail.account_diagnostic || {};
     // Render only supported, server-sanitized scalar fields, never raw responses.
     const scalar = value => ["string", "number", "boolean"].includes(typeof value) ? str(value) : "";
+    const credentialField = key => result[key] == null ? detail[key] : result[key];
+    const credentialKind = scalar(credentialField("credential_kind"));
+    const credentialKindLabel = ({ page: "Page 身份", user: "用户身份" })[credentialKind] || credentialKind;
+    const credentialPageId = scalar(credentialField("credential_page_id"));
+    const credentialFbUserId = scalar(credentialField("credential_fb_user_id"));
+    const credentialRelation = scalar(credentialField("credential_relation"));
+    const relationLabel = ({
+      video_from: "视频返回身份（video_from）",
+      creative_page: "广告 Creative 关联 Page（仅为凭证选择线索，不代表视频真实所有者）",
+      configured_user: "原冻结候选用户",
+    })[credentialRelation] || credentialRelation;
+    const credentialLookup = credentialField("credential_lookup");
+    const lookupDetails = credentialLookup && typeof credentialLookup === "object" ? credentialLookup : {};
+    const lookupStatus = scalar(credentialLookup) || [scalar(lookupDetails.status), scalar(lookupDetails.code)].filter(Boolean).join(" / ");
+    const lookupMessage = scalar(lookupDetails.message) || scalar(credentialField("credential_lookup_message"));
+    const identityHelp = credentialKindLabel ? "本条记录的请求身份：" + credentialKindLabel +
+      (credentialKind === "page" && credentialPageId ? " · Page " + credentialPageId : credentialKind === "user" && credentialFbUserId ? " · Meta 用户 " + credentialFbUserId : "") : "";
     const code = scalar(detail.code == null ? result.code : detail.code);
     const subcode = scalar(detail.error_subcode == null ? result.error_subcode : detail.error_subcode);
     const accountStatus = scalar(account.account_status == null ? account.status : account.account_status);
@@ -241,10 +258,18 @@
       ["请求追踪 ID", scalar(detail.fbtrace_id || result.fbtrace_id)],
       ["账户状态", [accountStatus, scalar(account.account_state)].filter(Boolean).join(" · ")],
       ["账户诊断", scalar(account.message)],
-      ["凭证用户", scalar(result.credential_user_id || detail.credential_user_id)],
+      ["凭证类型", credentialKindLabel],
+      ["Page ID", credentialPageId],
+      ["凭证记录 ID", scalar(credentialField("credential_row_id"))],
+      ["Meta 用户 ID", credentialFbUserId],
+      ["内部用户 ID", scalar(credentialField("credential_user_id"))],
+      ["身份关联依据", relationLabel],
+      ["凭证查找", lookupStatus],
+      ["凭证查找说明", lookupMessage],
     ].filter(row => row[1] !== "");
     if (!rows.length) return "";
-    return '<details class="object-diagnostic"><summary>查看诊断详情</summary><dl>' +
+    return '<details class="object-diagnostic"><summary>查看诊断详情</summary>' +
+      (identityHelp ? '<span class="cell-reason">' + esc(identityHelp) + "</span>" : "") + "<dl>" +
       rows.map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl></details>";
   }
   function directVideoEligible(item) { return item.kind === "video" && item.status === "blocked" && item.video_direct_eligible === true; }

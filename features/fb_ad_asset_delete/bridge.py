@@ -50,7 +50,8 @@ def get_service(app):
 
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             _service = Service(Store(str(path)), source,
-                lambda: GraphClient(source.token, version=os.environ.get("FB_AD_ASSET_DELETE_GRAPH_VERSION", "v25.0")),
+                lambda: GraphClient(source.token, version=os.environ.get("FB_AD_ASSET_DELETE_GRAPH_VERSION", "v25.0"),
+                    video_credential_provider=source.video_credential),
                 authorize=authorize)
         return _service
 
