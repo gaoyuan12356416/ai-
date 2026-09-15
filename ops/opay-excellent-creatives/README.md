@@ -2,6 +2,12 @@
 
 公开地址：`https://ai.yingliangads.com/reports/opay-excellent-creatives/`。
 
+## 月度更新时间
+
+北京时间（Asia/Shanghai）每月 2 日 08:00 启动刷新，生成上一个完整月份的终版，成功后自动发布。每月只运行一次；原 3 日初版定时器停用，原 5 日终版定时器改到 2 日 08:00。取消随机延迟，保留停机后补执行机制。页面中的生成时间记录实际完成时间。
+
+部署时只启用 `opay-excellent-creatives-final.timer`。迁移与回滚见 [2026-09-15 调度调整](../../doc/CTB-000102.opay-excellent-creatives-report/release-monthly-schedule-20260915.md)。CLI 的 `initial` 阶段继续保留供人工调用。
+
 ## 边界
 
 - 只统计素材产品 `OPay/Opay`；数据 App `OPay`、`OPay NGN`、`OPayPakistan`。

@@ -17,13 +17,11 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn('Cache-Control "no-store"', config)
         self.assertIn("immutable", config)
 
-    def test_timers_use_days_three_and_five(self):
+    def test_monthly_timer_uses_day_two_at_eight_beijing_time(self):
         service = (REPO / "deploy" / "opay-excellent-creatives-refresh@.service").read_text(
             encoding="utf-8"
         )
-        initial = (REPO / "deploy" / "opay-excellent-creatives-initial.timer").read_text(
-            encoding="utf-8"
-        )
+        initial = REPO / "deploy" / "opay-excellent-creatives-initial.timer"
         final = (REPO / "deploy" / "opay-excellent-creatives-final.timer").read_text(
             encoding="utf-8"
         )
@@ -34,10 +32,12 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("EnvironmentFile=/etc/opay-excellent-creatives.env", service)
         self.assertIn("/tmp/opay-excellent-creatives.lock", service)
         self.assertNotIn("tt_minis_multi_dim_dashboard.lock", service)
-        self.assertIn("*-*-03 10:00:00", initial)
-        self.assertIn("@initial.service", initial)
-        self.assertIn("*-*-05 10:00:00", final)
+        self.assertFalse(initial.exists())
+        self.assertIn("OnCalendar=*-*-02 08:00:00 Asia/Shanghai", final)
         self.assertIn("@final.service", final)
+        self.assertIn("Persistent=true", final)
+        self.assertIn("AccuracySec=1s", final)
+        self.assertIn("RandomizedDelaySec=0", final)
 
     def test_video_frame_has_bounded_opencv_fallback(self):
         generator = (HERE / "opay_excellent_creatives.py").read_text(encoding="utf-8")
