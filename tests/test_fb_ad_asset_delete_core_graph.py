@@ -125,12 +125,17 @@ class GraphTests(unittest.TestCase):
     def test_each_kind_deletes_the_object_id_and_video_never_unlinks_account_edge(self):
         for kind in ("creative", "ad", "video"):
             with self.subTest(kind=kind):
-                client, transport, _ = self.client([account_probe(), Response({"success": True})])
+                responses = [Response({"success": True})] if kind == "video" else [account_probe(), Response({"success": True})]
+                client, transport, _ = self.client(responses)
                 status, proof = client.delete(obj(kind))
                 self.assertEqual(status, "deleted")
                 self.assertTrue(proof["success"])
                 self.assertEqual(proof["credential_user_id"], "803")
-                self.assertEqual(proof["account_diagnostic"]["delete_permission"], "unverified")
+                if kind == "video":
+                    self.assertEqual(proof["delete_mode"], "video_id_direct")
+                    self.assertEqual(len(transport.calls), 1)
+                else:
+                    self.assertEqual(proof["account_diagnostic"]["delete_permission"], "unverified")
                 self.assertNotIn("unit-test-token", json.dumps(proof))
                 delete = transport.calls[-1]
                 self.assertEqual(delete["method"], "DELETE")

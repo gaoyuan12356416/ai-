@@ -154,6 +154,25 @@ class GraphClient:
                 self.credential_contexts[cache_key] = deepcopy(context)
             return dict(context, read_only=True)
 
+    def video_credential(self, obj):
+        """Choose an existing configured token without any Graph read probe.
+
+        Token absence may select the next configured candidate. A DELETE error
+        never rotates credentials or causes an automatic second write.
+        """
+        users = tuple(dict.fromkeys(str(x) for x in obj.get("user_ids", [])
+                                   if str(x).isdigit() and str(x) != "0"))
+        key = ("video_id_direct", users)
+        if key in self.tokens:
+            return self.tokens[key], deepcopy(self.credential_contexts[key])
+        for uid in users:
+            token = self.token_provider([uid])
+            if token:
+                context = {"credential_user_id": uid, "delete_mode": "video_id_direct"}
+                self.tokens[key], self.credential_contexts[key] = token, context
+                return token, deepcopy(context)
+        raise GraphError("missing_token", "所配置用户没有可用的 Meta Token")
+
     def read_node(self, obj, fields):
         token = self.credential(obj)
         try:
@@ -252,29 +271,44 @@ class GraphClient:
 
     def delete(self, obj):
         """Call only after a durable attempt has been claimed by the service."""
+        context = {"delete_mode": "video_id_direct"} if obj["kind"] == "video" else {}
         try:
-            token = self.credential(obj)
-            context = self.credential_context(obj)
+            if obj["kind"] == "video":
+                token, context = self.video_credential(obj)
+            else:
+                token = self.credential(obj)
+                context = self.credential_context(obj)
             data = self.request("DELETE", meta_id(obj["object_id"]), token)
             if data is True or (isinstance(data, dict) and data.get("success") is True):
                 return "deleted", dict(context, success=True, object_id=obj["object_id"], checked_at=now())
             return "unknown", dict(context, code="unconfirmed_delete_response", message="Meta 未返回明确删除成功，需要核实", checked_at=now())
         except GraphError as exc:
-            context = self.credential_context(obj)
+            if obj["kind"] != "video":
+                context = self.credential_context(obj)
             return "unknown" if exc.uncertain else "failed", dict(context, code=exc.code, message=exc.message, detail=exc.detail, checked_at=now())
 
     def reconcile(self, obj):
         # No unqualified GET error, including code 100/subcode 33 or missing
         # permissions, can turn an unknown write outcome into a successful one.
+        context = {}
         try:
             fields = "id,account_id,status,effective_status" if obj["kind"] == "ad" else "id,account_id,status" if obj["kind"] == "creative" else "id"
-            data = self.read_node(obj, fields)
+            if obj["kind"] == "video":
+                token, context = self.video_credential(obj)
+                data = self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
+                if not isinstance(data, dict) or str(data.get("id", "")) != obj["object_id"]:
+                    raise GraphError("object_mismatch", "Meta 未返回可核验的对象 ID")
+            else:
+                data = self.read_node(obj, fields)
+                context = self.credential_context(obj)
             if obj["kind"] in ("ad", "creative") and account_id(data.get("account_id", "")) not in obj["account_ids"]:
                 raise GraphError("account_mismatch", "Meta 对象所属账户不匹配", detail=self.credential_context(obj))
-            if str(data.get("status", "")).upper() == "DELETED" or str(data.get("effective_status", "")).upper() == "DELETED":
-                return "already_deleted", dict(self.credential_context(obj), confirmed_deleted=True,
+            if obj["kind"] in ("ad", "creative") and (str(data.get("status", "")).upper() == "DELETED" or str(data.get("effective_status", "")).upper() == "DELETED"):
+                return "already_deleted", dict(context, confirmed_deleted=True,
                     proof={"id": obj["object_id"], "status": "DELETED"}, checked_at=now())
-            return "unknown", dict(self.credential_context(obj), code="still_readable", message="对象仍可读取；原删除请求的最终结果尚未确认，保持禁止重试", checked_at=now())
+            return "unknown", dict(context, code="still_readable", message="对象仍可读取；原删除请求的最终结果尚未确认，保持禁止重试", checked_at=now())
         except (GraphError, AssetError) as exc:
-            return "unknown", dict(self.credential_context(obj), code=exc.code, message=exc.message,
+            if obj["kind"] != "video":
+                context = self.credential_context(obj)
+            return "unknown", dict(context, code=exc.code, message=exc.message,
                 detail=getattr(exc, "detail", {}), checked_at=now())

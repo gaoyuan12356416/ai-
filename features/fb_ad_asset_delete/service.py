@@ -17,7 +17,8 @@ def public_product(product):
 def public_object(obj):
     keys = ("key", "kind", "object_id", "status", "product_ids", "content_ids",
             "series_codes", "languages", "account_ids", "reason", "result", "updated_at")
-    return {key: obj.get(key, "") for key in keys}
+    return dict({key: obj.get(key, "") for key in keys},
+                video_direct_eligible=obj.get("kind") == "video" and obj.get("status") == "blocked")
 
 
 class Service:
@@ -71,6 +72,7 @@ class Service:
                 for status in STATUSES:
                     totals[status] += counts[status]
             job["summary"], job["phase_results"] = totals, stages
+        job["video_direct_eligible_count"] = job["phase_results"].get("video", {}).get("blocked", 0)
         return job
 
     @classmethod
@@ -96,7 +98,10 @@ class Service:
             raise AssetError("invalid_filter", "明细筛选条件无效")
         page, page_size = max(1, int(page)), max(1, min(100, int(page_size)))
         data = self._public(job)
-        objects = [o for o in data["objects"] if (not kind or o["kind"] == kind) and (not status or o["status"] == status)]
+        # Historical blocked Video rows retain their audit state until claimed,
+        # but operator filters must match the page's current pending count.
+        objects = [o for o in data["objects"] if (not kind or o["kind"] == kind) and
+                   (not status or ("pending" if o["video_direct_eligible"] else o["status"]) == status)]
         data.update(total=len(objects), page=page, page_size=page_size, objects=objects[(page-1)*page_size:page*page_size])
         return data
 
@@ -163,7 +168,7 @@ class Service:
                     ad_ids=[ad["ad_id"]], creative_ids=[ad.get("creative_id")], video_ids=ad.get("video_ids", []))
                 for name, entries in values.items():
                     obj[name] = sorted(set(obj[name]) | {str(x) for x in entries if x and str(x) not in ("0", "NULL")})
-                if ad.get("reason"):
+                if kind != "video" and ad.get("reason"):
                     self._block(obj, "source_ownership_conflict", ad["reason"])
                 return obj
 
@@ -202,22 +207,16 @@ class Service:
                     except AssetError as exc:
                         self._block(obj, exc.code, exc.message)
                         obj["result"] = self._error_result(exc)
-            # Assets backed by any unverified Ad remain blocked. An independent
-            # Ad can still be deleted when a creative/video cannot be verified.
+            # Creative retains ownership checks. Matched Video IDs are frozen
+            # for direct deletion, independently of Meta read availability.
             bad_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] == "blocked"}
             for obj in objects.values():
-                if obj["kind"] != "ad" and set(obj["ad_ids"]) & bad_ads:
+                if obj["kind"] == "creative" and set(obj["ad_ids"]) & bad_ads:
                     self._block(obj, "ad_ownership_unverified", "关联广告归属或当前 Creative 无法确认，请查看对应 Ad 阻止原因")
-                if obj["kind"] == "video":
-                    verified = any(c["kind"] == "creative" and c["status"] != "blocked" and
-                        obj["object_id"] in c.get("verified_video_ids", []) and set(c["ad_ids"]) & set(obj["ad_ids"])
-                        for c in objects.values())
-                    if not verified:
-                        self._block(obj, "video_relation_unverified", "无法从本次范围内已核验的 Creative 确认该视频关系")
             allowed_ads -= bad_ads
-            assets = [o for o in objects.values() if o["kind"] != "ad" and o["status"] == "pending"]
+            assets = [o for o in objects.values() if o["kind"] == "creative" and o["status"] == "pending"]
             self.store.update_job(job_id, preview_step="核验所选范围之外的共享引用")
-            for asset_kind in ("creative", "video"):
+            for asset_kind in ("creative",):
                 kind_assets = [o for o in assets if o["kind"] == asset_kind]
                 try:
                     refs = self.source.shared_references(kind_assets, progress=lambda kind, done, total:
@@ -278,16 +277,17 @@ class Service:
                 self._allowed(fresh_session, job)
                 self.store.update_job(job_id, current_phase=phase)
                 refs_error, outside_keys = None, set()
-                if phase != "ad":
+                if phase == "creative":
                     try:
                         phase_objects = [o for o in job["objects"] if o["kind"] == phase and o["status"] in ("pending", "failed")]
-                        refs = self.source.shared_references(phase_objects, fresh=phase == "video", progress=lambda kind, done, total:
+                        refs = self.source.shared_references(phase_objects, progress=lambda kind, done, total:
                             self.store.update_job(job_id, execution_step=self._reference_step(kind, done, total)))
                         outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
                     except AssetError as exc:
                         refs_error = exc
                 for obj in job["objects"]:
-                    if obj["kind"] != phase or obj["status"] not in ("pending", "failed"):
+                    eligible = obj["status"] in ("pending", "failed") or phase == "video" and obj["status"] == "blocked"
+                    if obj["kind"] != phase or not eligible:
                         continue
                     self._allowed(self.authorize(session), job)
                     # Claim first: the lock covers the final read check and the
@@ -298,17 +298,16 @@ class Service:
                             deleted_creatives.add(obj["object_id"])
                         continue
                     try:
-                        if refs_error:
-                            raise refs_error
                         if phase == "video":
-                            self.source.validate_reference_snapshot(refs)
-                        if obj["key"] in outside_keys:
-                            raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
-                        state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
-                        if state == "pending":
-                            if phase == "video":
-                                self.source.validate_reference_snapshot(refs)
                             state, result = graph.delete(obj)
+                        else:
+                            if refs_error:
+                                raise refs_error
+                            if obj["key"] in outside_keys:
+                                raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
+                            state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
+                            if state == "pending":
+                                state, result = graph.delete(obj)
                     except AssetError as exc:
                         state, result = "blocked", self._error_result(exc)
                     except Exception:
@@ -359,7 +358,7 @@ class Service:
         job = self.store.get_job(job_id)
         self._allowed(session, job)
         result = self.store.claim_recheck(job_id, str(payload.get("preview_id") or ""), actor_key(session), request_id,
-                                         sum(o["status"] == "blocked" for o in job["objects"]))
+                                         sum(o["status"] == "blocked" and o["kind"] != "video" for o in job["objects"]))
         if not result["duplicate"]:
             try:
                 self.spawn(self._recheck, job_id, result["operation_id"], copy.deepcopy(session))
@@ -380,7 +379,7 @@ class Service:
             job = self.store.get_job(job_id)
             self._allowed(self.authorize(session), job)
             graph = self.graph_factory()
-            blocked = [o for o in job["objects"] if o["status"] == "blocked"]
+            blocked = [o for o in job["objects"] if o["status"] == "blocked" and o["kind"] != "video"]
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
             for phase in PHASES:
@@ -391,7 +390,7 @@ class Service:
                 ref_error, refs = None, []
                 if phase != "ad" and candidates:
                     try:
-                        refs = self.source.shared_references(candidates, fresh=phase == "video", progress=lambda kind, done, total:
+                        refs = self.source.shared_references(candidates, progress=lambda kind, done, total:
                             self.store.update_recheck(operation_id, step=self._reference_step(kind, done, total)))
                     except AssetError as exc:
                         ref_error = exc
@@ -404,16 +403,7 @@ class Service:
                                 raise ref_error
                             if obj["key"] in outside:
                                 raise GraphError("shared_outside_scope", "仍有范围外广告引用该素材，保持阻止")
-                            if phase == "video":
-                                self.source.validate_reference_snapshot(refs)
-                                proved = any(c["kind"] == "creative" and obj["object_id"] in c.get("verified_video_ids", [])
-                                    and set(c.get("ad_ids", [])) & set(obj.get("ad_ids", [])) for c in job["objects"])
-                                if not proved:
-                                    raise GraphError("video_relation_unverified", "原任务缺少已核验视频关系，需重新预览")
                             state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
-                            if phase == "video":
-                                self.source.validate_reference_snapshot(refs)
-                                result["reference_snapshot"] = getattr(refs, "proof", None)
                         except AssetError as exc:
                             state, result = "blocked", self._error_result(exc)
                         self.store.recheck_object(operation_id, obj["key"], state, result)

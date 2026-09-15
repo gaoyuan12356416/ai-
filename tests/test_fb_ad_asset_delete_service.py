@@ -296,28 +296,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.statuses(job), {"creative:201": "unknown", "ad:101": "pending", "video:301": "pending"})
         self.assertEqual(self.store.get_job(job["job_id"])["status"], "interrupted")
 
-    def test_unverified_ad_blocks_its_linked_creative_and_video(self):
+    def test_unverified_ad_blocks_creative_but_retains_matched_video(self):
         self.graph.inspect_errors["ad:101"] = GraphError("creative_changed", "Current creative differs")
         job = self.preview()
         self.assertEqual(job["status"], "ready")
-        self.assertTrue(all(status == "blocked" for status in self.statuses(job).values()))
+        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "blocked", "video:301": "pending"})
         self.execute(job)
-        self.assertEqual(self.graph.deleted_keys(), [])
+        self.assertEqual(self.graph.deleted_keys(), ["video:301"])
 
-    def test_source_ownership_conflict_cannot_be_removed_by_live_graph_success(self):
+    def test_source_ownership_warning_keeps_ad_creative_blocked_and_video_direct(self):
         self.source.ads[0]["reason"] = "Conflicting source product"
         job = self.preview()
-        self.assertTrue(all(status == "blocked" for status in self.statuses(job).values()))
+        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "blocked", "video:301": "pending"})
         self.execute(job)
-        self.assertEqual(self.graph.deleted_keys(), [])
+        self.assertEqual(self.graph.deleted_keys(), ["video:301"])
 
-    def test_video_requires_live_creative_proof_and_new_live_video_is_frozen(self):
+    def test_source_video_and_new_live_video_are_both_frozen(self):
         self.graph.creative_videos["201"] = ["302"]
         job = self.preview()
-        self.assertEqual(self.statuses(job)["video:301"], "blocked")
+        self.assertEqual(self.statuses(job)["video:301"], "pending")
         self.assertEqual(self.statuses(job)["video:302"], "pending")
         self.execute(job, ("video",))
-        self.assertEqual(self.graph.deleted_keys(), ["video:302"])
+        self.assertEqual(self.graph.deleted_keys(), ["video:301", "video:302"])
 
     def test_missing_source_creative_is_discovered_from_verified_ad(self):
         self.source.ads = [ad(creative="", videos=[])]
@@ -333,19 +333,19 @@ class ServiceTests(unittest.TestCase):
         self.execute(job)
         self.assertEqual(self.graph.deleted_keys(), ["creative:201", "ad:101", "ad:102", "video:301"])
 
-    def test_outside_shared_reference_blocks_assets_while_independent_ad_is_eligible(self):
+    def test_outside_shared_reference_blocks_creative_only(self):
         self.source.references = [dict(key="creative:201", ad_id="999"), dict(key="video:301", ad_id="999")]
         job = self.preview()
-        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "pending", "video:301": "blocked"})
+        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "pending", "video:301": "pending"})
         self.execute(job)
-        self.assertEqual(self.graph.deleted_keys(), ["ad:101"])
+        self.assertEqual(self.graph.deleted_keys(), ["ad:101", "video:301"])
 
-    def test_incomplete_reference_query_blocks_assets(self):
+    def test_incomplete_reference_query_blocks_creative_only(self):
         self.source.reference_error = AssetError("reference_check_incomplete", "Reference query could not complete")
         job = self.preview()
-        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "pending", "video:301": "blocked"})
+        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "pending", "video:301": "pending"})
         self.execute(job)
-        self.assertEqual(self.graph.deleted_keys(), ["ad:101"])
+        self.assertEqual(self.graph.deleted_keys(), ["ad:101", "video:301"])
 
     def test_new_shared_reference_is_checked_again_immediately_before_execution(self):
         job = self.preview()
@@ -382,6 +382,19 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(AssetError) as error:
             self.service.detail(other, job["job_id"])
         self.assertEqual(error.exception.status, 403)
+
+    def test_pending_filter_includes_historical_direct_video_without_changing_ledger(self):
+        job = self.preview()
+        objects = self.store.get_job(job["job_id"])["objects"]
+        for obj in objects:
+            if obj["kind"] == "video":
+                obj.update(status="blocked", reason="Historical account read failed")
+        self.store.update_job(job["job_id"], objects=objects)
+        detail = self.service.detail(SESSION, job["job_id"], kind="video", status="pending")
+        self.assertEqual(detail["total"], 1)
+        self.assertTrue(detail["objects"][0]["video_direct_eligible"])
+        self.assertEqual(self.service.detail(SESSION, job["job_id"], kind="video", status="blocked")["total"], 0)
+        self.assertEqual(self.statuses(job)["video:301"], "blocked")
 
     def test_running_task_cannot_reconcile_or_start_a_second_distinct_run(self):
         job = self.preview()
@@ -455,7 +468,7 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(AssetError):
             self.service.recheck(SESSION, job["job_id"], {"preview_id": job["preview_id"], "request_id": "recheck-request-123456", "video_ids": ["999"]})
         self.begin_recheck(job)
-        self.assertTrue(all(s == "blocked" for s in self.statuses(job).values()))
+        self.assertEqual(self.statuses(job), {"creative:201": "blocked", "ad:101": "blocked", "video:301": "pending"})
         self.assertEqual(self.graph.events, [])
 
     def test_recheck_checks_current_permissions_and_keeps_source_failures_blocked(self):
@@ -465,16 +478,17 @@ class ServiceTests(unittest.TestCase):
         self.module_allowed = False
         self.workers.run_next()
         self.assertEqual(self.store.get_job(job["job_id"])["recheck"]["status"], "interrupted")
-        self.assertEqual(self.statuses(job)["video:301"], "blocked")
+        self.assertEqual(self.statuses(job)["creative:201"], "blocked")
+        self.assertEqual(self.statuses(job)["video:301"], "pending")
         self.assertEqual(self.graph.deleted_keys(), [])
 
-    def test_expired_video_snapshot_is_checked_again_after_graph_read(self):
+    def test_video_execution_does_not_consult_reference_snapshot(self):
         job = self.preview()
         self.source.snapshot_error = AssetError("video_index_expired", "expired")
         self.execute(job, ("video",))
-        self.assertEqual(self.graph.deleted_keys(), [])
-        self.assertEqual(self.statuses(job)["video:301"], "blocked")
-        self.assertTrue(self.source.fresh_checks[-1])
+        self.assertEqual(self.graph.events, [("DELETE", "video:301")])
+        self.assertEqual(self.statuses(job)["video:301"], "deleted")
+        self.assertNotIn(True, self.source.fresh_checks)
 
 
 if __name__ == "__main__":

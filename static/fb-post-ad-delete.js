@@ -100,7 +100,10 @@
   function ids() { return [...new Set($("idsInput").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))]; }
   function phases() { return PHASES.filter(kind => all("[data-phase]").some(input => input.value === kind && input.checked)); }
   function phaseResult(kind, job = state.job) { return (job && job.phase_results && job.phase_results[kind]) || {}; }
-  function eligible(kind, job = state.job) { const result = phaseResult(kind, job); return num(result.pending) + num(result.failed); }
+  function directVideoCount(job = state.job) { return Math.min(num(job && job.video_direct_eligible_count), num(phaseResult("video", job).blocked)); }
+  function eligible(kind, job = state.job) { const result = phaseResult(kind, job); return num(result.pending) + num(result.failed) + (kind === "video" ? directVideoCount(job) : 0); }
+  function remainingBlocked(kind, job = state.job) { return Math.max(0, num(phaseResult(kind, job).blocked) - (kind === "video" ? directVideoCount(job) : 0)); }
+  function remainingBlockedTotal(job = state.job) { return PHASES.reduce((count, kind) => count + remainingBlocked(kind, job), 0); }
   function selectedEligible(job = state.job, selected = phases()) { return selected.reduce((count, kind) => count + eligible(kind, job), 0); }
   function legacy(job = state.job) { return !!job && (job.read_only === true || !job.preview_id); }
   function recheckRunning(job = state.job) { return !!job && !legacy(job) && !!job.recheck && job.recheck.status === "running"; }
@@ -114,7 +117,7 @@
   function canRecheck() {
     return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() &&
       !state.pendingAction && !state.pendingRecheck && state.activeJobId === state.job.job_id &&
-      EXECUTABLE_STATES.has(state.job.status) && num(state.job.summary && state.job.summary.blocked) > 0;
+      EXECUTABLE_STATES.has(state.job.status) && remainingBlockedTotal() > 0;
   }
   function productById(id, job = state.job) {
     return state.products.find(item => str(item.id) === str(id)) ||
@@ -162,11 +165,11 @@
     $("previewBtn").textContent = state.previewBusy ? "正在提交预览…" : "预览匹配对象 →";
     $("executeBtn").disabled = !canExecute();
     $("executeBtn").textContent = state.executing ? "正在提交…" : state.job && ["partial", "interrupted", "completed"].includes(state.job.status) ? "继续或重试所选阶段" : "执行所选阶段";
-    $("executeBtn").title = dirty() ? "输入范围已变更，请重新预览" : !selected.length ? "请至少选择一个阶段" : !selectedEligible() ? "所选阶段没有待执行或明确失败项" : "";
+    $("executeBtn").title = dirty() ? "输入范围已变更，请重新预览" : !selected.length ? "请至少选择一个阶段" : !selectedEligible() ? "所选阶段没有待执行、明确失败或可直接尝试的 Video" : "";
     $("phaseOrder").textContent = selected.length ? selected.map(kind => PHASE_NAMES[kind]).join(" → ") : "请选择至少一个删除阶段";
     all("[data-phase]").forEach(input => { input.disabled = state.executing || state.reconciling || state.rechecking || jobBusy() || !!state.pendingRecheck; });
     show("staleNotice", dirty() && !legacy());
-    show("recheckBtn", !!state.job && !legacy() && num(state.job.summary && state.job.summary.blocked) > 0);
+    show("recheckBtn", !!state.job && !legacy() && remainingBlockedTotal() > 0);
     $("recheckBtn").disabled = !canRecheck();
     $("recheckBtn").textContent = state.rechecking || recheckRunning() ? "正在重新核验…" : "重新核验阻止项";
     $("recheckBtn").title = dirty() ? "输入范围已变更，请重新预览" : "重新核验原任务中的阻止项，保留固定对象清单；不会执行删除";
@@ -244,6 +247,7 @@
     return '<details class="object-diagnostic"><summary>查看诊断详情</summary><dl>' +
       rows.map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl></details>";
   }
+  function directVideoEligible(item) { return item.kind === "video" && item.status === "blocked" && item.video_direct_eligible === true; }
   function renderObjects(job) {
     const objects = list(job.objects);
     const total = num(job.total);
@@ -254,7 +258,10 @@
         return "<div>" + esc(product.name) + '<span class="cell-sub">ID ' + esc(id) + (product.kind ? " · " + esc(product.kind) : "") + "</span></div>";
       }).join("");
       const content = '<span class="mono">' + esc(list(item.content_ids).join("、") || "—") + '</span><span class="cell-sub">资源 ' + esc(list(item.series_codes).join("、") || "—") + '</span><span class="cell-sub">语言 ' + esc(list(item.languages).join("、") || "—") + "</span>";
-      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + badge(item.status, OBJECT_STATES) + '<span class="cell-reason">' + esc(safeReason(item)) + "</span>" + diagnosticDetails(item) + "</td></tr>";
+      const directVideo = directVideoEligible(item);
+      const resultLabel = directVideo ? '<span class="tag info">可直接尝试删除</span>' : badge(item.status, OBJECT_STATES);
+      const reason = directVideo ? (safeReason(item) ? '<details class="object-diagnostic"><summary>查看历史核查记录</summary><span class="cell-reason">' + esc(safeReason(item)) + "</span></details>" : "") : '<span class="cell-reason">' + esc(safeReason(item)) + "</span>";
+      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + resultLabel + reason + diagnosticDetails(item) + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="empty">' + (job.status === "previewing" ? "正在解析剧集并核查 Meta 对象，请稍候…" : "当前范围下没有匹配对象") + "</td></tr>");
     const pages = Math.max(1, Math.ceil(total / 50));
     $("pageText").textContent = "第 " + state.query.page + " / " + pages + " 页";
@@ -273,9 +280,9 @@
     $("jobMeta").textContent = "任务 " + str(job.job_id) + " · 更新于 " + time(job.updated_at || job.updated_at_utc || job.created_at || job.created_at_utc) + "（北京时间）";
     const summary = job.summary || {};
     const stats = [
-      ["总对象", num(summary.total), ""], ["待执行", num(summary.pending), ""],
+      ["总对象", num(summary.total), ""], ["待执行", num(summary.pending) + directVideoCount(job), ""],
       ["已删除", num(summary.deleted) + num(summary.already_deleted), "success"],
-      ["失败", num(summary.failed), "error"], ["已阻止", num(summary.blocked), "warning"],
+      ["失败", num(summary.failed), "error"], ["已阻止", Math.max(0, num(summary.blocked) - directVideoCount(job)), "warning"],
       ["待核实", num(summary.unknown), "warning"],
     ];
     html("stats", stats.map(([label, count, style]) => '<div class="stat ' + style + '"><strong>' + count.toLocaleString("zh-CN") + "</strong><span>" + label + "</span></div>").join(""));
@@ -290,9 +297,9 @@
       const result = phaseResult(kind, job);
       $(kind + "Count").textContent = num(result.total).toLocaleString("zh-CN");
       const pieces = [
-        ["待执行", num(result.pending)], ["执行中", num(result.in_progress)],
+        ["待执行", num(result.pending) + (kind === "video" ? directVideoCount(job) : 0)], ["执行中", num(result.in_progress)],
         ["已删除", num(result.deleted) + num(result.already_deleted)], ["失败", num(result.failed)],
-        ["阻止", num(result.blocked)], ["待核实", num(result.unknown)],
+        ["阻止", remainingBlocked(kind, job)], ["待核实", num(result.unknown)],
       ].filter(item => item[1] > 0);
       $(kind + "Summary").textContent = pieces.map(item => item[0] + " " + item[1]).join(" · ") || (job.status === "previewing" ? "正在核查…" : "无匹配对象");
     });
@@ -490,9 +497,10 @@
     if (!canExecute()) { toast("任务状态已更新，请重新核对可执行对象。"); return; }
     const selected = phases();
     const job = JSON.parse(JSON.stringify(state.job));
-    const blockedKinds = selected.filter(kind => num(phaseResult(kind, job).blocked) > 0);
+    const blockedKinds = selected.filter(kind => remainingBlocked(kind, job) > 0);
     state.confirmation = {
       job, job_id: job.job_id, preview_id: job.preview_id, phases: selected,
+      video_direct_count: selected.includes("video") ? directVideoCount(job) : 0,
       generation: state.formGeneration, blockedPage: 1, blockedReady: blockedKinds.length === 0,
     };
     html("confirmProducts", list(job.products).map(product => '<span class="product-chip">' + esc(productLabel(product)) + "<small>" + esc(parentLabel(product)) + "</small></span>").join(""));
@@ -501,13 +509,16 @@
     $("confirmOrder").textContent = selected.map(kind => PHASE_NAMES[kind]).join(" → ");
     html("confirmPhaseBody", selected.map(kind => {
       const result = phaseResult(kind, job);
-      return "<tr><td>" + PHASE_NAMES[kind] + "</td><td>" + eligible(kind, job) + "</td><td>" + (num(result.deleted) + num(result.already_deleted)) + "</td><td>" + num(result.blocked) + "</td><td>" + num(result.unknown) + "</td></tr>";
+      return "<tr><td>" + PHASE_NAMES[kind] + "</td><td>" + eligible(kind, job) + "</td><td>" + (num(result.deleted) + num(result.already_deleted)) + "</td><td>" + remainingBlocked(kind, job) + "</td><td>" + num(result.unknown) + "</td></tr>";
     }).join(""));
+    $("confirmExecutionHelp").textContent = "本次执行包含待执行及明确失败项。" +
+      (selected.includes("video") ? "另纳入 " + directVideoCount(job) + " 个历史阻止 Video。Video按固定预览ID直接请求删除；已成功跳过，实际结果以Meta响应为准。" : "") +
+      "结果待核实及其他仍阻止的对象跳过。";
     const blockers = list(job.blockers);
     show("confirmScopeBlockers", blockers.length > 0);
     html("confirmScopeBlockerList", blockerRows(blockers));
     show("confirmBlockedSection", blockedKinds.length > 0);
-    html("confirmBlockedKind", blockedKinds.map(kind => '<option value="' + kind + '">' + PHASE_NAMES[kind] + " · " + num(phaseResult(kind, job).blocked) + " 个</option>").join(""));
+    html("confirmBlockedKind", blockedKinds.map(kind => '<option value="' + kind + '">' + PHASE_NAMES[kind] + " · " + remainingBlocked(kind, job) + " 个</option>").join(""));
     message("confirmError", "");
     $("confirmDialog").showModal();
     $("cancelConfirmBtn").focus();
@@ -529,7 +540,7 @@
     try {
       const data = await api(detailPath(confirmation.job_id, { page, kind, status: "blocked" }));
       if (state.confirmation !== confirmation || seq !== state.blockedSeq) return;
-      html("confirmBlockedList", list(data.objects).map(item => '<div class="confirm-blocked-row"><strong class="mono">' + esc(item.object_id) + "</strong> · " + esc(PHASE_NAMES[item.kind] || item.kind) + "<br>" + esc(safeReason(item) || "归属核查未通过") + "</div>").join("") || '<div class="empty">当前没有被阻止对象</div>');
+      html("confirmBlockedList", list(data.objects).filter(item => !directVideoEligible(item)).map(item => '<div class="confirm-blocked-row"><strong class="mono">' + esc(item.object_id) + "</strong> · " + esc(PHASE_NAMES[item.kind] || item.kind) + "<br>" + esc(safeReason(item) || "归属核查未通过") + "</div>").join("") || '<div class="empty">当前没有仍被阻止的对象</div>');
       const pages = Math.max(1, Math.ceil(num(data.total) / 50));
       $("confirmBlockedPage").textContent = "第 " + page + " / " + pages + " 页 · 共 " + num(data.total) + " 个";
       $("confirmBlockedPrev").disabled = page <= 1;
@@ -619,7 +630,8 @@
     const confirmation = state.confirmation;
     if (!confirmation || !canExecute() || !confirmation.blockedReady || state.executing) return;
     if (confirmation.job_id !== state.job.job_id || confirmation.preview_id !== state.job.preview_id ||
-        confirmation.generation !== state.formGeneration || confirmation.phases.join(",") !== phases().join(",")) {
+        confirmation.generation !== state.formGeneration || confirmation.phases.join(",") !== phases().join(",") ||
+        confirmation.video_direct_count !== (phases().includes("video") ? directVideoCount() : 0)) {
       closeConfirmation(true);
       toast("执行范围已变更，请重新预览并确认。");
       return;

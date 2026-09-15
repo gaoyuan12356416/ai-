@@ -1,6 +1,6 @@
 """Read-only business-source adapter; all queries use the existing SQL FIFO gate."""
 import re
-from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete, creative_video_ids
+from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete, stored_video_ids, creative_video_ids
 from .video_index import ReferenceRows
 
 
@@ -200,7 +200,7 @@ class SqlSource:
                 row["account_id"] = account_id(row["account_id"])
             except AssetError:
                 reason = "广告账户 ID 无效"
-            row["video_ids"] = stored_ids(row["video_ids_raw"])
+            row["video_ids"] = stored_video_ids(row["video_ids_raw"])
             row["content_ids"] = sorted(matched)
             row["dramas"] = [targets[cid] for cid in sorted(matched)]
             row["reason"] = reason

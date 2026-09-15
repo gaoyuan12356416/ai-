@@ -450,7 +450,8 @@ class Store:
             row = self._object(conn, job_id, key)
             if run["job_id"] != job_id or run["status"] != "running" or row["kind"] not in json.loads(run["phases"]):
                 raise StoreError("Object does not belong to this active run")
-            if row["status"] not in ("pending", "failed"):
+            direct_video = row["kind"] == "video" and row["status"] == "blocked"
+            if row["status"] not in ("pending", "failed") and not direct_video:
                 return dict(self._object_data(row), claimed=False)
             receipt = conn.execute("SELECT * FROM fb_asset_delete_v2_receipts WHERE object_key=?", (key,)).fetchone()
             if receipt is not None:
@@ -474,9 +475,13 @@ class Store:
                          (attempt_id, job_id, key, run_id, "in_progress", now, None, "{}"))
             conn.execute("INSERT INTO fb_asset_delete_v2_object_locks VALUES (?,?,?,?,?,?)",
                          (key, job_id, run_id, attempt_id, "in_progress", now))
-            conn.execute("UPDATE fb_asset_delete_v2_objects SET status='in_progress',result='{}',run_id=?,attempt_id=?,updated_at=? WHERE job_id=? AND object_key=?",
-                         (run_id, attempt_id, now, job_id, key))
-            self._audit(conn, job_id, "object_claimed", {"key": key, "run_id": run_id, "attempt_id": attempt_id})
+            payload = json.loads(row["payload"])
+            previous = {"status": row["status"], "reason": payload.get("reason", ""), "result": json.loads(row["result"])} if direct_video else None
+            payload["reason"] = ""
+            conn.execute("UPDATE fb_asset_delete_v2_objects SET status='in_progress',result='{}',payload=?,run_id=?,attempt_id=?,updated_at=? WHERE job_id=? AND object_key=?",
+                         (_json(payload), run_id, attempt_id, now, job_id, key))
+            self._audit(conn, job_id, "object_claimed", {"key": key, "run_id": run_id, "attempt_id": attempt_id,
+                **({"video_direct": True, "previous": previous} if direct_video else {})})
             return dict(self._object_data(self._object(conn, job_id, key)), claimed=True)
 
     def finish_object(self, job_id, key, run_id, status, result):

@@ -103,6 +103,17 @@ def stored_ids_complete(value):
     return isinstance(values, list) and all(not isinstance(x, (bool, dict, list)) and re.fullmatch(r"[1-9][0-9]{0,31}", str(x).strip()) for x in values)
 
 
+def stored_video_ids(value):
+    """Extract complete IDs from the historical VARCHAR(512) video field.
+
+    A capacity-length CSV may end halfway through a numeric ID. Retain the
+    complete prefix, never turn that partial tail into a different Video ID.
+    """
+    if isinstance(value, str) and len(value) >= 512 and not value.lstrip().startswith("["):
+        value = re.sub(r"[^,;\s]+$", "", value)
+    return stored_ids(value)
+
+
 def content_markers(*names):
     ids = set()
     for name in names:
