@@ -99,7 +99,7 @@ def main():
             phase = 30 % duration
             timeline = Timeline(_asset_frames(av, np, entry, phase, False))
             actual = [hashlib.md5(timeline.at(i)).hexdigest() for i in range(90)]
-            cmd = [plan['ffmpeg'], '-v', 'error', '-stream_loop', '-1', '-i', entry['path'],
+            cmd = [plan['ffmpeg'], '-nostdin', '-v', 'error', '-stream_loop', '-1', '-i', entry['path'],
                    '-vf', 'trim=start=%.6f,fps=30,setpts=PTS-STARTPTS' % phase,
                    '-frames:v', '90', '-an', '-fps_mode', 'passthrough', '-f', 'framemd5', '-']
             output = subprocess.check_output(cmd, text=True, timeout=120)
