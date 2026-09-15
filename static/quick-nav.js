@@ -844,7 +844,7 @@
       navCache = config;
       writeStoredConfig(config);
     } catch (error) {
-      navCache = readStoredConfig() || cloneNav(DEFAULT_NAV);
+      navCache = readStoredConfig() || normalizeNavConfig(DEFAULT_NAV);
     }
     return navCache;
   }
@@ -925,7 +925,7 @@
     injectStyle();
     container.classList.add("quick-nav-root");
     const initialOptions = renderOptions(options);
-    const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
+    const initialConfig = navCache || readStoredConfig() || normalizeNavConfig(DEFAULT_NAV);
     container.innerHTML = buildNavHtml(initialConfig, initialOptions);
     setActive(container, initialOptions.activeKey);
     bindEvents(container, initialConfig, initialOptions);
