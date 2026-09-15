@@ -4,8 +4,11 @@ from .core import AssetError, account_id, content_markers, stored_ids, stored_id
 
 
 def q(value):
-    # A UTF-8 hex literal is independent of MySQL NO_BACKSLASH_ESCAPES mode.
-    return "CONVERT(0x%s USING utf8mb4)" % str(value).encode("utf-8").hex() if str(value) else "''"
+    # A charset-introduced hex literal stays coercible (4), so the source
+    # column's collation wins. CONVERT(...) has implicit coercibility (2) and
+    # fails on the live mix of unicode_ci/general_ci columns (MySQL 1267).
+    # Hex also avoids SQL-mode-dependent string escaping.
+    return "_utf8mb4 0x%s" % str(value).encode("utf-8").hex() if str(value) else "''"
 
 
 def inside(values):
