@@ -190,8 +190,10 @@ def render(plan, progress=None):
     if output.exists() or output.is_symlink():
         raise RuntimeError("native_output_already_exists")
     grid = ((CANVAS_WIDTH+15)//16, (CANVAS_HEIGHT+15)//16)
+    owns_raw = False
     try:
         with raw.open("xb") as handle:
+            owns_raw = True
             for index in range(count):
                 frame = source.at(index)
                 for asset_index, asset in enumerate(assets):
@@ -203,10 +205,10 @@ def render(plan, progress=None):
                                         *uploaded, rgba))
                 to_nv12(grid, (16, 16), (rgba, nv12))
                 cp.cuda.get_current_stream().synchronize()
-                handle.write(encoder.Encode(tensor))
+                handle.write(bytes(encoder.Encode(tensor)))
                 if progress is not None and (index % 30 == 0 or index == count-1):
                     progress(index+1, time.monotonic()-started)
-            handle.write(encoder.EndEncode())
+            handle.write(bytes(encoder.EndEncode()))
             handle.flush()
             os.fsync(handle.fileno())
         subprocess.run([
@@ -220,7 +222,7 @@ def render(plan, progress=None):
             "-movflags", "+faststart", str(output),
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=180)
     finally:
-        if raw.is_file() and not raw.is_symlink():
+        if owns_raw and raw.is_file() and not raw.is_symlink():
             raw.unlink()
 
 
