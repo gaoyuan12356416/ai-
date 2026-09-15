@@ -78,8 +78,8 @@
         },
         {
           key: "fbPostAdDelete",
-          label: "Post/Ad删除",
-          description: "按剧 ID 查找并先删 Facebook Post 后删 Ad",
+          label: "Meta 剧集广告删除",
+          description: "按产品和剧 ID 删除 Creative、Ad、Video",
           kind: "page",
           href: "/fb-post-ad-delete.html",
           module: "ad_control_center",
@@ -569,6 +569,27 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    // Migrate both saved server navigation and cached legacy navigation.
+    let assetItem;
+    normalized.forEach(group => {
+      group.items = (group.items || []).filter(item => {
+        if (item.key !== "fbPostAdDelete") return true;
+        assetItem = item;
+        return false;
+      });
+    });
+    let assetGroup = normalized.find(group => group.key === "meta_asset_delete");
+    if (!assetGroup) {
+      assetGroup = { key: "meta_asset_delete", label: "Meta 广告清理", order: 6, module: "fb_ad_asset_delete", items: [] };
+      normalized.push(assetGroup);
+    }
+    assetGroup.module = "fb_ad_asset_delete";
+    assetGroup.items.push(Object.assign({}, assetItem || {}, {
+      key: "fbPostAdDelete", label: "Meta 剧集广告删除", kind: "page",
+      description: "按产品和剧 ID 删除 Creative、Ad、Video",
+      href: "/fb-post-ad-delete.html", module: "fb_ad_asset_delete", order: 10,
+      enabled: !assetItem || assetItem.enabled !== false,
+    }));
     let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
     if (!tiktokPlatform) {
       tiktokPlatform = {

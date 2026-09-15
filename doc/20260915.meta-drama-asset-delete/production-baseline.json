@@ -1,0 +1,26 @@
+{
+  "app.py": {
+    "sha256": "62f5bd2d2a93d0fff6cf626275f4357d762dc27b2af4a8c3cb7c56b760aa7ff2",
+    "size": 1080485
+  },
+  "static/index.html": {
+    "sha256": "71848c62d166231462210ab1559f26df6e762e5b697af406dec6c9b39b47e9dd",
+    "size": 288147
+  },
+  "static/quick-nav.js": {
+    "sha256": "1f37200822afea821e00bdec49289e37fd20ad815178b9f13bff0e74e4dceeac",
+    "size": 30130
+  },
+  "static/fb-post-ad-delete.html": {
+    "sha256": "f85036310f48decbed41751fc29ee120daa0952eb3c7645a7700be780af34412",
+    "size": 3644
+  },
+  "static/fb-post-ad-delete.js": {
+    "sha256": "3fb6fec030805dbfc99c59dbfbb7f8f53e58dbbe6543405c22c8bbf6ba450ccd",
+    "size": 6989
+  },
+  "static/fb-post-ad-delete.css": {
+    "sha256": "a60c696db48d1218cbec96539b268bc7a4a026a112de6e566a6c726f5cdb0948",
+    "size": 3914
+  }
+}

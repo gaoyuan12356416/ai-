@@ -3,90 +3,121 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FB Post/Ad 删除 - AI自动后台</title>
-  <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915a" />
+  <meta name="color-scheme" content="light" />
+  <title>Meta 剧集广告删除 - AI自动后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/ui-topbar.css?v=20260915-meta-assets-v2" />
+  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-assets-v2" />
 </head>
 <body>
+  <a class="skip-link" href="#pageRoot">跳转到页面内容</a>
   <div class="app">
-    <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">删</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div>
-      <nav id="quickNav" class="nav"></nav>
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">AI</span><span><strong>AI自动后台</strong><small>运营工作台</small></span></a>
+      <div class="sidebar-label">工作空间</div>
+      <nav id="quickNav" class="nav" aria-label="后台导航"></nav>
+      <div class="sidebar-footer"><span class="online-dot"></span>ai.yingliangads.com</div>
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>FB Post/Ad 删除</h1><p>按剧 ID 查找 MoboReels Campaign、Ad、Post，并按 Post 优先、Ad 其次执行删除。</p></div>
-        <div id="topActions"></div>
+        <div class="title">
+          <div class="eyebrow"><button class="nav-toggle" id="navToggle" type="button" aria-controls="sidebar" aria-expanded="false">导航</button><a href="/">工作台</a><span aria-hidden="true">/</span><span>Meta 资产管理</span></div>
+          <h1>Meta 剧集广告删除</h1>
+          <p>按剧集与投放产品定位广告资产，预览后分阶段删除。</p>
+        </div>
+        <div class="top-actions" id="topActions">
+          <div class="user-card" id="userCard"></div>
+          <button class="btn btn-quiet" id="refreshPageBtn" type="button">刷新</button>
+          <button class="btn" id="authBtn" type="button">登录</button>
+        </div>
       </header>
-      <section id="loginGate" class="panel hidden"><div class="empty">请先登录后台后再访问此页面。<a href="/">返回登录</a></div></section>
-      <section id="permissionGate" class="panel hidden"><div class="empty">当前账号没有 AI自动规则调控权限。</div></section>
-      <section id="pageRoot" class="hidden">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>剧 ID</h2>
-            <div class="actions">
-              <button class="btn" id="refreshJobsBtn" type="button">刷新记录</button>
-              <button class="btn primary" id="previewBtn" type="button">预览</button>
-            </div>
-          </div>
+      <section id="loadingGate" class="panel gate" aria-live="polite"><span class="spinner" aria-hidden="true"></span>正在加载后台权限…</section>
+      <section id="loginGate" class="panel gate hidden"><h2>登录后使用</h2><p>请使用后台账号登录，查看有权限的产品与任务。</p><button class="btn primary" id="gateLoginBtn" type="button">登录后台</button></section>
+      <section id="permissionGate" class="panel gate hidden"><h2>暂未开通此功能</h2><p>当前账号没有「Meta 剧集广告删除」权限，请联系管理员在用户管理中分配。</p><a class="btn" href="/">返回工作台</a></section>
+      <section id="loadErrorGate" class="panel gate hidden" role="alert"><h2>页面加载失败</h2><p id="loadErrorText"></p><button class="btn" id="retryInitBtn" type="button">重新加载</button></section>
+      <div id="pageRoot" class="hidden" tabindex="-1">
+        <div class="workflow" aria-label="操作流程"><span><b>1</b>选择剧集与产品</span><i aria-hidden="true">→</i><span><b>2</b>预览匹配对象</span><i aria-hidden="true">→</i><span><b>3</b>确认分阶段删除</span></div>
+        <div id="requestNotice" class="notice warning hidden" role="status"><div><strong>执行请求的响应尚未确认</strong><p id="requestNoticeText"></p></div><button class="btn" id="resolveRequestBtn" type="button">核对执行请求</button></div>
+        <section class="panel scope-panel" aria-labelledby="scopeTitle">
+          <div class="panel-head"><div><h2 id="scopeTitle">查询删除范围</h2><p>只处理明确选中的投放产品，包含历史广告及已下架剧集。</p></div><span class="tag neutral">Meta 渠道</span></div>
           <div class="panel-body form-grid">
-            <label>
-              <span>每行一个剧 ID</span>
-              <textarea id="seriesInput" rows="7" placeholder="EN-XEY271&#10;EN-XEY251&#10;EN-XEY286"></textarea>
-            </label>
-            <label>
-              <span>产品口径</span>
-              <input id="productsInput" value="3443,3543,826" />
-            </label>
-          </div>
-        </section>
-
-        <section class="stats" id="stats"></section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <h2>删除执行</h2>
-            <div class="actions">
-              <button class="btn danger" id="deletePostsBtn" type="button" disabled>先删除 Post</button>
-              <button class="btn danger" id="deleteAdsBtn" type="button" disabled>确认后删除 Ad</button>
+            <div class="field">
+              <div class="field-heading"><label for="inputType">剧集标识</label><span class="muted" id="idCount">0 / 50 个</span></div>
+              <select id="inputType" aria-describedby="inputHelp"><option value="content_id">剧 ID · content_id</option><option value="series_code">资源 ID · series_code</option></select>
+              <label for="idsInput" class="sr-only">每行一个剧集标识</label>
+              <textarea id="idsInput" rows="5" spellcheck="false" autocomplete="off" placeholder="每行输入一个剧 ID" aria-describedby="inputHelp idCount"></textarea>
+              <p class="field-help" id="inputHelp">精确匹配对应剧集及语言版本，每行一个剧 ID。</p>
+            </div>
+            <div class="field product-field">
+              <div class="field-heading"><label for="productSearch">投放产品</label><span class="muted" id="productCount">已选 0 / 20</span></div>
+              <details class="product-picker" id="productPicker">
+                <summary id="productSummary">请选择投放产品<span class="chevron" aria-hidden="true"></span></summary>
+                <div class="product-dropdown">
+                  <div class="product-search"><input id="productSearch" type="search" autocomplete="off" placeholder="搜索产品名称、ID 或所属主产品" aria-label="搜索投放产品" /></div>
+                  <div class="product-options" id="productOptions" role="group" aria-label="可选投放产品"><div class="empty">正在加载产品…</div></div>
+                  <div class="product-menu-footer"><span id="productMatchCount" class="muted"></span><button class="text-btn" id="clearProductsBtn" type="button">清空选择</button></div>
+                </div>
+              </details>
+              <div class="selected-products" id="selectedProducts" aria-label="已选投放产品"><p class="selection-empty">尚未选择产品</p></div>
+              <p class="field-help">App 与 W2A 分别勾选；所属主产品用于解析剧资料，不扩大删除范围。</p>
+              <div class="notice error hidden" id="productsError" role="alert"></div>
             </div>
           </div>
-          <div class="panel-body">
-            <div id="currentJob" class="current-job">暂无预览结果</div>
-            <div class="log" id="logBox"></div>
+          <div class="panel-footer"><span class="muted" id="scopeHint">先预览对象，再确认执行。</span><button class="btn primary" id="previewBtn" type="button" disabled>预览匹配对象<span aria-hidden="true"> →</span></button></div>
+          <div class="inline-error hidden" id="formError" role="alert"></div>
+        </section>
+        <section class="panel hidden" id="resultPanel" aria-labelledby="resultTitle">
+          <div class="panel-head"><div><div class="heading-with-badge"><h2 id="resultTitle">预览与执行</h2><span id="jobStatus" class="tag neutral"></span></div><p id="jobMeta" class="job-meta"></p></div><button class="btn small" id="refreshJobBtn" type="button">刷新任务</button></div>
+          <div class="panel-body result-body">
+            <div id="jobNotice" class="notice info hidden" role="status"></div>
+            <div id="staleNotice" class="notice warning hidden" role="status">输入范围已变更，请重新预览后执行。下方仍展示上一次任务的结果。</div>
+            <div id="legacyNotice" class="notice info hidden">此为历史任务，仅保留只读记录。请使用上方查询范围建立新任务。</div>
+            <div class="stats" id="stats" aria-label="对象统计"></div>
+            <details class="scope-details" id="dramaDetails"><summary><span>已解析剧集 <b id="dramaCount">0</b></span><span class="muted">查看产品、语言与剧 ID</span></summary><div class="table-wrap scope-table"><table><thead><tr><th>投放产品</th><th>剧 ID</th><th>资源 ID</th><th>语言 / 剧名</th></tr></thead><tbody id="dramaBody"></tbody></table></div></details>
+            <details class="scope-details blocker-details hidden" id="blockerDetails"><summary><span>范围核查提示 <b id="blockerCount">0</b></span><span class="muted">归属不明的对象不会执行</span></summary><ul class="blocker-list" id="blockerList"></ul></details>
+            <div id="legacySummary" class="legacy-summary hidden"></div>
+            <div id="executionControls">
+              <div class="section-heading"><h3>选择删除阶段</h3><span class="muted">可单选或多选，按以下顺序执行</span></div>
+              <div class="phase-grid" id="phaseChoices">
+                <label class="phase-card"><input type="checkbox" value="creative" data-phase checked /><span class="phase-top"><span><span class="step-number">1</span>Creative</span><strong id="creativeCount">0</strong></span><span class="phase-subtitle">广告创意 · creative_id</span><span class="phase-summary" id="creativeSummary">等待预览</span></label>
+                <label class="phase-card"><input type="checkbox" value="ad" data-phase checked /><span class="phase-top"><span><span class="step-number">2</span>Ad</span><strong id="adCount">0</strong></span><span class="phase-subtitle">广告 · ad id</span><span class="phase-summary" id="adSummary">等待预览</span></label>
+                <label class="phase-card"><input type="checkbox" value="video" data-phase checked /><span class="phase-top"><span><span class="step-number">3</span>Video</span><strong id="videoCount">0</strong></span><span class="phase-subtitle">视频对象 · video id</span><span class="phase-summary" id="videoSummary">等待预览</span></label>
+              </div>
+              <div class="execution-footer"><div><strong id="phaseOrder">Creative → Ad → Video</strong><p class="field-help" id="executionHint">单对象失败后继续其余对象与后续阶段；成功对象自动跳过。</p></div><div class="actions"><button class="btn hidden" id="reconcileBtn" type="button">核实待确认结果</button><button class="btn danger" id="executeBtn" type="button" disabled>执行所选阶段</button></div></div>
+            </div>
+            <div class="notice error hidden" id="actionError" role="alert"></div>
           </div>
         </section>
-
-        <section class="panel">
-          <div class="panel-head"><h2>命中明细</h2><span id="detailCount"></span></div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>剧 ID</th>
-                  <th>账号</th>
-                  <th>Campaign</th>
-                  <th>Ad ID</th>
-                  <th>Post ID</th>
-                  <th>状态</th>
-                  <th>预览</th>
-                </tr>
-              </thead>
-              <tbody id="detailBody"></tbody>
-            </table>
-          </div>
+        <section class="panel hidden" id="objectsPanel" aria-labelledby="objectsTitle">
+          <div class="panel-head"><div><h2 id="objectsTitle">对象明细</h2><p id="detailCount">共 0 个对象</p></div><div class="table-filters"><label class="sr-only" for="kindFilter">对象类型</label><select id="kindFilter"><option value="">全部类型</option><option value="creative">Creative</option><option value="ad">Ad</option><option value="video">Video</option></select><label class="sr-only" for="statusFilter">对象状态</label><select id="statusFilter"><option value="">全部状态</option><option value="pending">待执行</option><option value="in_progress">执行中</option><option value="deleted">删除成功</option><option value="already_deleted">已确认删除</option><option value="failed">失败</option><option value="blocked">已阻止</option><option value="unknown">结果待核实</option></select></div></div>
+          <div class="table-wrap objects-table"><table><thead><tr><th>类型 / 对象 ID</th><th>投放产品</th><th>广告账户</th><th>剧集 / 资源 / 语言</th><th>处理结果</th></tr></thead><tbody id="detailBody"></tbody></table></div>
+          <div class="pagination"><span class="muted">每页 50 个对象</span><div class="actions"><button class="btn small" id="prevPageBtn" type="button" disabled>上一页</button><span id="pageText">第 1 / 1 页</span><button class="btn small" id="nextPageBtn" type="button" disabled>下一页</button></div></div>
         </section>
-
-        <section class="panel">
-          <div class="panel-head"><h2>最近任务</h2></div>
-          <div class="panel-body"><div class="jobs" id="jobsBox"></div></div>
+        <section class="panel" aria-labelledby="historyTitle">
+          <div class="panel-head"><div><h2 id="historyTitle">最近任务</h2><p id="historyScope">查看历史预览与执行结果 · 北京时间</p></div><button class="btn small" id="refreshJobsBtn" type="button">刷新记录</button></div>
+          <div class="jobs" id="jobsBox"><div class="empty">正在加载任务记录…</div></div>
         </section>
-      </section>
+      </div>
+      <footer class="page-footer">AI自动后台 <span aria-hidden="true">·</span> Meta 剧集广告删除</footer>
     </main>
   </div>
-  <div class="toast" id="toast"></div>
-  <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915a"></script>
-  <script src="/fb-post-ad-delete.js?v=20260915a"></script>
+  <dialog class="confirm-dialog" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
+    <div class="dialog-head"><div><span class="dialog-eyebrow">执行前确认</span><h2 id="confirmTitle">确认删除所选广告资产</h2></div><button class="icon-btn" id="closeConfirmBtn" type="button" aria-label="关闭确认">×</button></div>
+    <div class="dialog-body">
+      <p id="confirmDescription">将按下列产品和剧集范围执行删除，请核对具体对象及阶段。</p>
+      <div class="confirmation-section"><h3>投放产品</h3><div class="confirm-products" id="confirmProducts"></div></div>
+      <div class="confirmation-section"><h3>展开后的剧集 <span class="muted" id="confirmDramaCount"></span></h3><div class="table-wrap confirm-drama-table"><table><thead><tr><th>投放产品</th><th>剧 ID</th><th>资源 ID</th><th>语言 / 剧名</th></tr></thead><tbody id="confirmDramaBody"></tbody></table></div></div>
+      <div class="confirmation-section"><h3>执行阶段与数量</h3><div class="confirm-order" id="confirmOrder"></div><div class="table-wrap"><table class="confirm-phase-table"><thead><tr><th>阶段</th><th>本次执行</th><th>已删除</th><th>已阻止</th><th>待核实</th></tr></thead><tbody id="confirmPhaseBody"></tbody></table></div><p class="field-help">本次执行包含待执行及明确失败项。已删除、已阻止和结果待核实的对象均跳过。</p></div>
+      <div class="confirmation-section hidden" id="confirmScopeBlockers"><h3>范围核查提示</h3><ul class="blocker-list" id="confirmScopeBlockerList"></ul></div>
+      <div class="confirmation-section hidden" id="confirmBlockedSection"><div class="section-heading"><h3>被阻止对象</h3><select id="confirmBlockedKind" aria-label="查看对应阶段的阻止对象"></select></div><div id="confirmBlockedList" class="confirm-blocked-list"></div><div class="compact-pagination"><button class="btn small" id="confirmBlockedPrev" type="button">上一页</button><span id="confirmBlockedPage" class="muted"></span><button class="btn small" id="confirmBlockedNext" type="button">下一页</button></div></div>
+      <div class="notice warning">当前阶段完成后进入下一阶段；单对象失败不会中止后续阶段。Video 阶段删除视频对象。</div>
+      <div class="notice error hidden" id="confirmError" role="alert"></div>
+    </div>
+    <div class="dialog-footer"><button class="btn" id="cancelConfirmBtn" type="button">取消</button><button class="btn danger" id="confirmExecuteBtn" type="button">确认删除</button></div>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/ui-topbar.js?v=20260915-meta-assets-v2"></script>
+  <script src="/quick-nav.js?v=20260915-meta-assets-v2"></script>
+  <script src="/fb-post-ad-delete.js?v=20260915-meta-assets-v2"></script>
 </body>
 </html>
