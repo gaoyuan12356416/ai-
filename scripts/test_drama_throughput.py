@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -172,6 +173,88 @@ class PrefetchRuntimeTests(unittest.TestCase):
         gpu_fixtures.wait_for(lambda: value.get("next")["status"] == "completed")
         self.assertEqual(calls, ["next"])
 
+    def test_transport_failure_waits_then_retries_only_preparation(self):
+        finish, calls = threading.Event(), []
+        now = [time.time()]
+
+        def execute(payload):
+            if payload["job_id"] == "first":
+                async_runtime.emit_progress("rendering_random")
+                finish.wait(5)
+            return gpu_fixtures.result_for(payload)
+
+        def prepare(_payload, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise media_pipeline._download_error()
+
+        value = async_runtime.AsyncRuntime(self.directory.name, execute, lambda _: None,
+                                          prefetch=prepare, clock=lambda: now[0])
+        self.addCleanup(value.close, 3)
+        value.submit(gpu_fixtures.render_payload("first"))
+        value.submit(gpu_fixtures.render_payload("next"))
+        gpu_fixtures.wait_for(lambda: value._records["next"].get("_prefetch_result") == "retry_wait")
+        self.assertEqual(value._records["next"]["_prefetch_retry_after"], now[0] + 30)
+        self.assertEqual(value._records["next"]["_prefetch_error"]["code"], "drama_episode_download_failed")
+        self.assertNotIn("_prefetch_error", value.get("next"))
+        threading.Event().wait(0.35)
+        self.assertEqual(len(calls), 1)
+        now[0] += 31
+        gpu_fixtures.wait_for(lambda: value.get("next")["stage"] == "prefetched")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(value.get("first")["status"], "running")
+        finish.set()
+        gpu_fixtures.wait_for(lambda: value.get("next")["status"] == "completed")
+
+    def test_transport_retry_limit_survives_runtime_record(self):
+        finish = threading.Event()
+        now = [time.time()]
+
+        def execute(payload):
+            async_runtime.emit_progress("rendering_random")
+            finish.wait(5)
+            return gpu_fixtures.result_for(payload)
+
+        def prepare(_payload, **_kwargs):
+            raise media_pipeline._download_error()
+
+        value = async_runtime.AsyncRuntime(self.directory.name, execute, lambda _: None,
+                                          prefetch=prepare, clock=lambda: now[0])
+        self.addCleanup(value.close, 3)
+        value.submit(gpu_fixtures.render_payload("first"))
+        value.submit(gpu_fixtures.render_payload("next"))
+        for attempt in (1, 2, 3):
+            gpu_fixtures.wait_for(lambda: value._records["next"].get("_prefetch_attempts") == attempt
+                                 and value._records["next"].get("_prefetch_result") != "running")
+            now[0] += 100
+        threading.Event().wait(0.35)
+        state = json.loads((value.root / "jobs/next.json").read_text())
+        self.assertEqual((state["_prefetch_attempts"], state["_prefetch_result"]), (3, "failed"))
+        self.assertEqual(value.get("next")["status"], "queued")
+        finish.set()
+
+    def test_legacy_interrupted_preparation_can_resume_without_new_job_generation(self):
+        finish, prepared = threading.Event(), threading.Event()
+
+        def execute(payload):
+            async_runtime.emit_progress("rendering_random")
+            finish.wait(3)
+            return gpu_fixtures.result_for(payload)
+
+        value = async_runtime.AsyncRuntime(self.directory.name, execute, lambda _: None,
+            prefetch=lambda _payload, **_kwargs: prepared.set(), autostart=False)
+        self.addCleanup(value.close, 3)
+        value.submit(gpu_fixtures.render_payload("first"))
+        value.submit(gpu_fixtures.render_payload("next"))
+        value._records["next"]["_prefetch_attempted_generation"] = 1
+        value._save(value._records["next"])
+        value.start()
+        self.assertTrue(prepared.wait(3))
+        gpu_fixtures.wait_for(lambda: value.get("next")["stage"] == "prefetched")
+        self.assertEqual(value.get("next")["generation"], 1)
+        self.assertEqual(value._records["next"]["_prefetch_attempts"], 2)
+        finish.set()
+
     def test_shutdown_keeps_owner_lock_until_prefetch_drains(self):
         prepared, release = threading.Event(), threading.Event()
 
@@ -256,6 +339,37 @@ class PrefetchDownloadTests(unittest.TestCase):
             reused = media_pipeline.download_episode(item["episode_url"], target, session_factory=lambda: session)
             self.assertTrue(reused["reused"])
             self.assertEqual(session.calls, [])
+
+    def test_temporary_connection_failure_resumes_verified_prefix(self):
+        sessions = []
+
+        def downloader(url, path, route, callback, **kwargs):
+            session = media_fixtures.Session([
+                media_fixtures.Response([media_fixtures.BODY[:4], media_fixtures.requests.ConnectionError("secret")]),
+                media_fixtures.Response([media_fixtures.BODY[4:]], status=206,
+                    headers={"Content-Length": "6", "Content-Range": "bytes 4-9/10", "ETag": media_fixtures.ETAG}),
+            ])
+            sessions.append(session)
+            return media_pipeline.download_episode_with_route(url, path, route, callback,
+                session_factory=lambda: session, **kwargs)
+
+        self.assertEqual(self.prepare(workers=2, downloader=downloader)["completed_episodes"], 2)
+        self.assertTrue(all(session.calls[1]["headers"]["Range"] == "bytes=4-" for session in sessions))
+
+    def test_sibling_cancellation_does_not_hide_original_transport_failure(self):
+        first_started = threading.Event()
+
+        def downloader(url, path, route, callback, **kwargs):
+            if Path(path).name == "001.mp4":
+                first_started.set()
+                kwargs["stop_event"].wait(3)
+                raise media_pipeline._download_error("drama_episode_download_cancelled")
+            self.assertTrue(first_started.wait(3))
+            raise media_pipeline._download_error()
+
+        with self.assertRaises(media_pipeline.DramaSynthesisError) as caught:
+            self.prepare(workers=2, downloader=downloader)
+        self.assertEqual(caught.exception.code, "drama_episode_download_failed")
 
     def test_disk_reserve_rejects_before_network(self):
         downloader = mock.Mock()

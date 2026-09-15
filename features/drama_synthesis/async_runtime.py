@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -977,14 +978,21 @@ class AsyncRuntime:
                     continue
                 record = queued[0]
                 generation = record["generation"]
-                if record.get("_prefetch_attempted_generation") == generation:
+                same_generation = record.get("_prefetch_attempted_generation") == generation
+                attempts = record.get("_prefetch_attempts", 1) if same_generation else 0
+                if same_generation and (
+                        record["stage"] == "prefetched"
+                        or record.get("_prefetch_result") in {"completed", "failed"}
+                        or attempts >= 3
+                        or self.clock() < record.get("_prefetch_retry_after", 0)):
                     continue
                 lock = _FileLock(self.root / "locks" / (record["job_id"] + ".lock"))
                 if not lock.acquire():
                     continue
                 self._prefetch_job = record["job_id"]
                 self._prefetch_stop.clear()
-                record.update(stage="prefetching", _prefetch_attempted_generation=generation)
+                record.update(stage="prefetching", _prefetch_attempted_generation=generation,
+                              _prefetch_attempts=attempts + 1, _prefetch_result="running")
                 try:
                     self._save(record)
                 except Exception:
@@ -1005,20 +1013,32 @@ class AsyncRuntime:
                     current["heartbeat_at"] = current["last_progress_at"] = self._timestamp()
                     self._save(current)
 
-            ok = False
+            ok, error_code = False, None
             try:
                 self.prefetch(payload, stop_event=self._prefetch_stop, progress_callback=progress)
                 ok = not self._prefetch_stop.is_set()
-            except Exception:
-                # Optional preparation does not fail or retry the actual job.
-                # Canonical download checkpoints remain authoritative at render.
-                pass
+            except Exception as exc:
+                # Never log exception text: request errors may contain source URLs.
+                code = getattr(exc, "code", None)
+                error_code = code if code in ERROR_MESSAGES or code in {
+                    "drama_prefetch_stopped", "drama_prefetch_budget_exceeded", "drama_prefetch_path_invalid",
+                } else "drama_prefetch_internal_error"
             finally:
                 with self._mutex:
                     self._prefetch_job = None
                     current = self._records[record["job_id"]]
                     if current["status"] == "queued" and current["generation"] == generation:
                         current["stage"] = "prefetched" if ok else "queued"
+                        retry = error_code == "drama_episode_download_failed" and attempts + 1 < 3
+                        interrupted = self._prefetch_stop.is_set()
+                        current["_prefetch_result"] = (
+                            "completed" if ok else "stopped" if interrupted else "retry_wait" if retry else "failed")
+                        current["_prefetch_retry_after"] = self.clock() + 30 * (attempts + 1) if retry else 0
+                        current["_prefetch_error"] = {"code": error_code, "at": self._timestamp()} if error_code else None
+                        if error_code and not interrupted:
+                            logging.getLogger(__name__).warning(
+                                "drama prefetch stopped job_id=%s generation=%d attempt=%d code=%s retry=%s",
+                                current["job_id"], generation, attempts + 1, error_code, retry)
                         try:
                             self._save(current)
                         except Exception:

@@ -13,6 +13,10 @@ from .media_pipeline import download_episode_with_route
 class PrefetchStopped(Exception):
     """Optional lookahead stopped; normal execution retains all checkpoints."""
 
+    def __init__(self, code="drama_prefetch_stopped"):
+        super().__init__(code)
+        self.code = code
+
 
 def prefetch_episodes(payload, root, *, stop_event, progress_callback=None,
                       downloader=download_episode_with_route, workers=None,
@@ -28,13 +32,14 @@ def prefetch_episodes(payload, root, *, stop_event, progress_callback=None,
     job_dir = Path(root).absolute() / payload["job_id"]
     downloads = job_dir / "downloads"
     if job_dir.is_symlink() or downloads.is_symlink():
-        raise PrefetchStopped()
+        raise PrefetchStopped("drama_prefetch_path_invalid")
     downloads.mkdir(mode=0o700, parents=True, exist_ok=True)
     rows = payload["episodes"]
     sizes, totals, complete = [0] * len(rows), [0] * len(rows), set()
     mutex = threading.Lock()
     last_report, last_bytes = [0.0], [0]
     local_stop = threading.Event()
+    failures = []
 
     class Stop:
         def is_set(self):
@@ -53,9 +58,11 @@ def prefetch_episodes(payload, root, *, stop_event, progress_callback=None,
 
     def check_budget():
         remaining = sum(max(0, total - size) for size, total in zip(sizes, totals))
-        if stop.is_set() or sum(totals) > max_bytes or disk_usage(downloads).free < min_free_bytes + remaining:
-            local_stop.set()
+        if stop.is_set():
             raise PrefetchStopped()
+        if sum(totals) > max_bytes or disk_usage(downloads).free < min_free_bytes + remaining:
+            local_stop.set()
+            raise PrefetchStopped("drama_prefetch_budget_exceeded")
 
     def report(force=False):
         now = time.monotonic()
@@ -84,15 +91,23 @@ def prefetch_episodes(payload, root, *, stop_event, progress_callback=None,
         try:
             value = downloader(row["episode_url"], str(downloads / ("%03d.mp4" % row["episode_number"])),
                                row.get("download_route"), on_bytes, stop_event=stop,
-                               connect_timeout=5, read_timeout=15, max_attempts=1)
+                               connect_timeout=10, read_timeout=30, max_attempts=3)
             with mutex:
                 complete.add(index)
                 report(force=True)
             return value
-        except Exception:
-            local_stop.set()
+        except Exception as exc:
+            with mutex:
+                if not failures:
+                    failures.append(exc)
+                local_stop.set()
             raise
 
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="drama-prefetch-download") as pool:
-        list(pool.map(download, range(len(rows))))
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="drama-prefetch-download") as pool:
+            list(pool.map(download, range(len(rows))))
+    except Exception:
+        if failures:
+            raise failures[0] from None
+        raise
     return {"completed_episodes": len(complete), "downloaded_bytes": sum(sizes)}
