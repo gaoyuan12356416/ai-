@@ -1,0 +1,7 @@
+# Isolated optional overlay for CPython 3.10 / Linux x86_64 / CUDA 12.
+# Install --no-deps --require-hashes into a new immutable /data runtime folder.
+# numpy / torch / CUDA runtime libraries come from the existing pinned runtime.
+PyNvVideoCodec==1.0.2 --hash=sha256:da8ec7c2aaee5c634fb0c2451042c32cc58728c1b46b81e07c0e78ca235a4ef0
+av==12.3.0 --hash=sha256:0220fce2a62d71cc5e89617419b6224ddb43f1753b00f68b5c9af8b5f41d38c9
+cupy-cuda12x==13.3.0 --hash=sha256:cf4a2a0864364715881b50012927e88bd7ec1e6f1de3987970870861ae5ed25e
+fastrlock==0.8.3 --hash=sha256:0d6a77b3f396f7d41094ef09606f65ae57feeb713f4285e8e417f4021617ca62

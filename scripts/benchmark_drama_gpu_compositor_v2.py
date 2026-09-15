@@ -292,6 +292,7 @@ def main(argv=None):
     output = output_root / "rendered.mp4"
     swap_before = swap_used_bytes()
     started = time.monotonic()
+    cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN) if resource is not None else None
     with NvidiaSampler(swap_before) as gpu:
         result = render_chunked_random_output(
             source=clip, output=output, recipe=recipe, asset_root=asset_root,
@@ -299,6 +300,7 @@ def main(argv=None):
             confirmed_stopped_recovery=args.confirmed_stopped_recovery,
         )
     elapsed = time.monotonic() - started
+    cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN) if resource is not None else None
     output_info = probe(ffprobe, output)
     swap_after = swap_used_bytes()
     multiplier = source_info["duration"] / elapsed
@@ -352,6 +354,9 @@ def main(argv=None):
         "clip_duration_seconds": round(source_info["duration"], 6),
         "output_duration_seconds": round(output_info["duration"], 6),
         "elapsed_seconds": round(elapsed, 3),
+        "child_cpu_seconds": round(cpu_after.ru_utime+cpu_after.ru_stime-cpu_before.ru_utime-cpu_before.ru_stime, 3)
+            if cpu_before is not None else None,
+        "frame_pipeline": os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl"),
         "realtime_multiplier": round(multiplier, 3),
         "max_gpu_memory_mib": gpu.max_memory_mib,
         "max_gpu_utilization_percent": gpu.max_utilization_percent,

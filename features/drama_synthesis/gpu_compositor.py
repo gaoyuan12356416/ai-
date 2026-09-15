@@ -387,7 +387,7 @@ def build_opencl_chunk_command(
         phase = (start % duration) if duration > 0 else 0.0
         if asset_cache_entries:
             command.extend([
-                "-threads", str(threads), "-stream_loop", "-1", "-ss", "%.6f" % phase,
+                "-threads", str(threads), "-stream_loop", "-1",
                 "-c:v", "rawvideo", "-i", str(asset_cache_entries[category]["path"]),
             ])
         else:
@@ -404,9 +404,15 @@ def build_opencl_chunk_command(
         "format=rgba,hwupload[source]" % CANVAS_FPS
     ]
     for index, label in enumerate(("border", "opacity", "corners", "tint"), start=1):
+        category = ("border", "opacity_video", "corners", "tint")[index-1]
+        duration = float(asset_durations.get(category) or 0)
+        phase = start % duration if duration > 0 else 0
+        # input -ss together with -stream_loop repeats the seeked GOP/tail,
+        # not the full animation. Trim the continuous loop before uploading.
+        trim = "trim=start=%.6f," % phase if asset_cache_entries and phase else ""
         graph_parts.append(
-            "[%d:v]fps=%d,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]"
-            % (index, CANVAS_FPS, label)
+            "[%d:v]%sfps=%d,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]"
+            % (index, trim, CANVAS_FPS, label)
         )
     graph_parts.append(
         "[source][border][opacity][corners][tint]"
