@@ -184,7 +184,8 @@ def render(plan, progress=None):
     tensor = torch.from_dlpack(nv12)
     encoder = nvc.CreateEncoder(CANVAS_WIDTH, CANVAS_HEIGHT, "NV12", False,
                                codec="h264", preset="P3", profile="high", fps=str(CANVAS_FPS),
-                               gop="60", bf="0", rc="vbr", cq="21", bitrate="0")
+                               # SDK bf=1 means IPP (FFmpeg's -bf 0); bf=0 is all-I.
+                               gop="60", idrperiod="60", bf="1", rc="constqp", constqp="21")
     output = Path(plan["output"])
     raw = output.with_name(output.name + ".native.h264")
     if output.exists() or output.is_symlink():

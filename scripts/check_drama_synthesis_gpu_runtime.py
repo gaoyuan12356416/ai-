@@ -223,6 +223,7 @@ def compositor_pipeline_issues(env, asset_set, runner=subprocess.run, probe=None
         )
         from features.drama_synthesis.core import RECIPE_PROFILE
         from features.drama_synthesis import gpu_compositor
+        from features.drama_synthesis.asset_cache import selected_entries
 
         probe = probe or gpu_compositor._probe
         with tempfile.TemporaryDirectory(
@@ -276,6 +277,7 @@ def compositor_pipeline_issues(env, asset_set, runner=subprocess.run, probe=None
                 asset_media_types={key: rows[key]["media_type"] for key in rows},
                 asset_durations=durations, chunk=chunk, kernel_path=kernel_path,
                 device=env["DRAMA_GPU_OPENCL_DEVICE"],
+                asset_cache_entries=selected_entries(unsigned, root=env.get("DRAMA_GPU_ASSET_CACHE_ROOT", "")),
             )
             rendered = runner(command, check=False, capture_output=True, text=True, timeout=120)
             if rendered.returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
@@ -391,6 +393,7 @@ def main(argv=None):
     model_hashes = {}
     asset_set = None
     compositor_pipeline_checked = False
+    asset_cache_verified_count = 0
     runtime_fingerprint = {}
     if not issues:
         try:
@@ -407,6 +410,13 @@ def main(argv=None):
                 Path(os.environ["DRAMA_RANDOM_OVERLAY_ROOT"]),
                 os.environ["DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256"],
             )
+            if os.environ.get("DRAMA_GPU_ASSET_CACHE_ROOT"):
+                from features.drama_synthesis.asset_cache import cache_root, verified_entry
+                root = cache_root()
+                for category in ("border", "opacity_video", "corners", "tint"):
+                    for item in asset_set["categories"][category]:
+                        verified_entry(root, item["sha256"])
+                        asset_cache_verified_count += 1
         except Exception:
             issues.append("isolated_asset_set_invalid")
     if not issues:
@@ -433,6 +443,7 @@ def main(argv=None):
         "runtime_fingerprint": runtime_fingerprint,
         "cuda_tested": False,
         "compositor_pipeline_checked": compositor_pipeline_checked and not issues,
+        "asset_cache_verified_count": asset_cache_verified_count,
         "app_import_checked": bool(args.check_app_import and not issues),
     }, sort_keys=True))
     return 1 if issues else 0
