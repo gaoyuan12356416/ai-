@@ -1,5 +1,6 @@
 """Contract tests with no real Graph traffic or deletion calls."""
 from copy import deepcopy
+import json
 import unittest
 from unittest.mock import Mock
 
@@ -9,7 +10,7 @@ from features.fb_ad_asset_delete.core import (
     AssetError, actor_key, content_markers, creative_video_ids, normalize_input,
     normalize_phases, parse_ids, redact, stored_ids, stored_ids_complete,
 )
-from features.fb_ad_asset_delete.graph import GraphClient, GraphError
+from features.fb_ad_asset_delete.graph import ACCOUNT_FIELDS, GraphClient, GraphError
 
 
 class Response:
@@ -41,8 +42,8 @@ def obj(kind="creative", oid="123", accounts=None):
     return dict(kind=kind, object_id=oid, account_ids=accounts or ["444"], user_ids=["803", "804"])
 
 
-def account_probe():
-    return Response({"id": "act_444", "account_id": "444"})
+def account_probe(**extra):
+    return Response(dict(id="act_444", account_id="444", **extra))
 
 
 def error_response(code=100, status=400, **extra):
@@ -128,6 +129,9 @@ class GraphTests(unittest.TestCase):
                 status, proof = client.delete(obj(kind))
                 self.assertEqual(status, "deleted")
                 self.assertTrue(proof["success"])
+                self.assertEqual(proof["credential_user_id"], "803")
+                self.assertEqual(proof["account_diagnostic"]["delete_permission"], "unverified")
+                self.assertNotIn("unit-test-token", json.dumps(proof))
                 delete = transport.calls[-1]
                 self.assertEqual(delete["method"], "DELETE")
                 self.assertEqual(delete["url"], "https://graph.facebook.com/v25.0/123")
@@ -165,10 +169,128 @@ class GraphTests(unittest.TestCase):
 
     def test_no_automatic_token_rotation_after_a_delete_error(self):
         client, transport, provider = self.client([error_response(10), account_probe(), error_response(100)])
-        self.assertEqual(client.delete(obj())[0], "failed")
+        status, result = client.delete(obj())
+        self.assertEqual(status, "failed")
+        self.assertEqual(result["credential_user_id"], "804")
         self.assertEqual([call.args[0] for call in provider.call_args_list], [["803"], ["804"]])
         self.assertEqual([c["method"] for c in transport.calls], ["GET", "GET", "DELETE"])
         self.assertEqual(sum(c["method"] == "DELETE" for c in transport.calls), 1)
+
+    def test_error_user_messages_and_all_error_fields_are_retained_and_redacted(self):
+        response = Response({"error": {"code": 200, "error_subcode": 1487235, "type": "OAuthException",
+            "fbtrace_id": "trace-1", "is_transient": False,
+            "message": "Permissions error unit-test-token-803",
+            "error_user_title": "Title unit-test-token-803",
+            "error_user_msg": "Details unit-test-token-803 https://graph.facebook.com/123?access_token=other-secret",
+            "unexpected_raw_payload": {"access_token": "do-not-record-this"}}}, 400)
+        client, transport, _ = self.client([account_probe(account_status=1, user_tasks=["ADVERTISE"]), response])
+        status, result = client.delete(obj())
+        self.assertEqual(status, "failed")
+        self.assertEqual(result["credential_user_id"], "803")
+        self.assertEqual(result["detail"]["error_subcode"], 1487235)
+        self.assertEqual(result["detail"]["type"], "OAuthException")
+        self.assertEqual(result["detail"]["fbtrace_id"], "trace-1")
+        self.assertFalse(result["detail"]["is_transient"])
+        self.assertEqual(result["detail"]["http_status"], 400)
+        self.assertIn("Title", result["detail"]["error_user_title"])
+        self.assertIn("Details", result["detail"]["error_user_msg"])
+        for sensitive in ("unit-test-token", "other-secret", "https://", "do-not-record-this", "unexpected_raw_payload"):
+            self.assertNotIn(sensitive, json.dumps(result))
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "DELETE"])
+
+    def test_malformed_error_fields_cannot_store_nested_secrets_or_unbounded_text(self):
+        response = Response({"error": {"code": "unit-test-token-803", "message": "x" * 10000,
+            "type": ["unit-test-token-803"], "fbtrace_id": "unit-test-token-803",
+            "error_user_title": {"token": "private-token"}, "error_user_msg": ["private-token"]}}, 400)
+        client, _, _ = self.client([account_probe(), response])
+        status, result = client.delete(obj())
+        self.assertEqual(status, "failed")
+        self.assertLessEqual(len(result["message"]), 600)
+        self.assertEqual(result["detail"]["error_user_title"], "[invalid field omitted]")
+        self.assertNotIn("unit-test-token", json.dumps(result))
+        self.assertNotIn("private-token", json.dumps(result))
+
+    def test_readable_advertise_task_is_diagnostic_and_never_assumed_delete_permission(self):
+        client, transport, _ = self.client([account_probe(account_status=1, user_tasks=["ADVERTISE", "DRAFT", "ANALYZE"]),
+                                            Response({"success": True})])
+        diagnostic = client.diagnose(obj())
+        self.assertTrue(diagnostic["read_only"])
+        self.assertTrue(diagnostic["account_diagnostic"]["readable"])
+        self.assertEqual(diagnostic["account_diagnostic"]["account_state"], "active")
+        self.assertEqual(diagnostic["account_diagnostic"]["delete_permission"], "unverified")
+        self.assertEqual(diagnostic["account_diagnostic"]["user_tasks"], ["ADVERTISE", "ANALYZE", "DRAFT"])
+        self.assertEqual(transport.calls[0]["params"]["fields"], ACCOUNT_FIELDS)
+        self.assertEqual([call["method"] for call in transport.calls], ["GET"])
+        self.assertEqual(client.delete(obj())[0], "deleted")
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "DELETE"])
+
+    def test_disabled_account_is_explicit_diagnostic_without_inventing_error_subcode_meaning(self):
+        response = Response({"error": {"code": 200, "error_subcode": 2490592, "message": "Permissions error"}}, 400)
+        client, transport, provider = self.client([account_probe(account_status=2, user_tasks=["ADVERTISE"], disable_reason=1), response])
+        status, result = client.delete(obj())
+        self.assertEqual(status, "failed")
+        self.assertEqual(result["detail"]["error_subcode"], 2490592)
+        self.assertEqual(result["account_diagnostic"]["account_state"], "disabled")
+        self.assertEqual(result["account_diagnostic"]["disable_reason"], 1)
+        self.assertIn("已停用", result["account_diagnostic"]["message"])
+        self.assertNotIn("2490592", result["account_diagnostic"]["message"])
+        self.assertEqual(result["account_diagnostic"]["delete_permission"], "unverified")
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "DELETE"])
+
+    def test_unknown_delete_outcomes_still_identify_the_actual_credential(self):
+        for response in (requests.Timeout(), Response({"success": False}), Response(ValueError("invalid JSON"))):
+            with self.subTest(response=type(response).__name__):
+                client, transport, provider = self.client([error_response(10), account_probe(account_status=1), response])
+                status, result = client.delete(obj())
+                self.assertEqual(status, "unknown")
+                self.assertEqual(result["credential_user_id"], "804")
+                self.assertEqual(result["account_diagnostic"]["account_status"], 1)
+                self.assertNotIn("unit-test-token", json.dumps(result))
+                self.assertEqual(provider.call_count, 2)
+                self.assertEqual(sum(call["method"] == "DELETE" for call in transport.calls), 1)
+
+    def test_account_diagnostic_refresh_is_read_only_and_does_not_rotate_selected_token(self):
+        client, transport, provider = self.client([account_probe(account_status=1), error_response(200)])
+        self.assertEqual(client.diagnose(obj())["account_diagnostic"]["account_status"], 1)
+        refreshed = client.diagnose(obj(), fresh=True)
+        self.assertTrue(refreshed["read_only"])
+        self.assertEqual(refreshed["credential_user_id"], "803")
+        self.assertIsNone(refreshed["account_diagnostic"]["account_status"])
+        self.assertFalse(refreshed["account_diagnostic"]["readable"])
+        self.assertEqual(refreshed["account_diagnostic"]["code"], "200")
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
+        self.assertFalse(client.credential_context(obj())["account_diagnostic"]["readable"])
+
+    def test_account_refresh_updates_state_and_context_cannot_mutate_credential_cache(self):
+        client, transport, _ = self.client([account_probe(account_status=1), account_probe(account_status=2)])
+        client.diagnose(obj(), fresh=True)
+        self.assertEqual(len(transport.calls), 1)
+        context = client.credential_context(obj())
+        context["credential_user_id"] = "999"
+        context["account_diagnostic"]["account_status"] = 99
+        self.assertEqual(client.credential_context(obj())["credential_user_id"], "803")
+        self.assertEqual(client.credential_context(obj())["account_diagnostic"]["account_status"], 1)
+        self.assertEqual(client.diagnose(obj(), fresh=True)["account_diagnostic"]["account_state"], "disabled")
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
+
+    def test_diagnostic_field_allowlist_omits_unexpected_account_data(self):
+        client, _, _ = self.client([account_probe(account_status=True, user_tasks=["ADVERTISE", "private-token", {}, 1],
+            disable_reason="private-token", token="do-not-save")])
+        result = client.diagnose(obj())
+        self.assertIsNone(result["account_diagnostic"]["account_status"])
+        self.assertEqual(result["account_diagnostic"]["user_tasks"], ["ADVERTISE"])
+        self.assertNotIn("private-token", json.dumps(result))
+        self.assertNotIn("do-not-save", json.dumps(result))
+
+    def test_failed_credential_probes_do_not_claim_that_a_delete_credential_was_selected(self):
+        client, transport, _ = self.client([error_response(200), error_response(200)])
+        status, result = client.delete(obj())
+        self.assertEqual(status, "failed")
+        self.assertNotIn("credential_user_id", result)
+        self.assertEqual(result["detail"]["credential_probe_user_id"], "804")
+        self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
 
     def test_read_timeout_is_unavailable_and_never_deletion_proof(self):
         client, transport, _ = self.client([account_probe(), requests.Timeout()])
@@ -176,6 +298,7 @@ class GraphTests(unittest.TestCase):
             client.inspect(obj(), check_references=False)
         self.assertFalse(error.exception.uncertain)
         self.assertEqual(error.exception.code, "read_unavailable")
+        self.assertEqual(error.exception.detail["credential_user_id"], "803")
         self.assertTrue(all(call["method"] == "GET" for call in transport.calls))
 
     def test_confirmed_deleted_requires_the_expected_account(self):
@@ -218,6 +341,7 @@ class GraphTests(unittest.TestCase):
         with self.assertRaises(GraphError) as error:
             client.check_references(obj(), set())
         self.assertEqual(error.exception.code, "reference_check_incomplete")
+        self.assertEqual(error.exception.detail["credential_user_id"], "803")
 
     def test_outside_scope_creative_or_nested_video_reference_blocks(self):
         for asset in (obj("creative", "123"), obj("video", "777")):

@@ -12,6 +12,7 @@ from .graph import GraphClient
 from .service import Service
 from .source import SqlSource
 from .store import Store, StoreError
+from .video_index import MysqlVideoStream, VideoIndex
 
 PREFIX = "/api/fb-post-ad-delete"
 _service = None
@@ -31,7 +32,13 @@ def get_service(app):
             query = lambda sql, timeout: app["ad_control_run_mysql"](sql, timeout_seconds=timeout, via_stdin=True)
             if query("SELECT @@read_only", 10) != [["1"]]:
                 raise AssetError("read_only_source_required", "无法确认业务源库只读状态", 503)
-            source = SqlSource(query, schema=app["AD_CONTROL_DB_NAME"],
+            def check_disk():
+                if not os.path.ismount(str(root)):
+                    raise AssetError("data_disk_unavailable", "任务数据盘不可用，停止新增操作", 503)
+            video_index = VideoIndex(path.parent / "video-reference-index",
+                MysqlVideoStream(app["MYSQL_BASE_CMD"], app["MYSQL_PASSWORD"], app["AD_CONTROL_DB_NAME"]),
+                validate_storage=check_disk)
+            source = SqlSource(query, schema=app["AD_CONTROL_DB_NAME"], video_index=video_index,
                 lookup_actor=lambda session: app["lookup_admin_group_for_actor"](app["ad_material_actor"](session)))
 
             def authorize(session):
@@ -109,7 +116,7 @@ def dispatch(handler, parsed, app):
             data["items"].extend(_legacy(app, session, service))
             data["items"].sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
             return send(200, data)
-        match = re.fullmatch(r"/jobs/([A-Za-z0-9_-]{1,80})(?:/(execute|reconcile))?", suffix)
+        match = re.fullmatch(r"/jobs/([A-Za-z0-9_-]{1,80})(?:/(execute|reconcile|recheck))?", suffix)
         if method == "GET" and match and not match[2]:
             params = parse_qs(parsed.query)
             try:
@@ -134,6 +141,8 @@ def dispatch(handler, parsed, app):
                 return send(202, service.preview(session, payload))
             if match[2] == "execute":
                 return send(202, service.execute(session, match[1], payload))
+            if match[2] == "recheck":
+                return send(202, service.recheck(session, match[1], payload))
             return send(200, service.reconcile(session, match[1], payload))
         return send(404, {"error": "not_found", "message": "接口不存在"})
     except AssetError as exc:

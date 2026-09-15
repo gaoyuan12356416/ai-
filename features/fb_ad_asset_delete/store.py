@@ -25,6 +25,11 @@ _SECRET_KEYS = frozenset(("access_token", "refresh_token", "client_secret",
                           "app_secret", "authorization", "cookie", "password"))
 _TABLE = "fb_asset_delete_v2_"
 _SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_rechecks (
+        operation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE,
+        job_id TEXT NOT NULL REFERENCES fb_asset_delete_v2_jobs(job_id),
+        preview_id TEXT NOT NULL, actor TEXT NOT NULL, status TEXT NOT NULL,
+        owner_pid INTEGER NOT NULL, owner_start TEXT NOT NULL, metadata TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_jobs (
         job_id TEXT PRIMARY KEY, preview_id TEXT NOT NULL, actor TEXT NOT NULL,
         status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -352,6 +357,8 @@ class Store:
                 raise StoreError("Preview changed; refresh the task before execution", "preview_mismatch")
             if job["status"] not in ("ready", "completed", "partial", "interrupted"):
                 raise StoreError("Task cannot start from its current state", "job_not_ready")
+            if json.loads(job["metadata"]).get("recheck", {}).get("status") == "running":
+                raise StoreError("Read-only recheck is still running", "job_not_ready")
             exists, identity = _process_start(os.getpid())
             if exists is not True or not identity:
                 raise StoreError("Cannot establish worker process identity", "owner_identity_unavailable")
@@ -361,6 +368,81 @@ class Store:
             conn.execute("UPDATE fb_asset_delete_v2_jobs SET status='running',updated_at=? WHERE job_id=?", (now, job_id))
             self._audit(conn, job_id, "run_claimed", {"run_id": run_id, "actor": actor, "phases": phases, "request_id": request_id})
             return self._run_data(self._require(conn, "runs", "run_id", run_id))
+
+    def claim_recheck(self, job_id, preview_id, actor, request_id, total):
+        with self._transaction() as conn:
+            existing = conn.execute("SELECT * FROM fb_asset_delete_v2_rechecks WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                if (existing["job_id"], existing["preview_id"], existing["actor"]) != (job_id, preview_id, actor):
+                    raise StoreError("Recheck request conflicts", "request_conflict")
+                return dict(job_id=job_id, operation_id=existing["operation_id"], status=existing["status"], duplicate=True, read_only=True)
+            job = self._require(conn, "jobs", "job_id", job_id)
+            if job["preview_id"] != preview_id:
+                raise StoreError("Preview mismatch", "preview_mismatch")
+            data = json.loads(job["metadata"])
+            if job["status"] not in ("ready", "completed", "partial", "interrupted") or data.get("recheck", {}).get("status") == "running":
+                raise StoreError("Task is busy", "job_not_ready")
+            exists, identity = _process_start(os.getpid())
+            if exists is not True or not identity:
+                raise StoreError("Cannot establish process identity", "owner_identity_unavailable")
+            op = uuid.uuid4().hex
+            check = dict(operation_id=op, status="running", checked=0, total=total,
+                         step="正在重新核验固定清单；此操作不会执行删除", updated_at=_now())
+            conn.execute("INSERT INTO fb_asset_delete_v2_rechecks VALUES (?,?,?,?,?,?,?,?,?)",
+                         (op, request_id, job_id, preview_id, actor, "running", os.getpid(), identity, _json(check)))
+            data["recheck"] = check
+            conn.execute("UPDATE fb_asset_delete_v2_jobs SET metadata=?,updated_at=? WHERE job_id=?", (_json(data), _now(), job_id))
+            self._audit(conn, job_id, "recheck_claimed", dict(operation_id=op, request_id=request_id, actor=actor, total=total))
+            return dict(job_id=job_id, operation_id=op, status="running", duplicate=False, read_only=True)
+
+    def update_recheck(self, operation_id, **fields):
+        with self._transaction() as conn:
+            row = self._require(conn, "rechecks", "operation_id", operation_id)
+            if row["status"] != "running":
+                raise StoreError("Recheck is no longer running")
+            check = json.loads(row["metadata"])
+            check.update(fields, updated_at=_now())
+            if check["status"] not in ("running", "completed", "interrupted"):
+                raise StoreError("Invalid recheck status")
+            job = self._require(conn, "jobs", "job_id", row["job_id"])
+            data = json.loads(job["metadata"])
+            if data.get("recheck", {}).get("operation_id") != operation_id:
+                raise StoreError("Recheck has been superseded")
+            data["recheck"] = check
+            conn.execute("UPDATE fb_asset_delete_v2_rechecks SET status=?,metadata=? WHERE operation_id=?",
+                         (check["status"], _json(check), operation_id))
+            conn.execute("UPDATE fb_asset_delete_v2_jobs SET metadata=?,updated_at=? WHERE job_id=?", (_json(data), _now(), row["job_id"]))
+            if check["status"] != "running":
+                self._audit(conn, row["job_id"], "recheck_finished", check)
+
+    def recheck_object(self, operation_id, key, status, result):
+        if status not in ("pending", "blocked", "already_deleted"):
+            raise StoreError("Read-only recheck cannot delete or retry an object")
+        if status == "already_deleted" and not result.get("confirmed_deleted"):
+            raise StoreError("Deletion proof required")
+        with self._transaction() as conn:
+            check = self._require(conn, "rechecks", "operation_id", operation_id)
+            job = self._require(conn, "jobs", "job_id", check["job_id"])
+            if check["status"] != "running" or job["status"] == "running" or job["preview_id"] != check["preview_id"]:
+                raise StoreError("Recheck lost its claim")
+            obj = self._object(conn, check["job_id"], key)
+            if obj["status"] != "blocked":
+                raise StoreError("Only blocked objects can be rechecked")
+            payload = json.loads(obj["payload"])
+            payload["reason"] = result.get("message", "") if status == "blocked" else ""
+            # Keep frozen IDs, attempts, original DELETE results in attempts, and global fences.
+            conn.execute("UPDATE fb_asset_delete_v2_objects SET status=?,result=?,payload=?,updated_at=? WHERE job_id=? AND object_key=?",
+                         (status, _json(result), _json(payload), _now(), check["job_id"], key))
+            self._audit(conn, check["job_id"], "object_rechecked", dict(operation_id=operation_id, key=key,
+                before=json.loads(obj["result"]), status=status, result=result))
+
+    def recover_rechecks(self):
+        with self._transaction(False) as conn:
+            rows = conn.execute("SELECT * FROM fb_asset_delete_v2_rechecks WHERE status='running'").fetchall()
+        for row in rows:
+            if not _owner_alive(row["owner_pid"], row["owner_start"]):
+                self.update_recheck(row["operation_id"], status="interrupted",
+                    step="核验进程已中断，进度保留，请人工重新核验；未自动恢复删除")
 
     def claim_object(self, job_id, key, run_id):
         with self._transaction() as conn:

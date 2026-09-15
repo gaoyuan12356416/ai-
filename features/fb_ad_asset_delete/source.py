@@ -1,6 +1,7 @@
 """Read-only business-source adapter; all queries use the existing SQL FIFO gate."""
 import re
 from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete
+from .video_index import ReferenceRows
 
 
 def q(value):
@@ -24,12 +25,13 @@ def chunks(values, size=250):
 class SqlSource:
     AD_COLUMNS = ("row_id", "product_id", "ad_id", "creative_id", "video_ids_raw", "source_ids_raw", "original_ids_raw", "account_id", "user_id", "campaign_id", "ad_name", "campaign_name", "local_status")
 
-    def __init__(self, query, schema="kunlunads_dev", lookup_actor=None):
+    def __init__(self, query, schema="kunlunads_dev", lookup_actor=None, video_index=None):
         if not re.fullmatch(r"[A-Za-z0-9_]+", schema):
             raise ValueError("invalid source schema")
         self.query = query
         self.schema = "`%s`" % schema
         self.lookup_actor = lookup_actor or (lambda session: {})
+        self.video_index = video_index
 
     def read(self, sql, columns, timeout=30):
         if not sql.lstrip().upper().startswith("SELECT"):
@@ -219,26 +221,23 @@ class SqlSource:
                     ad["reason"] = "同一 Ad 在源记录中属于其他产品或广告账户"
         return list(ads.values()), blockers
 
-    def shared_references(self, objects, progress=None):
-        """Check all products, with one consistent SELECT per asset kind.
-
-        A verified Creative belongs to its Meta account; Videos retain a global
-        scan. All Video IDs share one statement snapshot, including concurrent
-        updates visible at statement start. Timeout never means no references.
-        """
-        refs, seen = [], set()
+    def shared_references(self, objects, progress=None, fresh=False):
+        """Creative account index; complete global Video snapshot, never SQL regex."""
+        refs, seen = ReferenceRows(), set()
         by_kind = {kind: sorted({o["object_id"] for o in objects if o["kind"] == kind}) for kind in ("creative", "video")}
         for kind, ids in by_kind.items():
             if not ids:
                 continue
+            if kind == "video":
+                if self.video_index is None:
+                    raise AssetError("video_index_unavailable", "视频引用索引未配置，保持阻止", 503)
+                video_refs = self.video_index.references(ids, fresh=fresh, progress=progress)
+                refs.extend(video_refs)
+                refs.proof = video_refs.proof
+                continue
             relevant = [o for o in objects if o["kind"] == kind]
             verified = kind == "creative" and all(o.get("account_verified") and len(o.get("account_ids", [])) == 1 for o in relevant)
-            if kind == "creative":
-                condition = "creative_id IN %s" % inside(ids)
-            else:
-                regex = "(^|[^0-9])(" + "|".join(ids) + ")([^0-9]|$)"
-                # Avoid expensive token matching for ordinary scalar fields.
-                condition = "(video_id IN %s OR (video_id REGEXP '[^0-9]' AND video_id REGEXP %s))" % (inside(ids), q(regex))
+            condition = "creative_id IN %s" % inside(ids)
             if verified:
                 accounts = {a for o in relevant for a in o["account_ids"]}
                 condition += " AND ad_account_id IN %s" % inside(sorted(accounts | {"act_" + a for a in accounts}))
@@ -261,6 +260,11 @@ class SqlSource:
             if progress:
                 progress(kind, 1, 1)
         return refs
+
+    def validate_reference_snapshot(self, refs):
+        if self.video_index is None:
+            raise AssetError("video_index_unavailable", "视频引用索引未配置，保持阻止", 503)
+        self.video_index.validate(getattr(refs, "proof", None))
 
     def token(self, user_ids):
         candidates = [str(x) for x in user_ids if re.fullmatch(r"[1-9][0-9]*", str(x))]

@@ -1,10 +1,12 @@
 """Scope contract tests; the source callback is always an in-memory fake."""
 from copy import deepcopy
 import unittest
+import tempfile
 from unittest.mock import Mock
 
 from features.fb_ad_asset_delete.core import AssetError, normalize_input
 from features.fb_ad_asset_delete.source import SqlSource, q
+from features.fb_ad_asset_delete.video_index import VideoIndex, ReferenceRows
 
 
 def product(pid="301", parent="301", kind="App"):
@@ -32,6 +34,11 @@ class FixtureSource(SqlSource):
     def __init__(self, **fixtures):
         super().__init__(lambda *_: (_ for _ in ()).throw(AssertionError("No real SQL transport")))
         self.fixtures, self.reads = fixtures, []
+        self.temp = tempfile.TemporaryDirectory()
+        unittest.addModuleCleanup(self.temp.cleanup)
+        rows = [[i+1, r["ad_id"], r["product_id"], r["account_id"], r["video_ids_raw"]]
+                for i, r in enumerate(fixtures.get("references", []))]
+        self.video_index = VideoIndex(self.temp.name, lambda: iter(rows))
 
     def read(self, sql, columns, timeout=30):
         self.reads.append((sql, columns, timeout))
@@ -261,7 +268,7 @@ class SourceTests(unittest.TestCase):
                                                creative_id="2001", video_ids_raw='["3001",broken]')])
         with self.assertRaises(AssetError) as error:
             source.shared_references([dict(kind="video", object_id="3001")])
-        self.assertEqual(error.exception.code, "reference_check_incomplete")
+        self.assertEqual(error.exception.code, "video_index_malformed")
 
     def test_verified_creative_uses_account_index_without_product_filter(self):
         source = FixtureSource(references=[])
@@ -272,15 +279,21 @@ class SourceTests(unittest.TestCase):
         self.assertIn(q("act_444"), sql)
         self.assertNotIn("product IN", sql)
 
-    def test_all_video_targets_share_one_global_statement_snapshot(self):
+    def test_all_video_targets_use_one_complete_index_and_no_regex_query(self):
         source = FixtureSource(references=[])
+        source.video_index = Mock()
+        source.video_index.references.return_value = ReferenceRows(proof={"generation_id": "one"})
         source.shared_references([dict(kind="video", object_id=str(3000 + i), account_ids=["444"], account_verified=True) for i in range(501)])
-        self.assertEqual(1, len(source.reads))
-        sql, _, timeout = source.reads[0]
-        self.assertIn("FORCE INDEX (PRIMARY)", sql)
-        self.assertNotIn("ad_account_id IN", sql)
-        self.assertIn(q("3500"), sql)
-        self.assertEqual(180, timeout)
+        self.assertEqual([], source.reads)
+        source.video_index.references.assert_called_once()
+        self.assertEqual(501, len(source.video_index.references.call_args.args[0]))
+
+    def test_missing_video_index_fails_closed_without_legacy_full_scan(self):
+        source = SqlSource(Mock())
+        with self.assertRaises(AssetError) as error:
+            source.shared_references([dict(kind="video", object_id="3001")])
+        self.assertEqual(error.exception.code, "video_index_unavailable")
+        source.query.assert_not_called()
 
     def test_global_ad_identity_conflict_is_checked_outside_selected_product(self):
         for other in (dict(ad_id="1001", product_id="999", account_id="444"),

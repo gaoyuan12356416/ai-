@@ -2,12 +2,32 @@
 import json
 import re
 import time
+from copy import deepcopy
 import requests
 from .core import AssetError, account_id, creative_video_ids, meta_id, now, redact
 
 CREATIVE_FIELDS = "id,account_id,status,video_id,object_story_spec,asset_feed_spec"
 AD_FIELDS = "id,account_id,status,effective_status,creative{%s}" % CREATIVE_FIELDS
+ACCOUNT_FIELDS = "id,account_id,account_status,user_tasks,disable_reason"
+ERROR_FIELDS = ("code", "error_subcode", "type", "fbtrace_id", "is_transient",
+                "message", "error_user_title", "error_user_msg")
 LIVE_STATUSES = ["ACTIVE", "PAUSED", "ADSET_PAUSED", "CAMPAIGN_PAUSED", "DISAPPROVED", "PENDING_REVIEW", "PREAPPROVED", "PENDING_BILLING_INFO", "WITH_ISSUES", "IN_PROCESS", "ARCHIVED"]
+
+
+def safe_error_detail(error, token):
+    """Keep only bounded scalar diagnostics, never echoed credentials/payloads."""
+    detail = {}
+    for key in ERROR_FIELDS:
+        if key not in error:
+            continue
+        value = error[key]
+        if isinstance(value, str):
+            detail[key] = redact(value.replace(token, "[redacted]") if token else value)
+        elif value is None or isinstance(value, (int, float, bool)):
+            detail[key] = value
+        else:
+            detail[key] = "[invalid field omitted]"
+    return detail
 
 
 class GraphError(AssetError):
@@ -27,6 +47,7 @@ class GraphClient:
         self.timeout = timeout
         self.max_inventory = max_inventory
         self.tokens, self.inventory_cache, self.video_library_cache = {}, {}, {}
+        self.credential_contexts = {}
 
     def request(self, method, path, token, params=None):
         if not re.fullmatch(r"(?:act_)?[1-9][0-9]{0,31}(?:/(?:ads|advideos))?", path):
@@ -46,18 +67,47 @@ class GraphClient:
         error = data.get("error") if isinstance(data, dict) else None
         if response.status_code >= 300 or error:
             error = error if isinstance(error, dict) else {}
-            message = str(error.get("message") or "Meta 请求失败").replace(token, "[redacted]")
-            detail = {k: error[k] for k in ("code", "error_subcode", "type", "fbtrace_id", "is_transient") if k in error}
+            detail = safe_error_detail(error, token)
+            message = detail.get("message") or "Meta 请求失败"
             detail["message"] = redact(message)
+            detail["http_status"] = response.status_code
             uncertain = method == "DELETE" and (response.status_code >= 500 or response.status_code in (301, 302, 307, 308))
-            raise GraphError(error.get("code", "graph_error"), message, uncertain, detail)
+            raise GraphError(detail.get("code", "graph_error"), message, uncertain, detail)
         return data
 
-    def credential(self, obj, account=None):
+    @staticmethod
+    def _credential_key(obj, account=None):
         accounts = obj.get("account_ids") or []
         aid = account_id(account or (accounts[0] if accounts else ""))
         users = [str(x) for x in obj.get("user_ids", []) if str(x).isdigit() and str(x) != "0"]
-        cache_key = (aid, tuple(users))
+        return aid, tuple(users)
+
+    @staticmethod
+    def _account_diagnostic(data, aid):
+        # Status 2 is Meta's disabled account state. Do not infer the meaning of
+        # a DELETE error subcode from account state or the advertised task list.
+        raw_status = data.get("account_status")
+        status = int(raw_status) if not isinstance(raw_status, bool) and re.fullmatch(r"[0-9]{1,3}", str(raw_status)) else None
+        tasks = data.get("user_tasks")
+        tasks = sorted({value for value in tasks if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z_]{0,63}", value)}) if isinstance(tasks, list) else []
+        diagnostic = {"account_id": aid, "account_status": status,
+                      "account_state": "disabled" if status == 2 else "active" if status == 1 else "unknown",
+                      "user_tasks": tasks, "readable": True, "delete_permission": "unverified", "checked_at": now(),
+                      "message": "仅确认广告账户可读；user_tasks 不足以确认具体对象的删除权限"}
+        if status == 2:
+            diagnostic["message"] = "广告账户已停用（account_status=2），请由管理员核查账户限制；账户可读不代表具有对象删除权限"
+        reason = data.get("disable_reason")
+        if not isinstance(reason, bool) and re.fullmatch(r"[0-9]{1,6}", str(reason)):
+            diagnostic["disable_reason"] = int(reason)
+        return diagnostic
+
+    def credential_context(self, obj, account=None):
+        """Return the selected credential's safe snapshot without any network I/O."""
+        return deepcopy(self.credential_contexts.get(self._credential_key(obj, account), {}))
+
+    def credential(self, obj, account=None):
+        cache_key = self._credential_key(obj, account)
+        aid, users = cache_key
         if cache_key in self.tokens:
             return self.tokens[cache_key]
         if not users:
@@ -70,20 +120,49 @@ class GraphClient:
             if not token:
                 continue
             try:
-                data = self.request("GET", "act_" + aid, token, {"fields": "id,account_id"})
+                data = self.request("GET", "act_" + aid, token, {"fields": ACCOUNT_FIELDS})
                 if not isinstance(data, dict) or account_id(data.get("account_id") or data.get("id")) != aid:
                     raise GraphError("account_mismatch", "Meta Token 返回的广告账户不匹配")
                 self.tokens[cache_key] = token
+                self.credential_contexts[cache_key] = {"credential_user_id": uid,
+                    "account_diagnostic": self._account_diagnostic(data, aid)}
                 return token
             except GraphError as exc:
+                exc.detail.update(credential_probe_user_id=uid, account_id=aid)
                 last = exc
         raise last or GraphError("missing_token", "所配置用户没有可用的 Meta Token")
 
+    def diagnose(self, obj, account=None, fresh=False):
+        """Read account diagnostics; a refresh never rotates a selected token."""
+        cache_key = self._credential_key(obj, account)
+        aid = cache_key[0]
+        had_context = cache_key in self.credential_contexts
+        try:
+            token = self.credential(obj, aid)
+            if fresh and had_context:
+                data = self.request("GET", "act_" + aid, token, {"fields": ACCOUNT_FIELDS})
+                if not isinstance(data, dict) or account_id(data.get("account_id") or data.get("id")) != aid:
+                    raise GraphError("account_mismatch", "Meta Token 返回的广告账户不匹配")
+                self.credential_contexts[cache_key]["account_diagnostic"] = self._account_diagnostic(data, aid)
+            return dict(self.credential_context(obj, aid), read_only=True)
+        except GraphError as exc:
+            context = self.credential_context(obj, aid)
+            context["account_diagnostic"] = {"account_id": aid, "account_status": None, "account_state": "unknown",
+                "readable": False, "delete_permission": "unverified", "checked_at": now(),
+                "code": exc.code, "message": exc.message, "detail": exc.detail}
+            if had_context:
+                self.credential_contexts[cache_key] = deepcopy(context)
+            return dict(context, read_only=True)
+
     def read_node(self, obj, fields):
         token = self.credential(obj)
-        data = self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
+        try:
+            data = self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
+        except GraphError as exc:
+            exc.detail.update(self.credential_context(obj))
+            raise
         if not isinstance(data, dict) or str(data.get("id", "")) != obj["object_id"]:
-            raise GraphError("object_mismatch", "Meta 未返回可核验的对象 ID")
+            raise GraphError("object_mismatch", "Meta 未返回可核验的对象 ID", detail=self.credential_context(obj))
         return data
 
     def inventory(self, obj, account, edge="ads", fresh=False):
@@ -98,18 +177,22 @@ class GraphClient:
             params["effective_status"] = json.dumps(LIVE_STATUSES)
         result, cursors = [], set()
         while True:
-            data = self.request("GET", "act_" + aid + "/" + edge, token, params)
+            try:
+                data = self.request("GET", "act_" + aid + "/" + edge, token, params)
+            except GraphError as exc:
+                exc.detail.update(self.credential_context(obj, aid))
+                raise
             if not isinstance(data, dict) or not isinstance(data.get("data"), list):
-                raise GraphError("reference_check_incomplete", "Meta 账户引用清单未完整返回")
+                raise GraphError("reference_check_incomplete", "Meta 账户引用清单未完整返回", detail=self.credential_context(obj, aid))
             result.extend(data["data"])
             if len(result) > self.max_inventory:
-                raise GraphError("reference_check_incomplete", "Meta 账户引用超过核验上限，不能执行该素材删除")
+                raise GraphError("reference_check_incomplete", "Meta 账户引用超过核验上限，不能执行该素材删除", detail=self.credential_context(obj, aid))
             paging = data.get("paging") or {}
             if not paging.get("next"):
                 break
             after = (paging.get("cursors") or {}).get("after")
             if not after or after in cursors:
-                raise GraphError("reference_check_incomplete", "Meta 引用清单分页不完整")
+                raise GraphError("reference_check_incomplete", "Meta 引用清单分页不完整", detail=self.credential_context(obj, aid))
             cursors.add(after)
             params["after"] = after
         cache[aid] = (time.monotonic(), result)
@@ -124,10 +207,10 @@ class GraphClient:
                     continue
                 creative = ad.get("creative")
                 if not isinstance(creative, dict) or not creative.get("id"):
-                    raise GraphError("reference_check_incomplete", "账户内存在无法读取 Creative 的广告，无法排除共享引用")
+                    raise GraphError("reference_check_incomplete", "账户内存在无法读取 Creative 的广告，无法排除共享引用", detail=self.credential_context(obj, aid))
                 referenced = str(creative["id"]) == obj["object_id"] if obj["kind"] == "creative" else obj["object_id"] in creative_video_ids(creative)
                 if referenced:
-                    raise GraphError("shared_outside_scope", "该素材仍被范围外 Ad %s 引用" % ad["id"])
+                    raise GraphError("shared_outside_scope", "该素材仍被范围外 Ad %s 引用" % ad["id"], detail=self.credential_context(obj, aid))
 
     def inspect(self, obj, allowed_ads=None, deleted_creatives=None, check_references=True):
         kind = obj["kind"]
@@ -135,16 +218,17 @@ class GraphClient:
         data = self.read_node(obj, fields)
         if kind in ("ad", "creative"):
             if account_id(data.get("account_id", "")) not in obj["account_ids"]:
-                raise GraphError("account_mismatch", "Meta 对象所属账户与预览不一致")
+                raise GraphError("account_mismatch", "Meta 对象所属账户与预览不一致", detail=self.credential_context(obj))
             if str(data.get("status", "")).upper() == "DELETED" or str(data.get("effective_status", "")).upper() == "DELETED":
-                return "already_deleted", {"confirmed_deleted": True, "proof": {"id": obj["object_id"], "status": "DELETED"}, "checked_at": now()}
+                return "already_deleted", dict(self.credential_context(obj), confirmed_deleted=True,
+                    proof={"id": obj["object_id"], "status": "DELETED"}, checked_at=now())
         if kind == "ad":
             creative = data.get("creative") or {}
             expected = set(obj.get("creative_ids") or [])
             actual = str(creative.get("id") or "")
             if expected and actual not in expected:
                 if actual or not expected.issubset(set(deleted_creatives or [])):
-                    raise GraphError("creative_changed", "Ad 当前 Creative 与预览范围不一致，请重新预览")
+                    raise GraphError("creative_changed", "Ad 当前 Creative 与预览范围不一致，请重新预览", detail=self.credential_context(obj))
         if kind == "video":
             # Library membership verifies the selected ad-account association;
             # actual deletion below still targets /{video_id}, never the edge.
@@ -154,28 +238,30 @@ class GraphClient:
                     member = True
                     break
             if not member:
-                raise GraphError("video_owner_unverified", "无法确认该视频属于预览中的广告账户素材库")
+                raise GraphError("video_owner_unverified", "无法确认该视频属于预览中的广告账户素材库", detail=self.credential_context(obj))
         if kind in ("creative", "video") and check_references:
             self.check_references(obj, set(allowed_ads or []))
-        proof = {"id": obj["object_id"], "account_ids": obj["account_ids"], "checked_at": now()}
+        proof = dict(self.credential_context(obj), id=obj["object_id"], account_ids=obj["account_ids"], checked_at=now())
         if kind == "ad":
             proof["creative_id"] = str((data.get("creative") or {}).get("id") or "")
         if kind == "creative":
             proof["video_ids"] = creative_video_ids(data)
             if "verified_video_ids" in obj and set(proof["video_ids"]) != set(obj["verified_video_ids"]):
-                raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览")
+                raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
         return "pending", proof
 
     def delete(self, obj):
         """Call only after a durable attempt has been claimed by the service."""
-        token = self.credential(obj)
         try:
+            token = self.credential(obj)
+            context = self.credential_context(obj)
             data = self.request("DELETE", meta_id(obj["object_id"]), token)
             if data is True or (isinstance(data, dict) and data.get("success") is True):
-                return "deleted", {"success": True, "object_id": obj["object_id"], "checked_at": now()}
-            return "unknown", {"code": "unconfirmed_delete_response", "message": "Meta 未返回明确删除成功，需要核实", "checked_at": now()}
+                return "deleted", dict(context, success=True, object_id=obj["object_id"], checked_at=now())
+            return "unknown", dict(context, code="unconfirmed_delete_response", message="Meta 未返回明确删除成功，需要核实", checked_at=now())
         except GraphError as exc:
-            return "unknown" if exc.uncertain else "failed", {"code": exc.code, "message": exc.message, "detail": exc.detail, "checked_at": now()}
+            context = self.credential_context(obj)
+            return "unknown" if exc.uncertain else "failed", dict(context, code=exc.code, message=exc.message, detail=exc.detail, checked_at=now())
 
     def reconcile(self, obj):
         # No unqualified GET error, including code 100/subcode 33 or missing
@@ -184,9 +270,11 @@ class GraphClient:
             fields = "id,account_id,status,effective_status" if obj["kind"] == "ad" else "id,account_id,status" if obj["kind"] == "creative" else "id"
             data = self.read_node(obj, fields)
             if obj["kind"] in ("ad", "creative") and account_id(data.get("account_id", "")) not in obj["account_ids"]:
-                raise GraphError("account_mismatch", "Meta 对象所属账户不匹配")
+                raise GraphError("account_mismatch", "Meta 对象所属账户不匹配", detail=self.credential_context(obj))
             if str(data.get("status", "")).upper() == "DELETED" or str(data.get("effective_status", "")).upper() == "DELETED":
-                return "already_deleted", {"confirmed_deleted": True, "proof": {"id": obj["object_id"], "status": "DELETED"}, "checked_at": now()}
-            return "unknown", {"code": "still_readable", "message": "对象仍可读取；原删除请求的最终结果尚未确认，保持禁止重试", "checked_at": now()}
+                return "already_deleted", dict(self.credential_context(obj), confirmed_deleted=True,
+                    proof={"id": obj["object_id"], "status": "DELETED"}, checked_at=now())
+            return "unknown", dict(self.credential_context(obj), code="still_readable", message="对象仍可读取；原删除请求的最终结果尚未确认，保持禁止重试", checked_at=now())
         except (GraphError, AssetError) as exc:
-            return "unknown", {"code": exc.code, "message": exc.message, "checked_at": now()}
+            return "unknown", dict(self.credential_context(obj), code=exc.code, message=exc.message,
+                detail=getattr(exc, "detail", {}), checked_at=now())

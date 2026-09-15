@@ -70,6 +70,13 @@ class BridgeTests(unittest.TestCase):
         payload = {"preview_id": "preview", "request_id": "request_123456789", "phases": ["video", "ad"]}
         self.assertEqual(202, self.dispatch("/jobs/job1/execute", "POST", payload)[0])
         self.service.execute.assert_called_once_with(self.session, "job1", payload)
+
+    def test_recheck_uses_frozen_route_and_returns_async_without_execute(self):
+        self.service.recheck.return_value = {"job_id": "job1", "operation_id": "check", "read_only": True}
+        payload = {"preview_id": "preview", "request_id": "request_123456789"}
+        self.assertEqual(202, self.dispatch("/jobs/job1/recheck", "POST", payload)[0])
+        self.service.recheck.assert_called_once_with(self.session, "job1", payload)
+        self.service.execute.assert_not_called()
     def test_invalid_large_body_and_array_rejected(self):
         self.assertEqual(400, self.dispatch("/preview", "POST", [1])[0])
         h = Handler("POST", {})

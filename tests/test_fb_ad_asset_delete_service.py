@@ -38,6 +38,8 @@ class FakeSource:
         self.references = []
         self.reference_error = None
         self.resolve_error = None
+        self.snapshot_error = None
+        self.fresh_checks = []
 
     def list_products(self, session):
         return deepcopy(self.catalog) if self.allowed else []
@@ -56,11 +58,16 @@ class FakeSource:
             raise self.resolve_error
         return deepcopy(self.ads), []
 
-    def shared_references(self, objects, progress=None):
+    def shared_references(self, objects, progress=None, fresh=False):
+        self.fresh_checks.append(fresh)
         if self.reference_error:
             raise self.reference_error
         keys = {o["key"] for o in objects}
         return deepcopy([row for row in self.references if row["key"] in keys])
+
+    def validate_reference_snapshot(self, refs):
+        if self.snapshot_error:
+            raise self.snapshot_error
 
 
 class GraphState:
@@ -402,6 +409,72 @@ class ServiceTests(unittest.TestCase):
                          {"creative:201", "creative:202", "creative:203"})
         self.assertEqual(self.graph.deleted_keys(), [])
         self.assertTrue(all(status == "unknown" for status in self.statuses(job).values()))
+
+    def begin_recheck(self, job, request_id="recheck-request-123456", run=True):
+        result = self.service.recheck(SESSION, job["job_id"], {"preview_id": job["preview_id"], "request_id": request_id})
+        if run and not result["duplicate"]:
+            self.workers.run_next()
+        return result
+
+    def test_recheck_preserves_frozen_successes_and_is_get_only(self):
+        self.source.reference_error = AssetError("reference_check_incomplete", "timeout")
+        job = self.preview()
+        self.source.reference_error = None
+        self.execute(job, ("ad",))
+        self.graph.events.clear()
+        with self.store._transaction(False) as conn:
+            attempts = conn.execute("SELECT COUNT(*) FROM fb_asset_delete_v2_attempts").fetchone()[0]
+        result = self.begin_recheck(job)
+        self.assertTrue(result["read_only"])
+        self.assertEqual(self.statuses(job), {"creative:201": "pending", "ad:101": "deleted", "video:301": "pending"})
+        self.assertEqual(self.graph.deleted_keys(), [])
+        fresh = self.store.get_job(job["job_id"])
+        self.assertEqual(fresh["preview_id"], job["preview_id"])
+        self.assertEqual(fresh["recheck"]["status"], "completed")
+        with self.store._transaction(False) as conn:
+            self.assertEqual(attempts, conn.execute("SELECT COUNT(*) FROM fb_asset_delete_v2_attempts").fetchone()[0])
+
+    def test_recheck_is_idempotent_and_excludes_concurrent_execution(self):
+        self.source.reference_error = AssetError("reference_check_incomplete", "timeout")
+        job = self.preview()
+        first = self.begin_recheck(job, run=False)
+        second = self.begin_recheck(job, run=False)
+        self.assertEqual(first["operation_id"], second["operation_id"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(len(self.workers.pending), 1)
+        with self.assertRaises(StoreError):
+            self.execute(job, run=False)
+        with self.assertRaises(StoreError):
+            self.begin_recheck(job, request_id="another-recheck-request", run=False)
+        self.workers.run_next()
+        self.assertTrue(self.begin_recheck(job)["duplicate"])
+
+    def test_recheck_cannot_change_ids_or_clear_permanent_ownership_conflicts(self):
+        self.source.ads[0]["reason"] = "Source ownership conflict"
+        job = self.preview()
+        with self.assertRaises(AssetError):
+            self.service.recheck(SESSION, job["job_id"], {"preview_id": job["preview_id"], "request_id": "recheck-request-123456", "video_ids": ["999"]})
+        self.begin_recheck(job)
+        self.assertTrue(all(s == "blocked" for s in self.statuses(job).values()))
+        self.assertEqual(self.graph.events, [])
+
+    def test_recheck_checks_current_permissions_and_keeps_source_failures_blocked(self):
+        self.source.reference_error = AssetError("video_index_incomplete", "stream failed")
+        job = self.preview()
+        self.begin_recheck(job, run=False)
+        self.module_allowed = False
+        self.workers.run_next()
+        self.assertEqual(self.store.get_job(job["job_id"])["recheck"]["status"], "interrupted")
+        self.assertEqual(self.statuses(job)["video:301"], "blocked")
+        self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_expired_video_snapshot_is_checked_again_after_graph_read(self):
+        job = self.preview()
+        self.source.snapshot_error = AssetError("video_index_expired", "expired")
+        self.execute(job, ("video",))
+        self.assertEqual(self.graph.deleted_keys(), [])
+        self.assertEqual(self.statuses(job)["video:301"], "blocked")
+        self.assertTrue(self.source.fresh_checks[-1])
 
 
 if __name__ == "__main__":
