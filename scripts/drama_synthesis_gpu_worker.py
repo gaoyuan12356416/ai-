@@ -169,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
                 "compositor_lanes": COMPOSITOR_LANES,
                 "compositor_filter_threads": COMPOSITOR_FILTER_THREADS,
                 "asset_cache_enabled": bool(os.environ.get("DRAMA_GPU_ASSET_CACHE_ROOT")),
+                "frame_pipeline": os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl"),
                 "renderer_profile": RENDERER_PROFILE,
                 "kernel_template_sha256": KERNEL_TEMPLATE_SHA256,
                 "release_sha": RELEASE_SHA,

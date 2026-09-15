@@ -102,6 +102,8 @@ def _main_frames(av, nvc, cp, source, start, convert):
         # though DecodedFrame.timestamp is zero in NVIDIA's 1.0.2 wheel.
         if context.name != "h264" or context.has_b_frames or context.format.name != "yuv420p":
             raise RuntimeError("native_source_codec_unsupported")
+        if int(context.colorspace) != 1 or int(context.color_range) != 1:
+            raise RuntimeError("native_source_color_unsupported")
         start = Fraction(str(start))
         origin = (stream.start_time or 0) * stream.time_base
         time_base = stream.time_base

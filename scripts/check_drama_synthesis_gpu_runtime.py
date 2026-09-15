@@ -141,6 +141,11 @@ def validate_environment(env, *, root=BASE):
     if not valid_nvidia_smi(env.get("DRAMA_NVIDIA_SMI", "")):
         issues.append("invalid:DRAMA_NVIDIA_SMI")
     backend = env.get("DRAMA_GPU_COMPOSITOR_BACKEND", "")
+    frame_pipeline = env.get("DRAMA_GPU_FRAME_PIPELINE", "opencl")
+    if frame_pipeline not in {"opencl", "cuda"}:
+        issues.append("invalid:DRAMA_GPU_FRAME_PIPELINE")
+    if frame_pipeline == "cuda" and not env.get("DRAMA_GPU_ASSET_CACHE_ROOT"):
+        issues.append("missing:DRAMA_GPU_ASSET_CACHE_ROOT")
     if backend not in {"legacy_cpu", "opencl_fused_v2"}:
         issues.append("invalid:DRAMA_GPU_COMPOSITOR_BACKEND")
     if backend == "opencl_fused_v2":
@@ -239,6 +244,13 @@ def compositor_pipeline_issues(env, asset_set, runner=subprocess.run, probe=None
                 "testsrc2=size=%dx%d:rate=%d:duration=1" % (CANVAS_WIDTH, CANVAS_HEIGHT, CANVAS_FPS),
                 "-an", "-c:v", "mpeg4", "-q:v", "5", "-pix_fmt", "yuv420p", str(source),
             ]
+            native = env.get("DRAMA_GPU_FRAME_PIPELINE", "opencl") == "cuda"
+            if native:
+                create = create[:-8] + [
+                    "-an", "-c:v", "h264_nvenc", "-bf", "0", "-pix_fmt", "yuv420p",
+                    "-colorspace", "bt709", "-color_range", "tv", "-color_trc", "bt709",
+                    "-color_primaries", "bt709", str(source),
+                ]
             created = runner(create, check=False, capture_output=True, text=True, timeout=60)
             if created.returncode != 0 or not source.is_file() or source.stat().st_size <= 0:
                 return ["gpu_compositor_pipeline_check_failed"]
@@ -279,6 +291,12 @@ def compositor_pipeline_issues(env, asset_set, runner=subprocess.run, probe=None
                 device=env["DRAMA_GPU_OPENCL_DEVICE"],
                 asset_cache_entries=selected_entries(unsigned, root=env.get("DRAMA_GPU_ASSET_CACHE_ROOT", "")),
             )
+            if native:
+                command = gpu_compositor.build_native_chunk_command(
+                    ffmpeg=env["DRAMA_FFMPEG"], source=source, output=output, spec=spec,
+                    recipe=unsigned, asset_durations=durations, chunk=chunk, plan_path=work/"native.json",
+                    cache_directory=env["DRAMA_GPU_ASSET_CACHE_ROOT"],
+                )
             rendered = runner(command, check=False, capture_output=True, text=True, timeout=120)
             if rendered.returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
                 return ["gpu_compositor_pipeline_check_failed"]
@@ -391,6 +409,8 @@ def main(argv=None):
         issues.append("python_version_mismatch")
     issues.extend(package_issues(direct_requirements()))
     model_hashes = {}
+    if os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl") == "cuda":
+        issues.extend(package_issues({"PyNvVideoCodec": "1.0.2", "av": "12.3.0", "cupy-cuda12x": "13.3.0", "fastrlock": "0.8.3"}))
     asset_set = None
     compositor_pipeline_checked = False
     asset_cache_verified_count = 0

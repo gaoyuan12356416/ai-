@@ -6,9 +6,12 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 
 from features.drama_synthesis import asset_cache
 from features.drama_synthesis.native_gpu import Timeline, fps_slot
+from features.drama_synthesis.h264_headers import sps_dimensions, packet_dimensions
+from features.drama_synthesis.gpu import run_render_with_progress
 
 
 class CacheTests(unittest.TestCase):
@@ -92,6 +95,25 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(timeline.at(29), 0)
         with self.assertRaisesRegex(RuntimeError, "ended_early"):
             timeline.at(31)
+
+
+class NativeBoundaryTests(unittest.TestCase):
+    def test_real_nvenc_sps_dimensions(self):
+        landscape = bytes.fromhex("6764001fac2b200a00b7602d4080805000003e80000c350e00000300aae6000006acfc2ef2e0a0")
+        portrait = bytes.fromhex("67640029ac2b20168143602d4040405000003e80000c350e000003002625a000001dcd652ef2e0a0")
+        self.assertEqual(sps_dimensions(landscape), (1280, 720))
+        self.assertEqual(sps_dimensions(portrait), (720, 1280))
+        self.assertEqual(packet_dimensions(b"\0\0\0\1"+landscape+b"\0\0\1"+portrait), (720, 1280))
+        self.assertIsNone(packet_dimensions(b"\0\0\1\x65\x88\x80"))
+        with self.assertRaises(ValueError):
+            sps_dimensions(portrait[:8])
+
+    def test_python_child_uses_same_tracked_progress_protocol(self):
+        updates = []
+        command = [sys.executable, "-c", "print('frame=30\\nout_time_us=1000000\\nprogress=end', flush=True)"]
+        run_render_with_progress(command, timeout=30, duration_seconds=1,
+                                 ffmpeg_progress=False, progress_callback=updates.append)
+        self.assertTrue(any(row.get("frame") == 30 for row in updates))
 
 
 if __name__ == "__main__":

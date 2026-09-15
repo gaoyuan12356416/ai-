@@ -352,7 +352,7 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
                              configured_timeout=None, diagnostic_path=None, diagnostic_context=None, stall_timeout=None,
                              popen=None, progress_callback=None, monotonic=None,
                              progress_offset_seconds=0.0, progress_total_seconds=None,
-                             progress_frame_offset=0):
+                             progress_frame_offset=0, ffmpeg_progress=True):
     """Track one child with monotonic extension, stall fencing and safe evidence."""
     from .async_runtime import clear_process, emit_progress, process_launch, record_process
 
@@ -386,7 +386,10 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
             raise _timeout_configuration_error()
     monotonic = monotonic or time.monotonic
     popen = popen or subprocess.Popen
-    tracked_command = [command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
+    if type(ffmpeg_progress) is not bool:
+        raise _timeout_configuration_error()
+    tracked_command = ([command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
+                       if ffmpeg_progress else list(command))
     updates = queue.Queue(maxsize=8)
     proc = None
     reader = None

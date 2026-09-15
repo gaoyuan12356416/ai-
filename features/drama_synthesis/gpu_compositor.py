@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -105,6 +106,15 @@ def compositor_filter_threads(value: Any = None) -> int:
     if isinstance(raw, bool) or not re.fullmatch(r"[1-4]", str(raw)):
         raise compositor_error()
     return int(raw)
+
+
+def frame_pipeline(value=None):
+    raw = os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl") if value is None else value
+    if raw not in {"opencl", "cuda"}:
+        raise compositor_error()
+    if raw == "cuda" and asset_cache_root() is None:
+        raise compositor_error()
+    return raw
 
 
 def runtime_identity(value: Any = None) -> str:
@@ -419,6 +429,19 @@ def build_opencl_chunk_command(
         "-frames:v", str(int(chunk["frame_count"])), "-movflags", "+faststart", str(output),
     ])
     return command
+
+
+def build_native_chunk_command(*, ffmpeg, source, output, spec, recipe, asset_durations,
+                               chunk, plan_path, cache_directory=None):
+    directory = asset_cache_root(cache_directory)
+    if directory is None:
+        raise compositor_error()
+    plan = {"spec": spec, "source": str(source), "output": str(output), "ffmpeg": ffmpeg,
+            "chunk": dict(chunk), "assets": recipe["assets"], "asset_durations": asset_durations,
+            "asset_cache_root": str(directory)}
+    _atomic_write_text(plan_path, canonical_json(plan))
+    script = Path(__file__).resolve().parents[2] / "scripts" / "render_drama_native_chunk.py"
+    return [sys.executable, str(script), "--plan", str(plan_path)]
 
 
 def build_join_command(ffmpeg: str, concat_file: Path, output: Path) -> list[str]:
@@ -862,6 +885,7 @@ def render_chunked_random_output(
         "version": 2,
         "backend": BACKEND,
         "asset_cache_version": ASSET_CACHE_VERSION if asset_cache_root() else None,
+        "frame_pipeline": frame_pipeline(),
         "renderer_profile": RENDERER_PROFILE,
         "runtime": runtime_fingerprint,
         "recipe_sha256": supplied_sha,
@@ -871,6 +895,8 @@ def render_chunked_random_output(
         "chunk_plan_sha256": chunk_plan_sha,
         "chunk_count": len(chunks),
     }
+    if frame_pipeline() == "cuda":
+        content_identity["cuda_kernel"] = file_fingerprint(Path(__file__).with_name("cuda") / "random_overlay_v1.cu")
     content_sha = hashlib.sha256(canonical_json(content_identity).encode("utf-8")).hexdigest()
     root = cache_root() / content_sha[:2] / content_sha
     chunks_root = root / "chunks"
@@ -957,23 +983,37 @@ def render_chunked_random_output(
                             render_needed = True
                             info = None
                     if render_needed:
-                        command = build_opencl_chunk_command(
-                            ffmpeg=ffmpeg,
-                            source=source_path,
-                            output=temporary,
-                            spec=spec,
-                            assets=selected,
-                            asset_media_types=media_types,
-                            asset_durations=asset_durations,
-                            chunk=row,
-                            kernel_path=kernel_path,
-                            asset_cache_entries=cached_assets,
-                        )
+                        native = frame_pipeline() == "cuda"
+                        if native:
+                            raw_partial = temporary.with_name(temporary.name + ".native.h264")
+                            if raw_partial.exists() or raw_partial.is_symlink():
+                                if not may_clean_partial or raw_partial.is_symlink() or not raw_partial.is_file():
+                                    raise checkpoint_error()
+                                raw_partial.unlink()
+                            command = build_native_chunk_command(
+                                ffmpeg=ffmpeg, source=source_path, output=temporary, spec=spec,
+                                recipe=fb_recipe, asset_durations=asset_durations, chunk=row,
+                                plan_path=chunks_root / ("chunk-%05d.native.json" % row["index"]),
+                            )
+                        else:
+                            command = build_opencl_chunk_command(
+                                ffmpeg=ffmpeg,
+                                source=source_path,
+                                output=temporary,
+                                spec=spec,
+                                assets=selected,
+                                asset_media_types=media_types,
+                                asset_durations=asset_durations,
+                                chunk=row,
+                                kernel_path=kernel_path,
+                                asset_cache_entries=cached_assets,
+                            )
                         try:
                             if runner is None:
                                 from .gpu import run_render_with_progress
                                 run_render_with_progress(
                                     command,
+                                    ffmpeg_progress=not native,
                                     timeout=render_timeout,
                                     absolute_timeout=render_timeout,
                                     configured_timeout=render_timeout,
