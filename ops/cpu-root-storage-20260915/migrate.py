@@ -8,6 +8,7 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import shutil
 import sqlite3
 import stat
@@ -68,7 +69,7 @@ def verify_disk(minimum=5 * 1024 ** 3):
 
 
 def paths(source):
-    if source not in SOURCES or os.path.normpath(source) != source:
+    if source not in SOURCES or posixpath.normpath(source) != source:
         raise RuntimeError('source is outside the exact allowlist')
     destination = BASE + '/rootfs' + source
     original = source + '.root-storage-20260915-original'
