@@ -69,12 +69,13 @@ def switch(backup, rollback=False):
     plan = json.loads((backup/"plan.json").read_text())
     for item in plan["files"]:
         target = Path(item["target"])
-        assert (digest(target) if target.exists() else None) == item["after" if rollback else "before"], "live drift: "+str(target)
+        expected = {item["after"]} if rollback else {item["before"], item.get("rollback_after", item["before"])}
+        assert (digest(target) if target.exists() else None) in expected, "live drift: "+str(target)
         assert digest(Path(plan["release"])/item["source"]) == item["after"], "release drift"
     for item in plan["files"]:
         if rollback and item["before"] is None:
             continue  # old adapter does not import the new module; keep data intact
-        source = backup/item["saved"] if rollback else Path(plan["release"])/item["source"]
+        source = backup/item.get("rollback_saved", item["saved"]) if rollback else Path(plan["release"])/item["source"]
         atomic_copy(source, Path(item["target"]))
     print(json.dumps(dict(action="rollback" if rollback else "applied", **{k:plan[k] for k in ("commit","backup")})))
 

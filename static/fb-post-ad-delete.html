@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light" />
   <title>Meta 剧集广告删除 - AI自动后台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-video-page-credentials" />
+  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-video-account-delete" />
   <link rel="stylesheet" href="/ui-topbar.css?v=20260915-meta-assets-standard-shell" />
 </head>
 <body>
@@ -82,9 +82,9 @@
               <div class="phase-grid" id="phaseChoices">
                 <label class="phase-card"><input type="checkbox" value="creative" data-phase checked /><span class="phase-top"><span><span class="step-number">1</span>Creative</span><strong id="creativeCount">0</strong></span><span class="phase-subtitle">广告创意 · creative_id</span><span class="phase-summary" id="creativeSummary">等待预览</span></label>
                 <label class="phase-card"><input type="checkbox" value="ad" data-phase checked /><span class="phase-top"><span><span class="step-number">2</span>Ad</span><strong id="adCount">0</strong></span><span class="phase-subtitle">广告 · ad id</span><span class="phase-summary" id="adSummary">等待预览</span></label>
-                <label class="phase-card"><input type="checkbox" value="video" data-phase checked /><span class="phase-top"><span><span class="step-number">3</span>Video</span><strong id="videoCount">0</strong></span><span class="phase-subtitle">视频对象 · video id</span><span class="phase-summary" id="videoSummary">等待预览</span></label>
+                <label class="phase-card"><input type="checkbox" value="video" data-phase checked /><span class="phase-top"><span><span class="step-number">3</span>Video</span><strong id="videoCount">0</strong></span><span class="phase-subtitle">广告账户视频素材 · video id</span><span class="phase-summary" id="videoSummary">等待预览</span></label>
               </div>
-              <div class="execution-footer"><div><strong id="phaseOrder">Creative → Ad → Video</strong><p class="field-help" id="executionHint">单对象失败后继续其余对象与后续阶段；成功对象自动跳过。Video按固定预览ID直接请求删除，以Meta实际响应为准。重新核验为只读操作，删除仍需单独确认。</p></div><div class="actions"><button class="btn hidden" id="recheckBtn" type="button">重新核验阻止项</button><button class="btn hidden" id="reconcileBtn" type="button">核实待确认结果</button><button class="btn danger" id="executeBtn" type="button" disabled>执行所选阶段</button></div></div>
+              <div class="execution-footer"><div><strong id="phaseOrder">Creative → Ad → Video</strong><p class="field-help" id="executionHint">单对象失败后继续其余对象与后续阶段；成功对象自动跳过。Video 按固定预览 ID 删除关联广告账户中的视频素材；单账户失败后继续，成功的账户与 Video 组合跳过，结果以 Meta 响应为准。重新核验为只读操作，删除仍需单独确认。</p></div><div class="actions"><button class="btn hidden" id="recheckBtn" type="button">重新核验阻止项</button><button class="btn hidden" id="reconcileBtn" type="button">核实待确认结果</button><button class="btn danger" id="executeBtn" type="button" disabled>执行所选阶段</button></div></div>
             </div>
             <div class="notice error hidden" id="actionError" role="alert"></div>
           </div>
@@ -108,10 +108,10 @@
       <p id="confirmDescription">将按下列产品和剧集范围执行删除，请核对具体对象及阶段。</p>
       <div class="confirmation-section"><h3>投放产品</h3><div class="confirm-products" id="confirmProducts"></div></div>
       <div class="confirmation-section"><h3>展开后的剧集 <span class="muted" id="confirmDramaCount"></span></h3><div class="table-wrap confirm-drama-table"><table><thead><tr><th>投放产品</th><th>剧 ID</th><th>资源 ID</th><th>语言 / 剧名</th></tr></thead><tbody id="confirmDramaBody"></tbody></table></div></div>
-      <div class="confirmation-section"><h3>执行阶段与数量</h3><div class="confirm-order" id="confirmOrder"></div><div class="table-wrap"><table class="confirm-phase-table"><thead><tr><th>阶段</th><th>本次执行</th><th>已删除</th><th>仍阻止</th><th>待核实</th></tr></thead><tbody id="confirmPhaseBody"></tbody></table></div><p class="field-help" id="confirmExecutionHelp">请核对所选阶段与数量。Video按固定预览ID直接请求删除；已成功跳过，实际结果以Meta响应为准。</p></div>
+      <div class="confirmation-section"><h3>执行阶段与数量</h3><div class="confirm-order" id="confirmOrder"></div><div class="table-wrap"><table class="confirm-phase-table"><thead><tr><th>阶段</th><th>本次执行</th><th>已删除</th><th>仍阻止</th><th>待核实</th></tr></thead><tbody id="confirmPhaseBody"></tbody></table></div><p class="field-help" id="confirmExecutionHelp">请核对所选阶段与数量。Video 数量按 ID 去重，关联广告账户分别处理；删除范围为账户中的视频素材，成功的账户与 Video 组合跳过。</p></div>
       <div class="confirmation-section hidden" id="confirmScopeBlockers"><h3>范围核查提示</h3><ul class="blocker-list" id="confirmScopeBlockerList"></ul></div>
       <div class="confirmation-section hidden" id="confirmBlockedSection"><div class="section-heading"><h3>被阻止对象</h3><select id="confirmBlockedKind" aria-label="查看对应阶段的阻止对象"></select></div><div id="confirmBlockedList" class="confirm-blocked-list"></div><div class="compact-pagination"><button class="btn small" id="confirmBlockedPrev" type="button">上一页</button><span id="confirmBlockedPage" class="muted"></span><button class="btn small" id="confirmBlockedNext" type="button">下一页</button></div></div>
-      <div class="notice warning">当前阶段完成后进入下一阶段；单对象失败不会中止后续阶段。Video 阶段删除视频对象。</div>
+      <div class="notice warning">当前阶段完成后进入下一阶段；单对象失败不会中止后续阶段。Video 阶段分别处理关联广告账户中的视频素材，单账户失败后继续，结果以 Meta 响应为准。</div>
       <div class="notice error hidden" id="confirmError" role="alert"></div>
     </div>
     <div class="dialog-footer"><button class="btn" id="cancelConfirmBtn" type="button">取消</button><button class="btn danger" id="confirmExecuteBtn" type="button">确认删除</button></div>
@@ -119,6 +119,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/ui-topbar.js?v=20260915-meta-assets-v2"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
-  <script src="/fb-post-ad-delete.js?v=20260915-meta-video-page-credentials"></script>
+  <script src="/fb-post-ad-delete.js?v=20260915-meta-video-account-delete"></script>
 </body>
 </html>

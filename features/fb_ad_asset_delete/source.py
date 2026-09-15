@@ -313,6 +313,65 @@ class SqlSource:
         by_id = {r["user_id"]: r["token"] for r in rows}
         return next((by_id[x] for x in candidates if by_id.get(x)), "")
 
+    def video_account_credential(self, obj, target_account):
+        """Dynamically read an account-specific source User Token, never a Page.
+
+        Old previews have flat scope arrays. Exact source rows may recover the
+        account/user pairing, but missing history only changes credential
+        preference: it never enlarges targets or blocks the frozen-user fallback.
+        """
+        aid = account_id(target_account)
+        if obj.get("kind") != "video" or aid not in {account_id(x) for x in obj.get("account_ids", [])}:
+            raise AssetError("account_outside_preview", "账户不在该 Video 的冻结范围内", 409)
+        users = list(dict.fromkeys(str(x) for x in obj.get("user_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))))
+        ads = {str(x) for x in obj.get("ad_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))}
+        products = {str(x) for x in obj.get("product_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))}
+        if not users:
+            return None
+
+        def source_users(rows):
+            matched = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                uid, row_id = str(row.get("user_id") or ""), str(row.get("source_row_id") or "")
+                if (str(row.get("account_id", "")).removeprefix("act_") == aid and uid in users and
+                        str(row.get("ad_id")) in ads and str(row.get("product_id")) in products and
+                        re.fullmatch(r"[1-9][0-9]{0,31}", row_id)):
+                    matched.append((int(row_id), uid))
+            return list(dict.fromkeys(uid for _, uid in sorted(matched)))
+
+        frozen = obj.get("video_account_sources")
+        preferred = source_users(frozen) if isinstance(frozen, list) else []
+        if not preferred and ads and products:
+            try:
+                rows = self.read("""SELECT CAST(a.id AS CHAR),a.product,a.ad_id,a.ad_account_id,CAST(a.user_id AS CHAR)
+                    FROM {s}.ads_facebook_auto_created_data a
+                    WHERE a.ad_id IN {ads} AND a.product IN {products} AND a.ad_account_id IN {accounts}
+                    ORDER BY a.id LIMIT 10001""".format(s=self.schema, ads=inside(sorted(ads)),
+                        products=inside(sorted(products)), accounts=inside([aid, "act_" + aid])),
+                    ("source_row_id", "product_id", "ad_id", "account_id", "user_id"), 5)
+                preferred = source_users(rows)
+            except Exception:
+                preferred = []
+        order = preferred + [uid for uid in users if uid not in preferred]
+        rows = self.read("""SELECT CAST(user_id AS CHAR),CAST(facebookUserID AS CHAR),accessToken
+            FROM {s}.ads_facebook_info WHERE user_id IN {users} AND TRIM(accessToken)<>''
+            ORDER BY FIELD(CAST(user_id AS CHAR),{order})""".format(
+                s=self.schema, users=inside(order), order=",".join(q(uid) for uid in order)),
+            ("user_id", "fb_user_id", "token"), 5)
+        by_id = {str(row.get("user_id")): row for row in rows if str(row.get("user_id")) in users and str(row.get("token") or "").strip()}
+        for uid in order:
+            row = by_id.get(uid)
+            if row:
+                result = dict(token=str(row["token"]).strip(), credential_kind="user", credential_user_id=uid,
+                              credential_relation="ad_source_user" if uid in preferred else "fallback")
+                fbid = str(row.get("fb_user_id") or "")
+                if re.fullmatch(r"[1-9][0-9]{0,31}", fbid):
+                    result["credential_fb_user_id"] = fbid
+                return result
+        return None
+
     def video_credential(self, user_ids, identity_id, relation):
         """Read one current credential for an exact identity and frozen users.
 

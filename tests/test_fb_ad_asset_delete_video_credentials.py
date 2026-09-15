@@ -327,13 +327,13 @@ class VideoCredentialGraphTests(unittest.TestCase):
 
 
 class VideoCredentialIntegrationTests(unittest.TestCase):
-    def test_unknown_and_success_are_not_replayed_and_selected_page_is_durable(self):
+    def test_current_service_uses_account_user_and_never_replays_unknown_or_success(self):
         for response, expected in ((requests.Timeout(), "unknown"), (Response(True), "deleted")):
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as folder:
                 store = Store(Path(folder) / "ledger.sqlite3")
                 job = job_data(status="failed")
                 store.create_job(job)
-                transport = FakeTransport([from_response(), response])
+                transport = FakeTransport([response])
                 provider = Mock(return_value=page_credential())
                 graph = GraphClient(lambda users: "test-user-secret", transport=transport, video_credential_provider=provider)
                 workers = QueuedWorkers()
@@ -343,12 +343,14 @@ class VideoCredentialIntegrationTests(unittest.TestCase):
                 workers.run_next()
                 stored = store.get_job(job["job_id"])
                 self.assertEqual(stored["objects"][0]["status"], expected)
-                self.assertEqual(stored["objects"][0]["result"]["credential_page_id"], "91001")
+                child = stored["objects"][0]["video_account_results"][0]
+                self.assertEqual(child["result"]["credential_kind"], "user")
+                self.assertEqual(child["result"]["delete_mode"], "ad_account_video")
                 self.assertNotIn("test-page-secret", json.dumps(stored))
                 service.execute(SESSION, job["job_id"], dict(payload, request_id="credential_run_two"))
                 workers.run_next()
                 self.assertEqual(sum(call["method"] == "DELETE" for call in transport.calls), 1)
-                self.assertEqual(provider.call_count, 1)
+                self.assertEqual(provider.call_count, 0)
 
     def test_sql_query_failure_does_not_stop_direct_deletion(self):
         source = SqlSource(Mock(side_effect=RuntimeError("SQL service unavailable")))

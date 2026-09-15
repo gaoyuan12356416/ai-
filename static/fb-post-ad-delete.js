@@ -13,6 +13,9 @@
     already_deleted: ["已确认删除", "success"], failed: ["失败", "error"], blocked: ["已阻止", "warning"],
     unknown: ["结果待核实", "purple"],
   };
+  const VIDEO_ACCOUNT_STATES = {
+    ...OBJECT_STATES, deleted: ["账户素材已删除", "success"], already_deleted: ["账户素材已确认删除", "success"],
+  };
   const EXECUTABLE_STATES = new Set(["ready", "completed", "partial", "interrupted"]);
   const $ = id => document.getElementById(id);
   const all = selector => Array.from(document.querySelectorAll(selector));
@@ -241,7 +244,14 @@
       video_from: "视频返回身份（video_from）",
       creative_page: "广告 Creative 关联 Page（仅为凭证选择线索，不代表视频真实所有者）",
       configured_user: "原冻结候选用户",
+      frozen_user_fallback: "原冻结候选用户",
+      fallback: "原冻结候选用户",
+      ad_source_user: "投放记录用户",
     })[credentialRelation] || credentialRelation;
+    const deleteMode = scalar(credentialField("delete_mode"));
+    const deleteScope = ({ ad_account_video: "广告账户中的视频素材", video_id_direct: "历史 Video ID 直删" })[deleteMode] || "";
+    const deleteEndpoint = scalar(credentialField("delete_endpoint"));
+    const safeEndpoint = /^\/?act_[1-9][0-9]{0,31}\/advideos(?:\?video_id=[1-9][0-9]{0,31})?$/.test(deleteEndpoint) ? deleteEndpoint : "";
     const credentialLookup = credentialField("credential_lookup");
     const lookupDetails = credentialLookup && typeof credentialLookup === "object" ? credentialLookup : {};
     const lookupStatus = scalar(credentialLookup) || [scalar(lookupDetails.status), scalar(lookupDetails.code)].filter(Boolean).join(" / ");
@@ -258,6 +268,9 @@
       ["请求追踪 ID", scalar(detail.fbtrace_id || result.fbtrace_id)],
       ["账户状态", [accountStatus, scalar(account.account_state)].filter(Boolean).join(" · ")],
       ["账户诊断", scalar(account.message)],
+      ["删除范围", deleteScope],
+      ["删除广告账户 ID", scalar(credentialField("delete_account_id"))],
+      ["请求路径", safeEndpoint],
       ["凭证类型", credentialKindLabel],
       ["Page ID", credentialPageId],
       ["凭证记录 ID", scalar(credentialField("credential_row_id"))],
@@ -272,11 +285,39 @@
       (identityHelp ? '<span class="cell-reason">' + esc(identityHelp) + "</span>" : "") + "<dl>" +
       rows.map(([label, value]) => "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl></details>";
   }
+  function videoAccountResults(item) {
+    if (item.kind !== "video") return [];
+    const current = list(item.video_account_results);
+    const saved = list(item.result && item.result.account_results);
+    const rows = current.length ? current : saved;
+    const accounts = new Map();
+    rows.forEach(row => {
+      if (!row || typeof row !== "object" || !["string", "number"].includes(typeof row.account_id)) return;
+      const id = str(row.account_id);
+      if (id) accounts.set(id, { ...row, account_id: id });
+    });
+    return [...accounts.values()];
+  }
+  function videoAccountDetails(rows) {
+    if (!rows.length) return "";
+    const counts = {};
+    rows.forEach(row => { counts[row.status] = (counts[row.status] || 0) + 1; });
+    const success = num(counts.deleted) + num(counts.already_deleted);
+    const progress = [
+      "已删除 " + success + " / " + rows.length,
+      ...["in_progress", "pending", "failed", "unknown", "blocked"].filter(status => counts[status]).map(status => OBJECT_STATES[status][0] + " " + counts[status]),
+    ].join(" · ");
+    return '<details class="object-diagnostic video-account-results"><summary>广告账户结果 · ' + esc(progress) + '</summary><div class="video-account-list">' +
+      rows.map(row => '<section class="video-account-result"><div class="video-account-heading"><strong class="mono">账户 ' + esc(row.account_id) + '</strong>' +
+        badge(row.status, VIDEO_ACCOUNT_STATES) + '</div><span class="cell-reason">' + esc(safeReason(row)) + '</span>' +
+        (["deleted", "already_deleted"].includes(row.status) ? '<span class="cell-sub">此账户与 Video 组合已成功，后续执行跳过。</span>' : "") +
+        diagnosticDetails(row) + "</section>").join("") + "</div></details>";
+  }
   function directVideoEligible(item) { return item.kind === "video" && item.status === "blocked" && item.video_direct_eligible === true; }
   function renderObjects(job) {
     const objects = list(job.objects);
     const total = num(job.total);
-    $("detailCount").textContent = "共 " + total + " 个对象" + (state.query.kind || state.query.status ? "（当前筛选）" : " · 相同对象已去重");
+    $("detailCount").textContent = "共 " + total + " 个对象" + (state.query.kind || state.query.status ? "（当前筛选）" : " · 相同对象已去重") + " · Video 按关联广告账户分别处理";
     html("detailBody", objects.map(item => {
       const products = list(item.product_ids).map(id => {
         const product = productById(id, job);
@@ -284,9 +325,14 @@
       }).join("");
       const content = '<span class="mono">' + esc(list(item.content_ids).join("、") || "—") + '</span><span class="cell-sub">资源 ' + esc(list(item.series_codes).join("、") || "—") + '</span><span class="cell-sub">语言 ' + esc(list(item.languages).join("、") || "—") + "</span>";
       const directVideo = directVideoEligible(item);
-      const resultLabel = directVideo ? '<span class="tag info">可直接尝试删除</span>' : badge(item.status, OBJECT_STATES);
+      const accountResults = videoAccountResults(item);
+      const oldVideoResult = item.kind === "video" && item.result && item.result.delete_mode === "video_id_direct";
+      const accountVideo = item.kind === "video" && (accountResults.length > 0 || item.result && item.result.delete_mode === "ad_account_video");
+      const resultLabel = directVideo ? '<span class="tag info">可尝试删除账户素材</span>' : badge(item.status, accountVideo ? VIDEO_ACCOUNT_STATES : OBJECT_STATES);
       const reason = directVideo ? (safeReason(item) ? '<details class="object-diagnostic"><summary>查看历史核查记录</summary><span class="cell-reason">' + esc(safeReason(item)) + "</span></details>" : "") : '<span class="cell-reason">' + esc(safeReason(item)) + "</span>";
-      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + resultLabel + reason + diagnosticDetails(item) + "</td></tr>";
+      const scopeLabel = item.kind === "video" ? '<span class="cell-sub">' + (accountVideo ? "广告账户视频素材" : oldVideoResult ? "历史记录 · Video ID 直删" : item.result && Object.keys(item.result).length ? "历史 Video 结果" : "广告账户视频素材") + '</span>' : "";
+      const oldDetails = oldVideoResult && accountResults.length ? '<details class="object-diagnostic"><summary>查看历史 Video ID 请求记录</summary>' + reason + diagnosticDetails(item) + '</details>' : reason + diagnosticDetails(item);
+      return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + resultLabel + scopeLabel + videoAccountDetails(accountResults) + oldDetails + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="empty">' + (job.status === "previewing" ? "正在解析剧集并核查 Meta 对象，请稍候…" : "当前范围下没有匹配对象") + "</td></tr>");
     const pages = Math.max(1, Math.ceil(total / 50));
     $("pageText").textContent = "第 " + state.query.page + " / " + pages + " 页";
@@ -326,7 +372,7 @@
         ["已删除", num(result.deleted) + num(result.already_deleted)], ["失败", num(result.failed)],
         ["阻止", remainingBlocked(kind, job)], ["待核实", num(result.unknown)],
       ].filter(item => item[1] > 0);
-      $(kind + "Summary").textContent = pieces.map(item => item[0] + " " + item[1]).join(" · ") || (job.status === "previewing" ? "正在核查…" : "无匹配对象");
+      $(kind + "Summary").textContent = (pieces.map(item => item[0] + " " + item[1]).join(" · ") || (job.status === "previewing" ? "正在核查…" : "无匹配对象")) + (kind === "video" && num(result.total) ? " · 按 Video ID 计数" : "");
     });
     let notice = "";
     let tone = "info";
@@ -537,7 +583,7 @@
       return "<tr><td>" + PHASE_NAMES[kind] + "</td><td>" + eligible(kind, job) + "</td><td>" + (num(result.deleted) + num(result.already_deleted)) + "</td><td>" + remainingBlocked(kind, job) + "</td><td>" + num(result.unknown) + "</td></tr>";
     }).join(""));
     $("confirmExecutionHelp").textContent = "本次执行包含待执行及明确失败项。" +
-      (selected.includes("video") ? "另纳入 " + directVideoCount(job) + " 个历史阻止 Video。Video按固定预览ID直接请求删除；已成功跳过，实际结果以Meta响应为准。" : "") +
+      (selected.includes("video") ? "另纳入 " + directVideoCount(job) + " 个历史阻止 Video。Video 数量按 ID 去重，按固定预览 ID 删除关联广告账户中的视频素材；单账户失败后继续，成功的账户与 Video 组合跳过，结果以 Meta 响应为准。" : "") +
       "结果待核实及其他仍阻止的对象跳过。";
     const blockers = list(job.blockers);
     show("confirmScopeBlockers", blockers.length > 0);

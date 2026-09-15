@@ -25,6 +25,11 @@ _SECRET_KEYS = frozenset(("access_token", "refresh_token", "client_secret",
                           "app_secret", "authorization", "cookie", "password", "token", "page_access_token"))
 _CREDENTIAL_FIELDS = frozenset(("delete_mode", "credential_kind", "credential_page_id", "credential_row_id",
     "credential_fb_user_id", "credential_user_id", "credential_relation", "credential_lookup", "credential_lookup_message"))
+_VIDEO_ACCOUNT_MODE = "ad_account_video"
+_VIDEO_CREDENTIAL_FIELDS = _CREDENTIAL_FIELDS | frozenset(("delete_account_id", "delete_endpoint",
+    "account_id", "video_id", "source_row_id", "source_row_ids", "source_user_id", "source_user_ids",
+    "ad_id", "ad_ids", "credential_source_row_id", "credential_source_row_ids", "credential_ad_id",
+    "credential_ad_ids"))
 _TABLE = "fb_asset_delete_v2_"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_rechecks (
@@ -65,10 +70,26 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
         action TEXT NOT NULL, created_at TEXT NOT NULL, details TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_video_accounts (
+        job_id TEXT NOT NULL, object_key TEXT NOT NULL, account_id TEXT NOT NULL,
+        status TEXT NOT NULL, ordinal INTEGER NOT NULL, run_id TEXT,
+        account_attempt_id TEXT, result TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (job_id, object_key, account_id),
+        FOREIGN KEY (job_id, object_key) REFERENCES fb_asset_delete_v2_objects(job_id, object_key))""",
+    """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_video_account_attempts (
+        account_attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL,
+        object_key TEXT NOT NULL, account_id TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES fb_asset_delete_v2_runs(run_id),
+        context TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
+        finished_at TEXT, result TEXT NOT NULL,
+        FOREIGN KEY (job_id, object_key, account_id)
+            REFERENCES fb_asset_delete_v2_video_accounts(job_id, object_key, account_id))""",
     "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_jobs_actor ON fb_asset_delete_v2_jobs(actor, created_at)",
     "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_runs_job ON fb_asset_delete_v2_runs(job_id, created_at)",
     "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_objects_key ON fb_asset_delete_v2_objects(object_key, status)",
     "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_attempts_job ON fb_asset_delete_v2_attempts(job_id, object_key)",
+    "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_video_accounts_pair ON fb_asset_delete_v2_video_accounts(object_key, account_id, status)",
+    "CREATE INDEX IF NOT EXISTS fb_asset_delete_v2_video_account_attempts_job ON fb_asset_delete_v2_video_account_attempts(job_id, object_key, account_id)",
 )
 
 
@@ -251,6 +272,12 @@ class Store:
         if include_objects:
             data["objects"] = [self._object_data(item) for item in conn.execute(
                 "SELECT * FROM fb_asset_delete_v2_objects WHERE job_id=? ORDER BY ordinal", (row["job_id"],))]
+            accounts = {}
+            for item in conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? ORDER BY object_key,ordinal", (row["job_id"],)):
+                accounts.setdefault(item["object_key"], []).append(self._video_account_data(item))
+            for obj in data["objects"]:
+                if obj["kind"] == "video":
+                    obj["video_account_results"] = accounts.get(obj["key"], [])
         if include_runs:
             data["runs"] = [self._run_data(item) for item in conn.execute(
                 "SELECT * FROM fb_asset_delete_v2_runs WHERE job_id=? ORDER BY created_at", (row["job_id"],))]
@@ -468,6 +495,10 @@ class Store:
                 result = {"reason": "unknown_fence" if lock["status"] == "unknown" else "object_locked",
                           "source_job_id": lock["job_id"], "source_run_id": lock["run_id"]}
                 status = "unknown" if lock["status"] == "unknown" else row["status"]
+                owner = self._object(conn, lock["job_id"], key)
+                if status == "unknown" and self._is_account_video(conn, owner):
+                    row = self._ensure_video_accounts(conn, row)
+                    result = dict(json.loads(row["result"]), **result)
                 conn.execute("UPDATE fb_asset_delete_v2_objects SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=?",
                              (status, _json(result), _now(), job_id, key))
                 self._audit(conn, job_id, "object_fenced", {"key": key, "run_id": run_id, **result})
@@ -507,6 +538,193 @@ class Store:
             self._audit(conn, job_id, "object_credential_selected", {"key": key, "run_id": run_id,
                 "attempt_id": row["attempt_id"], "credential": context})
 
+    @staticmethod
+    def _video_account_ids(row):
+        values = json.loads(row["payload"]).get("account_ids")
+        if row["kind"] != "video" or not isinstance(values, list) or not values:
+            raise StoreError("Frozen video account IDs are required", "invalid_input")
+        accounts = [_id(value, "account_id") for value in values]
+        if any(not value.isascii() or not value.isdecimal() for value in accounts):
+            raise StoreError("Frozen video account IDs must be numeric IDs without act_", "invalid_input")
+        return list(dict.fromkeys(accounts))
+
+    @staticmethod
+    def _video_account_data(row):
+        return dict(account_id=row["account_id"], status=row["status"], result=json.loads(row["result"]),
+                    account_attempt_id=row["account_attempt_id"], run_id=row["run_id"], updated_at=row["updated_at"])
+
+    def _video_account_results(self, conn, job_id, key):
+        return [self._video_account_data(row) for row in conn.execute(
+            "SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key=? ORDER BY ordinal", (job_id, key))]
+
+    def video_account_results(self, job_id, key):
+        with self._transaction(False) as conn:
+            row = self._object(conn, job_id, key)
+            if row["kind"] != "video":
+                raise StoreError("Account deletion progress belongs to a video", "invalid_input")
+            return self._video_account_results(conn, job_id, key)
+
+    def _is_account_video(self, conn, row):
+        return row["kind"] == "video" and (json.loads(row["result"]).get("delete_mode") == _VIDEO_ACCOUNT_MODE or
+            conn.execute("SELECT 1 FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key=? LIMIT 1",
+                         (row["job_id"], row["object_key"])).fetchone() is not None)
+
+    def _active_video_parent(self, conn, job_id, key, run_id):
+        row = self._object(conn, job_id, key)
+        run = self._require(conn, "runs", "run_id", run_id)
+        lock = conn.execute("SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?", (key,)).fetchone()
+        if (row["kind"] != "video" or row["status"] != "in_progress" or row["run_id"] != run_id or
+                run["job_id"] != job_id or run["status"] != "running" or "video" not in json.loads(run["phases"]) or
+                lock is None or (lock["job_id"], lock["run_id"], lock["attempt_id"], lock["status"]) !=
+                (job_id, run_id, row["attempt_id"], "in_progress")):
+            raise StoreError("Only the active parent video claim may process its accounts", "claim_conflict")
+        return row
+
+    def _refresh_video_result(self, conn, row, extra=None):
+        result = json.loads(row["result"])
+        result.update(extra or {})
+        result.update(delete_mode=_VIDEO_ACCOUNT_MODE, delete_scope=_VIDEO_ACCOUNT_MODE,
+                      video_id=row["object_id"], account_results=self._video_account_results(conn, row["job_id"], row["object_key"]))
+        conn.execute("UPDATE fb_asset_delete_v2_objects SET result=?,updated_at=? WHERE job_id=? AND object_key=?",
+                     (_json(result), _now(), row["job_id"], row["object_key"]))
+        return self._object(conn, row["job_id"], row["object_key"])
+
+    def _ensure_video_accounts(self, conn, row):
+        accounts = self._video_account_ids(row)
+        existing = self._video_account_results(conn, row["job_id"], row["object_key"])
+        if existing and [item["account_id"] for item in existing] != accounts:
+            raise StoreError("Frozen video account progress does not match its preview", "preview_frozen")
+        if not existing:
+            now = _now()
+            for ordinal, account in enumerate(accounts):
+                conn.execute("INSERT INTO fb_asset_delete_v2_video_accounts VALUES (?,?,?,?,?,?,?,?,?)",
+                             (row["job_id"], row["object_key"], account, "pending", ordinal, None, None, "{}", now))
+            self._audit(conn, row["job_id"], "video_accounts_initialized", dict(key=row["object_key"], account_ids=accounts))
+        return self._refresh_video_result(conn, row)
+
+    def begin_video_accounts(self, job_id, key, run_id):
+        """Commit the complete account scope before even looking up credentials."""
+        with self._transaction() as conn:
+            row = self._active_video_parent(conn, job_id, key, run_id)
+            row = self._ensure_video_accounts(conn, row)
+            return dict(self._object_data(row), video_account_results=self._video_account_results(conn, job_id, key))
+
+    def _video_account(self, conn, row, account_id):
+        account = _id(account_id, "account_id")
+        if account not in self._video_account_ids(row):
+            raise StoreError("Account is not in the frozen video preview", "preview_frozen")
+        child = conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key=? AND account_id=?",
+                             (row["job_id"], row["object_key"], account)).fetchone()
+        if child is None:
+            raise StoreError("Initialize frozen video accounts before processing them", "invalid_state")
+        return child
+
+    @staticmethod
+    def _video_context(context, account_id, video_id):
+        if not isinstance(context, dict) or set(context) - _VIDEO_CREDENTIAL_FIELDS:
+            raise StoreError("Unexpected video credential audit fields", "unsafe_metadata")
+        if (context.get("delete_mode") != _VIDEO_ACCOUNT_MODE or
+                context.get("delete_account_id", account_id) != account_id or
+                context.get("account_id", account_id) != account_id or
+                context.get("video_id", video_id) != video_id or
+                context.get("delete_endpoint", "act_" + account_id + "/advideos") != "act_" + account_id + "/advideos" or
+                context.get("credential_kind", "user") != "user"):
+            raise StoreError("Video credentials do not match this account operation", "credential_conflict")
+        return _json(context)
+
+    @staticmethod
+    def _account_outcome(result, account_id, video_id, require_absent=False):
+        if (not isinstance(result, dict) or result.get("delete_mode") != _VIDEO_ACCOUNT_MODE or
+                result.get("delete_scope") != _VIDEO_ACCOUNT_MODE or result.get("account_id") != account_id or
+                result.get("video_id") != video_id):
+            raise StoreError("Video outcome must identify its exact account and video", "invalid_input")
+        if require_absent:
+            proof = result.get("proof")
+            if (result.get("confirmed_absent") is not True or not isinstance(proof, dict) or
+                    proof.get("account_id") != account_id or proof.get("video_id") != video_id or proof.get("complete") is not True):
+                raise StoreError("Complete account-specific absence proof is required", "proof_required")
+        return _json(result)
+
+    def claim_video_account(self, job_id, key, run_id, account_id, context):
+        """A returned claim is the durable authorization for one account DELETE."""
+        with self._transaction() as conn:
+            row = self._active_video_parent(conn, job_id, key, run_id)
+            child = self._video_account(conn, row, account_id)
+            account = child["account_id"]
+            encoded = self._video_context(context, account, row["object_id"])
+            if child["status"] == "in_progress":
+                attempt = self._require(conn, "video_account_attempts", "account_attempt_id", child["account_attempt_id"])
+                if attempt["context"] != encoded:
+                    raise StoreError("An account attempt cannot change its selected identity", "credential_conflict")
+            if child["status"] not in ("pending", "failed"):
+                return dict(self._video_account_data(child), claimed=False)
+            pair_key = "video_account:%s:%s" % (account, row["object_id"])
+            receipt = conn.execute("SELECT * FROM fb_asset_delete_v2_receipts WHERE object_key=?", (pair_key,)).fetchone()
+            if receipt is not None:
+                result = dict(delete_mode=_VIDEO_ACCOUNT_MODE, delete_scope=_VIDEO_ACCOUNT_MODE, account_id=account,
+                    video_id=row["object_id"], success=True, reason="previous_account_deleted", source_job_id=receipt["job_id"],
+                    source_account_attempt_id=receipt["attempt_id"], proof=json.loads(receipt["result"]))
+                conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status='already_deleted',result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                             (_json(result), _now(), job_id, key, account))
+                self._refresh_video_result(conn, row)
+                self._audit(conn, job_id, "video_account_skipped_with_proof", dict(key=key, run_id=run_id, **result))
+                return dict(self._video_account_data(self._video_account(conn, row, account)), claimed=False)
+            attempt_id, now = uuid.uuid4().hex, _now()
+            result = dict(context, account_id=account, video_id=row["object_id"], delete_scope=_VIDEO_ACCOUNT_MODE)
+            conn.execute("INSERT INTO fb_asset_delete_v2_video_account_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (attempt_id, job_id, key, account, run_id, encoded, "in_progress", now, None, _json(result)))
+            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status='in_progress',run_id=?,account_attempt_id=?,result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                         (run_id, attempt_id, _json(result), now, job_id, key, account))
+            self._refresh_video_result(conn, row)
+            self._audit(conn, job_id, "video_account_claimed", dict(key=key, account_id=account, run_id=run_id,
+                account_attempt_id=attempt_id, credential=context))
+            return dict(self._video_account_data(self._video_account(conn, row, account)), claimed=True)
+
+    def finish_video_account(self, job_id, key, run_id, account_id, account_attempt_id, status, result):
+        if status not in ("deleted", "already_deleted", "failed", "blocked", "unknown"):
+            raise StoreError("Invalid account video outcome", "invalid_input")
+        with self._transaction() as conn:
+            row = self._object(conn, job_id, key)
+            child = self._video_account(conn, row, account_id)
+            account = child["account_id"]
+            self._account_outcome(result, account, row["object_id"])
+            if status in SUCCESS_STATUSES and result.get("success") is not True:
+                self._account_outcome(result, account, row["object_id"], require_absent=True)
+            attempt = self._require(conn, "video_account_attempts", "account_attempt_id", account_attempt_id)
+            if (attempt["job_id"], attempt["object_key"], attempt["account_id"], attempt["run_id"]) != (job_id, key, account, run_id):
+                raise StoreError("Account attempt does not match its frozen claim", "claim_conflict")
+            context = json.loads(attempt["context"])
+            if any(field in result and result[field] != context.get(field) for field in _VIDEO_CREDENTIAL_FIELDS -
+                   {"account_id", "video_id"} if field in result):
+                raise StoreError("Account outcome cannot replace its selected identity", "credential_conflict")
+            result = dict(context, **result)
+            encoded = _json(result)
+            if child["account_attempt_id"] == account_attempt_id and child["status"] == status:
+                if attempt["result"] != encoded:
+                    raise StoreError("A completed account attempt is immutable", "claim_conflict")
+                return self._video_account_data(child)
+            self._active_video_parent(conn, job_id, key, run_id)
+            if (child["run_id"], child["account_attempt_id"], child["status"], attempt["status"]) != (run_id, account_attempt_id, "in_progress", "in_progress"):
+                raise StoreError("Only the active account attempt may finish", "claim_conflict")
+            now = _now()
+            conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET status=?,finished_at=?,result=? WHERE account_attempt_id=?",
+                         (status, now, encoded, account_attempt_id))
+            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                         (status, encoded, now, job_id, key, account))
+            if status in SUCCESS_STATUSES:
+                self._receipt(conn, "video_account:%s:%s" % (account, row["object_id"]), job_id, run_id, account_attempt_id, status, encoded)
+            self._refresh_video_result(conn, row)
+            self._audit(conn, job_id, "video_account_finished", dict(key=key, account_id=account, run_id=run_id,
+                account_attempt_id=account_attempt_id, status=status, result=result))
+            return self._video_account_data(self._video_account(conn, row, account))
+
+    @staticmethod
+    def _account_parent_status(results):
+        statuses = {item["status"] for item in results}
+        if statuses & {"in_progress", "unknown"}:
+            return "unknown"
+        return "deleted" if results and statuses <= SUCCESS_STATUSES else "failed"
+
     def finish_object(self, job_id, key, run_id, status, result):
         if status not in ("deleted", "already_deleted", "failed", "blocked", "unknown"):
             raise StoreError("Invalid object outcome", "invalid_input")
@@ -514,6 +732,19 @@ class Store:
         with self._transaction() as conn:
             row = self._object(conn, job_id, key)
             run = self._require(conn, "runs", "run_id", run_id)
+            account_mode = self._is_account_video(conn, row) or (isinstance(result, dict) and result.get("delete_mode") == _VIDEO_ACCOUNT_MODE)
+            if account_mode:
+                if row["kind"] != "video" or result.get("delete_mode") != _VIDEO_ACCOUNT_MODE:
+                    raise StoreError("Account video results must retain their deletion scope", "invalid_input")
+                accounts = self._video_account_results(conn, job_id, key)
+                actual = self._account_parent_status(accounts)
+                if status != actual and not (status in SUCCESS_STATUSES and actual in SUCCESS_STATUSES):
+                    raise StoreError("Parent outcome cannot overwrite its account progress", "claim_conflict")
+                if any(item["status"] == "in_progress" for item in accounts):
+                    raise StoreError("Finish or recover each in-flight account before its parent", "claim_conflict")
+                result = dict(result, account_results=accounts, video_id=row["object_id"],
+                              delete_scope=_VIDEO_ACCOUNT_MODE, success=status in SUCCESS_STATUSES)
+                encoded = _json(result)
             if row["run_id"] == run_id and row["status"] == status:
                 return self._object_data(row)
             if row["run_id"] != run_id or row["status"] != "in_progress" or run["status"] != "running":
@@ -526,7 +757,7 @@ class Store:
                          (status, now, encoded, row["attempt_id"]))
             conn.execute("UPDATE fb_asset_delete_v2_objects SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=?",
                          (status, encoded, now, job_id, key))
-            if status in SUCCESS_STATUSES:
+            if status in SUCCESS_STATUSES and not account_mode:
                 self._receipt(conn, key, job_id, run_id, row["attempt_id"], status, encoded)
             if status == "unknown":
                 conn.execute("UPDATE fb_asset_delete_v2_object_locks SET status='unknown',updated_at=? WHERE object_key=?", (now, key))
@@ -552,6 +783,9 @@ class Store:
         encoded = _json(result)
         with self._transaction() as conn:
             row = self._object(conn, job_id, key)
+            if self._is_account_video(conn, row) or (isinstance(result, dict) and
+                    (result.get("delete_mode") == _VIDEO_ACCOUNT_MODE or result.get("delete_scope") == _VIDEO_ACCOUNT_MODE)):
+                raise StoreError("Account video outcomes require account-specific reconciliation", "account_reconciliation_required")
             if row["status"] in SUCCESS_STATUSES:
                 return self._object_data(row)
             if row["status"] != "unknown":
@@ -576,9 +810,95 @@ class Store:
                 conn.execute("DELETE FROM fb_asset_delete_v2_object_locks WHERE object_key=? AND status='unknown'", (key,))
             return self._object_data(self._object(conn, job_id, key))
 
+    def reconcile_video_account(self, job_id, key, account_id, status, result):
+        """Only an exact, complete account absence proof can settle an unknown."""
+        if status not in ("deleted", "already_deleted", "unknown"):
+            raise StoreError("Reconciliation cannot retry an unknown account", "invalid_input")
+        with self._transaction() as conn:
+            row = self._object(conn, job_id, key)
+            child = self._video_account(conn, row, account_id)
+            account = child["account_id"]
+            self._account_outcome(result, account, row["object_id"], require_absent=status in SUCCESS_STATUSES)
+            lock = conn.execute("SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?", (key,)).fetchone()
+            if lock is not None and lock["status"] == "in_progress":
+                raise StoreError("Cannot reconcile an active video DELETE", "claim_conflict")
+            if child["status"] in SUCCESS_STATUSES:
+                return dict(self._object_data(row), video_account_results=self._video_account_results(conn, job_id, key))
+            if child["status"] != "unknown" or row["status"] != "unknown":
+                raise StoreError("Only unknown account attempts require reconciliation", "invalid_state")
+            if status in SUCCESS_STATUSES:
+                self._receipt(conn, "video_account:%s:%s" % (account, row["object_id"]), job_id,
+                              child["run_id"], child["account_attempt_id"], status, _json(result))
+                children = conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE object_key=? AND account_id=? AND status='unknown'",
+                                        (key, account)).fetchall()
+            else:
+                children = [child]
+            for item in children:
+                updated = dict(json.loads(item["result"]), **result)
+                updated["requires_reconciliation"] = status == "unknown"
+                encoded, now = _json(updated), _now()
+                conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                             (status, encoded, now, item["job_id"], key, account))
+                if item["account_attempt_id"]:
+                    conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET status=?,finished_at=?,result=? WHERE account_attempt_id=? AND status='unknown'",
+                                 (status, now, encoded, item["account_attempt_id"]))
+                self._audit(conn, item["job_id"], "video_account_reconciled", dict(key=key, account_id=account,
+                    source_job_id=job_id, status=status, result=result, account_attempt_id=item["account_attempt_id"]))
+            # Settle the lock holder first, then release tasks that only waited
+            # for that parent fence. No proof is copied to a different account.
+            parents = conn.execute("SELECT * FROM fb_asset_delete_v2_objects WHERE object_key=? AND status='unknown'", (key,)).fetchall()
+            parents.sort(key=lambda item: item["job_id"] != (lock["job_id"] if lock else job_id))
+            for parent in parents:
+                if not self._is_account_video(conn, parent):
+                    continue
+                self._settle_video_parent(conn, parent, "account_read_only_reconciliation", extra={"checked_at": result.get("checked_at", _now())})
+            return dict(self._object_data(self._object(conn, job_id, key)), video_account_results=self._video_account_results(conn, job_id, key))
+
+    def _settle_video_parent(self, conn, row, reason, extra=None):
+        results = self._video_account_results(conn, row["job_id"], row["object_key"])
+        status = self._account_parent_status(results)
+        lock = conn.execute("SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?", (row["object_key"],)).fetchone()
+        owns_lock = lock is not None and (lock["job_id"], lock["attempt_id"]) == (row["job_id"], row["attempt_id"])
+        if lock is not None and not owns_lock:
+            status = "unknown"
+        result = dict(json.loads(row["result"]), **(extra or {}))
+        result.update(delete_mode=_VIDEO_ACCOUNT_MODE, delete_scope=_VIDEO_ACCOUNT_MODE, video_id=row["object_id"],
+                      account_results=results, reason=reason, requires_reconciliation=status == "unknown", success=status in SUCCESS_STATUSES)
+        encoded, now = _json(result), _now()
+        conn.execute("UPDATE fb_asset_delete_v2_objects SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=?",
+                     (status, encoded, now, row["job_id"], row["object_key"]))
+        if row["attempt_id"]:
+            conn.execute("UPDATE fb_asset_delete_v2_attempts SET status=?,finished_at=?,result=? WHERE attempt_id=? AND status IN ('in_progress','unknown')",
+                         (status, now, encoded, row["attempt_id"]))
+        if owns_lock:
+            if status == "unknown":
+                conn.execute("UPDATE fb_asset_delete_v2_object_locks SET status='unknown',updated_at=? WHERE object_key=?", (now, row["object_key"]))
+            else:
+                conn.execute("DELETE FROM fb_asset_delete_v2_object_locks WHERE object_key=? AND attempt_id=?", (row["object_key"], row["attempt_id"]))
+        self._audit(conn, row["job_id"], "video_accounts_aggregated", dict(key=row["object_key"], reason=reason, status=status, result=result))
+        return status
+
+    def _fence_video_accounts(self, conn, row, reason):
+        children = conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key=? AND status='in_progress'",
+                                (row["job_id"], row["object_key"])).fetchall()
+        for child in children:
+            result = dict(json.loads(child["result"]), reason=reason, requires_reconciliation=True)
+            encoded, now = _json(result), _now()
+            conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET status='unknown',finished_at=?,result=? WHERE account_attempt_id=? AND status='in_progress'",
+                         (now, encoded, child["account_attempt_id"]))
+            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status='unknown',result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                         (encoded, now, row["job_id"], row["object_key"], child["account_id"]))
+            self._audit(conn, row["job_id"], "video_account_inflight_unknown", dict(key=row["object_key"],
+                account_id=child["account_id"], account_attempt_id=child["account_attempt_id"], reason=reason))
+        return self._settle_video_parent(conn, row, reason)
+
     def _fence_inflight(self, conn, run_id, reason):
         rows = conn.execute("SELECT * FROM fb_asset_delete_v2_objects WHERE run_id=? AND status='in_progress'", (run_id,)).fetchall()
+        unknown = 0
         for row in rows:
+            if self._is_account_video(conn, row):
+                unknown += self._fence_video_accounts(conn, row, reason) == "unknown"
+                continue
             selected = {k: v for k, v in json.loads(row["result"]).items() if k in _CREDENTIAL_FIELDS}
             now, encoded = _now(), _json(dict(selected, reason=reason, requires_reconciliation=True))
             conn.execute("UPDATE fb_asset_delete_v2_attempts SET status='unknown',finished_at=?,result=? WHERE attempt_id=? AND status='in_progress'",
@@ -587,7 +907,8 @@ class Store:
                          (encoded, now, row["job_id"], row["object_key"]))
             conn.execute("UPDATE fb_asset_delete_v2_object_locks SET status='unknown',updated_at=? WHERE attempt_id=?", (now, row["attempt_id"]))
             self._audit(conn, row["job_id"], "inflight_became_unknown", {"key": row["object_key"], "run_id": run_id, "reason": reason})
-        return len(rows)
+            unknown += 1
+        return unknown
 
     def finish_run(self, run_id, status, summary=None):
         if status not in ("completed", "partial", "interrupted", "failed"):

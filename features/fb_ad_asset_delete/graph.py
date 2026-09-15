@@ -42,11 +42,12 @@ class GraphError(AssetError):
 
 class GraphClient:
     def __init__(self, token_provider, version="v25.0", transport=None, timeout=20, max_inventory=50000,
-                 video_credential_provider=None):
+                 video_credential_provider=None, video_account_credential_provider=None):
         if not re.fullmatch(r"v[0-9]+\.[0-9]+", version):
             raise ValueError("invalid graph version")
         self.token_provider = token_provider
         self.video_credential_provider = video_credential_provider
+        self.video_account_credential_provider = video_account_credential_provider
         self.base = "https://graph.facebook.com/" + version + "/"
         self.http = transport or requests.Session()
         self.timeout = timeout
@@ -419,6 +420,119 @@ class GraphClient:
             if "verified_video_ids" in obj and set(proof["video_ids"]) != set(obj["verified_video_ids"]):
                 raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
         return "pending", proof
+
+    @staticmethod
+    def _video_account_target(obj, account):
+        if obj.get("kind") != "video":
+            raise GraphError("invalid_video_kind", "账户视频接口只接受冻结 Video")
+        vid, aid = meta_id(obj["object_id"]), account_id(account)
+        allowed = {account_id(value) for value in obj.get("account_ids", [])}
+        if aid not in allowed:
+            raise GraphError("account_outside_preview", "广告账户不在该 Video 的冻结范围内")
+        return vid, aid
+
+    def prepare_video_account_delete(self, obj, account_id):
+        """Select a current source User Token; no Meta GET is a write gate."""
+        _, aid = self._video_account_target(obj, account_id)
+        users = list(dict.fromkeys(str(x) for x in obj.get("user_ids", []) if self._identity_id(x)))
+        context = {"delete_mode": "ad_account_video", "delete_account_id": aid,
+                   "delete_endpoint": "act_" + aid + "/advideos", "credential_kind": "user"}
+        if self.video_account_credential_provider is not None:
+            try:
+                credential = self.video_account_credential_provider(obj, aid)
+                if isinstance(credential, dict):
+                    uid = self._identity_id(credential.get("credential_user_id"))
+                    token = credential.get("token")
+                    relation = credential.get("credential_relation")
+                    if (uid in users and credential.get("credential_kind") == "user" and
+                            isinstance(token, str) and token.strip() and relation in ("ad_source_user", "fallback")):
+                        context.update(credential_user_id=uid, credential_relation=relation,
+                            credential_lookup="matched" if relation == "ad_source_user" else "fallback",
+                            credential_lookup_message="使用该账户源广告记录的投放用户凭证" if relation == "ad_source_user" else
+                                "源投放凭证不可用，使用原冻结候选用户的现有凭证")
+                        fbid = self._identity_id(credential.get("credential_fb_user_id"))
+                        if fbid:
+                            context["credential_fb_user_id"] = fbid
+                        return token, context
+            except Exception:
+                # Source recovery only improves credential selection. Do not
+                # turn missing history into a new account/video read gate.
+                pass
+        for uid in users:
+            try:
+                token = self.token_provider([uid])
+            except Exception:
+                raise GraphError("credential_read_unavailable", "User Token 读取未完成", detail=context) from None
+            if token:
+                context.update(credential_user_id=uid, credential_relation="fallback", credential_lookup="fallback",
+                               credential_lookup_message="使用原冻结候选用户的现有凭证，未进行 Meta 读取预检")
+                return token, context
+        raise GraphError("missing_token", "冻结候选用户没有可用的 Meta User Token", detail=context)
+
+    def delete_video_account(self, obj, account_id, prepared=None):
+        """One DELETE of the frozen (account, video), without token rotation."""
+        context = {}
+        try:
+            vid, aid = self._video_account_target(obj, account_id)
+            token, context = prepared if prepared is not None else self.prepare_video_account_delete(obj, aid)
+            context = deepcopy(context)
+            endpoint = "act_" + aid + "/advideos"
+            if (context.get("delete_mode") != "ad_account_video" or context.get("delete_account_id") != aid or
+                    context.get("delete_endpoint") != endpoint or context.get("credential_kind") != "user"):
+                raise GraphError("prepared_account_mismatch", "已审计凭证与目标广告账户不一致")
+            result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
+            data = self.request("DELETE", endpoint, token, {"video_id": vid})
+            if data is True or isinstance(data, dict) and data.get("success") is True:
+                return "deleted", dict(result, success=True, checked_at=now())
+            return "unknown", dict(result, code="unconfirmed_delete_response", message="Meta 未明确确认账户视频删除结果，需要核实", checked_at=now())
+        except AssetError as exc:
+            state = "unknown" if getattr(exc, "uncertain", False) else "failed"
+            return state, dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
+                delete_mode="ad_account_video", delete_scope="ad_account_video", code=exc.code,
+                message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
+
+    def reconcile_video_account(self, obj, account_id):
+        """Only a complete account-library read can prove this pair is absent."""
+        context = {}
+        try:
+            vid, aid = self._video_account_target(obj, account_id)
+            token, context = self.prepare_video_account_delete(obj, aid)
+            result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
+            params, seen, cursors, pages = {"fields": "id", "limit": "100"}, set(), set(), 0
+            deadline = time.monotonic() + 30
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GraphError("account_video_read_limit", "账户视频完整核实已达到时限")
+                data = self.request("GET", "act_" + aid + "/advideos", token, params, timeout=min(self.timeout, 5, remaining))
+                pages += 1
+                if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                    raise GraphError("account_video_read_incomplete", "账户视频列表未完整返回")
+                for item in data["data"]:
+                    ident = self._identity_id(item.get("id")) if isinstance(item, dict) else ""
+                    if not ident or ident in seen:
+                        raise GraphError("account_video_read_incomplete", "账户视频列表含无法核实或重复的记录")
+                    if ident == vid:
+                        return "unknown", dict(result, code="account_video_present", message="该账户下仍能读取此 Video，保持待核实且不自动重试", checked_at=now())
+                    seen.add(ident)
+                    if len(seen) > self.max_inventory:
+                        raise GraphError("account_video_read_limit", "账户视频列表超过完整核实上限")
+                paging = data.get("paging", {})
+                if not isinstance(paging, dict):
+                    raise GraphError("account_video_read_incomplete", "账户视频分页信息无效")
+                if not paging.get("next"):
+                    proof = {"account_id": aid, "video_id": vid, "complete": True, "pages": pages, "items": len(seen)}
+                    return "already_deleted", dict(result, confirmed_absent=True, proof=proof,
+                        message="完整读取该账户视频库后确认已无此 Video", checked_at=now())
+                after = (paging.get("cursors") or {}).get("after") if isinstance(paging.get("cursors", {}), dict) else None
+                if not isinstance(after, str) or not after or len(after) > 4096 or after in cursors or pages >= min(self.max_inventory, 500):
+                    raise GraphError("account_video_read_incomplete", "账户视频分页不完整或已达到上限")
+                cursors.add(after)
+                params["after"] = after
+        except AssetError as exc:
+            return "unknown", dict(context, account_id=str(account_id).removeprefix("act_"), video_id=str(obj.get("object_id", "")),
+                delete_mode="ad_account_video", delete_scope="ad_account_video", code=exc.code,
+                message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
 
     def delete(self, obj, prepared=None):
         """Call only after a durable attempt has been claimed by the service."""
