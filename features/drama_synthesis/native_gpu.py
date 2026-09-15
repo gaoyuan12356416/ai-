@@ -1,9 +1,9 @@
-"""Private NVDEC -> CUDA -> NVENC chunk candidate; no business or upload APIs.
+"""Tracked NVDEC -> CUDA -> NVENC chunk renderer; no business or upload APIs.
 
 The low-level 1.0.2 NVIDIA demuxer does not preserve PTS in this runtime and its
 seek path crashes. PyAV therefore supplies demuxed Annex-B packets and exact
-timestamps; NVDEC is used only for pixel decoding. Until the full validation
-matrix passes this module is an offline candidate, not a production fallback.
+timestamps; NVDEC is used only for pixel decoding. Runtime preflight, immutable
+asset receipts and the parent compositor's checkpoints gate production use.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .gpu_compositor import compile_opencl_kernel
 from .h264_headers import packet_dimensions
 
 KERNEL = Path(__file__).with_name("cuda") / "random_overlay_v1.cu"
-IDENTITY = "nvdec-cuda-nvenc-v1-candidate"
+IDENTITY = "nvdec-cuda-nvenc-rgba-demux-v2"
 
 
 def fps_slot(seconds):
@@ -31,6 +31,15 @@ def fps_slot(seconds):
     if value < 0:
         return -fps_slot(-Fraction(seconds))
     return (2 * value.numerator + value.denominator) // (2 * value.denominator)
+
+
+def container_origin(container, stream):
+    # FFmpeg's input -ss uses the container clock. Video can start a few
+    # milliseconds after audio; subtracting video.start_time changes the
+    # 25 -> 30 fps duplicate pattern and breaks chunk boundary alignment.
+    if container.start_time is not None:
+        return Fraction(container.start_time, 1000000)
+    return (stream.start_time or 0) * stream.time_base
 
 
 class Timeline:
@@ -61,7 +70,9 @@ def _asset_frames(av, np, entry, phase, image):
         time_base = stream.time_base
         phase = Fraction(str(phase))
         container.seek(int(phase / time_base), stream=stream, backward=True, any_frame=False)
-        offset = -phase
+        # Keep the absolute clock through trim -> fps -> setpts. Subtracting
+        # phase before rounding moves duplicate frames at fractional phases.
+        offset = Fraction(0)
         while True:
             last_end = None
             yielded = False
@@ -73,7 +84,7 @@ def _asset_frames(av, np, entry, phase, image):
                 timestamp = packet.pts * time_base
                 duration = packet.duration * time_base if packet.duration else Fraction(1, CANVAS_FPS)
                 last_end = timestamp + duration
-                if timestamp + offset < 0:
+                if timestamp + offset < phase:
                     continue
                 array = np.frombuffer(packet, dtype=np.uint8).reshape(CANVAS_HEIGHT, CANVAS_WIDTH, 4)
                 yield timestamp + offset, array
@@ -105,7 +116,7 @@ def _main_frames(av, nvc, cp, source, start, convert):
         if int(context.colorspace) != 1 or int(context.color_range) != 1:
             raise RuntimeError("native_source_color_unsupported")
         start = Fraction(str(start))
-        origin = (stream.start_time or 0) * stream.time_base
+        origin = container_origin(container, stream)
         time_base = stream.time_base
         container.seek(int((start + origin) / time_base), stream=stream, backward=True, any_frame=False)
         bsf = av.BitStreamFilterContext("h264_mp4toannexb", stream)

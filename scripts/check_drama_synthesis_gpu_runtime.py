@@ -461,7 +461,8 @@ def main(argv=None):
         "issues": issues,
         "model_sha256": model_hashes,
         "runtime_fingerprint": runtime_fingerprint,
-        "cuda_tested": False,
+        "cuda_tested": (os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl") == "cuda"
+                        and compositor_pipeline_checked and not issues),
         "compositor_pipeline_checked": compositor_pipeline_checked and not issues,
         "asset_cache_verified_count": asset_cache_verified_count,
         "app_import_checked": bool(args.check_app_import and not issues),

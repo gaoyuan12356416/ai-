@@ -7,9 +7,10 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
+from types import SimpleNamespace
 
 from features.drama_synthesis import asset_cache
-from features.drama_synthesis.native_gpu import Timeline, fps_slot
+from features.drama_synthesis.native_gpu import Timeline, fps_slot, container_origin
 from features.drama_synthesis.h264_headers import sps_dimensions, packet_dimensions
 from features.drama_synthesis.gpu import run_render_with_progress
 
@@ -95,6 +96,16 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(timeline.at(29), 0)
         with self.assertRaisesRegex(RuntimeError, "ended_early"):
             timeline.at(31)
+
+    def test_audio_video_start_offset_keeps_container_clock(self):
+        stream = SimpleNamespace(start_time=269, time_base=Fraction(1, 12800))
+        self.assertEqual(container_origin(SimpleNamespace(start_time=0), stream), 0)
+        self.assertEqual(container_origin(SimpleNamespace(start_time=None), stream), Fraction(269, 12800))
+
+    def test_nonzero_pts_25_to_30_duplicate_pattern(self):
+        # FFmpeg fps=30,setpts=PTS-STARTPTS for video starting 21 ms after audio.
+        timeline = Timeline((Fraction(21, 1000) + Fraction(i, 25), i) for i in range(50))
+        self.assertEqual([timeline.at(i) for i in range(10)], [0, 1, 2, 3, 4, 4, 5, 6, 7, 8])
 
 
 class NativeBoundaryTests(unittest.TestCase):
