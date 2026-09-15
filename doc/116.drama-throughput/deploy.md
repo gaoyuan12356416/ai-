@@ -20,15 +20,17 @@
 
 ## 2026-09-15 已部署
 
-- 生产代码提交：`82274708ebb750f6a1d15be3627e70aab5c11a60`；GitHub 分支 `codex/drama-throughput-20260915`。
+- 最终生产代码提交：`6e37c72b9a730e190a43a3ee41a21f5b4b5d1866`；GitHub 分支 `codex/drama-throughput-20260915`。前两版 `8227470`、`dbdec9a` 的改动包含在最终提交中。
 - CPU 拉取检出：`/mnt/data-disk/drama-throughput-20260915/source`；备份 `/mnt/data-disk/drama-throughput-20260915/backups/pre-8227470`。
-- HK 发布：`/data/drama-synthesis-gpu/releases/82274708ebb750f6a1d15be3627e70aab5c11a60`；备份 `/data/drama-synthesis-gpu/backups/20260915-throughput-pre-8227470`。
+- HK 发布：`/data/drama-synthesis-gpu/releases/6e37c72b9a730e190a43a3ee41a21f5b4b5d1866`；原基线备份 `/data/drama-synthesis-gpu/backups/20260915-throughput-pre-8227470`。中间版本备份使用相同前缀的 `pre-dbdec9a`、`pre-6e37c72`。
 - CPU 新增 `drama-material-job-worker.service.d/99-drama-throughput.conf`，观察数量 2。
-- HK 新增 `drama-synthesis-gpu-worker.service.d/99-drama-throughput.conf`，完整 release SHA、下载 6、预取 2、预算 16 GiB、空闲 20 GiB。
+- HK 新增 `drama-synthesis-gpu-worker.service.d/99-drama-throughput.conf`，完整 release SHA、下载 6、预取 2、下载阶段重叠 1、预算 16 GiB、空闲 20 GiB。
 - CPU API/job worker、HK worker/tunnel 均已重启并 active/running；API topbar、公网页面、CPU 到 HK 的 healthz 均 HTTP 200。
-- 原任务保留 ID、冻结输入指纹和已完成 44 集下载；GPU 代次从 1 到 2，CPU 自动接回原任务。
+- 原任务保留 ID、冻结输入指纹和全部 53 集完整下载记录；最终 GPU 代次为 4，CPU 原租约持续接回。下一任务代次保持 1，并继续复用此前部分下载。
 
 旧 GPU 优雅退出等待下载线程超过 120 秒。切换前暂停其主进程，确认操作系统与 runtime 均无子进程、无 YouTube 媒体文件句柄，核验 4 个部分下载文件的持久前缀 SHA，再结束旧服务。证明保存于 HK 备份内 `shutdown-checkpoint-proof.json`。重启后复核 44 个完整记录仍在；重新校验期间网络传输为零、无新增 FFmpeg 转码命令。
+
+最后一次切换时，旧服务已在拼接准备阶段自然退出，MainPID=0；核验原任务 53 个完整记录、下一任务两个持久部分文件后切换最终发布。证据位于 `pre-6e37c72/shutdown-checkpoint-proof.json`。CPU 的 async_runtime/prefetch 两个模块从最终 GitHub 检出精确同步，无需再次重启 API。运维脚本发送信号前必须检查 PID 大于 1、进程身份仍匹配；服务已经停止时直接核验记录后切换，不向 PID 0 发送信号。
 
 ## 精确代码回滚
 
