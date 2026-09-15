@@ -28,6 +28,7 @@
 - 107 个停止时的素材文件前缀全部匹配，无缺失、无改写。恢复时先验证磁盘素材，进度计数暂时重算；随后确认 53/54 下载与规格化文件复用，最后一集从已有 partial 继续传输。
 - 20:04:47 CPU 回读：任务 98%，已下载 53/54、规格化 53/54、4750.3MB/4756.5MB、1.02MB/s，无错误。
 - 20:07:58 GPU 回读：最后一集已续传并完成规格化，合并视频完成，原任务进入上传（1,862,270,976 / 3,418,532,325 字节）；两服务仍 active、NRestarts=0。
+- 20:09:17 GPU 回读 completed、3,418,532,325 字节已全部上传；20:09:18 CPU 回读 done / 100% / 全部产物已生成，error_message 为空。当前 CPU 隧道继续返回 cuda 与正确代码 SHA。最终恢复与业务完成证据见备份目录 final-verification.json。
 - 剩余业务任务只启用了 concat_video，random_template_video=false。原生模板渲染在真实服务预检和私有完整样片中验证；该拼接任务本身不会触发模板 CUDA 渲染。新随机模板任务自动使用新链路。
 
 证据保存在备份目录；固定样片见 test-report.md。本地 `artifacts/drama-gpu-frame-pipeline-20260915/evidence-summary.json` 为脱敏汇总，不含 worker.env、原始业务 payload 或凭证。
