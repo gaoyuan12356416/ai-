@@ -16,8 +16,31 @@
 ## 台账
 FB_AD_ASSET_DELETE_DB_PATH默认/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3；FB_AD_ASSET_DELETE_GRAPH_VERSION默认v25.0。不可回退根盘；业务MySQL必须63350且@@read_only=1。旧台账原位置只读展示。
 
-## 回滚原则
-仅回滚代码/静态，保留当前V2台账与未知锁；不要把历史台账备份覆盖当前进度。回滚若恢复旧功能实现，应先关闭本模块入口及旧删除执行路由。精确备份路径、提交、检查结果与回滚命令在部署完成后补录。
+## 已部署版本与证据
+- 完成时间：2026-09-15 11:43（Asia/Shanghai）。GitHub分支 `codex/meta-drama-asset-delete-20260915`，部署版本 `9d77fec3fe06492c249db3092cc91b3a496c08e5`。
+- 主API与两处静态先部署 `0077d29b3dfb0af505f953c1180ddc3b86606e87`；随后 `9d77fec` 增加 Nginx 转发，应用代码与静态内容相同。
+- GitHub服务器检出目录：`/mnt/data-disk/meta-ad-asset-delete/release-9d77fec3fe06`。19个部署目标（包括两处静态和Nginx配置）与该版本逐文件SHA256一致。
+- 代码、两处静态、原SQLite在线备份及校验清单：`/mnt/data-disk/meta-ad-asset-delete/backup-20260915T033429Z-0077d29b3dfb`。
+- Nginx新增配置 `/etc/nginx/default.d/fb-ad-asset-delete.conf`；变更记录 `/mnt/data-disk/meta-ad-asset-delete/nginx-backup-20260915T0344Z-9d77fec3fe06/plan.json`，变更前该配置不存在。
+- 切换时暂停9个发布timer并等待正在运行的发布任务自然结束；仅重启 `drama-material-api.service`。全部9个timer已恢复active。Nginx配置通过 `nginx -t` 后热重载，主API与Nginx均active。
+- 公网页面200；`/api/ui/topbar` 200且暴露新模块；新products/jobs接口未登录401。补齐Nginx路由后重新验证，已排除初次公网404。
+- 新台账 `PRAGMA integrity_check=ok`，任务数0、执行尝试数0；没有线上真实删除。主API重启后错误日志无新增条目。
+- 本地与服务器Python3.9.6均通过106项针对性测试。详见测试报告。
+
+## 精确回滚步骤
+仅回滚代码/静态，保留当前V2台账、成功凭据和未知锁；不要把历史台账备份覆盖当前进度。
+
+1. 暂停上述9个发布timer，记录其原状态，等待所有相关发布service自然结束；同时确认本模块没有正在执行的任务。不要强杀发布请求。
+2. 执行以下命令。脚本先核验备份及当前部署文件，发现漂移会拒绝覆盖；恢复的旧app会立即关闭三个旧删除入口。
+
+```bash
+python3 /mnt/data-disk/meta-ad-asset-delete/release-0077d29b3dfb/scripts/deploy_meta_asset_delete.py rollback /mnt/data-disk/meta-ad-asset-delete/backup-20260915T033429Z-0077d29b3dfb
+systemctl restart drama-material-api.service
+```
+
+3. 检查主API和健康接口，按备份中的 `timer-states.json` 恢复原本active的timer。保留Nginx转发配置；旧删除入口已在回滚代码中关闭，不能通过恢复旧页面重新执行删除。
+
+9个timer为：`x-auto-post-runner`、`x-auto-post-scheduler`、`x-post-schedule-claim`、`x-post-schedule`、`x-post-manual`、`tt-post-runner`、`tt-auto-post-runner`、`tt-auto-post-scheduler`、`fb-auto-post-runner`（均以 `.timer` 结尾）。
 
 ## 生产只读校验与性能边界
 - 产品目录329项；826未包含；3543是W2A、父产品3360。

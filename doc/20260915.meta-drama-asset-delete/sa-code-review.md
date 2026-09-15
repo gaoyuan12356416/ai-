@@ -1,6 +1,6 @@
 # 代码评审记录
 
-已完成台账与core/source/graph的独立测试审查，服务编排23项独立测试已通过，未留阻断缺陷。
+已完成台账与core/source/graph的独立测试审查，服务编排23项独立测试已通过。已修复发现的匹配、阶段和删除安全性缺陷；Video全局引用核验的生产性能限制仍存在，核验超时时阻止Video，详见测试报告。
 
 已修复审查项：
 - 素材product/language与所选父产品和语言版本不符时阻止。
@@ -12,4 +12,4 @@
 - 历史SQLite使用只读URI并显式关闭连接。
 - UI执行响应不确定保留request_id，同键核对；AbortError不直接改写只读message属性。
 
-上线前再次运行全部针对性测试、Python3.9服务端测试、JS语法和diff检查。详细结果在test-report.md；最终部署证据在deploy.md。
+已完成106项本地及Python3.9服务端针对性测试、JS语法和diff检查。Nginx配置检查与公网登录门禁验收通过。详细结果在test-report.md；最终部署证据在deploy.md。

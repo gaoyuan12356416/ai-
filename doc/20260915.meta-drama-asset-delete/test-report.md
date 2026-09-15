@@ -1,8 +1,8 @@
 # 测试报告
 
-日期：2026-09-15。Windows隔离工作区，Python3.14；部署前还将使用服务端Python3.9.6运行相同测试。所有Graph写请求均为Mock。
+日期：2026-09-15。Windows隔离工作区Python3.14、服务器Python3.9.6均已测试。所有Graph写请求均为Mock；生产验收仅做读取。
 
-最终本地针对性测试：102项全部通过（store19、core/graph24、source27、service23、bridge9），耗时2.50秒。JS node --check通过，app.py和新功能包py_compile通过。
+最终针对性测试：106项全部通过（store19、core/graph24、source29、service23、bridge9、部署回滚1、SQL适配1）。本地耗时3.099秒、服务器2.099秒。JS node --check通过，app.py和新功能包py_compile通过。Nginx新增转发通过真实 `nginx -t` 与公网401验收。
 
 浏览器本机Mock（127.0.0.1:8766）已验证：
 - 页面统一侧栏、顶栏、用户卡；零默认产品。
@@ -12,8 +12,13 @@
 - 模拟执行时Ad阶段未被处理；修改剧ID后执行按钮禁用、需重新预览。
 - 旧Post任务只读，执行入口隐藏。
 
-未使用任何线上真实DELETE；生产只读验收、最终用例总数与结果在部署后补录。
+线上验收：部署版本9d77fec，19个目标文件SHA256一致，主API和Nginx均active，9个发布timer已恢复。公网HTML200、顶栏200，新products/jobs接口未登录401。生产浏览器显示新版标题、后台框架、用户卡与登录门禁。台账完整性ok，任务0、执行尝试0；未使用任何线上真实DELETE。
 
 补充浏览器验收：execute模拟第一次503已受理，页面禁用新执行并保留request_id；点击核对后以相同request_id返回已有运行。Mock请求日志证实两次参数和request_id完全相同。
 
-生产只读校验通过内容/资源/产品解析与Meta AD/Creative关系；Video全局引用扫描180秒超时按设计阻止，不能宣称真实Video删除已验收。增加字符集、单查询全部Video目标、账户索引、SQL stdin兼容和关闭旧执行的回滚测试。
+生产只读校验通过内容/资源/产品解析与Meta Ad/Creative关系：短剧目录329项且不含826；content_id=66075322仅1个en版本，series_code=XEY271展开10个版本；content_id=68608322/product3543匹配11个Ad。指定Ad/Creative真实GET成功，Creative返回2个视频ID。
+
+Video全局引用扫描实测超过180秒，按设计阻止Video且不影响Creative/Ad独立阶段；不能宣称线上真实Video删除已验收。当前源表无合适Video索引，此项性能限制仍存在，未修改业务源库。字符集、单查询全部Video目标、账户索引、SQL stdin兼容和关闭旧执行的回滚已有针对性测试。
+
+## 验收结论
+页面、权限门禁、精确匹配、阶段状态机、幂等恢复和台账实现已上线，模拟删除测试通过。线上只读验收通过上述范围；真实删除由操作人在页面确认具体目标后触发。Video仍受全局引用核验性能限制，核验未完成时明确阻止，不能记为成功或零引用。
