@@ -1,5 +1,6 @@
 """Video reference completeness tests using temporary SQLite and mocked processes."""
 from copy import deepcopy
+from contextlib import closing
 import io
 import json
 from pathlib import Path
@@ -167,6 +168,60 @@ class VideoIndexTests(unittest.TestCase):
                     index.references(["123"], fresh=True)
                 self.assertEqual(error.exception.code, "video_index_malformed")
                 self.assertEqual(index._proof()["malformed_rows"], 1)
+
+    def test_zero_placeholders_are_empty_but_full_length_numeric_tail_is_ambiguous(self):
+        index, _ = self.index([[1, "101", "301", "444", "0,0, 0;0"],
+                               [2, "102", "301", "444", "123"]])
+        refs = index.references(["123"])
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs.proof["malformed_rows"], 0)
+        # Syntactically valid 512-character CSV may end in a truncated numeric ID.
+        raw = ("123456789012345," * 35)[:512]
+        index.stream = Mock(return_value=iter([[3, "103", "302", "555", raw]]))
+        with self.assertRaises(AssetError) as error:
+            index.references(["123"], fresh=True)
+        self.assertEqual(error.exception.code, "video_index_malformed")
+
+    def test_old_parser_generation_is_rebuilt_even_before_expiry(self):
+        index, stream = self.index([[1, "101", "301", "444", "123"]])
+        proof = index.build()
+        proof.pop("format_version")
+        with closing(sqlite3.connect(str(index.path))) as conn:
+            conn.execute("UPDATE metadata SET value=? WHERE key='proof'", (json.dumps(proof),))
+            conn.commit()
+        result = index.references(["123"])
+        self.assertEqual(stream.call_count, 2)
+        self.assertEqual(result.proof["format_version"], 2)
+        self.assertNotEqual(result.proof["generation_id"], proof["generation_id"])
+
+    def test_live_resolver_preserves_outside_references_and_never_caches_missing_permissions(self):
+        index, _ = self.index([[1, "101", "301", "444", "123"],
+                               [2, "102", "outside", "555", "456,"]])
+        resolver = Mock(return_value=[dict(key="video:123", ad_id="102", product_id="outside", account_id="555"),
+                                      dict(key="video:999", ad_id="102", product_id="outside", account_id="555")])
+        refs = index.references(["123"], resolver=resolver)
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0]["product_id"], "outside")
+        self.assertEqual(resolver.call_args.args[0][0]["row_id"], 2)
+        resolver.side_effect = AssetError("video_reference_unverified", "permission denied")
+        with self.assertRaises(AssetError) as error:
+            index.references(["123"], resolver=resolver)
+        self.assertEqual(error.exception.code, "video_reference_unverified")
+
+    def test_resolver_timeout_and_excessive_anomalies_cannot_return_partial_references(self):
+        index, _ = self.index([[1, "101", "301", "444", "123,"]])
+        def slow_resolver(records):
+            self.wall_time += 61
+            return []
+        with self.assertRaises(AssetError) as error:
+            index.references(["123"], resolver=slow_resolver)
+        self.assertEqual(error.exception.code, "video_index_expired")
+        index.stream = Mock(return_value=iter([[i, str(100+i), "301", "444", "123,"] for i in range(1, 102)]))
+        resolver = Mock(return_value=[])
+        with self.assertRaises(AssetError) as error:
+            index.references(["123"], fresh=True, resolver=resolver)
+        self.assertEqual(error.exception.code, "video_index_malformed")
+        resolver.assert_not_called()
 
     def test_build_singleflight_lock_excludes_other_instances_and_releases_after_completion(self):
         first, _ = self.index()

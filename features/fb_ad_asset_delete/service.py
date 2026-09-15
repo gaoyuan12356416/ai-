@@ -374,7 +374,7 @@ class Service:
         retryable = {"reference_check_incomplete", "shared_outside_scope", "source_unavailable",
                      "read_unavailable", "video_owner_unverified", "video_index_incomplete",
                      "video_index_expired", "video_index_malformed", "video_index_unavailable",
-                     "video_index_building", "video_index_disk_full", "video_index_too_large"}
+                     "video_index_building", "video_index_disk_full", "video_index_too_large", "video_reference_unverified"}
         checked, released = 0, 0
         try:
             job = self.store.get_job(job_id)

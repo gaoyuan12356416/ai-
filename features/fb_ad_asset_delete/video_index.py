@@ -6,6 +6,7 @@ source DDL, background timer, token persistence, or Meta mutation is involved.
 from contextlib import closing
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -15,11 +16,23 @@ import time
 import uuid
 from .core import AssetError, stored_ids, stored_ids_complete
 
+FORMAT_VERSION = 2
+
 
 class ReferenceRows(list):
     def __init__(self, rows=(), proof=None):
         super().__init__(rows)
         self.proof = proof
+
+
+def video_ids_complete(raw):
+    text = str(raw or "").strip()
+    # A full VARCHAR(512) can be silently cut even when its last token is numeric.
+    if len(str(raw or "")) >= 512:
+        return False
+    if re.fullmatch(r"0(?:\s*[,;]\s*0)*", text):
+        return True  # explicit zero placeholders cannot identify a Meta node
+    return stored_ids_complete(raw)
 
 
 class MysqlVideoStream:
@@ -117,7 +130,7 @@ class VideoIndex:
 
     def validate(self, proof):
         age = self.clock() - float((proof or {}).get("snapshot_started_at", 0))
-        if not proof or proof.get("complete") is not True or age < 0 or age >= self.max_age:
+        if not proof or proof.get("format_version") != FORMAT_VERSION or proof.get("complete") is not True or age < 0 or age >= self.max_age:
             raise AssetError("video_index_expired", "视频引用快照不完整或已过期，请重新核验；未执行该视频删除", 409)
 
     def build(self, progress=None):
@@ -151,7 +164,7 @@ class VideoIndex:
                     raise ValueError("invalid source row")
                 rid, aid, product, account, raw = row
                 count += 1
-                if not stored_ids_complete(raw):
+                if not video_ids_complete(raw):
                     malformed += 1
                     conn.execute("INSERT INTO malformed VALUES (?,?,?,?,?)", (int(rid), str(aid or ""), str(product or ""), str(account or ""), str(raw)))
                 else:
@@ -177,7 +190,7 @@ class VideoIndex:
             conn.executemany("INSERT INTO ads VALUES (?,?,?,?)", ads)
             conn.executemany("INSERT INTO refs VALUES (?,?)", refs)
             conn.execute("CREATE INDEX refs_video ON refs(video_id)")
-            proof = dict(generation_id=stage.stem.removeprefix("building-"), complete=True,
+            proof = dict(format_version=FORMAT_VERSION, generation_id=stage.stem.removeprefix("building-"), complete=True,
                          snapshot_started_at=started, completed_at=self.clock(), source_rows=count,
                          relations=relations, malformed_rows=malformed)
             self.validate(proof)
@@ -213,7 +226,7 @@ class VideoIndex:
             if stage.exists():
                 stage.unlink()
 
-    def references(self, ids, fresh=False, progress=None):
+    def references(self, ids, fresh=False, progress=None, resolver=None):
         self._storage()
         proof = self._proof()
         try:
@@ -229,7 +242,14 @@ class VideoIndex:
                 proof = json.loads(conn.execute("SELECT value FROM metadata WHERE key='proof'").fetchone()[0])
                 self.validate(proof)
                 if proof["malformed_rows"]:
-                    raise AssetError("video_index_malformed", "全局视频引用存在 %s 条无法完整解析的记录，暂不能排除共享引用" % proof["malformed_rows"], 409)
+                    if resolver is None or proof["malformed_rows"] > 100:
+                        raise AssetError("video_index_malformed", "全局视频引用存在 %s 条无法完整解析的记录，需核实历史广告实际关系" % proof["malformed_rows"], 409)
+                    bad = [dict(zip(("row_id", "ad_id", "product_id", "account_id", "raw"), row))
+                           for row in conn.execute("SELECT row_id,ad_id,product_id,account_id,raw FROM malformed LIMIT 101")]
+                    if len(bad) != proof["malformed_rows"]:
+                        raise AssetError("video_index_incomplete", "历史视频异常记录不完整，保持阻止", 503)
+                    target_keys = {"video:" + v for v in ids}
+                    result.extend(r for r in resolver(bad) if r["key"] in target_keys)
                 for offset in range(0, len(ids), 250):
                     part = ids[offset:offset+250]
                     rows = conn.execute("SELECT r.video_id,a.ad_id,a.product_id,a.account_id FROM refs r JOIN ads a ON a.row_id=r.row_id WHERE r.video_id IN (" + ",".join("?" * len(part)) + ") LIMIT 100001", part).fetchall()

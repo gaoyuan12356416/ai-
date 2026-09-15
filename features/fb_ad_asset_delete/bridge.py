@@ -39,7 +39,8 @@ def get_service(app):
                 MysqlVideoStream(app["MYSQL_BASE_CMD"], app["MYSQL_PASSWORD"], app["AD_CONTROL_DB_NAME"]),
                 validate_storage=check_disk)
             source = SqlSource(query, schema=app["AD_CONTROL_DB_NAME"], video_index=video_index,
-                lookup_actor=lambda session: app["lookup_admin_group_for_actor"](app["ad_material_actor"](session)))
+                lookup_actor=lambda session: app["lookup_admin_group_for_actor"](app["ad_material_actor"](session)),
+                reference_graph_factory=lambda: GraphClient(source.token, version=os.environ.get("FB_AD_ASSET_DELETE_GRAPH_VERSION", "v25.0")))
 
             def authorize(session):
                 fresh = app["load_session"](session.get("session_token", ""))

@@ -295,6 +295,39 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "video_index_unavailable")
         source.query.assert_not_called()
 
+    def anomaly_source(self, side_effect):
+        graph = Mock()
+        graph.read_node.side_effect = side_effect
+        source = SqlSource(Mock(), reference_graph_factory=lambda: graph)
+        source.read = Mock(return_value=[dict(row_id="1", ad_id="901", account_id="act_444", user_id="803", default_user="804")])
+        return source, graph, [dict(row_id=1, ad_id="901", account_id="act_444", product_id="999", raw="123,")]
+
+    def test_truncated_reference_requires_live_meta_proof_and_keeps_other_product(self):
+        source, graph, rows = self.anomaly_source([dict(id="901", account_id="444", status="ACTIVE"),
+            dict(id="901", creative=dict(id="201", asset_feed_spec=dict(videos=[dict(video_id="301")])))] )
+        refs = source.resolve_video_anomalies(rows, [dict(user_ids=["805"])])
+        self.assertEqual(refs, [dict(key="video:301", ad_id="901", product_id="999", account_id="444")])
+        self.assertEqual(graph.read_node.call_args_list[0].args[0]["user_ids"], ["803", "804", "805"])
+        graph.delete.assert_not_called()
+
+    def test_only_explicit_meta_deleted_state_clears_truncated_history(self):
+        source, graph, rows = self.anomaly_source([dict(id="901", account_id="444", status="DELETED")])
+        self.assertEqual(source.resolve_video_anomalies(rows, []), [])
+        self.assertEqual(graph.read_node.call_count, 1)
+        from features.fb_ad_asset_delete.graph import GraphError
+        source, graph, rows = self.anomaly_source(GraphError("200", "Permissions error"))
+        with self.assertRaises(AssetError) as error:
+            source.resolve_video_anomalies(rows, [])
+        self.assertEqual(error.exception.code, "video_reference_unverified")
+        self.assertEqual(error.exception.detail["reference_account_id"], "444")
+        graph.delete.assert_not_called()
+
+    def test_anomaly_does_not_treat_missing_creative_as_no_video(self):
+        source, graph, rows = self.anomaly_source([dict(id="901", account_id="444", status="ACTIVE"), dict(id="901")])
+        with self.assertRaises(AssetError) as error:
+            source.resolve_video_anomalies(rows, [])
+        self.assertEqual(error.exception.code, "video_reference_unverified")
+
     def test_global_ad_identity_conflict_is_checked_outside_selected_product(self):
         for other in (dict(ad_id="1001", product_id="999", account_id="444"),
                       dict(ad_id="1001", product_id="301", account_id="555")):

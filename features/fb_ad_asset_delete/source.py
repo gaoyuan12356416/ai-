@@ -1,6 +1,6 @@
 """Read-only business-source adapter; all queries use the existing SQL FIFO gate."""
 import re
-from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete
+from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete, creative_video_ids
 from .video_index import ReferenceRows
 
 
@@ -25,13 +25,14 @@ def chunks(values, size=250):
 class SqlSource:
     AD_COLUMNS = ("row_id", "product_id", "ad_id", "creative_id", "video_ids_raw", "source_ids_raw", "original_ids_raw", "account_id", "user_id", "campaign_id", "ad_name", "campaign_name", "local_status")
 
-    def __init__(self, query, schema="kunlunads_dev", lookup_actor=None, video_index=None):
+    def __init__(self, query, schema="kunlunads_dev", lookup_actor=None, video_index=None, reference_graph_factory=None):
         if not re.fullmatch(r"[A-Za-z0-9_]+", schema):
             raise ValueError("invalid source schema")
         self.query = query
         self.schema = "`%s`" % schema
         self.lookup_actor = lookup_actor or (lambda session: {})
         self.video_index = video_index
+        self.reference_graph_factory = reference_graph_factory
 
     def read(self, sql, columns, timeout=30):
         if not sql.lstrip().upper().startswith("SELECT"):
@@ -231,7 +232,8 @@ class SqlSource:
             if kind == "video":
                 if self.video_index is None:
                     raise AssetError("video_index_unavailable", "视频引用索引未配置，保持阻止", 503)
-                video_refs = self.video_index.references(ids, fresh=fresh, progress=progress)
+                resolver = (lambda rows: self.resolve_video_anomalies(rows, objects)) if self.reference_graph_factory else None
+                video_refs = self.video_index.references(ids, fresh=fresh, progress=progress, resolver=resolver)
                 refs.extend(video_refs)
                 refs.proof = video_refs.proof
                 continue
@@ -265,6 +267,43 @@ class SqlSource:
         if self.video_index is None:
             raise AssetError("video_index_unavailable", "视频引用索引未配置，保持阻止", 503)
         self.video_index.validate(getattr(refs, "proof", None))
+
+    def resolve_video_anomalies(self, records, objects):
+        """Only current Meta GET proof may repair ambiguous/truncated source fields."""
+        from .graph import AD_FIELDS
+        graph = self.reference_graph_factory()
+        ids = [str(r["row_id"]) for r in records]
+        rows = self.read("SELECT CAST(a.id AS CHAR),a.ad_id,a.ad_account_id,CAST(a.user_id AS CHAR),CAST(COALESCE(p.default_user,0) AS CHAR) FROM %s.ads_facebook_auto_created_data a LEFT JOIN %s.ads_apps_setting p ON p.id=a.product WHERE a.id IN %s LIMIT 101" % (self.schema, self.schema, inside(ids)),
+                         ("row_id", "ad_id", "account_id", "user_id", "default_user"))
+        source = {r["row_id"]: r for r in rows}
+        fallback_users = sorted({u for o in objects for u in o.get("user_ids", [])})
+        refs = []
+        for record in records:
+            row = source.get(str(record["row_id"]))
+            aid = str(record["account_id"]).removeprefix("act_")
+            try:
+                if not row or row["ad_id"] != record["ad_id"] or account_id(row["account_id"]) != aid:
+                    raise AssetError("reference_identity_changed", "历史引用归属发生变化")
+                obj = dict(object_id=record["ad_id"], account_ids=[aid],
+                           user_ids=list(dict.fromkeys([row["user_id"], row["default_user"]] + fallback_users)))
+                ad = graph.read_node(obj, "id,account_id,status,effective_status")
+                if account_id(ad.get("account_id")) != aid:
+                    raise AssetError("account_mismatch", "历史广告所属账户无法确认")
+                if ad.get("status") == "DELETED" or ad.get("effective_status") == "DELETED":
+                    continue
+                ad = graph.read_node(obj, AD_FIELDS.replace("asset_feed_spec", "asset_feed_spec,image_hash"))
+                creative = ad.get("creative") or {}
+                videos = creative_video_ids(creative)
+                images = creative.get("image_hash") or (creative.get("asset_feed_spec") or {}).get("images")
+                if not creative.get("id") or not videos and not images:
+                    raise AssetError("reference_creative_unverified", "历史广告完整视频关系无法确认")
+                refs.extend(dict(key="video:"+vid, ad_id=record["ad_id"], product_id=record["product_id"], account_id=aid) for vid in videos)
+            except AssetError as exc:
+                error = AssetError("video_reference_unverified", "历史视频引用字段可能截断，无法核实账户 %s 的 Ad %s。请由有权访问该账户的管理员恢复读取后重新核验（Meta/读取错误 %s）" % (aid, record["ad_id"], exc.code), 409)
+                error.detail = dict(source_row_id=record["row_id"], reference_account_id=aid, reference_ad_id=record["ad_id"],
+                                    cause=getattr(exc, "detail", {}), unresolved_records=len(records))
+                raise error from None
+        return refs
 
     def token(self, user_ids):
         candidates = [str(x) for x in user_ids if re.fullmatch(r"[1-9][0-9]*", str(x))]
