@@ -19,6 +19,7 @@ import time
 from .asset_cache import verified_entry
 from .composition import CANVAS_FPS, CANVAS_HEIGHT, CANVAS_WIDTH
 from .gpu_compositor import compile_opencl_kernel
+from .h264_headers import packet_dimensions
 
 KERNEL = Path(__file__).with_name("cuda") / "random_overlay_v1.cu"
 IDENTITY = "nvdec-cuda-nvenc-v1-candidate"
@@ -106,7 +107,13 @@ def _main_frames(av, nvc, cp, source, start, convert):
         time_base = stream.time_base
         container.seek(int((start + origin) / time_base), stream=stream, backward=True, any_frame=False)
         bsf = av.BitStreamFilterContext("h264_mp4toannexb", stream)
-        decoder = nvc.CreateDecoder(gpuid=0, codec=nvc.cudaVideoCodec.H264, usedevicememory=True)
+        cp.cuda.runtime.free(0)
+        context_pointer = cp.cuda.driver.ctxGetCurrent()
+        def new_decoder():
+            return nvc.CreateDecoder(gpuid=0, codec=nvc.cudaVideoCodec.H264, usedevicememory=True,
+                                     cudacontext=context_pointer, cudastream=cp.cuda.get_current_stream().ptr)
+        decoder = new_decoder()
+        dimensions = None
         pending = deque()
 
         def decoded(packet):
@@ -135,6 +142,18 @@ def _main_frames(av, nvc, cp, source, start, convert):
             for filtered in bsf.filter(packet):
                 if filtered.pts is None:
                     raise RuntimeError("native_source_timestamp_missing")
+                new_dimensions = packet_dimensions(bytes(filtered))
+                if new_dimensions is not None:
+                    if dimensions is not None and new_dimensions != dimensions:
+                        if not packet.is_keyframe:
+                            raise RuntimeError("native_resolution_change_requires_keyframe")
+                        empty = nvc.PacketData()
+                        empty.bsl, empty.bsl_data = 0, 0
+                        yield from decoded(empty)
+                        if pending:
+                            raise RuntimeError("native_boundary_frames_missing")
+                        decoder = new_decoder()
+                    dimensions = new_dimensions
                 pending.append(filtered.pts * time_base)
                 data = nvc.PacketData()
                 data.bsl, data.bsl_data = filtered.size, filtered.buffer_ptr
@@ -230,7 +249,9 @@ def render(plan, progress=None):
 def main(argv=None):
     import argparse
     import resource
+    import ctypes
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # No crash dumps of production media memory.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True)
     args = parser.parse_args(argv)
