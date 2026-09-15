@@ -145,7 +145,9 @@ def _main_frames(av, nvc, cp, source, start, convert):
                 new_dimensions = packet_dimensions(bytes(filtered))
                 if new_dimensions is not None:
                     if dimensions is not None and new_dimensions != dimensions:
-                        if not packet.is_keyframe:
+                        # PyAV's BSF consumes the original packet; use the
+                        # returned packet's flags, not the now-empty input.
+                        if not filtered.is_keyframe:
                             raise RuntimeError("native_resolution_change_requires_keyframe")
                         empty = nvc.PacketData()
                         empty.bsl, empty.bsl_data = 0, 0
