@@ -1,50 +1,498 @@
 (function () {
   const DEFAULT_NAV = [
     {
+      key: "ad_control",
+      label: "AI自动规则调控",
+      order: 5,
+      module: "ad_control_center",
+      items: [
+        {
+          key: "adControl",
+          label: "调控概览",
+          description: "查看状态、风险提示和常用入口",
+          kind: "page",
+          href: "/ad-control.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "adControlRules",
+          label: "规则组管理",
+          description: "创建、编辑、复制、启停规则组",
+          kind: "page",
+          href: "/ad-control-rules.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 20,
+        },
+        {
+          key: "adControlPools",
+          label: "账户池",
+          description: "按产品维护账户池",
+          kind: "page",
+          href: "/ad-control-account-pools.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 30,
+        },
+        {
+          key: "adControlBindings",
+          label: "绑定关系",
+          description: "绑定产品、账户池和规则组",
+          kind: "page",
+          href: "/ad-control-bindings.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 40,
+        },
+        {
+          key: "adControlRun",
+          label: "运行控制台",
+          description: "Preview、dry-run、确认关闭和急停",
+          kind: "page",
+          href: "/ad-control-run.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 50,
+        },
+        {
+          key: "adControlTokens",
+          label: "Token配置",
+          description: "配置产品默认和账户级 token",
+          kind: "page",
+          href: "/ad-control-tokens.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 60,
+        },
+        {
+          key: "adControlLogs",
+          label: "执行日志",
+          description: "查看调控审计和失败原因",
+          kind: "page",
+          href: "/ad-control-logs.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 70,
+        },
+        {
+          key: "fbPostAdDelete",
+          label: "Post/Ad删除",
+          description: "按剧 ID 查找并先删 Facebook Post 后删 Ad",
+          kind: "page",
+          href: "/fb-post-ad-delete.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 80,
+        },
+      ],
+    },
+    {
       key: "drama",
-      label: "剧集合成",
+      label: "短剧任务列表",
+      order: 10,
       module: "drama_synthesis",
       items: [
-        { key: "tasks", label: "任务列表", description: "创建、重试、删除、查看结果", kind: "page", href: "/", module: "drama_synthesis", enabled: true, order: 10 },
-        { key: "screenshots", label: "截图素材", description: "批量提交剧 ID，查看图片进度", kind: "page", href: "/screenshots.html", module: "cover_synthesis", enabled: true, order: 20 }
-      ]
+        {
+          key: "tasks",
+          label: "剧集合成",
+          description: "创建、重试、删除、查看结果",
+          kind: "page",
+          href: "/drama-synthesis.html",
+          module: "drama_synthesis",
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "screenshots",
+          label: "封面图合成",
+          description: "批量提交剧 ID，查看图片进度",
+          kind: "page",
+          href: "/screenshots.html",
+          module: "cover_synthesis",
+          enabled: true,
+          order: 20,
+        },
+      ],
     },
     {
       key: "ad_material",
       label: "投放素材",
+      order: 20,
       module: "ad_material_tasks",
       items: [
-        { key: "adMaterials", label: "投放素材任务", description: "创建需求、审核素材并完成上报", kind: "page", href: "/#adMaterials", module: "ad_material_tasks", enabled: true, order: 10 }
-      ]
+        {
+          key: "adMaterials",
+          label: "投放素材任务",
+          description: "创建需求、审核素材并完成上报",
+          kind: "page",
+          href: "/ad-material-tasks.html",
+          module: "ad_material_tasks",
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
+      key: "ad_material_test",
+      label: "投放素材测试",
+      order: 21,
+      module: "ad_material_test",
+      items: [
+        {
+          key: "adMaterialTest",
+          label: "投放素材测试环境",
+          description: "独立测试服务，不影响线上任务",
+          kind: "page",
+          href: "https://ai.yingliangads.com/ad-material-test/#adMaterials",
+          module: "ad_material_test",
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
+      key: "voiceover",
+      label: "配音剧素材",
+      order: 30,
+      module: "voiceover_drama_tasks",
+      items: [
+        {
+          key: "voiceoverTasks",
+          label: "配音剧语种任务",
+          description: "查询系列素材并批量创建设计师需求",
+          kind: "page",
+          href: "/voiceover-drama.html",
+          module: "voiceover_drama_tasks",
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
+      key: "tiktok_platform",
+      label: "TikTok 社媒",
+      order: 35,
+      module: "tt_posts",
+      items: [
+        {
+          key: "ttAccountSettings",
+          label: "TT 个号管理",
+          description: "维护每个 TikTok 个号的隐私、互动和内容披露设置",
+          kind: "page",
+          href: "/tt-account-settings.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "ttPostPool",
+          label: "TT Post发布池",
+          description: "选择账号、素材和发布时间，确认后加入安全发布队列",
+          kind: "page",
+          href: "/tt-post-pool.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 20,
+        },
+        {
+          key: "ttAutoPublishTemplates",
+          label: "TT 自动发布模板",
+          description: "创建、复制、启停和手动执行自动选材发布模板",
+          kind: "page",
+          href: "/tt-auto-publish-templates.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 30,
+        },
+        {
+          key: "ttAutoPublishRuns",
+          label: "TT 发布日志",
+          description: "统一查看素材池发布与自动发布任务、状态和结果",
+          kind: "page",
+          href: "/tt-publish-logs.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        },
+      ],
+    },
+    {
+      key: "facebook_platform",
+      label: "Facebook 社媒",
+      order: 38,
+      module: "fb_page_posts",
+      items: [
+        {
+          key: "fbAutoPublishTemplates",
+          label: "FB Page 自动发布模板",
+          description: "按Page池维护视频选材和发布时间模板",
+          kind: "page",
+          href: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
+          module: "fb_page_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "fbAutoPublishRuns",
+          label: "FB Page 发布记录",
+          description: "查看Page冻结、跳过原因和Graph发布结果",
+          kind: "page",
+          href: "/fb-auto-publish-runs.html",
+          module: "fb_page_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 20,
+        },
+      ],
+    },
+    {
+      key: "x_platform",
+      label: "X平台推广",
+      order: 40,
+      module: "x_accounts",
+      items: [
+        {
+          key: "xAccounts",
+          label: "X账号授权",
+          description: "授权并管理自己的多个X账号",
+          kind: "page",
+          href: "/x-accounts.html",
+          module: "x_accounts",
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "xAccountList",
+          label: "X账号列表",
+          description: "查看全部X账号及授权状态",
+          kind: "page",
+          href: "/x-account-list.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
+          order: 20,
+        },
+        {
+          key: "xAutoPublishTemplates",
+          label: "X Post 自动发布模板",
+          description: "维护独立的选材、文案和发布时间模板",
+          kind: "page",
+          href: "/x-auto-publish-templates.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 21,
+        },
+        {
+          key: "xAutoPublishRuns",
+          label: "X Post 自动发布记录",
+          description: "查看模板运行、账号任务和最终发布结果",
+          kind: "page",
+          href: "/x-auto-publish-runs.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 22,
+        },
+        {
+          key: "xPostMaterialPool",
+          label: "Post素材池",
+          description: "维护定时发布使用的自定义素材",
+          kind: "page",
+          href: "/x-post-material-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 30,
+        },
+        {
+          key: "xPostDramaPool",
+          label: "Post短剧池",
+          description: "按短剧免费集数顺序维护和发布Post",
+          kind: "page",
+          href: "/x-post-drama-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        },
+        {
+          key: "xPostLogs",
+          label: "Post发布日志",
+          description: "查看每日选材、发布结果和预览链接",
+          kind: "page",
+          href: "/x-post-logs.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
+          order: 50,
+        },
+      ],
+    },
+    {
+      key: "youtube_platform",
+      label: "YouTube 社媒",
+      order: 45,
+      module: "youtube_auto_publish",
+      items: [
+        {
+          key: "youtubeAutoPublish",
+          label: "YouTube 自动发布",
+          description: "选择视频素材、审核封面并发布到 YouTube",
+          kind: "page",
+          href: "/youtube-publish.html",
+          module: "youtube_auto_publish",
+          enabled: true,
+          order: 10,
+        },
+      ],
     },
     {
       key: "system",
       label: "设置",
+      order: 90,
       adminOnly: true,
       items: [
-        { key: "settings", label: "基础设置", description: "产品映射和系统说明", kind: "page", href: "/settings.html", adminOnly: true, enabled: true, order: 10 },
-        { key: "navigation", label: "快速导航栏配置", description: "维护后台左侧导航", kind: "page", href: "/navigation.html", adminOnly: true, enabled: true, order: 15 },
-        { key: "users", label: "用户管理", description: "查看登录用户和权限", kind: "page", href: "/users.html", adminOnly: true, enabled: true, order: 20 },
-        { key: "logs", label: "操作日志", description: "仅管理员可见", kind: "page", href: "/logs.html", adminOnly: true, enabled: true, order: 30 }
-      ]
-    }
+        {
+          key: "settings",
+          label: "基础设置",
+          description: "产品映射和系统说明",
+          kind: "page",
+          href: "/settings.html",
+          adminOnly: true,
+          enabled: true,
+          order: 10,
+        },
+        {
+          key: "navigation",
+          label: "快速导航栏配置",
+          description: "维护后台左侧导航",
+          kind: "page",
+          href: "/navigation.html",
+          adminOnly: true,
+          enabled: true,
+          order: 15,
+        },
+        {
+          key: "users",
+          label: "用户管理",
+          description: "查看登录用户和权限",
+          kind: "page",
+          href: "/users.html",
+          adminOnly: true,
+          enabled: true,
+          order: 20,
+        },
+        {
+          key: "logs",
+          label: "操作日志",
+          description: "仅管理员可见",
+          kind: "page",
+          href: "/logs.html",
+          adminOnly: true,
+          enabled: true,
+          order: 30,
+        },
+      ],
+    },
   ];
 
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v5";
+  const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
+  // Open the current page's group on entry; retain explicit toggles across renders.
+  const expandedGroups = new Set();
+  const activeKeys = new WeakMap();
 
   function injectStyle() {
     if (styleInjected) return;
     styleInjected = true;
     const style = document.createElement("style");
     style.textContent = `
-      .quick-nav-root .nav-group, .nav .nav-group { display: grid; gap: 8px; margin-bottom: 14px; }
-      .quick-nav-root .nav-parent, .nav .nav-parent { color: rgba(237,243,255,.66); font-size: 12px; font-weight: 700; padding: 6px 10px; }
-      .quick-nav-root .nav-children, .nav .nav-children { display: grid; gap: 6px; }
-      .quick-nav-root .nav-item, .nav .nav-item { width: 100%; border: 0; background: transparent; color: inherit; text-align: left; border-radius: 14px; padding: 12px 14px; cursor: pointer; display: block; text-decoration: none; }
-      .quick-nav-root .nav-item:hover, .nav .nav-item:hover, .quick-nav-root .nav-item.active, .nav .nav-item.active { background: linear-gradient(135deg, rgba(47,102,255,.96), rgba(31,72,201,.96)); box-shadow: 0 12px 24px rgba(23, 50, 131, .28); color: #fff; }
-      .quick-nav-root .nav-item span, .nav .nav-item span { display: block; margin-top: 4px; color: rgba(237,243,255,.64); font-size: 12px; }
-      .quick-nav-root .nav-item strong, .nav .nav-item strong { display: block; font-size: 14px; }
+      .quick-nav-root,
+      .nav { display: grid; gap: 10px; }
+      .quick-nav-root .nav-group,
+      .nav .nav-group {
+        display: grid;
+        gap: 6px;
+        border-radius: 16px;
+        padding: 6px;
+        background: rgba(255,255,255,.04);
+      }
+      .quick-nav-root .nav-parent,
+      .nav .nav-parent {
+        width: 100%;
+        min-height: 36px;
+        border: 0;
+        background: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: rgba(237,243,255,.86);
+        font: inherit;
+        font-weight: 800;
+        padding: 10px 12px;
+        cursor: pointer;
+        border-radius: 12px;
+        text-align: left;
+      }
+      .quick-nav-root .nav-parent:hover,
+      .nav .nav-parent:hover { background: rgba(255,255,255,.07); }
+      .quick-nav-root .nav-parent::after,
+      .nav .nav-parent::after {
+        content: "\\203A";
+        color: rgba(237,243,255,.62);
+        font-size: 20px;
+        line-height: 1;
+        transition: transform .18s ease;
+        transform: rotate(90deg);
+      }
+      .quick-nav-root .nav-group.collapsed .nav-parent::after,
+      .nav .nav-group.collapsed .nav-parent::after { transform: rotate(0deg); }
+      .quick-nav-root .nav-children,
+      .nav .nav-children { display: grid; gap: 6px; padding-left: 8px; }
+      .quick-nav-root .nav-group.collapsed .nav-children,
+      .nav .nav-group.collapsed .nav-children { display: none; }
+      .quick-nav-root .nav-item,
+      .nav .nav-item {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        border-radius: 14px;
+        padding: 12px 14px 12px 18px;
+        cursor: pointer;
+        display: block;
+        text-decoration: none;
+      }
+      .quick-nav-root .nav-item:hover,
+      .nav .nav-item:hover,
+      .quick-nav-root .nav-item.active,
+      .nav .nav-item.active {
+        background: linear-gradient(135deg, rgba(47,102,255,.96), rgba(31,72,201,.96));
+        box-shadow: 0 12px 24px rgba(23, 50, 131, .28);
+        color: #fff;
+      }
+      .quick-nav-root .nav-item span,
+      .nav .nav-item span {
+        display: block;
+        margin-top: 4px;
+        color: rgba(237,243,255,.64);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .quick-nav-root .nav-item strong,
+      .nav .nav-item strong { display: block; font-size: 14px; line-height: 1.25; }
     `;
     document.head.appendChild(style);
   }
@@ -78,13 +526,35 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
-    tasks: "#tasks",
-    screenshots: "#screenshots",
-    adMaterials: "#adMaterials",
-    settings: "#settings",
-    navigation: "#navigation",
-    users: "#users",
-    logs: "#logs"
+    tasks: "/drama-synthesis.html",
+    screenshots: "/screenshots.html",
+    adMaterials: "/ad-material-tasks.html",
+    voiceoverTasks: "/voiceover-drama.html",
+    ttAccountSettings: "/tt-account-settings.html",
+    ttPostPool: "/tt-post-pool.html",
+    ttAutoPublishTemplates: "/tt-auto-publish-templates.html",
+    ttAutoPublishRuns: "/tt-publish-logs.html",
+    fbAutoPublishTemplates: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
+    fbAutoPublishRuns: "/fb-auto-publish-runs.html",
+    xAccounts: "/x-accounts.html",
+    xAccountList: "/x-account-list.html",
+    xAutoPublishTemplates: "/x-auto-publish-templates.html",
+    xAutoPublishRuns: "/x-auto-publish-runs.html",
+    xPostMaterialPool: "/x-post-material-pool.html",
+    xPostDramaPool: "/x-post-drama-pool.html",
+    xPostLogs: "/x-post-logs.html",
+    adControl: "/ad-control.html",
+    adControlRules: "/ad-control-rules.html",
+    adControlPools: "/ad-control-account-pools.html",
+    adControlBindings: "/ad-control-bindings.html",
+    adControlRun: "/ad-control-run.html",
+    adControlTokens: "/ad-control-tokens.html",
+    adControlLogs: "/ad-control-logs.html",
+    fbPostAdDelete: "/fb-post-ad-delete.html",
+    settings: "/settings.html",
+    navigation: "/navigation.html",
+    users: "/users.html",
+    logs: "/logs.html",
   };
 
   function navItemHref(item) {
@@ -92,23 +562,255 @@
     return INTERNAL_VIEW_HREFS[key] || item.href || "#";
   }
 
-  function mergeDefaultNav(config) {
-    const groups = Array.isArray(config) ? config.slice() : [];
-    for (const defaultGroup of DEFAULT_NAV) {
-      const group = groups.find(item => item.key === defaultGroup.key);
-      if (!group) {
-        groups.push(defaultGroup);
-        continue;
-      }
-      const existing = new Set((group.items || []).map(item => item.key));
-      for (const defaultItem of defaultGroup.items || []) {
-        if (!existing.has(defaultItem.key)) {
-          group.items = group.items || [];
-          group.items.push(defaultItem);
-        }
-      }
+  function cloneNav(config) {
+    return JSON.parse(JSON.stringify(Array.isArray(config) ? config : []));
+  }
+
+  function normalizeNavConfig(config) {
+    if (!Array.isArray(config)) return null;
+    const normalized = cloneNav(config);
+    let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
+    if (!tiktokPlatform) {
+      tiktokPlatform = {
+        key: "tiktok_platform",
+        label: "TikTok 社媒",
+        order: 35,
+        module: "tt_posts",
+        items: [],
+      };
+      normalized.push(tiktokPlatform);
     }
-    return groups;
+    if (!Array.isArray(tiktokPlatform.items)) tiktokPlatform.items = [];
+    const ttAccountSettingsExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAccountSettings"
+    );
+    if (!ttAccountSettingsExists) {
+      tiktokPlatform.items.push({
+        key: "ttAccountSettings",
+        label: "TT 个号管理",
+        description: "维护每个 TikTok 个号的隐私、互动和内容披露设置",
+        kind: "page",
+        href: "/tt-account-settings.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 10,
+      });
+    }
+    const ttPostPoolExists = tiktokPlatform.items.some(item => item && item.key === "ttPostPool");
+    if (!ttPostPoolExists) {
+      tiktokPlatform.items.push({
+        key: "ttPostPool",
+        label: "TT Post发布池",
+        description: "选择账号、素材和发布时间，确认后加入安全发布队列",
+        kind: "page",
+        href: "/tt-post-pool.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 20,
+      });
+    }
+    const ttPostPool = tiktokPlatform.items.find(
+      item => item && item.key === "ttPostPool"
+    );
+    if (ttPostPool && Number(ttPostPool.order || 0) <= 10) {
+      ttPostPool.order = 20;
+    }
+    const ttAutoPublishTemplatesExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAutoPublishTemplates"
+    );
+    if (!ttAutoPublishTemplatesExists) {
+      tiktokPlatform.items.push({
+        key: "ttAutoPublishTemplates",
+        label: "TT 自动发布模板",
+        description: "创建、复制、启停和手动执行自动选材发布模板",
+        kind: "page",
+        href: "/tt-auto-publish-templates.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 30,
+      });
+    }
+    const ttAutoPublishRunsExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAutoPublishRuns"
+    );
+    if (!ttAutoPublishRunsExists) {
+      tiktokPlatform.items.push({
+        key: "ttAutoPublishRuns",
+        label: "TT 发布日志",
+        description: "统一查看素材池发布与自动发布任务、状态和结果",
+        kind: "page",
+        href: "/tt-publish-logs.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 40,
+      });
+    }
+    const xPlatform = normalized.find(group => group && group.key === "x_platform");
+    let facebookPlatform = normalized.find(group => group && group.key === "facebook_platform");
+    if (!facebookPlatform) {
+      facebookPlatform = {
+        key: "facebook_platform",
+        label: "Facebook 社媒",
+        order: 38,
+        module: "fb_page_posts",
+        items: [],
+      };
+      normalized.push(facebookPlatform);
+    }
+    if (!Array.isArray(facebookPlatform.items)) facebookPlatform.items = [];
+    if (!facebookPlatform.items.some(item => item && item.key === "fbAutoPublishTemplates")) {
+      facebookPlatform.items.push({
+        key: "fbAutoPublishTemplates",
+        label: "FB Page 自动发布模板",
+        description: "按Page池维护视频选材和发布时间模板",
+        kind: "page",
+        href: "/fb-auto-publish-templates.html?v=20260820-list-only-v2",
+        module: "fb_page_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 10,
+      });
+    }
+    if (!facebookPlatform.items.some(item => item && item.key === "fbAutoPublishRuns")) {
+      facebookPlatform.items.push({
+        key: "fbAutoPublishRuns",
+        label: "FB Page 发布记录",
+        description: "查看Page冻结、跳过原因和Graph发布结果",
+        kind: "page",
+        href: "/fb-auto-publish-runs.html",
+        module: "fb_page_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 20,
+      });
+    }
+    if (xPlatform) {
+      if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      const xAutoPublishTemplatesExists = xPlatform.items.some(
+        item => item && item.key === "xAutoPublishTemplates"
+      );
+      if (!xAutoPublishTemplatesExists) {
+        xPlatform.items.push({
+          key: "xAutoPublishTemplates",
+          label: "X Post 自动发布模板",
+          description: "维护独立的选材、文案和发布时间模板",
+          kind: "page",
+          href: "/x-auto-publish-templates.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 21,
+        });
+      }
+      const xAutoPublishRunsExists = xPlatform.items.some(
+        item => item && item.key === "xAutoPublishRuns"
+      );
+      if (!xAutoPublishRunsExists) {
+        xPlatform.items.push({
+          key: "xAutoPublishRuns",
+          label: "X Post 自动发布记录",
+          description: "查看模板运行、账号任务和最终发布结果",
+          kind: "page",
+          href: "/x-auto-publish-runs.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 22,
+        });
+      }
+      const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
+      if (!exists) {
+        xPlatform.items.push({
+          key: "xPostMaterialPool",
+          label: "Post素材池",
+          description: "维护定时发布使用的自定义素材",
+          kind: "page",
+          href: "/x-post-material-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 30,
+        });
+      }
+      const dramaPoolExists = xPlatform.items.some(item => item && item.key === "xPostDramaPool");
+      if (!dramaPoolExists) {
+        xPlatform.items.push({
+          key: "xPostDramaPool",
+          label: "Post短剧池",
+          description: "按短剧免费集数顺序维护和发布Post",
+          kind: "page",
+          href: "/x-post-drama-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        });
+      }
+      const postLogs = xPlatform.items.find(item => item && item.key === "xPostLogs");
+      if (postLogs && Number(postLogs.order || 0) <= 40) postLogs.order = 50;
+    }
+    return normalized;
+  }
+
+  function readStoredConfig() {
+    try {
+      const raw = localStorage.getItem(CONFIG_CACHE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (!cached || !cached.updatedAt || cached.updatedAt + CONFIG_CACHE_TTL_MS <= Date.now()) {
+        try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (storageError) {}
+        return null;
+      }
+      return normalizeNavConfig(cached && cached.items);
+    } catch (error) {
+      try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (storageError) {}
+      return null;
+    }
+  }
+
+  function writeStoredConfig(config) {
+    try {
+      const items = normalizeNavConfig(config);
+      if (!items) return;
+      localStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify({ items, updatedAt: Date.now() }));
+    } catch (error) {}
+  }
+
+  function readStoredAuth() {
+    try {
+      const raw = localStorage.getItem(AUTH_CACHE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (!cached || cached.expiresAt <= Date.now()) return null;
+      return cached.auth || null;
+    } catch (error) {
+      try { localStorage.removeItem(AUTH_CACHE_KEY); } catch (storageError) {}
+      return null;
+    }
+  }
+
+  function writeStoredAuth(auth) {
+    if (!(auth && auth.authenticated && auth.user)) {
+      try { localStorage.removeItem(AUTH_CACHE_KEY); } catch (error) {}
+      return;
+    }
+    try {
+      localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify({
+        auth,
+        authenticated: true,
+        user: auth.user,
+        expiresAt: Date.now() + 6 * 60 * 60 * 1000,
+      }));
+    } catch (error) {}
+  }
+
+  function renderOptions(options) {
+    const merged = Object.assign({}, options || {});
+    if (!merged.auth) merged.auth = readStoredAuth() || {};
+    else writeStoredAuth(merged.auth);
+    return merged;
   }
 
   async function loadConfig() {
@@ -116,17 +818,35 @@
     try {
       const response = await fetch("/navigation.json", { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error("navigation config request failed");
-      navCache = mergeDefaultNav(await response.json());
+      const config = normalizeNavConfig(await response.json());
+      if (!config) throw new Error("navigation config must be an array");
+      navCache = config;
+      writeStoredConfig(config);
     } catch (error) {
-      navCache = DEFAULT_NAV;
+      navCache = readStoredConfig() || cloneNav(DEFAULT_NAV);
     }
     return navCache;
+  }
+
+  function itemLookup(config) {
+    const lookup = {};
+    for (const group of config || []) {
+      for (const item of group.items || []) {
+        lookup[item.key] = item;
+      }
+    }
+    return lookup;
   }
 
   function renderItem(item, activeKey) {
     const active = item.key === activeKey || item.view === activeKey;
     const description = item.description ? `<span>${escapeHtml(item.description)}</span>` : "";
-    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" data-quick-nav-view="${escapeHtml(item.view || "")}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+  }
+
+  function renderGroup(group, items, activeKey) {
+    const collapsed = expandedGroups.has(group.key) ? "" : " collapsed";
+    return `<div class="nav-group${collapsed}" data-quick-nav-group="${escapeHtml(group.key)}"><button class="nav-parent" type="button" data-quick-nav-toggle="${escapeHtml(group.key)}">${escapeHtml(group.label || "")}</button><div class="nav-children">${items.map(item => renderItem(item, activeKey)).join("")}</div></div>`;
   }
 
   function buildNavHtml(config, options) {
@@ -134,8 +854,48 @@
       if (!visibleFor(options.auth || {}, group)) return "";
       const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
       if (!items.length) return "";
-      return `<div class="nav-group"><div class="nav-parent">${escapeHtml(group.label || "")}</div><div class="nav-children">${items.map(item => renderItem(item, options.activeKey)).join("")}</div></div>`;
+      return renderGroup(group, items, options.activeKey);
     }).join("");
+  }
+
+  function setActive(container, activeKey) {
+    const root = typeof container === "string" ? document.querySelector(container) : container;
+    if (!root) return;
+    root.querySelectorAll(".nav-item").forEach(item => {
+      item.classList.toggle("active", item.dataset.quickNavKey === activeKey || (!!activeKey && item.dataset.quickNavView === activeKey));
+    });
+    const activeGroup = root.querySelector(".nav-item.active")?.closest(".nav-group");
+    const previous = activeKeys.get(root);
+    if (activeGroup) {
+      const groupKey = activeGroup.dataset.quickNavGroup;
+      if (!previous || previous.key !== activeKey || previous.group !== groupKey) {
+        expandedGroups.add(groupKey);
+        activeGroup.classList.remove("collapsed");
+      }
+      activeKeys.set(root, { key: activeKey, group: groupKey });
+    } else {
+      activeKeys.delete(root);
+    }
+  }
+
+  function bindEvents(container, config, options) {
+    container.onclick = event => {
+      const toggle = event.target.closest("[data-quick-nav-toggle]");
+      if (toggle && container.contains(toggle)) {
+        const key = toggle.dataset.quickNavToggle || "";
+        if (expandedGroups.has(key)) expandedGroups.delete(key);
+        else expandedGroups.add(key);
+        toggle.closest(".nav-group")?.classList.toggle("collapsed", !expandedGroups.has(key));
+        return;
+      }
+      const link = event.target.closest("a.nav-item");
+      if (!link || !container.contains(link) || typeof options.onNavigate !== "function") return;
+      const items = itemLookup(config);
+      const item = items[link.dataset.quickNavKey] || null;
+      if (!item) return;
+      event.preventDefault();
+      options.onNavigate(item, event);
+    };
   }
 
   async function render(options) {
@@ -143,14 +903,22 @@
     if (!container) return;
     injectStyle();
     container.classList.add("quick-nav-root");
-    container.innerHTML = buildNavHtml(navCache || DEFAULT_NAV, options);
+    const initialOptions = renderOptions(options);
+    const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
+    container.innerHTML = buildNavHtml(initialConfig, initialOptions);
+    setActive(container, initialOptions.activeKey);
+    bindEvents(container, initialConfig, initialOptions);
     const config = await loadConfig();
-    container.innerHTML = buildNavHtml(config, options);
+    const finalOptions = renderOptions(options);
+    container.innerHTML = buildNavHtml(config, finalOptions);
+    setActive(container, finalOptions.activeKey);
+    bindEvents(container, config, finalOptions);
   }
 
   function clearCache() {
     navCache = null;
+    try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (error) {}
   }
 
-  window.QuickNav = { render, loadConfig, clearCache };
+  window.QuickNav = { render, loadConfig, clearCache, setActive };
 })();

@@ -31,6 +31,9 @@
 
 
 import base64
+import binascii
+from email import policy
+from email.parser import BytesParser
 import json
 
 import concurrent.futures
@@ -130,6 +133,7 @@ import hmac
 
 
 import logging
+import math
 
 
 
@@ -162,6 +166,7 @@ import logging
 
 
 import os
+import posixpath
 
 
 
@@ -258,6 +263,8 @@ import secrets
 
 
 import shutil
+import socket
+import ipaddress
 
 
 
@@ -321,6 +328,7 @@ import sqlite3
 
 
 
+import signal
 import subprocess
 
 
@@ -516,6 +524,7 @@ import unicodedata
 
 
 import wave
+import zipfile
 
 
 
@@ -547,7 +556,8 @@ import wave
 
 
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from html import escape
 
 
 
@@ -675,7 +685,7 @@ from socketserver import ThreadingMixIn
 
 
 
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 
 
 
@@ -740,6 +750,63 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 
 import requests
+
+from features.tt_drama_resolver import (
+    InvalidContentIdError,
+    MySQLDramaRepository,
+    ResolverUnavailableError,
+    TTDramaResolver,
+    TokenBucketRateLimiter,
+    normalize_content_id,
+)
+from features.tt_drama_resources import (
+    InvalidContentIdError as ResourceInvalidContentIdError,
+    ResourceSourceError,
+    SQLiteResourceCache,
+    W2AHTMLClient,
+    W2AResourceService,
+)
+from features.material_status_broadcast import service as material_status_service
+from features.material_replication_broadcast import delivery as material_replication_delivery
+from features.material_replication_broadcast import service as material_replication_service
+from features.drama_synthesis.core import (
+    DramaSynthesisError,
+    DramaSynthesisStore,
+    ImmutableFilesystemPublisher,
+    freeze_random_recipe,
+)
+from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
+from features.drama_synthesis.catalog import catalog_from_manifest
+from features.drama_synthesis import gpu_cache as drama_gpu_cache
+from features.drama_synthesis import async_runtime as drama_async_runtime
+from features.drama_synthesis import cpu_runtime as drama_cpu_runtime
+from features.drama_synthesis import remote_client as drama_remote_client
+from features.drama_synthesis.local_checkpoint import (
+    atomic_write_record, checkpoint_error, durable_ensure_directory,
+    file_fingerprint, load_completed, read_record, save_completed,
+)
+from features.drama_synthesis.app_support import ObservationStop as DramaObservationStop
+from features.drama_synthesis.app_support import remote_display as drama_remote_display
+from features.drama_synthesis.media_pipeline import (
+    CONCAT_STREAM_PROBE_ARGS,
+    NORMALIZATION_PROFILE,
+    concat_signature as drama_concat_signature,
+    concat_signatures_are_compatible,
+    download_and_prepare_segments,
+    freeze_concat_normalization_plan,
+    freeze_episode_download_route,
+    prepare_normalized_concat_segment,
+    probe_media_source_with_anchor,
+    validate_concat_normalization_plan,
+    validate_normalized_concat_signatures,
+    verify_media_source_anchor,
+)
+from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
+from fb_playable_generator import (
+    build_browser_preview_html,
+    build_meta_playable_html,
+    discover_playable_resource_references,
+)
 
 try:
 
@@ -873,6 +940,180 @@ DB_NAME = os.environ.get("DRAMA_DB_NAME", "kunlunads_dev")
 
 
 SOURCE_TABLE = os.environ.get("DRAMA_SOURCE_TABLE", "ads_drama_resource")
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, str(default)) or str(default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(minimum), min(value, int(maximum)))
+
+
+def _fixed_tt_drama_resource_landing_id():
+    landing_id = _bounded_env_int(
+        "TT_DRAMA_RESOURCE_LANDING_ID", 2049, 1, 9999999999
+    )
+    if landing_id != 2049:
+        raise RuntimeError(
+            "TT_DRAMA_RESOURCE_LANDING_ID must be exactly 2049"
+        )
+    return landing_id
+
+
+TT_DRAMA_RESOLVER_APP_ID = str(
+    os.environ.get("TT_DRAMA_RESOLVER_APP_ID", "1479") or "1479"
+).strip()
+TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT_SECONDS", 2, 1, 10
+)
+TT_DRAMA_RESOLVER_DB_READ_TIMEOUT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_READ_TIMEOUT_SECONDS", 3, 1, 15
+)
+TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY", 4, 1, 16
+)
+TT_DRAMA_RESOLVER_REPOSITORY = MySQLDramaRepository(
+    host=MYSQL_HOST,
+    port=MYSQL_PORT,
+    user=MYSQL_USER,
+    password=MYSQL_PASSWORD,
+    database=DB_NAME,
+    table=SOURCE_TABLE,
+    app_id=TT_DRAMA_RESOLVER_APP_ID,
+    connect_timeout_seconds=TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT,
+    read_timeout_seconds=TT_DRAMA_RESOLVER_DB_READ_TIMEOUT,
+    max_concurrency=TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY,
+    allowed_cover_hosts=os.environ.get("TT_DRAMA_RESOLVER_COVER_HOSTS", ""),
+)
+TT_DRAMA_MYSQL_RESOLVER = TTDramaResolver(
+    loader=TT_DRAMA_RESOLVER_REPOSITORY.lookup,
+    positive_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_CACHE_TTL_SECONDS", 3600, 30, 86400
+    ),
+    negative_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_NEGATIVE_TTL_SECONDS", 300, 10, 3600
+    ),
+    stale_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_STALE_TTL_SECONDS", 21600, 60, 172800
+    ),
+    max_entries=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_CACHE_MAX_ENTRIES", 10000, 100, 100000
+    ),
+    wait_timeout_seconds=(
+        TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT
+        + TT_DRAMA_RESOLVER_DB_READ_TIMEOUT
+        + 3
+    ),
+)
+TT_DRAMA_RESOURCE_SOURCE = str(
+    os.environ.get("TT_DRAMA_RESOURCE_SOURCE", "mysql") or "mysql"
+).strip().lower()
+if TT_DRAMA_RESOURCE_SOURCE not in {"mysql", "w2a_cache"}:
+    logging.error(
+        "unsupported TT_DRAMA_RESOURCE_SOURCE=%s; using mysql failback",
+        TT_DRAMA_RESOURCE_SOURCE,
+    )
+    TT_DRAMA_RESOURCE_SOURCE = "mysql"
+
+TT_DRAMA_RESOURCE_CACHE = None
+TT_DRAMA_RESOURCE_CLIENT = None
+TT_DRAMA_RESOURCE_SERVICE = None
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    try:
+        TT_DRAMA_RESOURCE_LANDING_ID = (
+            _fixed_tt_drama_resource_landing_id()
+        )
+    except RuntimeError as exc:
+        logging.error("%s; using mysql failback", exc)
+        TT_DRAMA_RESOURCE_SOURCE = "mysql"
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    TT_DRAMA_RESOURCE_CACHE = SQLiteResourceCache(
+        os.environ.get(
+            "TT_DRAMA_RESOURCE_DB_PATH",
+            "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3",
+        ),
+        busy_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_SQLITE_BUSY_TIMEOUT_SECONDS", 5, 1, 30
+        ),
+    )
+    TT_DRAMA_RESOURCE_CLIENT = W2AHTMLClient(
+        landing_id=TT_DRAMA_RESOURCE_LANDING_ID,
+        timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+        max_html_bytes=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_MAX_BYTES",
+            512 * 1024,
+            16 * 1024,
+            2 * 1024 * 1024,
+        ),
+        allowed_cover_hosts=os.environ.get(
+            "TT_DRAMA_RESOURCE_COVER_HOSTS", "cdn.usrgrow.com"
+        ),
+    )
+    TT_DRAMA_RESOURCE_SERVICE = W2AResourceService(
+        cache=TT_DRAMA_RESOURCE_CACHE,
+        client=TT_DRAMA_RESOURCE_CLIENT,
+        landing_id=TT_DRAMA_RESOURCE_CLIENT.landing_id,
+        positive_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_POSITIVE_TTL_SECONDS",
+            86400,
+            300,
+            604800,
+        ),
+        negative_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_NEGATIVE_TTL_SECONDS", 900, 30, 3600
+        ),
+        stale_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_STALE_TTL_SECONDS",
+            604800,
+            3600,
+            2592000,
+        ),
+        lease_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_LEASE_SECONDS", 15, 5, 60
+        ),
+        wait_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_WAIT_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+    )
+    TT_DRAMA_RESOLVER = TT_DRAMA_RESOURCE_SERVICE
+else:
+    TT_DRAMA_RESOLVER = TT_DRAMA_MYSQL_RESOLVER
+TT_DRAMA_RESOLVER_PUBLIC_FIELDS = (
+    "content_id",
+    "title",
+    "description",
+    "cover_url",
+    "country",
+    "language",
+    "episode_count",
+    "source_updated_at",
+)
+TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES = {
+    "MISS": "MISS",
+    "ORIGIN_FILL": "MISS",
+    "NEGATIVE_FILL": "MISS",
+    "HIT": "HIT",
+    "DISK_HIT": "HIT",
+    "NEGATIVE_HIT": "NEGATIVE_HIT",
+    "STALE": "STALE",
+}
+TT_DRAMA_RESOLVER_RATE_LIMITER = TokenBucketRateLimiter(
+    limit_per_minute=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_RATE_LIMIT_PER_MINUTE", 30, 0, 600
+    ),
+    max_keys=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_RATE_LIMIT_MAX_KEYS", 10000, 100, 100000
+    ),
+)
+TT_DRAMA_RESOLVER_MAX_INFLIGHT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_MAX_INFLIGHT", 32, 4, 256
+)
+TT_DRAMA_RESOLVER_REQUEST_GATE = threading.BoundedSemaphore(
+    TT_DRAMA_RESOLVER_MAX_INFLIGHT
+)
 
 
 
@@ -1190,6 +1431,28 @@ PUBLIC_BASE_URL = os.environ.get(
 
 )
 
+DRAMA_SYNTHESIS_STORE = DramaSynthesisStore(JOB_DB_PATH)
+DRAMA_SHORT_LINK_ROOT = os.environ.get("DRAMA_SHORT_LINK_ROOT", "").strip()
+DRAMA_SHORT_LINK_OWNER = os.environ.get("DRAMA_SHORT_LINK_OWNER", "").strip()
+if bool(DRAMA_SHORT_LINK_ROOT) != bool(DRAMA_SHORT_LINK_OWNER):
+    raise RuntimeError("DRAMA_SHORT_LINK_ROOT and DRAMA_SHORT_LINK_OWNER must be configured together")
+DRAMA_SHORT_LINK_PUBLISHER = (
+    ImmutableFilesystemPublisher(DRAMA_SHORT_LINK_ROOT, owner_user=DRAMA_SHORT_LINK_OWNER)
+    if DRAMA_SHORT_LINK_ROOT
+    else None
+)
+DRAMA_RANDOM_OVERLAY_ROOT = os.environ.get("DRAMA_RANDOM_OVERLAY_ROOT", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_FILE = os.environ.get("DRAMA_RANDOM_OVERLAY_MANIFEST_FILE", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256 = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256", ""
+).strip().lower()
+DRAMA_RANDOM_OVERLAY_FFMPEG = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFMPEG", "/usr/bin/ffmpeg"
+).strip()
+DRAMA_RANDOM_OVERLAY_FFPROBE = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFPROBE", "/usr/bin/ffprobe"
+).strip()
+
 NAVIGATION_CONFIG_PATH = os.environ.get(
 
     "DRAMA_NAVIGATION_CONFIG_PATH", "/usr/share/nginx/html/navigation.json"
@@ -1241,6 +1504,55 @@ AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
 ]
 
 
+def resolve_playable_preview_auth_mode(raw_mode, expected_token):
+    mode = str(raw_mode or "").strip().lower()
+    if not mode:
+        return "enforce" if str(expected_token or "").strip() else "observe"
+    if mode not in ("off", "observe", "enforce"):
+        raise ValueError("PLAYABLE_PREVIEW_AUTH_MODE must be off, observe or enforce")
+    return mode
+
+
+PLAYABLE_PREVIEW_API_TOKEN = (
+    os.environ.get("PLAYABLE_PREVIEW_API_TOKEN", "")
+    or os.environ.get("FB_PLAYABLE_API_TOKEN", "")
+).strip()
+PLAYABLE_PREVIEW_AUTH_MODE = resolve_playable_preview_auth_mode(
+    os.environ.get("PLAYABLE_PREVIEW_AUTH_MODE", ""),
+    PLAYABLE_PREVIEW_API_TOKEN,
+)
+PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
+PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES = int(
+    os.environ.get("PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES", str(PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES))
+)
+PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES = int(
+    os.environ.get("PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES", "4096")
+)
+PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT = max(
+    1, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT", "5"))
+)
+PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT = max(
+    1, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT", "20"))
+)
+PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS = max(
+    0, min(5, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS", "3")))
+)
+PLAYABLE_PREVIEW_MAX_CONCURRENCY = max(
+    1,
+    int(os.environ.get("PLAYABLE_PREVIEW_MAX_CONCURRENCY", "1")),
+)
+PLAYABLE_PREVIEW_REQUEST_SLOTS = threading.BoundedSemaphore(
+    PLAYABLE_PREVIEW_MAX_CONCURRENCY
+)
+PLAYABLE_PREVIEW_MAX_ASSET_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_ASSET_BYTES", "4800000"))
+PLAYABLE_PREVIEW_MAX_ZIP_BYTES = min(
+    PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+    int(os.environ.get("PLAYABLE_PREVIEW_MAX_ZIP_BYTES", str(PLAYABLE_PREVIEW_MAX_ASSET_BYTES))),
+)
+PLAYABLE_PREVIEW_TRIAL_SECONDS = int(os.environ.get("PLAYABLE_PREVIEW_TRIAL_SECONDS", "20"))
+PLAYABLE_PREVIEW_DOC_OBJECT_KEY = "ad-materials/docs/playable-preview-api.md"
+
+
 AI_SOURCE_CALLBACK_URL = os.environ.get(
     "AI_SOURCE_CALLBACK_URL", "https://aa.yingliangads.com/api/material/ai-source"
 ).strip()
@@ -1255,6 +1567,60 @@ ADMIN_MAPPING_MYSQL_USER = os.environ.get("ADMIN_MAPPING_MYSQL_USER", "").strip(
 ADMIN_MAPPING_MYSQL_PASSWORD = os.environ.get("ADMIN_MAPPING_MYSQL_PASSWORD", "")
 ADMIN_MAPPING_MYSQL_DATABASE = os.environ.get("ADMIN_MAPPING_MYSQL_DATABASE", "").strip()
 ADMIN_MAPPING_MYSQL_TIMEOUT = int(os.environ.get("ADMIN_MAPPING_MYSQL_TIMEOUT", "8"))
+
+MATERIAL_STATUS_WEBHOOK_TOKENS = tuple(
+    item.strip()
+    for item in os.environ.get("MATERIAL_STATUS_WEBHOOK_TOKENS", "").split(",")
+    if item.strip()
+)
+MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID = os.environ.get(
+    "MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID",
+    "oc_88f2eb329508d13bfd2be3de0e221797",
+).strip()
+MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES = max(
+    1024,
+    min(
+        material_status_service.MAX_REQUEST_BYTES,
+        int(os.environ.get("MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES", "32768")),
+    ),
+)
+MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS = max(
+    1,
+    min(20, int(os.environ.get("MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS", "5"))),
+)
+MATERIAL_STATUS_WEBHOOK_POLL_SECONDS = max(
+    0.2,
+    min(30.0, float(os.environ.get("MATERIAL_STATUS_WEBHOOK_POLL_SECONDS", "1"))),
+)
+MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS = max(
+    300,
+    min(3600, int(os.environ.get("MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS", "300"))),
+)
+MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS = (1, 5, 30, 120, 600)
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS = max(
+    60,
+    min(
+        86400,
+        int(
+            os.environ.get(
+                "MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS",
+                "300",
+            )
+        ),
+    ),
+)
+MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS = max(
+    30,
+    min(
+        300,
+        int(
+            os.environ.get(
+                "MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS",
+                "180",
+            )
+        ),
+    ),
+)
 
 COS_SECRET_ID = os.environ.get("COS_SECRET_ID", "").strip()
 
@@ -2232,6 +2598,7 @@ DEMUCS_TIMEOUT = int(os.environ.get("DEMUCS_TIMEOUT", "3600"))
 GPU_VIDEO_WORKER_URL = os.environ.get("GPU_VIDEO_WORKER_URL", "").strip().rstrip("/")
 GPU_VIDEO_WORKER_TOKEN = os.environ.get("GPU_VIDEO_WORKER_TOKEN", "").strip()
 GPU_VIDEO_WORKER_TIMEOUT = int(os.environ.get("GPU_VIDEO_WORKER_TIMEOUT", "14400"))
+DRAMA_GPU_ASYNC_ENABLED = os.environ.get("DRAMA_GPU_ASYNC_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 
 
 
@@ -2424,6 +2791,16 @@ logging.basicConfig(
 
 
 JOB_DB_LOCK = threading.Lock()
+MATERIAL_STATUS_OUTBOX_LOCK = threading.Lock()
+MATERIAL_STATUS_OUTBOX = None
+MATERIAL_STATUS_WORKER_STOP = threading.Event()
+MATERIAL_STATUS_WORKER_LOCK = threading.Lock()
+MATERIAL_STATUS_WORKER_THREAD = None
+MATERIAL_STATUS_MAPPING_CACHE_LOCK = threading.Lock()
+MATERIAL_STATUS_MAPPING_CACHE = None
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP = threading.Event()
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_LOCK = threading.Lock()
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD = None
 
 
 
@@ -2962,6 +3339,10 @@ FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize
 
 
 FEISHU_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+FEISHU_BATCH_GET_ID_URL = (
+    "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id"
+    "?user_id_type=open_id"
+)
 
 
 
@@ -3171,10 +3552,6 @@ DEFAULT_ADMIN_NAMES = "郜远"
 
 FEISHU_ALLOWED_TENANT_KEYS = [item.strip() for item in os.environ.get("FEISHU_ALLOWED_TENANT_KEYS", DEFAULT_ALLOWED_TENANT_KEYS).split(",") if item.strip()]
 
-TT_MINIS_REPORT_ALLOWED_TENANT_KEY = os.environ.get(
-    "TT_MINIS_REPORT_ALLOWED_TENANT_KEY", DEFAULT_ALLOWED_TENANT_KEYS
-).strip()
-
 
 
 
@@ -3291,6 +3668,14 @@ MODULE_PERMISSIONS = {
 
     "ad_material_tasks": "投放素材任务",
 
+    "ad_control_center": "AI自动规则调控（旧版）",
+    "ad_control_v3": "AI自动调控 V3",
+    "voiceover_drama_tasks": "配音剧语种任务",
+    "x_accounts": "X账号授权管理",
+    "tt_posts": "TikTok 社媒发布",
+    "fb_page_posts": "Facebook Page 自动发布",
+    "youtube_auto_publish": "YouTube 自动发布",
+
 
 
 
@@ -3341,6 +3726,13 @@ DEFAULT_USER_PERMISSIONS = {
     "drama_synthesis": False,
     "cover_synthesis": False,
     "ad_material_tasks": False,
+    "ad_control_center": False,
+    "ad_control_v3": False,
+    "voiceover_drama_tasks": False,
+    "x_accounts": False,
+    "tt_posts": False,
+    "fb_page_posts": False,
+    "youtube_auto_publish": False,
     "settings": False,
 }
 
@@ -8448,6 +8840,10 @@ def normalize_user_permissions(value, role="user"):
 
     if isinstance(value, dict):
 
+        inherit_v3_from_legacy = (
+            "ad_control_v3" not in value and "ad_control_center" in value
+        )
+
 
 
 
@@ -8543,6 +8939,12 @@ def normalize_user_permissions(value, role="user"):
 
 
                 permissions[key] = bool(value.get(key))
+
+        # V3 originally shared the legacy ad_control_center permission. Preserve
+        # access for existing users until an administrator explicitly saves the
+        # new independent V3 permission.
+        if inherit_v3_from_legacy:
+            permissions["ad_control_v3"] = bool(value.get("ad_control_center"))
 
 
 
@@ -9355,8 +9757,7 @@ def probe_media_stream_info(path):
         proc = subprocess.run(
             [
                 ffprobe_path(), "-v", "error",
-                "-show_entries",
-                "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,duration:format=duration",
+                *CONCAT_STREAM_PROBE_ARGS,
                 "-of", "json",
                 path,
             ],
@@ -11213,7 +11614,7 @@ def shell_quote(value):
 
 
 
-def json_response(handler, status_code, payload):
+def json_response(handler, status_code, payload, no_store=False, extra_headers=None):
 
 
 
@@ -11310,6 +11711,13 @@ def json_response(handler, status_code, payload):
 
 
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+
+    if no_store:
+
+        handler.send_header("Cache-Control", "no-store")
+
+    for header_name, header_value in (extra_headers or {}).items():
+        handler.send_header(str(header_name), str(header_value))
 
 
 
@@ -13037,7 +13445,7 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "concat_video": bool(outputs.get("concat_video", True)),
+        "concat_video": bool(outputs.get("concat_video", False)),
 
 
 
@@ -13069,7 +13477,7 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "no_bgm_video": bool(outputs.get("no_bgm_video", True)),
+        "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
 
 
 
@@ -13101,7 +13509,9 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "cover_16x9": bool(outputs.get("cover_16x9", True)),
+        "cover_16x9": bool(outputs.get("cover_16x9", False)),
+
+        "random_template_video": bool(outputs.get("random_template_video", outputs.get("random_template", False))),
 
 
 
@@ -13240,6 +13650,10 @@ def selected_job_outputs_ready(job):
         return False
     if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
         return False
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job.get("job_id", ""))
+        if not recipe or not str(recipe.get("output_url") or "").strip():
+            return False
     return True
 
 
@@ -13464,7 +13878,7 @@ def normalize_advanced_options(raw_options):
 
 
 
-        "cover_template": str(options.get("cover_template", "default") or "default"),
+        "cover_template": "default",
 
 
 
@@ -13496,7 +13910,7 @@ def normalize_advanced_options(raw_options):
 
 
 
-        "naming_rule": str(options.get("naming_rule", "default") or "default"),
+        "naming_rule": "default",
 
 
 
@@ -13529,6 +13943,7 @@ def normalize_advanced_options(raw_options):
 
 
         "output_resolution": str(options.get("output_resolution", "1280x720") or "1280x720"),
+        "random_template": options.get("random_template") if isinstance(options.get("random_template"), dict) else None,
 
 
 
@@ -14139,6 +14554,173 @@ def run_mysql(query):
 
 
 
+
+
+def drama_random_template_catalog():
+    if DRAMA_RANDOM_OVERLAY_MANIFEST_FILE:
+        return catalog_from_manifest(
+            DRAMA_RANDOM_OVERLAY_MANIFEST_FILE,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    # This branch is the media-only worker's local asset diagnostic. CPU page
+    # and job queries must use their own pinned metadata file, even if the GPU
+    # is unavailable; never proxy a business catalog query to that worker.
+    if not GPU_VIDEO_WORKER_URL and DRAMA_RANDOM_OVERLAY_ROOT and DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+        return catalog_from_assets(
+            DRAMA_RANDOM_OVERLAY_ROOT,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    raise DramaSynthesisError(
+        "drama_template_catalog_unavailable",
+        "CPU随机模板目录未配置或校验失败",
+        503,
+    )
+
+
+def drama_youtube_repository():
+    try:
+        timeout = int(os.environ.get("DRAMA_YOUTUBE_HTTP_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120
+    client = YouTubeHTTPClient(timeout=timeout)
+
+    def identity_probe(credential):
+        try:
+            token = client.refresh_access_token(credential)
+            client.verify_channel_identity(token, credential.channel_id)
+            return True
+        except Exception:
+            return False
+
+    return YouTubeCredentialRepository(run_mysql, schema=DB_NAME, identity_probe=identity_probe)
+
+
+def decorate_drama_synthesis_job(job):
+    if not job:
+        return job
+    item = dict(job)
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(item.get("job_id", ""))
+    item["random_template_recipe"] = None
+    item["output_random_template_url"] = ""
+    if recipe:
+        frozen = dict(recipe.get("recipe") or {})
+        # The browser needs the frozen layer names and version, not server paths.
+        item["random_template_recipe"] = frozen
+        item["output_random_template_url"] = str(recipe.get("output_url") or "")
+    item["short_links"] = DRAMA_SYNTHESIS_STORE.short_links_for_job(item.get("job_id", ""))
+    youtube_rows = DRAMA_SYNTHESIS_STORE.youtube_tasks_for_job(
+        item.get("job_id", ""), limit=20
+    )
+    safe_fields = (
+        "id", "channel_id", "source_kind", "title", "status", "video_state",
+        "comment_status", "sync_status", "video_id", "comment_id", "unknown_outcome",
+        "error_code", "error_message", "created_at_utc", "updated_at_utc",
+        "video_published_at_utc", "comment_published_at_utc",
+    )
+    item["youtube_publish_tasks"] = [
+        {key: row.get(key) for key in safe_fields} for row in youtube_rows
+    ]
+    result_preview = dict(item.get("result_preview") or {})
+    result_preview["random_template"] = item["output_random_template_url"]
+    item["result_preview"] = result_preview
+    runtime = globals().get("drama_cpu_runtime")
+    snapshot = runtime.get_remote_status(JOB_DB_PATH, item.get("job_id", "")) if runtime else None
+    if snapshot:
+        item["remote_runtime"] = snapshot
+        item["remote_progress"] = drama_remote_display(snapshot)
+        if item.get("status") == "failed":
+            view = item["remote_progress"]
+            view["stage_label"] = "制作失败" if snapshot.get("status") == "failed" else "执行状态待核查"
+            view["stage_percent"] = None
+            view["detail"] = item.get("error_message") or view["stage_label"]
+            item["status_label"] = view["stage_label"]
+        elif item.get("status") != "done":
+            item["status_label"] = item["remote_progress"]["stage_label"]
+        item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
+    return item
+
+
+def drama_synthesis_error_payload(exc):
+    payload = {"code": exc.code, "error": str(exc), "message": str(exc)}
+    payload.update(exc.details)
+    return payload
+
+
+def require_completed_drama_job(job_id):
+    job = fetch_job_row(job_id)
+    if not job:
+        raise DramaSynthesisError("drama_job_not_found", "任务不存在", 404)
+    if job.get("status") != "done" or not selected_job_outputs_ready(job):
+        raise DramaSynthesisError("drama_job_not_completed", "任务尚未完成", 409)
+    return job
+
+
+def drama_youtube_source(job, source_kind):
+    source_kind = str(source_kind or "").strip()
+    random_template_url = str(job.get("output_random_template_url") or "")
+    if source_kind == "random_template" and not random_template_url:
+        frozen = DRAMA_SYNTHESIS_STORE.recipe(str(job.get("job_id") or ""))
+        if frozen and str(frozen.get("completed_at_utc") or ""):
+            random_template_url = str(frozen.get("output_url") or "")
+    sources = {
+        "concat_video": str(job.get("output_video_url") or ""),
+        "no_bgm_video": str(job.get("output_video_no_bgm_url") or ""),
+        "random_template": random_template_url,
+    }
+    source_url = sources.get(source_kind, "")
+    if not source_url:
+        raise DramaSynthesisError("youtube_source_unavailable", "所选视频产物不可用", 409)
+    return source_kind, source_url
+
+
+def enqueue_drama_youtube_publish(job_id, payload):
+    if str(os.environ.get("YOUTUBE_LIVE_ENABLED", "0")).strip() != "1":
+        raise DramaSynthesisError("youtube_publish_disabled", "YouTube真实发布尚未启用", 503)
+    job = require_completed_drama_job(job_id)
+    source_kind, source_url = drama_youtube_source(job, payload.get("material_kind"))
+    repository = drama_youtube_repository()
+    credential = repository.credential(
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=str(payload.get("channel_local_id") or ""),
+        account_id=str(payload.get("youtube_account_id") or ""),
+        expected_channel_id=str(payload.get("channel_id") or ""),
+    )
+    requested_app_id = str(payload.get("app_id") or "")
+    if requested_app_id != str(job.get("app_id") or ""):
+        raise DramaSynthesisError("youtube_app_mismatch", "YouTube产品与任务不一致", 409)
+    description_template = str(payload.get("description_template") or "").strip()
+    description_rendered = description_template
+    if "{{url}}" in description_template:
+        link = DRAMA_SYNTHESIS_STORE.ensure_short_link(
+            job_id, source_kind, str(job.get("content_id") or ""), DRAMA_SHORT_LINK_PUBLISHER
+        )
+        description_rendered = description_template.replace("{{url}}", str(link.get("short_url") or ""))
+    row = DRAMA_SYNTHESIS_STORE.enqueue_youtube(
+        operation_id=str(payload.get("operation_id") or ""),
+        job_id=job_id,
+        content_id=str(job.get("content_id") or ""),
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=credential.channel_local_id,
+        channel_id=credential.channel_id,
+        youtube_account_id=credential.account_id,
+        source_kind=source_kind,
+        source_url=source_url,
+        title=payload.get("title"),
+        description_template=description_template,
+        description_rendered=description_rendered,
+        comment_text=payload.get("comment_text"),
+        duplicate_confirmed=bool(payload.get("duplicate_confirmed", False)),
+        scopes=credential.scopes,
+        operator_user_id=str(payload.get("_operator_user_id") or ""),
+        operator_name=str(payload.get("_operator_name") or ""),
+    )
+    safe_fields = (
+        "id", "job_id", "channel_id", "source_kind", "title", "status",
+        "video_state", "comment_status", "sync_status", "video_id", "comment_id",
+        "unknown_outcome", "error_code", "error_message", "created_at_utc",
+        "updated_at_utc",
+    )
+    return {key: row.get(key) for key in safe_fields}
 
 
 def get_job_db_connection():
@@ -21567,6 +22149,10 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
     job_id = str(job.get("job_id") or "").strip()
     if not job_id:
         return False
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job_id):
+        # Async jobs may only finish from a verified GPU result and atomic commit.
+        return False
     outputs = normalize_outputs(job.get("outputs", {}))
     candidates = {}
     if outputs["cover_16x9"]:
@@ -21581,11 +22167,17 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
         candidates["output_video_no_bgm_url"] = str(
             job.get("output_video_no_bgm_url") or ""
         ).strip() or build_drama_public_url(job_id, "material_no_bgm.mp4")
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job_id)
+        if not recipe or not str(recipe.get("completed_at_utc") or ""):
+            return False
+        candidates["output_random_template_url"] = str(recipe.get("output_url") or "")
 
     min_bytes = {
         "cover_16x9_url": 1024,
         "output_video_url": 1024 * 1024,
         "output_video_no_bgm_url": 1024 * 1024,
+        "output_random_template_url": 1024 * 1024,
     }
     for key, url in candidates.items():
         if not public_artifact_ready(url, min_bytes.get(key, 1)):
@@ -21953,6 +22545,42 @@ def guess_content_type(path):
     if lower.endswith(".svg"):
 
         return "image/svg+xml"
+    if lower.endswith(".gif"):
+
+        return "image/gif"
+    if lower.endswith(".webp"):
+
+        return "image/webp"
+    if lower.endswith(".html") or lower.endswith(".htm"):
+
+        return "text/html; charset=utf-8"
+    if lower.endswith(".css"):
+
+        return "text/css; charset=utf-8"
+    if lower.endswith(".js"):
+
+        return "application/javascript; charset=utf-8"
+    if lower.endswith(".zip"):
+
+        return "application/zip"
+    if lower.endswith(".json"):
+
+        return "application/json; charset=utf-8"
+    if lower.endswith(".md") or lower.endswith(".markdown"):
+
+        return "text/markdown; charset=utf-8"
+    if lower.endswith(".wasm"):
+
+        return "application/wasm"
+    if lower.endswith(".mp3"):
+
+        return "audio/mpeg"
+    if lower.endswith(".wav"):
+
+        return "audio/wav"
+    if lower.endswith(".ogg"):
+
+        return "audio/ogg"
 
     return "application/octet-stream"
 
@@ -21960,7 +22588,7 @@ def guess_content_type(path):
 
 
 
-def get_cos_client(timeout=None):
+def get_cos_client(timeout=None, *, retry=None):
 
     if not cos_enabled():
 
@@ -21975,17 +22603,20 @@ def get_cos_client(timeout=None):
         KeepAlive=False,
     )
 
-    return CosS3Client(config)
+    if retry is None:
+        return CosS3Client(config)
+    return CosS3Client(config, retry=retry)
 
 
 
 
 
-def upload_file_to_cos(path):
+def upload_file_to_cos(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not cos_enabled():
 
-        return build_public_url(path)
+        url = build_public_url(path)
+        return (url, None) if return_receipt else url
 
     if not file_ready(path):
 
@@ -21994,12 +22625,63 @@ def upload_file_to_cos(path):
     object_key = build_cos_object_key(path)
     object_url = build_cos_url(object_key)
     expected_size = os.path.getsize(path)
+    runtime = globals().get("drama_async_runtime")
+    media_context = runtime.capture_context() if runtime else None
+    # Legacy synchronous GPU calls have no AsyncRuntime context. Recognize only
+    # the three fixed renderer artifact paths so their internal publish calls
+    # still enter the same durable multipart checkpoint as the final receipt
+    # read. Ordinary publish callers keep the previous upload contract.
+    inferred_job_id = None
+    try:
+        relative = os.path.relpath(os.path.realpath(path), os.path.realpath(PUBLIC_ROOT))
+        parts = relative.split(os.sep)
+        if (len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", parts[0])
+                and parts[1] in set(drama_gpu_cache.ARTIFACT_FILENAMES.values())):
+            inferred_job_id = parts[0]
+    except (OSError, ValueError):
+        inferred_job_id = None
+    requested_job_id = str(checkpoint_job_id or "").strip() or None
+    context_job_id = str(media_context.job_id) if media_context else None
+    identities = {value for value in (requested_job_id, context_job_id, inferred_job_id) if value is not None}
+    if (len(identities) > 1 or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value)
+                                   for value in identities)):
+        raise DramaSynthesisError("drama_upload_checkpoint_conflict", "上传记录与当前成片或目标不一致，已停止上传", 409)
+    upload_job_id = next(iter(identities), None)
+    def media_upload_progress(consumed, total):
+        if media_context:
+            with runtime.use_context(media_context):
+                runtime.emit_progress("uploading", uploaded_bytes=consumed, total_bytes=total)
+    if media_context:
+        media_upload_progress(0, expected_size)
+    if media_context or return_receipt or requested_job_id or inferred_job_id:
+        if not upload_job_id:
+            raise DramaSynthesisError("drama_upload_configuration_invalid", "上传参数无效", 400)
+        from features.drama_synthesis.cos_upload import resume_upload
+
+        # Keep multipart identity outside the disposable job working directory.
+        # Only the drama execution context uses this path; other upload callers
+        # retain their existing contract and concurrency settings.
+        checkpoint_path = os.path.join(
+            WORK_ROOT, ".runtime", "uploads", upload_job_id,
+            hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
+        )
+        receipt = resume_upload(
+            # The SDK otherwise retries POST internally, outside the durable
+            # create/complete fences. Retry only via the verified checkpoint.
+            get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
+            bucket=COS_BUCKET, key=object_key, path=path,
+            checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
+            content_type=guess_content_type(path), acl="public-read",
+        )
+        return (object_url, receipt) if return_receipt else object_url
+
     try:
         response = requests.head(object_url, timeout=(5, 15))
         if response.status_code == 200:
             remote_size = int(response.headers.get("Content-Length") or "-1")
             if remote_size == expected_size:
                 logging.info("reuse existing COS object: %s", object_url)
+                media_upload_progress(expected_size, expected_size)
                 return object_url
     except Exception as exc:
         logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
@@ -22014,6 +22696,7 @@ def upload_file_to_cos(path):
             PartSize=max(1, COS_MULTIPART_PART_SIZE_MB),
             MAXThread=max(1, COS_MULTIPART_THREADS),
             EnableMD5=False,
+            progress_callback=media_upload_progress if media_context else None,
             ACL="public-read",
             ContentType=guess_content_type(path),
         )
@@ -22038,13 +22721,14 @@ def upload_file_to_cos(path):
 
             )
 
+    media_upload_progress(expected_size, expected_size)
     return object_url
 
 
 
 
 
-def publish_asset(path):
+def publish_asset(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not file_ready(path):
 
@@ -22052,9 +22736,837 @@ def publish_asset(path):
 
     if cos_enabled():
 
-        return upload_file_to_cos(path)
+        return upload_file_to_cos(
+            path, return_receipt=return_receipt, checkpoint_job_id=checkpoint_job_id,
+        )
 
-    return build_public_url(path)
+    url = build_public_url(path)
+    return (url, None) if return_receipt else url
+
+
+def playable_preview_root():
+    return os.path.join(AD_MATERIAL_PUBLIC_ROOT, "playable-preview")
+
+
+def playable_preview_public_base_url():
+    return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/playable-preview"
+
+
+def playable_preview_doc_url():
+    if cos_enabled():
+        return build_cos_url(PLAYABLE_PREVIEW_DOC_OBJECT_KEY)
+    return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/docs/playable-preview-api.md"
+
+
+def evaluate_playable_preview_auth(headers, expected_token, mode):
+    auth = str(headers.get("Authorization", "") or "")
+    token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    token = token or str(headers.get("X-API-Token", "") or "").strip()
+    token_configured = bool(expected_token)
+    token_present = bool(token)
+    token_valid = bool(
+        token_configured
+        and token_present
+        and secrets.compare_digest(
+            token.encode("utf-8"),
+            str(expected_token).encode("utf-8"),
+        )
+    )
+    allowed = mode != "enforce" or token_valid
+    return token_present, token_valid, allowed
+
+
+def log_playable_preview_auth(path, mode, token_present, token_valid, allowed):
+    logging.info(
+        "playable_preview_auth path=%s mode=%s auth_present=%s auth_valid=%s decision=%s",
+        path,
+        mode,
+        token_present,
+        token_valid,
+        "allow" if allowed else "deny",
+    )
+
+
+def require_playable_preview_access(handler):
+    token_present, token_valid, allowed = evaluate_playable_preview_auth(
+        handler.headers,
+        PLAYABLE_PREVIEW_API_TOKEN,
+        PLAYABLE_PREVIEW_AUTH_MODE,
+    )
+    log_playable_preview_auth(
+        urlparse(handler.path).path,
+        PLAYABLE_PREVIEW_AUTH_MODE,
+        token_present,
+        token_valid,
+        allowed,
+    )
+    if allowed:
+        return True
+    if not PLAYABLE_PREVIEW_API_TOKEN:
+        logging.error("playable preview auth is enforced but no API token is configured")
+        json_response(
+            handler,
+            503,
+            {
+                "code": "auth_not_configured",
+                "error": "playable preview authentication is unavailable",
+                "message": "playable preview authentication is unavailable",
+            },
+        )
+        return False
+    json_response(
+        handler,
+        403,
+        {"code": "forbidden", "error": "forbidden", "message": "forbidden"},
+    )
+    return False
+
+
+def sanitize_playable_filename(value, fallback):
+    name = os.path.basename(str(value or "").strip())
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
+    return name or fallback
+
+
+def safe_extract_zip(zip_path, target_dir, max_extracted_bytes, max_extracted_files):
+    with zipfile.ZipFile(zip_path) as zf:
+        entries = [info for info in zf.infolist() if str(info.filename or "")]
+        if len(entries) > max_extracted_files:
+            raise ValueError(
+                "zip contains too many files: %s > %s"
+                % (len(entries), max_extracted_files)
+            )
+        declared_size = sum(
+            max(0, int(info.file_size or 0))
+            for info in entries
+            if not info.is_dir()
+        )
+        if declared_size > max_extracted_bytes:
+            raise ValueError(
+                "zip extracted size exceeds limit: %s > %s"
+                % (declared_size, max_extracted_bytes)
+            )
+        planned_entries = []
+        destinations = {}
+        for info in zf.infolist():
+            raw_name = str(info.filename or "")
+            if not raw_name:
+                continue
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise ValueError(
+                    "unsupported zip compression method: %s"
+                    % info.compress_type
+                )
+            if info.flag_bits & 0x1:
+                raise ValueError("encrypted zip entries are not supported: %s" % raw_name)
+            unix_mode = (int(info.external_attr or 0) >> 16) & 0xFFFF
+            if (unix_mode & 0o170000) == 0o120000:
+                raise ValueError("zip symbolic links are not supported: %s" % raw_name)
+            entry_type = unix_mode & 0o170000
+            is_directory = info.is_dir()
+            if (
+                (is_directory and entry_type not in (0, 0o040000))
+                or (not is_directory and entry_type not in (0, 0o100000))
+            ):
+                raise ValueError("zip special entries are not supported: %s" % raw_name)
+            normalized = posixpath.normpath(raw_name.replace("\\", "/"))
+            if (
+                normalized in ("", ".", "..")
+                or normalized.startswith("../")
+                or normalized.startswith("/")
+                or re.match(r"^[A-Za-z]:", normalized)
+            ):
+                raise ValueError("unsafe zip entry: %s" % raw_name)
+            destination = os.path.abspath(
+                os.path.join(target_dir, *normalized.split("/"))
+            )
+            target_root = os.path.abspath(target_dir)
+            if os.path.commonpath((target_root, destination)) != target_root:
+                raise ValueError("unsafe zip entry: %s" % raw_name)
+            destination_key = os.path.normcase(destination)
+            if destination_key in destinations:
+                raise ValueError("duplicate zip entry: %s" % raw_name)
+            for existing_key, existing_is_directory in destinations.items():
+                if (
+                    (not existing_is_directory and destination_key.startswith(existing_key + os.sep))
+                    or (not is_directory and existing_key.startswith(destination_key + os.sep))
+                ):
+                    raise ValueError("zip file and directory paths conflict: %s" % raw_name)
+            destinations[destination_key] = is_directory
+            planned_entries.append((info, destination, is_directory))
+
+        extracted_size = 0
+        for info, destination, is_directory in planned_entries:
+            if is_directory:
+                os.makedirs(destination, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with zf.open(info) as src, open(destination, "wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    extracted_size += len(chunk)
+                    if extracted_size > max_extracted_bytes:
+                        raise ValueError(
+                            "zip extracted size exceeds limit: %s > %s"
+                            % (extracted_size, max_extracted_bytes)
+                        )
+                    dst.write(chunk)
+
+
+def find_playable_entry(game_dir):
+    candidates = []
+    for root, _, files in os.walk(game_dir):
+        for filename in files:
+            if filename.lower() == "index.html":
+                path = os.path.join(root, filename)
+                rel = os.path.relpath(path, game_dir).replace(os.sep, "/")
+                candidates.append(rel)
+    if candidates:
+        candidates.sort(key=lambda item: (item.count("/"), len(item), item))
+        return "game/" + candidates[0]
+    html_candidates = []
+    for root, _, files in os.walk(game_dir):
+        for filename in files:
+            if filename.lower().endswith((".html", ".htm")):
+                path = os.path.join(root, filename)
+                rel = os.path.relpath(path, game_dir).replace(os.sep, "/")
+                html_candidates.append(rel)
+    if html_candidates:
+        html_candidates.sort(key=lambda item: (item.count("/"), len(item), item))
+        return "game/" + html_candidates[0]
+    raise ValueError("uploaded static page must include an html entry")
+
+
+def _playable_remote_origin(parsed):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid static page URL port") from exc
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80
+    return parsed.scheme.lower(), str(parsed.hostname or "").lower().rstrip("."), port
+
+
+def _validate_playable_remote_url(url, expected_origin=None, required_path_prefix=""):
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("static page URL must start with http:// or https://")
+    if parsed.username or parsed.password:
+        raise ValueError("static page URL must not include credentials")
+    origin = _playable_remote_origin(parsed)
+    if expected_origin and origin != expected_origin:
+        raise ValueError("remote playable resources must stay on the entry origin")
+    decoded_path = unquote(parsed.path or "/").replace("\\", "/")
+    normalized_path = posixpath.normpath(decoded_path)
+    if not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+    if required_path_prefix:
+        prefix = posixpath.normpath(required_path_prefix).rstrip("/") + "/"
+        if not normalized_path.startswith(prefix):
+            raise ValueError("remote playable resource escapes the entry directory")
+    try:
+        addresses = {
+            item[4][0].split("%", 1)[0]
+            for item in socket.getaddrinfo(
+                parsed.hostname,
+                origin[2],
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except (OSError, socket.gaierror) as exc:
+        raise ValueError("unable to resolve static page host") from exc
+    if not addresses:
+        raise ValueError("unable to resolve static page host")
+    for address in addresses:
+        try:
+            remote_ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("invalid static page host address") from exc
+        if not remote_ip.is_global:
+            raise ValueError("static page URL resolves to a non-public address")
+    return parsed
+
+
+def _fetch_playable_remote_bytes(
+    session,
+    url,
+    expected_origin,
+    required_path_prefix,
+    max_bytes,
+):
+    current_url = str(url or "").strip()
+    redirects = 0
+    while True:
+        _validate_playable_remote_url(
+            current_url,
+            expected_origin=expected_origin,
+            required_path_prefix=required_path_prefix,
+        )
+        try:
+            response = session.get(
+                current_url,
+                allow_redirects=False,
+                stream=True,
+                timeout=(
+                    PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT,
+                    PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT,
+                ),
+                headers={"User-Agent": "YingliangPlayablePreview/1.0"},
+            )
+        except requests.RequestException as exc:
+            raise ValueError("unable to download remote playable resource") from exc
+        try:
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = str(response.headers.get("Location") or "").strip()
+                if not location or redirects >= PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS:
+                    raise ValueError("remote playable redirect limit exceeded")
+                current_url = urljoin(current_url, location)
+                redirects += 1
+                continue
+            if response.status_code != 200:
+                raise ValueError(
+                    "remote playable resource returned HTTP %s"
+                    % response.status_code
+                )
+            declared_length = int(response.headers.get("Content-Length") or 0)
+            if declared_length > max_bytes:
+                raise ValueError("remote playable resource exceeds download limit")
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise ValueError("remote playable resource exceeds download limit")
+            return current_url, bytes(body), str(
+                response.headers.get("Content-Type") or ""
+            ).lower()
+        finally:
+            response.close()
+
+
+def _decode_playable_remote_text(content):
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def download_playable_static_site(source_url, game_dir):
+    initial = _validate_playable_remote_url(source_url)
+    expected_origin = _playable_remote_origin(initial)
+    required_path_prefix = posixpath.dirname(initial.path or "/") or "/"
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        final_url, entry_content, content_type = _fetch_playable_remote_bytes(
+            session,
+            source_url,
+            expected_origin,
+            required_path_prefix,
+            PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
+        )
+        final_parsed = _validate_playable_remote_url(
+            final_url,
+            expected_origin=expected_origin,
+            required_path_prefix=required_path_prefix,
+        )
+        entry_name = sanitize_playable_filename(
+            posixpath.basename(final_parsed.path),
+            "index.html",
+        )
+        if not entry_name.lower().endswith((".html", ".htm")):
+            if "text/html" not in content_type:
+                raise ValueError("remote static page is not HTML")
+            entry_name = "index.html"
+        if not entry_content:
+            raise ValueError("remote static page is empty")
+        os.makedirs(game_dir, exist_ok=True)
+        with open(os.path.join(game_dir, entry_name), "wb") as handle:
+            handle.write(entry_content)
+
+        entry_base_url = urljoin(final_url, "./")
+        entry_base_path = posixpath.dirname(final_parsed.path or "/") or "/"
+        queued = list(
+            discover_playable_resource_references(
+                _decode_playable_remote_text(entry_content),
+                "",
+            )
+        )
+        downloaded = {entry_name}
+        total_bytes = len(entry_content)
+        while queued:
+            key = queued.pop(0)
+            if key in downloaded or key == entry_name:
+                continue
+            if len(downloaded) >= PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES:
+                raise ValueError("remote playable contains too many files")
+            remaining = PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES - total_bytes
+            if remaining <= 0:
+                raise ValueError("remote playable exceeds extracted size limit")
+            resource_url = urljoin(entry_base_url, key)
+            _, content, resource_type = _fetch_playable_remote_bytes(
+                session,
+                resource_url,
+                expected_origin,
+                entry_base_path,
+                remaining,
+            )
+            target_path = os.path.abspath(
+                os.path.join(game_dir, *key.replace("\\", "/").split("/"))
+            )
+            game_root = os.path.abspath(game_dir)
+            if os.path.commonpath((game_root, target_path)) != game_root:
+                raise ValueError("remote playable resource escapes output directory")
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "wb") as handle:
+                handle.write(content)
+            downloaded.add(key)
+            total_bytes += len(content)
+            extension = os.path.splitext(key.lower())[1]
+            if extension in (".html", ".htm", ".json", ".js", ".mjs", ".css") or any(
+                marker in resource_type
+                for marker in ("text/", "javascript", "json")
+            ):
+                for discovered in discover_playable_resource_references(
+                    _decode_playable_remote_text(content),
+                    posixpath.dirname(key),
+                ):
+                    if discovered not in downloaded and discovered not in queued:
+                        queued.append(discovered)
+        return {
+            "entry": entry_name,
+            "file_count": len(downloaded),
+            "total_bytes": total_bytes,
+        }
+    finally:
+        session.close()
+
+
+def parse_playable_preview_multipart(handler, content_length):
+    content_type = str(handler.headers.get("Content-Type", "") or "")
+    if "\r" in content_type or "\n" in content_type:
+        raise ValueError("invalid multipart Content-Type")
+    body = handler.rfile.read(content_length)
+    if len(body) != content_length:
+        raise ValueError("incomplete multipart request body")
+    message = BytesParser(policy=policy.default).parsebytes(
+        (
+            "Content-Type: %s\r\nMIME-Version: 1.0\r\n\r\n" % content_type
+        ).encode("utf-8")
+        + body
+    )
+    defects = [
+        defect
+        for part in message.walk()
+        for defect in getattr(part, "defects", ())
+    ]
+    if defects:
+        raise ValueError(
+            "invalid multipart request body: %s"
+            % defects[0].__class__.__name__
+        )
+    if not message.is_multipart():
+        raise ValueError("invalid multipart request body")
+    payload = {}
+    upload = None
+    upload_fields = {"static_page", "file", "static_file", "game_file", "zip", "html"}
+    text_fields = {
+        "static_page",
+        "static_page_url",
+        "game_url",
+        "play_count",
+        "trial_seconds",
+        "store_url",
+        "title",
+        "filename",
+        "headline_text",
+        "subtitle_text",
+        "cta_text",
+        "install_text",
+        "play_label",
+        "translations",
+    }
+    seen_text_fields = set()
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        key = str(part.get_param("name", header="content-disposition") or "")
+        filename = part.get_filename()
+        if key in upload_fields and filename is not None:
+            if upload is not None:
+                raise ValueError("multiple upload files are not supported")
+            upload = {
+                "filename": str(filename or ""),
+                "content": part.get_payload(decode=True) or b"",
+            }
+            continue
+        if key not in text_fields or filename is not None:
+            continue
+        if key in seen_text_fields:
+            raise ValueError("duplicate multipart field: %s" % key)
+        seen_text_fields.add(key)
+        raw_value = part.get_payload(decode=True) or b""
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            payload[key] = raw_value.decode(charset, errors="strict")
+        except (LookupError, UnicodeError) as exc:
+            raise ValueError(
+                "invalid multipart field encoding: %s" % key
+            ) from exc
+    source_values = [
+        str(payload.get(key) or "").strip()
+        for key in ("static_page", "static_page_url", "game_url")
+        if str(payload.get(key) or "").strip()
+    ]
+    if len(source_values) > 1:
+        raise ValueError("multiple static page URL fields are not supported")
+    if upload and source_values:
+        raise ValueError("provide either an upload file or a static page URL, not both")
+    if upload:
+        if not upload.get("filename"):
+            raise ValueError("uploaded file must include a filename")
+        payload.update(upload)
+    elif source_values:
+        payload["source_url"] = source_values[0]
+    else:
+        raise ValueError("missing upload file or static page URL")
+    return payload
+
+
+def parse_playable_preview_request(handler):
+    content_length = int(handler.headers.get("Content-Length", "0") or "0")
+    if content_length <= 0:
+        raise ValueError("empty request body")
+    if content_length > PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES:
+        raise ValueError("upload too large")
+    content_type = str(handler.headers.get("Content-Type", "") or "").lower()
+    if "multipart/form-data" in content_type:
+        return parse_playable_preview_multipart(handler, content_length)
+    body = handler.rfile.read(content_length)
+    if len(body) != content_length:
+        raise ValueError("incomplete request body")
+    payload = json.loads(body.decode("utf-8")) if body else {}
+    if not isinstance(payload, dict):
+        raise ValueError("JSON request body must be an object")
+    zip_base64 = payload.get("static_zip_base64") or payload.get("zip_base64")
+    html_base64 = payload.get("static_html_base64") or payload.get("html_base64")
+    static_html = payload.get("static_html") or payload.get("html")
+    source_values = [
+        str(payload.get(key) or "").strip()
+        for key in ("static_page", "static_page_url", "game_url")
+        if str(payload.get(key) or "").strip()
+    ]
+    if len(source_values) > 1:
+        raise ValueError("multiple static page URL fields are not supported")
+    provided_sources = sum(bool(value) for value in (zip_base64, html_base64, static_html))
+    provided_sources += 1 if source_values else 0
+    if provided_sources > 1:
+        raise ValueError("provide exactly one static page source")
+    if source_values:
+        payload["source_url"] = source_values[0]
+    elif zip_base64:
+        payload["content"] = base64.b64decode(
+            re.sub(r"\s+", "", str(zip_base64 or "")), validate=True
+        )
+        payload["filename"] = payload.get("filename") or "game.zip"
+    elif html_base64:
+        payload["content"] = base64.b64decode(
+            re.sub(r"\s+", "", str(html_base64 or "")), validate=True
+        )
+        payload["filename"] = payload.get("filename") or "index.html"
+    elif static_html:
+        payload["content"] = str(static_html or "").encode("utf-8")
+        payload["filename"] = payload.get("filename") or "index.html"
+    else:
+        raise ValueError(
+            "missing static_page URL, static_html, static_html_base64 or "
+            "static_zip_base64 (legacy game_url, html, html_base64 and "
+            "zip_base64 are also accepted)"
+        )
+    return payload
+
+
+PLAYABLE_PREVIEW_TRANSLATIONS = {
+    "en": {"headline": "Trial Complete", "subtitle": "Install the app to keep playing.", "cta": "Install to Play More", "plays": "Plays"},
+    "es": {"headline": "Prueba finalizada", "subtitle": "Instala la app para seguir jugando.", "cta": "Jugar más", "plays": "Jugadas"},
+    "pt": {"headline": "Teste concluído", "subtitle": "Instale o app para continuar jogando.", "cta": "Jogar mais", "plays": "Jogadas"},
+    "id": {"headline": "Demo selesai", "subtitle": "Instal aplikasi untuk terus bermain.", "cta": "Main lagi", "plays": "Main"},
+    "th": {"headline": "จบทดลองเล่นแล้ว", "subtitle": "ติดตั้งแอปเพื่อเล่นต่อ", "cta": "เล่นต่อเลย", "plays": "จำนวนครั้งที่เล่น"},
+    "vi": {"headline": "Đã hết lượt chơi thử", "subtitle": "Cài đặt ứng dụng để tiếp tục chơi.", "cta": "Chơi thêm", "plays": "Lượt chơi"},
+    "ja": {"headline": "体験プレイ終了", "subtitle": "アプリをインストールして続きをプレイ。", "cta": "もっと遊ぶ", "plays": "プレイ回数"},
+    "ko": {"headline": "체험 종료", "subtitle": "앱을 설치하고 계속 플레이하세요.", "cta": "더 플레이하기", "plays": "플레이"},
+    "zh": {"headline": "试玩结束", "subtitle": "安装后解锁完整体验", "cta": "立即安装", "plays": "试玩次数"},
+    "zh-cn": {"headline": "试玩结束", "subtitle": "安装后解锁完整体验", "cta": "立即安装", "plays": "试玩次数"},
+    "zh-tw": {"headline": "試玩結束", "subtitle": "安裝後解鎖完整體驗", "cta": "立即安裝", "plays": "試玩次數"},
+    "fr": {"headline": "Essai terminé", "subtitle": "Installez l'app pour continuer à jouer.", "cta": "Jouer plus", "plays": "Parties"},
+    "de": {"headline": "Test beendet", "subtitle": "Installiere die App, um weiterzuspielen.", "cta": "Weiter spielen", "plays": "Spiele"},
+    "it": {"headline": "Prova terminata", "subtitle": "Installa l'app per continuare a giocare.", "cta": "Gioca ancora", "plays": "Partite"},
+    "tr": {"headline": "Deneme bitti", "subtitle": "Oynamaya devam etmek için uygulamayı yükle.", "cta": "Daha fazla oyna", "plays": "Oynama"},
+    "ar": {"headline": "انتهت التجربة", "subtitle": "ثبّت التطبيق لمواصلة اللعب.", "cta": "العب أكثر", "plays": "مرات اللعب"},
+    "hi": {"headline": "ट्रायल खत्म", "subtitle": "खेलना जारी रखने के लिए ऐप इंस्टॉल करें.", "cta": "और खेलें", "plays": "प्ले"},
+    "ru": {"headline": "Пробная игра завершена", "subtitle": "Установите приложение, чтобы продолжить.", "cta": "Играть дальше", "plays": "Игр"},
+    "ms": {"headline": "Percubaan tamat", "subtitle": "Pasang aplikasi untuk terus bermain.", "cta": "Main lagi", "plays": "Mainan"},
+}
+
+
+def playable_preview_translations(payload):
+    translations = {
+        lang: dict(values) for lang, values in PLAYABLE_PREVIEW_TRANSLATIONS.items()
+    }
+    raw = payload.get("translations")
+    if isinstance(raw, str) and raw.strip():
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        for lang, item in raw.items():
+            if not isinstance(item, dict):
+                continue
+            lang_key = str(lang or "").strip().lower()
+            if not lang_key:
+                continue
+            merged = dict(translations.get(lang_key) or {})
+            for source_key, target_key in (
+                ("headline", "headline"),
+                ("title", "headline"),
+                ("subtitle", "subtitle"),
+                ("description", "subtitle"),
+                ("cta", "cta"),
+                ("button", "cta"),
+                ("install", "cta"),
+            ):
+                if item.get(source_key):
+                    merged[target_key] = str(item.get(source_key))
+            if item.get("plays"):
+                merged["plays"] = str(item.get("plays"))
+            if merged:
+                translations[lang_key] = merged
+    if payload.get("headline_text"):
+        translations.setdefault("en", {})["headline"] = str(payload.get("headline_text"))
+    if payload.get("subtitle_text"):
+        translations.setdefault("en", {})["subtitle"] = str(payload.get("subtitle_text"))
+    if payload.get("cta_text"):
+        translations.setdefault("en", {})["cta"] = str(payload.get("cta_text"))
+    if payload.get("install_text"):
+        translations.setdefault("en", {})["cta"] = str(payload.get("install_text"))
+    if payload.get("play_label"):
+        translations.setdefault("en", {})["plays"] = str(payload.get("play_label"))
+    return translations
+
+
+def _create_playable_preview(payload, preview_id):
+    store_url = str(payload.get("store_url") or "").strip()
+    if not store_url:
+        raise ValueError("missing store_url")
+    if not re.match(r"^https?://", store_url, re.I):
+        raise ValueError("store_url must start with http:// or https://")
+    play_count = int(payload.get("play_count") or payload.get("play_times") or payload.get("plays") or 0)
+    if play_count < 0:
+        raise ValueError("play_count must be >= 0")
+    trial_seconds = int(payload.get("trial_seconds") or PLAYABLE_PREVIEW_TRIAL_SECONDS)
+    trial_seconds = max(1, min(120, trial_seconds))
+    filename = sanitize_playable_filename(payload.get("filename"), "game.zip")
+    source_url = str(payload.get("source_url") or "").strip()
+    content = payload.get("content") or b""
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    if source_url and content:
+        raise ValueError("provide either uploaded content or a static page URL, not both")
+    if not source_url and not content:
+        raise ValueError("static page source is empty")
+    if len(content) > PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES:
+        raise ValueError("upload too large")
+
+    output_dir = os.path.join(playable_preview_root(), preview_id)
+    game_dir = os.path.join(output_dir, "game")
+    os.makedirs(game_dir, exist_ok=True)
+
+    source_path = None
+
+    try:
+        if source_url:
+            remote_source = download_playable_static_site(source_url, game_dir)
+            game_src = "game/" + remote_source["entry"]
+        else:
+            source_path = os.path.join(output_dir, filename)
+            with open(source_path, "wb") as fp:
+                fp.write(content)
+            if filename.lower().endswith(".zip"):
+                safe_extract_zip(
+                    source_path,
+                    game_dir,
+                    PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
+                    PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES,
+                )
+            else:
+                html_name = "index.html" if not filename.lower().endswith((".html", ".htm")) else filename
+                with open(os.path.join(game_dir, sanitize_playable_filename(html_name, "index.html")), "wb") as fp:
+                    fp.write(content)
+            game_src = find_playable_entry(game_dir)
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+    entry_relative = game_src[len("game/"):] if game_src.startswith("game/") else game_src
+    title = str(payload.get("title") or "Playable Preview").strip() or "Playable Preview"
+    translations = playable_preview_translations(payload)
+    documentation_url = playable_preview_doc_url()
+    index_path = os.path.join(output_dir, "index.html")
+    try:
+        document, compatibility = build_meta_playable_html(
+            game_dir,
+            entry_relative,
+            title,
+            play_count,
+            trial_seconds,
+            translations,
+            max_asset_bytes=PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        )
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+    document_bytes = document.encode("utf-8")
+    html_size = len(document_bytes)
+    with open(index_path, "wb") as fp:
+        fp.write(document_bytes)
+    preview_path = os.path.join(output_dir, "preview.html")
+    preview_document = build_browser_preview_html(store_url, title, "index.html")
+    preview_document_bytes = preview_document.encode("utf-8")
+    preview_html_size = len(preview_document_bytes)
+    with open(preview_path, "wb") as fp:
+        fp.write(preview_document_bytes)
+
+    shutil.rmtree(game_dir, ignore_errors=True)
+    if source_path and source_path != index_path and os.path.exists(source_path):
+        os.remove(source_path)
+
+    zip_path = os.path.join(output_dir, "playable-preview.zip")
+    with zipfile.ZipFile(
+        zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=8
+    ) as zf:
+        zf.write(index_path, "index.html")
+    zip_size = os.path.getsize(zip_path)
+    if zip_size > PLAYABLE_PREVIEW_MAX_ZIP_BYTES:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ValueError(
+            "generated Meta playable zip exceeds limit: %s > %s"
+            % (zip_size, PLAYABLE_PREVIEW_MAX_ZIP_BYTES)
+        )
+
+    size_headroom = min(
+        PLAYABLE_PREVIEW_MAX_ASSET_BYTES - html_size,
+        PLAYABLE_PREVIEW_MAX_ZIP_BYTES - zip_size,
+    )
+    compatibility.update({
+        "html_size": html_size,
+        "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
+    })
+    manifest_path = os.path.join(output_dir, "manifest.json")
+    manifest = {
+        "preview_id": preview_id,
+        "title": title,
+        "trial_seconds": trial_seconds,
+        "play_count": max(1, play_count),
+        "store_url": store_url,
+        "documentation_url": documentation_url,
+        "source_entry": game_src,
+        "entry": "index.html",
+        "preview_entry": "preview.html",
+        "html_size": html_size,
+        "preview_html_size": preview_html_size,
+        "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
+        "meta_compatible": True,
+        "compatibility": compatibility,
+        "languages": sorted(translations.keys()),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as fp:
+        json.dump(manifest, fp, ensure_ascii=False, indent=2)
+
+    if cos_enabled():
+        for root, _, files in os.walk(output_dir):
+            for item in files:
+                path = os.path.join(root, item)
+                if path == source_path and source_path != index_path:
+                    continue
+                upload_file_to_cos(path)
+        preview_url = build_cos_url(build_cos_object_key(preview_path))
+        meta_html_url = build_cos_url(build_cos_object_key(index_path))
+        zip_url = build_cos_url(build_cos_object_key(zip_path))
+        manifest_url = build_cos_url(build_cos_object_key(manifest_path))
+        shutil.rmtree(output_dir, ignore_errors=True)
+    else:
+        preview_url = build_public_url(preview_path)
+        meta_html_url = build_public_url(index_path)
+        zip_url = build_public_url(zip_path)
+        manifest_url = build_public_url(manifest_path)
+    return {
+        "preview_id": preview_id,
+        "preview_html_url": preview_url,
+        "meta_html_url": meta_html_url,
+        "zip_url": zip_url,
+        "manifest_url": manifest_url,
+        "trial_seconds": trial_seconds,
+        "play_count": max(1, play_count),
+        "store_url": store_url,
+        "documentation_url": documentation_url,
+        "entry": "index.html",
+        "preview_entry": "preview.html",
+        "source_entry": game_src,
+        "html_size": html_size,
+        "preview_html_size": preview_html_size,
+        "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
+        "meta_compatible": True,
+        "compatibility": compatibility,
+        "languages": sorted(translations.keys()),
+    }
+
+
+def cleanup_playable_preview_artifacts(preview_id):
+    output_dir = os.path.join(playable_preview_root(), preview_id)
+    output_exists = os.path.isdir(output_dir)
+    try:
+        if output_exists and cos_enabled():
+            try:
+                client = get_cos_client()
+                for filename in ("index.html", "preview.html", "playable-preview.zip", "manifest.json"):
+                    try:
+                        client.delete_object(
+                            Bucket=COS_BUCKET,
+                            Key=build_cos_object_key(os.path.join(output_dir, filename)),
+                        )
+                    except Exception as exc:
+                        logging.warning(
+                            "playable preview COS cleanup failed: preview_id=%s file=%s error=%s",
+                            preview_id,
+                            filename,
+                            exc.__class__.__name__,
+                        )
+            except Exception as exc:
+                logging.warning(
+                    "playable preview COS cleanup initialization failed: preview_id=%s error=%s",
+                    preview_id,
+                    exc.__class__.__name__,
+                )
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def create_playable_preview(payload):
+    preview_id = uuid.uuid4().hex
+    try:
+        return _create_playable_preview(payload, preview_id)
+    except Exception:
+        cleanup_playable_preview_artifacts(preview_id)
+        raise
 
 
 
@@ -24313,389 +25825,25 @@ def row_to_job(row):
 def set_job_progress(job, status=None, progress=None, detail=None, persist=True):
     if job.get("_gpu_worker"):
         persist = False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if status is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["status"] = status
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if progress is None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        progress = job.get("progress", progress_for_status(job.get("status", "queued")))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    job["progress"] = clamp_progress(progress)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if detail is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = str(detail or "").strip()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    elif "progress_detail" not in job:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = ""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if persist:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        upsert_job_record(job)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    lock = job.setdefault("_state_lock", threading.RLock())
+    with lock:
+        if status is not None:
+            job["status"] = status
+        if progress is None:
+            progress = job.get("progress", progress_for_status(job.get("status", "queued")))
+        job["progress"] = clamp_progress(progress)
+        if detail is not None:
+            job["progress_detail"] = str(detail or "").strip()
+        elif "progress_detail" not in job:
+            job["progress_detail"] = ""
+        snapshot = job.get("_remote_snapshot")
+        if snapshot and job.get("status") != "done":
+            view = drama_remote_display(snapshot)
+            job["status"] = view["status"]
+            job["progress"] = clamp_progress(view["stage_percent"] or 0)
+            job["progress_detail"] = view["detail"]
+        if persist:
+            upsert_job_record(job)
     return job
 
 
@@ -25187,6 +26335,12 @@ def upsert_job_record(job):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(
+                    conn, job["job_id"], job["_fenced_lease"],
+                    allow_done=(status_text == "done"),
+                )
             conn.execute(
 
 
@@ -27595,7 +28749,7 @@ def fetch_job_row(job_id):
 
 
 
-    return enrich_material_job_timing(row_to_job(row)) if row else None
+    return decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) if row else None
 
 
 
@@ -30363,7 +31517,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-        "items": [enrich_material_job_timing(row_to_job(row)) for row in rows],
+        "items": [decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) for row in rows],
 
 
 
@@ -32644,6 +33798,5684 @@ def mysql_table_columns(table_name, database=None):
 
 def sql_identifier(name):
     return "`%s`" % str(name or "").replace("`", "``")
+
+
+from features.ad_control_copy_engine import service as ad_control_copy_service
+
+
+from features.ad_control_execution_log import service as ad_control_execution_log_service
+
+
+AD_CONTROL_DB_NAME = os.environ.get("AD_CONTROL_DB_NAME", DB_NAME).strip() or "kunlunads_dev"
+AD_CONTROL_GRAPH_VERSION = os.environ.get("AD_CONTROL_GRAPH_VERSION", "v19.0").strip() or "v19.0"
+AD_CONTROL_GRAPH_TIMEOUT = int(os.environ.get("AD_CONTROL_GRAPH_TIMEOUT", "30"))
+AD_CONTROL_PREVIEW_TTL_SECONDS = int(os.environ.get("AD_CONTROL_PREVIEW_TTL_SECONDS", "1800"))
+AD_CONTROL_MAX_PAGE_SIZE = int(os.environ.get("AD_CONTROL_MAX_PAGE_SIZE", "200"))
+AD_CONTROL_MAX_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_EXECUTE", "50"))
+AD_CONTROL_MAX_METRIC_IDS = int(os.environ.get("AD_CONTROL_MAX_METRIC_IDS", "200"))
+AD_CONTROL_MAX_LIVE_ACCOUNTS = int(os.environ.get("AD_CONTROL_MAX_LIVE_ACCOUNTS", "500"))
+AD_CONTROL_MAX_LIVE_CAMPAIGNS = int(os.environ.get("AD_CONTROL_MAX_LIVE_CAMPAIGNS", "1000"))
+AD_CONTROL_MAX_LIVE_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE", "200"))
+AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))
+AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))
+AD_CONTROL_ACTION_LOG_DB_NAME = "ads_ai"
+AD_CONTROL_ACTION_LOG_TABLE = "ad_control_action_log"
+AD_CONTROL_ACTION_LOG_MYSQL_HOST = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST") or "101.32.56.53").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PORT = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT") or "63353").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_USER = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER") or "").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD") or ""
+AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST") or "101.32.56.53").strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT") or "63350").strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_USER = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_USER") or AD_CONTROL_ACTION_LOG_MYSQL_USER).strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD") or AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD
+AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "3"))
+AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "5"))
+AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))
+AD_CONTROL_RESOURCE_LIMIT_PERCENT = float(os.environ.get("AD_CONTROL_RESOURCE_LIMIT_PERCENT", "85"))
+AD_CONTROL_REDIS_URL = os.environ.get("AD_CONTROL_REDIS_URL", "").strip()
+AD_CONTROL_LOG_INSIGHT_CONTEXT = os.environ.get("AD_CONTROL_LOG_INSIGHT_CONTEXT", "0").strip().lower() in ("1", "true", "yes", "on")
+AD_CONTROL_ACTION_TARGET_CACHE_MAX = int(os.environ.get("AD_CONTROL_ACTION_TARGET_CACHE_MAX", "80"))
+AD_CONTROL_ACTION_TARGET_CACHE = {}
+AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS = int(os.environ.get("AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS", "12"))
+AD_CONTROL_ACCOUNT_LIST_CACHE_SECONDS = int(os.environ.get("AD_CONTROL_ACCOUNT_LIST_CACHE_SECONDS", "300"))
+AD_CONTROL_ACCOUNT_LIST_CACHE = {}
+AD_CONTROL_ACCOUNT_LIST_CACHE_LOCK = threading.Lock()
+AD_CONTROL_CRITICAL_DB_RETRIES = int(os.environ.get("AD_CONTROL_CRITICAL_DB_RETRIES", "4"))
+AD_CONTROL_DEFAULT_USER_CACHE_SECONDS = int(os.environ.get("AD_CONTROL_DEFAULT_USER_CACHE_SECONDS", "600"))
+AD_CONTROL_TOKEN_CACHE_SECONDS = int(os.environ.get("AD_CONTROL_TOKEN_CACHE_SECONDS", "300"))
+AD_CONTROL_DEFAULT_USER_CACHE = {}
+AD_CONTROL_TOKEN_CACHE = {}
+AD_CONTROL_CREDENTIAL_CACHE_LOCK = threading.Lock()
+FB_POST_AD_DELETE_PRODUCTS = [
+    item.strip()
+    for item in os.environ.get("FB_POST_AD_DELETE_PRODUCTS", "3443,3543,826").split(",")
+    if item.strip()
+]
+FB_POST_AD_DELETE_MAX_SERIES = int(os.environ.get("FB_POST_AD_DELETE_MAX_SERIES", "50"))
+FB_POST_AD_DELETE_MAX_ADS = int(os.environ.get("FB_POST_AD_DELETE_MAX_ADS", "10000"))
+FB_POST_AD_DELETE_LOG_LIMIT = int(os.environ.get("FB_POST_AD_DELETE_LOG_LIMIT", "5000"))
+AD_CONTROL_INSIGHT_START_TABLE = os.environ.get("AD_CONTROL_INSIGHT_START_TABLE", "ads_facebook_hours_insights").strip() or "ads_facebook_hours_insights"
+AD_CONTROL_INSIGHT_START_FIELD = os.environ.get("AD_CONTROL_INSIGHT_START_FIELD", "dt").strip() or "dt"
+AD_CONTROL_INSIGHT_CAMPAIGN_FIELD = os.environ.get("AD_CONTROL_INSIGHT_CAMPAIGN_FIELD", "campaign_id").strip() or "campaign_id"
+AD_CONTROL_INSIGHT_ACCOUNT_FIELD = os.environ.get("AD_CONTROL_INSIGHT_ACCOUNT_FIELD", "ad_account_id").strip()
+AD_CONTROL_INSIGHT_PRODUCT_FIELD = os.environ.get("AD_CONTROL_INSIGHT_PRODUCT_FIELD", "").strip()
+AD_CONTROL_INSIGHTS_TIME_INCREMENT = os.environ.get("AD_CONTROL_INSIGHTS_TIME_INCREMENT", "1").strip() or "1"
+AD_CONTROL_PRODUCT_ALIASES_DEFAULT = {
+    "dramawave": [
+        "dramawave",
+        "Dramawave",
+        "1479",
+        "2355",
+        "2358",
+        "2475",
+        "2477",
+        "3086",
+        "[w2a]Dramawave",
+        "[w2a]DramaWave iOS",
+        "[w2a]drama-double",
+    ],
+    "hotdrama": [
+        "hotdrama",
+        "HotDrama",
+        "3302",
+        "3296",
+        "[w2a]hotdrama-double",
+    ],
+    "freereels": [
+        "freereels",
+        "FreeReels",
+        "979",
+        "2580",
+        "3062",
+        "3304",
+        "[w2a]FreeReels",
+        "[w2a]FreeReels-double",
+    ],
+}
+try:
+    AD_CONTROL_PRODUCT_ALIASES = json.loads(
+        os.environ.get("AD_CONTROL_PRODUCT_ALIASES_JSON", json.dumps(AD_CONTROL_PRODUCT_ALIASES_DEFAULT, ensure_ascii=False))
+    )
+except Exception:
+    AD_CONTROL_PRODUCT_ALIASES = AD_CONTROL_PRODUCT_ALIASES_DEFAULT
+AD_CONTROL_DRAMA_SCHEMA_CACHE = {}
+AD_CONTROL_DRAMA_SCHEMA_CACHE_LOCK = threading.Lock()
+
+AD_CONTROL_LEVELS = {
+    "campaign": {
+        "id_column": "campaign_id",
+        "name_column": "campaign_name",
+        "action_at_column": "campaign_action_at",
+        "label": "Campaign",
+    },
+    "adset": {
+        "id_column": "adset_id",
+        "name_column": "adset_name",
+        "action_at_column": "adset_action_at",
+        "label": "Ad set",
+    },
+    "ad": {
+        "id_column": "ad_id",
+        "name_column": "ad_name",
+        "action_at_column": "ad_action_at",
+        "label": "Ad",
+    },
+}
+
+AD_CONTROL_PREVIEW_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_preview (
+  preview_id TEXT PRIMARY KEY,
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  product TEXT NOT NULL DEFAULT '',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  sample_json TEXT NOT NULL DEFAULT '[]',
+  total_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+AD_CONTROL_ACTION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_action (
+  action_id TEXT PRIMARY KEY,
+  preview_id TEXT NOT NULL DEFAULT '',
+  rule_id TEXT NOT NULL DEFAULT '',
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  product TEXT NOT NULL DEFAULT '',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  requested_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  results_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_CONTROL_OBJECT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_object_state (
+  object_key TEXT PRIMARY KEY,
+  product TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  account_id TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  campaign_id TEXT NOT NULL DEFAULT '',
+  last_pause_action_id TEXT NOT NULL DEFAULT '',
+  last_reopen_action_id TEXT NOT NULL DEFAULT '',
+  object_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT '',
+  paused_at TEXT NOT NULL DEFAULT '',
+  reopened_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_CONTROL_RULE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule (
+  rule_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  product TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'pause',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  thresholds_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_run_at TEXT NOT NULL DEFAULT '',
+  last_result_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
+AD_CONTROL_TOKEN_CONFIG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_token_config (
+  product TEXT NOT NULL DEFAULT '',
+  account_id TEXT NOT NULL DEFAULT '',
+  user_id TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (product, account_id)
+)
+"""
+
+AD_CONTROL_ACCOUNT_GROUP_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_account_group (
+  group_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  account_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+AD_CONTROL_RULE_SET_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule_set (
+  rule_set_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  default_window_json TEXT NOT NULL DEFAULT '{"type":"since_start"}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+AD_CONTROL_RULE_GROUP_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule_group (
+  group_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  rule_set_id TEXT NOT NULL DEFAULT '',
+  account_group_id TEXT NOT NULL DEFAULT '',
+  account_ids_json TEXT NOT NULL DEFAULT '[]',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  strategy_json TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  emergency_stopped INTEGER NOT NULL DEFAULT 0,
+  last_preview_id TEXT NOT NULL DEFAULT '',
+  last_preview_hash TEXT NOT NULL DEFAULT '',
+  last_run_at TEXT NOT NULL DEFAULT '',
+  last_result_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  owner_user_id TEXT NOT NULL DEFAULT '',
+  object_level TEXT NOT NULL DEFAULT 'campaign',
+  run_mode TEXT NOT NULL DEFAULT 'observe',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+
+def ensure_ad_control_tables():
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(AD_CONTROL_PREVIEW_TABLE_SQL)
+            conn.execute(AD_CONTROL_ACTION_TABLE_SQL)
+            conn.execute(AD_CONTROL_OBJECT_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_TABLE_SQL)
+            conn.execute(AD_CONTROL_TOKEN_CONFIG_TABLE_SQL)
+            conn.execute(AD_CONTROL_ACCOUNT_GROUP_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_SET_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_GROUP_TABLE_SQL)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(ad_control_rule_group)").fetchall()}
+            if "rule_set_id" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN rule_set_id TEXT NOT NULL DEFAULT ''")
+            if "strategy_json" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN strategy_json TEXT NOT NULL DEFAULT '{}'")
+            if "owner_user_id" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
+            if "object_level" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN object_level TEXT NOT NULL DEFAULT 'campaign'")
+            if "run_mode" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN run_mode TEXT NOT NULL DEFAULT 'observe'")
+                # Rows that existed before run_mode were production pause
+                # bindings. Preserve their behavior; only newly created V2
+                # groups default to observe.
+                conn.execute("UPDATE ad_control_rule_group SET run_mode='live'")
+            conn.execute(
+                "UPDATE ad_control_rule_group SET owner_user_id=created_by "
+                "WHERE COALESCE(owner_user_id,'')='' AND COALESCE(created_by,'')<>''"
+            )
+            # An enabled orphan cannot be displayed or emergency-stopped by any
+            # user, while the internal runner would still execute it. Fail
+            # closed until an operator assigns a verified owner from backup.
+            conn.execute(
+                "UPDATE ad_control_rule_group SET enabled=0,emergency_stopped=1 "
+                "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=''"
+            )
+            conn.execute(
+                "UPDATE ad_control_rule SET enabled=0 WHERE COALESCE(created_by,'')=''"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_enabled ON ad_control_rule(enabled, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_account_group_product ON ad_control_account_group(product, deleted)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_set_product ON ad_control_rule_set(product, deleted)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_product ON ad_control_rule_group(product, deleted, enabled)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_owner ON ad_control_rule_group(owner_user_id, deleted, updated_at)")
+            legacy_rows = conn.execute(
+                """
+                SELECT group_id, name, product, rules_json, created_by, created_at, updated_at
+                 FROM ad_control_rule_group
+                 WHERE COALESCE(rule_set_id, '') = ''
+                   AND COALESCE(product, '') <> ''
+                """
+            ).fetchall()
+            for row in legacy_rows:
+                rule_set_id = "legacy_%s" % str(row["group_id"] or "").strip()
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_control_rule_set (
+                      rule_set_id, name, product, rules_json, default_window_json,
+                      created_by, created_at, updated_at, deleted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        rule_set_id,
+                        row["name"] or "",
+                        row["product"] or "",
+                        row["rules_json"] or "[]",
+                        '{"type":"since_start"}',
+                        row["created_by"] or "",
+                        row["created_at"] or "",
+                        row["updated_at"] or "",
+                    ),
+                )
+                conn.execute(
+                    "UPDATE ad_control_rule_group SET rule_set_id=? WHERE group_id=?",
+                    (rule_set_id, row["group_id"]),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def ad_control_db_prefix():
+    return sql_identifier(AD_CONTROL_DB_NAME)
+
+
+def ad_control_table(table_name):
+    return "%s.%s" % (ad_control_db_prefix(), sql_identifier(table_name))
+
+
+def ad_control_quote(value):
+    return "'%s'" % mysql_escape_literal(value)
+
+
+def ad_control_sql_in(values):
+    clean = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not clean:
+        return "('')"
+    return "(" + ",".join(ad_control_quote(value) for value in clean) + ")"
+
+
+def ad_control_product_values(product):
+    value = str(product or "").strip()
+    aliases = []
+    if value:
+        aliases.append(value)
+    mapping = AD_CONTROL_PRODUCT_ALIASES if isinstance(AD_CONTROL_PRODUCT_ALIASES, dict) else {}
+    for key, items in mapping.items():
+        if str(key or "").strip().lower() == value.lower():
+            aliases.extend(items if isinstance(items, list) else [])
+            break
+    out = []
+    seen = set()
+    for item in aliases:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out or [value]
+
+
+def ad_control_product_condition(expr, product):
+    return "%s IN %s" % (expr, ad_control_sql_in(ad_control_product_values(product)))
+
+
+def ad_control_norm_account_sql(expr):
+    return "REPLACE(REPLACE(TRIM(%s),'act_',''),'ACT_','')" % expr
+
+
+def ad_control_normalize_account(value):
+    return str(value or "").strip().replace("act_", "").replace("ACT_", "")
+
+
+def ad_control_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = re.split(r"[,，\s]+", str(value or ""))
+    out = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out
+
+
+def ad_control_level(value):
+    level = str(value or "campaign").strip().lower()
+    if level not in AD_CONTROL_LEVELS:
+        raise StructuredApiError("invalid_level", "对象层级无效")
+    return level
+
+
+def ad_control_action(value):
+    action = str(value or "preview").strip().lower()
+    if action in ("close", "pause", "paused"):
+        return "pause"
+    if action in ("open", "reopen", "active", "restart"):
+        return "reopen"
+    if action == "preview":
+        return "preview"
+    raise StructuredApiError("invalid_action", "调控动作无效")
+
+
+def ad_control_int(value, default=0, minimum=None, maximum=None):
+    try:
+        number = int(value)
+    except Exception:
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def ad_control_criteria(payload, require_action=False):
+    payload = payload or {}
+    product = str(payload.get("product", "") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "请选择产品")
+    action = ad_control_action(payload.get("action", "preview"))
+    if require_action and action == "preview":
+        raise StructuredApiError("missing_action", "请选择关停或重启动作")
+    level = ad_control_level(payload.get("level", "campaign"))
+    page_size = ad_control_int(payload.get("page_size", 50), 50, 1, AD_CONTROL_MAX_PAGE_SIZE)
+    page = ad_control_int(payload.get("page", 1), 1, 1, 100000)
+    criteria = {
+        "product": product,
+        "action": action,
+        "level": level,
+        "accounts": ad_control_list(payload.get("accounts") or payload.get("account_ids")),
+        "timezones": ad_control_list(payload.get("timezones")),
+        "countries": [item.upper() for item in ad_control_list(payload.get("countries"))],
+        "languages": [item.lower() for item in ad_control_list(payload.get("languages"))],
+        "statuses": [item.upper() for item in ad_control_list(payload.get("statuses"))],
+        "query": str(payload.get("query", "") or "").strip(),
+        "created_from": str(payload.get("created_from", "") or "").strip(),
+        "created_to": str(payload.get("created_to", "") or "").strip(),
+        "metric_days": ad_control_int(payload.get("metric_days", 3), 3, 1, 30),
+        "page": page,
+        "page_size": page_size,
+    }
+    return criteria
+
+
+def ad_control_candidate_where(criteria):
+    level_cfg = AD_CONTROL_LEVELS[criteria["level"]]
+    id_column = level_cfg["id_column"]
+    where = [
+        ad_control_product_condition("d.product", criteria["product"]),
+        "d.%s IS NOT NULL" % sql_identifier(id_column),
+        "d.%s<>''" % sql_identifier(id_column),
+    ]
+    accounts = [ad_control_normalize_account(item) for item in criteria.get("accounts") or []]
+    if accounts:
+        where.append("%s IN %s" % (ad_control_norm_account_sql("d.ad_account_id"), ad_control_sql_in(accounts)))
+    if criteria.get("timezones"):
+        where.append("CAST(s.time_zone AS CHAR) IN %s" % ad_control_sql_in(criteria["timezones"]))
+    if criteria.get("countries"):
+        where.append("UPPER(COALESCE(d.country,'')) IN %s" % ad_control_sql_in(criteria["countries"]))
+    if criteria.get("languages"):
+        where.append("LOWER(COALESCE(d.language,'')) IN %s" % ad_control_sql_in(criteria["languages"]))
+    if criteria.get("statuses"):
+        where.append("UPPER(COALESCE(d.status,'')) IN %s" % ad_control_sql_in(criteria["statuses"]))
+    if criteria.get("created_from"):
+        where.append("d.created_at >= %s" % ad_control_quote(criteria["created_from"] + " 00:00:00"))
+    if criteria.get("created_to"):
+        where.append("d.created_at <= %s" % ad_control_quote(criteria["created_to"] + " 23:59:59"))
+    if criteria.get("query"):
+        like = "%%%s%%" % mysql_escape_literal(criteria["query"])
+        text_columns = [
+            "d.ad_account_id",
+            "d.campaign_id",
+            "d.campaign_name",
+            "d.adset_id",
+            "d.adset_name",
+            "d.ad_id",
+            "d.ad_name",
+        ]
+        where.append("(" + " OR ".join("%s LIKE '%s'" % (column, like) for column in text_columns) + ")")
+    return " AND ".join(where)
+
+
+def ad_control_candidate_join():
+    return (
+        "FROM {data} d "
+        "LEFT JOIN {accounts} s ON {account_norm}= {setting_norm}"
+    ).format(
+        data=ad_control_table("ads_facebook_auto_created_data"),
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+    )
+
+
+def ad_control_group_columns(level):
+    if level == "campaign":
+        return ["d.ad_account_id", "d.campaign_id"]
+    if level == "adset":
+        return ["d.ad_account_id", "d.campaign_id", "d.adset_id"]
+    return ["d.ad_account_id", "d.campaign_id", "d.adset_id", "d.ad_id"]
+
+
+def ad_control_fetch_candidates(criteria, page=None, page_size=None):
+    level = criteria["level"]
+    level_cfg = AD_CONTROL_LEVELS[level]
+    id_column = level_cfg["id_column"]
+    name_column = level_cfg["name_column"]
+    page = ad_control_int(page or criteria.get("page", 1), 1, 1, 100000)
+    page_size = ad_control_int(page_size or criteria.get("page_size", 50), 50, 1, AD_CONTROL_MAX_PAGE_SIZE)
+    where_sql = ad_control_candidate_where(criteria)
+    join_sql = ad_control_candidate_join()
+    group_sql = ", ".join(ad_control_group_columns(level))
+    count_sql = (
+        "SELECT COUNT(DISTINCT CONCAT_WS(':', d.ad_account_id, d.%s)) %s WHERE %s"
+        % (sql_identifier(id_column), join_sql, where_sql)
+    )
+    total_rows = run_mysql(count_sql)
+    total = int(total_rows[0][0] or 0) if total_rows else 0
+    offset = (page - 1) * page_size
+    select_sql = """
+        SELECT
+          MIN(d.id),
+          COALESCE(MIN(d.product), ''),
+          d.ad_account_id,
+          COALESCE(MAX(NULLIF(s.name,'')), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.account_status AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.is_inactive AS CHAR)), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_id,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.adset_id,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.adset_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.ad_id,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.ad_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.{id_column},'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.{name_column},'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.status,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.local_status AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.budget AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), '0'),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.latest_budget AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), '0'),
+          GROUP_CONCAT(DISTINCT CAST(d.user_id AS CHAR) ORDER BY d.user_id SEPARATOR ','),
+          MIN(d.created_at),
+          MAX(d.updated_at),
+          COUNT(*)
+        {join_sql}
+        WHERE {where_sql}
+        GROUP BY {group_sql}
+        ORDER BY MAX(d.updated_at) DESC
+        LIMIT {limit_value} OFFSET {offset_value}
+    """.format(
+        id_column=sql_identifier(id_column),
+        name_column=sql_identifier(name_column),
+        join_sql=join_sql,
+        where_sql=where_sql,
+        group_sql=group_sql,
+        limit_value=page_size,
+        offset_value=offset,
+    )
+    rows = run_mysql(" ".join(select_sql.split()))
+    items = []
+    keys = [
+        "row_id", "product", "account_id", "account_name", "time_zone", "account_status", "is_inactive",
+        "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", "object_id",
+        "object_name", "status", "local_status", "country", "language", "budget", "latest_budget",
+        "user_ids", "created_at", "updated_at", "row_count",
+    ]
+    for raw in rows:
+        item = {key: (raw[index] if index < len(raw) else "") for index, key in enumerate(keys)}
+        item["level"] = level
+        item["object_key"] = ad_control_object_key(item)
+        item["status"] = str(item.get("status") or "").upper()
+        item["account_normalized"] = ad_control_normalize_account(item.get("account_id"))
+        try:
+            item["row_count"] = int(item.get("row_count") or 0)
+        except Exception:
+            item["row_count"] = 0
+        items.append(item)
+    ad_control_attach_metrics(criteria, items)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+def ad_control_attach_metrics(criteria, items):
+    campaign_ids = []
+    for item in items:
+        campaign_id = str(item.get("campaign_id") or "").strip()
+        if campaign_id and campaign_id not in campaign_ids:
+            campaign_ids.append(campaign_id)
+    campaign_ids = campaign_ids[:AD_CONTROL_MAX_METRIC_IDS]
+    if not campaign_ids:
+        return
+    days = ad_control_int(criteria.get("metric_days", 3), 3, 1, 30)
+    sql = """
+        SELECT account_id, campaign_id, ROUND(SUM(spend_usd),2), COALESCE(SUM(install),0), COUNT(DISTINCT dt)
+          FROM {table}
+         WHERE {product_where}
+           AND campaign_id IN {campaign_ids}
+           AND dt >= CURDATE() - INTERVAL {days} DAY
+         GROUP BY account_id, campaign_id
+    """.format(
+        table=ad_control_table("ads_platform_report_items"),
+        product_where=ad_control_product_condition("product", criteria["product"]),
+        campaign_ids=ad_control_sql_in(campaign_ids),
+        days=days,
+    )
+    try:
+        rows = run_mysql(" ".join(sql.split()))
+    except Exception:
+        logging.exception("failed to load ad control metrics")
+        return
+    metrics = {}
+    by_campaign = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0] if len(row) > 0 else "")
+        campaign_id = str(row[1] if len(row) > 1 else "")
+        payload = {
+            "spend_usd": float(row[2] or 0),
+            "install": int(float(row[3] or 0)),
+            "metric_days": int(float(row[4] or 0)),
+        }
+        metrics[(account_id, campaign_id)] = payload
+        by_campaign[campaign_id] = payload
+    for item in items:
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        campaign_id = str(item.get("campaign_id") or "")
+        item["metrics"] = metrics.get((account_id, campaign_id)) or by_campaign.get(campaign_id) or {
+            "spend_usd": 0,
+            "install": 0,
+            "metric_days": 0,
+        }
+
+
+def ad_control_object_key(item):
+    return "%s:%s:%s:%s" % (
+        str(item.get("product") or ""),
+        str(item.get("level") or "campaign"),
+        ad_control_normalize_account(item.get("account_id")),
+        str(item.get("object_id") or ""),
+    )
+
+
+def ad_control_language_from_campaign_name(name):
+    text = str(name or "")
+    match = re.search(r"(?:^|[_|])([A-Za-z]{2}(?:[-_/][A-Za-z]{2})?)(?=_0_)", text)
+    if not match:
+        return ""
+    return re.sub(r"[-_/]+", "", match.group(1)).upper()
+
+
+def ad_control_display_language(raw_language, campaign_name=""):
+    parsed = ad_control_language_from_campaign_name(campaign_name)
+    if parsed:
+        return parsed
+    return re.sub(r"[-_/]+", "", str(raw_language or "").strip()).upper()
+
+
+def list_ad_control_products(query="", limit=200):
+    limit = ad_control_int(limit, 200, 1, 500)
+    where = "(name<>'' OR product<>'')"
+    if query:
+        like = "%%%s%%" % mysql_escape_literal(query)
+        where += " AND (name LIKE '%s' OR product LIKE '%s' OR app_id LIKE '%s')" % (like, like, like)
+    sql = """
+        SELECT name, product, app_id, updated_at
+          FROM {table}
+         WHERE {where}
+         ORDER BY updated_at DESC
+         LIMIT {limit}
+    """.format(table=ad_control_table("setting_product"), where=where, limit=limit)
+    rows = run_mysql(" ".join(sql.split()))
+    items = []
+    seen = set()
+    for row in rows:
+        name = str(row[0] or "").strip()
+        product_value = str(row[1] or "").strip()
+        app_id = str(row[2] or "").strip()
+        updated_at = row[3] if len(row) > 3 else ""
+        product_key = product_value or name
+        if not product_key or product_key in seen:
+            continue
+        seen.add(product_key)
+        label_parts = []
+        for value in (name, product_value, app_id):
+            if value and value not in label_parts:
+                label_parts.append(value)
+        items.append({
+            "product": product_key,
+            "label": " / ".join(label_parts) if label_parts else product_key,
+            "name": name,
+            "product_value": product_value,
+            "app_id": app_id,
+            "account_count": "",
+            "campaign_count": "",
+            "updated_at": updated_at,
+        })
+        if len(items) >= limit:
+            break
+    return {"items": items}
+
+
+def ad_control_run_mysql(query, timeout_seconds=None):
+    timeout_seconds = max(3, int(timeout_seconds or AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS))
+    mysql_env = os.environ.copy()
+    if MYSQL_PASSWORD:
+        mysql_env["MYSQL_PWD"] = MYSQL_PASSWORD
+    mysql_env["MYSQL_QUERY_TIMEOUT_SECONDS"] = str(timeout_seconds)
+    mysql_env["MYSQL_QUERY_TIMEOUT_KILL_AFTER"] = "3"
+    mysql_env["MYSQL_MAX_EXECUTION_TIME_MS"] = str(timeout_seconds * 1000)
+    proc = subprocess.run(
+        MYSQL_BASE_CMD + [query],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        env=mysql_env,
+        timeout=timeout_seconds + 8,
+    )
+    return [line.split("\t") for line in proc.stdout.splitlines() if line.strip()]
+
+
+def ad_control_saved_pool_account_ids(product, owner_user_id=None):
+    ids = []
+    seen = set()
+    for group in list_ad_control_account_groups(
+        product, owner_user_id=owner_user_id
+    ).get("items", []):
+        for value in group.get("account_ids") or []:
+            account_id = ad_control_normalize_account(value)
+            if account_id and account_id not in seen:
+                seen.add(account_id)
+                ids.append(account_id)
+    return ids
+
+
+def ad_control_list_accounts_by_product_legacy(product, owner_user_id=None):
+    product = str(product or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "请选择产品")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    cache_key = (owner_user_id, product)
+    now = time.time()
+    with AD_CONTROL_ACCOUNT_LIST_CACHE_LOCK:
+        cached = AD_CONTROL_ACCOUNT_LIST_CACHE.get(cache_key) or {}
+        if cached.get("expires_at", 0) > now:
+            return {
+                "items": [dict(item) for item in cached.get("items", [])],
+                "source": "cache",
+            }
+
+        saved_ids = ad_control_saved_pool_account_ids(
+            product, owner_user_id=owner_user_id
+        )
+        try:
+            account_sql = """
+                SELECT d.ad_account_id, MAX(d.updated_at)
+                  FROM {data} d
+                 WHERE {product_where}
+                   AND d.ad_account_id IS NOT NULL
+                   AND d.ad_account_id<>''
+              GROUP BY d.ad_account_id
+              ORDER BY MAX(d.updated_at) DESC
+                 LIMIT 1000
+            """.format(
+                data=ad_control_table("ads_facebook_auto_created_data"),
+                product_where=ad_control_product_condition("d.product", product),
+            )
+            rows = ad_control_run_mysql(" ".join(account_sql.split()))
+            account_ids = []
+            updated_by_id = {}
+            for row in rows:
+                account_id = ad_control_normalize_account(row[0] if row else "")
+                if account_id and account_id not in updated_by_id:
+                    account_ids.append(account_id)
+                    updated_by_id[account_id] = row[1] if len(row) > 1 else ""
+            for account_id in saved_ids:
+                if account_id not in updated_by_id:
+                    account_ids.append(account_id)
+                    updated_by_id[account_id] = ""
+
+            settings = {}
+            if account_ids:
+                setting_sql = """
+                    SELECT account_id,
+                           COALESCE(NULLIF(name,''), ''),
+                           COALESCE(CAST(time_zone AS CHAR), ''),
+                           COALESCE(CAST(account_status AS CHAR), ''),
+                           COALESCE(CAST(is_inactive AS CHAR), '')
+                      FROM {accounts}
+                     WHERE {setting_norm} IN {account_ids}
+                """.format(
+                    accounts=ad_control_table("ads_accounts_setting"),
+                    setting_norm=ad_control_norm_account_sql("account_id"),
+                    account_ids=ad_control_sql_in(account_ids),
+                )
+                for row in ad_control_run_mysql(" ".join(setting_sql.split())):
+                    account_id = ad_control_normalize_account(row[0] if row else "")
+                    if account_id and account_id not in settings:
+                        settings[account_id] = row
+
+            items = []
+            for account_id in account_ids:
+                setting = settings.get(account_id) or []
+                items.append({
+                    "account_id": account_id,
+                    "account_name": setting[1] if len(setting) > 1 else "",
+                    "time_zone": setting[2] if len(setting) > 2 else "",
+                    "account_status": setting[3] if len(setting) > 3 else "",
+                    "is_inactive": setting[4] if len(setting) > 4 else "",
+                    "campaign_count": 0,
+                    "adset_count": 0,
+                    "ad_count": 0,
+                    "updated_at": updated_by_id.get(account_id, ""),
+                })
+            AD_CONTROL_ACCOUNT_LIST_CACHE[cache_key] = {
+                "items": [dict(item) for item in items],
+                "expires_at": time.time() + AD_CONTROL_ACCOUNT_LIST_CACHE_SECONDS,
+            }
+            return {"items": items, "source": "business_db"}
+        except Exception as exc:
+            logging.warning("ad control account list fallback for %s: %s", product, exc.__class__.__name__)
+            stale_items = [dict(item) for item in cached.get("items", [])]
+            if stale_items:
+                return {
+                    "items": stale_items,
+                    "source": "stale_cache",
+                    "warning": "业务库账户列表暂不可用，当前显示最近一次缓存。",
+                }
+            fallback_items = [{
+                "account_id": account_id,
+                "account_name": "",
+                "time_zone": "",
+                "account_status": "",
+                "is_inactive": "",
+                "campaign_count": 0,
+                "adset_count": 0,
+                "ad_count": 0,
+                "updated_at": "",
+            } for account_id in saved_ids]
+            return {
+                "items": fallback_items,
+                "source": "saved_pools",
+                "warning": "业务库账户列表暂不可用，已显示账户池中保存的账号。",
+            }
+def list_ad_control_accounts(product=None, owner_user_id=None):
+    product = str(product or "").strip()
+    if product:
+        return ad_control_list_accounts_by_product_legacy(
+            product, owner_user_id=owner_user_id
+        )
+    source_queries = [
+        "SELECT ad_account_id,product,campaign_id,adset_id,ad_id,updated_at "
+        "FROM %s" % ad_control_table("ads_facebook_auto_created_data")
+    ]
+    union_sql = " UNION ALL ".join(source_queries)
+    product_where = "WHERE d.product=%s" % ad_control_quote(product) if product else ""
+    sql = """
+        SELECT
+          d.ad_account_id,
+          COALESCE(MAX(NULLIF(s.name,'')), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.account_status AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.is_inactive AS CHAR)), ''),
+          COUNT(DISTINCT d.campaign_id),
+          COUNT(DISTINCT d.adset_id),
+          COUNT(DISTINCT d.ad_id),
+          MAX(d.updated_at),
+          GROUP_CONCAT(DISTINCT NULLIF(d.product,'') ORDER BY d.product SEPARATOR ',')
+        FROM ({data}) d
+        LEFT JOIN {accounts} s ON s.platform_id=1 AND {account_norm}= {setting_norm}
+        {product_where}
+          {where_prefix} d.ad_account_id IS NOT NULL
+          AND d.ad_account_id<>''
+        GROUP BY d.ad_account_id
+        ORDER BY MAX(d.updated_at) DESC
+        LIMIT 1000
+    """.format(
+        data=union_sql,
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        product_where=product_where,
+        where_prefix="AND" if product_where else "WHERE",
+    )
+    rows = ad_control_run_mysql(" ".join(sql.split()))
+    items = []
+    for row in rows:
+        items.append({
+            "account_id": row[0],
+            "account_name": row[1],
+            "time_zone": row[2],
+            "account_status": row[3],
+            "is_inactive": row[4],
+            "campaign_count": int(row[5] or 0),
+            "adset_count": int(row[6] or 0),
+            "ad_count": int(row[7] or 0),
+            "updated_at": row[8],
+            "products": ad_control_list(row[9]),
+        })
+    return {"items": items, "source": "business_db_all_products"}
+
+
+def create_ad_control_preview(payload, session):
+    ensure_ad_control_tables()
+    criteria = ad_control_criteria(payload, require_action=False)
+    data = ad_control_fetch_candidates(criteria)
+    preview_id = uuid.uuid4().hex
+    expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    actor_user_id = str((session or {}).get("user_id") or "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_preview (
+                  preview_id, actor_user_id, action, level, product, criteria_json,
+                  sample_json, total_count, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    preview_id,
+                    actor_user_id,
+                    criteria["action"],
+                    criteria["level"],
+                    criteria["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(data["items"][: min(50, len(data["items"]))], ensure_ascii=False),
+                    data["total"],
+                    expires_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    data.update({
+        "preview_id": preview_id,
+        "expires_at": expires_at,
+        "action": criteria["action"],
+        "level": criteria["level"],
+        "product": criteria["product"],
+    })
+    return data
+
+
+def fetch_ad_control_preview(preview_id):
+    preview_id = str(preview_id or "").strip()
+    if not preview_id:
+        raise StructuredApiError("missing_preview", "请先试算")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_control_preview WHERE preview_id = ?", (preview_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise StructuredApiError("preview_not_found", "试算批次不存在或已失效")
+    expires_at = str(row["expires_at"] or "")
+    if expires_at:
+        try:
+            expires_at_value = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+        except Exception as exc:
+            raise StructuredApiError(
+                "preview_invalid",
+                "试算批次过期时间无效，请重新试算",
+            ) from exc
+        if expires_at_value < datetime.utcnow():
+            raise StructuredApiError("preview_expired", "试算批次已过期，请重新试算")
+    return dict(row)
+
+
+def ad_control_token_for_user_ids(user_ids):
+    ids = [item for item in ad_control_list(user_ids) if item and item != "0"]
+    if not ids:
+        return ""
+    sql = """
+        SELECT accessToken
+          FROM {table}
+         WHERE user_id IN {user_ids}
+           AND accessToken IS NOT NULL
+           AND accessToken<>''
+         ORDER BY FIELD(CAST(user_id AS CHAR), {field_ids})
+         LIMIT 1
+    """.format(
+        table=ad_control_table("ads_facebook_info"),
+        user_ids=ad_control_sql_in(ids),
+        field_ids=",".join(ad_control_quote(item) for item in ids),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    return str(rows[0][0] or "").strip() if rows else ""
+
+
+def ad_control_graph_get(token, object_id, fields):
+    response = requests.get(
+        "https://graph.facebook.com/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id),
+        params={"access_token": token, "fields": fields},
+        timeout=AD_CONTROL_GRAPH_TIMEOUT,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or payload.get("error"):
+        raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+    return payload
+
+
+def ad_control_graph_set_status(token, object_id, status):
+    response = requests.post(
+        "https://graph.facebook.com/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id),
+        data={"access_token": token, "status": status},
+        timeout=AD_CONTROL_GRAPH_TIMEOUT,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or payload.get("error"):
+        raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+    return payload
+
+
+FB_POST_AD_DELETE_JOB_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS fb_post_ad_delete_job (
+  job_id TEXT PRIMARY KEY,
+  preview_id TEXT NOT NULL,
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  series_ids_json TEXT NOT NULL DEFAULT '[]',
+  products_json TEXT NOT NULL DEFAULT '[]',
+  phase TEXT NOT NULL DEFAULT 'preview',
+  status TEXT NOT NULL DEFAULT 'preview',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  items_json TEXT NOT NULL DEFAULT '[]',
+  logs_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+
+def ensure_fb_post_ad_delete_tables():
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(FB_POST_AD_DELETE_JOB_TABLE_SQL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_post_ad_delete_preview ON fb_post_ad_delete_job(preview_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_post_ad_delete_actor_updated ON fb_post_ad_delete_job(actor_user_id, updated_at)")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def fb_post_ad_delete_series_ids(value):
+    raw = value if isinstance(value, (list, tuple, set)) else re.split(r"[,，;；\s]+", str(value or ""))
+    out = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip().upper()
+        if not text:
+            continue
+        text = re.sub(r"[^A-Z0-9_-]+", "", text)
+        if not text:
+            continue
+        if text not in seen:
+            out.append(text)
+            seen.add(text)
+    if not out:
+        raise StructuredApiError("missing_series_ids", "请输入剧 ID")
+    if len(out) > FB_POST_AD_DELETE_MAX_SERIES:
+        raise StructuredApiError("too_many_series_ids", "单次最多支持 %d 个剧 ID" % FB_POST_AD_DELETE_MAX_SERIES)
+    return out
+
+
+def fb_post_ad_delete_product_ids(value=None):
+    products = ad_control_list(value) if value else list(FB_POST_AD_DELETE_PRODUCTS)
+    if not products:
+        raise StructuredApiError("missing_products", "缺少产品口径")
+    return products[:20]
+
+
+def fb_post_ad_delete_series_tokens(series_ids):
+    out = []
+    seen = set()
+    for series_id in series_ids:
+        candidates = [series_id]
+        if series_id.startswith("EN-"):
+            candidates.append(series_id[3:])
+        else:
+            candidates.append("EN-" + series_id)
+        for item in candidates:
+            if item and item not in seen:
+                out.append(item)
+                seen.add(item)
+    return out
+
+
+def fb_post_ad_delete_match_expr(series_ids):
+    clauses = []
+    for token in fb_post_ad_delete_series_tokens(series_ids):
+        like = "%%%s%%" % mysql_escape_literal(token)
+        clauses.append("(UPPER(a.campaign_name) LIKE '%s' OR UPPER(a.ad_name) LIKE '%s')" % (like, like))
+    return "(" + " OR ".join(clauses) + ")" if clauses else "(1=0)"
+
+
+def fb_post_ad_delete_post_url(page_id, post_id):
+    page_id = str(page_id or "").strip()
+    post_id = str(post_id or "").strip()
+    if not page_id or not post_id:
+        return ""
+    return "https://www.facebook.com/%s/posts/%s" % (page_id, post_id)
+
+
+def fb_post_ad_delete_chunked(values, size=500):
+    values = list(values or [])
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
+def fb_post_ad_delete_fetch_targets(series_ids, products=None):
+    series_ids = fb_post_ad_delete_series_ids(series_ids)
+    products = fb_post_ad_delete_product_ids(products)
+    sql = """
+        SELECT
+          CAST(a.id AS CHAR),
+          COALESCE(CAST(a.user_id AS CHAR), ''),
+          COALESCE(a.product, ''),
+          COALESCE(a.app_id, ''),
+          COALESCE(a.ad_account_id, ''),
+          COALESCE(s.name, ''),
+          COALESCE(a.campaign_id, ''),
+          COALESCE(a.adset_id, ''),
+          COALESCE(a.ad_id, ''),
+          COALESCE(a.creative_id, ''),
+          COALESCE(a.campaign_name, ''),
+          COALESCE(a.adset_name, ''),
+          COALESCE(a.ad_name, ''),
+          COALESCE(a.source_id, ''),
+          COALESCE(a.original_source_id, ''),
+          COALESCE(a.status, ''),
+          COALESCE(DATE_FORMAT(a.start_time, '%Y-%m-%d %H:%i:%s'), ''),
+          COALESCE(DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s'), '')
+        FROM {data} a
+        LEFT JOIN {accounts} s
+          ON s.platform_id=1
+         AND {account_norm}= {setting_norm}
+       WHERE a.product IN {products}
+         AND a.ad_id IS NOT NULL
+         AND a.ad_id<>''
+         AND {match_expr}
+       ORDER BY a.start_time DESC, a.created_at DESC, a.id DESC
+       LIMIT {limit}
+    """.format(
+        data=ad_control_table("ads_facebook_auto_created_data"),
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("a.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        products=ad_control_sql_in(products),
+        match_expr=fb_post_ad_delete_match_expr(series_ids),
+        limit=FB_POST_AD_DELETE_MAX_ADS + 1,
+    )
+    rows = ad_control_run_mysql(" ".join(sql.split()), timeout_seconds=60)
+    if len(rows) > FB_POST_AD_DELETE_MAX_ADS:
+        raise StructuredApiError("too_many_ads", "命中 Ads 超过上限 %d，请缩小剧 ID 范围" % FB_POST_AD_DELETE_MAX_ADS)
+    columns = [
+        "created_data_id", "user_id", "product", "app_id", "ad_account_id", "account_name",
+        "campaign_id", "adset_id", "ad_id", "creative_id", "campaign_name", "adset_name",
+        "ad_name", "source_id", "original_source_id", "local_status", "start_time", "created_at",
+    ]
+    items = [dict(zip(columns, row)) for row in rows]
+    by_ad = {item["ad_id"]: item for item in items}
+    for item in items:
+        item["series_ids"] = [sid for sid in series_ids if sid in str(item.get("campaign_name", "") + " " + item.get("ad_name", "")).upper() or sid.replace("EN-", "") in str(item.get("campaign_name", "") + " " + item.get("ad_name", "")).upper()]
+        item["posts"] = []
+        item["post_ids"] = []
+        item["page_ids"] = []
+        item["post_preview_urls"] = []
+
+    ad_ids = list(by_ad)
+    for part in fb_post_ad_delete_chunked(ad_ids):
+        rows = ad_control_run_mysql(
+            "SELECT ad_id,page_id,post_id,status FROM %s WHERE ad_id IN %s AND post_id<>''" % (
+                ad_control_table("ads_facebook_auto_page"),
+                ad_control_sql_in(part),
+            ),
+            timeout_seconds=30,
+        )
+        for ad_id, page_id, post_id, status in rows:
+            item = by_ad.get(ad_id)
+            if not item:
+                continue
+            post = {"page_id": page_id, "post_id": post_id, "object_id": "%s_%s" % (page_id, post_id), "source": "ads_facebook_auto_page", "local_status": status, "preview_url": fb_post_ad_delete_post_url(page_id, post_id)}
+            if post["object_id"] not in [p.get("object_id") for p in item["posts"]]:
+                item["posts"].append(post)
+
+    source_ids = sorted({item.get("source_id") for item in items if item.get("source_id") and item.get("source_id") != "0"})
+    log_posts = {}
+    for part in fb_post_ad_delete_chunked(source_ids):
+        rows = ad_control_run_mysql(
+            "SELECT CAST(source_id AS CHAR),page_id,CAST(post_id AS CHAR),CAST(real_post_id AS CHAR) FROM %s WHERE source_id IN %s AND (post_id>0 OR real_post_id>0)" % (
+                ad_control_table("ads_facebook_post_log"),
+                ad_control_sql_in(part),
+            ),
+            timeout_seconds=30,
+        )
+        for source_id, page_id, post_id, real_post_id in rows:
+            post_value = real_post_id if real_post_id and real_post_id != "0" else post_id
+            if post_value and post_value != "0":
+                log_posts.setdefault(source_id, []).append({"page_id": page_id, "post_id": post_value})
+    for item in items:
+        if not item["posts"]:
+            for post in log_posts.get(item.get("source_id") or "", []):
+                page_id = post.get("page_id") or ""
+                post_id = post.get("post_id") or ""
+                item["posts"].append({"page_id": page_id, "post_id": post_id, "object_id": "%s_%s" % (page_id, post_id), "source": "ads_facebook_post_log", "local_status": "", "preview_url": fb_post_ad_delete_post_url(page_id, post_id)})
+        seen_pages = set()
+        seen_posts = set()
+        urls = []
+        for post in item["posts"]:
+            if post.get("page_id"):
+                seen_pages.add(post["page_id"])
+            if post.get("post_id"):
+                seen_posts.add(post["post_id"])
+            if post.get("preview_url"):
+                urls.append(post["preview_url"])
+        item["page_ids"] = sorted(seen_pages)
+        item["post_ids"] = sorted(seen_posts)
+        item["post_preview_urls"] = urls
+    return items
+
+
+def fb_post_ad_delete_summary(items, phase="preview"):
+    post_objects = {}
+    campaigns = set()
+    accounts = set()
+    deleted_ads = 0
+    for item in items:
+        if item.get("campaign_id"):
+            campaigns.add(item["campaign_id"])
+        if item.get("ad_account_id"):
+            accounts.add(ad_control_normalize_account(item["ad_account_id"]))
+        if str(item.get("local_status") or "").upper() == "DELETED":
+            deleted_ads += 1
+        for post in item.get("posts") or []:
+            if post.get("object_id"):
+                post_objects[post["object_id"]] = post
+    return {
+        "phase": phase,
+        "ads": len(items),
+        "campaigns": len(campaigns),
+        "accounts": len(accounts),
+        "post_objects": len(post_objects),
+        "local_deleted_ads": deleted_ads,
+        "ads_with_post": sum(1 for item in items if item.get("posts")),
+    }
+
+
+def fb_post_ad_delete_save_job(job):
+    ensure_fb_post_ad_delete_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO fb_post_ad_delete_job (
+                  job_id, preview_id, actor_user_id, series_ids_json, products_json,
+                  phase, status, summary_json, items_json, logs_json, created_at, updated_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                  phase=excluded.phase,
+                  status=excluded.status,
+                  summary_json=excluded.summary_json,
+                  items_json=excluded.items_json,
+                  logs_json=excluded.logs_json,
+                  updated_at=CURRENT_TIMESTAMP,
+                  finished_at=excluded.finished_at
+                """,
+                (
+                    job["job_id"], job["preview_id"], job.get("actor_user_id", ""),
+                    json.dumps(job.get("series_ids") or [], ensure_ascii=False),
+                    json.dumps(job.get("products") or [], ensure_ascii=False),
+                    job.get("phase", "preview"), job.get("status", "preview"),
+                    json.dumps(job.get("summary") or {}, ensure_ascii=False),
+                    json.dumps(job.get("items") or [], ensure_ascii=False),
+                    json.dumps((job.get("logs") or [])[-FB_POST_AD_DELETE_LOG_LIMIT:], ensure_ascii=False),
+                    job.get("finished_at", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def fb_post_ad_delete_load_job(job_id, actor_user_id=None):
+    ensure_fb_post_ad_delete_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM fb_post_ad_delete_job WHERE job_id=?", (job_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise StructuredApiError("job_not_found", "任务不存在")
+    if actor_user_id and str(row["actor_user_id"] or "") != str(actor_user_id):
+        raise StructuredApiError("job_not_found", "任务不存在")
+    item = dict(row)
+    for key, default in (("series_ids_json", []), ("products_json", []), ("summary_json", {}), ("items_json", []), ("logs_json", [])):
+        try:
+            item[key.replace("_json", "")] = json.loads(item.get(key) or json.dumps(default))
+        except Exception:
+            item[key.replace("_json", "")] = default
+    return item
+
+
+def fb_post_ad_delete_create_preview(payload, session):
+    series_ids = fb_post_ad_delete_series_ids(payload.get("series_ids") or payload.get("series_text"))
+    products = fb_post_ad_delete_product_ids(payload.get("products"))
+    items = fb_post_ad_delete_fetch_targets(series_ids, products)
+    job = {
+        "job_id": uuid.uuid4().hex,
+        "preview_id": uuid.uuid4().hex,
+        "actor_user_id": ad_control_actor(session),
+        "series_ids": series_ids,
+        "products": products,
+        "phase": "preview",
+        "status": "preview",
+        "summary": fb_post_ad_delete_summary(items, "preview"),
+        "items": items,
+        "logs": [{"ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), "level": "info", "message": "预览完成，命中 %d 个 Ad、%d 个唯一 Post" % (len(items), fb_post_ad_delete_summary(items).get("post_objects", 0))}],
+        "finished_at": "",
+    }
+    fb_post_ad_delete_save_job(job)
+    return {k: job[k] for k in ("job_id", "preview_id", "series_ids", "products", "phase", "status", "summary", "items", "logs")}
+
+
+def fb_post_ad_delete_graph_delete(token, object_id):
+    response = requests.delete(
+        "https://graph.facebook.com/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id),
+        data={"access_token": token},
+        timeout=AD_CONTROL_GRAPH_TIMEOUT,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or payload.get("error"):
+        raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+    return payload
+
+
+def fb_post_ad_delete_missing_error(exc):
+    text = str(exc).lower()
+    return any(fragment in text for fragment in ("object does not exist", "unsupported get request", "cannot query users by their username", "missing permissions", "does not exist"))
+
+
+def fb_post_ad_delete_update_local_ad(ad_id):
+    sql = """
+        UPDATE {table}
+           SET status='DELETED', local_status=1, ad_action_at=UNIX_TIMESTAMP(), updated_at=NOW()
+         WHERE ad_id={ad_id}
+    """.format(table=ad_control_table("ads_facebook_auto_created_data"), ad_id=ad_control_quote(ad_id))
+    ad_control_run_mysql(" ".join(sql.split()), timeout_seconds=20)
+
+
+def fb_post_ad_delete_run(job_id, phase, actor_user_id):
+    job = fb_post_ad_delete_load_job(job_id, actor_user_id=actor_user_id)
+    items = job.get("items") or []
+    logs = job.get("logs") or []
+
+    def log(level, message, **extra):
+        entry = {"ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), "level": level, "message": message}
+        entry.update(extra)
+        logs.append(entry)
+        job["logs"] = logs[-FB_POST_AD_DELETE_LOG_LIMIT:]
+        fb_post_ad_delete_save_job(job)
+
+    job["phase"] = phase
+    job["status"] = "running"
+    job["summary"] = fb_post_ad_delete_summary(items, phase)
+    fb_post_ad_delete_save_job(job)
+    try:
+        if phase == "posts":
+            unique_posts = {}
+            for item in items:
+                for post in item.get("posts") or []:
+                    if post.get("object_id"):
+                        unique_posts.setdefault(post["object_id"], {"post": post, "user_ids": []})
+                        if item.get("user_id"):
+                            unique_posts[post["object_id"]]["user_ids"].append(item["user_id"])
+            success = skipped = error = 0
+            for object_id, payload in unique_posts.items():
+                post = payload["post"]
+                token = ad_control_token_for_user_ids(payload.get("user_ids") or [])
+                if not token:
+                    error += 1
+                    post["delete_status"] = "missing_token"
+                    log("error", "Post 缺少可用 token，未删除", object_id=object_id)
+                    continue
+                try:
+                    try:
+                        ad_control_graph_get(token, object_id, "id,permalink_url")
+                    except Exception as exc:
+                        if fb_post_ad_delete_missing_error(exc):
+                            skipped += 1
+                            post["delete_status"] = "already_deleted"
+                            log("info", "Post 已不存在，跳过", object_id=object_id)
+                            continue
+                        raise
+                    result = fb_post_ad_delete_graph_delete(token, object_id)
+                    success += 1
+                    post["delete_status"] = "deleted"
+                    post["delete_result"] = result
+                    log("info", "Post 删除成功", object_id=object_id)
+                except Exception as exc:
+                    error += 1
+                    post["delete_status"] = "error"
+                    post["delete_error"] = str(exc)
+                    log("error", "Post 删除失败：%s" % str(exc)[:300], object_id=object_id)
+            post_status_by_id = {oid: data["post"] for oid, data in unique_posts.items()}
+            for item in items:
+                for idx, post in enumerate(item.get("posts") or []):
+                    if post.get("object_id") in post_status_by_id:
+                        item["posts"][idx] = post_status_by_id[post["object_id"]]
+            job["summary"] = fb_post_ad_delete_summary(items, phase)
+            job["summary"].update({"post_deleted": success, "post_already_deleted": skipped, "post_errors": error, "all_posts_deleted": error == 0})
+        elif phase == "ads":
+            latest = fb_post_ad_delete_load_job(job_id, actor_user_id=actor_user_id)
+            previous_summary = latest.get("summary") or {}
+            if not previous_summary.get("all_posts_deleted"):
+                raise StructuredApiError("posts_not_confirmed", "Post 尚未全部确认删除，禁止删除 Ads")
+            success = skipped = error = 0
+            for item in items:
+                ad_id = item.get("ad_id")
+                if not ad_id:
+                    continue
+                token = ad_control_token_for_user_ids([item.get("user_id")])
+                if not token:
+                    error += 1
+                    item["ad_delete_status"] = "missing_token"
+                    log("error", "Ad 缺少可用 token，未删除", ad_id=ad_id)
+                    continue
+                try:
+                    try:
+                        meta = ad_control_graph_get(token, ad_id, "id,account_id,status,effective_status,name")
+                        if str(meta.get("status") or "").upper() == "DELETED" or str(meta.get("effective_status") or "").upper() == "DELETED":
+                            skipped += 1
+                            item["ad_delete_status"] = "already_deleted"
+                            item["ad_meta"] = meta
+                            log("info", "Ad 已是 DELETED，跳过", ad_id=ad_id)
+                            continue
+                    except Exception as exc:
+                        if fb_post_ad_delete_missing_error(exc):
+                            skipped += 1
+                            item["ad_delete_status"] = "already_deleted"
+                            log("info", "Ad 已不可读，按已删除跳过", ad_id=ad_id)
+                            continue
+                        raise
+                    result = fb_post_ad_delete_graph_delete(token, ad_id)
+                    try:
+                        fb_post_ad_delete_update_local_ad(ad_id)
+                    except Exception as exc:
+                        log("warn", "Ad 已删但业务库状态回写失败：%s" % str(exc)[:300], ad_id=ad_id)
+                    success += 1
+                    item["ad_delete_status"] = "deleted"
+                    item["ad_delete_result"] = result
+                    log("info", "Ad 删除成功", ad_id=ad_id)
+                except Exception as exc:
+                    error += 1
+                    item["ad_delete_status"] = "error"
+                    item["ad_delete_error"] = str(exc)
+                    log("error", "Ad 删除失败：%s" % str(exc)[:300], ad_id=ad_id)
+            job["summary"] = fb_post_ad_delete_summary(items, phase)
+            job["summary"].update({"ad_deleted": success, "ad_already_deleted": skipped, "ad_errors": error, "all_ads_deleted": error == 0})
+        else:
+            raise StructuredApiError("invalid_phase", "执行阶段无效")
+        job["items"] = items
+        job["status"] = "done"
+        job["finished_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        log("info", "%s 阶段完成" % ("Post 删除" if phase == "posts" else "Ad 删除"))
+    except Exception as exc:
+        job["status"] = "failed"
+        job["finished_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        log("error", "任务失败：%s" % str(exc)[:500])
+    finally:
+        fb_post_ad_delete_save_job(job)
+
+
+def fb_post_ad_delete_start(payload, session, phase):
+    job_id = str(payload.get("job_id") or "").strip()
+    if not job_id:
+        raise StructuredApiError("missing_job_id", "请先预览")
+    confirm = str(payload.get("confirm") or "").strip()
+    expected = "DELETE_POSTS" if phase == "posts" else "DELETE_ADS"
+    if confirm != expected:
+        raise StructuredApiError("missing_confirm", "确认字段必须填写 %s" % expected)
+    actor_user_id = ad_control_actor(session)
+    job = fb_post_ad_delete_load_job(job_id, actor_user_id=actor_user_id)
+    if job.get("status") == "running":
+        raise StructuredApiError("job_running", "任务正在执行中")
+    job["phase"] = phase
+    job["status"] = "running"
+    fb_post_ad_delete_save_job(job)
+    thread = threading.Thread(target=fb_post_ad_delete_run, args=(job_id, phase, actor_user_id), name="fb-post-ad-delete-%s" % job_id[:8])
+    thread.daemon = True
+    thread.start()
+    return {"job_id": job_id, "phase": phase, "status": "running"}
+
+
+def ad_control_meta_fields(level):
+    if level == "campaign":
+        return "account_id,status,effective_status,name"
+    if level == "adset":
+        return "account_id,campaign_id,status,effective_status,name"
+    return "account_id,campaign_id,adset_id,status,effective_status,name"
+
+
+def ad_control_update_business_status(row, target_status):
+    level = row.get("level") or "campaign"
+    level_cfg = AD_CONTROL_LEVELS[level]
+    id_column = level_cfg["id_column"]
+    action_column = level_cfg["action_at_column"]
+    sql = """
+        UPDATE {table}
+           SET status={status},
+               {action_column}=UNIX_TIMESTAMP(),
+               updated_at=NOW()
+         WHERE {product_where}
+           AND {account_norm}= {account_id}
+           AND {id_column}={object_id}
+    """.format(
+        table=ad_control_table("ads_facebook_auto_created_data"),
+        status=ad_control_quote(target_status),
+        action_column=sql_identifier(action_column),
+        product_where=ad_control_product_condition("product", row.get("product")),
+        account_norm=ad_control_norm_account_sql("ad_account_id"),
+        account_id=ad_control_quote(ad_control_normalize_account(row.get("account_id"))),
+        id_column=sql_identifier(id_column),
+        object_id=ad_control_quote(row.get("object_id")),
+    )
+    run_mysql(" ".join(sql.split()))
+
+
+def ad_control_load_object_states(items):
+    keys = [item.get("object_key") for item in items if item.get("object_key")]
+    if not keys:
+        return {}
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            placeholders = ",".join(["?"] * len(keys))
+            rows = conn.execute(
+                "SELECT * FROM ad_control_object_state WHERE object_key IN (%s)" % placeholders,
+                keys,
+            ).fetchall()
+            return {row["object_key"]: dict(row) for row in rows}
+        finally:
+            conn.close()
+
+
+def ad_control_save_object_state(action_id, row, status):
+    now_text = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    existing = ad_control_load_object_states([row]).get(row["object_key"], {})
+    pause_action = action_id if status == "paused" else existing.get("last_pause_action_id", "")
+    reopen_action = action_id if status == "reopened" else existing.get("last_reopen_action_id", "")
+    paused_at = now_text if status == "paused" else existing.get("paused_at", "")
+    reopened_at = now_text if status == "reopened" else existing.get("reopened_at", "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ad_control_object_state (
+                  object_key, product, level, account_id, object_id, campaign_id,
+                  last_pause_action_id, last_reopen_action_id, object_json,
+                  status, paused_at, reopened_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    row["object_key"],
+                    row.get("product", ""),
+                    row.get("level", ""),
+                    row.get("account_id", ""),
+                    row.get("object_id", ""),
+                    row.get("campaign_id", ""),
+                    pause_action,
+                    reopen_action,
+                    json.dumps(row, ensure_ascii=False),
+                    status,
+                    paused_at,
+                    reopened_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def execute_ad_control(payload, session):
+    ensure_ad_control_tables()
+    preview = fetch_ad_control_preview(payload.get("preview_id"))
+    if str(preview.get("actor_user_id") or "") != ad_control_actor(session):
+        raise StructuredApiError("not_found", "preview not found")
+    criteria = json.loads(preview["criteria_json"] or "{}")
+    action = ad_control_action(payload.get("action") or criteria.get("action"))
+    if action not in ("pause", "reopen"):
+        raise StructuredApiError("invalid_action", "请选择关停或重启动作")
+    if action != criteria.get("action"):
+        raise StructuredApiError("preview_action_mismatch", "执行动作和试算动作不一致，请重新试算")
+    max_items = ad_control_int(payload.get("max_items", AD_CONTROL_MAX_EXECUTE), AD_CONTROL_MAX_EXECUTE, 1, AD_CONTROL_MAX_EXECUTE)
+    dry_run = bool(payload.get("dry_run"))
+    criteria = dict(criteria)
+    data = ad_control_fetch_candidates(criteria, page=1, page_size=max_items)
+    items = data["items"]
+    states = ad_control_load_object_states(items)
+    action_id = uuid.uuid4().hex
+    target_status = "PAUSED" if action == "pause" else "ACTIVE"
+    results = []
+    success_count = skipped_count = error_count = 0
+    for item in items:
+        item["level"] = criteria["level"]
+        item["object_key"] = ad_control_object_key(item)
+        if action == "reopen" and states.get(item["object_key"], {}).get("status") != "paused":
+            skipped_count += 1
+            results.append({"object_key": item["object_key"], "status": "skipped", "reason": "not_paused_by_control_center"})
+            continue
+        if action == "pause" and str(item.get("status") or "").upper() == "PAUSED":
+            skipped_count += 1
+            results.append({"object_key": item["object_key"], "status": "skipped", "reason": "already_paused"})
+            continue
+        try:
+            token = ad_control_token_for_user_ids(item.get("user_ids", ""))
+            if not token:
+                skipped_count += 1
+                results.append({"object_key": item["object_key"], "status": "skipped", "reason": "missing_meta_token"})
+                continue
+            meta = ad_control_graph_get(token, item["object_id"], ad_control_meta_fields(item["level"]))
+            meta_account = ad_control_normalize_account(meta.get("account_id"))
+            item_account = ad_control_normalize_account(item.get("account_id"))
+            if meta_account and item_account and meta_account != item_account:
+                skipped_count += 1
+                results.append({
+                    "object_key": item["object_key"],
+                    "status": "skipped",
+                    "reason": "account_owner_mismatch",
+                    "meta_account": meta.get("account_id"),
+                    "asset_account": item.get("account_id"),
+                })
+                continue
+            if dry_run:
+                success_count += 1
+                results.append({"object_key": item["object_key"], "status": "dry_run", "meta": meta})
+                continue
+            payload_result = ad_control_graph_set_status(token, item["object_id"], target_status)
+            warnings = []
+            try:
+                ad_control_update_business_status(item, target_status)
+            except Exception as exc:
+                logging.warning(
+                    "ad control business status update failed after graph success: %s: %s",
+                    item.get("object_key"),
+                    exc,
+                )
+                warnings.append("business_status_update_failed: %s" % exc)
+            ad_control_save_object_state(action_id, item, "paused" if action == "pause" else "reopened")
+            success_count += 1
+            result_item = {"object_key": item["object_key"], "status": "success", "meta": payload_result}
+            if warnings:
+                result_item["warnings"] = warnings
+            results.append(result_item)
+        except Exception as exc:
+            error_count += 1
+            logging.exception("ad control execute failed: %s", item.get("object_key"))
+            results.append({"object_key": item.get("object_key", ""), "status": "error", "reason": str(exc)})
+    actor_user_id = str((session or {}).get("user_id") or "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_action (
+                  action_id, preview_id, actor_user_id, action, level, product, criteria_json,
+                  requested_count, success_count, skipped_count, error_count, dry_run,
+                  results_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    action_id,
+                    preview["preview_id"],
+                    actor_user_id,
+                    action,
+                    criteria["level"],
+                    criteria["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    len(items),
+                    success_count,
+                    skipped_count,
+                    error_count,
+                    1 if dry_run else 0,
+                    json.dumps(results, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "action_id": action_id,
+        "preview_id": preview["preview_id"],
+        "action": action,
+        "dry_run": dry_run,
+        "requested_count": len(items),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "remaining_count": max(0, int(data.get("total", 0)) - len(items)),
+        "results": results[:200],
+    }
+
+
+def ad_control_rule_payload(row):
+    item = dict(row)
+    for key in ("criteria_json", "schedule_json", "thresholds_json", "last_result_json"):
+        try:
+            item[key.replace("_json", "")] = json.loads(item.get(key) or "{}")
+        except Exception:
+            item[key.replace("_json", "")] = {}
+        item.pop(key, None)
+    item["enabled"] = bool(item.get("enabled"))
+    return item
+
+
+def list_ad_control_rules(owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            if internal:
+                rows = conn.execute("SELECT * FROM ad_control_rule ORDER BY updated_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ad_control_rule WHERE created_by=? ORDER BY updated_at DESC",
+                    (owner_user_id,),
+                ).fetchall()
+            return {"items": [ad_control_rule_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def save_ad_control_rule(payload, session):
+    ensure_ad_control_tables()
+    criteria = ad_control_criteria(payload.get("criteria") or payload, require_action=True)
+    rule_id = str(payload.get("rule_id") or "").strip() or uuid.uuid4().hex
+    name = str(payload.get("name") or criteria["product"] + " " + criteria["action"]).strip()
+    schedule = payload.get("schedule") or {}
+    thresholds = payload.get("thresholds") or {}
+    enabled = 1 if payload.get("enabled") else 0
+    actor_user_id = ad_control_actor(session)
+    if not actor_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT created_by FROM ad_control_rule WHERE rule_id=?", (rule_id,)
+            ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor_user_id:
+                raise StructuredApiError("not_found", "rule not found")
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule (
+                  rule_id, name, enabled, product, action, level, criteria_json,
+                  schedule_json, thresholds_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(rule_id) DO UPDATE SET
+                  name=excluded.name,
+                  enabled=excluded.enabled,
+                  product=excluded.product,
+                  action=excluded.action,
+                  level=excluded.level,
+                  criteria_json=excluded.criteria_json,
+                  schedule_json=excluded.schedule_json,
+                  thresholds_json=excluded.thresholds_json,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    rule_id,
+                    name,
+                    enabled,
+                    criteria["product"],
+                    criteria["action"],
+                    criteria["level"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(schedule, ensure_ascii=False),
+                    json.dumps(thresholds, ensure_ascii=False),
+                    actor_user_id,
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
+            return ad_control_rule_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def set_ad_control_rule_enabled(rule_id, enabled, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    rule_id = str(rule_id or "").strip()
+    if not rule_id:
+        raise StructuredApiError("missing_rule_id", "缺少规则 ID")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE ad_control_rule SET enabled=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE rule_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((1 if enabled else 0, rule_id) if internal else (1 if enabled else 0, rule_id, owner_user_id)),
+            )
+            if cursor.rowcount != 1:
+                raise StructuredApiError("rule_not_found", "规则不存在")
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
+            return ad_control_rule_payload(row)
+        finally:
+            conn.close()
+
+
+def ad_control_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def ad_control_json_loads(value, default):
+    try:
+        if value is None or value == "":
+            return default
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def ad_control_json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def ad_control_actor(session):
+    return str((session or {}).get("user_id") or "")
+
+
+def ad_control_rule_hash(payload):
+    return hashlib.sha256(ad_control_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def ad_control_live_scope_hash(scope):
+    accounts = sorted({
+        ad_control_normalize_account(item)
+        for item in (scope.get("account_ids") or [])
+        if ad_control_normalize_account(item)
+    })
+    return ad_control_rule_hash({
+        "product": scope.get("product") or "",
+        "accounts": accounts,
+        "rules": scope.get("rules") or [],
+        "window": scope.get("window") or {"type": "since_start"},
+        "strategy": scope.get("strategy") or {},
+        "object_level": scope.get("object_level") or "campaign",
+        "run_mode": scope.get("run_mode") or "observe",
+        "rule_group_id": scope.get("rule_group_id") or "",
+        "binding_id": scope.get("rule_group_id") or "",
+    })
+
+
+def ad_control_account_key(account_id):
+    normalized = ad_control_normalize_account(account_id)
+    return "act_%s" % normalized if normalized else ""
+
+
+def ad_control_parse_rule_group_path(path, suffix=""):
+    prefix = "/api/ad-control/rule-groups/"
+    if not path.startswith(prefix):
+        return ""
+    value = path[len(prefix):]
+    if suffix:
+        if not value.endswith(suffix):
+            return ""
+        value = value[:-len(suffix)]
+    return value.strip("/")
+
+
+def ad_control_parse_rule_set_path(path):
+    prefix = "/api/ad-control/rule-sets/"
+    if not path.startswith(prefix):
+        return ""
+    return path[len(prefix):].strip("/")
+
+
+def ad_control_parse_binding_path(path, suffix=""):
+    prefix = "/api/ad-control/bindings/"
+    if not path.startswith(prefix):
+        return ""
+    value = path[len(prefix):]
+    if suffix:
+        if not value.endswith(suffix):
+            return ""
+        value = value[:-len(suffix)]
+    return value.strip("/")
+
+
+def ad_control_parse_account_group_path(path):
+    prefix = "/api/ad-control/account-groups/"
+    if not path.startswith(prefix):
+        return ""
+    return path[len(prefix):].strip("/")
+
+
+def ad_control_safe_json_list(value):
+    data = ad_control_json_loads(value, [])
+    return data if isinstance(data, list) else []
+
+
+def ad_control_safe_json_dict(value):
+    data = ad_control_json_loads(value, {})
+    return data if isinstance(data, dict) else {}
+
+
+def ad_control_token_config_payload(row):
+    item = dict(row)
+    item["validation"] = ad_control_safe_json_dict(item.pop("validation_json", "{}"))
+    item["account_id"] = item.get("account_id") or ""
+    item["scope"] = "account" if item["account_id"] else "product"
+    return item
+
+
+def ad_control_run_critical_mysql(query, label):
+    attempts = max(1, AD_CONTROL_CRITICAL_DB_RETRIES)
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return run_mysql(query)
+        except Exception as exc:
+            last_error = exc
+            logging.warning(
+                "ad control critical db query retry label=%s attempt=%s/%s error=%s",
+                label,
+                attempt + 1,
+                attempts,
+                exc.__class__.__name__,
+            )
+            if attempt + 1 < attempts:
+                time.sleep(0.2 * (attempt + 1))
+    raise last_error
+
+
+def ad_control_local_default_user_cache(product):
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT user_id, label, validation_json, updated_at
+                  FROM ad_control_token_config
+                 WHERE product=? AND account_id=''
+                """,
+                (str(product or "").strip(),),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row or not str(row["user_id"] or "").strip():
+        return {}
+    validation = ad_control_safe_json_dict(row["validation_json"])
+    return {
+        "product": str(product or "").strip(),
+        "account_id": "",
+        "user_id": str(row["user_id"] or "").strip(),
+        "label": row["label"] or "apps_setting.default_user cache",
+        "scope": "product",
+        "source": "local_default_user_cache",
+        "app_id": str(validation.get("app_id") or ""),
+        "app_name": str(validation.get("app_name") or ""),
+        "app_key": str(validation.get("app_key") or ""),
+        "validation": {
+            "ok": True,
+            "source": "local_default_user_cache",
+            "validated_at": validation.get("validated_at") or row["updated_at"] or "",
+        },
+    }
+
+
+def ad_control_store_local_default_user_cache(config):
+    product = str((config or {}).get("product") or "").strip()
+    user_id = str((config or {}).get("user_id") or "").strip()
+    if not product or not user_id:
+        return
+    ensure_ad_control_tables()
+    validation = {
+        "ok": True,
+        "source": "ads_apps_setting.default_user",
+        "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "app_id": config.get("app_id", ""),
+        "app_name": config.get("app_name", ""),
+        "app_key": config.get("app_key", ""),
+    }
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_token_config (
+                  product, account_id, user_id, label, validation_json,
+                  created_by, created_at, updated_at
+                ) VALUES (?, '', ?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(product, account_id) DO UPDATE SET
+                  user_id=excluded.user_id,
+                  label=excluded.label,
+                  validation_json=excluded.validation_json,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    product,
+                    user_id,
+                    "apps_setting.default_user cache",
+                    json.dumps(validation, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def ad_control_product_app_default_user(product):
+    product = str(product or "").strip()
+    if not product:
+        return {}
+    cache_key = product.lower()
+    now = time.time()
+    with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+        cached = AD_CONTROL_DEFAULT_USER_CACHE.get(cache_key) or {}
+        if cached.get("expires_at", 0) > now:
+            return dict(cached.get("config") or {})
+    candidates = ad_control_product_values(product)
+    numeric = [item for item in candidates if str(item).strip().isdigit()]
+    names = [item for item in candidates if not str(item).strip().isdigit()]
+    where_parts = []
+    if numeric:
+        where_parts.append("CAST(id AS CHAR) IN %s" % ad_control_sql_in(numeric))
+    if names:
+        where_parts.append("(LOWER(name) IN %s OR LOWER(app_id) IN %s)" % (
+            ad_control_sql_in([item.lower() for item in names]),
+            ad_control_sql_in([item.lower() for item in names]),
+        ))
+    where = " OR ".join(where_parts) if where_parts else "0=1"
+    sql = """
+        SELECT CAST(id AS CHAR), COALESCE(name,''), COALESCE(app_id,''), CAST(default_user AS CHAR)
+          FROM {table}
+         WHERE ({where})
+           AND COALESCE(default_user,0) > 0
+         ORDER BY CASE
+             {priority_sql}
+             ELSE 999
+           END,
+           id
+         LIMIT 1
+    """.format(
+        table=ad_control_table("ads_apps_setting"),
+        where=where,
+        priority_sql=" ".join(
+            "WHEN CAST(id AS CHAR)=%s THEN %d" % (ad_control_quote(item), index)
+            for index, item in enumerate(numeric)
+        ) or "WHEN 1=0 THEN 998",
+    )
+    try:
+        rows = ad_control_run_critical_mysql(" ".join(sql.split()), "product_default_user")
+    except Exception:
+        with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+            cached_config = dict((AD_CONTROL_DEFAULT_USER_CACHE.get(cache_key) or {}).get("config") or {})
+        if cached_config:
+            cached_config["source"] = "memory_stale_default_user_cache"
+            return cached_config
+        local_config = ad_control_local_default_user_cache(product)
+        if local_config:
+            with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+                AD_CONTROL_DEFAULT_USER_CACHE[cache_key] = {
+                    "config": dict(local_config),
+                    "expires_at": now + AD_CONTROL_DEFAULT_USER_CACHE_SECONDS,
+                }
+            return local_config
+        raise
+    if not rows:
+        return {}
+    row = rows[0]
+    user_id = str(row[3] if len(row) > 3 else "").strip()
+    if not user_id or user_id == "0":
+        return {}
+    config = {
+        "product": product,
+        "account_id": "",
+        "user_id": user_id,
+        "label": "apps_setting.default_user",
+        "scope": "product",
+        "source": "ads_apps_setting.default_user",
+        "app_id": str(row[0] if len(row) > 0 else "").strip(),
+        "app_name": str(row[1] if len(row) > 1 else "").strip(),
+        "app_key": str(row[2] if len(row) > 2 else "").strip(),
+        "validation": {
+            "ok": True,
+            "source": "ads_apps_setting.default_user",
+            "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    }
+    with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+        AD_CONTROL_DEFAULT_USER_CACHE[cache_key] = {
+            "config": dict(config),
+            "expires_at": now + AD_CONTROL_DEFAULT_USER_CACHE_SECONDS,
+        }
+    ad_control_store_local_default_user_cache(config)
+    return config
+
+
+def list_ad_control_token_config(product):
+    product = str(product or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    config = ad_control_product_app_default_user(product)
+    return {"items": [config] if config else [], "source": "ads_apps_setting.default_user"}
+
+
+def save_ad_control_token_config(payload, session):
+    raise StructuredApiError(
+        "token_config_managed_by_apps_setting",
+        "Token 配置已改为读取目标产品 ads_apps_setting.default_user，不再通过本页主动配置。",
+    )
+
+
+def ad_control_token_for_user_id(user_id):
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+    now = time.time()
+    with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+        cached = AD_CONTROL_TOKEN_CACHE.get(user_id) or {}
+        if cached.get("expires_at", 0) > now:
+            return str(cached.get("token") or "")
+    sql = """
+        SELECT accessToken
+          FROM {table}
+         WHERE CAST(user_id AS CHAR)={user_id}
+           AND accessToken IS NOT NULL
+           AND accessToken<>''
+         LIMIT 1
+    """.format(
+        table=ad_control_table("ads_facebook_info"),
+        user_id=ad_control_quote(user_id),
+    )
+    try:
+        rows = ad_control_run_critical_mysql(" ".join(sql.split()), "meta_token")
+    except Exception:
+        with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+            stale_token = str((AD_CONTROL_TOKEN_CACHE.get(user_id) or {}).get("token") or "")
+        if stale_token:
+            return stale_token
+        raise
+    token = str(rows[0][0] or "").strip() if rows else ""
+    if token:
+        with AD_CONTROL_CREDENTIAL_CACHE_LOCK:
+            AD_CONTROL_TOKEN_CACHE[user_id] = {
+                "token": token,
+                "expires_at": now + AD_CONTROL_TOKEN_CACHE_SECONDS,
+            }
+    return token
+
+
+def ad_control_token_config_for_accounts(product, account_ids):
+    product = str(product or "").strip()
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    default_config = ad_control_product_app_default_user(product)
+    out = {}
+    for account_id in accounts:
+        out[account_id] = default_config or {}
+    return out
+
+
+def validate_ad_control_token_config(payload):
+    product = str(payload.get("product") or "").strip()
+    accounts = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("accounts") or payload.get("account_ids"))]
+    accounts = [item for item in accounts if item]
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if len(accounts) > AD_CONTROL_MAX_LIVE_ACCOUNTS:
+        raise StructuredApiError("too_many_accounts", "too many accounts", max_accounts=AD_CONTROL_MAX_LIVE_ACCOUNTS)
+    config = ad_control_product_app_default_user(product)
+    user_id = str(config.get("user_id") or "").strip()
+    if not user_id:
+        raise StructuredApiError("missing_apps_setting_default_user", "target product has no ads_apps_setting.default_user")
+    token = ad_control_token_for_user_id(user_id)
+    if not token:
+        raise StructuredApiError("missing_meta_token", "token owner has no Meta token")
+    def validate_account(account_id):
+        try:
+            meta = ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+            return {"account_id": account_id, "ok": True, "name": meta.get("name", "")}
+        except Exception as exc:
+            return {"account_id": account_id, "ok": False, "reason": str(exc)}
+
+    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), max(1, len(accounts)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(validate_account, accounts))
+    ok_count = len([item for item in results if item.get("ok")])
+    return {
+        "product": product,
+        "user_id": user_id,
+        "source": "ads_apps_setting.default_user",
+        "app_id": config.get("app_id", ""),
+        "app_name": config.get("app_name", ""),
+        "ok": ok_count == len(accounts),
+        "checked_count": len(accounts),
+        "ok_count": ok_count,
+        "results": results,
+        "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def ad_control_validate_scope_token_access(scope):
+    product = str(scope.get("product") or "").strip()
+    if product:
+        product_accounts = {product: list(scope["account_ids"])}
+    else:
+        whitelists = ad_control_account_campaign_whitelists(scope["account_ids"])
+        product_accounts = {}
+        for account_id in scope["account_ids"]:
+            for source_product in (whitelists.get(account_id) or {}).keys():
+                product_accounts.setdefault(source_product, []).append(account_id)
+    errors = []
+    checked_count = 0
+    if not product_accounts:
+        errors.append({"reason": "no_account_campaign_whitelist"})
+    for source_product, account_ids in product_accounts.items():
+        token_configs = ad_control_token_config_for_accounts(source_product, account_ids)
+        for account_id in account_ids:
+            checked_count += 1
+            token_user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+            if not token_user_id:
+                errors.append({"account_id": account_id, "product": source_product, "reason": "missing_token_config"})
+                continue
+            token = ad_control_token_for_user_id(token_user_id)
+            if not token:
+                errors.append({"account_id": account_id, "product": source_product, "token_user_id": token_user_id, "reason": "missing_meta_token"})
+                continue
+            try:
+                ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+            except Exception as exc:
+                errors.append({"account_id": account_id, "product": source_product, "token_user_id": token_user_id, "reason": str(exc)})
+    if errors:
+        raise StructuredApiError(
+            "token_access_failed",
+            "token cannot access selected accounts",
+            accounts=",".join(str(item.get("account_id") or "") for item in errors[:10]),
+            errors=errors[:10],
+        )
+    return {"ok": True, "checked_count": checked_count}
+
+
+def ad_control_account_group_payload(row):
+    item = dict(row)
+    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
+    item["deleted"] = bool(item.get("deleted"))
+    return item
+
+
+def list_ad_control_account_groups(product=None, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    where = "WHERE deleted=0"
+    params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND created_by=?"
+        params.append(owner_user_id)
+    if product:
+        where += " AND product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_account_group %s ORDER BY updated_at DESC" % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_account_group_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def save_ad_control_account_group(payload, session):
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not name:
+        raise StructuredApiError("missing_name", "missing group name")
+    group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
+    account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    account_ids = [item for item in account_ids if item]
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT created_by,product,account_ids_json FROM ad_control_account_group WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor:
+                raise StructuredApiError("not_found", "account group not found")
+            configuration_changed = bool(previous) and (
+                str(previous["product"] or "") != product
+                or sorted(ad_control_safe_json_list(previous["account_ids_json"])) != sorted(account_ids)
+            )
+            conn.execute(
+                """
+                INSERT INTO ad_control_account_group (
+                  group_id, name, product, account_ids_json, created_by, created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  account_ids_json=excluded.account_ids_json,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (group_id, name, product, json.dumps(account_ids, ensure_ascii=False), actor),
+            )
+            if configuration_changed:
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=0,
+                           last_preview_id='',
+                           last_preview_hash='',
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE account_group_id=? AND deleted=0
+                    """,
+                    (group_id,),
+                )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_account_group WHERE group_id=?", (group_id,)).fetchone()
+            return ad_control_account_group_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def delete_ad_control_account_group(group_id, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        raise StructuredApiError("missing_group_id", "missing account group id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            owned = conn.execute(
+                "SELECT 1 FROM ad_control_account_group WHERE group_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((group_id,) if internal else (group_id, owner_user_id)),
+            ).fetchone()
+            if not owned:
+                raise StructuredApiError("not_found", "account group not found")
+            active_bindings = conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ad_control_rule_group
+                 WHERE account_group_id=? AND deleted=0
+                """,
+                (group_id,),
+            ).fetchone()[0]
+            if active_bindings:
+                raise StructuredApiError("account_group_in_use", "账户池仍被规则组使用，不能删除", binding_count=active_bindings)
+            cursor = conn.execute(
+                "UPDATE ad_control_account_group SET deleted=1, updated_at=CURRENT_TIMESTAMP "
+                "WHERE group_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((group_id,) if internal else (group_id, owner_user_id)),
+            )
+            if cursor.rowcount != 1:
+                raise StructuredApiError("not_found", "account group not found")
+            conn.commit()
+            return {"message": "deleted", "group_id": group_id}
+        finally:
+            conn.close()
+
+
+def ad_control_rule_set_payload(row):
+    item = dict(row)
+    item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
+    item["default_window"] = ad_control_safe_json_dict(item.pop("default_window_json", '{"type":"since_start"}'))
+    item["deleted"] = bool(item.get("deleted"))
+    return item
+
+
+def list_ad_control_rule_sets(product=None, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    where = "WHERE deleted=0"
+    params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND created_by=?"
+        params.append(owner_user_id)
+    if product:
+        where += " AND product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_rule_set %s ORDER BY updated_at DESC" % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_rule_set_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def fetch_ad_control_rule_set(rule_set_id, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    rule_set_id = str(rule_set_id or "").strip()
+    if not rule_set_id:
+        raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
+            ).fetchone()
+            if not row:
+                raise StructuredApiError("not_found", "rule set not found")
+            return ad_control_rule_set_payload(row)
+        finally:
+            conn.close()
+
+
+def save_ad_control_rule_set(payload, session):
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not name:
+        raise StructuredApiError("missing_name", "missing rule set name")
+    rule_set_id = str(payload.get("rule_set_id") or "").strip() or uuid.uuid4().hex
+    rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    default_window = payload.get("default_window") if isinstance(payload.get("default_window"), dict) else {}
+    if not default_window:
+        default_window = payload.get("window") if isinstance(payload.get("window"), dict) else {"type": "since_start"}
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT created_by,product,rules_json,default_window_json "
+                "FROM ad_control_rule_set WHERE rule_set_id=?",
+                (rule_set_id,),
+            ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor:
+                raise StructuredApiError("not_found", "rule set not found")
+            configuration_changed = bool(previous) and (
+                str(previous["product"] or "") != product
+                or ad_control_safe_json_list(previous["rules_json"]) != rules
+                or ad_control_safe_json_dict(previous["default_window_json"]) != default_window
+            )
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule_set (
+                  rule_set_id, name, product, rules_json, default_window_json,
+                  created_by, created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(rule_set_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  rules_json=excluded.rules_json,
+                  default_window_json=excluded.default_window_json,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (
+                    rule_set_id,
+                    name,
+                    product,
+                    json.dumps(rules, ensure_ascii=False),
+                    json.dumps(default_window, ensure_ascii=False),
+                    actor,
+                ),
+            )
+            if configuration_changed:
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=0,
+                           last_preview_id='',
+                           last_preview_hash='',
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE rule_set_id=? AND deleted=0
+                    """,
+                    (rule_set_id,),
+                )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule_set WHERE rule_set_id=?", (rule_set_id,)).fetchone()
+            return ad_control_rule_set_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def delete_ad_control_rule_set(rule_set_id, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    rule_set_id = str(rule_set_id or "").strip()
+    if not rule_set_id:
+        raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            owned = conn.execute(
+                "SELECT 1 FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
+            ).fetchone()
+            if not owned:
+                raise StructuredApiError("not_found", "rule set not found")
+            active_bindings = conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ad_control_rule_group
+                 WHERE rule_set_id=? AND deleted=0
+                """,
+                (rule_set_id,),
+            ).fetchone()[0]
+            if active_bindings:
+                raise StructuredApiError("rule_set_in_use", "rule set is used by bindings", binding_count=active_bindings)
+            cursor = conn.execute(
+                "UPDATE ad_control_rule_set SET deleted=1, updated_at=CURRENT_TIMESTAMP "
+                "WHERE rule_set_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
+            )
+            if cursor.rowcount != 1:
+                raise StructuredApiError("not_found", "rule set not found")
+            conn.commit()
+            return {"message": "deleted", "rule_set_id": rule_set_id}
+        finally:
+            conn.close()
+
+
+def ad_control_live_scope_hash(scope):
+    accounts = sorted({
+        ad_control_normalize_account(item)
+        for item in (scope.get("account_ids") or [])
+        if ad_control_normalize_account(item)
+    })
+    return ad_control_rule_hash({
+        "product": scope.get("product") or "",
+        "accounts": accounts,
+        "rules": scope.get("rules") or [],
+        "window": scope.get("window") or {"type": "since_start"},
+        "strategy": scope.get("strategy") or {},
+        "rule_group_id": scope.get("rule_group_id") or "",
+        "binding_id": scope.get("rule_group_id") or "",
+    })
+
+
+def ad_control_rule_group_payload(row):
+    item = dict(row)
+    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
+    linked_account_ids = ad_control_safe_json_list(item.pop("account_group_ids_json", "[]"))
+    if linked_account_ids:
+        item["account_ids"] = linked_account_ids
+    item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
+    item["strategy"] = ad_control_safe_json_dict(item.pop("strategy_json", "{}"))
+    rule_set_rules = ad_control_safe_json_list(item.pop("rule_set_rules_json", "[]"))
+    if not item["rules"] and rule_set_rules:
+        item["rules"] = rule_set_rules
+    item["rule_set_default_window"] = ad_control_safe_json_dict(item.pop("rule_set_default_window_json", "{}"))
+    item["last_result"] = ad_control_safe_json_dict(item.pop("last_result_json", "{}"))
+    item["enabled"] = bool(item.get("enabled"))
+    item["emergency_stopped"] = bool(item.get("emergency_stopped"))
+    item["deleted"] = bool(item.get("deleted"))
+    item["binding_id"] = item.get("group_id", "")
+    item["rule_set_id"] = item.get("rule_set_id", "")
+    item["current_preview_hash"] = ad_control_live_scope_hash({
+        "product": item.get("product"),
+        "account_ids": item.get("account_ids"),
+        "rules": item.get("rules"),
+        "window": item.get("rule_set_default_window") or {"type": "since_start"},
+        "strategy": item.get("strategy"),
+        "object_level": item.get("object_level") or "campaign",
+        "run_mode": item.get("run_mode") or "observe",
+        "rule_group_id": item.get("group_id"),
+    })
+    expires_at = str(item.pop("last_preview_expires_at", "") or "")
+    item["last_preview_expires_at"] = expires_at
+    if not item.get("last_preview_id") or not item.get("last_preview_hash"):
+        item["preview_status"] = "missing"
+    elif item.get("last_preview_hash") != item.get("current_preview_hash"):
+        item["preview_status"] = "stale"
+    elif expires_at:
+        try:
+            item["preview_status"] = "expired" if datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.utcnow() else "ready"
+        except Exception:
+            item["preview_status"] = "stale"
+    else:
+        item["preview_status"] = "missing"
+    item["preview_ready"] = item["preview_status"] == "ready"
+    return item
+
+
+def ad_control_fanout_migration_signature(row):
+    """Return only behavior-affecting fields for legacy fan-out migration."""
+    rules = ad_control_safe_json_list(row["rules_json"])
+    strategy = ad_control_safe_json_dict(row["strategy_json"])
+    # Legacy fan-out bindings may differ only by product/account aggregation
+    # metadata.  Every behavior-affecting strategy value must remain equal.
+    for key in (
+        "frontend_rule_group_id",
+        "product",
+        "products",
+        "selected_products",
+        "account_ids",
+        "selected_account_ids",
+        "account_count",
+        "product_count",
+    ):
+        strategy.pop(key, None)
+    return (
+        ad_control_json_dumps(rules),
+        ad_control_json_dumps(strategy),
+        str(row["object_level"] or "campaign").lower(),
+        str(row["run_mode"] or "live").lower(),
+    )
+
+
+def ad_control_validate_group_migration_rows(conn, migrate_from_group_ids, actor, group_id):
+    if not migrate_from_group_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(migrate_from_group_ids))
+    migration_rows = conn.execute(
+        "SELECT * FROM ad_control_rule_group WHERE deleted=0 AND group_id IN (%s)" % placeholders,
+        tuple(migrate_from_group_ids),
+    ).fetchall()
+    rows_by_id = {str(row["group_id"] or ""): row for row in migration_rows}
+    if set(rows_by_id) != set(migrate_from_group_ids):
+        raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
+    for migrate_id in migrate_from_group_ids:
+        row = rows_by_id[migrate_id]
+        row_owner = str(row["owner_user_id"] or row["created_by"] or "")
+        row_strategy = ad_control_safe_json_dict(row["strategy_json"])
+        frontend_id = str(row_strategy.get("frontend_rule_group_id") or "")
+        if row_owner != actor or (migrate_id != group_id and frontend_id != group_id):
+            raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
+    if len(migrate_from_group_ids) > 1:
+        signatures = {
+            ad_control_fanout_migration_signature(rows_by_id[migrate_id])
+            for migrate_id in migrate_from_group_ids
+        }
+        if len(signatures) != 1:
+            raise StructuredApiError(
+                "fanout_source_config_mismatch",
+                "fan-out source bindings have divergent rule configuration; migrate them separately",
+            )
+    return rows_by_id
+
+
+def list_ad_control_rule_groups(product=None, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    where = "WHERE g.deleted=0"
+    params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND g.owner_user_id=?"
+        params.append(owner_user_id)
+    if product:
+        where += " AND g.product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT g.*,
+                       rs.name AS rule_set_name,
+                       rs.rules_json AS rule_set_rules_json,
+                       rs.default_window_json AS rule_set_default_window_json,
+                       ag.account_ids_json AS account_group_ids_json,
+                       p.expires_at AS last_preview_expires_at
+                  FROM ad_control_rule_group g
+             LEFT JOIN ad_control_rule_set rs
+                    ON rs.rule_set_id = g.rule_set_id
+                   AND rs.deleted = 0
+             LEFT JOIN ad_control_account_group ag
+                    ON ag.group_id = g.account_group_id
+                   AND ag.deleted = 0
+                   AND (
+                        ag.created_by = g.owner_user_id
+                        OR (g.created_by <> '' AND ag.created_by = g.created_by)
+                   )
+             LEFT JOIN ad_control_preview p
+                    ON p.preview_id = g.last_preview_id
+                  %s
+              ORDER BY g.updated_at DESC
+                """ % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_rule_group_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def list_ad_control_bindings(product=None, owner_user_id=None, internal=False):
+    return list_ad_control_rule_groups(product, owner_user_id=owner_user_id, internal=internal)
+
+
+def fetch_ad_control_rule_group(group_id, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT g.*,
+                       rs.name AS rule_set_name,
+                       rs.rules_json AS rule_set_rules_json,
+                       rs.default_window_json AS rule_set_default_window_json,
+                       ag.account_ids_json AS account_group_ids_json,
+                       p.expires_at AS last_preview_expires_at
+                  FROM ad_control_rule_group g
+             LEFT JOIN ad_control_rule_set rs
+                    ON rs.rule_set_id = g.rule_set_id
+                   AND rs.deleted = 0
+             LEFT JOIN ad_control_account_group ag
+                    ON ag.group_id = g.account_group_id
+                   AND ag.deleted = 0
+                   AND (
+                        ag.created_by = g.owner_user_id
+                        OR (g.created_by <> '' AND ag.created_by = g.created_by)
+                   )
+             LEFT JOIN ad_control_preview p
+                    ON p.preview_id = g.last_preview_id
+                 WHERE g.group_id=? AND g.deleted=0
+                """,
+                (str(group_id or "").strip(),),
+            ).fetchone()
+            if not row:
+                raise StructuredApiError("not_found", "rule group not found")
+            if not internal:
+                owner_user_id = str(owner_user_id or "").strip()
+                if not owner_user_id or str(row["owner_user_id"] or row["created_by"] or "") != owner_user_id:
+                    raise StructuredApiError("not_found", "rule group not found")
+            return ad_control_rule_group_payload(row)
+        finally:
+            conn.close()
+
+
+def ad_control_rule_group_snapshot(conn, group_id):
+    """Read a rule group and its preview dependencies on an existing transaction."""
+    row = conn.execute(
+        """
+        SELECT g.*,
+               rs.name AS rule_set_name,
+               rs.rules_json AS rule_set_rules_json,
+               rs.default_window_json AS rule_set_default_window_json,
+               ag.account_ids_json AS account_group_ids_json,
+               p.expires_at AS last_preview_expires_at
+          FROM ad_control_rule_group g
+     LEFT JOIN ad_control_rule_set rs
+            ON rs.rule_set_id = g.rule_set_id
+           AND rs.deleted = 0
+     LEFT JOIN ad_control_account_group ag
+            ON ag.group_id = g.account_group_id
+           AND ag.deleted = 0
+           AND (
+                ag.created_by = g.owner_user_id
+                OR (g.created_by <> '' AND ag.created_by = g.created_by)
+           )
+     LEFT JOIN ad_control_preview p
+            ON p.preview_id = g.last_preview_id
+         WHERE g.group_id=? AND g.deleted=0
+        """,
+        (str(group_id or "").strip(),),
+    ).fetchone()
+    if not row:
+        raise StructuredApiError("not_found", "rule group not found")
+    return ad_control_rule_group_payload(row)
+
+
+def fetch_ad_control_binding(binding_id, owner_user_id=None, internal=False):
+    return fetch_ad_control_rule_group(binding_id, owner_user_id=owner_user_id, internal=internal)
+
+
+def save_ad_control_rule_group(payload, session):
+    payload = dict(payload or {})
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise StructuredApiError("missing_name", "missing rule group name")
+    group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
+    migrate_from_group_ids = [
+        str(item or "").strip()
+        for item in ad_control_list(payload.get("migrate_from_group_ids"))
+        if str(item or "").strip()
+    ]
+    ensure_ad_control_tables()
+    existing = None
+    stored_group = None
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)).fetchone()
+            stored_group = ad_control_rule_group_payload(row) if row else None
+            existing = stored_group if stored_group and not stored_group.get("deleted") else None
+            if migrate_from_group_ids:
+                ad_control_validate_group_migration_rows(
+                    conn, migrate_from_group_ids, actor, group_id
+                )
+        finally:
+            conn.close()
+    if stored_group and str(stored_group.get("owner_user_id") or stored_group.get("created_by") or "") != actor:
+        raise StructuredApiError("not_found", "rule group not found")
+    if migrate_from_group_ids:
+        payload_strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+        if str(payload_strategy.get("frontend_rule_group_id") or "") != group_id:
+            raise StructuredApiError("invalid_group_migration", "invalid legacy group migration")
+
+    account_group_id = str(payload.get("account_group_id") or "").strip()
+    account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    account_ids = [item for item in account_ids if item]
+    rule_set_id = str(payload.get("rule_set_id") or "").strip()
+    rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+    is_account_group = (
+        not product
+        or "object_level" in payload
+        or "run_mode" in payload
+        or any(str(rule.get("action") or "").lower() == "copy" for rule in rules if isinstance(rule, dict))
+        or (existing and not existing.get("product"))
+    )
+    object_level = str((existing or {}).get("object_level") or "campaign")
+    run_mode = str((existing or {}).get("run_mode") or "observe")
+    if is_account_group:
+        try:
+            normalized = ad_control_copy_service.normalize_rule_group(payload, actor, existing=existing)
+        except ValueError as exc:
+            raise StructuredApiError(str(exc), str(exc))
+        product = ""
+        account_group_id = ""
+        rule_set_id = ""
+        account_ids = normalized["account_ids"]
+        rules = normalized["rules"]
+        strategy = normalized["strategy"]
+        object_level = normalized["object_level"]
+        run_mode = normalized["run_mode"]
+        enabled = 1 if normalized["enabled"] else 0
+    elif rule_set_id:
+        rule_set = fetch_ad_control_rule_set(rule_set_id, owner_user_id=actor)
+        if rule_set.get("product") != product:
+            raise StructuredApiError("rule_set_product_mismatch", "rule set product does not match binding product")
+        if not rules:
+            rules = rule_set.get("rules") or []
+    elif rules:
+        rule_set_id = "legacy_%s" % group_id
+        save_ad_control_rule_set(
+            {
+                "rule_set_id": rule_set_id,
+                "product": product,
+                "name": name,
+                "rules": rules,
+                "default_window": payload.get("default_window") if isinstance(payload.get("default_window"), dict) else {"type": "since_start"},
+            },
+            session,
+        )
+    if not is_account_group:
+        # Saving configuration is never an enable path. Preserve an already
+        # enabled legacy binding only while its behavior is unchanged; the
+        # dedicated enabled endpoint is the sole 0 -> 1 transition.
+        enabled = 0
+    if enabled and not is_account_group:
+        validate_account_ids = list(account_ids)
+        if not validate_account_ids and account_group_id:
+            groups = list_ad_control_account_groups(product, owner_user_id=actor).get("items", [])
+            for account_group in groups:
+                if account_group.get("group_id") == account_group_id:
+                    validate_account_ids = [ad_control_normalize_account(item) for item in account_group.get("account_ids", [])]
+                    break
+        validate_account_ids = [item for item in validate_account_ids if item]
+        if not validate_account_ids:
+            raise StructuredApiError("missing_accounts", "select accounts before enabling rule group")
+        ad_control_validate_scope_token_access({
+            "product": product,
+            "account_ids": validate_account_ids,
+        })
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current_target = conn.execute(
+                "SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)
+            ).fetchone()
+            if (
+                current_target
+                and str(current_target["owner_user_id"] or current_target["created_by"] or "") != actor
+            ):
+                raise StructuredApiError("not_found", "rule group not found")
+            if not is_account_group:
+                enabled = 1 if current_target and current_target["enabled"] else 0
+            if account_group_id:
+                account_group = conn.execute(
+                    "SELECT group_id,product,created_by FROM ad_control_account_group "
+                    "WHERE group_id=? AND deleted=0",
+                    (account_group_id,),
+                ).fetchone()
+                if not account_group:
+                    raise StructuredApiError("account_group_not_found", "account group not found")
+                if str(account_group["product"] or "") != product:
+                    raise StructuredApiError(
+                        "account_group_product_mismatch",
+                        "account group product does not match rule group product",
+                    )
+                legacy_same_link = bool(
+                    current_target
+                    and str(current_target["account_group_id"] or "") == account_group_id
+                    and str(current_target["created_by"] or "")
+                    and str(current_target["created_by"] or "")
+                    == str(account_group["created_by"] or "")
+                )
+                if str(account_group["created_by"] or "") != actor and not legacy_same_link:
+                    raise StructuredApiError("account_group_not_found", "account group not found")
+            configuration_changed = bool(current_target) and (
+                str(current_target["product"] or "") != product
+                or str(current_target["rule_set_id"] or "") != rule_set_id
+                or str(current_target["account_group_id"] or "") != account_group_id
+                or sorted(ad_control_safe_json_list(current_target["account_ids_json"])) != sorted(account_ids)
+                or ad_control_safe_json_list(current_target["rules_json"]) != rules
+                or ad_control_safe_json_dict(current_target["strategy_json"]) != strategy
+                or str(current_target["object_level"] or "campaign").lower() != object_level
+                or str(current_target["run_mode"] or "observe").lower() != run_mode
+            )
+            # This is the authoritative migration validation. BEGIN IMMEDIATE
+            # prevents a concurrent writer from changing a source binding
+            # between this re-read and the upsert/soft-delete below.
+            ad_control_validate_group_migration_rows(
+                conn, migrate_from_group_ids, actor, group_id
+            )
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule_group (
+                  group_id, name, product, rule_set_id, account_group_id, account_ids_json, rules_json, strategy_json,
+                  enabled, emergency_stopped, created_by, owner_user_id, object_level, run_mode,
+                  created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  rule_set_id=excluded.rule_set_id,
+                  account_group_id=excluded.account_group_id,
+                  account_ids_json=excluded.account_ids_json,
+                  rules_json=excluded.rules_json,
+                  strategy_json=excluded.strategy_json,
+                  enabled=excluded.enabled,
+                  owner_user_id=ad_control_rule_group.owner_user_id,
+                  object_level=excluded.object_level,
+                  run_mode=excluded.run_mode,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (
+                    group_id,
+                    name,
+                    product,
+                    rule_set_id,
+                    account_group_id,
+                    json.dumps(account_ids, ensure_ascii=False),
+                    json.dumps(rules, ensure_ascii=False),
+                    json.dumps(strategy, ensure_ascii=False),
+                    enabled,
+                    actor,
+                    actor,
+                    object_level,
+                    run_mode,
+                ),
+            )
+            obsolete_ids = [item for item in migrate_from_group_ids if item != group_id]
+            if obsolete_ids:
+                placeholders = ",".join(["?"] * len(obsolete_ids))
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET enabled=0,deleted=1,updated_at=CURRENT_TIMESTAMP "
+                    "WHERE group_id IN (%s) "
+                    "AND COALESCE(NULLIF(owner_user_id,''),created_by)=?" % placeholders,
+                    tuple(obsolete_ids) + (actor,),
+                )
+                if cursor.rowcount != len(obsolete_ids):
+                    raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
+            if configuration_changed:
+                conn.execute(
+                    "UPDATE ad_control_rule_group SET enabled=0,last_preview_id='',"
+                    "last_preview_hash='',updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                    (group_id,),
+                )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)).fetchone()
+            return ad_control_rule_group_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def save_ad_control_binding(payload, session):
+    return save_ad_control_rule_group(payload, session)
+
+
+def delete_ad_control_rule_group(group_id, owner_user_id=None, internal=False):
+    ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        raise StructuredApiError("missing_group_id", "missing rule group id")
+    if not internal:
+        fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=False)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_control_rule_group SET deleted=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                (group_id,),
+            )
+            if conn.total_changes < 1:
+                raise StructuredApiError("not_found", "rule group not found")
+            conn.commit()
+            return {"message": "deleted", "group_id": group_id}
+        finally:
+            conn.close()
+
+
+def delete_ad_control_binding(binding_id, owner_user_id=None, internal=False):
+    return delete_ad_control_rule_group(binding_id, owner_user_id=owner_user_id, internal=internal)
+
+
+def set_ad_control_rule_group_enabled(
+    group_id, enabled, owner_user_id=None, internal=False, live_mode_confirm=""
+):
+    ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    owner_user_id = str(owner_user_id or "").strip()
+
+    def validate_target(group):
+        if not internal:
+            group_owner = str(group.get("owner_user_id") or group.get("created_by") or "")
+            if not owner_user_id or group_owner != owner_user_id:
+                raise StructuredApiError("not_found", "rule group not found")
+        if str(group.get("object_level") or "campaign").lower() == "ad":
+            raise StructuredApiError("phase_not_enabled", "Ad copy phase is not enabled")
+        if (
+            not internal
+            and str(group.get("run_mode") or "observe").lower() == "live"
+            and str(live_mode_confirm or "") != ad_control_copy_service.LIVE_CONFIRMATION
+        ):
+            raise StructuredApiError(
+                "live_mode_confirm_required",
+                "live mode confirmation is required",
+            )
+        if not group.get("preview_ready"):
+            raise StructuredApiError("preview_required", "preview this rule group before enabling it")
+
+    group = fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=internal)
+    initial_emergency_stopped = bool(group.get("emergency_stopped"))
+    initial_updated_at = str(group.get("updated_at") or "")
+    if enabled:
+        validate_target(group)
+        scope = ad_control_resolve_live_scope({"rule_group_id": group_id})
+        ad_control_validate_scope_token_access(scope)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current_group = ad_control_rule_group_snapshot(conn, group_id)
+            if enabled:
+                # Token validation happens outside the SQLite write lock. Re-read
+                # every behavior-affecting field before enabling so a concurrent
+                # save cannot enable a different or stale configuration.
+                validate_target(current_group)
+                if current_group.get("current_preview_hash") != group.get("current_preview_hash"):
+                    raise StructuredApiError("preview_stale", "rule group changed during enable")
+                if current_group.get("emergency_stopped") and (
+                    not initial_emergency_stopped
+                    or str(current_group.get("updated_at") or "") != initial_updated_at
+                ):
+                    raise StructuredApiError(
+                        "emergency_stop_changed",
+                        "rule group was emergency-stopped during enable",
+                    )
+                cursor = conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=1,
+                           emergency_stopped=0,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=? AND deleted=0
+                    """,
+                    (group_id,),
+                )
+            else:
+                if not internal:
+                    group_owner = str(current_group.get("owner_user_id") or current_group.get("created_by") or "")
+                    if not owner_user_id or group_owner != owner_user_id:
+                        raise StructuredApiError("not_found", "rule group not found")
+                cursor = conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=0,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=? AND deleted=0
+                    """,
+                    (group_id,),
+                )
+            if cursor.rowcount != 1:
+                raise StructuredApiError("not_found", "rule group not found")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=internal)
+
+
+def set_ad_control_binding_enabled(
+    binding_id, enabled, owner_user_id=None, internal=False, live_mode_confirm=""
+):
+    return set_ad_control_rule_group_enabled(
+        binding_id,
+        enabled,
+        owner_user_id=owner_user_id,
+        internal=internal,
+        live_mode_confirm=live_mode_confirm,
+    )
+
+
+def ad_control_emergency_stop(payload, owner_user_id=None, internal=False):
+    payload = dict(payload or {})
+    scope = str(payload.get("scope") or "").strip()
+    group_id = str(payload.get("group_id") or "").strip()
+    if scope not in ("rule_group", "global"):
+        raise StructuredApiError("invalid_scope", "invalid emergency stop scope")
+    if scope == "rule_group" and not group_id:
+        raise StructuredApiError("missing_group_id", "missing rule group id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    stop_updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            if scope == "rule_group":
+                where = "group_id=? AND deleted=0"
+                params = [group_id]
+                if not internal:
+                    where += " AND COALESCE(NULLIF(owner_user_id,''),created_by)=?"
+                    params.append(owner_user_id)
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET emergency_stopped=1, enabled=0, updated_at=? "
+                    "WHERE " + where,
+                    tuple([stop_updated_at] + params),
+                )
+                if cursor.rowcount < 1:
+                    raise StructuredApiError("not_found", "rule group not found")
+            else:
+                where = "deleted=0"
+                params = []
+                if not internal:
+                    where += " AND COALESCE(NULLIF(owner_user_id,''),created_by)=?"
+                    params.append(owner_user_id)
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET emergency_stopped=1, enabled=0, updated_at=? "
+                    "WHERE " + where,
+                    tuple([stop_updated_at] + params),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "message": "stopped",
+        "scope": scope,
+        "group_id": group_id,
+        "affected_count": max(0, int(cursor.rowcount or 0)),
+    }
+
+
+def ad_control_runner_status(owner_user_id=None, internal=False):
+    resource = ad_control_resource_snapshot()
+    groups = list_ad_control_rule_groups(owner_user_id=owner_user_id, internal=internal).get("items", [])
+    return {
+        "resource": resource,
+        "enabled_rule_groups": len([item for item in groups if item.get("enabled")]),
+        "emergency_stopped_groups": len([item for item in groups if item.get("emergency_stopped")]),
+        "max_workers": AD_CONTROL_LIVE_MAX_WORKERS,
+        "resource_limit_percent": AD_CONTROL_RESOURCE_LIMIT_PERCENT,
+        # Copy execution is intentionally not connected in this release.
+        "copy_campaign_enabled": False,
+        "copy_persistence_ready": False,
+        "ad_copy_enabled": False,
+    }
+
+
+def ad_control_local_time_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(text[:19], fmt).replace(tzinfo=timezone.utc)
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return text
+
+
+def ad_control_short_id(value, head=8, tail=6):
+    text = str(value or "").strip()
+    if len(text) <= head + tail + 3:
+        return text
+    return "%s...%s" % (text[:head], text[-tail:])
+
+
+def ad_control_result_account_campaign(result):
+    key = str((result or {}).get("object_key") or "")
+    parts = key.split(":")
+    account_id = parts[2] if len(parts) >= 4 else ""
+    campaign_id = parts[3] if len(parts) >= 4 else ""
+    return account_id, campaign_id
+
+
+def ad_control_split_compact_values(value, limit=4):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    values = []
+    for part in re.split(r"[\n,;/]+", text):
+        item = str(part or "").strip()
+        if item and item not in values:
+            values.append(item)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def ad_control_join_compact_values(*values, limit=4):
+    out = []
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            parts = value
+        else:
+            parts = ad_control_split_compact_values(value, limit=limit)
+        for part in parts:
+            item = str(part or "").strip()
+            if item and item not in out:
+                out.append(item)
+            if len(out) >= limit:
+                break
+        if len(out) >= limit:
+            break
+    return " / ".join(out)
+
+
+def ad_control_context_from_campaign_name(campaign_name):
+    text = str(campaign_name or "").strip()
+    context = {}
+    if not text:
+        return context
+    language_match = re.search(r"_(?:worldwide|[a-z]{2}(?:-[a-z]{2})?)-[^_]*_([a-z]{2}(?:-[a-z]{2})?)_", text, re.IGNORECASE)
+    if language_match:
+        context["language"] = language_match.group(1).upper()
+    resource_matches = re.findall(r"-([1-9][0-9]{3,6})(?=-|_|\\|)", text)
+    if resource_matches:
+        context["resource_id"] = ad_control_join_compact_values(resource_matches[:2])
+    content_matches = re.findall(r"_0_([A-Za-z0-9]{6,})-[1-9][0-9]{3,6}(?=-|_|\\|)", text)
+    if content_matches:
+        context["content_id"] = ad_control_join_compact_values(content_matches[:2])
+    return context
+
+
+def ad_control_action_preview_context(preview_id):
+    preview_id = str(preview_id or "").strip()
+    if not preview_id:
+        return {}
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT sample_json FROM ad_control_preview WHERE preview_id=?", (preview_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return {}
+    samples = ad_control_safe_json_list(row["sample_json"] if isinstance(row, sqlite3.Row) else row[0])
+    context = {}
+    for item in samples:
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        campaign_id = str(item.get("campaign_id") or "").strip()
+        if not account_id or not campaign_id:
+            continue
+        campaign_name = str(item.get("campaign_name") or "")
+        context[(account_id, campaign_id)] = {
+            "campaign_name": campaign_name,
+            "country": str(item.get("country") or "").strip(),
+            "language": ad_control_display_language(item.get("language"), campaign_name),
+            "raw_language": str(item.get("language") or "").strip(),
+            "source_id": ad_control_join_compact_values(item.get("source_id")),
+            "original_source_id": ad_control_join_compact_values(item.get("original_source_id")),
+            "business_status": str(item.get("status") or "").strip(),
+            "series_code": ad_control_join_compact_values(item.get("series_code")),
+            "resource_id": ad_control_join_compact_values(item.get("resource_id")),
+            "resource_name": str(item.get("resource_name") or "").strip(),
+        }
+    return context
+
+
+def ad_control_action_campaign_context(product, results, existing_context=None):
+    pairs = []
+    account_ids = []
+    campaign_ids = []
+    for result in results or []:
+        account_id, campaign_id = ad_control_result_account_campaign(result)
+        account_id = ad_control_normalize_account(account_id)
+        campaign_id = str(campaign_id or "").strip()
+        if not account_id or not campaign_id:
+            continue
+        pair = (account_id, campaign_id)
+        if existing_context and pair in existing_context:
+            continue
+        if pair not in pairs:
+            pairs.append(pair)
+        if account_id not in account_ids:
+            account_ids.append(account_id)
+        if campaign_id not in campaign_ids:
+            campaign_ids.append(campaign_id)
+    context = dict(existing_context or {})
+    if not pairs:
+        return context
+    account_values = []
+    for account_id in account_ids:
+        account_values.extend([account_id, "act_%s" % account_id, "ACT_%s" % account_id])
+    try:
+        sql = """
+            SELECT
+              {account_norm},
+              CAST(d.campaign_id AS CHAR),
+              COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+              COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+              COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+              COALESCE(GROUP_CONCAT(DISTINCT NULLIF(CAST(d.source_id AS CHAR),'') ORDER BY d.updated_at DESC SEPARATOR ','), ''),
+              COALESCE(GROUP_CONCAT(DISTINCT NULLIF(CAST(d.original_source_id AS CHAR),'') ORDER BY d.updated_at DESC SEPARATOR ','), ''),
+              COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.status,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), '')
+              FROM {table} d
+             WHERE {product_where}
+               AND d.ad_account_id IN {account_values}
+               AND CAST(d.campaign_id AS CHAR) IN {campaign_values}
+             GROUP BY {account_norm}, CAST(d.campaign_id AS CHAR)
+        """.format(
+            account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+            table=ad_control_table("ads_facebook_auto_created_data"),
+            product_where=ad_control_product_condition("d.product", product),
+            account_values=ad_control_sql_in(account_values),
+            campaign_values=ad_control_sql_in(campaign_ids),
+        )
+        for row in run_mysql(" ".join(sql.split())):
+            key = (ad_control_normalize_account(row[0]), str(row[1] or "").strip())
+            campaign_name = str(row[2] or "")
+            context[key] = {
+                "campaign_name": campaign_name,
+                "country": str(row[3] or "").strip(),
+                "language": ad_control_display_language(row[4], campaign_name),
+                "raw_language": str(row[4] or "").strip(),
+                "source_id": ad_control_join_compact_values(row[5]),
+                "original_source_id": ad_control_join_compact_values(row[6]),
+                "business_status": str(row[7] or "").strip(),
+            }
+    except Exception:
+        logging.exception("failed to load ad control campaign context from created_data")
+    if AD_CONTROL_LOG_INSIGHT_CONTEXT:
+        try:
+            sql = """
+                SELECT
+                  {account_norm},
+                  CAST(i.campaign_id AS CHAR),
+                  COALESCE(GROUP_CONCAT(DISTINCT NULLIF(CAST(i.series_code AS CHAR),'') SEPARATOR ','), ''),
+                  COALESCE(GROUP_CONCAT(DISTINCT NULLIF(CAST(i.resource_id AS CHAR),'') SEPARATOR ','), ''),
+                  COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(COALESCE(NULLIF(i.drama_language,''), i.language),'') ORDER BY i.dt DESC SEPARATOR ','), ',', 1), ''),
+                  COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(i.country,'') ORDER BY i.dt DESC SEPARATOR ','), ',', 1), ''),
+                  COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(i.resource_name,'') ORDER BY i.dt DESC SEPARATOR '\\n'), '\\n', 1), '')
+                  FROM {table} i
+                 WHERE {product_where}
+                   AND i.dt >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                   AND {account_norm} IN {account_values}
+                   AND CAST(i.campaign_id AS CHAR) IN {campaign_values}
+                 GROUP BY {account_norm}, CAST(i.campaign_id AS CHAR)
+            """.format(
+                account_norm=ad_control_norm_account_sql("i.ad_account_id"),
+                table=ad_control_table("ads_custom_source_insight"),
+                product_where=ad_control_product_condition("i.product", product),
+                account_values=ad_control_sql_in(account_ids),
+                campaign_values=ad_control_sql_in(campaign_ids),
+            )
+            for row in run_mysql(" ".join(sql.split())):
+                key = (ad_control_normalize_account(row[0]), str(row[1] or "").strip())
+                item = context.setdefault(key, {})
+                item["series_code"] = ad_control_join_compact_values(row[2])
+                item["resource_id"] = ad_control_join_compact_values(row[3])
+                item["insight_language"] = ad_control_display_language(row[4], item.get("campaign_name", ""))
+                item["insight_country"] = str(row[5] or "").strip()
+                item["resource_name"] = str(row[6] or "").strip()
+        except Exception:
+            logging.exception("failed to load ad control campaign context from insight")
+    return context
+
+
+def ad_control_reason_label(reason):
+    text = str(reason or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    if "read-only option" in lower or "--read-only" in lower:
+        return "业务库状态同步失败：MySQL 只读"
+    if "business_status_update_failed" in lower:
+        if "read-only option" in lower or "--read-only" in lower:
+            return "Graph 已执行，业务库同步失败：MySQL 只读"
+        return "Graph 已执行，业务库同步失败"
+    if "not_pause_target" in lower:
+        return "不符合本次关停条件"
+    if "already_paused" in lower:
+        return "已经是暂停状态"
+    if "not_active" in lower:
+        return "Meta 当前不是 ACTIVE"
+    if "missing_meta_token" in lower:
+        return "缺少 Meta token"
+    if "account_owner_mismatch" in lower:
+        return "账号归属不一致"
+    if "command '['mysql'" in lower or "returned non-zero exit status" in lower:
+        return "业务库状态同步失败（历史日志未记录 stderr；当前已定位为 MySQL 只读）"
+    if len(text) > 160:
+        return text[:157] + "..."
+    return text
+
+
+def ad_control_action_status(item):
+    display_status = item.get("display_status") or {}
+    if isinstance(display_status, dict) and display_status.get("label"):
+        return display_status
+    criteria = item.get("criteria") or {}
+    execution_summary = criteria.get("execution_summary") or {}
+    run_status = str(item.get("run_status") or criteria.get("runner_status") or execution_summary.get("run_status") or "").strip().lower()
+    remaining_count = int(item.get("remaining_count") or execution_summary.get("remaining_count") or 0)
+    retryable_error_count = int(item.get("retryable_error_count") or execution_summary.get("retryable_error_count") or 0)
+    error_count = int(item.get("error_count") or 0)
+    blocked_count = int(item.get("blocked_count") or execution_summary.get("blocked_count") or 0)
+    runner_reason = str(item.get("runner_reason") or criteria.get("runner_reason") or execution_summary.get("runner_reason") or "").strip()
+    if run_status == "partial":
+        if blocked_count > 0 or error_count > retryable_error_count:
+            return {"key": "blocked", "label": "执行受阻（非重试错误）", "class": "danger"}
+        if remaining_count == 0 and runner_reason == "live_execute_verify_remaining":
+            return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
+        if retryable_error_count > 0:
+            return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+        if remaining_count > 0:
+            return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
+        return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
+    if run_status == "blocked":
+        return {"key": "blocked", "label": "执行受阻", "class": "danger"}
+    if run_status == "executed" and not (remaining_count or error_count or blocked_count):
+        return {"key": "success", "label": "执行完成", "class": "ok"}
+    if run_status == "executed":
+        return {"key": "inconsistent", "label": "状态异常：完成记录仍有未处理项", "class": "danger"}
+    if run_status in ("error", "failed"):
+        return {"key": "failed", "label": "执行失败", "class": "danger"}
+    success_count = int(item.get("success_count") or 0)
+    dry_run = bool(item.get("dry_run"))
+    if blocked_count > 0 or error_count > retryable_error_count:
+        return {"key": "failed", "label": "失败", "class": "danger"}
+    if retryable_error_count > 0:
+        return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+    if remaining_count > 0:
+        return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
+    if dry_run and success_count > 0:
+        return {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
+    if success_count > 0:
+        return {"key": "success", "label": "成功", "class": "ok"}
+    return {"key": "noop", "label": "无执行目标", "class": "warn"}
+
+
+def ad_control_action_rule_map(items):
+    ids = []
+    for item in items:
+        criteria = item.get("criteria") or {}
+        rule_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+        if rule_group_id and rule_group_id not in ids:
+            ids.append(rule_group_id)
+    if not ids:
+        return {}
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            placeholders = ",".join(["?"] * len(ids))
+            rows = conn.execute(
+                "SELECT group_id, name, product, rule_set_id, account_group_id FROM ad_control_rule_group WHERE group_id IN (%s)" % placeholders,
+                ids,
+            ).fetchall()
+            return {row["group_id"]: dict(row) for row in rows}
+        finally:
+            conn.close()
+
+
+def ad_control_action_audit(item, rule_map=None, include_samples=True):
+    criteria = item.get("criteria") or {}
+    results = item.get("results") or []
+    campaign_context = {}
+    if include_samples:
+        campaign_context = ad_control_action_preview_context(item.get("preview_id"))
+        campaign_context = ad_control_action_campaign_context(
+            item.get("product") or criteria.get("product") or "",
+            results,
+            existing_context=campaign_context,
+        )
+    rule_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    rule_group = (rule_map or {}).get(rule_group_id) or {}
+    status = ad_control_action_status(item)
+    execution_summary = criteria.get("execution_summary") or {}
+    run_status = str(
+        item.get("run_status")
+        or criteria.get("runner_status")
+        or execution_summary.get("run_status")
+        or ""
+    ).strip().lower()
+    observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
+    if observe_mode and run_status in ("", "executed"):
+        status = {"key": "observed", "label": "观察完成", "class": "ok"}
+    reason_counts = {}
+    warning_counts = {}
+    detail_samples = []
+    for result in results:
+        status_text = str(result.get("status") or "")
+        reason = ad_control_reason_label(result.get("reason") or "")
+        if reason:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        for warning in result.get("warnings") or []:
+            warning_text = ad_control_reason_label(warning)
+            if warning_text:
+                warning_counts[warning_text] = warning_counts.get(warning_text, 0) + 1
+        if include_samples:
+            account_id, campaign_id = ad_control_result_account_campaign(result)
+            context = campaign_context.get((ad_control_normalize_account(account_id), str(campaign_id or "").strip())) or {}
+            name_context = ad_control_context_from_campaign_name(context.get("campaign_name") or ((result.get("meta") or {}).get("name") if isinstance(result.get("meta"), dict) else "") or "")
+            context_language = context.get("insight_language") or context.get("language") or ""
+            if not context_language:
+                context_language = name_context.get("language") or ""
+            context_country = context.get("insight_country") or context.get("country") or ""
+            resource_display = ad_control_join_compact_values(context.get("series_code"), context.get("resource_id"), name_context.get("resource_id"))
+            campaign_name = context.get("campaign_name") or ((result.get("meta") or {}).get("name") if isinstance(result.get("meta"), dict) else "") or ""
+            sample = {
+                "status": status_text,
+                "status_label": {
+                    "success": "成功",
+                    "dry_run": "Dry-run",
+                    "error": "失败",
+                    "skipped": "跳过",
+                }.get(status_text, status_text or "--"),
+                "object_key": result.get("object_key") or "",
+                "account_id": account_id,
+                "campaign_id": campaign_id,
+                "campaign_short": ad_control_short_id(campaign_id, 6, 6),
+                "campaign_name": campaign_name,
+                "series_code": context.get("series_code") or "",
+                "resource_id": context.get("resource_id") or name_context.get("resource_id") or "",
+                "resource_display": resource_display,
+                "resource_name": context.get("resource_name") or "",
+                "language": context_language,
+                "country": context_country,
+                "source_id": context.get("source_id") or "",
+                "original_source_id": context.get("original_source_id") or "",
+                "content_id": name_context.get("content_id") or "",
+                "business_status": context.get("business_status") or "",
+                "reason": reason,
+                "warnings": [ad_control_reason_label(warning) for warning in (result.get("warnings") or [])],
+            }
+            detail_samples.append(sample)
+    reason_summary = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ]
+    warning_summary = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(warning_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ]
+    return {
+        "status": status,
+        "created_at_local": ad_control_local_time_text(item.get("created_at")),
+        "mode": "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real",
+        "mode_label": "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+        "action_label": {"pause": "关停", "copy": "复制", "mixed": "关闭/复制", "reopen": "重启", "preview": "预览"}.get(str(item.get("action") or ""), item.get("action") or ""),
+        "rule_group_id": rule_group_id,
+        "rule_group_name": rule_group.get("name") or rule_group_id or "--",
+        "rule_set_id": rule_group.get("rule_set_id") or criteria.get("rule_set_id") or "",
+        "account_group_id": rule_group.get("account_group_id") or criteria.get("account_group_id") or "",
+        "counts": {
+            "requested": int(item.get("requested_count") or 0),
+            "success": int(item.get("success_count") or 0),
+            "skipped": int(item.get("skipped_count") or 0),
+            "error": int(item.get("error_count") or 0),
+        },
+        "flow": {
+            "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),
+            "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),
+            "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),
+            "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),
+            "deferred": int(item.get("deferred_count") or 0),
+            "remaining": int(item.get("remaining_count") or 0),
+            "retryable": int(item.get("retryable_error_count") or 0),
+            "blocked": int(item.get("blocked_count") or 0),
+        },
+        "log_store": item.get("log_store") or "sqlite_fallback",
+        "reason_summary": reason_summary,
+        "warning_summary": warning_summary,
+        "samples": detail_samples,
+        "raw_result_count": len(results),
+    }
+
+
+def list_ad_control_actions(
+    limit=50, product="", binding_id="", action="", date_from="", date_to="",
+    include_targets=False, view="raw", owner_user_id=None, internal=False,
+):
+    ensure_ad_control_tables()
+    limit = ad_control_int(limit, 50, 1, 200)
+    product = str(product or "").strip()
+    binding_id = str(binding_id or "").strip()
+    action = str(action or "").strip()
+    date_from = str(date_from or "").strip()
+    date_to = str(date_to or "").strip()
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+        if binding_id and binding_id not in owned_group_ids:
+            raise StructuredApiError("not_found", "rule group not found")
+
+    def visible(item):
+        if internal:
+            return True
+        criteria = item.get("criteria") or {}
+        group_ref = str(
+            item.get("binding_id")
+            or criteria.get("rule_group_id")
+            or criteria.get("binding_id")
+            or ""
+        ).strip()
+        if group_ref:
+            return group_ref in owned_group_ids
+        return str(item.get("actor_user_id") or "") == owner_user_id
+
+    view = "daily" if str(view or "").strip().lower() == "daily" else "raw"
+    raw_limit = 1000 if view == "daily" else limit
+    fetch_date_from = date_from
+    fetch_date_to = date_to
+    if view == "daily":
+        if date_from:
+            fetch_date_from = (datetime.strptime(date_from[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        if date_to:
+            fetch_date_to = (datetime.strptime(date_to[:10], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    date_from_utc = ad_control_action_log_utc_bound(fetch_date_from)
+    date_to_utc = ad_control_action_log_utc_bound(fetch_date_to, end=True)
+    mysql_items = []
+    mysql_has_more = False
+    mysql_available = False
+    storage_error = ""
+    try:
+        mysql_page = ad_control_execution_log_service.list_actions_page(
+            ad_control_action_log_reader_config(),
+            {
+                "product": product,
+                "binding_id": binding_id,
+                "action": action,
+                "date_from": date_from_utc,
+                "date_to": date_to_utc,
+                "owned_binding_ids": sorted(owned_group_ids),
+                "legacy_actor_user_id": owner_user_id,
+                "owner_filter": not internal,
+            },
+            limit=raw_limit,
+            table=AD_CONTROL_ACTION_LOG_TABLE,
+        )
+        mysql_items = [item for item in (mysql_page.get("items") or []) if visible(item)]
+        mysql_has_more = bool(mysql_page.get("has_more"))
+        mysql_available = True
+    except Exception as exc:
+        storage_error = str(exc)
+        logging.exception("failed to list ads_ai ad-control action logs")
+    where = []
+    params = []
+    if product:
+        where.append("product=?")
+        params.append(product)
+    if action:
+        where.append("action=?")
+        params.append(action)
+    if date_from_utc:
+        where.append("created_at>=?")
+        params.append(date_from_utc)
+    if date_to_utc:
+        where.append("created_at<=?")
+        params.append(date_to_utc)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    query_limit = raw_limit
+    if view == "raw" and (binding_id or not internal):
+        query_limit = 1000
+    sqlite_items = []
+    sqlite_has_more = False
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """SELECT action_id, preview_id, actor_user_id, action, level, product,
+                          criteria_json, requested_count, success_count, skipped_count,
+                          error_count, dry_run, created_at
+                     FROM ad_control_action %s
+                 ORDER BY created_at DESC, action_id DESC LIMIT ?""" % where_sql,
+                tuple(params + [query_limit + 1]),
+            ).fetchall()
+            sqlite_has_more = len(rows) > query_limit
+            for row in rows[:query_limit]:
+                item = dict(row)
+                item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+                item["results"] = []
+                item["dry_run"] = bool(item.get("dry_run"))
+                item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                summary = item["criteria"].get("execution_summary") or {}
+                item["event_key"] = item["criteria"].get("runner_event_key") or ""
+                item["source_type"] = item["criteria"].get("source_type") or ""
+                item["run_status"] = item["criteria"].get("runner_status") or summary.get("run_status") or ""
+                item["runner_reason"] = item["criteria"].get("runner_reason") or summary.get("runner_reason") or ""
+                item["scanned_count"] = int(item["criteria"].get("scan_count") or 0)
+                item["candidate_count"] = int(item["criteria"].get("candidate_count") or 0)
+                item["matched_count"] = int(item["criteria"].get("execution_target_count") or 0)
+                item["batch_planned_count"] = int(item["criteria"].get("execution_batch_count") or item.get("requested_count") or 0)
+                for field in ("deferred_count", "retryable_error_count", "blocked_count", "remaining_count"):
+                    item[field] = int(summary.get(field) or 0)
+                item["reason_summary"] = []
+                item["log_version"] = 1
+                item["log_store"] = "sqlite_fallback"
+                if not visible(item):
+                    continue
+                if binding_id and item["binding_id"] != binding_id:
+                    continue
+                sqlite_items.append(item)
+        finally:
+            conn.close()
+    merged = {}
+    for item in mysql_items + sqlite_items:
+        action_id = str(item.get("action_id") or "")
+        if action_id and action_id not in merged:
+            merged[action_id] = item
+    source_truncated = bool(mysql_has_more or sqlite_has_more)
+    daily_meta = {}
+    if view == "daily":
+        daily_candidates = []
+        for item in merged.values():
+            business_date = ad_control_execution_log_service.action_business_date(
+                item, AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS
+            )
+            if date_from and business_date < date_from:
+                continue
+            if date_to and business_date > date_to:
+                continue
+            daily_candidates.append(item)
+        daily_meta = ad_control_execution_log_service.group_actions_daily(
+            daily_candidates,
+            limit=limit,
+            local_offset_hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS,
+            source_truncated=source_truncated,
+        )
+        items = daily_meta.get("items") or []
+    else:
+        items = sorted(
+            merged.values(),
+            key=lambda item: (str(item.get("created_at") or ""), str(item.get("action_id") or "")),
+            reverse=True,
+        )[:limit]
+    rule_map = ad_control_action_rule_map(items)
+    include_targets = bool(include_targets)
+    for item in items:
+        criteria = item.get("criteria") or {}
+        execution_summary = criteria.get("execution_summary") or {}
+        run_status = str(
+            item.get("run_status")
+            or criteria.get("runner_status")
+            or execution_summary.get("run_status")
+            or ""
+        ).strip().lower()
+        observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
+        audit = ad_control_action_audit(item, rule_map, include_samples=include_targets)
+        status = audit.get("status") or ad_control_action_status(item)
+        if observe_mode and run_status in ("", "executed"):
+            status = {"key": "observed", "label": "观察完成", "class": "ok"}
+        mode = "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"
+        mode_label = "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"
+        audit.update({
+            "status": status,
+            "mode": mode,
+            "mode_label": mode_label,
+            "action_label": {
+                "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
+                "reopen": "重启", "preview": "预览",
+            }.get(str(item.get("action") or ""), item.get("action") or ""),
+        })
+        item["audit"] = audit
+        if item.get("reason_summary"):
+            item["audit"]["reason_summary"] = item.get("reason_summary")
+        item["audit"]["log_store"] = item.get("log_store") or "sqlite_fallback"
+        if not include_targets:
+            item["results"] = []
+            item["audit"]["samples"] = []
+        for batch in item.get("batches") or []:
+            batch["status"] = ad_control_action_status(batch)
+    return {
+        "items": items,
+        "storage": "ads_ai" if mysql_available else "sqlite_fallback",
+        "storage_error": storage_error,
+        "view": view,
+        "truncated": bool(daily_meta.get("truncated")) if view == "daily" else source_truncated,
+        "source_truncated": bool(daily_meta.get("source_truncated")) if view == "daily" else source_truncated,
+        "has_more_groups": bool(daily_meta.get("has_more_groups")) if view == "daily" else False,
+        "has_more": source_truncated if view == "raw" else False,
+        "discarded_group_count": int(daily_meta.get("discarded_group_count") or 0),
+        "raw_action_count": int(daily_meta.get("raw_action_count") or len(merged)),
+        "group_count": int(daily_meta.get("group_count") or len(items)),
+    }
+
+
+def fetch_ad_control_action(action_id, owner_user_id=None, internal=False):
+    action_id = str(action_id or "").strip()
+    if not action_id:
+        raise StructuredApiError("missing_action_id", "缺少 action_id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+    def visible(item):
+        if internal:
+            return True
+        group_ref = str(item.get("binding_id") or (item.get("criteria") or {}).get("rule_group_id") or "")
+        if group_ref:
+            return group_ref in owned_group_ids
+        return str(item.get("actor_user_id") or "") == owner_user_id
+
+    try:
+        item = ad_control_mysql_action(action_id)
+        if item:
+            if visible(item):
+                return item
+            raise StructuredApiError("action_not_found", "执行日志不存在")
+    except StructuredApiError:
+        raise
+    except Exception:
+        logging.exception("failed to fetch ads_ai ad-control action log action_id=%s", action_id)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_control_action WHERE action_id=?", (action_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise StructuredApiError("action_not_found", "执行日志不存在")
+    item = dict(row)
+    item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+    item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
+    item["dry_run"] = bool(item.get("dry_run"))
+    item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+    item["log_store"] = "sqlite_fallback"
+    if not visible(item):
+        raise StructuredApiError("action_not_found", "执行日志不存在")
+    return item
+
+
+def get_ad_control_action_targets(action_id, owner_user_id=None, internal=False):
+    item = fetch_ad_control_action(
+        action_id, owner_user_id=owner_user_id, internal=internal
+    )
+    cache_key = "%s:%s:%s" % (
+        item.get("action_id") or "",
+        item.get("updated_at") or item.get("created_at") or "",
+        len(item.get("results") or []),
+    )
+    cached = AD_CONTROL_ACTION_TARGET_CACHE.get(cache_key)
+    if cached:
+        return cached
+    rule_map = ad_control_action_rule_map([item])
+    audit = ad_control_action_audit(item, rule_map, include_samples=True)
+    payload = {
+        "action_id": item.get("action_id") or "",
+        "raw_result_count": audit.get("raw_result_count") or 0,
+        "samples": audit.get("samples") or [],
+        "results": item.get("results") or [],
+        "audit": audit,
+    }
+    AD_CONTROL_ACTION_TARGET_CACHE[cache_key] = payload
+    if len(AD_CONTROL_ACTION_TARGET_CACHE) > AD_CONTROL_ACTION_TARGET_CACHE_MAX:
+        first_key = next(iter(AD_CONTROL_ACTION_TARGET_CACHE))
+        AD_CONTROL_ACTION_TARGET_CACHE.pop(first_key, None)
+    return payload
+
+
+def ad_control_action_log_writer_config():
+    if not AD_CONTROL_ACTION_LOG_MYSQL_HOST or not AD_CONTROL_ACTION_LOG_MYSQL_USER:
+        raise RuntimeError("ad-control ads_ai writer database is not configured")
+    return {
+        "host": AD_CONTROL_ACTION_LOG_MYSQL_HOST,
+        "port": int(AD_CONTROL_ACTION_LOG_MYSQL_PORT or 63353),
+        "user": AD_CONTROL_ACTION_LOG_MYSQL_USER,
+        "password": AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD,
+        "database": AD_CONTROL_ACTION_LOG_DB_NAME,
+        "connect_timeout": AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT,
+        "read_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+        "write_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+    }
+
+
+def ad_control_action_log_reader_config():
+    if not AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST or not AD_CONTROL_ACTION_LOG_READER_MYSQL_USER:
+        raise RuntimeError("ad-control ads_ai reader database is not configured")
+    return {
+        "host": AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST,
+        "port": int(AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT or 63350),
+        "user": AD_CONTROL_ACTION_LOG_READER_MYSQL_USER,
+        "password": AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD,
+        "database": AD_CONTROL_ACTION_LOG_DB_NAME,
+        "connect_timeout": AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT,
+        "read_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+        "write_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+    }
+
+
+def ad_control_local_action_log_row(action_id):
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT a.*, COALESCE(p.total_count, 0) AS preview_total_count
+                  FROM ad_control_action a
+                  LEFT JOIN ad_control_preview p ON p.preview_id=a.preview_id
+                 WHERE a.action_id=?
+                 LIMIT 1
+                """,
+                (str(action_id or ""),),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def ad_control_persist_action_log(action_id, overrides=None):
+    row = ad_control_local_action_log_row(action_id)
+    if not row:
+        raise StructuredApiError("action_not_found", "执行日志不存在")
+    overrides = dict(overrides or {})
+    criteria = ad_control_safe_json_dict(row.get("criteria_json"))
+    raw_results = ad_control_safe_json_list(row.get("results_json"))
+    results = []
+    for item in raw_results:
+        if item.get("status") == "error" and "retryable" not in item:
+            item = ad_control_execution_log_service.enrich_error_result(item)
+        results.append(item)
+    requested_value = row.get("requested_count")
+    requested_count = int(requested_value if requested_value is not None else len(results))
+    if "matched_count" in overrides:
+        matched_value = overrides.get("matched_count")
+    elif "execution_target_count" in criteria:
+        matched_value = criteria.get("execution_target_count")
+    elif "matched_count" in criteria:
+        matched_value = criteria.get("matched_count")
+    else:
+        matched_value = requested_count
+    matched_count = int(matched_value or 0)
+    preview_error_count = int(criteria.get("preview_error_count") or 0)
+    summary = ad_control_execution_log_service.execution_summary(
+        results,
+        matched_count=matched_count,
+        requested_count=requested_count,
+        preview_error_count=preview_error_count,
+    )
+    summary.update({key: value for key, value in overrides.items() if value is not None})
+    actor_user_id = str(row.get("actor_user_id") or "")
+    binding_id = str(criteria.get("binding_id") or criteria.get("rule_group_id") or "")
+    record = {
+        "action_id": row.get("action_id") or "",
+        "preview_id": row.get("preview_id") or "",
+        "binding_id": binding_id,
+        "rule_id": row.get("rule_id") or criteria.get("rule_id") or "",
+        "event_key": summary.get("event_key") or criteria.get("runner_event_key") or "",
+        "source_type": summary.get("source_type") or ("scheduled" if actor_user_id == "ad_control_rule_runner" else "api"),
+        "actor_user_id": actor_user_id,
+        "product": row.get("product") or criteria.get("product") or "",
+        "action": row.get("action") or criteria.get("action") or "",
+        "object_level": row.get("level") or criteria.get("level") or "campaign",
+        "run_status": (
+            overrides.get("run_status")
+            if "run_status" in overrides
+            else criteria.get("runner_status") or summary.get("run_status") or ""
+        ),
+        "runner_reason": (
+            overrides.get("runner_reason")
+            if "runner_reason" in overrides
+            else criteria.get("runner_reason") or summary.get("runner_reason") or ""
+        ),
+        "dry_run": int(row.get("dry_run") or 0),
+        "scanned_count": int(criteria.get("scan_count") or row.get("preview_total_count") or 0),
+        "candidate_count": int(criteria.get("candidate_count") or 0),
+        "matched_count": matched_count,
+        "batch_planned_count": int(criteria.get("execution_batch_count") or requested_count),
+        "deferred_count": int(summary.get("deferred_count") or 0),
+        "requested_count": requested_count,
+        "success_count": int(row.get("success_count") or 0),
+        "skipped_count": int(row.get("skipped_count") or 0),
+        "error_count": int(row.get("error_count") or 0),
+        "retryable_error_count": int(summary.get("retryable_error_count") or 0),
+        "blocked_count": int(summary.get("blocked_count") or 0),
+        "remaining_count": int(summary.get("remaining_count") or 0),
+        "criteria": criteria,
+        "results": results,
+        "created_at": row.get("created_at") or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "log_version": 2 if "scan_count" in criteria else 1,
+    }
+    return ad_control_execution_log_service.upsert_action(
+        ad_control_action_log_writer_config(), record, AD_CONTROL_ACTION_LOG_TABLE
+    )
+
+
+def ad_control_update_action_log_runner(action_id, event_key, status, reason, remaining_count):
+    action_id = str(action_id or "").strip()
+    if not action_id:
+        return 0
+    return ad_control_execution_log_service.update_runner_status(
+        ad_control_action_log_writer_config(),
+        action_id,
+        event_key,
+        status,
+        reason,
+        remaining_count,
+        AD_CONTROL_ACTION_LOG_TABLE,
+    )
+
+
+def ad_control_action_log_utc_bound(value, end=False):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    local_dt = datetime.strptime(value[:10], "%Y-%m-%d")
+    if end:
+        local_dt += timedelta(days=1, seconds=-1)
+    return (local_dt - timedelta(hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ad_control_mysql_action_items(
+    limit, product="", binding_id="", action="", date_from="", date_to="",
+    owned_binding_ids=None, legacy_actor_user_id="", owner_filter=False,
+):
+
+    return ad_control_execution_log_service.list_actions(
+        ad_control_action_log_reader_config(),
+        {
+            "product": product,
+            "binding_id": binding_id,
+            "action": action,
+            "date_from": ad_control_action_log_utc_bound(date_from),
+            "date_to": ad_control_action_log_utc_bound(date_to, end=True),
+            "owned_binding_ids": list(owned_binding_ids or []),
+            "legacy_actor_user_id": legacy_actor_user_id,
+            "owner_filter": bool(owner_filter),
+        },
+        limit=limit,
+        table=AD_CONTROL_ACTION_LOG_TABLE,
+    )
+
+
+def ad_control_mysql_action(action_id):
+    return ad_control_execution_log_service.fetch_action(
+        ad_control_action_log_reader_config(), action_id, AD_CONTROL_ACTION_LOG_TABLE
+    )
+
+
+def ad_control_resource_snapshot():
+    cpu_percent = None
+    mem_percent = None
+    try:
+        if hasattr(os, "getloadavg"):
+            load1 = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            cpu_percent = min(100.0, max(0.0, (load1 / cpu_count) * 100.0))
+    except Exception:
+        cpu_percent = None
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", "r") as handle:
+            for line in handle:
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    meminfo[parts[0]] = ad_control_float(parts[1].strip().split()[0], 0.0)
+        total = meminfo.get("MemTotal", 0.0)
+        available = meminfo.get("MemAvailable", 0.0)
+        if total > 0:
+            mem_percent = max(0.0, min(100.0, ((total - available) / total) * 100.0))
+    except Exception:
+        mem_percent = None
+    over_limit = any(
+        value is not None and value >= AD_CONTROL_RESOURCE_LIMIT_PERCENT
+        for value in (cpu_percent, mem_percent)
+    )
+    return {"cpu_percent": cpu_percent, "memory_percent": mem_percent, "over_limit": over_limit}
+
+
+def ad_control_redis_parse_url():
+    if not AD_CONTROL_REDIS_URL:
+        return None
+    parsed = urlparse(AD_CONTROL_REDIS_URL)
+    if parsed.scheme not in ("redis", "rediss"):
+        return None
+    return {
+        "host": parsed.hostname or "127.0.0.1",
+        "port": parsed.port or 6379,
+        "password": parsed.password or "",
+        "db": int((parsed.path or "/0").strip("/") or "0"),
+        "ssl": parsed.scheme == "rediss",
+    }
+
+
+def ad_control_redis_command(*parts):
+    config = ad_control_redis_parse_url()
+    if not config:
+        return None
+    payload = ("*%d\r\n" % len(parts)).encode("utf-8")
+    for part in parts:
+        raw = str(part).encode("utf-8")
+        payload += ("$%d\r\n" % len(raw)).encode("utf-8") + raw + b"\r\n"
+    sock = socket.create_connection((config["host"], config["port"]), timeout=1.5)
+    try:
+        if config["password"]:
+            ad_control_redis_send(sock, "AUTH", config["password"])
+        if config["db"]:
+            ad_control_redis_send(sock, "SELECT", str(config["db"]))
+        sock.sendall(payload)
+        return ad_control_redis_read(sock)
+    finally:
+        sock.close()
+
+
+def ad_control_redis_send(sock, *parts):
+    payload = ("*%d\r\n" % len(parts)).encode("utf-8")
+    for part in parts:
+        raw = str(part).encode("utf-8")
+        payload += ("$%d\r\n" % len(raw)).encode("utf-8") + raw + b"\r\n"
+    sock.sendall(payload)
+    return ad_control_redis_read(sock)
+
+
+def ad_control_redis_read(sock):
+    prefix = sock.recv(1)
+    if not prefix:
+        return None
+    line = b""
+    while not line.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        line += chunk
+    text = line[:-2].decode("utf-8", "replace")
+    if prefix == b"+":
+        return text
+    if prefix == b"-":
+        raise RuntimeError(text)
+    if prefix == b":":
+        return int(text or "0")
+    if prefix == b"$":
+        size = int(text or "-1")
+        if size < 0:
+            return None
+        data = b""
+        while len(data) < size + 2:
+            data += sock.recv(size + 2 - len(data))
+        return data[:size].decode("utf-8", "replace")
+    return text
+
+
+def ad_control_campaign_start_key(product, account_id, campaign_id):
+    return "ad_control:campaign_start:%s:%s:%s" % (
+        str(product or "").strip(),
+        ad_control_normalize_account(account_id),
+        str(campaign_id or "").strip(),
+    )
+
+
+def ad_control_get_cached_campaign_start(product, account_id, campaign_id):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    try:
+        raw = ad_control_redis_command("GET", key)
+        data = ad_control_safe_json_dict(raw)
+        if data.get("campaign_start_at"):
+            data["cache"] = "redis"
+            return data
+    except Exception as exc:
+        logging.info("ad control redis get failed: %s", exc)
+    return {}
+
+
+def ad_control_set_cached_campaign_start(product, account_id, campaign_id, value):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    payload = {
+        "campaign_start_at": value.get("campaign_start_at", ""),
+        "source_table": value.get("source_table", ""),
+        "source_field": value.get("source_field", ""),
+        "cached_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        ad_control_redis_command("SET", key, json.dumps(payload, ensure_ascii=False))
+        payload["cache"] = "redis"
+    except Exception as exc:
+        logging.info("ad control redis set failed: %s", exc)
+        payload["cache"] = "none"
+    return payload
+
+
+def ad_control_delete_cached_campaign_start(product, account_id, campaign_id):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    try:
+        ad_control_redis_command("DEL", key)
+    except Exception as exc:
+        logging.info("ad control redis del failed: %s", exc)
+    return {"message": "refreshed", "key": key}
+
+
+def ad_control_validate_insight_start_schema():
+    query = "SHOW COLUMNS FROM `%s`.`%s`" % (
+        AD_CONTROL_DB_NAME.replace("`", "``"),
+        AD_CONTROL_INSIGHT_START_TABLE.replace("`", "``"),
+    )
+    try:
+        rows = ad_control_run_critical_mysql(query, "insight_start_schema")
+    except Exception as exc:
+        raise StructuredApiError(
+            "insight_start_schema_unavailable",
+            "failed to read insight start table schema",
+            table=AD_CONTROL_INSIGHT_START_TABLE,
+            cause=exc.__class__.__name__,
+        )
+    columns = {row[0] for row in rows if row}
+    required = [AD_CONTROL_INSIGHT_CAMPAIGN_FIELD, AD_CONTROL_INSIGHT_START_FIELD]
+    missing = [item for item in required if item not in columns]
+    if missing:
+        raise StructuredApiError(
+            "invalid_insight_start_schema",
+            "insight start table missing required fields",
+            table=AD_CONTROL_INSIGHT_START_TABLE,
+            missing=",".join(missing),
+        )
+    return columns
+
+
+def ad_control_query_campaign_starts(product, account_id, campaign_ids):
+    campaign_ids = [str(item or "").strip() for item in campaign_ids if str(item or "").strip()]
+    if not campaign_ids:
+        return {}
+    columns = ad_control_validate_insight_start_schema()
+    where = [
+        "%s IN %s" % (sql_identifier(AD_CONTROL_INSIGHT_CAMPAIGN_FIELD), ad_control_sql_in(campaign_ids)),
+        "%s IS NOT NULL" % sql_identifier(AD_CONTROL_INSIGHT_START_FIELD),
+    ]
+    if AD_CONTROL_INSIGHT_ACCOUNT_FIELD and AD_CONTROL_INSIGHT_ACCOUNT_FIELD in columns:
+        where.append("%s=%s" % (
+            ad_control_norm_account_sql(sql_identifier(AD_CONTROL_INSIGHT_ACCOUNT_FIELD)),
+            ad_control_quote(ad_control_normalize_account(account_id)),
+        ))
+    if AD_CONTROL_INSIGHT_PRODUCT_FIELD and AD_CONTROL_INSIGHT_PRODUCT_FIELD in columns:
+        where.append(ad_control_product_condition(sql_identifier(AD_CONTROL_INSIGHT_PRODUCT_FIELD), product))
+    sql = """
+        SELECT CAST({campaign_field} AS CHAR), MIN({start_field})
+          FROM {table}
+         WHERE {where_sql}
+         GROUP BY CAST({campaign_field} AS CHAR)
+    """.format(
+        campaign_field=sql_identifier(AD_CONTROL_INSIGHT_CAMPAIGN_FIELD),
+        start_field=sql_identifier(AD_CONTROL_INSIGHT_START_FIELD),
+        table=ad_control_table(AD_CONTROL_INSIGHT_START_TABLE),
+        where_sql=" AND ".join(where),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        campaign_id = str(row[0] or "").strip()
+        start_at = str(row[1] or "").strip()
+        if campaign_id and start_at:
+            out[campaign_id] = {
+                "campaign_start_at": start_at,
+                "source_table": AD_CONTROL_INSIGHT_START_TABLE,
+                "source_field": AD_CONTROL_INSIGHT_START_FIELD,
+            }
+    return out
+
+
+def ad_control_campaign_start(product, account_id, campaign_id, refresh=False):
+    if not refresh:
+        cached = ad_control_get_cached_campaign_start(product, account_id, campaign_id)
+        if cached:
+            return cached
+    data = ad_control_query_campaign_starts(product, account_id, [campaign_id]).get(str(campaign_id), {})
+    if data.get("campaign_start_at"):
+        return ad_control_set_cached_campaign_start(product, account_id, campaign_id, data)
+    return {"campaign_start_at": "", "cache": "miss", "reason": "missing_campaign_start_at"}
+
+
+def ad_control_parse_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("T", " ").replace("Z", "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:26] if "%f" in fmt else text[:19 if "H" in fmt else 10], fmt)
+        except Exception:
+            pass
+    return None
+
+
+def ad_control_age_hours(start_at):
+    dt = ad_control_parse_datetime(start_at)
+    if not dt:
+        return None
+    return max(0.0, (datetime.utcnow() - dt).total_seconds() / 3600.0)
+
+
+def ad_control_product_campaign_whitelist(product, account_ids):
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not product or not accounts:
+        return {}
+    account_values = []
+    for account_id in accounts:
+        account_values.extend([account_id, "act_%s" % account_id, "ACT_%s" % account_id])
+    sql = """
+        SELECT
+          {account_norm},
+          CAST(d.campaign_id AS CHAR),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), '')
+          FROM {table} d
+     LEFT JOIN {accounts_table} s
+            ON {account_norm}= {setting_norm}
+         WHERE {product_where}
+           AND d.campaign_id IS NOT NULL
+           AND d.campaign_id<>''
+           AND UPPER(COALESCE(d.status,''))='ACTIVE'
+           AND d.ad_account_id IN {account_values}
+         GROUP BY {account_norm}, CAST(d.campaign_id AS CHAR)
+    """.format(
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        table=ad_control_table("ads_facebook_auto_created_data"),
+        accounts_table=ad_control_table("ads_accounts_setting"),
+        product_where=ad_control_product_condition("d.product", product),
+        account_values=ad_control_sql_in(account_values),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0])
+        campaign_id = str(row[1] or "").strip()
+        if account_id and campaign_id:
+            campaign_name = str(row[2] or "")
+            out.setdefault(account_id, {})[campaign_id] = {
+                "campaign_name": campaign_name,
+                "country": str(row[3] or "").strip(),
+                "language": ad_control_display_language(row[4], campaign_name),
+                "raw_language": str(row[4] or "").strip(),
+                "account_time_zone": str(row[5] or "").strip(),
+            }
+    return out
+
+
+def ad_control_account_campaign_whitelists(account_ids):
+    """Return account -> source product -> Campaign for account-only groups."""
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not accounts:
+        return {}
+    columns = (
+        "id,ad_account_id,product,campaign_id,campaign_name,country,language,updated_at"
+    )
+    sources = [
+        "SELECT 'kunlunads_dev' AS source_schema,%s FROM %s" % (
+            columns, ad_control_table("ads_facebook_auto_created_data")
+        )
+    ]
+    sql = """
+        SELECT
+          {account_norm}, COALESCE(CAST(d.product AS CHAR),''), CAST(d.campaign_id AS CHAR),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\n'), '\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          GROUP_CONCAT(CONCAT(d.source_schema, ':', d.id) ORDER BY d.updated_at DESC SEPARATOR ',')
+        FROM ({sources}) d
+        LEFT JOIN {accounts_table} s
+          ON s.platform_id=1 AND {account_norm}= {setting_norm}
+        WHERE d.campaign_id IS NOT NULL AND d.campaign_id<>''
+          AND {account_norm} IN {accounts}
+        GROUP BY {account_norm}, COALESCE(CAST(d.product AS CHAR),''), CAST(d.campaign_id AS CHAR)
+    """.format(
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        sources=" UNION ALL ".join(sources),
+        accounts_table=ad_control_table("ads_accounts_setting"),
+        accounts=ad_control_sql_in(accounts),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0])
+        product = str(row[1] or "").strip()
+        campaign_id = str(row[2] or "").strip()
+        if not account_id or not product or not campaign_id:
+            continue
+        out.setdefault(account_id, {}).setdefault(product, {})[campaign_id] = {
+            "campaign_name": str(row[3] or ""),
+            "country": str(row[4] or ""),
+            "language": str(row[5] or ""),
+            "account_time_zone": str(row[6] or ""),
+            "created_data_refs": ad_control_list(row[7]),
+        }
+    return out
+
+
+def ad_control_drama_schema_snapshot():
+    """Cache the two stable schema probes shared by preview worker threads."""
+    with AD_CONTROL_DRAMA_SCHEMA_CACHE_LOCK:
+        if AD_CONTROL_DRAMA_SCHEMA_CACHE:
+            return {
+                "insight_columns": set(AD_CONTROL_DRAMA_SCHEMA_CACHE.get("insight_columns") or []),
+                "drama_columns": set(AD_CONTROL_DRAMA_SCHEMA_CACHE.get("drama_columns") or []),
+            }
+        snapshot = {
+            "insight_columns": set(mysql_table_columns("ads_custom_source_hours_insights", AD_CONTROL_DB_NAME)),
+            "drama_columns": set(mysql_table_columns("ads_drama_info", AD_CONTROL_DB_NAME)),
+        }
+        AD_CONTROL_DRAMA_SCHEMA_CACHE.update(snapshot)
+        return snapshot
+
+
+def ad_control_campaign_drama_context(created_data_refs, schema_snapshot=None):
+    """Resolve drama identity without guessing from Campaign names."""
+    source_ids = []
+    for ref in created_data_refs or []:
+        schema, separator, row_id = str(ref or "").partition(":")
+        if separator and schema == "kunlunads_dev" and row_id.isdigit():
+            source_ids.append(row_id)
+    if not source_ids:
+        return {"drama_mapping_reason": "missing_drama_mapping"}
+    schema_snapshot = schema_snapshot or ad_control_drama_schema_snapshot()
+    insight_columns = set(schema_snapshot.get("insight_columns") or [])
+    drama_columns = set(schema_snapshot.get("drama_columns") or [])
+    if not {"created_data_id", "series_code"}.issubset(insight_columns) or "series_code" not in drama_columns:
+        return {"drama_mapping_reason": "missing_drama_mapping_schema"}
+    select_content = "CAST(di.content_id AS CHAR)" if "content_id" in drama_columns else "''"
+    select_published = "CAST(di.published_at AS CHAR)" if "published_at" in drama_columns else "''"
+    select_deploy = "CAST(di.deploy_time AS CHAR)" if "deploy_time" in drama_columns else "''"
+    rows = run_mysql(" ".join("""
+        SELECT CAST(h.series_code AS CHAR), {content}, {published}, {deploy}
+          FROM {hours} h
+     LEFT JOIN {drama} di ON CAST(di.series_code AS CHAR)=CAST(h.series_code AS CHAR)
+         WHERE CAST(h.created_data_id AS CHAR) IN {ids}
+           AND COALESCE(CAST(h.series_code AS CHAR),'')<>''
+         ORDER BY h.created_data_id DESC
+         LIMIT 20
+    """.format(
+        content=select_content,
+        published=select_published,
+        deploy=select_deploy,
+        hours=ad_control_table("ads_custom_source_hours_insights"),
+        drama=ad_control_table("ads_drama_info"),
+        ids=ad_control_sql_in(source_ids),
+    ).split()))
+    identities = {(str(row[0] or ""), str(row[1] or "")) for row in rows if row and str(row[0] or "")}
+    if not identities:
+        return {"drama_mapping_reason": "missing_drama_mapping"}
+    if len(identities) != 1:
+        return {"drama_mapping_reason": "ambiguous_drama_mapping"}
+    series_code, content_id = next(iter(identities))
+    latest = rows[0]
+    return {
+        "series_code": series_code,
+        "content_id": content_id,
+        "published_at": str(latest[2] or ""),
+        "deploy_time": str(latest[3] or ""),
+    }
+
+
+def ad_control_graph_paged_get(token, object_id, edge, params):
+    url = "https://graph.facebook.com/%s/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id, edge)
+    params = dict(params or {})
+    params["access_token"] = token
+    items = []
+    while url:
+        response = requests.get(url, params=params, timeout=AD_CONTROL_GRAPH_TIMEOUT)
+        payload = response.json() if response.content else {}
+        if response.status_code >= 400 or payload.get("error"):
+            raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+        items.extend(payload.get("data") or [])
+        next_url = ((payload.get("paging") or {}).get("next") or "").strip()
+        url = next_url or ""
+        params = {}
+        if len(items) >= AD_CONTROL_MAX_LIVE_CAMPAIGNS:
+            break
+    return items
+
+
+def ad_control_meta_active_campaigns(token, account_id):
+    params = {
+        "fields": "id,name,status,effective_status",
+        "limit": "500",
+        "effective_status": json.dumps(["ACTIVE"]),
+    }
+    return ad_control_graph_paged_get(token, ad_control_account_key(account_id), "campaigns", params)
+
+
+def ad_control_metric_window(rule, default_window, start_at):
+    window = rule.get("window") if isinstance(rule, dict) else {}
+    if not isinstance(window, dict):
+        window = {}
+    if not window:
+        window = default_window if isinstance(default_window, dict) else {}
+    window_type = str(window.get("type") or "since_start").strip()
+    today = datetime.utcnow().date()
+    until = today.strftime("%Y-%m-%d")
+    if window_type == "today":
+        since = until
+    elif window_type == "recent_hours":
+        hours = ad_control_int(window.get("hours", 24), 24, 1, 720)
+        since = (datetime.utcnow() - timedelta(hours=hours)).date().strftime("%Y-%m-%d")
+    else:
+        start_dt = ad_control_parse_datetime(start_at)
+        since = start_dt.date().strftime("%Y-%m-%d") if start_dt else until
+        window_type = "since_start"
+    return {"type": window_type, "since": since, "until": until}
+
+
+def ad_control_extract_action(actions, names):
+    total = 0.0
+    for action in actions or []:
+        action_type = str(action.get("action_type") or "")
+        if action_type in names:
+            total += ad_control_float(action.get("value"), 0.0)
+    return total
+
+
+def ad_control_parse_insight_row(row):
+    spend = ad_control_float(row.get("spend"), 0.0)
+    install = ad_control_extract_action(row.get("actions"), {"mobile_app_install", "omni_app_install", "app_install"})
+    purchase = ad_control_extract_action(row.get("actions"), {"purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"})
+    revenue = ad_control_extract_action(row.get("action_values"), {"purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"})
+    roas = 0.0
+    purchase_roas = row.get("purchase_roas") or []
+    if purchase_roas:
+        roas = ad_control_float(purchase_roas[0].get("value"), 0.0)
+    if not roas and spend > 0 and revenue:
+        roas = revenue / spend
+    return {
+        "spend": spend,
+        "install": int(install),
+        "purchase": int(purchase),
+        "revenue": revenue,
+        "roas": roas,
+        "roas_pct": roas * 100.0,
+        "purchase_cpa": (spend / purchase) if purchase else None,
+    }
+
+
+def ad_control_merge_metrics(metrics):
+    out = {"spend": 0.0, "install": 0, "purchase": 0, "revenue": 0.0, "roas": 0.0, "roas_pct": 0.0, "purchase_cpa": None}
+    for item in metrics:
+        out["spend"] += ad_control_float(item.get("spend"), 0.0)
+        out["install"] += int(ad_control_float(item.get("install"), 0.0))
+        out["purchase"] += int(ad_control_float(item.get("purchase"), 0.0))
+        out["revenue"] += ad_control_float(item.get("revenue"), 0.0)
+    if out["spend"] > 0:
+        out["roas"] = out["revenue"] / out["spend"]
+        out["roas_pct"] = out["roas"] * 100.0
+    if out["purchase"] > 0:
+        out["purchase_cpa"] = out["spend"] / out["purchase"]
+    return out
+
+
+def ad_control_meta_account_insights(token, account_id, campaign_ids, since, until):
+    out = {}
+    fields = "campaign_id,campaign_name,spend,actions,action_values,purchase_roas"
+    ids = [str(item or "").strip() for item in campaign_ids if str(item or "").strip()]
+    for offset in range(0, len(ids), 50):
+        chunk = ids[offset:offset + 50]
+        filtering = [{"field": "campaign.id", "operator": "IN", "value": chunk}]
+        params = {
+            "level": "campaign",
+            "fields": fields,
+            "time_range": json.dumps({"since": since, "until": until}),
+            "filtering": json.dumps(filtering),
+            "limit": "500",
+        }
+        rows = ad_control_graph_paged_get(token, ad_control_account_key(account_id), "insights", params)
+        for row in rows:
+            campaign_id = str(row.get("campaign_id") or "").strip()
+            if campaign_id:
+                out[campaign_id] = ad_control_parse_insight_row(row)
+    return out
+
+
+def ad_control_condition_value(item, field):
+    metrics = item.get("metrics") or {}
+    field = str(field or "").strip()
+    if field.startswith("metrics."):
+        field = field.split(".", 1)[1]
+    aliases = {
+        "spend_usd": "spend",
+        "installs": "install",
+        "purchases": "purchase",
+        "roas": "roas_pct",
+        "purchase_cpa_usd": "purchase_cpa",
+        "cpa": "purchase_cpa",
+        "country_group": "country",
+        "geo": "country",
+        "region": "country",
+        "lang": "language",
+        "locale": "language",
+        "time_zone": "account_time_zone",
+        "timezone": "account_time_zone",
+        "account_timezone": "account_time_zone",
+    }
+    field = aliases.get(field, field)
+    if field in ("age_hours", "runtime_hours"):
+        return item.get("age_hours")
+    if field in ("status", "effective_status"):
+        return item.get(field) or item.get("effective_status") or item.get("status")
+    if field in metrics:
+        return metrics.get(field)
+    return item.get(field)
+
+
+def ad_control_timezone_values(value):
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    values = {text, text.upper()}
+    match = re.search(r"([+-]?\d{1,2})(?:[:.]?(\d{1,2}))?$", text)
+    if not match:
+        return values
+    try:
+        hours = int(match.group(1))
+        minutes = int((match.group(2) or "0")[:2])
+    except Exception:
+        return values
+    if minutes == 0:
+        values.update({
+            str(hours),
+            "%+d" % hours,
+            "UTC%+d" % hours,
+            "UTC%+03d:00" % hours,
+            "GMT%+d" % hours,
+            "GMT%+03d:00" % hours,
+        })
+    return {item.upper() for item in values if item}
+
+
+def ad_control_string_values(value):
+    return {str(value or "").strip(), str(value or "").strip().upper()}
+
+
+def ad_control_language_key(value):
+    return re.sub(r"[-_/\\s]+", "", str(value or "").strip()).upper()
+
+
+def ad_control_match_condition(item, condition):
+    field = condition.get("field")
+    field_key = str(field or "").strip()
+    op = str(condition.get("op") or condition.get("operator") or "eq").lower()
+    op = {
+        ">=": "gte", "<=": "lte", ">": "gt", "<": "lt",
+        "=": "eq", "==": "eq", "!=": "ne",
+    }.get(op, op)
+    actual = ad_control_condition_value(item, field)
+    expected = condition.get("value")
+    if op in ("exists", "present"):
+        return actual is not None and actual != ""
+    if actual is None:
+        return False
+    if op in ("in", "not_in"):
+        values = expected if isinstance(expected, list) else ad_control_list(expected)
+        if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+            expected_values = set()
+            for value in values:
+                expected_values.update(ad_control_timezone_values(value))
+            matched = bool(ad_control_timezone_values(actual) & expected_values)
+        elif field_key in ("country", "country_group", "geo", "region"):
+            matched = str(actual or "").strip().upper() in [str(value or "").strip().upper() for value in values]
+        elif field_key in ("language", "lang", "locale"):
+            matched = ad_control_language_key(actual) in [ad_control_language_key(value) for value in values]
+        else:
+            matched = str(actual) in [str(value) for value in values]
+        return not matched if op == "not_in" else matched
+    if op == "between":
+        values = expected if isinstance(expected, list) else [condition.get("min"), condition.get("max")]
+        if len(values) < 2:
+            return False
+        number = ad_control_float(actual, None)
+        if number is None:
+            return False
+        return number >= ad_control_float(values[0]) and number <= ad_control_float(values[1])
+    if op in ("gt", "gte", "lt", "lte"):
+        number = ad_control_float(actual, None)
+        target = ad_control_float(expected, None)
+        if number is None or target is None:
+            return False
+        if op == "gt":
+            return number > target
+        if op == "gte":
+            return number >= target
+        if op == "lt":
+            return number < target
+        return number <= target
+    if op in ("ne", "neq"):
+        if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+            return not bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
+        if field_key in ("country", "country_group", "geo", "region"):
+            return str(actual or "").strip().upper() != str(expected or "").strip().upper()
+        if field_key in ("language", "lang", "locale"):
+            return ad_control_language_key(actual) != ad_control_language_key(expected)
+        return str(actual) != str(expected)
+    if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+        return bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
+    if field_key in ("country", "country_group", "geo", "region"):
+        return str(actual or "").strip().upper() == str(expected or "").strip().upper()
+    if field_key in ("language", "lang", "locale"):
+        return ad_control_language_key(actual) == ad_control_language_key(expected)
+    return str(actual) == str(expected)
+
+
+def ad_control_evaluate_rules(item, rules):
+    return ad_control_copy_service.evaluate_rule_actions(item, rules or [], ad_control_match_condition)
+
+
+def ad_control_resolve_live_scope(payload):
+    group = None
+    if payload.get("rule_group_id"):
+        group = fetch_ad_control_rule_group(payload.get("rule_group_id"), internal=True)
+        product = group.get("product") or ""
+        rules = group.get("rules") or []
+        default_window = group.get("rule_set_default_window") or {"type": "since_start"}
+        account_group_id = group.get("account_group_id") or ""
+        account_ids = list(group.get("account_ids") or [])
+        if account_group_id:
+            group_owner = str(group.get("owner_user_id") or group.get("created_by") or "")
+            account_group = list_ad_control_account_groups(
+                product, owner_user_id=group_owner
+            ).get("items", [])
+            match = [item for item in account_group if item.get("group_id") == account_group_id]
+            if match:
+                account_ids = list(match[0].get("account_ids") or [])
+    else:
+        product = str(payload.get("product") or "").strip()
+        rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+        default_window = {"type": "since_start"}
+        account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    if not product and not group:
+        raise StructuredApiError("missing_product", "missing product")
+    account_ids = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not account_ids:
+        raise StructuredApiError("missing_accounts", "select at least one account")
+    if len(account_ids) > AD_CONTROL_MAX_LIVE_ACCOUNTS:
+        raise StructuredApiError("too_many_accounts", "too many accounts", max_accounts=AD_CONTROL_MAX_LIVE_ACCOUNTS)
+    if not rules:
+        rules = [{"name": "observe all", "action": "observe", "enabled": True, "conditions": []}]
+    strategy = (group or {}).get("strategy") if isinstance((group or {}).get("strategy"), dict) else {}
+    if not strategy and isinstance(payload.get("strategy"), dict):
+        strategy = payload.get("strategy") or {}
+    return {
+        "product": product,
+        "account_ids": account_ids,
+        "rules": rules,
+        "rule_group": group,
+        "rule_group_id": (group or {}).get("group_id") or str(payload.get("rule_group_id") or ""),
+        "strategy": strategy,
+        "window": payload.get("window") if isinstance(payload.get("window"), dict) else default_window,
+        "object_level": (group or {}).get("object_level") or "campaign",
+        "run_mode": (group or {}).get("run_mode") or "observe",
+        "owner_user_id": (group or {}).get("owner_user_id") or (group or {}).get("created_by") or "",
+        "scheduled": bool(payload.get("scheduled")),
+    }
+
+
+def ad_control_collect_live_account(scope, account_id, token_config, whitelist, source_product=None):
+    account_id = ad_control_normalize_account(account_id)
+    source_product = str(source_product if source_product is not None else scope.get("product") or "").strip()
+    if not whitelist:
+        # A configured account may legitimately have no created-data Campaign
+        # for the resolved product yet.  There is nothing to scan or mutate,
+        # so keep the legacy zero-candidate semantics and exit before schedule,
+        # Token or Graph access.  Ambiguous product mappings are still emitted
+        # separately by deduplicate_account_product_campaigns and fail closed.
+        return {
+            "account_id": account_id,
+            "items": [],
+            "errors": [],
+            "active_count": 0,
+            "candidate_count": 0,
+            "missing_start_count": 0,
+            "scheduled_due_count": 0,
+        }
+    scheduled_due_count = 0
+    if scope.get("scheduled"):
+        timezones = {
+            str((value or {}).get("account_time_zone") or "").strip()
+            for value in whitelist.values()
+            if str((value or {}).get("account_time_zone") or "").strip()
+        }
+        account_time_zone = next(iter(timezones)) if len(timezones) == 1 else ""
+        due, schedule_reason = ad_control_account_schedule_due(
+            scope.get("strategy") or {}, account_time_zone
+        )
+        if not due:
+            errors = []
+            if schedule_reason in (
+                "unknown_account_timezone", "missing_execute_time",
+            ):
+                errors.append({"reason": schedule_reason})
+            return {
+                "account_id": account_id,
+                "items": [],
+                "errors": errors,
+                "active_count": 0,
+                "candidate_count": 0,
+                "missing_start_count": 0,
+                "schedule_reason": schedule_reason,
+                "scheduled_due_count": 0,
+            }
+        scheduled_due_count = 1
+    token_user_id = str((token_config or {}).get("user_id") or "").strip()
+    token = ad_control_token_for_user_id(token_user_id)
+    if not token:
+        reason = "missing_meta_token" if token_user_id else "missing_apps_setting_default_user"
+        return {
+            "account_id": account_id,
+            "items": [],
+            "errors": [{"reason": reason, "token_user_id": token_user_id}],
+            "scheduled_due_count": scheduled_due_count,
+        }
+    active_campaigns = ad_control_meta_active_campaigns(token, account_id)
+    active_by_id = {str(item.get("id") or "").strip(): item for item in active_campaigns}
+    campaign_ids = [campaign_id for campaign_id in whitelist.keys() if campaign_id in active_by_id]
+    campaign_ids = campaign_ids[:AD_CONTROL_MAX_LIVE_CAMPAIGNS]
+    starts = {}
+    missing = []
+    cached_missing = []
+    for campaign_id in campaign_ids:
+        start = ad_control_get_cached_campaign_start(source_product, account_id, campaign_id)
+        if start.get("campaign_start_at"):
+            starts[campaign_id] = start
+        else:
+            cached_missing.append(campaign_id)
+    if cached_missing:
+        bulk_starts = ad_control_query_campaign_starts(source_product, account_id, cached_missing)
+        for campaign_id in cached_missing:
+            start = bulk_starts.get(str(campaign_id)) or {}
+            if start.get("campaign_start_at"):
+                starts[campaign_id] = ad_control_set_cached_campaign_start(
+                    source_product, account_id, campaign_id, start
+                )
+            else:
+                missing.append(campaign_id)
+    metrics_by_campaign = {}
+    by_window = {}
+    for campaign_id, start in starts.items():
+        window = ad_control_metric_window({}, scope.get("window"), start.get("campaign_start_at"))
+        by_window.setdefault((window["since"], window["until"]), []).append(campaign_id)
+    for (since, until), ids in by_window.items():
+        metrics_by_campaign.update(ad_control_meta_account_insights(token, account_id, ids, since, until))
+    items = []
+    for campaign_id in campaign_ids:
+        campaign = active_by_id.get(campaign_id) or {}
+        whitelist_item = whitelist.get(campaign_id) or {}
+        start = starts.get(campaign_id) or {"reason": "missing_campaign_start_at"}
+        age_hours = ad_control_age_hours(start.get("campaign_start_at"))
+        metrics = metrics_by_campaign.get(campaign_id) or {}
+        item = {
+            "product": source_product,
+            "level": "campaign",
+            "account_id": account_id,
+            "campaign_id": campaign_id,
+            "object_id": campaign_id,
+            "object_key": "%s:campaign:%s:%s" % (source_product, account_id, campaign_id),
+            "campaign_name": campaign.get("name") or whitelist_item.get("campaign_name", ""),
+            "country": whitelist_item.get("country", ""),
+            "language": whitelist_item.get("language", ""),
+            "account_time_zone": whitelist_item.get("account_time_zone", ""),
+            "status": campaign.get("status", ""),
+            "effective_status": campaign.get("effective_status", ""),
+            "campaign_start": start,
+            "campaign_start_at": start.get("campaign_start_at", ""),
+            "age_hours": age_hours,
+            "metrics": metrics,
+            "token_user_id": token_user_id,
+            "created_data_refs": list(whitelist_item.get("created_data_refs") or []),
+            "skip_reason": "" if age_hours is not None else "missing_campaign_start_at",
+        }
+        needs_drama_context = any(
+            isinstance(rule, dict)
+            and str(rule.get("action") or "").lower() == "copy"
+            and str((rule.get("drama_scope") or {}).get("type") if isinstance(rule.get("drama_scope"), dict) else rule.get("drama_scope") or "all").lower() != "all"
+            for rule in scope.get("rules") or []
+        )
+        if needs_drama_context and not item.get("skip_reason"):
+            item.update(ad_control_campaign_drama_context(item.get("created_data_refs") or []))
+        decision = ad_control_evaluate_rules(item, scope.get("rules") or []) if age_hours is not None and not item.get("skip_reason") else {"matched_rules": [], "target_action": "none"}
+        item.update(decision)
+        items.append(item)
+    return {
+        "account_id": account_id,
+        "items": items,
+        "errors": [],
+        "active_count": len(active_campaigns),
+        "candidate_count": len(campaign_ids),
+        "missing_start_count": len(missing),
+        "scheduled_due_count": scheduled_due_count,
+    }
+
+
+def ad_control_account_schedule_due(strategy, account_time_zone, now_utc=None):
+    return ad_control_copy_service.schedule_due(
+        strategy or {}, account_time_zone, now_utc=now_utc
+    )
+
+
+def create_ad_control_live_preview(payload, session, internal=False):
+    ensure_ad_control_tables()
+    actor = ad_control_actor(session)
+    if payload.get("rule_group_id") and not internal:
+        fetch_ad_control_rule_group(payload.get("rule_group_id"), owner_user_id=actor, internal=False)
+    scope = ad_control_resolve_live_scope(payload or {})
+    if scope.get("object_level") == "ad":
+        preview_id = uuid.uuid4().hex
+        preview_hash = ad_control_rule_hash({
+            "product": scope.get("product") or "",
+            "accounts": scope["account_ids"],
+            "rules": scope["rules"],
+            "object_level": "ad",
+            "run_mode": scope.get("run_mode") or "observe",
+            "rule_group_id": scope.get("rule_group_id"),
+        })
+        expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+        criteria = {
+            "mode": "live", "product": scope.get("product") or "", "accounts": scope["account_ids"],
+            "rules": scope["rules"], "object_level": "ad", "run_mode": scope.get("run_mode") or "observe",
+            "rule_group_id": scope.get("rule_group_id"), "binding_id": scope.get("rule_group_id"),
+            "owner_user_id": scope.get("owner_user_id") or actor,
+            "preview_hash": preview_hash, "execution_target_count": 0, "execution_batch_count": 0,
+            "scheduled": bool(payload.get("scheduled")),
+            "phase_not_enabled": True,
+        }
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO ad_control_preview (
+                      preview_id, actor_user_id, action, level, product, criteria_json,
+                      sample_json, total_count, created_at, expires_at
+                    ) VALUES (?, ?, 'mixed', 'ad', ?, ?, '[]', 0, CURRENT_TIMESTAMP, ?)
+                    """,
+                    (preview_id, actor, scope.get("product") or "", json.dumps(criteria, ensure_ascii=False), expires_at),
+                )
+                if scope.get("rule_group_id"):
+                    conn.execute(
+                        "UPDATE ad_control_rule_group SET last_preview_id=?,last_preview_hash=?,updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                        (preview_id, preview_hash, scope.get("rule_group_id")),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "preview_id": preview_id, "preview_hash": preview_hash, "expires_at": expires_at,
+            "product": scope.get("product") or "", "account_count": len(scope["account_ids"]),
+            "total": 0, "pause_count": 0, "copy_count": 0, "execution_count": 0,
+            "execution_remaining_count": 0, "observe_count": 0, "shadowed_count": 0,
+            "error_count": 1, "errors": [{"reason": "phase_not_enabled", "object_level": "ad"}],
+            "items": [], "remaining_count": 0, "run_mode": scope.get("run_mode") or "observe",
+            "object_level": "ad", "phase_not_enabled": True,
+        }
+    resource = ad_control_resource_snapshot()
+    jobs = []
+    pre_errors = []
+    if scope.get("product"):
+        whitelist_by_account = ad_control_product_campaign_whitelist(scope["product"], scope["account_ids"])
+        token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
+        for account_id in scope["account_ids"]:
+            jobs.append((
+                account_id, scope["product"], token_configs.get(account_id) or {},
+                whitelist_by_account.get(account_id) or {},
+            ))
+    else:
+        whitelists = ad_control_account_campaign_whitelists(scope["account_ids"])
+        whitelists, pre_errors = ad_control_copy_service.deduplicate_account_product_campaigns(whitelists)
+        products = sorted({product for account in whitelists.values() for product in account.keys()})
+        configs_by_product = {
+            product: ad_control_token_config_for_accounts(product, scope["account_ids"])
+            for product in products
+        }
+        for account_id in scope["account_ids"]:
+            for product, whitelist in sorted((whitelists.get(account_id) or {}).items()):
+                jobs.append((
+                    account_id, product,
+                    (configs_by_product.get(product) or {}).get(account_id) or {},
+                    whitelist,
+                ))
+    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), max(1, len(jobs)))
+    if resource.get("over_limit"):
+        workers = 1
+    account_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {}
+        for account_id, source_product, token_config, whitelist in jobs:
+            future = executor.submit(
+                ad_control_collect_live_account,
+                scope,
+                account_id,
+                token_config,
+                whitelist,
+                source_product,
+            )
+            future_map[future] = (account_id, source_product)
+        for future in concurrent.futures.as_completed(future_map):
+            account_id, source_product = future_map[future]
+            try:
+                account_results.append(future.result())
+            except Exception as exc:
+                logging.exception("ad control live preview account failed: %s product=%s", account_id, source_product)
+                account_results.append({"account_id": account_id, "items": [], "errors": [{"reason": str(exc), "product": source_product}]})
+    items = []
+    errors = list(pre_errors)
+    for result in account_results:
+        items.extend(result.get("items") or [])
+        for err in result.get("errors") or []:
+            err["account_id"] = result.get("account_id")
+            errors.append(err)
+    selection_group = dict(scope.get("rule_group") or {})
+    selection_group["rules"] = scope.get("rules") or []
+    selection_group["strategy"] = scope.get("strategy") or {}
+    items = ad_control_copy_service.apply_copy_candidate_selection(selection_group, items)
+    outside_top_n_items = [
+        item for item in items
+        if item.get("candidate_selection_reason") == "outside_top_n"
+    ]
+    total = len(items)
+    pause_items = [item for item in items if item.get("target_action") == "pause"]
+    copy_items = [item for item in items if item.get("target_action") == "copy"]
+    action_items = pause_items + copy_items
+    action_items.sort(key=lambda item: (
+        0 if item.get("target_action") == "pause" else 1,
+        ad_control_normalize_account(item.get("account_id")),
+        str(item.get("campaign_id") or item.get("object_id") or ""),
+    ))
+    pause_count = len(pause_items)
+    copy_count = len(copy_items)
+    execution_candidates = action_items
+    if str(scope.get("run_mode") or "observe").lower() == "live" and pause_items:
+        # Copy persistence is intentionally unavailable in this release.  Do
+        # not let a known-blocked copy consume either the global batch or the
+        # per-account pause allowance.  Once a fresh preview has no pause
+        # targets left, copy-only candidates are selected and fail closed in
+        # execute_ad_control_live before Token/Graph access.
+        execution_candidates = pause_items
+    execution_items = ad_control_execution_log_service.balanced_execution_items(
+        execution_candidates,
+        max_total=AD_CONTROL_MAX_LIVE_EXECUTE,
+        max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,
+    )
+    observe_count = len([item for item in items if item.get("target_action") == "observe"])
+    shadowed_count = sum(int(item.get("shadowed_count") or 0) for item in items)
+    preview_id = uuid.uuid4().hex
+    preview_hash = ad_control_live_scope_hash(scope)
+    expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    criteria = {
+        "mode": "live",
+        "product": scope["product"],
+        "accounts": scope["account_ids"],
+        "rules": scope["rules"],
+        "window": scope.get("window"),
+        "strategy": scope.get("strategy") or {},
+        "object_level": scope.get("object_level") or "campaign",
+        "run_mode": scope.get("run_mode") or "observe",
+        "rule_group_id": scope.get("rule_group_id"),
+        "binding_id": scope.get("rule_group_id"),
+        "owner_user_id": scope.get("owner_user_id") or ad_control_actor(session),
+        "preview_hash": preview_hash,
+        "scheduled": bool(payload.get("scheduled")),
+        "execution_target_count": pause_count + copy_count,
+        "pause_target_count": pause_count,
+        "copy_target_count": copy_count,
+        "execution_batch_count": len(execution_items),
+        "execution_truncated": pause_count + copy_count > len(execution_items),
+        "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
+        "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),
+        "preview_error_count": len(errors),
+        "scheduled_due_count": sum(
+            int(result.get("scheduled_due_count") or 0)
+            for result in account_results
+        ),
+        "max_per_account": AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,
+    }
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_preview (
+                  preview_id, actor_user_id, action, level, product, criteria_json,
+                  sample_json, total_count, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    preview_id,
+                    ad_control_actor(session),
+                    "mixed" if copy_count else "pause",
+                    scope.get("object_level") or "campaign",
+                    scope["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(execution_items, ensure_ascii=False),
+                    total,
+                    expires_at,
+                ),
+            )
+            if scope.get("rule_group_id"):
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET last_preview_id=?, last_preview_hash=?, updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (preview_id, preview_hash, scope.get("rule_group_id")),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "preview_id": preview_id,
+        "expires_at": expires_at,
+        "preview_hash": preview_hash,
+        "product": scope["product"],
+        "account_count": len(scope["account_ids"]),
+        "total": total,
+        "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
+        "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),
+        "pause_count": pause_count,
+        "copy_count": copy_count,
+        "execution_count": len(execution_items),
+        "execution_remaining_count": max(0, pause_count + copy_count - len(execution_items)),
+        "observe_count": observe_count,
+        "shadowed_count": shadowed_count,
+        "outside_top_n_count": len(outside_top_n_items),
+        "run_mode": scope.get("run_mode") or "observe",
+        "object_level": scope.get("object_level") or "campaign",
+        "error_count": len(errors),
+        "scheduled_due_count": sum(
+            int(result.get("scheduled_due_count") or 0)
+            for result in account_results
+        ),
+        "resource": resource,
+        "strategy": scope.get("strategy") or {},
+        "items": execution_items[:200],
+        "observations": outside_top_n_items[:200],
+        "errors": errors[:100],
+        "remaining_count": max(0, total - min(total, 200)),
+    }
+
+
+def ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=False):
+    """Fail closed when a saved group no longer matches the executable preview."""
+    group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    if not group_id:
+        if require_enabled:
+            raise StructuredApiError("rule_group_required", "formal execution requires a saved rule group")
+        return None
+    group = ad_control_rule_group_snapshot(conn, group_id)
+    expected_owner = str(criteria.get("owner_user_id") or "").strip()
+    group_owner = str(group.get("owner_user_id") or group.get("created_by") or "").strip()
+    expected_hash = str(criteria.get("preview_hash") or "").strip()
+    if expected_owner and group_owner != expected_owner:
+        raise StructuredApiError("preview_stale", "rule group owner changed after preview")
+    if (
+        str(group.get("last_preview_id") or "") != str(preview.get("preview_id") or "")
+        or str(group.get("last_preview_hash") or "") != expected_hash
+        or str(group.get("current_preview_hash") or "") != expected_hash
+    ):
+        raise StructuredApiError("preview_stale", "rule group changed after preview")
+    if require_enabled and (not group.get("enabled") or group.get("emergency_stopped")):
+        raise StructuredApiError("rule_group_not_active", "rule group is disabled or emergency stopped")
+    return group
+
+
+def ad_control_guarded_campaign_pause(preview, criteria, token, item, account_id):
+    """Revalidate freshness under a cross-process SQLite write lock before Meta POST."""
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=True)
+            meta = ad_control_graph_get(
+                token, item.get("campaign_id"), "account_id,status,effective_status,name"
+            )
+            meta_account = ad_control_normalize_account(meta.get("account_id"))
+            if meta_account and meta_account != account_id:
+                conn.commit()
+                return {"meta": meta, "skip_reason": "account_owner_mismatch"}
+            if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                conn.commit()
+                return {"meta": meta, "skip_reason": "not_active"}
+            payload_result = ad_control_graph_set_status(token, item.get("campaign_id"), "PAUSED")
+            conn.commit()
+            return {"meta": meta, "payload_result": payload_result}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def execute_ad_control_live(payload, session):
+    ensure_ad_control_tables()
+    preview = fetch_ad_control_preview(payload.get("preview_id"))
+    if str(preview.get("actor_user_id") or "") != ad_control_actor(session):
+        raise StructuredApiError("not_found", "preview not found")
+    criteria = ad_control_safe_json_dict(preview.get("criteria_json"))
+    if criteria.get("mode") != "live":
+        raise StructuredApiError("invalid_preview", "preview is not a live preview")
+    expected_hash = str(criteria.get("preview_hash") or "").strip()
+    confirmed_hash = str(payload.get("preview_hash") or "").strip()
+    if not expected_hash or confirmed_hash != expected_hash:
+        raise StructuredApiError("preview_hash_mismatch", "preview hash confirmation is required")
+    requested_group_id = str(payload.get("rule_group_id") or "").strip()
+    preview_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    if requested_group_id and requested_group_id != preview_group_id:
+        raise StructuredApiError("preview_group_mismatch", "preview does not belong to this rule group")
+    dry_run = bool(payload.get("dry_run", True))
+    run_mode = str(criteria.get("run_mode") or "live").lower()
+    if str(criteria.get("object_level") or "campaign").lower() == "ad":
+        raise StructuredApiError("phase_not_enabled", "Ad copy phase is not enabled")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=False)
+        finally:
+            conn.close()
+    items = ad_control_safe_json_list(preview.get("sample_json"))[:AD_CONTROL_MAX_LIVE_EXECUTE]
+    has_copy = bool(int(criteria.get("copy_target_count") or 0)) or any(
+        str(item.get("target_action") or "").lower() == "copy" for item in items
+    )
+    accepted_confirmations = {"EXECUTE_LIVE_PAUSE"}
+    if has_copy:
+        accepted_confirmations.add("EXECUTE_LIVE_RULE_GROUP")
+    if run_mode == "live" and not dry_run and str(payload.get("confirm") or "") not in accepted_confirmations:
+        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    if run_mode == "live" and not dry_run:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=True)
+            finally:
+                conn.close()
+    action_id = uuid.uuid4().hex
+    pre_results = []
+    pause_items = []
+    for item in items:
+        target_action = str(item.get("target_action") or "").lower()
+        base = {
+            "object_key": item.get("object_key") or "",
+            "object_id": item.get("object_id") or item.get("campaign_id") or item.get("ad_id") or "",
+            "account_id": ad_control_normalize_account(item.get("account_id")),
+            "campaign_id": str(item.get("campaign_id") or item.get("object_id") or ""),
+            "campaign_name": item.get("campaign_name") or "",
+            "target_action": target_action,
+            "target_rule_id": item.get("target_rule_id") or "",
+        }
+        if run_mode != "live":
+            pre_results.append(dict(
+                base,
+                status="observed",
+                reason="would_%s" % target_action if target_action in ("pause", "copy") else "observe_mode",
+            ))
+        elif target_action == "copy":
+            pre_results.append(dict(
+                base,
+                status="skipped",
+                reason="phase_not_enabled" if criteria.get("object_level") == "ad" else "copy_persistence_not_configured",
+            ))
+        elif target_action == "pause":
+            pause_items.append(item)
+        else:
+            pre_results.append(dict(base, status="skipped", reason="not_write_target"))
+
+    token_configs = (
+        ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+        if pause_items and criteria.get("product") else {}
+    )
+    token_by_user = {}
+    token_by_account = {}
+    selected_accounts = []
+    for item in pause_items:
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        if account_id and account_id not in selected_accounts:
+            selected_accounts.append(account_id)
+    for account_id in selected_accounts:
+        account_item = next(
+            (item for item in pause_items if ad_control_normalize_account(item.get("account_id")) == account_id),
+            {},
+        )
+        user_id = str(
+            account_item.get("token_user_id")
+            or (token_configs.get(account_id) or {}).get("user_id")
+            or ""
+        ).strip()
+        if user_id and user_id not in token_by_user:
+            token_by_user[user_id] = ad_control_token_for_user_id(user_id)
+        token_by_account[account_id] = token_by_user.get(user_id, "")
+    enforce_product_whitelist = bool(selected_accounts and criteria.get("product"))
+    if enforce_product_whitelist:
+        whitelist_by_account = ad_control_product_campaign_whitelist(
+            criteria.get("product"), selected_accounts
+        )
+    else:
+        whitelist_by_account = {}
+    grouped = {}
+    order = {}
+    for index, item in enumerate(pause_items):
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        grouped.setdefault(account_id, []).append(item)
+        order[item.get("object_key") or "%s:%s" % (account_id, item.get("campaign_id"))] = index
+    application_rate_limited = threading.Event()
+
+    def deferred_result(item, account_id, reason, error_item=None):
+        error_item = error_item or {}
+        return {
+            "object_key": item.get("object_key") or "",
+            "account_id": account_id,
+            "campaign_id": str(item.get("campaign_id") or item.get("object_id") or ""),
+            "campaign_name": item.get("campaign_name") or "",
+            "status": "deferred",
+            "reason": reason,
+            "retryable": True,
+            "rate_limited": bool(error_item.get("rate_limited")),
+            "error_code": error_item.get("error_code"),
+            "error_subcode": error_item.get("error_subcode"),
+        }
+
+    def execute_account(account_id, account_items):
+        account_results = []
+        token = token_by_account.get(account_id) or ""
+        whitelist = whitelist_by_account.get(account_id) or {}
+        for item_index, item in enumerate(account_items):
+            if application_rate_limited.is_set():
+                for pending in account_items[item_index:]:
+                    account_results.append(deferred_result(
+                        pending, account_id, "deferred_after_application_rate_limit",
+                        {"rate_limited": True, "error_code": 4},
+                    ))
+                break
+            campaign_id = str(item.get("campaign_id") or item.get("object_id") or "")
+            base = {
+                "object_key": item.get("object_key") or "",
+                "account_id": account_id,
+                "campaign_id": campaign_id,
+                "campaign_name": item.get("campaign_name") or "",
+            }
+            if item.get("skip_reason"):
+                account_results.append(dict(base, status="skipped", reason=item.get("skip_reason")))
+                continue
+            if enforce_product_whitelist and campaign_id not in whitelist:
+                account_results.append(dict(base, status="skipped", reason="outside_product_whitelist"))
+                continue
+            if not token:
+                account_results.append(dict(base, status="skipped", reason="missing_meta_token"))
+                continue
+            try:
+                if dry_run:
+                    meta = ad_control_graph_get(token, campaign_id, "account_id,status,effective_status,name")
+                    meta_account = ad_control_normalize_account(meta.get("account_id"))
+                    if not meta_account or meta_account != account_id:
+                        account_results.append(dict(base, status="skipped", reason="account_owner_mismatch", meta=meta))
+                        continue
+                    if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                        account_results.append(dict(base, status="skipped", reason="not_active", meta=meta))
+                        continue
+                    account_results.append(dict(base, status="dry_run", meta=meta))
+                    continue
+                guarded = ad_control_guarded_campaign_pause(
+                    preview, criteria, token, item, account_id
+                )
+                meta = guarded.get("meta") or {}
+                if guarded.get("skip_reason"):
+                    account_results.append(dict(
+                        base, status="skipped", reason=guarded.get("skip_reason"), meta=meta
+                    ))
+                    continue
+                graph_response = guarded.get("payload_result") or {}
+                warnings = []
+                try:
+                    ad_control_save_object_state(action_id, {
+                        "object_key": base["object_key"],
+                        "product": criteria.get("product"),
+                        "level": "campaign",
+                        "account_id": account_id,
+                        "object_id": campaign_id,
+                        "campaign_id": campaign_id,
+                    }, "paused")
+                except Exception as exc:
+                    logging.warning("ad control local state save failed after graph success: %s: %s", base["object_key"], exc)
+                    warnings.append("local_state_save_failed: %s" % exc)
+                result_item = dict(base, status="success", meta=meta, graph_response=graph_response)
+                if warnings:
+                    result_item["warnings"] = warnings
+                account_results.append(result_item)
+            except Exception as exc:
+                error_item = dict(base, status="error", reason=str(exc))
+                error_item.update(ad_control_execution_log_service.graph_error_details(exc))
+                account_results.append(error_item)
+                logging.exception("ad control live execute failed: %s", base["object_key"])
+                application_limited = (
+                    error_item.get("error_code") == 4
+                    or error_item.get("error_subcode") == 5044001
+                )
+                if application_limited:
+                    application_rate_limited.set()
+                stop_account = (
+                    bool(error_item.get("retryable"))
+                    or error_item.get("error_code") in (102, 190)
+                )
+                if stop_account:
+                    deferred_reason = (
+                        "deferred_after_application_rate_limit"
+                        if application_limited
+                        else "deferred_after_account_error"
+                    )
+                    for pending in account_items[item_index + 1:]:
+                        account_results.append(deferred_result(
+                            pending, account_id, deferred_reason, error_item
+                        ))
+                    break
+        return account_results
+
+    results = list(pre_results)
+    workers = min(max(1, AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS), max(1, len(grouped)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(execute_account, account_id, account_items): account_id
+            for account_id, account_items in grouped.items()
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            account_id = future_map[future]
+            try:
+                results.extend(future.result())
+            except Exception as exc:
+                logging.exception("ad control account execution worker failed: %s", account_id)
+                for item in grouped.get(account_id) or []:
+                    error_item = {
+                        "object_key": item.get("object_key") or "",
+                        "account_id": account_id,
+                        "campaign_id": item.get("campaign_id") or item.get("object_id") or "",
+                        "campaign_name": item.get("campaign_name") or "",
+                        "status": "error",
+                        "reason": str(exc),
+                    }
+                    error_item.update(ad_control_execution_log_service.graph_error_details(exc))
+                    results.append(error_item)
+    results.sort(key=lambda item: order.get(item.get("object_key") or "%s:%s" % (item.get("account_id"), item.get("campaign_id")), 10 ** 9))
+    success_count = len([item for item in results if item.get("status") in ("success", "dry_run")])
+    skipped_count = len([item for item in results if item.get("status") in ("skipped", "observed")])
+    error_count = len([item for item in results if item.get("status") == "error"])
+    summary = ad_control_execution_log_service.execution_summary(
+        results,
+        matched_count=int(criteria.get("execution_target_count") or len(items)),
+        requested_count=len(items),
+        preview_error_count=int(criteria.get("preview_error_count") or 0),
+    )
+    action_criteria = dict(criteria)
+    action_criteria["execution_summary"] = summary
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_action (
+                  action_id, preview_id, actor_user_id, action, level, product, criteria_json,
+                  requested_count, success_count, skipped_count, error_count, dry_run,
+                  results_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    action_id,
+                    preview["preview_id"],
+                    ad_control_actor(session),
+                    "mixed" if has_copy else "pause",
+                    criteria.get("object_level") or "campaign",
+                    criteria.get("product", ""),
+                    json.dumps(action_criteria, ensure_ascii=False),
+                    len(items),
+                    success_count,
+                    skipped_count,
+                    error_count,
+                    1 if dry_run else 0,
+                    json.dumps(results, ensure_ascii=False),
+                ),
+            )
+            if criteria.get("rule_group_id"):
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET last_run_at=CURRENT_TIMESTAMP, last_result_json=?, updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (
+                        json.dumps({
+                            "action_id": action_id,
+                            "success_count": success_count,
+                            "skipped_count": skipped_count,
+                            "error_count": error_count,
+                            "dry_run": dry_run,
+                            "remaining_count": summary.get("remaining_count", 0),
+                        }, ensure_ascii=False),
+                        criteria.get("rule_group_id"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    log_store = "ads_ai"
+    log_store_error = ""
+    try:
+        ad_control_persist_action_log(action_id, summary)
+    except Exception as exc:
+        log_store = "sqlite_fallback"
+        log_store_error = str(exc)
+        logging.exception("failed to persist ad-control action to ads_ai action_id=%s", action_id)
+    return {
+        "action_id": action_id,
+        "preview_id": preview["preview_id"],
+        "dry_run": dry_run,
+        "requested_count": len(items),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "results": results[:200],
+        "log_store": log_store,
+        "log_store_error": log_store_error,
+        **summary,
+    }
+
+
+def refresh_ad_control_campaign_start(payload):
+    product = str(payload.get("product") or "").strip()
+    account_id = ad_control_normalize_account(payload.get("account_id"))
+    campaign_id = str(payload.get("campaign_id") or "").strip()
+    if not product or not account_id or not campaign_id:
+        raise StructuredApiError("missing_campaign", "product, account_id and campaign_id are required")
+    ad_control_delete_cached_campaign_start(product, account_id, campaign_id)
+    return ad_control_campaign_start(product, account_id, campaign_id, refresh=True)
 
 
 def lookup_admin_group_by_email(email):
@@ -35093,6 +41925,559 @@ def post_ad_material_source(task, asset):
     return source_id or str(data.get("id") or "")
 
 
+from features.tt_auto_posts.client import (
+    TT_AUTO_ADMIN_PREFIX,
+    TTAutoPostAdminClientError,
+    error_payload as tt_auto_posts_error_payload,
+    parse_admin_query as tt_auto_posts_query_params,
+    request_admin as tt_auto_post_service_request,
+)
+from features.x_auto_posts.client import (
+    X_AUTO_ADMIN_PREFIX,
+    XAutoPostAdminClientError,
+    error_payload as x_auto_posts_error_payload,
+    parse_admin_query as x_auto_posts_query_params,
+    request_admin as x_auto_post_service_request,
+)
+from features.fb_auto_posts.client import (
+    FB_AUTO_ADMIN_PREFIX,
+    FBAutoPostAdminClientError,
+    error_payload as fb_auto_posts_error_payload,
+    parse_admin_query as fb_auto_posts_query_params,
+    request_admin as fb_auto_post_service_request,
+)
+
+
+_YOUTUBE_AUTO_SERVICE = None
+_YOUTUBE_AUTO_SERVICE_LOCK = threading.Lock()
+
+
+def get_youtube_auto_service():
+    """Do not initialize storage/adapters when legacy workers import app."""
+    global _YOUTUBE_AUTO_SERVICE
+    if _YOUTUBE_AUTO_SERVICE is None:
+        with _YOUTUBE_AUTO_SERVICE_LOCK:
+            if _YOUTUBE_AUTO_SERVICE is None:
+                import sys
+                from features.youtube_auto_publish.runtime import build_service
+
+                _YOUTUBE_AUTO_SERVICE = build_service(sys.modules[__name__])
+    return _YOUTUBE_AUTO_SERVICE
+
+
+def fb_auto_post_actor_scope(session):
+    """Map a Cookie session to the durable Page-pool owner scope."""
+    session = session or {}
+    is_admin = session.get("role") == "admin"
+    email = str(session.get("email") or "").strip()
+    owner_user_id = ""
+    if email:
+        database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+        try:
+            rows = run_mysql(
+                "SELECT DISTINCT CAST(sub_user_id AS CHAR) "
+                "FROM `%s`.admin_user_group WHERE email='%s' "
+                "AND status=0 AND sub_user_id IS NOT NULL LIMIT 2"
+                % (database.replace("`", "``"), mysql_escape_literal(email))
+            )
+            mapped = [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+            if len(set(mapped)) == 1:
+                owner_user_id = mapped[0]
+        except Exception:
+            logging.exception("FB auto publish owner mapping lookup failed")
+    if not is_admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner_user_id):
+        raise FBAutoPostAdminClientError(
+            "fb_auto_owner_mapping_missing",
+            "当前账号未唯一映射到Page池负责人",
+            403,
+        )
+    return {
+        "user_id": str(session.get("user_id") or "")[:128],
+        "name": str(session.get("name") or "")[:200],
+        "is_admin": is_admin,
+        "owner_user_id": owner_user_id,
+    }
+
+
+class TTPostAdminClientError(RuntimeError):
+    """Secret-safe failure returned by the CPU-side TT Post service."""
+
+    def __init__(self, code, message, status=503):
+        self.code = str(code or "tt_post_service_unavailable")
+        self.status = int(status) if isinstance(status, int) else 503
+        super().__init__(str(message or "TT Post服务暂不可用"))
+
+
+TT_POST_ADMIN_SERVICE_URL = str(
+    os.environ.get(
+        "TT_POST_ADMIN_SERVICE_URL",
+        "http://127.0.0.1:18829",
+    )
+    or ""
+).strip().rstrip("/")
+TT_POST_ADMIN_INTERNAL_TOKEN = str(
+    os.environ.get("TT_POST_INTERNAL_TOKEN", "") or ""
+)
+try:
+    TT_POST_ADMIN_TIMEOUT = int(
+        os.environ.get("TT_POST_ADMIN_TIMEOUT", "360") or "360"
+    )
+except (TypeError, ValueError):
+    TT_POST_ADMIN_TIMEOUT = 360
+TT_POST_ADMIN_TIMEOUT = max(1, min(TT_POST_ADMIN_TIMEOUT, 600))
+try:
+    TT_POST_ADMIN_PREVIEW_TIMEOUT = int(
+        os.environ.get("TT_POST_ADMIN_PREVIEW_TIMEOUT", "60") or "60"
+    )
+except (TypeError, ValueError):
+    TT_POST_ADMIN_PREVIEW_TIMEOUT = 60
+TT_POST_ADMIN_PREVIEW_TIMEOUT = max(
+    5,
+    min(TT_POST_ADMIN_PREVIEW_TIMEOUT, 120),
+)
+try:
+    TT_POST_CODE_RESOLVER_TIMEOUT = float(
+        os.environ.get("TT_POST_CODE_RESOLVER_TIMEOUT", "3") or "3"
+    )
+except (TypeError, ValueError):
+    TT_POST_CODE_RESOLVER_TIMEOUT = 3.0
+TT_POST_CODE_RESOLVER_TIMEOUT = max(
+    0.5,
+    min(TT_POST_CODE_RESOLVER_TIMEOUT, 10.0),
+)
+
+TT_POST_ADMIN_ROUTE_METHODS = {
+    "/api/admin/tt-posts/accounts": {"GET"},
+    "/api/admin/tt-posts/account-settings": {"GET", "POST"},
+    "/api/admin/tt-posts/account-settings/creator-info": {"POST"},
+    "/api/admin/tt-posts/account-settings/batch": {"POST"},
+    "/api/admin/tt-posts/account-settings/batch/creator-info": {"POST"},
+    "/api/admin/tt-posts/creator-info": {"POST"},
+    "/api/admin/tt-posts/materials/preview": {"POST"},
+    "/api/admin/tt-posts/material-pool": {"GET", "POST"},
+    "/api/admin/tt-posts/auto-config": {"GET", "POST"},
+    "/api/admin/tt-posts/direct-tests": {"GET"},
+    "/api/admin/tt-posts/test-publish": {"POST"},
+    "/api/admin/tt-posts/schedule": {"GET", "POST"},
+    "/api/admin/tt-posts/run-now": {"POST"},
+    "/api/admin/tt-posts/tasks": {"GET"},
+    "/api/admin/tt-posts/queue": {"GET"},
+    "/api/admin/tt-posts/events": {"GET"},
+    "/internal/tt-posts/code-resolve": {"GET"},
+}
+TT_POST_SENSITIVE_KEYS = {
+    "accesstoken",
+    "refreshtoken",
+    "authorization",
+    "credential",
+    "credentials",
+    "claimtoken",
+    "internaltoken",
+    "clientsecret",
+    "password",
+}
+
+
+def _tt_post_contains_sensitive_key(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in TT_POST_SENSITIVE_KEYS:
+                return True
+            if _tt_post_contains_sensitive_key(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_tt_post_contains_sensitive_key(item) for item in value)
+    return False
+
+
+def _tt_post_safe_error_message(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 500:
+        return "TT Post服务请求失败"
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "access_token",
+            "access token",
+            "refresh_token",
+            "refresh token",
+            "authorization:",
+            "bearer ",
+            "client_secret",
+            "claim_token",
+        )
+    ) or re.search(
+        r"(?:[A-Za-z0-9_-]{64,}|(?:[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+)",
+        text,
+    ):
+        return "TT Post服务请求失败"
+    return text
+
+
+def _tt_post_public_payload(value):
+    if not isinstance(value, dict) or _tt_post_contains_sensitive_key(value):
+        raise TTPostAdminClientError(
+            "tt_post_unsafe_response",
+            "TT Post服务返回了非公开字段",
+            502,
+        )
+    result = dict(value)
+    items = result.get("items")
+    if isinstance(items, list):
+        normalized_items = []
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                normalized_items.append(raw_item)
+                continue
+            item = dict(raw_item)
+            for key in (
+                "source_account_id",
+                "account_id",
+                "main_account_id",
+                "external_account_id",
+            ):
+                if item.get(key) not in (None, ""):
+                    item[key] = str(item[key])
+            normalized_items.append(item)
+        result["items"] = normalized_items
+    item = result.get("item")
+    if isinstance(item, dict):
+        item = dict(item)
+        for key in (
+            "source_account_id",
+            "account_id",
+            "main_account_id",
+            "external_account_id",
+        ):
+            if item.get(key) not in (None, ""):
+                item[key] = str(item[key])
+        result["item"] = item
+    return result
+
+
+def _tt_post_query_params(raw_query, allowed, required=()):
+    parsed = parse_qs(str(raw_query or ""), keep_blank_values=True)
+    allowed_keys = set(allowed)
+    if set(parsed) - allowed_keys:
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "查询参数无效",
+            400,
+        )
+    result = {}
+    for key, values in parsed.items():
+        if len(values) != 1 or not str(values[0]).strip():
+            raise TTPostAdminClientError(
+                "invalid_request",
+                "查询参数无效",
+                400,
+            )
+        result[key] = str(values[0]).strip()
+    if any(key not in result for key in required):
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "缺少必要查询参数",
+            400,
+        )
+    return result
+
+
+def _tt_code_public_route_item(value, expected_query, source):
+    """Validate and reduce the sidecar response before public composition."""
+
+    if not isinstance(value, dict) or set(value) - {
+        "content_id",
+        "target_url",
+        "query_type",
+        "route_mode",
+        "code",
+        "source",
+        "af_channel",
+    }:
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    raw_query = str(expected_query or "")
+    normalized_source = str(source or "")
+    if normalized_source not in {"Search", "Featured"}:
+        raise TTPostAdminClientError(
+            "tt_code_source_invalid",
+            "搜索来源无效",
+            400,
+        )
+    is_code = bool(re.fullmatch(r"[A-Za-z0-9]{4}", raw_query))
+    normalized_query = raw_query.upper() if is_code else normalize_content_id(raw_query)
+    expected_query_type = "code" if is_code else "content_id"
+    query_type = str(value.get("query_type") or "")
+    route_mode = str(value.get("route_mode") or "")
+    content_id = normalize_content_id(value.get("content_id"))
+    if (
+        query_type != expected_query_type
+        or (not is_code and content_id != normalized_query)
+        or str(value.get("source") or "") != normalized_source
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    if is_code:
+        if (
+            route_mode != "code_exact"
+            or str(value.get("code") or "") != normalized_query
+            or str(value.get("af_channel") or "") != "TT"
+        ):
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = "TT"
+        expected_keys = {
+            "c",
+            "af_adset",
+            "af_adset_id",
+            "af_ad",
+            "af_ad_id",
+            "af_channel",
+            "af_c_id",
+            "af_dp",
+        }
+    elif route_mode == "published_clone":
+        if str(value.get("af_channel") or "") != normalized_source:
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = normalized_source
+        expected_keys = {
+            "c",
+            "af_adset",
+            "af_adset_id",
+            "af_ad",
+            "af_ad_id",
+            "af_channel",
+            "af_c_id",
+            "af_dp",
+        }
+    elif route_mode == "generic_fallback":
+        if str(value.get("af_channel") or "") != normalized_source:
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = normalized_source
+        expected_keys = {"af_dp", "c", "af_c_id", "af_channel"}
+    else:
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+
+    target_url = str(value.get("target_url") or "")
+    if not target_url or len(target_url) > 8192 or target_url != target_url.strip():
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    parsed = urlparse(target_url)
+    try:
+        target_port = parsed.port
+    except ValueError:
+        target_port = -1
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "www.dramawavew2a.com"
+        or target_port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/ads/101/2250/view"
+        or parsed.params
+        or parsed.fragment
+        or set(params) != expected_keys
+        or any(len(values) != 1 or not values[0] for values in params.values())
+        or params.get("af_dp") != [content_id]
+        or params.get("af_channel") != [expected_channel]
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    if route_mode == "generic_fallback" and (
+        params.get("c") != ["TTpost"]
+        or params.get("af_c_id") != ["0001"]
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    result = {
+        "content_id": content_id,
+        "target_url": target_url,
+        "query_type": query_type,
+        "route_mode": route_mode,
+    }
+    if is_code:
+        result["code"] = normalized_query
+    return result
+
+
+def _tt_post_service_request(method, path, payload=None, query=None):
+    method = str(method or "").upper()
+    allowed_methods = TT_POST_ADMIN_ROUTE_METHODS.get(str(path or ""))
+    if allowed_methods is None and re.fullmatch(
+        r"/api/admin/tt-posts/queue/[1-9][0-9]*/(?:cancel|reconcile)",
+        str(path or ""),
+    ):
+        allowed_methods = {"POST"}
+    if not allowed_methods or method not in allowed_methods:
+        raise TTPostAdminClientError(
+            "tt_post_route_not_allowed",
+            "TT Post服务路由无效",
+            500,
+        )
+    parsed_base = urlparse(TT_POST_ADMIN_SERVICE_URL)
+    if (
+        parsed_base.scheme != "http"
+        or parsed_base.hostname not in {"127.0.0.1", "::1", "localhost"}
+        or parsed_base.username is not None
+        or parsed_base.password is not None
+        or parsed_base.query
+        or parsed_base.fragment
+        or parsed_base.path not in ("", "/")
+        or len(TT_POST_ADMIN_INTERNAL_TOKEN) < 32
+        or len(TT_POST_ADMIN_INTERNAL_TOKEN) > 512
+    ):
+        raise TTPostAdminClientError(
+            "tt_post_service_not_configured",
+            "TT Post服务尚未完成内部配置",
+            503,
+        )
+    if payload is not None and (
+        not isinstance(payload, dict)
+        or _tt_post_contains_sensitive_key(payload)
+    ):
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "请求包含无效字段",
+            400,
+        )
+    safe_query = {}
+    if query is not None:
+        if not isinstance(query, dict):
+            raise TTPostAdminClientError(
+                "invalid_request",
+                "查询参数无效",
+                400,
+            )
+        for key, value in query.items():
+            normalized_key = str(key or "").strip()
+            if (
+                not normalized_key
+                or _tt_post_contains_sensitive_key({normalized_key: value})
+                or isinstance(value, (dict, list, tuple))
+            ):
+                raise TTPostAdminClientError(
+                    "invalid_request",
+                    "查询参数无效",
+                    400,
+                )
+            safe_query[normalized_key] = str(value)
+    if path == "/api/admin/tt-posts/materials/preview":
+        request_timeout = TT_POST_ADMIN_PREVIEW_TIMEOUT
+    elif path == "/internal/tt-posts/code-resolve":
+        request_timeout = TT_POST_CODE_RESOLVER_TIMEOUT
+    else:
+        request_timeout = TT_POST_ADMIN_TIMEOUT
+    try:
+        response = requests.request(
+            method,
+            TT_POST_ADMIN_SERVICE_URL + path,
+            headers={
+                "Accept": "application/json",
+                "Authorization": "Bearer %s"
+                % TT_POST_ADMIN_INTERNAL_TOKEN,
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            params=safe_query or None,
+            json=payload,
+            timeout=request_timeout,
+        )
+    except requests.RequestException:
+        raise TTPostAdminClientError(
+            "tt_post_service_unavailable",
+            "TT Post服务暂不可用",
+            503,
+        ) from None
+    content = bytes(response.content or b"")
+    if len(content) > 1024 * 1024:
+        raise TTPostAdminClientError(
+            "tt_post_response_too_large",
+            "TT Post服务响应超过安全上限",
+            502,
+        )
+    try:
+        response_payload = json.loads(content.decode("utf-8")) if content else {}
+    except (UnicodeError, ValueError):
+        raise TTPostAdminClientError(
+            "tt_post_invalid_response",
+            "TT Post服务响应无效",
+            502,
+        ) from None
+    if not isinstance(response_payload, dict):
+        raise TTPostAdminClientError(
+            "tt_post_invalid_response",
+            "TT Post服务响应无效",
+            502,
+        )
+    if not 200 <= int(response.status_code) < 300:
+        code = str(
+            response_payload.get("code")
+            or response_payload.get("error")
+            or "tt_post_service_error"
+        ).strip()
+        if not re.fullmatch(r"[a-z0-9_]{1,80}", code):
+            code = "tt_post_service_error"
+        status = int(response.status_code)
+        if status < 400 or status > 599:
+            status = 502
+        raise TTPostAdminClientError(
+            code,
+            _tt_post_safe_error_message(
+                response_payload.get("message")
+                or response_payload.get("error_message")
+            ),
+            status,
+        )
+    return _tt_post_public_payload(response_payload)
+
+
+def tt_posts_error_payload(exc):
+    code = str(
+        getattr(exc, "code", "tt_post_service_unavailable")
+        or "tt_post_service_unavailable"
+    )
+    if not re.fullmatch(r"[a-z0-9_]{1,80}", code):
+        code = "tt_post_service_unavailable"
+    status = int(getattr(exc, "status", 503) or 503)
+    if status < 400 or status > 599:
+        status = 503
+    message = _tt_post_safe_error_message(str(exc))
+    return status, {"error": code, "code": code, "message": message}
+
+
 def complete_ad_material_upload(task_id, session):
     task = fetch_ad_material_task(task_id)
     ensure_ad_material_access(session, task)
@@ -35138,6 +42523,685 @@ def complete_ad_material_upload(task_id, session):
         raise StructuredApiError("source_upload_failed", "部分素材上报失败", errors=errors)
     update_ad_material_task_status(task_id, "done", error_message="")
     return fetch_ad_material_task(task_id)
+
+
+from features.voiceover_drama_tasks.service import (
+    configure_voiceover_drama_tasks,
+    create_voiceover_design_tasks,
+    list_voiceover_designers,
+    voiceover_filter_materials,
+    voiceover_material_counts,
+)
+
+configure_voiceover_drama_tasks(
+    ADMIN_MAPPING_MYSQL_DATABASE=ADMIN_MAPPING_MYSQL_DATABASE,
+    DB_NAME=DB_NAME,
+    StructuredApiError=StructuredApiError,
+    run_mysql=run_mysql,
+    mysql_escape_literal=mysql_escape_literal,
+    app_package_for_app_id=app_package_for_app_id,
+    ad_material_actor=ad_material_actor,
+    api_error_payload=api_error_payload,
+)
+
+from features.x_accounts.client import (
+    XAccountsClientError,
+    configure_x_accounts_client,
+    get_x_accounts_config,
+    add_x_post_drama_pool,
+    add_x_post_material_pool,
+    batch_delete_x_post_drama_pool,
+    create_x_post_manual_run,
+    delete_x_post_drama_pool,
+    delete_x_post_material_pool,
+    query_x_post_account_options,
+    query_x_post_drama_pool,
+    query_x_post_drama_pool_episodes,
+    query_x_post_logs,
+    query_x_post_material_pool,
+    query_x_post_manual_run,
+    query_x_post_runs,
+    query_x_post_schedule,
+    query_x_accounts as query_x_authorized_accounts,
+    logout_x_account,
+    save_x_post_schedule,
+    set_x_post_drama_pool_priority,
+    set_x_account_drama_language,
+    set_x_account_publish_approval,
+    start_x_authorization,
+    verify_x_account,
+)
+from features.x_account_stats.service import merge_account_stats
+from features.x_posts.drama_selector import (
+    DramaSelectionError as XPostDramaSelectionError,
+    audit_drama as audit_x_post_drama,
+)
+from features.x_posts.selector import (
+    connect_read_only as connect_x_post_read_only,
+    material_key as x_post_material_key,
+    normalize_material_url as x_post_normalize_material_url,
+    previous_source_date as x_post_previous_source_date,
+    select_pool_candidates as select_x_post_pool_candidates,
+)
+
+try:
+    X_POST_AUTOMATION_INTERNAL_TIMEOUT = int(os.environ.get("X_POST_AUTOMATION_INTERNAL_TIMEOUT", "30") or "30")
+except (TypeError, ValueError):
+    X_POST_AUTOMATION_INTERNAL_TIMEOUT = 30
+X_POST_AUTOMATION_INTERNAL_TIMEOUT = max(1, min(X_POST_AUTOMATION_INTERNAL_TIMEOUT, 120))
+
+X_ACCOUNT_STATS_CACHE_PATH = os.environ.get(
+    "X_ACCOUNT_STATS_CACHE_PATH",
+    "/mnt/data-disk/x-account-operating-stats/current.json",
+)
+try:
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = int(
+        os.environ.get("X_ACCOUNT_STATS_MAX_AGE_SECONDS", "54000") or "54000"
+    )
+except (TypeError, ValueError):
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = 54000
+X_ACCOUNT_STATS_MAX_AGE_SECONDS = max(
+    60, min(X_ACCOUNT_STATS_MAX_AGE_SECONDS, 7 * 24 * 60 * 60)
+)
+
+try:
+    configure_x_accounts_client(
+        base_url=os.environ.get("X_POST_AUTOMATION_INTERNAL_URL", "http://127.0.0.1:8810"),
+        internal_token=os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN", ""),
+        timeout=X_POST_AUTOMATION_INTERNAL_TIMEOUT,
+    )
+except ValueError:
+    configure_x_accounts_client(
+        base_url="http://127.0.0.1:8810",
+        internal_token="",
+        timeout=X_POST_AUTOMATION_INTERNAL_TIMEOUT,
+    )
+
+X_ACCOUNTS_ERROR_META = {
+    "invalid_random_daily_count": (400, "每日随机发布次数无效"),
+    "invalid_schedule_mode": (400, "自动发布模式无效"),
+    "invalid_post_template": (400, "X Post描述模板无效"),
+    "invalid_request": (400, "请求参数无效"),
+    "x_account_disabled": (409, "X账号已在后台停用，请重新授权后再使用"),
+    "x_account_drama_language_conflict": (409, "该账号仍绑定其他语言的未完结短剧，暂不能修改剧语言"),
+    "x_account_drama_language_invalid": (400, "剧语言代码无效"),
+    "x_account_not_publishable": (409, "X账号当前状态不可用于发布"),
+    "x_account_not_found": (404, "X账号记录不存在"),
+    "x_account_owned_by_other": (409, "该X账号已归属其他后台用户，请联系管理员处理"),
+    "x_admin_required": (403, "仅管理员可查看全部X账号"),
+    "x_disconnect_failed": (502, "X账号停用失败，请稍后重试"),
+    "x_disconnect_pending": (409, "X账号存在旧退出待处理状态，请先完成停用"),
+    "x_identity_mismatch": (409, "X Token账号身份不匹配，请重新授权"),
+    "x_oauth_not_configured": (503, "X OAuth客户端尚未完整配置"),
+    "x_post_pool_item_not_found": (404, "X素材池记录不存在"),
+    "x_post_account_language_mismatch": (409, "X账号剧语言与待发布内容不一致"),
+    "x_post_pool_item_occupied": (409, "素材已被发布队列占用，不能删除或重复使用"),
+    "x_post_pool_item_published": (409, "已发布素材必须保留审计记录"),
+    "x_post_pool_item_unavailable": (409, "素材池记录已发布、已变更或不可用"),
+    "x_post_pool_material_already_exists": (409, "素材已在X素材池中"),
+    "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
+    "x_post_rate_limited": (429, "X API请求过于频繁，请稍后重试"),
+    "x_post_random_plan_generation_failed": (500, "随机发布时间生成失败"),
+    "x_post_random_times_must_be_empty": (400, "随机发布不能同时设置固定时间"),
+    "x_post_storage_conflict": (409, "素材池写入冲突，请刷新后重试"),
+    "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
+    "x_post_schedule_collision": (409, "同一账号不能在两个发布池配置相同时间点"),
+    "x_post_schedule_config_changed": (409, "自动发布设置已变更，请刷新后重试"),
+    "x_post_schedule_not_found": (404, "自动发布设置不存在"),
+    "x_post_schedule_run_exists": (409, "该时间点已存在不同的冻结发布批次"),
+    "x_post_schedule_version_conflict": (409, "自动发布设置已被修改，请刷新后重试"),
+    "x_post_drama_already_used": (409, "该短剧已有X发布历史"),
+    "x_post_drama_account_language_mismatch": (409, "短剧语言与已绑定X账号的剧语言不一致"),
+    "x_post_drama_episode_already_used": (409, "该短剧集数已被发布队列占用"),
+    "x_post_drama_pool_item_exists": (409, "该短剧已在短剧池中"),
+    "x_post_drama_pool_item_not_found": (404, "短剧池记录不存在"),
+    "x_post_drama_pool_item_occupied": (409, "已生成发布队列的短剧不能删除"),
+    "x_post_drama_pool_item_unavailable": (409, "短剧池记录当前不可用于发布"),
+    "x_post_drama_priority_conflict": (409, "仅未分配且可用的短剧可以设置高优"),
+    "x_post_drama_sequence_conflict": (409, "短剧没有按入池和免费集数顺序发布"),
+    "x_post_manual_account_mismatch": (409, "手动发布账号与冻结任务不一致"),
+    "x_post_manual_candidate_shortage": (409, "手动发布候选数量不足"),
+    "x_post_manual_material_mismatch": (409, "手动发布素材与冻结任务不一致"),
+    "x_post_manual_material_unavailable": (409, "所选素材已入池或已被发布队列占用"),
+    "x_post_manual_plan_exists": (409, "手动发布任务已生成冻结队列"),
+    "x_post_manual_run_not_found": (404, "手动发布任务不存在"),
+    "x_post_manual_run_terminal": (409, "手动发布任务已经结束"),
+    "x_post_manual_scope_mismatch": (400, "素材数量必须与目标账号数量一致"),
+    "x_post_manual_source_mismatch": (409, "手动发布素材来源日期发生变化"),
+    "x_token_missing": (409, "X账号Token不存在，请重新授权"),
+    "x_token_revoked": (409, "X授权已失效，请重新授权"),
+    "x_token_invalid": (409, "Token失效，请重新登陆"),
+    "x_upstream_error": (502, "X API请求失败，请稍后重试"),
+    "x_accounts_unavailable": (503, "X账号服务暂不可用"),
+}
+
+
+def x_accounts_error_payload(exc):
+    code = str(getattr(exc, "code", "x_accounts_unavailable") or "x_accounts_unavailable")
+    status, message = X_ACCOUNTS_ERROR_META.get(code, X_ACCOUNTS_ERROR_META["x_accounts_unavailable"])
+    return status, {"error": code if code in X_ACCOUNTS_ERROR_META else "x_accounts_unavailable", "message": message}
+
+
+def x_accounts_actor(session):
+    session = session if isinstance(session, dict) else {}
+    return {
+        "tenant_key": str(session.get("tenant_key", "") or ""),
+        "user_id": str(session.get("user_id", "") or ""),
+        "name": str(session.get("name", "") or ""),
+        "email": str(session.get("email", "") or ""),
+        "role": str(session.get("role", "user") or "user"),
+    }
+
+
+def x_post_drama_verification_actor(session):
+    """Use all-account verification only after the drama-page permission gate."""
+    actor = x_accounts_actor(session)
+    actor["role"] = "admin"
+    return actor
+
+
+
+def x_post_admin_query_params(raw_query, *, runs=False):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "run_date", "source_date", "status"}
+    if not runs:
+        allowed.update({"account_id", "material_id", "unknown_outcome", "task_source"})
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+
+    result = {}
+    try:
+        result["page"] = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        result["page_size"] = max(1, min(100, int((raw.get("page_size") or ["20"])[0] or "20")))
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+
+    for key in ("run_date", "source_date"):
+        value = str((raw.get(key) or [""])[0] or "").strip()
+        if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("%s must use YYYY-MM-DD" % key)
+        if value:
+            result[key] = value
+
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status and not re.fullmatch(r"[a-z_]{1,32}", status):
+        raise ValueError("invalid status")
+    if status:
+        result["status"] = status
+
+    if not runs:
+        for key in ("account_id", "material_id"):
+            value = str((raw.get(key) or [""])[0] or "").strip()
+            if value and not re.fullmatch(r"\d{1,20}", value):
+                raise ValueError("%s must be a positive integer" % key)
+            if value:
+                result[key] = value
+        unknown_outcome = str((raw.get("unknown_outcome") or [""])[0] or "").strip().lower()
+        if unknown_outcome:
+            if unknown_outcome not in ("0", "1", "true", "false"):
+                raise ValueError("unknown_outcome must be 0 or 1")
+            result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
+        task_source = str((raw.get("task_source") or [""])[0] or "").strip().lower()
+        if task_source:
+            if task_source not in {"drama_pool", "material_pool", "auto_publish"}:
+                raise ValueError("invalid task_source")
+            result["task_source"] = task_source
+    return result
+
+
+def x_post_pool_query_params(raw_query):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "status", "availability", "material_id"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+    try:
+        page = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        page_size = max(
+            1,
+            min(100, int((raw.get("page_size") or ["20"])[0] or "20")),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+    result = {"page": page, "page_size": page_size}
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status:
+        if status not in {"unpublished", "published"}:
+            raise ValueError("invalid status")
+        result["status"] = status
+    availability = str(
+        (raw.get("availability") or [""])[0] or ""
+    ).strip().lower()
+    if availability:
+        if availability not in {
+            "available",
+            "deferred",
+            "validation_failed",
+            "occupied",
+            "failed",
+            "needs_review",
+            "published",
+        }:
+            raise ValueError("invalid availability")
+        result["availability"] = availability
+    material_id = str((raw.get("material_id") or [""])[0] or "").strip()
+    if material_id:
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+            raise ValueError("material_id must be a positive integer")
+        result["material_id"] = material_id
+    return result
+
+
+def x_post_drama_pool_query_params(raw_query):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "status", "drama_id"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+    try:
+        page = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        page_size = max(
+            1,
+            min(100, int((raw.get("page_size") or ["20"])[0] or "20")),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+    result = {"page": page, "page_size": page_size}
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status:
+        if status not in {
+            "pending",
+            "active",
+            "completed",
+            "validation_failed",
+            "needs_review",
+        }:
+            raise ValueError("invalid status")
+        result["status"] = status
+    drama_id = str((raw.get("drama_id") or [""])[0] or "").strip()
+    if drama_id:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", drama_id):
+            raise ValueError("invalid drama_id")
+        result["drama_id"] = drama_id
+    return result
+
+
+X_POST_POOL_VALIDATION_MESSAGES = {
+    "material_not_found_or_ineligible": "素材ID不存在，或不是符合X发布要求的Dramawave有效视频",
+    "material_product_mismatch": "素材不属于Dramawave",
+    "material_metadata_invalid": "素材元数据不完整或无效",
+    "material_url_not_https": "素材URL不是HTTPS地址",
+    "material_has_violation": "素材存在违规记录",
+    "violation_check_invalid": "素材违规记录无法安全核验",
+    "material_source_tag_invalid": "素材标签无法安全核验",
+    "material_source_tag_unsafe": "素材标签包含色情、暴力等禁用内容",
+    "material_tag_invalid": "素材关联标签无法安全核验",
+    "material_tag_unsafe": "素材关联标签包含色情、暴力等禁用内容",
+    "drama_mapping_missing": "素材没有匹配到短剧信息",
+    "drama_mapping_invalid": "素材对应的短剧信息不完整",
+    "drama_mapping_ambiguous": "素材匹配到多条不一致的短剧信息",
+    "drama_label_invalid": "短剧标签无法安全核验",
+    "drama_label_unsafe": "短剧标签包含色情、暴力等禁用内容",
+    "pool_item_invalid": "素材ID或素材池记录无效",
+    "material_safety_check_failed": "素材未通过X发布安全校验",
+}
+
+
+def x_post_normalize_material_ids(material_ids):
+    if (
+        not isinstance(material_ids, (list, tuple))
+        or not material_ids
+        or len(material_ids) > 100
+    ):
+        raise ValueError("material_ids must contain 1 to 100 items")
+    normalized = []
+    seen = set()
+    for raw in material_ids:
+        try:
+            key = x_post_material_key(raw)
+        except Exception:
+            raise ValueError("material_id must be a positive integer") from None
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return normalized
+
+
+def x_post_material_preview_urls(material_ids, row_loader=None):
+    normalized = x_post_normalize_material_ids(material_ids)
+    database = str(DB_NAME or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", database):
+        raise RuntimeError("material source database is unavailable")
+    query = (
+        "SELECT CAST(id AS CHAR),url FROM `%s`.ads_custom_source "
+        "WHERE id IN (%s) ORDER BY id"
+        % (database, ",".join(str(int(item)) for item in normalized))
+    )
+    loader = row_loader or (
+        lambda sql: ad_control_run_mysql(sql, timeout_seconds=10)
+    )
+    rows = loader(query)
+    if not isinstance(rows, (list, tuple)):
+        raise RuntimeError("material source query returned invalid rows")
+    allowed = set(normalized)
+    values = {}
+    duplicates = set()
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        material_id = str(row[0] or "").strip()
+        if material_id not in allowed:
+            continue
+        if material_id in values:
+            duplicates.add(material_id)
+            continue
+        location = x_post_normalize_material_url(row[1])
+        if (
+            not location
+            or len(location) > 4096
+            or "\\" in location
+            or any(char.isspace() or ord(char) == 127 for char in location)
+        ):
+            continue
+        parsed = urlparse(location)
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+        ):
+            continue
+        values[material_id] = location
+    for material_id in duplicates:
+        values.pop(material_id, None)
+    return {material_id: values.get(material_id, "") for material_id in normalized}
+
+
+def x_post_material_preview_location(material_id, row_loader=None):
+    material_id = x_post_normalize_material_ids([material_id])[0]
+    location = x_post_material_preview_urls([material_id], row_loader=row_loader).get(
+        material_id, ""
+    )
+    if not location:
+        raise LookupError("素材不存在或没有可用的素材 URL")
+    return location
+
+
+def x_post_enrich_material_pool_preview_urls(result, row_loader=None):
+    if not isinstance(result, dict):
+        return result
+    items = result.get("items")
+    if not isinstance(items, list):
+        return result
+    material_ids = [
+        str(item.get("material_id") or "").strip()
+        for item in items
+        if isinstance(item, dict) and item.get("material_id") not in (None, "")
+    ]
+    preview_urls = {}
+    if material_ids:
+        try:
+            preview_urls = x_post_material_preview_urls(
+                material_ids, row_loader=row_loader
+            )
+        except Exception:
+            preview_urls = {}
+    for item in items:
+        if isinstance(item, dict):
+            material_id = str(item.get("material_id") or "").strip()
+            item["material_preview_url"] = preview_urls.get(material_id, "")
+    return result
+
+
+def x_post_initial_material_checks(
+    material_ids,
+    connection_factory=None,
+    candidate_loader=None,
+    now=None,
+):
+    normalized = x_post_normalize_material_ids(material_ids)
+    checked_at = (
+        now.astimezone(timezone.utc)
+        if isinstance(now, datetime) and now.tzinfo is not None
+        else datetime.now(timezone.utc)
+    )
+    created_at = checked_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+    pool_items = [
+        {"id": index, "material_id": material_id, "created_at": created_at}
+        for index, material_id in enumerate(normalized, 1)
+    ]
+    loader = candidate_loader or select_x_post_pool_candidates
+    connection = None
+    try:
+        if connection_factory is not None:
+            connection = connection_factory()
+        else:
+            connection = connect_x_post_read_only(
+                host=MYSQL_HOST,
+                port=int(MYSQL_PORT or 3306),
+                user=MYSQL_USER,
+                password=MYSQL_PASSWORD,
+                database=DB_NAME,
+                connect_timeout=5,
+                read_timeout=30,
+            )
+        selected, rejections = loader(
+            connection,
+            pool_items,
+            x_post_previous_source_date(now),
+            limit=len(normalized),
+            schema=DB_NAME,
+        )
+    except Exception:
+        return [
+            {
+                "material_id": material_id,
+                "error_code": "material_validation_unavailable",
+                "error_message": "素材暂时无法完成X发布标准校验，当前不可发布",
+            }
+            for material_id in normalized
+        ]
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
+
+    outcomes = {
+        index: {
+            "material_id": material_id,
+            "error_code": "material_validation_incomplete",
+            "error_message": "素材未完成X发布标准校验，当前不可发布",
+        }
+        for index, material_id in enumerate(normalized, 1)
+    }
+    for candidate in selected if isinstance(selected, list) else []:
+        pool_item_id = candidate.get("pool_item_id") if isinstance(candidate, dict) else None
+        if pool_item_id in outcomes:
+            outcomes[pool_item_id] = {
+                "material_id": outcomes[pool_item_id]["material_id"],
+                "error_code": "",
+                "error_message": "",
+            }
+    for rejection in rejections if isinstance(rejections, list) else []:
+        pool_item_id = (
+            rejection.get("pool_item_id") if isinstance(rejection, dict) else None
+        )
+        if pool_item_id not in outcomes:
+            continue
+        code = str(rejection.get("error_code") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", code):
+            code = "material_validation_failed"
+        message = X_POST_POOL_VALIDATION_MESSAGES.get(
+            code,
+            str(rejection.get("error_message") or "素材未通过X发布标准校验").strip(),
+        )
+        outcomes[pool_item_id] = {
+            "material_id": outcomes[pool_item_id]["material_id"],
+            "error_code": code,
+            "error_message": message[:500],
+        }
+    return [outcomes[index] for index in sorted(outcomes)]
+
+
+def x_post_normalize_drama_ids(drama_ids):
+    if (
+        not isinstance(drama_ids, (list, tuple))
+        or not drama_ids
+        or len(drama_ids) > 100
+    ):
+        raise ValueError("drama_ids must contain 1 to 100 items")
+    normalized = []
+    seen = set()
+    for raw in drama_ids:
+        content_id = str(raw or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
+            raise ValueError("drama_id is invalid")
+        if content_id in seen:
+            raise ValueError("drama_ids contains a duplicate")
+        seen.add(content_id)
+        normalized.append(content_id)
+    return normalized
+
+
+X_POST_DRAMA_VALIDATION_MESSAGES = {
+    "drama_not_found": "未找到对应的Dramawave短剧",
+    "drama_no_free_episodes": "该短剧没有可发布的免费剧集",
+    "drama_episode_gap": "免费剧集集数不连续",
+    "drama_episode_url_ambiguous": "同一免费剧集存在多个不一致的视频URL",
+    "drama_metadata_ambiguous": "短剧元数据在不同资源记录中不一致",
+    "drama_resource_invalid": "短剧资源数据不完整",
+    "x_post_drama_query_failed": "短剧资源查询暂不可用",
+}
+
+
+def x_post_drama_validation_message(code, error):
+    code = str(code or "drama_resource_invalid")[:64]
+    detail = str(error or "").strip()
+    message = X_POST_DRAMA_VALIDATION_MESSAGES.get(code, "")
+    if code == "drama_resource_invalid" and detail:
+        message = "%s：%s" % (
+            message or "短剧资源数据不完整",
+            detail,
+        )
+    return (message or detail or "短剧未通过X发布校验")[:500]
+
+
+def x_post_drama_validation_checks(
+    drama_ids,
+    connection_factory=None,
+):
+    normalized = x_post_normalize_drama_ids(drama_ids)
+    connection = None
+    try:
+        connection = (
+            connection_factory()
+            if callable(connection_factory)
+            else connect_x_post_read_only(
+                host=MYSQL_HOST,
+                port=int(MYSQL_PORT or 3306),
+                user=MYSQL_USER,
+                password=MYSQL_PASSWORD,
+                database=DB_NAME,
+                connect_timeout=5,
+                read_timeout=30,
+            )
+        )
+        results = []
+        for content_id in normalized:
+            try:
+                audit = audit_x_post_drama(
+                    connection,
+                    content_id,
+                    schema=DB_NAME,
+                    app_id=1479,
+                )
+                episodes = audit.get("episodes", [])
+                results.append(
+                    {
+                        "drama_id": content_id,
+                        "content_id": content_id,
+                        "available": True,
+                        "valid": True,
+                        "drama_name": audit["drama_name"],
+                        "description": audit["description"],
+                        "language": audit["language"],
+                        "labels": audit["labels"],
+                        "name_tag": audit["name_tag"],
+                        "free_episode_count": int(
+                            audit["free_episode_count"]
+                        ),
+                        "first_sub_num": (
+                            int(episodes[0]["sub_number"])
+                            if episodes
+                            else 0
+                        ),
+                        "last_sub_num": (
+                            int(episodes[-1]["sub_number"])
+                            if episodes
+                            else 0
+                        ),
+                        "error_code": "",
+                        "error_message": "",
+                    }
+                )
+            except XPostDramaSelectionError as exc:
+                code = str(
+                    getattr(exc, "code", "drama_resource_invalid")
+                    or "drama_resource_invalid"
+                )[:64]
+                results.append(
+                    {
+                        "drama_id": content_id,
+                        "content_id": content_id,
+                        "available": False,
+                        "valid": False,
+                        "drama_name": "",
+                        "description": "",
+                        "language": "",
+                        "labels": "",
+                        "name_tag": "",
+                        "free_episode_count": 0,
+                        "first_sub_num": 0,
+                        "last_sub_num": 0,
+                        "error_code": code,
+                        "error_message": x_post_drama_validation_message(
+                            code,
+                            exc,
+                        ),
+                    }
+                )
+        return results
+    except Exception:
+        return [
+            {
+                "drama_id": content_id,
+                "content_id": content_id,
+                "available": False,
+                "valid": False,
+                "drama_name": "",
+                "description": "",
+                "language": "",
+                "labels": "",
+                "name_tag": "",
+                "free_episode_count": 0,
+                "first_sub_num": 0,
+                "last_sub_num": 0,
+                "error_code": "x_post_drama_query_failed",
+                "error_message": "短剧资源查询暂不可用",
+            }
+            for content_id in normalized
+        ]
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
 
 
 def parse_ad_material_task_route(path):
@@ -39868,6 +47932,1152 @@ def send_feishu_text(receive_id_type, receive_id, text):
 
 
 
+class MaterialStatusDeliveryError(RuntimeError):
+    def __init__(
+        self,
+        code,
+        message,
+        retryable=False,
+        refresh_token=False,
+        uncertain=False,
+    ):
+        self.code = str(code or "delivery_failed")
+        self.retryable = bool(retryable)
+        self.refresh_token = bool(refresh_token)
+        # Observational metadata for the new batch path; legacy retry/fallback
+        # decisions continue to use their original fields unchanged.
+        self.uncertain = bool(uncertain)
+        super().__init__(
+            material_status_service.redact_sensitive_text(message, limit=500)
+        )
+
+
+def material_status_webhook_token_eligible(token):
+    token = str(token or "")
+    return (
+        len(token) >= 32
+        and token.isascii()
+        and not any(char.isspace() for char in token)
+    )
+
+
+def material_status_webhook_config_error():
+    if not any(
+        material_status_webhook_token_eligible(token)
+        for token in MATERIAL_STATUS_WEBHOOK_TOKENS
+    ):
+        return "material status webhook token is not configured"
+    if not MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID:
+        return "material status fallback chat is not configured"
+    if not (FEISHU_APP_ID and FEISHU_APP_SECRET):
+        return "Feishu app is not configured"
+    if not (
+        ADMIN_MAPPING_MYSQL_HOST
+        and ADMIN_MAPPING_MYSQL_USER
+        and (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME)
+    ):
+        return "admin mapping database is not configured"
+    return ""
+
+
+def material_status_webhook_token_valid(authorization_header):
+    matched = False
+    for expected_token in MATERIAL_STATUS_WEBHOOK_TOKENS:
+        current = (
+            material_status_webhook_token_eligible(expected_token)
+            and material_status_service.validate_bearer_authorization(
+                authorization_header,
+                expected_token,
+            )
+        )
+        matched = bool(current) or matched
+    return matched
+
+
+def get_material_status_outbox():
+    global MATERIAL_STATUS_OUTBOX
+    with MATERIAL_STATUS_OUTBOX_LOCK:
+        if MATERIAL_STATUS_OUTBOX is None:
+            MATERIAL_STATUS_OUTBOX = material_status_service.MaterialStatusOutbox(
+                JOB_DB_PATH
+            )
+        return MATERIAL_STATUS_OUTBOX
+
+
+def get_material_status_optimizer_cache():
+    global MATERIAL_STATUS_MAPPING_CACHE
+    with MATERIAL_STATUS_MAPPING_CACHE_LOCK:
+        if MATERIAL_STATUS_MAPPING_CACHE is None:
+            MATERIAL_STATUS_MAPPING_CACHE = (
+                material_status_service.MaterialStatusOptimizerCache(
+                    JOB_DB_PATH
+                )
+            )
+        return MATERIAL_STATUS_MAPPING_CACHE
+
+
+def run_material_status_mapping_query(query, timeout_seconds=None):
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not (
+        ADMIN_MAPPING_MYSQL_HOST
+        and ADMIN_MAPPING_MYSQL_USER
+        and database
+    ):
+        raise MaterialStatusDeliveryError(
+            "mapping_not_configured",
+            "admin mapping database is not configured",
+            retryable=False,
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_]+", database):
+        raise MaterialStatusDeliveryError(
+            "mapping_not_configured",
+            "admin mapping database name is invalid",
+            retryable=False,
+        )
+    if timeout_seconds is None:
+        timeout_seconds = ADMIN_MAPPING_MYSQL_TIMEOUT
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError, OverflowError):
+        timeout_seconds = ADMIN_MAPPING_MYSQL_TIMEOUT
+    timeout_seconds = max(2, min(timeout_seconds, 300))
+    cmd = ["mysql", "-h", ADMIN_MAPPING_MYSQL_HOST]
+    if ADMIN_MAPPING_MYSQL_PORT:
+        cmd.extend(["-P", ADMIN_MAPPING_MYSQL_PORT])
+    cmd.extend(
+        [
+            "-u",
+            ADMIN_MAPPING_MYSQL_USER,
+            "--default-character-set=utf8mb4",
+            "--connect-timeout=%s"
+            % max(1, min(ADMIN_MAPPING_MYSQL_TIMEOUT, 30)),
+            "-N",
+            "-B",
+            database,
+            "-e",
+            query,
+        ]
+    )
+    mysql_env = os.environ.copy()
+    mysql_env["MYSQL_PWD"] = ADMIN_MAPPING_MYSQL_PASSWORD
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            env=mysql_env,
+            universal_newlines=True,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise MaterialStatusDeliveryError(
+            "mapping_unavailable",
+            "admin mapping query unavailable: %s" % exc.__class__.__name__,
+            retryable=True,
+        ) from None
+    if result.returncode != 0:
+        raise MaterialStatusDeliveryError(
+            "mapping_unavailable",
+            "admin mapping query failed with code %s" % result.returncode,
+            retryable=True,
+        )
+    return [
+        line.split("\t")
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def build_material_status_optimizer_cache_entries(rows):
+    grouped = {}
+    for row in rows or ():
+        if len(row) < 2:
+            continue
+        admin_user_id = str(row[0] or "").strip()
+        optimizer_name = str(row[1] or "").strip()
+        email = str(row[2] if len(row) > 2 else "").strip()
+        if not admin_user_id.isdigit() or not optimizer_name:
+            continue
+        item = grouped.setdefault(
+            optimizer_name,
+            {"admin_user_ids": set(), "emails": {}},
+        )
+        item["admin_user_ids"].add(admin_user_id)
+        if email:
+            item["emails"].setdefault(email.lower(), email)
+    entries = []
+    for optimizer_name, item in grouped.items():
+        if len(item["admin_user_ids"]) != 1 or len(item["emails"]) != 1:
+            continue
+        try:
+            entry = material_status_service.normalize_optimizer_cache_entry(
+                optimizer_name,
+                next(iter(item["admin_user_ids"])),
+                next(iter(item["emails"].values())),
+            )
+        except material_status_service.MaterialStatusError:
+            continue
+        entries.append(entry)
+    entries.sort(key=lambda item: item["optimizer_name"])
+    return entries
+
+
+def refresh_material_status_optimizer_cache():
+    database = (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
+    rows = run_material_status_mapping_query(
+        "SELECT CAST(u.id AS CHAR),u.username,g.email "
+        "FROM `%s`.admin_users AS u "
+        "LEFT JOIN `%s`.admin_user_group AS g "
+        "ON g.sub_user_id=u.id AND g.status=0 AND TRIM(g.email)<>'' "
+        "WHERE TRIM(u.username)<>'' "
+        "ORDER BY u.id ASC,g.id ASC LIMIT 10000"
+        % (database, database),
+        timeout_seconds=MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS,
+    )
+    entries = build_material_status_optimizer_cache_entries(rows)
+    if not entries:
+        raise MaterialStatusDeliveryError(
+            "mapping_invalid",
+            "admin mapping refresh returned no usable optimizer entries",
+            retryable=True,
+        )
+    count = get_material_status_optimizer_cache().replace_all(entries)
+    logging.info(
+        "material status optimizer cache refreshed entries=%s",
+        count,
+    )
+    return count
+
+
+def material_status_mapping_cache_refresh_loop():
+    while not MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.is_set():
+        try:
+            refresh_material_status_optimizer_cache()
+        except MaterialStatusDeliveryError as exc:
+            logging.warning(
+                "material status optimizer cache refresh failed code=%s error=%s",
+                exc.code,
+                str(exc),
+            )
+        except Exception:
+            logging.exception(
+                "material status optimizer cache refresh failed"
+            )
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.wait(
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS
+        )
+
+
+def start_material_status_mapping_cache_refresh_worker():
+    global MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+    with MATERIAL_STATUS_MAPPING_CACHE_REFRESH_LOCK:
+        if (
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD is not None
+            and MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD.is_alive()
+        ):
+            return MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+        get_material_status_optimizer_cache()
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.clear()
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD = threading.Thread(
+            target=material_status_mapping_cache_refresh_loop,
+            name="material-status-mapping-cache-refresh",
+            daemon=True,
+        )
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD.start()
+        return MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+
+
+def resolve_material_status_optimizer_from_database(optimizer_name):
+    optimizer_name = str(optimizer_name or "").strip()
+    if not optimizer_name:
+        return {
+            "matched": False,
+            "code": "optimizer_name_missing",
+            "message": "接口未提供优化师名称",
+        }
+    database = (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
+    optimizer_name_hex = optimizer_name.encode("utf-8").hex()
+    user_rows = run_material_status_mapping_query(
+        "SELECT CAST(id AS CHAR), username "
+        "FROM `%s`.admin_users "
+        "WHERE BINARY TRIM(username)="
+        "BINARY TRIM(CONVERT(0x%s USING utf8mb4)) "
+        "LIMIT 2"
+        % (database, optimizer_name_hex)
+    )
+    if not user_rows:
+        return {
+            "matched": False,
+            "code": "optimizer_not_found",
+            "message": "admin_users.username 未找到完全匹配的用户",
+        }
+    if len(user_rows) != 1:
+        return {
+            "matched": False,
+            "code": "optimizer_ambiguous",
+            "message": "admin_users.username 匹配到多个用户",
+        }
+    admin_user_id = str(user_rows[0][0] or "").strip()
+    if not admin_user_id.isdigit():
+        raise MaterialStatusDeliveryError(
+            "mapping_invalid",
+            "admin user id is invalid",
+            retryable=False,
+        )
+    email_rows = run_material_status_mapping_query(
+        "SELECT email "
+        "FROM `%s`.admin_user_group "
+        "WHERE sub_user_id=%s AND status=0 AND TRIM(email)<>'' "
+        "ORDER BY id ASC LIMIT 20"
+        % (database, admin_user_id)
+    )
+    emails = {}
+    for row in email_rows:
+        email = str(row[0] if row else "").strip()
+        if email:
+            emails.setdefault(email.lower(), email)
+    if not emails:
+        return {
+            "matched": False,
+            "code": "optimizer_email_missing",
+            "message": "admin_user_group 未配置可用 email",
+            "admin_user_id": admin_user_id,
+        }
+    if len(emails) != 1:
+        return {
+            "matched": False,
+            "code": "optimizer_email_ambiguous",
+            "message": "admin_user_group 存在多个不同 email",
+            "admin_user_id": admin_user_id,
+        }
+    return {
+        "matched": True,
+        "admin_user_id": admin_user_id,
+        "email": next(iter(emails.values())),
+    }
+
+
+def resolve_material_status_optimizer(optimizer_name):
+    optimizer_name = str(optimizer_name or "").strip()
+    if not optimizer_name:
+        return resolve_material_status_optimizer_from_database(optimizer_name)
+    try:
+        cached = get_material_status_optimizer_cache().get(optimizer_name)
+    except Exception:
+        logging.exception(
+            "material status optimizer cache read failed optimizer=%s",
+            optimizer_name,
+        )
+        cached = None
+    if cached:
+        return {
+            "matched": True,
+            "admin_user_id": cached["admin_user_id"],
+            "email": cached["email"],
+        }
+    resolution = resolve_material_status_optimizer_from_database(
+        optimizer_name
+    )
+    if resolution.get("matched"):
+        try:
+            get_material_status_optimizer_cache().upsert(
+                optimizer_name,
+                resolution["admin_user_id"],
+                resolution["email"],
+            )
+        except Exception:
+            logging.exception(
+                "material status optimizer cache write failed optimizer=%s",
+                optimizer_name,
+            )
+    return resolution
+
+
+def mask_material_status_email(email):
+    email = str(email or "").strip()
+    if "@" not in email:
+        return ""
+    local, domain = email.rsplit("@", 1)
+    if not local or not domain:
+        return ""
+    return "%s***@%s" % (local[:1], domain)
+
+
+def invalidate_material_status_feishu_token(expected_token):
+    expected_token = str(expected_token or "")
+    with AUTH_CACHE_LOCK:
+        cached_token = str(
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE.get("token") or ""
+        )
+        if expected_token and cached_token == expected_token:
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE["token"] = ""
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE["expires_at"] = 0
+
+
+def material_status_feishu_response(
+    response,
+    operation,
+    tenant_access_token="",
+):
+    try:
+        data = response.json()
+    except Exception:
+        raise MaterialStatusDeliveryError(
+            "%s_invalid_response" % operation,
+            "Feishu %s returned invalid JSON" % operation,
+            retryable=response.status_code >= 500,
+            uncertain=(operation == "message_send"),
+        ) from None
+    if not isinstance(data, dict) or "code" not in data:
+        raise MaterialStatusDeliveryError(
+            "%s_invalid_response" % operation,
+            "Feishu %s response is missing a result code" % operation,
+            retryable=True,
+            uncertain=(operation == "message_send"),
+        )
+    feishu_code = data.get("code")
+    retryable_codes = {
+        99991400,
+        99991401,
+        99991663,
+        99991664,
+        99991668,
+    }
+    refresh_token_codes = {
+        99991661,
+        99991663,
+        99991664,
+        99991668,
+    }
+    if response.status_code >= 400 or feishu_code != 0:
+        retryable = (
+            response.status_code == 429
+            or response.status_code >= 500
+            or feishu_code in retryable_codes
+        )
+        refresh_token = feishu_code in refresh_token_codes
+        if refresh_token:
+            invalidate_material_status_feishu_token(
+                tenant_access_token
+            )
+        raise MaterialStatusDeliveryError(
+            "%s_failed" % operation,
+            "Feishu %s failed: http=%s code=%s message=%s"
+            % (
+                operation,
+                response.status_code,
+                feishu_code,
+                data.get("msg") or "",
+            ),
+            retryable=retryable,
+            refresh_token=refresh_token,
+            uncertain=(operation == "message_send" and response.status_code >= 500),
+        )
+    return data
+
+
+def lookup_material_status_feishu_open_id(email):
+    data = None
+    for auth_attempt in range(2):
+        try:
+            tenant_access_token = get_feishu_tenant_access_token()
+            response = requests.post(
+                FEISHU_BATCH_GET_ID_URL,
+                headers={
+                    "Authorization": "Bearer " + tenant_access_token,
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json={"emails": [str(email or "").strip()]},
+                timeout=15,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_lookup_unavailable",
+                "Feishu user lookup unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        except Exception as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_lookup_unavailable",
+                "Feishu user lookup unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        try:
+            data = material_status_feishu_response(
+                response,
+                "user_lookup",
+                tenant_access_token=tenant_access_token,
+            )
+            break
+        except MaterialStatusDeliveryError as exc:
+            if exc.refresh_token and auth_attempt == 0:
+                continue
+            raise
+    user_list = ((data.get("data") or {}).get("user_list") or [])
+    open_ids = []
+    for item in user_list:
+        if not isinstance(item, dict):
+            continue
+        open_id = str(
+            item.get("user_id")
+            or item.get("open_id")
+            or ""
+        ).strip()
+        if open_id.startswith("ou_") and open_id not in open_ids:
+            open_ids.append(open_id)
+    if not open_ids:
+        return {
+            "matched": False,
+            "code": "feishu_user_not_found",
+            "message": "email 未匹配到飞书 open_id",
+        }
+    if len(open_ids) != 1:
+        return {
+            "matched": False,
+            "code": "feishu_user_ambiguous",
+            "message": "email 匹配到多个飞书 open_id",
+        }
+    return {"matched": True, "open_id": open_ids[0]}
+
+
+def send_material_status_feishu_text(
+    receive_id_type,
+    receive_id,
+    text,
+    message_uuid,
+):
+    receive_id = str(receive_id or "").strip()
+    if not receive_id:
+        raise MaterialStatusDeliveryError(
+            "feishu_receive_id_missing",
+            "Feishu receive id is missing",
+            retryable=False,
+        )
+    message_uuid = str(message_uuid or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,50}", message_uuid):
+        raise MaterialStatusDeliveryError(
+            "feishu_message_uuid_invalid",
+            "Feishu message uuid is invalid",
+            retryable=False,
+        )
+    data = None
+    send_outcome_uncertain = False
+    for auth_attempt in range(2):
+        try:
+            tenant_access_token = get_feishu_tenant_access_token()
+            response = requests.post(
+                FEISHU_MESSAGE_URL
+                + "?"
+                + urlencode({"receive_id_type": receive_id_type}),
+                headers={
+                    "Authorization": "Bearer " + tenant_access_token,
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json={
+                    "receive_id": receive_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                    "uuid": message_uuid,
+                },
+                timeout=15,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_send_unavailable",
+                "Feishu send unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+                uncertain=True,
+            ) from None
+        except Exception as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_send_unavailable",
+                "Feishu send unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+                uncertain=True,
+            ) from None
+        try:
+            data = material_status_feishu_response(
+                response,
+                "message_send",
+                tenant_access_token=tenant_access_token,
+            )
+            break
+        except MaterialStatusDeliveryError as exc:
+            # Keep any earlier send uncertainty across the internal token retry.
+            # A later explicit rejection cannot prove the first send failed.
+            send_outcome_uncertain = send_outcome_uncertain or exc.uncertain
+            exc.uncertain = send_outcome_uncertain
+            if exc.refresh_token and auth_attempt == 0:
+                continue
+            raise
+    message_id = str(
+        (data.get("data") or {}).get("message_id")
+        or data.get("message_id")
+        or ""
+    ).strip()
+    if not message_id:
+        raise MaterialStatusDeliveryError(
+            "message_send_invalid_response",
+            "Feishu message_send response is missing message_id",
+            retryable=True,
+            uncertain=True,
+        )
+    return {
+        "message_id": message_id,
+        "status_code": response.status_code,
+    }
+
+
+def material_status_retry_delay(attempt_count):
+    index = max(
+        0,
+        min(
+            len(MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS) - 1,
+            int(attempt_count or 1) - 1,
+        ),
+    )
+    return MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS[index]
+
+
+def material_status_record_audit(event, action, detail):
+    safe_detail = {
+        "event_id": material_status_service.format_event_id(event["id"]),
+        "resource_id": str((event.get("payload") or {}).get("resource_id") or ""),
+        "optimizer_name": str(
+            (event.get("payload") or {}).get("optimizer_name") or ""
+        ),
+    }
+    safe_detail.update(
+        {
+            str(key): value
+            for key, value in (detail or {}).items()
+            if key in ("delivery_kind", "failure_code", "attempt_count")
+        }
+    )
+    try:
+        append_audit_log(
+            None,
+            action,
+            "material_status_broadcast",
+            material_status_service.format_event_id(event["id"]),
+            safe_detail,
+        )
+    except Exception:
+        logging.exception(
+            "material status audit write failed event=%s",
+            material_status_service.format_event_id(event["id"]),
+        )
+
+
+def material_status_retry_or_dead(
+    event,
+    outbox,
+    error_code,
+    error_message,
+    result=None,
+):
+    if int(event.get("attempt_count") or 0) < int(
+        event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+    ):
+        return outbox.schedule_retry(
+            event["id"],
+            event["lease_id"],
+            error_code,
+            error_message,
+            delay_seconds=material_status_retry_delay(
+                event.get("attempt_count")
+            ),
+            result=result,
+        )
+    terminal = outbox.mark_dead_letter(
+        event["id"],
+        event["lease_id"],
+        error_code,
+        error_message,
+        result=result,
+    )
+    material_status_record_audit(
+        terminal,
+        "material_status_broadcast_dead_letter",
+        {
+            "failure_code": error_code,
+            "attempt_count": terminal.get("attempt_count", 0),
+        },
+    )
+    return terminal
+
+
+def deliver_material_status_fallback(
+    event,
+    outbox,
+    reason_code,
+    reason_message,
+    resolution=None,
+):
+    resolution = resolution or {}
+    message = material_status_service.format_fallback_message(
+        event["payload"],
+        reason_code=reason_code,
+        reason_text=reason_message,
+        event_id=event["id"],
+    )
+    result_meta = {"failure_code": reason_code}
+    admin_user_id = str(resolution.get("admin_user_id") or "").strip()
+    if admin_user_id:
+        result_meta["admin_user_id"] = admin_user_id
+    masked_email = mask_material_status_email(resolution.get("email"))
+    if masked_email:
+        result_meta["masked_email"] = masked_email
+    try:
+        sent = send_material_status_feishu_text(
+            "chat_id",
+            MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
+            message,
+            "mst-%s-fallback"
+            % material_status_service.format_event_id(event["id"]),
+        )
+        if sent.get("message_id"):
+            result_meta["feishu_message_id"] = sent["message_id"]
+        delivered = outbox.mark_delivered(
+            event["id"],
+            event["lease_id"],
+            delivery_kind="fallback",
+            result=result_meta,
+        )
+        material_status_record_audit(
+            delivered,
+            "material_status_broadcast_delivered",
+            {
+                "delivery_kind": "fallback",
+                "failure_code": reason_code,
+                "attempt_count": delivered.get("attempt_count", 0),
+            },
+        )
+        return delivered
+    except MaterialStatusDeliveryError as exc:
+        return material_status_retry_or_dead(
+            event,
+            outbox,
+            "fallback_send_failed",
+            str(exc),
+            result={"failure_code": reason_code},
+        )
+
+
+def process_material_status_event(event, outbox=None):
+    outbox = outbox or get_material_status_outbox()
+    payload = event.get("payload") or {}
+    if event.get("last_error_code") == "fallback_send_failed":
+        prior_result = event.get("result") or {}
+        prior_reason = (
+            prior_result.get("failure_code") or "optimizer_not_matched"
+        )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            prior_reason,
+            "",
+        )
+    try:
+        resolution = resolve_material_status_optimizer(
+            payload.get("optimizer_name")
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={"failure_code": exc.code},
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            exc.code,
+            str(exc),
+        )
+    if not resolution.get("matched"):
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            resolution.get("code") or "optimizer_not_found",
+            resolution.get("message") or "未匹配到对应优化师",
+            resolution=resolution,
+        )
+
+    try:
+        feishu_user = lookup_material_status_feishu_open_id(
+            resolution["email"]
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={
+                    "admin_user_id": resolution["admin_user_id"],
+                    "masked_email": mask_material_status_email(
+                        resolution["email"]
+                    ),
+                    "failure_code": exc.code,
+                },
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            exc.code,
+            str(exc),
+            resolution=resolution,
+        )
+    if not feishu_user.get("matched"):
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            feishu_user.get("code") or "feishu_user_not_found",
+            feishu_user.get("message") or "email 未匹配到飞书用户",
+            resolution=resolution,
+        )
+
+    private_message = material_status_service.format_private_message(
+        payload,
+        event_id=event["id"],
+    )
+    try:
+        sent = send_material_status_feishu_text(
+            "open_id",
+            feishu_user["open_id"],
+            private_message,
+            "mst-%s-private"
+            % material_status_service.format_event_id(event["id"]),
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={
+                    "admin_user_id": resolution["admin_user_id"],
+                    "masked_email": mask_material_status_email(
+                        resolution["email"]
+                    ),
+                    "failure_code": exc.code,
+                },
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            "private_send_failed",
+            str(exc),
+            resolution=resolution,
+        )
+
+    result_meta = {
+        "admin_user_id": resolution["admin_user_id"],
+        "masked_email": mask_material_status_email(resolution["email"]),
+    }
+    if sent.get("message_id"):
+        result_meta["feishu_message_id"] = sent["message_id"]
+    delivered = outbox.mark_delivered(
+        event["id"],
+        event["lease_id"],
+        delivery_kind="private",
+        result=result_meta,
+    )
+    material_status_record_audit(
+        delivered,
+        "material_status_broadcast_delivered",
+        {
+            "delivery_kind": "private",
+            "attempt_count": delivered.get("attempt_count", 0),
+        },
+    )
+    return delivered
+
+
+def material_status_worker_loop():
+    outbox = get_material_status_outbox()
+    while not MATERIAL_STATUS_WORKER_STOP.is_set():
+        try:
+            event = outbox.claim_next(
+                lease_seconds=MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS
+            )
+        except Exception:
+            logging.exception("material status outbox claim failed")
+            MATERIAL_STATUS_WORKER_STOP.wait(
+                MATERIAL_STATUS_WEBHOOK_POLL_SECONDS
+            )
+            continue
+        if not event:
+            MATERIAL_STATUS_WORKER_STOP.wait(
+                MATERIAL_STATUS_WEBHOOK_POLL_SECONDS
+            )
+            continue
+        try:
+            process_material_status_event(event, outbox=outbox)
+        except Exception as exc:
+            logging.exception(
+                "material status processing failed event=%s",
+                material_status_service.format_event_id(event["id"]),
+            )
+            try:
+                material_status_retry_or_dead(
+                    event,
+                    outbox,
+                    "internal_error",
+                    "%s: %s" % (exc.__class__.__name__, exc),
+                    result={"failure_code": "internal_error"},
+                )
+            except Exception:
+                logging.exception(
+                    "material status failure state write failed event=%s",
+                    material_status_service.format_event_id(event["id"]),
+                )
+
+
+def start_material_status_worker():
+    global MATERIAL_STATUS_WORKER_THREAD
+    with MATERIAL_STATUS_WORKER_LOCK:
+        if (
+            MATERIAL_STATUS_WORKER_THREAD is not None
+            and MATERIAL_STATUS_WORKER_THREAD.is_alive()
+        ):
+            return MATERIAL_STATUS_WORKER_THREAD
+        get_material_status_outbox()
+        MATERIAL_STATUS_WORKER_STOP.clear()
+        MATERIAL_STATUS_WORKER_THREAD = threading.Thread(
+            target=material_status_worker_loop,
+            name="material-status-broadcast-worker",
+            daemon=True,
+        )
+        MATERIAL_STATUS_WORKER_THREAD.start()
+        return MATERIAL_STATUS_WORKER_THREAD
+
+
+def material_status_worker_ready():
+    try:
+        thread = start_material_status_worker()
+        return bool(thread and thread.is_alive())
+    except Exception:
+        logging.exception("material status broadcast worker is unavailable")
+        return False
+
+
+MATERIAL_REPLICATION_WEBHOOK_TOKENS = tuple(
+    item.strip()
+    for item in os.environ.get("MATERIAL_REPLICATION_WEBHOOK_TOKENS", "").split(",")
+    if item.strip()
+)
+MATERIAL_REPLICATION_RUNTIME = None
+MATERIAL_REPLICATION_RUNTIME_LOCK = threading.Lock()
+
+
+def material_replication_record_audit(row):
+    append_audit_log(
+        None,
+        "material_replication_" + row["status"],
+        "material_replication_broadcast",
+        material_replication_service.format_batch_id(row["id"]),
+        {
+            "status": row["status"],
+            "delivery_kind": row.get("delivery_kind", ""),
+            "attempt_count": row["attempt_count"],
+            "failure_code": row.get("last_error_code", ""),
+        },
+    )
+
+
+def get_material_replication_runtime():
+    global MATERIAL_REPLICATION_RUNTIME
+    with MATERIAL_REPLICATION_RUNTIME_LOCK:
+        if MATERIAL_REPLICATION_RUNTIME is None:
+            MATERIAL_REPLICATION_RUNTIME = material_replication_delivery.ReplicationRuntime(
+                JOB_DB_PATH,
+                MATERIAL_REPLICATION_WEBHOOK_TOKENS,
+                MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
+                resolve_material_status_optimizer,
+                lookup_material_status_feishu_open_id,
+                send_material_status_feishu_text,
+                dependencies_ready=lambda: bool(
+                    FEISHU_APP_ID and FEISHU_APP_SECRET
+                    and ADMIN_MAPPING_MYSQL_HOST and ADMIN_MAPPING_MYSQL_USER
+                    and (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME)
+                ),
+                audit=material_replication_record_audit,
+            )
+        return MATERIAL_REPLICATION_RUNTIME
+
+
+def handle_material_replication_webhook_request(handler):
+    material_replication_delivery.handle_request(
+        handler, get_material_replication_runtime(), json_response,
+    )
+
+
+def handle_material_status_webhook_request(handler):
+    config_error = material_status_webhook_config_error()
+    if config_error:
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "素材状态播报接口暂未配置",
+            },
+            no_store=True,
+        )
+        return
+    if not material_status_webhook_token_valid(
+        handler.headers.get("Authorization", "")
+    ):
+        json_response(
+            handler,
+            401,
+            {
+                "code": "invalid_token",
+                "message": "Bearer Token 缺失或错误",
+            },
+            no_store=True,
+            extra_headers={"WWW-Authenticate": "Bearer"},
+        )
+        return
+    if not material_status_worker_ready():
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "素材状态播报投递服务暂不可用",
+            },
+            no_store=True,
+        )
+        return
+    content_type = str(handler.headers.get("Content-Type") or "").lower()
+    if content_type.split(";", 1)[0].strip() != "application/json":
+        json_response(
+            handler,
+            415,
+            {
+                "code": "unsupported_media_type",
+                "message": "Content-Type 必须为 application/json",
+            },
+            no_store=True,
+        )
+        return
+    if str(handler.headers.get("Transfer-Encoding") or "").strip():
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_request",
+                "message": "不支持 chunked 请求体",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        content_length = int(handler.headers.get("Content-Length", ""))
+    except (TypeError, ValueError):
+        content_length = -1
+    if content_length < 0:
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_request",
+                "message": "缺少有效 Content-Length",
+            },
+            no_store=True,
+        )
+        return
+    if content_length > MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES:
+        handler.close_connection = True
+        json_response(
+            handler,
+            413,
+            {
+                "code": "payload_too_large",
+                "message": "请求体超过 32 KiB",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        raw_body = handler.rfile.read(content_length)
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_json",
+                "message": "请求体不是有效 UTF-8 JSON",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        source_ip = material_status_service.extract_audit_source_ip(
+            handler.client_address[0],
+            handler.headers.get("X-Real-IP", ""),
+        )
+        event = get_material_status_outbox().enqueue(
+            handler.headers.get(
+                material_status_service.IDEMPOTENCY_KEY_HEADER
+            ),
+            payload,
+            max_attempts=MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS,
+            source_ip=source_ip,
+        )
+    except material_status_service.MaterialStatusError as exc:
+        json_response(
+            handler,
+            exc.status,
+            {
+                "code": exc.code,
+                "message": str(exc),
+            },
+            no_store=True,
+        )
+        return
+    except Exception:
+        logging.exception("material status event enqueue failed")
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "事件暂时无法可靠落库",
+            },
+            no_store=True,
+        )
+        return
+    created = bool(event.pop("created", False))
+    json_response(
+        handler,
+        202,
+        {
+            "code": "accepted" if created else "duplicate_accepted",
+            "message": "事件已接收，正在投递" if created else "事件已接收",
+            "event_id": material_status_service.format_event_id(event["id"]),
+            "duplicate": not created,
+            "delivery_status": event.get("status", ""),
+            "received_at": event.get("created_at", ""),
+        },
+        no_store=True,
+    )
+
+
 def build_job_completion_message(job):
 
 
@@ -40116,6 +49326,9 @@ def mark_job_notification(job, notified_at="", error=""):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(conn, job["job_id"], job["_fenced_lease"], allow_done=True)
             conn.execute(
 
 
@@ -47999,6 +57212,61 @@ def delete_session(session_token):
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         return json.load(handle)
+
+
+def navigation_item_access(session, item_key, config):
+    """Evaluate a page against the same group/item rules used by quick-nav.js."""
+    unavailable = {"allowed": False, "error": "navigation_item_unavailable"}
+    if not session or not str(item_key or "").strip() or not isinstance(config, list):
+        return unavailable
+
+    target_key = str(item_key).strip()
+    denied = None
+    for group in config:
+        if not isinstance(group, dict):
+            continue
+        items = group.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or str(item.get("key", "")).strip() != target_key:
+                continue
+            if group.get("enabled") is False or item.get("enabled") is False:
+                continue
+            if (
+                (group.get("adminOnly") or item.get("adminOnly"))
+                and session.get("role") != "admin"
+            ):
+                denied = denied or {"allowed": False, "error": "admin_required"}
+                continue
+
+            required_modules = []
+            for node in (group, item):
+                module_key = str(node.get("module", "") or "").strip()
+                if module_key and module_key not in required_modules:
+                    required_modules.append(module_key)
+            missing_module = next(
+                (
+                    module_key
+                    for module_key in required_modules
+                    if not has_module_permission(session, module_key)
+                ),
+                "",
+            )
+            if missing_module:
+                if denied is None or denied.get("error") != "admin_required":
+                    denied = {
+                        "allowed": False,
+                        "error": "permission_denied",
+                        "module": missing_module,
+                    }
+                continue
+            return {
+                "allowed": True,
+                "item_key": target_key,
+                "modules": required_modules,
+            }
+    return denied or unavailable
 
 
 def validate_navigation_config(config):
@@ -57947,419 +67215,40 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
 
 
 def run_cmd(cmd, timeout=None):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     logging.info("running: %s", " ".join(cmd))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    proc = subprocess.run(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        cmd,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stdout=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stderr=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        universal_newlines=True,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        timeout=timeout,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    runtime = globals().get("drama_async_runtime")
+    context = runtime.capture_context() if runtime else None
+    if not context:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=timeout)
+    else:
+        # Process tracking is scoped to drama synthesis; other callers are unchanged.
+        limit = timeout if timeout is not None else int(os.environ.get("DRAMA_GPU_SUBPROCESS_TIMEOUT", "43200"))
+        child = None
+        try:
+            with runtime.process_launch():
+                child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         universal_newlines=True, start_new_session=True)
+                runtime.record_process(child.pid)
+            out, err = child.communicate(timeout=limit)
+        except BaseException:
+            if child is not None:
+                if child.poll() is None:
+                    try:
+                        if os.name == "posix":
+                            os.killpg(child.pid, signal.SIGKILL)
+                        else:
+                            child.kill()
+                    except ProcessLookupError:
+                        pass
+                child.wait()
+            raise
+        finally:
+            if child is not None and child.poll() is not None:
+                runtime.clear_process(child.pid)
+        proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     if proc.returncode != 0:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        raise RuntimeError(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            "command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        raise RuntimeError("command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip()))
     return proc
 
 
@@ -59968,24 +68857,57 @@ def normalize_episode(source_path, output_path):
     ])
 
 
-def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="48000"):
+def normalize_concat_segment(source_path, output_path, plan):
+    plan = validate_concat_normalization_plan(plan)
+    target, source, audio = plan["target"], plan["source"], plan["audio"]
+    target_width, target_height = target["width"], target["height"]
+    sar_numerator, sar_denominator = source["sar_numerator"], source["sar_denominator"]
+    scale_factor = "min(%d/(iw*%d/%d),%d/ih)" % (
+        target_width, sar_numerator, sar_denominator, target_height,
+    )
+    deinterlace_filter = (
+        "bwdif=mode=send_frame:parity=%s:deint=all," % source["deinterlace_parity"]
+        if source["scan_mode"] == "interlaced" else ""
+    )
+    video_filter = deinterlace_filter + (
+        "fps=25,"
+        "scale=w='max(2,trunc(%s*(iw*%d/%d)/2)*2)':"
+        "h='max(2,trunc(%s*ih/2)*2)':eval=init,"
+        "setsar=1,"
+        "colorspace=ispace=%s:itrc=%s:iprimaries=%s:irange=%s:"
+        "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+        "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black"
+    ) % (
+        scale_factor, sar_numerator, sar_denominator, scale_factor,
+        source["color_space"], source["color_transfer"], source["color_primaries"], source["color_range"],
+        target_width, target_height,
+    )
     ensure_dir(os.path.dirname(output_path))
     tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
     if os.path.exists(tmp_output_path):
         os.remove(tmp_output_path)
     try:
-        run_cmd([
-            FFMPEG, "-y", "-i", source_path,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-vf", "fps=%s,format=yuv420p,setsar=1" % fps,
-            "-r", str(fps),
+        command = [FFMPEG, "-y", "-i", source_path]
+        if audio["mode"] == "silence":
+            command.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+        command.extend([
+            "-map", "0:v:0", "-map", "1:a:0" if audio["mode"] == "silence" else "0:a:0",
+            "-vf", video_filter,
+            "-r", "25",
             *video_encode_args(),
-            "-c:a", "aac", "-b:a", "128k", "-ar", str(audio_rate), "-ac", "2",
-            "-af", "aresample=async=1:first_pts=0",
+            "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+            "-video_track_timescale", "12800",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+            "-color_primaries", "bt709", "-chroma_sample_location", "left",
+            "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp", "-b:a", "128k",
+            "-ar", str(audio["sample_rate"]), "-ac", str(audio["channels"]), "-tag:a", "mp4a",
+            "-af", ("aresample=async=1:first_pts=0,apad"
+                    if audio["mode"] == "resample" else "aresample=async=1:first_pts=0"),
             "-movflags", "+faststart",
             "-shortest",
             tmp_output_path,
         ])
+        run_cmd(command)
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("normalized concat segment is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -59997,42 +68919,42 @@ def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="480
 
 
 def concat_segments_need_normalization(segment_paths):
-    signatures = []
-    for path in segment_paths:
-        data = probe_media_stream_info(path)
-        streams = data.get("streams") or []
-        video = next((item for item in streams if item.get("codec_type") == "video"), None)
-        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-        if not video or not audio:
-            return True
-        signatures.append((
-            video.get("codec_name") or "",
-            int(video.get("width") or 0),
-            int(video.get("height") or 0),
-            video.get("avg_frame_rate") or video.get("r_frame_rate") or "",
-            video.get("time_base") or "",
-            audio.get("codec_name") or "",
-            audio.get("sample_rate") or "",
-            int(audio.get("channels") or 0),
-            audio.get("time_base") or "",
-        ))
-    return len(set(signatures)) > 1
+    if len(segment_paths) <= 1:
+        return False
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    signatures = [drama_concat_signature(info) for info, _ in snapshots]
+    for path, (info, anchor) in zip(segment_paths, snapshots):
+        verify_media_source_anchor(path, info, anchor)
+    return not concat_signatures_are_compatible(signatures)
 
 
 def prepare_concat_segments(segment_paths, output_dir):
-    if len(segment_paths) <= 1 or not concat_segments_need_normalization(segment_paths):
+    if len(segment_paths) <= 1:
+        return segment_paths
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    source_infos = [info for info, _ in snapshots]
+    source_anchors = [anchor for _, anchor in snapshots]
+    if concat_signatures_are_compatible(drama_concat_signature(info) for info in source_infos):
+        for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+            verify_media_source_anchor(path, info, anchor)
         return segment_paths
     ensure_dir(output_dir)
     normalized_paths = []
-    for index, source_path in enumerate(segment_paths):
+    normalized_signatures = []
+    for index, (source_path, source_info) in enumerate(zip(segment_paths, source_infos)):
         normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
-        if (
-            not file_ready(normalized_path)
-            or not valid_video_file(normalized_path)
-            or not valid_av_duration_alignment(normalized_path)
-        ):
-            normalize_concat_segment(source_path, normalized_path)
+        normalized_path, signature, _ = prepare_normalized_concat_segment(
+            source_path, normalized_path, source_info=source_info, source_anchor=source_anchors[index],
+            reference_info=source_infos[0], reference_source=segment_paths[0],
+            reference_anchor=source_anchors[0], segment_index=index,
+            normalize=normalize_concat_segment, probe=probe_media_stream_info,
+            normalization_profile=NORMALIZATION_PROFILE,
+        )
         normalized_paths.append(normalized_path)
+        normalized_signatures.append(signature)
+    validate_normalized_concat_signatures(normalized_signatures)
+    for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+        verify_media_source_anchor(path, info, anchor)
     return normalized_paths
 
 
@@ -60119,16 +69041,111 @@ def probe_intro_reference_timing(reference_path):
     return timing
 
 
+def validate_intro_cover_color_contract(cover_path):
+    """Parse JPEG APP markers and accept only the fixed JFIF/sRGB contract."""
+    saw_jfif = False
+    saw_scan = False
+    header_bytes = 2
+    try:
+        if os.path.islink(cover_path) or not os.path.isfile(cover_path):
+            raise RuntimeError("intro cover color contract unsupported")
+        with open(cover_path, "rb") as handle:
+            if handle.read(2) != b"\xff\xd8":
+                raise RuntimeError("intro cover color contract unsupported")
+            for _ in range(1024):
+                prefix = handle.read(1)
+                if prefix != b"\xff":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker = handle.read(1)
+                while marker == b"\xff":
+                    marker = handle.read(1)
+                if len(marker) != 1 or marker == b"\x00":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker_value = marker[0]
+                header_bytes += 2
+                if marker_value == 0xD9:
+                    break
+                if marker_value in {0x01, *range(0xD0, 0xD8)}:
+                    continue
+                length_bytes = handle.read(2)
+                if len(length_bytes) != 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                segment_length = int.from_bytes(length_bytes, "big")
+                if segment_length < 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                payload = handle.read(segment_length - 2)
+                if len(payload) != segment_length - 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                header_bytes += segment_length
+                if header_bytes > 4 * 1024 * 1024:
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xE0 and payload.startswith(b"JFIF\x00") and len(payload) >= 14:
+                    saw_jfif = True
+                elif marker_value == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                elif marker_value == 0xEE and payload.startswith(b"Adobe"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xDA:
+                    saw_scan = True
+                    break
+            else:
+                raise RuntimeError("intro cover color contract unsupported")
+    except OSError:
+        raise RuntimeError("intro cover color contract unsupported") from None
+    if not saw_jfif or not saw_scan:
+        raise RuntimeError("intro cover color contract unsupported")
+    return {
+        "range": "pc", "matrix": "bt470", "transfer": "iec61966-2-1",
+        "primaries": "bt709",
+    }
+
+
+def freeze_intro_cover_source(cover_path, private_directory):
+    """Copy a stable cover into a private random file and bind its exact bytes."""
+    from features.drama_synthesis.intro_cover import canonicalize_frozen_cover, cover_error
+    before = file_fingerprint(cover_path)
+    fd, frozen_path = tempfile.mkstemp(prefix=".intro-cover-", suffix=".jpg", dir=private_directory)
+    opened_fd = fd
+    try:
+        with open(cover_path, "rb") as source, os.fdopen(fd, "wb") as target:
+            opened_fd = -1
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        after = file_fingerprint(cover_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
+        if before != after or before != frozen_fingerprint:
+            raise cover_error("drama_intro_cover_source_changed")
+        canonicalize_frozen_cover(frozen_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
+        color = validate_intro_cover_color_contract(frozen_path)
+        return frozen_path, frozen_fingerprint, color
+    except BaseException:
+        if opened_fd >= 0:
+            os.close(opened_fd)
+        if os.path.exists(frozen_path):
+            os.remove(frozen_path)
+        raise
+
+
 def render_intro(cover_path, output_path, reference_path=None):
-    timing = probe_intro_reference_timing(reference_path)
-    intro_fps = timing["fps"]
-    intro_audio_rate = timing["audio_rate"]
-    if reference_path:
-        logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
     ensure_dir(os.path.dirname(output_path))
-    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
-    if os.path.exists(tmp_output_path):
-        os.remove(tmp_output_path)
+    frozen_cover_path, frozen_cover_fingerprint, cover_color = freeze_intro_cover_source(
+        cover_path, os.path.dirname(output_path),
+    )
+    try:
+        timing = probe_intro_reference_timing(reference_path)
+        intro_fps = timing["fps"]
+        intro_audio_rate = timing["audio_rate"]
+        if reference_path:
+            logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
+        tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+    except BaseException:
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
+        raise
 
 
 
@@ -60160,7 +69177,8 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    run_cmd([
+    try:
+        run_cmd([
 
 
 
@@ -60192,7 +69210,7 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        FFMPEG, "-y", "-loop", "1", "-i", cover_path,
+        FFMPEG, "-y", "-loop", "1", "-i", frozen_cover_path,
 
 
 
@@ -60288,7 +69306,16 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        "-vf", (
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
+            "in_range=%s:out_range=tv:in_color_matrix=%s:out_color_matrix=bt709,"
+            "colorspace=ispace=bt709:itrc=%s:iprimaries=%s:irange=tv:"
+            "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        ) % (
+            cover_color["range"], cover_color["matrix"], cover_color["transfer"],
+            cover_color["primaries"],
+        ),
 
 
 
@@ -60352,7 +69379,13 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", tmp_output_path,
+        "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-video_track_timescale", "12800",
+        "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+        "-color_primaries", "bt709", "-chroma_sample_location", "left",
+        "-movflags", "+faststart", "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp",
+        "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-tag:a", "mp4a",
+        "-shortest", tmp_output_path,
 
 
 
@@ -60384,8 +69417,9 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    ])
-    try:
+        ])
+        if file_fingerprint(frozen_cover_path) != frozen_cover_fingerprint:
+            raise RuntimeError("intro cover changed during render")
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("intro output is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -60394,6 +69428,8 @@ def render_intro(cover_path, output_path, reference_path=None):
     finally:
         if os.path.exists(tmp_output_path):
             os.remove(tmp_output_path)
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
 
 
 
@@ -60487,6 +69523,71 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
+
+
+def strict_drama_job_directory(root, job_id):
+    """Resolve one internal job directory without creating outside a real root."""
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
+    root = os.path.abspath(os.fspath(root))
+    try:
+        if (not os.path.lexists(root) or os.path.islink(root)
+                or not os.path.isdir(root) or os.path.realpath(root) != root):
+            raise checkpoint_error()
+        target = os.path.abspath(os.path.join(root, job_id))
+        if os.path.commonpath((root, target)) != root:
+            raise checkpoint_error()
+        if (os.path.lexists(target)
+                and (os.path.islink(target) or os.path.realpath(target) != target)):
+            raise checkpoint_error()
+        return target
+    except DramaSynthesisError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise checkpoint_error() from None
+
+
+def validate_intro_for_reference(intro_path, reference_path):
+    """Bind an existing intro's exact bytes to the current normalization contract."""
+    if (not os.path.lexists(intro_path) or os.path.islink(intro_path)
+            or not file_ready(intro_path)):
+        raise checkpoint_error()
+    reference_info, reference_anchor = probe_media_source_with_anchor(
+        reference_path, probe_media_stream_info,
+    )
+    try:
+        freeze_concat_normalization_plan(reference_info, reference_info, 0)
+    finally:
+        verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    try:
+        intro_info, intro_anchor = probe_media_source_with_anchor(
+            intro_path, probe_media_stream_info,
+        )
+        try:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+            duration = float((intro_info.get("format") or {}).get("duration") or 0)
+            streams = intro_info.get("streams") or []
+            videos = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "video"]
+            audios = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "audio"]
+            values = [duration, *videos, *audios]
+            if (not videos or not audios
+                    or any(not math.isfinite(value) or value <= 0 for value in values)
+                    or abs(duration - float(INTRO_SECONDS)) > 0.25
+                    or abs(videos[0] - audios[0]) > 1.0):
+                raise checkpoint_error()
+            freeze_concat_normalization_plan(reference_info, intro_info, -1)
+        finally:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+    except DramaSynthesisError as exc:
+        if exc.code in {"drama_media_checkpoint_unverified", "drama_media_checkpoint_conflict"}:
+            raise
+        raise checkpoint_error() from None
+    except (AttributeError, TypeError, ValueError):
+        raise checkpoint_error() from None
+    verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    return intro_anchor
 
 
 def concat_segments(segment_paths, output_path):
@@ -64506,7 +73607,7 @@ def concat_wav_files(input_paths, output_path):
 
 
 
-def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path):
+def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path, *, publish_result=True):
 
 
 
@@ -67610,7 +76711,8 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                shutil.copy2(output_video_path, public_output_path)
+                if publish_result:
+                    shutil.copy2(output_video_path, public_output_path)
 
 
 
@@ -67642,7 +76744,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                job["output_video_no_bgm_url"] = publish_asset(public_output_path)
+                    job["output_video_no_bgm_url"] = publish_asset(public_output_path)
 
 
 
@@ -67672,7 +76774,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
+                    update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
 
 
 
@@ -70284,25 +79386,76 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         return None
     if not GPU_VIDEO_WORKER_TOKEN:
         raise ValueError("GPU_VIDEO_WORKER_TOKEN is required when GPU_VIDEO_WORKER_URL is set")
-    payload = {
-        "job_id": job["job_id"],
-        "content_id": job.get("content_id", ""),
-        "episode_start": job.get("episode_start", 0),
-        "episode_end": job.get("episode_end", 0),
-        "outputs": {
-            "concat_video": bool(outputs.get("concat_video", True)),
-            "no_bgm_video": bool(outputs.get("no_bgm_video", True)),
-        },
-        "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
-        "await_cover_16x9": bool(await_cover_16x9),
-        "episodes": [
-            {
-                "episode_number": int(item["episode_number"]),
-                "episode_url": item["episode_url"],
-            }
-            for item in requested
-        ],
-    }
+    async_enabled = globals().get("DRAMA_GPU_ASYNC_ENABLED", False)
+    payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]) if async_enabled else None
+    if payload is None:
+        payload = {
+            "job_id": job["job_id"],
+            "content_id": job.get("content_id", ""),
+            "episode_start": job.get("episode_start", 0),
+            "episode_end": job.get("episode_end", 0),
+            "outputs": {
+                "concat_video": bool(outputs.get("concat_video", False)),
+                "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
+                "random_template_video": bool(outputs.get("random_template_video", False)),
+            },
+            "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
+            "await_cover_16x9": bool(await_cover_16x9),
+            "episodes": [
+                {
+                    "episode_number": int(item["episode_number"]),
+                    "episode_url": item["episode_url"],
+                }
+                for item in requested
+            ],
+        }
+        if async_enabled:
+            for episode in payload["episodes"]:
+                episode["download_route"] = freeze_episode_download_route(episode["episode_url"])
+        if outputs.get("random_template_video"):
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            if not stored_recipe:
+                raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+            payload["random_template_recipe"] = stored_recipe["recipe"]
+    if async_enabled:
+        payload = drama_cpu_runtime.remember_remote_submission(
+            JOB_DB_PATH, job["job_id"], payload, job.get("_fenced_lease"))
+        previous = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job["job_id"]) or {}
+        expected = drama_cpu_runtime.get_remote_resume_intent(JOB_DB_PATH, job["job_id"])
+        lock = job.setdefault("_state_lock", threading.RLock())
+        cover_acknowledged = False
+        def on_status(snapshot):
+            nonlocal cover_acknowledged
+            stop = job.get("_remote_stop_event")
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            if (not cover_acknowledged and payload.get("await_cover_16x9")
+                    and snapshot.get("status") in {"queued", "running"}
+                    and snapshot.get("connection_state") == "connected"):
+                cover_url = str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or "")
+                if cover_url:
+                    try:
+                        submit_gpu_video_cover(job, cover_url)
+                    except requests.RequestException:
+                        # A lost cover callback is retried on the next GET, never
+                        # interpreted as failed media or a new render submission.
+                        snapshot = dict(snapshot, connection_state="reconnecting", error_code="cover_connection_unavailable")
+                    else:
+                        cover_acknowledged = True
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            with lock:
+                drama_cpu_runtime.record_remote_status(
+                    JOB_DB_PATH, job["job_id"], snapshot, job.get("_fenced_lease"))
+                job["_remote_snapshot"] = snapshot
+                if snapshot.get("status") != "completed":
+                    set_job_progress(job)
+        return drama_remote_client.wait_for_gpu_job(
+            GPU_VIDEO_WORKER_URL, GPU_VIDEO_WORKER_TOKEN, payload,
+            on_status=on_status, stop_event=job.get("_remote_stop_event"),
+            previous_status=previous, known_remote=bool(previous.get("generation")),
+            explicit_resume=(expected is not None), expected_generation=expected,
+        )
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer %s" % GPU_VIDEO_WORKER_TOKEN,
@@ -70338,13 +79491,21 @@ def submit_gpu_video_cover(job, cover_16x9_url):
         GPU_VIDEO_WORKER_URL + "/api/gpu-video/cover",
         data=json.dumps(payload).encode("utf-8"),
         headers=headers,
-        timeout=60,
+        timeout=(3, 15) if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else 60,
+        allow_redirects=False,
     )
-    response.raise_for_status()
-    result = response.json()
-    if result.get("error"):
-        raise RuntimeError(result.get("error"))
-    return result
+    try:
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and response.status_code in {400, 401, 403, 409}:
+            raise drama_remote_client.RemoteRecoveryRequired()
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or result.get("error"):
+            if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+                raise drama_remote_client.RemoteRecoveryRequired()
+            raise RuntimeError("GPU cover callback failed")
+        return result
+    finally:
+        response.close()
 
 
 def gpu_cover_url_marker_path(workdir):
@@ -70354,10 +79515,33 @@ def gpu_cover_url_marker_path(workdir):
 def write_gpu_cover_url(workdir, cover_16x9_url):
     ensure_dir(workdir)
     marker_path = gpu_cover_url_marker_path(workdir)
-    tmp_path = marker_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        fp.write(str(cover_16x9_url or "").strip())
-    os.replace(tmp_path, marker_path)
+    value = str(cover_16x9_url or "").strip()
+    # Publish a complete first binding atomically. A delayed callback must not
+    # replace the cover already consumed by this job's frozen intro.
+    fd, tmp_path = tempfile.mkstemp(prefix=".cover-binding-", dir=workdir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(value)
+            fp.flush()
+            os.fsync(fp.fileno())
+        try:
+            os.link(tmp_path, marker_path)
+        except FileExistsError:
+            if os.path.islink(marker_path):
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+            with open(marker_path, "r", encoding="utf-8") as fp:
+                previous = fp.read(32768).strip()
+            if previous != value:
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+        if os.name == "posix":
+            directory = os.open(workdir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def wait_for_gpu_cover_url(workdir, timeout_seconds):
@@ -70378,64 +79562,321 @@ def gpu_video_result_path(job_id):
     return os.path.join(GPU_VIDEO_RESULT_ROOT, safe_job_id + ".json")
 
 
+def gpu_video_local_artifact_identity(input_fingerprint, output_kind, source_paths, processing_profile):
+    """Freeze the sources and processing contract for one completed local output."""
+    try:
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                or output_kind not in {"concat", "no_bgm"}
+                or not isinstance(source_paths, (list, tuple)) or not source_paths
+                or not isinstance(processing_profile, dict)):
+            raise checkpoint_error()
+        # Round-trip through strict JSON so mutable/non-portable profile values
+        # cannot enter a durable identity record.
+        profile = json.loads(json.dumps(
+            processing_profile, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ))
+        sources = []
+        for index, path in enumerate(source_paths):
+            fingerprint = file_fingerprint(path)
+            sources.append({
+                "index": index,
+                "name": os.path.basename(os.fspath(path)),
+                "sha256": fingerprint["sha256"],
+                "size_bytes": fingerprint["size_bytes"],
+            })
+        return {
+            "version": 1,
+            "input_fingerprint": str(input_fingerprint),
+            "output_kind": output_kind,
+            "sources": sources,
+            "processing_profile": profile,
+        }
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def gpu_video_local_checkpoint_path(artifact_path):
+    return os.fspath(artifact_path) + ".completed.json"
+
+
+def load_gpu_video_local_artifact(artifact_path, identity, *, related_paths=()):
+    """Load an identity-bound final artifact; never adopt an untracked file."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        completed = load_completed(checkpoint_path, artifact_path, identity)
+        if completed is None:
+            if any(os.path.lexists(os.fspath(path)) for path in (artifact_path, *tuple(related_paths))):
+                raise checkpoint_error()
+            return None
+        if (set(completed) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(completed.get("sha256") or ""))
+                or type(completed.get("size_bytes")) is not int
+                or completed["size_bytes"] <= 0):
+            raise checkpoint_error()
+        return completed
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def save_gpu_video_local_artifact(artifact_path, identity):
+    """Persist and read back the completed artifact before any upload starts."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        fingerprint = file_fingerprint(artifact_path)
+        result = {
+            "sha256": fingerprint["sha256"],
+            "size_bytes": fingerprint["size_bytes"],
+        }
+        save_completed(
+            checkpoint_path, artifact_path, identity, result,
+            fingerprint=fingerprint,
+        )
+        if load_completed(checkpoint_path, artifact_path, identity) != result:
+            raise checkpoint_error()
+        return result
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def restore_gpu_video_public_artifact(source_path, target_path, *, expected_fingerprint):
+    """Restore a missing public copy from a verified workspace artifact."""
+    temporary = None
+    try:
+        source_path, target_path = os.fspath(source_path), os.fspath(target_path)
+        expected = dict(expected_fingerprint or {})
+        if (set(expected) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(expected.get("sha256") or ""))
+                or type(expected.get("size_bytes")) is not int
+                or expected["size_bytes"] <= 0):
+            raise checkpoint_error()
+        source = file_fingerprint(source_path)
+        if source != expected:
+            raise checkpoint_error()
+        parent = os.path.dirname(target_path)
+        if os.path.lexists(target_path):
+            if file_fingerprint(target_path) != source:
+                raise checkpoint_error(conflict=True)
+            with open(target_path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            if os.name == "posix":
+                directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            if file_fingerprint(target_path) != expected:
+                raise checkpoint_error()
+            return target_path
+        durable_ensure_directory(parent)
+        fd, temporary = tempfile.mkstemp(
+            prefix="." + os.path.basename(target_path) + ".restore.", dir=parent,
+        )
+        os.close(fd)
+        shutil.copy2(source_path, temporary)
+        # Windows rejects fsync on a read-only handle.  Reopen the completed
+        # temporary copy read/write so the same durability fence works on both
+        # worker platforms before the atomic replace.
+        with open(temporary, "r+b") as handle:
+            os.fsync(handle.fileno())
+        if file_fingerprint(temporary) != source:
+            raise checkpoint_error()
+        os.replace(temporary, target_path)
+        temporary = None
+        if os.name == "posix":
+            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        if file_fingerprint(target_path) != source:
+            raise checkpoint_error()
+        return target_path
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def gpu_video_no_bgm_profile():
+    """Version the configured Demucs/remux plan used by local checkpoints."""
+    return {
+        "version": 1,
+        "pipeline": "drama-demucs-v1",
+        "remux_profile": "copy-video-vocals-aac-v1",
+        "device": str(DEMUCS_DEVICE or ""),
+        "profiles": demucs_profiles(),
+        "chunk_seconds": [
+            max(int(DEMUCS_CHUNK_SECONDS), 30),
+            max(min(int(DEMUCS_CHUNK_SECONDS), 60), 24),
+            max(int(DEMUCS_FALLBACK_CHUNK_SECONDS), 20),
+            24,
+        ],
+    }
+
+
 def gpu_video_result_satisfies_outputs(result, outputs):
     if not result:
         return False
-    if bool(outputs.get("concat_video", True)):
+    if drama_gpu_cache.versioned(result):
+        client = get_cos_client(
+            timeout=max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT), retry=0,
+        )
+        return drama_gpu_cache.verify_artifacts(
+            result, outputs, client=client, bucket=COS_BUCKET,
+            url_for_key=build_cos_url,
+        )
+    if bool(outputs.get("concat_video", False)):
         url = str(result.get("output_video_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
             return False
-    if bool(outputs.get("no_bgm_video", True)):
+    if bool(outputs.get("no_bgm_video", False)):
         url = str(result.get("output_video_no_bgm_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+    if bool(outputs.get("random_template_video", False)):
+        url = str(result.get("output_random_template_url") or "").strip()
+        if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_output_sha256") or "")):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_recipe_sha256") or "")):
             return False
     return True
 
 
-def read_gpu_video_result(job_id, outputs):
+def read_gpu_video_result(job_id, outputs, *, input_fingerprint=None):
     result_path = gpu_video_result_path(job_id)
     if os.path.isfile(result_path):
         try:
             with open(result_path, "r", encoding="utf-8") as fp:
                 result = json.load(fp)
+            if not isinstance(result, dict) or str(result.get("job_id") or "") != str(job_id):
+                raise drama_gpu_cache.cache_error()
+            if drama_async_runtime.capture_context() is not None and not drama_gpu_cache.versioned(result):
+                raise drama_gpu_cache.cache_error()
+            if drama_gpu_cache.versioned(result):
+                expected = str(result.get("input_fingerprint") or "")
+                if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                        or not secrets.compare_digest(expected, str(input_fingerprint))):
+                    raise drama_gpu_cache.cache_error()
             if gpu_video_result_satisfies_outputs(result, outputs):
+                if drama_gpu_cache.versioned(result):
+                    return drama_gpu_cache.public_result(result)
                 return result
+        except DramaSynthesisError:
+            raise
         except Exception as exc:
             logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
+            raise drama_gpu_cache.cache_error() from None
 
-    result = {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
-    if bool(outputs.get("concat_video", True)):
+    # A new AsyncRuntime execution must never adopt an object solely from a
+    # predictable public filename. Only an already persisted legacy manifest
+    # may use the compatibility path above; new work proceeds through its
+    # upload checkpoint and creates a verified v3 manifest.
+    if drama_async_runtime.capture_context() is not None:
+        return None
+
+    result = {
+        "job_id": job_id,
+        "output_video_url": "",
+        "output_video_no_bgm_url": "",
+        "output_random_template_url": "",
+    }
+    if bool(outputs.get("concat_video", False)):
         result["output_video_url"] = build_drama_public_url(job_id, "material.mp4")
-    if bool(outputs.get("no_bgm_video", True)):
+    if bool(outputs.get("no_bgm_video", False)):
         result["output_video_no_bgm_url"] = build_drama_public_url(job_id, "material_no_bgm.mp4")
+    # Random-template results are never inferred from a public filename: the
+    # immutable output and recipe hashes in the manifest are part of identity.
     if gpu_video_result_satisfies_outputs(result, outputs):
         write_gpu_video_result(job_id, result)
         return result
     return None
 
 
-def write_gpu_video_result(job_id, result):
-    ensure_dir(GPU_VIDEO_RESULT_ROOT)
+def write_gpu_video_result(job_id, result, *, artifact_paths=None, artifact_receipts=None):
     result_path = gpu_video_result_path(job_id)
-    tmp_path = result_path + ".tmp"
-    payload = dict(result or {})
-    payload["job_id"] = str(job_id or payload.get("job_id") or "")
-    payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp_path, result_path)
+    # The completed manifest is the durable recovery boundary.  The shared
+    # writer fsyncs the file, atomically replaces it and then fsyncs its parent
+    # directory on POSIX.  Read it back before the caller may delete the local
+    # media, so any persistence or serialization failure keeps the artifacts.
+    try:
+        durable_ensure_directory(GPU_VIDEO_RESULT_ROOT)
+        payload = dict(result or {})
+        payload["job_id"] = str(job_id or payload.get("job_id") or "")
+        payload["updated_at"] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+        if artifact_paths is not None:
+            payload.update(drama_gpu_cache.artifact_metadata(payload, artifact_paths, artifact_receipts))
+        elif artifact_receipts is not None:
+            raise drama_gpu_cache.cache_error()
+        atomic_write_record(result_path, payload)
+        if read_record(result_path) != payload:
+            raise drama_gpu_cache.cache_error()
+    except Exception:
+        # A completed render whose manifest is not durably provable must remain
+        # recoverable and keep its local artifacts; never surface a generic
+        # render failure that could encourage a fresh render.
+        raise drama_gpu_cache.cache_error() from None
+
+
+def verify_gpu_artifact_uploads(job_id, result, artifact_paths):
+    """Re-read every selected upload through its durable checkpoint.
+
+    The second resumable call performs an authenticated SDK HEAD and validates
+    the checkpoint binding. It cannot create a replacement object because a
+    missing or conflicting checkpoint fails closed.
+    """
+    if not cos_enabled():
+        return None
+    selected = {field for field in drama_gpu_cache.ARTIFACT_FILENAMES if result.get(field)}
+    if not selected or set(artifact_paths) != selected:
+        raise drama_gpu_cache.cache_error()
+    receipts = {}
+    for field in sorted(selected):
+        try:
+            url, receipt = publish_asset(
+                artifact_paths[field], return_receipt=True, checkpoint_job_id=job_id,
+            )
+        except DramaSynthesisError:
+            raise
+        except Exception:
+            raise drama_gpu_cache.cache_error() from None
+        if url != result[field] or not isinstance(receipt, dict):
+            raise drama_gpu_cache.cache_error()
+        receipts[field] = receipt
+    # Recompute each local SHA here, before the manifest writer is allowed to
+    # persist or cleanup. The writer repeats the same validation as its own
+    # durable boundary.
+    drama_gpu_cache.artifact_metadata(result, artifact_paths, receipts)
+    return receipts
 
 
 def handle_gpu_video_cover(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
+    job_id = payload.get("job_id")
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     if not cover_16x9_url:
         raise ValueError("missing cover_16x9_url")
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
+    durable_ensure_directory(workdir)
     write_gpu_cover_url(workdir, cover_16x9_url)
     return {"job_id": job_id, "ok": True}
 
@@ -70455,28 +79896,98 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
             logging.warning("skip GPU cleanup unexpected %s basename: %s", label, target_dir)
             return
         if os.path.isdir(target_real):
-            shutil.rmtree(target_real, ignore_errors=True)
-            logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
+            try:
+                shutil.rmtree(target_real)
+            except OSError as exc:
+                logging.warning("GPU %s cleanup retained after verified result: %s (%s)", label, target_real, exc)
+                return
+            if os.path.exists(target_real):
+                logging.warning("GPU %s cleanup path still exists after verified result: %s", label, target_real)
+            else:
+                logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
 
     remove_job_dir(WORK_ROOT, workdir, "work")
     remove_job_dir(PUBLIC_ROOT, public_dir, "public")
 
 
+def cached_gpu_video_result(payload, *, allow_legacy=True):
+    job_id = str((payload or {}).get("job_id") or "")
+    path = gpu_video_result_path(job_id)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+        if not isinstance(result, dict) or str(result.get("job_id") or "") != job_id:
+            raise drama_gpu_cache.cache_error()
+        if not allow_legacy and not drama_gpu_cache.versioned(result):
+            raise drama_gpu_cache.cache_error()
+        expected_fingerprint = result.get("input_fingerprint")
+        actual_fingerprint = drama_async_runtime.render_fingerprint(payload)
+        if drama_gpu_cache.versioned(result):
+            if (not re.fullmatch(r"[0-9a-f]{64}", str(expected_fingerprint or ""))
+                    or not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint)):
+                raise drama_gpu_cache.cache_error()
+        elif expected_fingerprint and not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint):
+            raise drama_gpu_cache.cache_error()
+        if not gpu_video_result_satisfies_outputs(result, payload.get("outputs") or {}):
+            raise drama_gpu_cache.cache_error()
+        public = drama_gpu_cache.public_result(result) if drama_gpu_cache.versioned(result) else result
+        if (payload.get("outputs") or {}).get("random_template_video"):
+            drama_gpu_cache.verify_cached_recipe(public, payload.get("random_template_recipe"))
+        return public
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise drama_gpu_cache.cache_error() from None
+
+
+def strict_cached_gpu_video_result(payload):
+    return cached_gpu_video_result(payload, allow_legacy=False)
+
+
+def gpu_video_resume_ready(payload):
+    # The runtime additionally proves the prior process generation has stopped.
+    if strict_cached_gpu_video_result(payload):
+        return True
+    job_id = str((payload or {}).get("job_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
+        return False
+    workdir = os.path.join(WORK_ROOT, job_id)
+    return (os.path.isdir(workdir) and not os.path.islink(workdir)
+            and os.path.dirname(os.path.realpath(workdir)) == os.path.realpath(WORK_ROOT))
+
+
 def handle_gpu_video_render(payload):
-    job_id = str((payload or {}).get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
-    lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
-    with lock:
-        return _handle_gpu_video_render_unlocked(payload)
+    job_id = (payload or {}).get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
+    # The dedicated worker owns this lock for its full lifetime.  A legacy
+    # monolith route may render only while that worker is absent, which avoids
+    # cross-process duplicate jobs and preserves the global heavy concurrency
+    # of one.  Calls made by AsyncRuntime already run beneath the same owner and
+    # per-job file locks, so they must not reacquire it.
+    compatibility_owner = None
+    if drama_async_runtime.capture_context() is None:
+        runtime_root = durable_ensure_directory(os.path.join(WORK_ROOT, ".runtime"))
+        compatibility_owner = drama_async_runtime._FileLock(runtime_root / "owner.lock")
+        if not compatibility_owner.acquire():
+            raise drama_async_runtime.runtime_error("gpu_runtime_unavailable")
+    try:
+        lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
+        with lock:
+            return _handle_gpu_video_render_unlocked(payload)
+    finally:
+        if compatibility_owner is not None:
+            compatibility_owner.release()
 
 
 def _handle_gpu_video_render_unlocked(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    job_id = payload.get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     episodes = payload.get("episodes") or []
     if not episodes:
         raise ValueError("missing episodes")
@@ -70484,26 +79995,42 @@ def _handle_gpu_video_render_unlocked(payload):
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
     await_cover_16x9 = bool(payload.get("await_cover_16x9") or payload.get("wait_for_cover"))
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
-    render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True))
-    render_no_bgm = bool(outputs.get("no_bgm_video", True))
-    publish_concat = bool(outputs.get("concat_video", True))
+    render_random = bool(outputs.get("random_template_video", False))
+    random_recipe = payload.get("random_template_recipe") if render_random else None
+    if render_random and not isinstance(random_recipe, dict):
+        raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+    random_source_kind = str((random_recipe or {}).get("source") or "")
+    if render_random and random_source_kind not in {"concat_video", "no_bgm_video"}:
+        raise DramaSynthesisError("drama_random_template_source_invalid", "随机模板源视频无效", 409)
+    render_concat = bool(outputs.get("concat_video", False) or outputs.get("no_bgm_video", False) or render_random)
+    publish_no_bgm = bool(outputs.get("no_bgm_video", False))
+    render_no_bgm = bool(publish_no_bgm or (render_random and random_source_kind == "no_bgm_video"))
+    publish_concat = bool(outputs.get("concat_video", False))
     if not render_concat:
-        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": "", "output_random_template_url": ""}
 
-    existing_result = read_gpu_video_result(job_id, outputs)
+    input_fingerprint = drama_async_runtime.render_fingerprint(payload)
+    existing_result = read_gpu_video_result(
+        job_id, outputs, input_fingerprint=input_fingerprint,
+    )
     if existing_result:
+        if render_random:
+            drama_gpu_cache.verify_cached_recipe(existing_result, random_recipe)
         logging.info("reuse GPU video result for job=%s", job_id)
         return existing_result
 
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
     segment_dir = os.path.join(workdir, "segments")
     concat_segment_dir = os.path.join(workdir, "concat_segments")
-    public_dir = os.path.join(PUBLIC_ROOT, job_id)
-    ensure_dir(download_dir)
-    ensure_dir(segment_dir)
-    ensure_dir(concat_segment_dir)
-    ensure_dir(public_dir)
+    public_dir = strict_drama_job_directory(PUBLIC_ROOT, job_id)
+    # The completed artifact/checkpoint pair lives directly in workdir.  Make
+    # the first directory entry durable before a render can create either file.
+    durable_ensure_directory(workdir)
+    durable_ensure_directory(public_dir, mode=0o755)
+    durable_ensure_directory(download_dir)
+    durable_ensure_directory(segment_dir)
+    durable_ensure_directory(concat_segment_dir)
 
     job = {
         "_gpu_worker": True,
@@ -70516,6 +80043,7 @@ def _handle_gpu_video_render_unlocked(payload):
         "progress_detail": "",
         "output_video_url": "",
         "output_video_no_bgm_url": "",
+        "output_random_template_url": "",
     }
     segment_paths = []
     total_steps = (
@@ -70524,6 +80052,7 @@ def _handle_gpu_video_render_unlocked(payload):
         + 1
         + (1 if render_no_bgm else 0)
         + (1 if publish_concat else 0)
+        + (1 if render_random else 0)
     )
     completed_steps = 0
 
@@ -70541,51 +80070,31 @@ def _handle_gpu_video_render_unlocked(payload):
             "episode_url": episode_url,
             "source_path": os.path.join(download_dir, "%03d.mp4" % episode_number),
             "normalized_path": os.path.join(segment_dir, "%03d.mp4" % episode_number),
+            **({"download_route": item["download_route"]} if "download_route" in item else {}),
         })
 
-    max_download_workers = max(1, min(4, len(episode_work_items)))
-    download_futures = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_download_workers) as download_executor:
-        for item in episode_work_items:
-            if file_ready(item["source_path"]):
-                continue
-            download_futures[item["episode_number"]] = download_executor.submit(
-                download_file,
-                item["episode_url"],
-                item["source_path"],
-            )
-        if download_futures:
-            logging.info(
-                "GPU prefetch queued %d episode downloads with %d workers for job=%s",
-                len(download_futures),
-                max_download_workers,
-                job_id,
-            )
-
-        for item in episode_work_items:
-            future = download_futures.get(item["episode_number"])
-            if future is not None:
-                future.result()
-            segment_paths.append(item["source_path"])
-            completed_steps += 1
-            update_render_stage(job, completed_steps, total_steps, "GPU episode %d downloaded" % item["episode_number"])
-
-    if cover_16x9_url or await_cover_16x9:
-        if not cover_16x9_url:
-            cover_16x9_url = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
+    def intro_factory(first_source_path):
+        selected_cover = cover_16x9_url
+        if not selected_cover:
+            drama_async_runtime.emit_progress("waiting_cover")
+            selected_cover = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
-        remove_invalid_video_file(intro_path, "GPU intro")
-        if not file_ready(cover_path):
-            download_file(cover_16x9_url, cover_path)
-        if not file_ready(intro_path):
-            reference_path = episode_work_items[0]["source_path"] if episode_work_items else None
-            render_intro(cover_path, intro_path, reference_path=reference_path)
-        segment_paths.insert(0, intro_path)
-        completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
+        if os.path.lexists(intro_path):
+            validate_intro_for_reference(intro_path, first_source_path)
+        else:
+            if not file_ready(cover_path):
+                download_file(selected_cover, cover_path)
+            render_intro(cover_path, intro_path, reference_path=first_source_path)
+            validate_intro_for_reference(intro_path, first_source_path)
+        return intro_path
 
-    segment_paths = prepare_concat_segments(segment_paths, concat_segment_dir)
+    segment_paths = download_and_prepare_segments(
+        episode_work_items, output_dir=concat_segment_dir,
+        probe=probe_media_stream_info, normalize=normalize_concat_segment,
+        intro_factory=intro_factory if (cover_16x9_url or await_cover_16x9) else None,
+    )
+    drama_async_runtime.emit_progress("concatenating")
 
     output_name = "%s_%s_eps_%s_%s.mp4" % (
         job["content_id"] or "material",
@@ -70595,46 +80104,129 @@ def _handle_gpu_video_render_unlocked(payload):
     )
     output_path = os.path.join(workdir, output_name)
     public_video_path = os.path.join(public_dir, "material.mp4")
-    remove_invalid_video_file(output_path, "GPU concat workspace")
-    remove_invalid_video_file(public_video_path, "GPU concat public")
-    if not file_ready(output_path):
+    concat_profile = {
+        "version": 1,
+        "pipeline": "drama-concat-copy-v1",
+        "normalization_profile": NORMALIZATION_PROFILE,
+    }
+    concat_identity = gpu_video_local_artifact_identity(
+        input_fingerprint, "concat", segment_paths, concat_profile,
+    )
+    concat_completed = load_gpu_video_local_artifact(
+        output_path, concat_identity,
+        related_paths=(public_video_path,),
+    )
+    if concat_completed is None:
         concat_segments(segment_paths, output_path)
+        if not valid_video_file(output_path):
+            raise checkpoint_error()
+        if gpu_video_local_artifact_identity(
+                input_fingerprint, "concat", segment_paths, concat_profile,
+        ) != concat_identity:
+            raise checkpoint_error(conflict=True)
+        concat_completed = save_gpu_video_local_artifact(output_path, concat_identity)
     if not valid_video_file(output_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % output_path)
-    if publish_concat and not file_ready(public_video_path):
-        shutil.copy2(output_path, public_video_path)
-    if publish_concat and not valid_video_file(public_video_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
-    update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
+        raise checkpoint_error()
 
     if render_no_bgm:
+        drama_async_runtime.emit_progress("removing_bgm")
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
-        remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
-        remove_invalid_video_file(public_no_bgm_path, "GPU no-BGM public")
-        if file_ready(public_no_bgm_path):
+        no_bgm_profile = gpu_video_no_bgm_profile()
+        no_bgm_identity = gpu_video_local_artifact_identity(
+            input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+        )
+        no_bgm_completed = load_gpu_video_local_artifact(
+            no_bgm_output_path, no_bgm_identity,
+            related_paths=(public_no_bgm_path,),
+        )
+        if no_bgm_completed is None:
+            run_no_bgm_pipeline(
+                job, output_path, no_bgm_output_path, public_no_bgm_path,
+                publish_result=False,
+            )
+            if (not valid_video_file(no_bgm_output_path)
+                    or not valid_av_duration_alignment(no_bgm_output_path)):
+                raise checkpoint_error()
+            if gpu_video_local_artifact_identity(
+                    input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+            ) != no_bgm_identity:
+                raise checkpoint_error(conflict=True)
+            no_bgm_completed = save_gpu_video_local_artifact(
+                no_bgm_output_path, no_bgm_identity,
+            )
+        if (not valid_video_file(no_bgm_output_path)
+                or not valid_av_duration_alignment(no_bgm_output_path)):
+            raise checkpoint_error()
+        if publish_no_bgm:
+            restore_gpu_video_public_artifact(
+                no_bgm_output_path, public_no_bgm_path,
+                expected_fingerprint=no_bgm_completed,
+            )
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
-        else:
-            run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
+            update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU no-BGM video uploaded")
 
     if publish_concat:
+        restore_gpu_video_public_artifact(
+            output_path, public_video_path,
+            expected_fingerprint=concat_completed,
+        )
         job["output_video_url"] = publish_asset(public_video_path)
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
+
+    random_result = None
+    if render_random:
+        drama_async_runtime.emit_progress("rendering")
+        if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+            raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+        public_random_path = os.path.join(public_dir, "material_random_template.mp4")
+        random_result = render_random_output(
+            source=no_bgm_output_path if random_source_kind == "no_bgm_video" else output_path,
+            output=public_random_path,
+            recipe=random_recipe,
+            asset_root=DRAMA_RANDOM_OVERLAY_ROOT,
+            manifest_sha256=DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+            ffmpeg=DRAMA_RANDOM_OVERLAY_FFMPEG,
+            ffprobe=DRAMA_RANDOM_OVERLAY_FFPROBE,
+        )
+        job["output_random_template_url"] = publish_asset(public_random_path)
+        completed_steps += 1
 
     result = {
         "job_id": job_id,
         "output_video_url": job.get("output_video_url", ""),
-        "output_video_no_bgm_url": job.get("output_video_no_bgm_url", ""),
+        "output_video_no_bgm_url": job.get("output_video_no_bgm_url", "") if publish_no_bgm else "",
+        "output_random_template_url": job.get("output_random_template_url", ""),
     }
     if publish_concat and not result["output_video_url"]:
         raise RuntimeError("GPU concat video upload did not return a URL")
-    if render_no_bgm and not result["output_video_no_bgm_url"]:
+    if publish_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
-    write_gpu_video_result(job_id, result)
-    cleanup_gpu_video_job_files(job_id, workdir, public_dir)
+    if render_random:
+        if not result["output_random_template_url"] or not random_result:
+            raise RuntimeError("GPU random-template video upload did not return a URL")
+        result.update({
+            "random_template_output_sha256": random_result["output_sha256"],
+            "random_template_output_profile": random_result["profile"],
+            "random_template_recipe_sha256": random_result["recipe_sha256"],
+        })
+    artifact_paths = {
+        field: os.path.join(public_dir, filename)
+        for field, filename in drama_gpu_cache.ARTIFACT_FILENAMES.items()
+        if result.get(field)
+    }
+    result["input_fingerprint"] = input_fingerprint
+    artifact_receipts = verify_gpu_artifact_uploads(job_id, result, artifact_paths)
+    if artifact_receipts is None:
+        # Local serving has no authenticated remote identity. Preserve the old
+        # unversioned manifest and the media files; never fabricate v3.
+        write_gpu_video_result(job_id, result)
+    else:
+        write_gpu_video_result(
+            job_id, result, artifact_paths=artifact_paths, artifact_receipts=artifact_receipts,
+        )
+        cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
 
 
@@ -71228,6 +80820,16 @@ def submit_job(payload, actor_session=None):
 
 
     validation = validate_content_request(app_id, content_id, episode_start, episode_end)
+    job_id = uuid.uuid4().hex
+    if outputs["random_template_video"]:
+        recipe = freeze_random_recipe(
+            job_id=job_id,
+            content_id=content_id,
+            request=advanced.get("random_template"),
+            catalog=drama_random_template_catalog(),
+        )
+        # Freeze before the legacy row becomes visible to the external worker.
+        DRAMA_SYNTHESIS_STORE.freeze_recipe(job_id, recipe)
 
 
 
@@ -71291,7 +80893,7 @@ def submit_job(payload, actor_session=None):
 
 
 
-        "job_id": uuid.uuid4().hex,
+        "job_id": job_id,
 
 
 
@@ -72589,7 +82191,49 @@ def submit_job(payload, actor_session=None):
 
 
 
+def complete_async_gpu_job(job, gpu_result):
+    result = dict(gpu_result or {})
+    outputs = normalize_outputs(job.get("outputs", {}))
+    if outputs.get("cover_16x9"):
+        result["cover_16x9_url"] = str(job.get("cover_16x9_url") or "")
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"]) if outputs.get("random_template_video") else None
+    expected = str((recipe or {}).get("recipe_sha256") or "")
+    if outputs.get("random_template_video") and not expected:
+        raise DramaSynthesisError("drama_recipe_missing", "冻结配方不存在，已停止回填", 409)
+    with job.setdefault("_state_lock", threading.RLock()):
+        completed = drama_cpu_runtime.atomic_complete_job(
+            JOB_DB_PATH, job["job_id"], result, job.get("_fenced_lease"),
+            expected_recipe_sha256=expected,
+        )
+        job.update(completed)
+    try:
+        notify_job_creator_on_completion(job)
+    except Exception:
+        logging.exception("completion notification failed after atomic media completion: job=%s", job.get("job_id"))
+
+
 def process_job(job):
+    if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+        return _process_job_observed(job)
+    parent_stop = job.get("_remote_stop_event")
+    observer_stop = DramaObservationStop(parent_stop)
+    job["_remote_stop_event"] = observer_stop
+    try:
+        return _process_job_observed(job)
+    finally:
+        # Stop and join this attempt's observer before a retry reuses the lease.
+        # This never cancels the durable GPU execution.
+        observer_stop.set()
+        executor = job.pop("_gpu_observer_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if parent_stop is None:
+            job.pop("_remote_stop_event", None)
+        else:
+            job["_remote_stop_event"] = parent_stop
+
+
+def _process_job_observed(job):
 
 
 
@@ -72621,6 +82265,13 @@ def process_job(job):
 
 
 
+    job.setdefault("_state_lock", threading.RLock())
+    if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and gpu_video_worker_enabled():
+        saved_payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"])
+        if saved_payload and (not saved_payload.get("await_cover_16x9") or job.get("cover_16x9_url")):
+            result = call_gpu_video_worker(job, [], normalize_outputs(job.get("outputs", {})))
+            complete_async_gpu_job(job, result)
+            return
     clear_job_deleted_marker(job["job_id"])
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
@@ -73327,7 +82978,13 @@ def process_job(job):
 
 
 
-    need_video_pipeline = outputs["concat_video"] or outputs["no_bgm_video"]
+    need_video_pipeline = (
+        outputs["concat_video"]
+        or outputs["no_bgm_video"]
+        or outputs["random_template_video"]
+    )
+    if outputs["random_template_video"] and not gpu_video_worker_enabled():
+        raise DramaSynthesisError("drama_random_gpu_unavailable", "香港GPU随机模板服务暂不可用", 503)
 
 
 
@@ -75095,6 +84752,8 @@ def process_job(job):
         set_job_progress(job, status="rendering", progress=20, detail="GPU 服已开始处理素材，等待封面后合并")
         ensure_job_not_deleted(job["job_id"])
         gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            job["_gpu_observer_executor"] = gpu_executor
         gpu_future = gpu_executor.submit(call_gpu_video_worker, job, requested, outputs, need_cover)
 
 
@@ -75671,7 +85330,8 @@ def process_job(job):
         job["_gpu_cover_16x9_url"] = job.get("cover_16x9_url") or publish_asset(public_cover_path)
         if outputs["cover_16x9"] and not job.get("cover_16x9_url"):
             job["cover_16x9_url"] = job["_gpu_cover_16x9_url"]
-        submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
+        if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
 
     if need_video_pipeline and gpu_video_worker_enabled():
         set_job_progress(job, status="rendering", progress=46, detail="已提交 GPU 服制作合集视频")
@@ -75679,13 +85339,30 @@ def process_job(job):
         if gpu_future is None:
             gpu_result = call_gpu_video_worker(job, requested, outputs)
         else:
-            gpu_result = gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
+            gpu_result = gpu_future.result() if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
             gpu_executor.shutdown(wait=False)
             gpu_executor = None
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            complete_async_gpu_job(job, gpu_result)
+            return
         if outputs["concat_video"]:
             job["output_video_url"] = gpu_result.get("output_video_url", "")
         if outputs["no_bgm_video"]:
             job["output_video_no_bgm_url"] = gpu_result.get("output_video_no_bgm_url", "")
+        if outputs["random_template_video"]:
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            expected_recipe_sha = str((stored_recipe or {}).get("recipe_sha256") or "")
+            actual_recipe_sha = str(gpu_result.get("random_template_recipe_sha256") or "")
+            if not expected_recipe_sha or not secrets.compare_digest(expected_recipe_sha, actual_recipe_sha):
+                raise DramaSynthesisError("drama_recipe_result_mismatch", "GPU随机模板结果与冻结配方不一致", 502)
+            job["output_random_template_url"] = str(gpu_result.get("output_random_template_url") or "")
+            DRAMA_SYNTHESIS_STORE.complete_recipe(
+                job["job_id"],
+                output_url=job["output_random_template_url"],
+                output_sha256=str(gpu_result.get("random_template_output_sha256") or ""),
+                output_profile=str(gpu_result.get("random_template_output_profile") or ""),
+                recipe_sha256=actual_recipe_sha,
+            )
         if outputs["cover_16x9"] and not job.get("cover_16x9_url") and os.path.isfile(public_cover_path):
             job["cover_16x9_url"] = publish_asset(public_cover_path)
         set_job_progress(job, status="rendering", progress=98, detail="GPU 服视频制作完成")
@@ -81564,7 +91241,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notified_at"] = ""
+    # Notification and media retries are independent.
 
 
 
@@ -81596,7 +91273,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notification_error"] = ""
+    # Preserve the last delivery outcome while reconnecting.
 
 
 
@@ -81625,6 +91302,17 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]):
+        # Claim immediately; the worker reconnects to the frozen remote execution.
+        job["status"] = "queued"
+        job["progress_detail"] = "等待恢复原制作任务的跟踪"
+        upsert_job_record(job)
+        run_job_async(job)
+        return
+    # Preserve the legacy retry notification contract outside async runtime.
+    job["completion_notified_at"] = ""
+    job["completion_notification_error"] = ""
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
     if selected_job_outputs_ready(job):
@@ -82279,6 +91967,10 @@ def retry_job(job_id):
 
         if job.get("status") != "failed":
             raise ValueError("任务正在处理中，无需重复提交")
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            remote = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job_id) or {}
+            if remote.get("status") in {"failed", "recovery_required"} and remote.get("generation"):
+                drama_cpu_runtime.request_remote_resume(JOB_DB_PATH, job_id, int(remote["generation"]))
         resume_job_from_checkpoint(job)
     finally:
         lock.release()
@@ -84088,6 +93780,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "auth": auth,
         }
 
+    def _send_report_auth_status(self):
+        if not feishu_auth_enabled() or self._session():
+            self.send_response(204)
+        else:
+            self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _require_auth(self):
 
 
@@ -84871,6 +94571,518 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         json_response(self, 403, {"error": "permission_denied", "module": module_key})
         return False
 
+    def _require_cookie_admin(self):
+        if not self._require_auth():
+            return False
+        session = self._session()
+        if session and session.get("auth_type") == "api_token":
+            json_response(self, 403, {"error": "cookie_auth_required", "module": "admin"})
+            return False
+        if session and session.get("role") == "admin":
+            return True
+        json_response(self, 403, {"error": "admin_required"})
+        return False
+
+    def _require_cookie_navigation_item(self, item_key):
+        if not self._require_auth():
+            return False
+        session = self._session()
+        if session and session.get("auth_type") == "api_token":
+            json_response(
+                self,
+                403,
+                {"error": "cookie_auth_required", "navigation_item": item_key},
+                no_store=True,
+            )
+            return False
+        try:
+            access = navigation_item_access(
+                session,
+                item_key,
+                load_navigation_config(),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            logging.exception(
+                "failed to load navigation config for item %s",
+                item_key,
+            )
+            json_response(
+                self,
+                503,
+                {
+                    "error": "navigation_config_unavailable",
+                    "navigation_item": item_key,
+                },
+                no_store=True,
+            )
+            return False
+        if access.get("allowed"):
+            return True
+        payload = {
+            "error": access.get("error", "navigation_item_unavailable"),
+            "navigation_item": item_key,
+        }
+        if access.get("module"):
+            payload["module"] = access["module"]
+        json_response(self, 403, payload, no_store=True)
+        return False
+
+    def _require_same_origin_json(self):
+        content_type = str(self.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            json_response(
+                self,
+                415,
+                {"error": "json_content_type_required"},
+                no_store=True,
+            )
+            return False
+
+        source = str(self.headers.get("Origin", "") or self.headers.get("Referer", "") or "").strip()
+        if not source:
+            return True
+        source_url = urlparse(source)
+        expected_host = str(self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "") or "").split(",", 1)[0].strip()
+        expected_proto = str(self.headers.get("X-Forwarded-Proto", "") or "").split(",", 1)[0].strip().lower()
+        if not source_url.scheme or not source_url.netloc or source_url.netloc.lower() != expected_host.lower():
+            json_response(
+                self,
+                403,
+                {"error": "same_origin_required"},
+                no_store=True,
+            )
+            return False
+        if expected_proto and source_url.scheme.lower() != expected_proto:
+            json_response(
+                self,
+                403,
+                {"error": "same_origin_required"},
+                no_store=True,
+            )
+            return False
+        return True
+
+    def _youtube_auto_actor(self):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "youtube_auto_publish"):
+            json_response(self, 403, {"error": "permission_denied", "module": "youtube_auto_publish"}, no_store=True)
+            return None
+        try:
+            access = navigation_item_access(session, "youtubeAutoPublish", load_navigation_config())
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": "youtubeAutoPublish"}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
+    def _youtube_auto_json(self, max_bytes):
+        """Bound body reads before parsing; reject ambiguous HTTP framing."""
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+            self.close_connection = True
+            json_response(self, 411, {"error": "valid_content_length_required"}, no_store=True)
+            return None
+        # Bound digit length before int() as well as the eventual body allocation.
+        if len(lengths[0]) > 9 or int(lengths[0]) > max_bytes:
+            self.close_connection = True
+            json_response(self, 413, {"error": "request_too_large"}, no_store=True)
+            return None
+        if int(lengths[0]) < 2:
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        source = str(self.headers.get("Origin") or self.headers.get("Referer") or "").strip()
+        try:
+            valid_source = urlparse(source).scheme.lower() in ("https", "http")
+        except ValueError:
+            valid_source = False
+        if not valid_source or str(self.headers.get("Sec-Fetch-Site", "")).lower() == "cross-site":
+            self.close_connection = True
+            json_response(self, 403, {"error": "same_origin_required"}, no_store=True)
+            return None
+        if not self._require_same_origin_json():
+            self.close_connection = True
+            return None
+        length = int(lengths[0])
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("short request")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("object required")
+        except (ValueError, UnicodeError):
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        # Ownership and privilege come exclusively from the loaded session.
+        for key in ("actor", "creator", "tenant_key", "user_id", "open_id", "role", "is_admin"):
+            payload.pop(key, None)
+        return payload
+
+    def _dispatch_youtube_auto_publish(self, parsed):
+        actor = self._youtube_auto_actor()
+        if actor is None:
+            self.close_connection = True
+            return
+        prefix = "/api/youtube-auto-publish"
+        path = parsed.path[len(prefix):]
+        task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
+        cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
+        get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
+        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
+        if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
+            self.close_connection = True
+            json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
+        payload = None
+        if self.command == "POST":
+            payload = self._youtube_auto_json(3 * 1024 * 1024 if path in ("/covers", "/covers/upload") else 32 * 1024)
+            if payload is None:
+                return
+        from features.youtube_auto_publish.templates import WorkflowError
+        try:
+            service = get_youtube_auto_service()
+            if self.command == "GET":
+                query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
+                if path == "/bootstrap":
+                    result = service.bootstrap(actor, include_channels=query.get("include_channels", ["1"])[0] != "0")
+                elif path == "/channels":
+                    result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
+                elif path == "/materials":
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1")
+                elif path == "/tasks":
+                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
+                elif path == "/settings":
+                    result = service.settings(actor)
+                elif task:
+                    result = service.get_task(actor, task.group(1))
+                else:
+                    asset = service.asset(actor, cover.group(1))
+                    with open(asset["path"], "rb") as handle:
+                        data = handle.read(2 * 1024 * 1024 + 1)
+                    if len(data) > 2 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != asset["sha256"]:
+                        raise WorkflowError("cover_changed", "封面文件已变化，请重新上传", 409)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "private, no-store, max-age=0")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            elif path == "/tasks":
+                result = service.create_task(actor, payload)
+            elif path == "/channels/verify-thumbnail":
+                result = service.verify_channel_thumbnail(actor, payload)
+            elif path in ("/covers", "/covers/upload"):
+                result = service.upload_cover(actor, payload)
+            elif path == "/settings":
+                result = service.save_settings(actor, payload)
+            elif task.group(2) == "review":
+                result = service.review(actor, task.group(1), payload)
+            elif task.group(2) == "schedule":
+                result = service.schedule(actor, task.group(1), payload)
+            else:
+                result = service.retry(actor, task.group(1))
+            json_response(self, 200, result, no_store=True)
+        except (WorkflowError, DramaSynthesisError) as exc:
+            json_response(self, exc.status, {"error": exc.code, "message": str(exc)}, no_store=True)
+        except ValueError:
+            json_response(self, 400, {"error": "invalid_request", "message": "请求参数无效"}, no_store=True)
+        except Exception:
+            # Runtime/adapter errors may contain credentials or private filesystem paths.
+            json_response(self, 503, {"error": "youtube_auto_unavailable", "message": "YouTube 自动发布暂不可用，请稍后重试"}, no_store=True)
+
+    def _dispatch_ad_control_v3(self, parsed):
+        """Lazily dispatch the isolated V3 surface after its prefix matched."""
+        try:
+            from features.ad_control_v3 import routes as ad_control_v3_routes
+
+            ad_control_v3_routes.dispatch(self, self.command, parsed)
+        except Exception:
+            logging.exception("ad-control V3 route dispatcher failed")
+            json_response(
+                self,
+                500,
+                {
+                    "code": "internal_error",
+                    "error": "internal server error",
+                    "message": "internal server error",
+                },
+                no_store=True,
+            )
+        return True
+
+    def _tt_drama_client_key(self):
+        peer = str((self.client_address or ("",))[0] or "").strip()
+        try:
+            peer_ip = ipaddress.ip_address(peer)
+        except ValueError:
+            peer_ip = None
+        if peer_ip is not None and peer_ip.is_loopback:
+            candidate = str(
+                self.headers.get("X-Real-IP", "")
+                or self.headers.get("X-Forwarded-For", "")
+                or ""
+            ).split(",", 1)[0].strip()
+            try:
+                return ipaddress.ip_address(candidate).compressed
+            except ValueError:
+                pass
+        return peer_ip.compressed if peer_ip is not None else (peer or "unknown")
+
+    def _dispatch_tt_drama_resolver(self, parsed):
+        started_at = time.perf_counter()
+        cache_state = "BYPASS"
+
+        def respond(status_code, payload):
+            elapsed_ms = max(
+                0.0, (time.perf_counter() - started_at) * 1000.0
+            )
+            json_response(
+                self,
+                status_code,
+                payload,
+                no_store=True,
+                extra_headers={
+                    "X-TT-Drama-Cache": cache_state,
+                    "Server-Timing": "tt-drama-resolver;dur=%.2f" % elapsed_ms,
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            if set(params) != {"content_id"}:
+                raise InvalidContentIdError("content_id is required")
+            values = params.get("content_id") or []
+            if len(values) != 1:
+                raise InvalidContentIdError("content_id must appear exactly once")
+            content_id = normalize_content_id(values[0])
+            if not TT_DRAMA_RESOLVER_RATE_LIMITER.allow(
+                self._tt_drama_client_key()
+            ):
+                cache_state = "RATE_LIMITED"
+                respond(
+                    429,
+                    {
+                        "found": False,
+                        "error": "rate_limited",
+                        "message": "Too many searches. Please wait a moment and try again.",
+                    },
+                )
+                return
+            if not TT_DRAMA_RESOLVER_REQUEST_GATE.acquire(blocking=False):
+                cache_state = "OVERLOADED"
+                respond(
+                    503,
+                    {
+                        "found": False,
+                        "error": "resolver_overloaded",
+                        "message": "Story search is busy. Please try again.",
+                    },
+                )
+                return
+            try:
+                outcome = TT_DRAMA_RESOLVER.resolve(content_id)
+            finally:
+                TT_DRAMA_RESOLVER_REQUEST_GATE.release()
+            cache_state = TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES.get(
+                str(outcome.cache_state or ""),
+                "MISS",
+            )
+            if not outcome.found:
+                respond(
+                    404,
+                    {
+                        "found": False,
+                        "error": "not_found",
+                        "message": "No matching DramaWave story was found.",
+                    },
+                )
+                return
+            public_item = {
+                key: outcome.item.get(key)
+                for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS
+            }
+            respond(200, {"found": True, "data": public_item})
+        except (InvalidContentIdError, ResourceInvalidContentIdError):
+            respond(
+                400,
+                {
+                    "found": False,
+                    "error": "invalid_request",
+                    "message": "Enter one complete DramaWave Content ID.",
+                },
+            )
+        except (ResolverUnavailableError, ResourceSourceError):
+            cache_state = "ERROR"
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        except Exception:
+            cache_state = "ERROR"
+            logging.exception("unexpected TT drama resolver failure")
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+
+    def _dispatch_tt_code_resolver(self, parsed):
+        """Compose the private code route with verified public drama data."""
+
+        started_at = time.perf_counter()
+        cache_state = "BYPASS"
+
+        def respond(status_code, payload):
+            elapsed_ms = max(
+                0.0,
+                (time.perf_counter() - started_at) * 1000.0,
+            )
+            json_response(
+                self,
+                status_code,
+                payload,
+                no_store=True,
+                extra_headers={
+                    "X-TT-Drama-Cache": cache_state,
+                    "Server-Timing": "tt-code-resolver;dur=%.2f" % elapsed_ms,
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        acquired = False
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            if set(params) != {"query", "source"}:
+                raise InvalidContentIdError("query and source are required")
+            query_values = params.get("query") or []
+            source_values = params.get("source") or []
+            if len(query_values) != 1 or len(source_values) != 1:
+                raise InvalidContentIdError("query and source must be unique")
+            raw_query = str(query_values[0] or "")
+            source = str(source_values[0] or "")
+            if source not in {"Search", "Featured"}:
+                raise InvalidContentIdError("source is invalid")
+            if re.fullmatch(r"[A-Za-z0-9]{4}", raw_query):
+                normalized_query = raw_query.upper()
+            else:
+                normalized_query = normalize_content_id(raw_query)
+            if not TT_DRAMA_RESOLVER_RATE_LIMITER.allow(
+                self._tt_drama_client_key()
+            ):
+                cache_state = "RATE_LIMITED"
+                respond(
+                    429,
+                    {
+                        "found": False,
+                        "error": "rate_limited",
+                        "message": "Too many searches. Please wait a moment and try again.",
+                    },
+                )
+                return
+            acquired = TT_DRAMA_RESOLVER_REQUEST_GATE.acquire(blocking=False)
+            if not acquired:
+                cache_state = "OVERLOADED"
+                respond(
+                    503,
+                    {
+                        "found": False,
+                        "error": "resolver_overloaded",
+                        "message": "Story search is busy. Please try again.",
+                    },
+                )
+                return
+            route_payload = _tt_post_service_request(
+                "GET",
+                "/internal/tt-posts/code-resolve",
+                query={"query": normalized_query, "source": source},
+            )
+            route = _tt_code_public_route_item(
+                route_payload.get("item"),
+                normalized_query,
+                source,
+            )
+            outcome = TT_DRAMA_RESOLVER.resolve(route["content_id"])
+            cache_state = TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES.get(
+                str(outcome.cache_state or ""),
+                "MISS",
+            )
+            if not outcome.found:
+                respond(
+                    404,
+                    {
+                        "found": False,
+                        "error": "not_found",
+                        "message": "No matching DramaWave story was found.",
+                    },
+                )
+                return
+            public_drama = {
+                key: outcome.item.get(key)
+                for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS
+            }
+            respond(200, {"found": True, "item": {**public_drama, **route}})
+        except (InvalidContentIdError, ResourceInvalidContentIdError):
+            respond(
+                400,
+                {
+                    "found": False,
+                    "error": "invalid_request",
+                    "message": "Enter a four-character code or complete Content ID.",
+                },
+            )
+        except TTPostAdminClientError as exc:
+            status, payload = tt_posts_error_payload(exc)
+            respond(status, {"found": False, **payload})
+        except (ResolverUnavailableError, ResourceSourceError):
+            cache_state = "ERROR"
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        except Exception:
+            cache_state = "ERROR"
+            logging.exception("unexpected TT code resolver failure")
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        finally:
+            if acquired:
+                TT_DRAMA_RESOLVER_REQUEST_GATE.release()
+
     def _require_any_module(self, module_keys):
         if not self._require_auth():
             return False
@@ -84880,50 +95092,6 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return True
         json_response(self, 403, {"error": "permission_denied", "modules": list(module_keys)})
         return False
-
-    def _send_empty_response(self, status_code):
-        self.send_response(status_code)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def _handle_tt_minis_report_auth(self):
-        original_uri = (self.headers.get("X-Original-URI", "") or "")[:512]
-        client_ip = (
-            self.headers.get("X-Real-IP", "")
-            or self.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
-            or (self.client_address[0] if self.client_address else "")
-        )
-        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
-        if not feishu_auth_enabled() or not session:
-            logging.info(
-                "tt_minis_report_auth denied status=401 ip=%s uri=%s",
-                client_ip,
-                original_uri,
-            )
-            self._send_empty_response(401)
-            return
-        tenant_key = str(session.get("tenant_key", "") or "").strip()
-        if tenant_key != TT_MINIS_REPORT_ALLOWED_TENANT_KEY:
-            logging.info(
-                "tt_minis_report_auth denied status=403 ip=%s uri=%s user_id=%s name=%s tenant_key=%s",
-                client_ip,
-                original_uri,
-                session.get("user_id", ""),
-                session.get("name", ""),
-                tenant_key,
-            )
-            self._send_empty_response(403)
-            return
-        logging.info(
-            "tt_minis_report_auth allowed ip=%s uri=%s user_id=%s name=%s tenant_key=%s",
-            client_ip,
-            original_uri,
-            session.get("user_id", ""),
-            session.get("name", ""),
-            tenant_key,
-        )
-        self._send_empty_response(204)
-        return
 
 
 
@@ -85261,8 +95429,110 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
-        if parsed.path == "/api/report-auth/tt-minis-native-growth":
-            self._handle_tt_minis_report_auth()
+        if parsed.path in {
+            "/fb-post-ad-delete.html",
+            "/fb-post-ad-delete.css",
+            "/fb-post-ad-delete.js",
+        }:
+            static_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "static",
+                parsed.path.lstrip("/"),
+            )
+            try:
+                with open(static_path, "rb") as handle:
+                    data = handle.read()
+                self.send_response(200)
+                self.send_header("Content-Type", guess_content_type(static_path))
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:
+                json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
+
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
+
+        if parsed.path == "/api/gpu-video/random-overlay/catalog":
+            auth = self.headers.get("Authorization", "")
+            token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+            if not GPU_VIDEO_WORKER_TOKEN or not secrets.compare_digest(token, GPU_VIDEO_WORKER_TOKEN):
+                json_response(self, 403, {"error": "forbidden"})
+                return
+            try:
+                if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+                    raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+                json_response(
+                    self,
+                    200,
+                    {"item": catalog_from_assets(DRAMA_RANDOM_OVERLAY_ROOT, DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256)},
+                )
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("GPU random-template catalog failed")
+                json_response(self, 503, {"code": "drama_random_assets_unavailable", "error": "GPU随机模板素材不可用"})
+            return
+
+        if parsed.path == "/api/public/tt-code/resolve":
+            self._dispatch_tt_code_resolver(parsed)
+            return
+
+        if parsed.path == "/api/public/tt-drama/resolve":
+            self._dispatch_tt_drama_resolver(parsed)
+            return
+
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
+
+        if parsed.path.startswith("/api/fb-post-ad-delete/jobs/"):
+            if not self._require_cookie_module("ad_control_center"):
+                return
+            try:
+                job_id = unquote(parsed.path[len("/api/fb-post-ad-delete/jobs/"):].strip("/"))
+                job = fb_post_ad_delete_load_job(job_id, actor_user_id=ad_control_actor(self._session()))
+                json_response(self, 200, job, no_store=True)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc), no_store=True)
+            return
+
+        if parsed.path == "/api/fb-post-ad-delete/jobs":
+            if not self._require_cookie_module("ad_control_center"):
+                return
+            try:
+                ensure_fb_post_ad_delete_tables()
+                with JOB_DB_LOCK:
+                    conn = get_job_db_connection()
+                    try:
+                        rows = conn.execute(
+                            """
+                            SELECT job_id, preview_id, phase, status, summary_json, series_ids_json, products_json, created_at, updated_at, finished_at
+                              FROM fb_post_ad_delete_job
+                             WHERE actor_user_id=?
+                          ORDER BY updated_at DESC
+                             LIMIT 30
+                            """,
+                            (ad_control_actor(self._session()),),
+                        ).fetchall()
+                    finally:
+                        conn.close()
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    for key, default in (("summary_json", {}), ("series_ids_json", []), ("products_json", [])):
+                        try:
+                            item[key.replace("_json", "")] = json.loads(item.get(key) or json.dumps(default))
+                        except Exception:
+                            item[key.replace("_json", "")] = default
+                    items.append(item)
+                json_response(self, 200, {"items": items}, no_store=True)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc), no_store=True)
             return
 
 
@@ -85359,6 +95629,542 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+            return
+
+        if parsed.path == "/api/report-auth/tt-minis-native-growth":
+            self._send_report_auth_status()
+            return
+
+        if parsed.path == "/api/ui/topbar":
+            json_response(self, 200, self._auth_payload())
+            return
+
+        if (
+            parsed.path in {
+                FB_AUTO_ADMIN_PREFIX + "/groups",
+                FB_AUTO_ADMIN_PREFIX + "/templates",
+                FB_AUTO_ADMIN_PREFIX + "/runs",
+            }
+            or re.fullmatch(
+                re.escape(FB_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "fbAutoPublishRuns"
+                if parsed.path.startswith(FB_AUTO_ADMIN_PREFIX + "/runs")
+                else "fbAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = fb_auto_posts_query_params(parsed.path, parsed.query)
+                result = fb_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                    actor=fb_auto_post_actor_scope(self._session()),
+                )
+                json_response(self, 200, result, no_store=True)
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if (
+            parsed.path in {
+                X_AUTO_ADMIN_PREFIX + "/accounts",
+                X_AUTO_ADMIN_PREFIX + "/templates",
+                X_AUTO_ADMIN_PREFIX + "/runs",
+            }
+            or re.fullmatch(
+                re.escape(X_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "xAutoPublishRuns"
+                if parsed.path.startswith(X_AUTO_ADMIN_PREFIX + "/runs")
+                else "xAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = x_auto_posts_query_params(parsed.path, parsed.query)
+                result = x_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAutoPostAdminClientError as exc:
+                status, payload = x_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if (
+            parsed.path in {
+                TT_AUTO_ADMIN_PREFIX + "/accounts",
+                TT_AUTO_ADMIN_PREFIX + "/templates",
+                TT_AUTO_ADMIN_PREFIX + "/runs",
+                TT_AUTO_ADMIN_PREFIX + "/publish-logs",
+            }
+            or re.fullmatch(
+                re.escape(TT_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "ttAutoPublishRuns"
+                if parsed.path.startswith(TT_AUTO_ADMIN_PREFIX + "/runs")
+                or parsed.path == TT_AUTO_ADMIN_PREFIX + "/publish-logs"
+                else "ttAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = tt_auto_posts_query_params(parsed.path, parsed.query)
+                result = tt_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                )
+                json_response(self, 200, result, no_store=True)
+            except TTAutoPostAdminClientError as exc:
+                status, payload = tt_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path in {
+            "/api/admin/tt-posts/accounts",
+            "/api/admin/tt-posts/account-settings",
+            "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/auto-config",
+            "/api/admin/tt-posts/direct-tests",
+            "/api/admin/tt-posts/schedule",
+            "/api/admin/tt-posts/tasks",
+            "/api/admin/tt-posts/queue",
+            "/api/admin/tt-posts/events",
+        }:
+            navigation_key = (
+                "ttAccountSettings"
+                if parsed.path == "/api/admin/tt-posts/account-settings"
+                else "ttPostPool"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                if parsed.path in {
+                    "/api/admin/tt-posts/accounts",
+                    "/api/admin/tt-posts/account-settings",
+                    "/api/admin/tt-posts/auto-config",
+                }:
+                    query = _tt_post_query_params(parsed.query, set())
+                elif parsed.path == "/api/admin/tt-posts/events":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {"queue_id"},
+                        required={"queue_id"},
+                    )
+                elif parsed.path == "/api/admin/tt-posts/schedule":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {"source_account_id"},
+                        required={"source_account_id"},
+                    )
+                elif parsed.path in {
+                    "/api/admin/tt-posts/material-pool",
+                    "/api/admin/tt-posts/direct-tests",
+                }:
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                        },
+                    )
+                elif parsed.path == "/api/admin/tt-posts/tasks":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                            "task_type",
+                        },
+                    )
+                else:
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                        },
+                    )
+                result = _tt_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                )
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, payload = tt_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/x-accounts/config":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            try:
+                json_response(self, 200, get_x_accounts_config(), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/x-accounts":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            try:
+                session = self._session() or {}
+                json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="mine"), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-accounts":
+            if not self._require_cookie_admin():
+                return
+            try:
+                session = self._session() or {}
+                accounts = query_x_authorized_accounts(x_accounts_actor(session), scope="all")
+                json_response(
+                    self,
+                    200,
+                    merge_account_stats(
+                        accounts,
+                        X_ACCOUNT_STATS_CACHE_PATH,
+                        max_age_seconds=X_ACCOUNT_STATS_MAX_AGE_SECONDS,
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/logs":
+            if not self._require_cookie_admin():
+                return
+            try:
+                params = x_post_admin_query_params(parsed.query)
+                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
+                json_response(self, 200, query_x_post_logs(params), no_store=True)
+            except ValueError as exc:
+                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/runs":
+            if not self._require_cookie_admin():
+                return
+            try:
+                params = x_post_admin_query_params(parsed.query, runs=True)
+                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
+                json_response(self, 200, query_x_post_runs(params), no_store=True)
+            except ValueError as exc:
+                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/account-options":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_account_options(
+                        x_accounts_actor(self._session()),
+                        "material",
+                        "xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/schedule":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_schedule(
+                        x_accounts_actor(self._session()),
+                        "material",
+                        "xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/account-options":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_account_options(
+                        x_accounts_actor(self._session()),
+                        "drama",
+                        "xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/schedule":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_schedule(
+                        x_accounts_actor(self._session()),
+                        "drama",
+                        "xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        drama_episodes_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/episodes",
+            parsed.path,
+        )
+        if drama_episodes_match:
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                params = x_post_drama_pool_query_params(parsed.query)
+                json_response(
+                    self,
+                    200,
+                    query_x_post_drama_pool_episodes(
+                        drama_episodes_match.group(1),
+                        {
+                            "page": params["page"],
+                            "page_size": params["page_size"],
+                        },
+                        x_accounts_actor(self._session()),
+                        navigation_item="xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                params = x_post_drama_pool_query_params(parsed.query)
+                params.update(
+                    {
+                        "actor": x_accounts_actor(self._session()),
+                        "scope": "all",
+                    }
+                )
+                json_response(
+                    self,
+                    200,
+                    query_x_post_drama_pool(
+                        params,
+                        navigation_item="xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/preview":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                raw_preview_query = parse_qs(
+                    str(parsed.query or ""), keep_blank_values=False
+                )
+                if set(raw_preview_query) != {"material_id"}:
+                    raise ValueError("material_id is required")
+                material_values = raw_preview_query.get("material_id") or []
+                if len(material_values) != 1:
+                    raise ValueError("material_id must be unique")
+                material_id = str(material_values[0] or "").strip()
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+                    raise ValueError("material_id must be a positive integer")
+                pool_result = query_x_post_material_pool(
+                    {
+                        "page": 1,
+                        "page_size": 1,
+                        "material_id": material_id,
+                        "actor": x_accounts_actor(self._session()),
+                        "scope": "all",
+                    },
+                    navigation_item="xPostMaterialPool",
+                )
+                pool_items = (
+                    pool_result.get("items", [])
+                    if isinstance(pool_result, dict)
+                    else []
+                )
+                if (
+                    len(pool_items) != 1
+                    or str(pool_items[0].get("material_id") or "") != material_id
+                ):
+                    raise LookupError("素材池记录不存在")
+                location = x_post_material_preview_location(material_id)
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except LookupError as exc:
+                json_response(
+                    self,
+                    404,
+                    {"error": "x_post_material_preview_unavailable", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ):
+                json_response(
+                    self,
+                    503,
+                    {
+                        "error": "x_post_material_preview_unavailable",
+                        "message": "素材预览暂不可用，请稍后重试",
+                    },
+                    no_store=True,
+                )
+            return
+
+        x_manual_run_match = re.fullmatch(
+            r"/api/admin/x-posts/material-pool/manual-runs/([0-9]+)",
+            parsed.path,
+        )
+        if x_manual_run_match:
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_manual_run(
+                        x_manual_run_match.group(1),
+                        x_accounts_actor(self._session()),
+                        navigation_item="xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                params = x_post_pool_query_params(parsed.query)
+                params.update(
+                    {"actor": x_accounts_actor(self._session()), "scope": "all"}
+                )
+                result = query_x_post_material_pool(
+                    params,
+                    navigation_item="xPostMaterialPool",
+                )
+                json_response(
+                    self,
+                    200,
+                    x_post_enrich_material_pool_preview_urls(result),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
 
@@ -85782,6 +96588,207 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 200, {"items": load_navigation_config()})
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/voiceover-drama/designers":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                json_response(self, 200, list_voiceover_designers())
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/products":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_products(
+                        query=(params.get("q") or [""])[0],
+                        limit=(params.get("limit") or ["200"])[0],
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/accounts":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_accounts(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rules":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(
+                    self, 200,
+                    list_ad_control_rules(owner_user_id=ad_control_actor(self._session())),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/token-config":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_token_config((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/account-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(
+                    self, 200,
+                    list_ad_control_account_groups(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-sets":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(
+                    self, 200,
+                    list_ad_control_rule_sets(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(
+                    self, 200,
+                    fetch_ad_control_rule_set(
+                        rule_set_id, owner_user_id=ad_control_actor(self._session())
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/bindings":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_bindings(
+                    (params.get("product") or [""])[0], owner_user_id=ad_control_actor(self._session())
+                ))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, fetch_ad_control_binding(
+                    binding_id, owner_user_id=ad_control_actor(self._session())
+                ))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_rule_groups(
+                    (params.get("product") or [""])[0], owner_user_id=ad_control_actor(self._session())
+                ))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/runner/status":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, ad_control_runner_status(
+                    owner_user_id=ad_control_actor(self._session())
+                ))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/actions/") and parsed.path.endswith("/targets"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                action_id = unquote(parsed.path[len("/api/ad-control/actions/"):-len("/targets")].strip("/"))
+                json_response(
+                    self,
+                    200,
+                    get_ad_control_action_targets(
+                        action_id, owner_user_id=ad_control_actor(self._session())
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/actions":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                include_targets = (params.get("include_targets") or [""])[0].strip().lower() in ("1", "true", "yes", "on")
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_actions(
+                        limit=(params.get("limit") or ["50"])[0],
+                        product=(params.get("product") or [""])[0],
+                        binding_id=(params.get("binding_id") or params.get("group_id") or [""])[0],
+                        action=(params.get("action") or [""])[0],
+                        date_from=(params.get("date_from") or [""])[0],
+                        date_to=(params.get("date_to") or [""])[0],
+                        view=(params.get("view") or ["raw"])[0],
+                        include_targets=include_targets,
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
             return
 
         if parsed.path == "/api/ad-material/competitor-sources":
@@ -86701,6 +97708,49 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+
+        if parsed.path == "/api/drama-material/random-template-catalog":
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                catalog = drama_random_template_catalog()
+                json_response(self, 200, {"item": catalog})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama random-template catalog failed")
+                json_response(self, 503, {"code": "drama_template_catalog_unavailable", "error": "随机模板目录暂不可用"})
+            return
+
+        youtube_publish_match = re.fullmatch(r"/api/drama-material/youtube-publishes/([1-9][0-9]{0,18})", parsed.path)
+        if youtube_publish_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            row = DRAMA_SYNTHESIS_STORE.youtube_task(int(youtube_publish_match.group(1)))
+            if not row:
+                json_response(self, 404, {"code": "youtube_publish_not_found", "error": "YouTube发布任务不存在"})
+                return
+            safe = ("id","job_id","app_id","channel_id","source_kind","source_url","title","description_template","description_rendered","status","video_state","comment_status","sync_status","video_id","comment_id","unknown_outcome","error_code","error_message","created_at_utc","updated_at_utc","video_published_at_utc","comment_published_at_utc")
+            json_response(self, 200, {"item": {key: row.get(key) for key in safe}})
+            return
+        youtube_channels_match = re.fullmatch(
+            r"/api/drama-material/youtube/channels",
+            parsed.path,
+        )
+        if youtube_channels_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                query = parse_qs(parsed.query)
+                app_id = str((query.get("app_id") or [""])[0])
+                items = drama_youtube_repository().list_for_app(app_id)
+                json_response(self, 200, {"items": items})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama YouTube channel listing failed")
+                json_response(self, 503, {"code": "youtube_channels_unavailable", "error": "YouTube频道列表暂不可用"})
+            return
 
         if parsed.path == "/api/drama-material/products":
 
@@ -88158,6 +99208,1524 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
+
+        fb_auto_template_match = re.fullmatch(
+            re.escape(FB_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:enable|disable|run-now))?)?",
+            parsed.path,
+        )
+        if fb_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "fbAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "enable": "enable_fb_auto_publish_template",
+                "disable": "disable_fb_auto_publish_template",
+                "run-now": "run_fb_auto_publish_template",
+                "templates": "create_fb_auto_publish_template",
+            }.get(action_suffix, "update_fb_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise FBAutoPostAdminClientError(
+                        "invalid_request", "请求体必须是对象", 400
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = fb_auto_post_actor_scope(session)
+                result = fb_auto_post_service_request(
+                    "POST", parsed.path, payload=outbound_payload
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                append_audit_log(
+                    session,
+                    action,
+                    "fb_auto_publish_template",
+                    target_id,
+                    {
+                        "template_id": target_id,
+                        "run_id": str(result.get("run_id") or ""),
+                        "due_slot_id": str(result.get("due_slot_id") or ""),
+                        "operation_id": str(result.get("operation_id") or "")[:100],
+                        "expected_version": str(
+                            request_payload.get("expected_version") or ""
+                        ),
+                    },
+                )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "fb_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception("FB auto publish audit write failed")
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("FB auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        x_auto_account_verify_match = re.fullmatch(
+            re.escape(X_AUTO_ADMIN_PREFIX)
+            + r"/accounts/([1-9][0-9]*)/verify",
+            parsed.path,
+        )
+        if x_auto_account_verify_match:
+            if not self._require_cookie_navigation_item(
+                "xAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_auto_account_verify_match.group(1)
+            try:
+                request_payload = self._read_json()
+                if request_payload != {}:
+                    raise XAutoPostAdminClientError(
+                        "invalid_request",
+                        "账号资格刷新请求体必须为空对象",
+                        400,
+                    )
+                result = x_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload={},
+                )
+                refreshed = (
+                    result.get("account")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("account"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "refresh_x_auto_publish_account",
+                        "x_authorized_account",
+                        account_id,
+                        {
+                            "account_id": account_id,
+                            "status": str(refreshed.get("status") or "")[:64],
+                            "publish_eligible": bool(
+                                refreshed.get("publish_eligible")
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish account refresh audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except XAutoPostAdminClientError as exc:
+                status, payload = x_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "refresh_x_auto_publish_account_failed",
+                        "x_authorized_account",
+                        account_id,
+                        {"account_id": account_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish account refresh failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("X auto publish account refresh request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        x_auto_template_match = re.fullmatch(
+            re.escape(X_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?",
+            parsed.path,
+        )
+        if x_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "xAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            request_payload = {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "copy": "copy_x_auto_publish_template",
+                "enable": "enable_x_auto_publish_template",
+                "disable": "disable_x_auto_publish_template",
+                "preview": "preview_x_auto_publish_template",
+                "run-now": "run_x_auto_publish_template",
+                "templates": "create_x_auto_publish_template",
+            }.get(action_suffix, "update_x_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise XAutoPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = {
+                    "user_id": str(session.get("user_id") or "")[:128],
+                    "name": str(session.get("name") or "")[:200],
+                }
+                result = x_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=outbound_payload,
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                result_run_id = str(
+                    (result.get("run_id") if isinstance(result, dict) else "")
+                    or ""
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                try:
+                    append_audit_log(
+                        session,
+                        action,
+                        "x_auto_publish_template",
+                        target_id,
+                        {
+                            "template_id": target_id,
+                            "run_id": result_run_id,
+                            "expected_version": str(
+                                request_payload.get("expected_version") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish template audit write failed"
+                    )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except XAutoPostAdminClientError as exc:
+                status, payload = x_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "x_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X auto publish template failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("X auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        tt_auto_force_close_match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/tasks/([1-9][0-9]*)/force-close",
+            parsed.path,
+        )
+        if tt_auto_force_close_match:
+            if not self._require_cookie_navigation_item("ttAutoPublishRuns"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            task_id = tt_auto_force_close_match.group(1)
+            request_payload = {}
+            try:
+                request_payload = self._read_json()
+                if (
+                    not isinstance(request_payload, dict)
+                    or set(request_payload) != {"reason"}
+                ):
+                    raise TTAutoPostAdminClientError(
+                        "invalid_request", "强制关闭参数无效", 400
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = {
+                    "user_id": str(session.get("user_id") or "")[:128],
+                    "name": str(session.get("name") or "")[:200],
+                }
+                result = tt_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=outbound_payload,
+                )
+                result_task = (
+                    result.get("task", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("task"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "force_close_tt_auto_publish_task",
+                        "tt_auto_publish_task",
+                        task_id,
+                        {
+                            "task_id": task_id,
+                            "status": str(result_task.get("status") or ""),
+                            "reason": str(request_payload.get("reason") or "")[:200],
+                        },
+                    )
+                except Exception:
+                    logging.exception("TT auto force-close audit write failed")
+                json_response(self, 200, result, no_store=True)
+            except TTAutoPostAdminClientError as exc:
+                status, error_payload = tt_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "force_close_tt_auto_publish_task_failed",
+                        "tt_auto_publish_task",
+                        task_id,
+                        {"task_id": task_id, "error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto force-close failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception:
+                logging.exception("TT auto force-close request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "强制关闭请求无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        tt_auto_template_match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?",
+            parsed.path,
+        )
+        if tt_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "ttAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            request_payload = {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "copy": "copy_tt_auto_publish_template",
+                "enable": "enable_tt_auto_publish_template",
+                "disable": "disable_tt_auto_publish_template",
+                "preview": "preview_tt_auto_publish_template",
+                "run-now": "run_tt_auto_publish_template",
+                "templates": "create_tt_auto_publish_template",
+            }.get(action_suffix, "update_tt_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTAutoPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = {
+                    "user_id": str(session.get("user_id") or "")[:128],
+                    "name": str(session.get("name") or "")[:200],
+                }
+                result = tt_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=outbound_payload,
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                result_run_id = str(
+                    (result.get("run_id") if isinstance(result, dict) else "")
+                    or ""
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                try:
+                    append_audit_log(
+                        session,
+                        action,
+                        "tt_auto_publish_template",
+                        target_id,
+                        {
+                            "template_id": target_id,
+                            "run_id": result_run_id,
+                            "expected_version": str(
+                                request_payload.get("expected_version") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto publish template audit write failed"
+                    )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except TTAutoPostAdminClientError as exc:
+                status, payload = tt_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto publish template failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("TT auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        tt_post_queue_action_match = re.fullmatch(
+            r"/api/admin/tt-posts/queue/([1-9][0-9]*)/(cancel|reconcile)",
+            parsed.path,
+        )
+        if tt_post_queue_action_match:
+            if not self._require_cookie_navigation_item("ttPostPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            queue_id = tt_post_queue_action_match.group(1)
+            queue_action = tt_post_queue_action_match.group(2)
+            audit_action = (
+                "cancel_tt_post_queue"
+                if queue_action == "cancel"
+                else "manual_reconcile_tt_post_queue"
+            )
+            request_payload = {}
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                allowed_fields = (
+                    {"reason"} if queue_action == "cancel" else set()
+                )
+                if set(request_payload) - allowed_fields:
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求包含无效字段",
+                        400,
+                    )
+                result = _tt_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=request_payload,
+                )
+                item = (
+                    result.get("item", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("item"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action,
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "status": str(item.get("status") or ""),
+                            "remote_status": str(
+                                result.get("remote_status") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, error_payload = tt_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action + "_failed",
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception:
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action + "_failed",
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "error": "invalid_request",
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action invalid-request audit failed"
+                    )
+                json_response(
+                    self,
+                    400,
+                    {
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        if parsed.path in {
+            "/api/admin/tt-posts/account-settings",
+            "/api/admin/tt-posts/account-settings/creator-info",
+            "/api/admin/tt-posts/account-settings/batch",
+            "/api/admin/tt-posts/account-settings/batch/creator-info",
+            "/api/admin/tt-posts/creator-info",
+            "/api/admin/tt-posts/materials/preview",
+            "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/auto-config",
+            "/api/admin/tt-posts/test-publish",
+            "/api/admin/tt-posts/schedule",
+            "/api/admin/tt-posts/run-now",
+        }:
+            navigation_key = (
+                "ttAccountSettings"
+                if parsed.path.startswith(
+                    "/api/admin/tt-posts/account-settings"
+                )
+                else "ttPostPool"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            request_payload = {}
+            action_by_path = {
+                "/api/admin/tt-posts/account-settings": (
+                    "save_tt_post_account_settings"
+                ),
+                "/api/admin/tt-posts/account-settings/creator-info": (
+                    "check_tt_post_account_settings_creator_info"
+                ),
+                "/api/admin/tt-posts/account-settings/batch": (
+                    "batch_save_tt_post_account_settings"
+                ),
+                "/api/admin/tt-posts/account-settings/batch/creator-info": (
+                    "batch_check_tt_post_account_settings_creator_info"
+                ),
+                "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
+                "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
+                "/api/admin/tt-posts/material-pool": "add_tt_post_material_pool",
+                "/api/admin/tt-posts/auto-config": "save_tt_post_auto_config",
+                "/api/admin/tt-posts/test-publish": "create_tt_post_direct_test",
+                "/api/admin/tt-posts/schedule": "save_tt_post_daily_schedule",
+                "/api/admin/tt-posts/run-now": "run_tt_post_now",
+            }
+            action = action_by_path[parsed.path]
+            batch_source_account_ids = []
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                if parsed.path.endswith("/batch"):
+                    raw_targets = request_payload.get("targets")
+                    for target in (
+                        raw_targets[:50]
+                        if isinstance(raw_targets, list)
+                        else []
+                    ):
+                        if isinstance(target, dict):
+                            value = str(
+                                target.get("source_account_id") or ""
+                            ).strip()
+                            if value:
+                                batch_source_account_ids.append(value)
+                elif parsed.path.endswith("/batch/creator-info"):
+                    raw_account_ids = request_payload.get(
+                        "source_account_ids"
+                    )
+                    batch_source_account_ids = [
+                        str(value or "").strip()
+                        for value in (
+                            raw_account_ids[:50]
+                            if isinstance(raw_account_ids, list)
+                            else []
+                        )
+                        if str(value or "").strip()
+                    ]
+                elif parsed.path == "/api/admin/tt-posts/auto-config":
+                    raw_account_ids = request_payload.get(
+                        "source_account_ids"
+                    )
+                    batch_source_account_ids = [
+                        str(value or "").strip()
+                        for value in (
+                            raw_account_ids[:50]
+                            if isinstance(raw_account_ids, list)
+                            else []
+                        )
+                        if str(value or "").strip()
+                    ]
+                result = _tt_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=request_payload,
+                )
+                item = (
+                    result.get("item", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("item"), dict)
+                    else {}
+                )
+                is_direct_test = parsed.path == (
+                    "/api/admin/tt-posts/test-publish"
+                )
+                if is_direct_test:
+                    target_id = str(item.get("id") or "")
+                elif batch_source_account_ids:
+                    target_id = "batch:%d" % len(batch_source_account_ids)
+                elif parsed.path.startswith(
+                    "/api/admin/tt-posts/account-settings"
+                ):
+                    target_id = str(
+                        request_payload.get("source_account_id") or ""
+                    )
+                else:
+                    target_id = str(
+                        item.get("queue_id")
+                        or item.get("id")
+                        or request_payload.get("source_account_id")
+                        or request_payload.get("material_id")
+                        or ""
+                    )
+                try:
+                    audit_details = {
+                        "source_account_id": str(
+                            request_payload.get("source_account_id") or ""
+                        ),
+                        "material_id": str(
+                            request_payload.get("material_id") or ""
+                        ),
+                        "content_id": str(
+                            item.get("content_id")
+                            or request_payload.get("content_id")
+                            or ""
+                        ),
+                        "queue_id": str(item.get("queue_id") or ""),
+                        "scheduled_at": str(
+                            item.get("scheduled_at")
+                            or request_payload.get("scheduled_at")
+                            or ""
+                        ),
+                        "publish_mode": str(
+                            item.get("publish_mode") or ""
+                        ),
+                        "publish_time": str(
+                            item.get("publish_time")
+                            or request_payload.get("publish_time")
+                            or ""
+                        ),
+                        "trigger_type": str(
+                            item.get("trigger_type") or ""
+                        ),
+                    }
+                    if parsed.path == "/api/admin/tt-posts/account-settings":
+                        saved_settings = (
+                            item.get("account_settings")
+                            if isinstance(item.get("account_settings"), dict)
+                            else {}
+                        )
+                        for key in (
+                            "drama_language",
+                            "privacy_level",
+                            "allow_comment",
+                            "allow_duet",
+                            "allow_stitch",
+                            "commercial_disclosure",
+                            "brand_organic_toggle",
+                            "brand_content_toggle",
+                            "is_aigc",
+                            "version",
+                        ):
+                            if key in saved_settings:
+                                audit_details[key] = saved_settings[key]
+                    elif parsed.path == (
+                        "/api/admin/tt-posts/account-settings/batch"
+                    ):
+                        result_items = (
+                            result.get("items")
+                            if isinstance(result, dict)
+                            and isinstance(result.get("items"), list)
+                            else []
+                        )
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
+                        audit_details["saved_count"] = int(
+                            result.get("saved_count") or len(result_items)
+                        )
+                        for key in (
+                            "drama_language",
+                            "privacy_level",
+                            "allow_comment",
+                            "allow_duet",
+                            "allow_stitch",
+                            "commercial_disclosure",
+                            "brand_organic_toggle",
+                            "brand_content_toggle",
+                            "is_aigc",
+                        ):
+                            if key in request_payload:
+                                audit_details[key] = request_payload[key]
+                    elif parsed.path == (
+                        "/api/admin/tt-posts/account-settings"
+                        "/batch/creator-info"
+                    ):
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
+                    elif parsed.path == "/api/admin/tt-posts/auto-config":
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
+                        audit_details["enabled"] = bool(
+                            item.get(
+                                "enabled",
+                                request_payload.get("enabled", False),
+                            )
+                        )
+                        audit_details["publish_times"] = list(
+                            item.get("publish_times")
+                            if isinstance(item.get("publish_times"), list)
+                            else request_payload.get("publish_times")
+                            if isinstance(
+                                request_payload.get("publish_times"), list
+                            )
+                            else []
+                        )
+                        audit_details["expected_version"] = (
+                            request_payload.get("expected_version")
+                        )
+                        audit_details["result_version"] = item.get("version")
+                    elif is_direct_test:
+                        audit_details["direct_test_id"] = str(
+                            item.get("id") or ""
+                        )
+                        audit_details["direct_test_status"] = str(
+                            item.get("status") or ""
+                        )
+                        audit_details["expected_config_version"] = (
+                            request_payload.get("expected_config_version")
+                        )
+                    append_audit_log(
+                        session,
+                        action,
+                        "tt_post",
+                        target_id,
+                        audit_details,
+                    )
+                except Exception:
+                    logging.exception("TT Post admin audit write failed")
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, error_payload = tt_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_post",
+                        str(
+                            request_payload.get("source_account_id")
+                            or request_payload.get("material_id")
+                            or (
+                                "batch:%d" % len(batch_source_account_ids)
+                                if batch_source_account_ids
+                                else ""
+                            )
+                            or ""
+                        ),
+                        {
+                            "source_account_id": str(
+                                request_payload.get("source_account_id") or ""
+                            ),
+                            "material_id": str(
+                                request_payload.get("material_id") or ""
+                            ),
+                            "source_account_ids": batch_source_account_ids,
+                            "account_count": len(batch_source_account_ids),
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post admin failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception:
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_post",
+                        "",
+                        {"error": "invalid_request"},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post admin invalid-request audit write failed"
+                    )
+                json_response(
+                    self,
+                    400,
+                    {
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        x_post_account_verify_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool"
+            r"/account-options/([0-9]+)/verify",
+            parsed.path,
+        )
+        if x_post_account_verify_match:
+            account_id = x_post_account_verify_match.group(1)
+            navigation_item = "xPostDramaPool"
+            if not self._require_cookie_navigation_item(navigation_item):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                result = verify_x_account(
+                    account_id,
+                    x_post_drama_verification_actor(session),
+                    scope="all",
+                    only_refresh_required=True,
+                    preserve_transient_status=True,
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "auto_verify_x_post_account",
+                        "x_account",
+                        account_id,
+                        {
+                            "navigation_item": navigation_item,
+                            "status": item.get("status", ""),
+                            "username": item.get("username", ""),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post account auto-verification audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "auto_verify_x_post_account_failed",
+                        "x_account",
+                        account_id,
+                        {
+                            "navigation_item": navigation_item,
+                            "error": payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post account auto-verification failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/manual-publish":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            requested_material_ids = []
+            requested_account_ids = []
+            requested_publish_mode = "immediate"
+            requested_scheduled_at = ""
+            try:
+                payload = self._read_json()
+                required_fields = {
+                    "material_ids",
+                    "account_ids",
+                    "idempotency_key",
+                }
+                allowed_fields = required_fields | {
+                    "publish_mode",
+                    "scheduled_at",
+                }
+                if not required_fields.issubset(payload) or not set(payload).issubset(
+                    allowed_fields
+                ):
+                    raise ValueError("手动发布请求字段不完整或包含未知字段")
+                requested_material_ids = list(payload.get("material_ids") or [])
+                requested_account_ids = list(payload.get("account_ids") or [])
+                requested_publish_mode = str(
+                    payload.get("publish_mode", "immediate") or "immediate"
+                )
+                requested_scheduled_at = str(
+                    payload.get("scheduled_at", "") or ""
+                )
+                result = create_x_post_manual_run(
+                    requested_material_ids,
+                    requested_account_ids,
+                    payload.get("idempotency_key"),
+                    x_accounts_actor(session),
+                    navigation_item="xPostMaterialPool",
+                    publish_mode=requested_publish_mode,
+                    scheduled_at=requested_scheduled_at,
+                )
+                item = result.get("item", {}) if isinstance(result, dict) else {}
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "create_x_post_manual_run",
+                        "x_post_manual_run",
+                        str(item.get("id", "") or ""),
+                        {
+                            "material_ids": requested_material_ids,
+                            "account_ids": requested_account_ids,
+                            "expected_count": int(item.get("expected_count", 0) or 0),
+                            "created": bool(item.get("created")),
+                            "publish_mode": str(
+                                item.get("publish_mode", "immediate")
+                                or "immediate"
+                            ),
+                            "scheduled_at": str(
+                                item.get("scheduled_at", "") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception("X post manual-run audit write failed")
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 202, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "create_x_post_manual_run_failed",
+                        "x_post_manual_run",
+                        "batch",
+                        {
+                            "material_ids": requested_material_ids[:50],
+                            "account_ids": requested_account_ids[:50],
+                            "publish_mode": requested_publish_mode,
+                            "scheduled_at": requested_scheduled_at,
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post manual-run failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        x_drama_priority_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority",
+            parsed.path,
+        )
+        if x_drama_priority_match:
+            if self.command != "PUT":
+                json_response(
+                    self,
+                    405,
+                    {"error": "method_not_allowed", "message": "请使用 PUT"},
+                    no_store=True,
+                )
+                return
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_drama_priority_match.group(1)
+            try:
+                payload = self._read_json()
+                if set(payload) != {"high_priority"} or not isinstance(
+                    payload.get("high_priority"), bool
+                ):
+                    raise ValueError("high_priority必须是布尔值")
+                result = set_x_post_drama_pool_priority(
+                    pool_item_id,
+                    payload["high_priority"],
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "set_x_post_drama_pool_priority",
+                        "x_post_drama_pool",
+                        pool_item_id,
+                        {"high_priority": payload["high_priority"]},
+                    )
+                except Exception:
+                    logging.exception("X post drama priority audit write failed")
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "set_x_post_drama_pool_priority_failed",
+                        "x_post_drama_pool",
+                        pool_item_id,
+                        {"error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama priority failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        x_post_schedule_routes = {
+            "/api/admin/x-posts/material-pool/schedule": (
+                "material",
+                "xPostMaterialPool",
+            ),
+            "/api/admin/x-posts/drama-pool/schedule": (
+                "drama",
+                "xPostDramaPool",
+            ),
+        }
+        if parsed.path in x_post_schedule_routes:
+            source_type, navigation_item = x_post_schedule_routes[
+                parsed.path
+            ]
+            if not self._require_cookie_navigation_item(navigation_item):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                settings = self._read_json()
+                result = save_x_post_schedule(
+                    settings,
+                    x_accounts_actor(session),
+                    source_type,
+                    navigation_item,
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "update_x_post_%s_schedule" % source_type,
+                        "x_post_schedule",
+                        source_type,
+                        {
+                            "enabled": bool(settings.get("enabled")),
+                            "body_template_sha256": hashlib.sha256(
+                                str(settings.get("body_template", "") or "").encode(
+                                    "utf-8"
+                                )
+                            ).hexdigest(),
+                            "body_template_uses_url": "{{url}}"
+                            in str(settings.get("body_template", "") or ""),
+                            "account_count": len(
+                                settings.get("account_ids", [])
+                                if isinstance(
+                                    settings.get("account_ids"),
+                                    list,
+                                )
+                                else []
+                            ),
+                            "schedule_mode": str(
+                                settings.get("schedule_mode", "fixed")
+                                or "fixed"
+                            ),
+                            "random_daily_count": (
+                                settings.get("random_daily_count", 0)
+                                if isinstance(
+                                    settings.get("random_daily_count", 0),
+                                    int,
+                                )
+                                and not isinstance(
+                                    settings.get("random_daily_count", 0),
+                                    bool,
+                                )
+                                else 0
+                            ),
+                            "publish_time_count": len(
+                                settings.get("publish_times", [])
+                                if isinstance(
+                                    settings.get("publish_times"),
+                                    list,
+                                )
+                                else []
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post %s schedule audit write failed",
+                        source_type,
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/preview":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            try:
+                payload = self._read_json()
+                json_response(
+                    self,
+                    200,
+                    {
+                        "items": x_post_drama_validation_checks(
+                            payload.get("drama_ids")
+                        )
+                    },
+                    no_store=True,
+                )
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/batch-delete":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            requested_pool_item_ids = []
+            requested_count = 0
+            try:
+                payload = self._read_json()
+                raw_pool_item_ids = payload.get("pool_item_ids")
+                if isinstance(raw_pool_item_ids, list):
+                    requested_count = len(raw_pool_item_ids)
+                    requested_pool_item_ids = [
+                        int(value)
+                        for value in raw_pool_item_ids[:100]
+                        if not isinstance(value, bool)
+                        and str(value or "").isdigit()
+                        and int(value) > 0
+                    ]
+                result = batch_delete_x_post_drama_pool(
+                    raw_pool_item_ids,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "deleted_count": int(
+                                item.get("deleted_count", 0)
+                                if isinstance(item, dict)
+                                else 0
+                            ),
+                            "pool_item_ids": requested_pool_item_ids,
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool batch-delete audit write failed"
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "pool_item_ids": requested_pool_item_ids,
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool batch-delete failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception as exc:
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "pool_item_ids": requested_pool_item_ids,
+                            "error": "invalid_request",
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool invalid batch-delete audit write failed"
+                    )
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                payload = self._read_json()
+                drama_ids = payload.get("drama_ids")
+                validation_checks = x_post_drama_validation_checks(
+                    drama_ids
+                )
+                result = add_x_post_drama_pool(
+                    drama_ids,
+                    validation_checks,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "add_x_post_drama_pool",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "created_count": int(
+                                result.get("created_count", 0)
+                                if isinstance(result, dict)
+                                else 0
+                            ),
+                            "validation_failed_count": sum(
+                                1
+                                for item in validation_checks
+                                if item.get("error_code")
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool audit write failed"
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "add_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {"error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
+
+        if parsed.path == material_replication_delivery.ENDPOINT:
+            handle_material_replication_webhook_request(self)
+            return
+
+        if (
+            parsed.path
+            == "/api/integrations/v1/material-task-status-events"
+        ):
+            handle_material_status_webhook_request(self)
+            return
+
+        if parsed.path in ("/api/ad-material/playable-preview", "/api/fb-playable/preview"):
+            if not require_playable_preview_access(self):
+                return
+            if not PLAYABLE_PREVIEW_REQUEST_SLOTS.acquire(blocking=False):
+                json_response(
+                    self,
+                    429,
+                    {
+                        "code": "playable_preview_busy",
+                        "error": "playable preview service is busy",
+                        "message": "playable preview service is busy",
+                    },
+                )
+                return
+            try:
+                payload = create_playable_preview(parse_playable_preview_request(self))
+                json_response(self, 200, payload)
+            except (ValueError, UnicodeError, binascii.Error, zipfile.BadZipFile) as exc:
+                logging.warning(
+                    "playable preview request rejected: %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                )
+                json_response(self, 400, api_error_payload(exc))
+            except Exception:
+                logging.exception("playable preview generation failed")
+                json_response(
+                    self,
+                    500,
+                    {
+                        "code": "internal_error",
+                        "error": "playable preview generation failed",
+                        "message": "playable preview generation failed",
+                    },
+                )
+            finally:
+                PLAYABLE_PREVIEW_REQUEST_SLOTS.release()
+            return
+
         if parsed.path == "/api/gpu-video/render":
             try:
                 auth = self.headers.get("Authorization", "")
@@ -88279,6 +100847,329 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/admin/x-posts/material-pool":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                payload = self._read_json()
+                material_ids = payload.get("material_ids")
+                if material_ids is None and payload.get("material_id") not in (
+                    None,
+                    "",
+                ):
+                    material_ids = [payload.get("material_id")]
+                validation_checks = x_post_initial_material_checks(material_ids)
+                result = add_x_post_material_pool(
+                    material_ids,
+                    x_accounts_actor(session),
+                    validation_checks=validation_checks,
+                    navigation_item="xPostMaterialPool",
+                )
+                append_audit_log(
+                    session,
+                    "add_x_post_material_pool",
+                    "x_post_material_pool",
+                    "batch",
+                    {
+                        "created_count": int(
+                            result.get("created_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "skipped_count": int(
+                            result.get("skipped_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "already_in_pool_count": int(
+                            result.get("already_in_pool_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "already_used_count": int(
+                            result.get("already_used_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "validation_failed_count": int(
+                            result.get("validation_failed_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "deferred_count": int(
+                            result.get("deferred_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "add_x_post_material_pool_failed",
+                    "x_post_material_pool",
+                    "batch",
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/x-accounts/authorize":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            append_audit_log(session, "authorize_x_account_attempted", "x_account", "pending", {})
+            try:
+                result = start_x_authorization(x_accounts_actor(session))
+                append_audit_log(
+                    session,
+                    "authorize_x_account_started",
+                    "x_account",
+                    "pending",
+                    {"callback_url": result.get("callback_url", ""), "scopes": result.get("scopes", [])},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "authorize_x_account_failed",
+                    "x_account",
+                    "pending",
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
+            return
+
+        x_admin_verify_match = re.match(r"^/api/admin/x-accounts/(\d+)/verify$", parsed.path)
+        if x_admin_verify_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_verify_match.group(1)
+            append_audit_log(session, "admin_verify_x_account_attempted", "x_account", account_id, {})
+            try:
+                result = verify_x_account(account_id, x_accounts_actor(session), scope="all")
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "admin_verify_x_account",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {"status": item.get("status", ""), "username": item.get("username", "")},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_verify_x_account_failed",
+                    "x_account",
+                    account_id,
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
+            return
+
+        x_admin_publish_approval_match = re.match(
+            r"^/api/admin/x-accounts/(\d+)/publish-approval$",
+            parsed.path,
+        )
+        if x_admin_publish_approval_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_publish_approval_match.group(1)
+            try:
+                payload = self._read_json()
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON请求体必须是对象")
+                approved = payload.get("approved")
+                if not isinstance(approved, bool):
+                    raise ValueError("approved必须是布尔值")
+                result = set_x_account_publish_approval(
+                    account_id,
+                    approved,
+                    x_accounts_actor(session),
+                )
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_publish_approval",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "account_id": int(account_id),
+                        "publish_approved": approved,
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_publish_approval_failed",
+                    "x_account",
+                    account_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
+            return
+
+        x_admin_drama_language_match = re.match(
+            r"^/api/admin/x-accounts/(\d+)/drama-language$",
+            parsed.path,
+        )
+        if x_admin_drama_language_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_drama_language_match.group(1)
+            try:
+                payload = self._read_json()
+                if not isinstance(payload, dict) or set(payload) != {
+                    "drama_language"
+                }:
+                    raise ValueError(
+                        "JSON body must contain only drama_language"
+                    )
+                result = set_x_account_drama_language(
+                    account_id,
+                    payload.get("drama_language"),
+                    x_accounts_actor(session),
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_drama_language",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "account_id": int(account_id),
+                        "drama_language": item.get("drama_language", ""),
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_drama_language_failed",
+                    "x_account",
+                    account_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(
+                    self, status, error_payload, no_store=True
+                )
+            return
+
+        x_verify_match = re.match(r"^/api/x-accounts/(\d+)/verify$", parsed.path)
+        if x_verify_match:
+            if not self._require_cookie_module("x_accounts"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_verify_match.group(1)
+            append_audit_log(session, "verify_x_account_attempted", "x_account", account_id, {})
+            try:
+                result = verify_x_account(account_id, x_accounts_actor(session), scope="mine")
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "verify_x_account",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {"status": item.get("status", ""), "username": item.get("username", "")},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "verify_x_account_failed",
+                    "x_account",
+                    account_id,
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
+            return
+
+        x_logout_match = re.match(r"^/api/x-accounts/(\d+)/logout$", parsed.path)
+        if x_logout_match:
+            if not self._require_cookie_module("x_accounts"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_logout_match.group(1)
+            append_audit_log(session, "logout_x_account_attempted", "x_account", account_id, {})
+            try:
+                result = logout_x_account(account_id, x_accounts_actor(session))
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "logout_x_account",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "status": item.get("status", ""),
+                        "username": item.get("username", ""),
+                        "disconnected_at": item.get("disconnected_at", ""),
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "logout_x_account_failed",
+                    "x_account",
+                    account_id,
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
+            return
+
         if parsed.path == "/api/admin/users/role":
 
             if not self._require_admin():
@@ -88335,6 +101226,314 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        if parsed.path == "/api/ad-control/preview":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = create_ad_control_preview(self._read_json(), self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/execute":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = execute_ad_control(self._read_json(), self._session())
+                append_audit_log(
+                    self._session(),
+                    "execute_ad_control",
+                    "ad_control",
+                    payload.get("action_id", ""),
+                    {
+                        "preview_id": payload.get("preview_id", ""),
+                        "action": payload.get("action", ""),
+                        "requested_count": payload.get("requested_count", 0),
+                        "success_count": payload.get("success_count", 0),
+                        "skipped_count": payload.get("skipped_count", 0),
+                        "error_count": payload.get("error_count", 0),
+                        "dry_run": payload.get("dry_run", False),
+                    },
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/fb-post-ad-delete/preview":
+            if not self._require_cookie_module("ad_control_center"):
+                return
+            try:
+                payload = fb_post_ad_delete_create_preview(self._read_json(), self._session())
+                append_audit_log(
+                    self._session(),
+                    "preview_fb_post_ad_delete",
+                    "fb_post_ad_delete",
+                    payload.get("job_id", ""),
+                    {"series_ids": payload.get("series_ids", []), "summary": payload.get("summary", {})},
+                )
+                json_response(self, 200, payload, no_store=True)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc), no_store=True)
+            return
+
+        if parsed.path == "/api/fb-post-ad-delete/delete-posts":
+            if not self._require_cookie_module("ad_control_center"):
+                return
+            try:
+                payload = fb_post_ad_delete_start(self._read_json(), self._session(), "posts")
+                append_audit_log(self._session(), "start_fb_post_delete", "fb_post_ad_delete", payload.get("job_id", ""), payload)
+                json_response(self, 202, payload, no_store=True)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc), no_store=True)
+            return
+
+        if parsed.path == "/api/fb-post-ad-delete/delete-ads":
+            if not self._require_cookie_module("ad_control_center"):
+                return
+            try:
+                payload = fb_post_ad_delete_start(self._read_json(), self._session(), "ads")
+                append_audit_log(self._session(), "start_fb_ad_delete", "fb_post_ad_delete", payload.get("job_id", ""), payload)
+                json_response(self, 202, payload, no_store=True)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc), no_store=True)
+            return
+
+        if parsed.path == "/api/ad-control/rules":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule", "ad_control_rule", payload.get("rule_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rules/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                rule_id = parsed.path[len("/api/ad-control/rules/"):-len("/enabled")].strip("/")
+                body = self._read_json()
+                payload = set_ad_control_rule_enabled(
+                    rule_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                )
+                append_audit_log(
+                    self._session(),
+                    "set_ad_control_rule_enabled",
+                    "ad_control_rule",
+                    payload.get("rule_id", ""),
+                    {"enabled": payload.get("enabled", False)},
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/token-config":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_token_config(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_token_config", "ad_control_token_config", payload.get("product", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/token-config/validate":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, validate_ad_control_token_config(self._read_json()))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/account-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_account_group(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_account_group", "ad_control_account_group", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-sets":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule_set(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_set", "ad_control_rule_set", payload.get("rule_set_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_set_id"] = rule_set_id
+                payload = save_ad_control_rule_set(body, self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_set", "ad_control_rule_set", payload.get("rule_set_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/bindings":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_binding(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_binding", "ad_control_binding", payload.get("binding_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                binding_id = ad_control_parse_binding_path(parsed.path, "/enabled")
+                body = self._read_json()
+                payload = set_ad_control_binding_enabled(
+                    binding_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                    live_mode_confirm=body.get("live_mode_confirm") or body.get("confirm") or "",
+                )
+                append_audit_log(self._session(), "set_ad_control_binding_enabled", "ad_control_binding", payload.get("binding_id", ""), {"enabled": payload.get("enabled", False)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/preview-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_binding_path(parsed.path, "/preview-live")
+                payload = create_ad_control_live_preview(body, self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/execute-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_binding_path(parsed.path, "/execute-live")
+                payload = execute_ad_control_live(body, self._session())
+                append_audit_log(self._session(), "execute_ad_control_live", "ad_control_binding", body.get("rule_group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["group_id"] = binding_id
+                payload = save_ad_control_binding(body, self._session())
+                append_audit_log(self._session(), "save_ad_control_binding", "ad_control_binding", payload.get("binding_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule_group(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_group", "ad_control_rule_group", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                rule_group_id = ad_control_parse_rule_group_path(parsed.path, "/enabled")
+                body = self._read_json()
+                payload = set_ad_control_rule_group_enabled(
+                    rule_group_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                    live_mode_confirm=body.get("live_mode_confirm") or body.get("confirm") or "",
+                )
+                append_audit_log(self._session(), "set_ad_control_rule_group_enabled", "ad_control_rule_group", payload.get("group_id", ""), {"enabled": payload.get("enabled", False)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/preview-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_rule_group_path(parsed.path, "/preview-live")
+                payload = create_ad_control_live_preview(body, self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/execute-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_rule_group_path(parsed.path, "/execute-live")
+                payload = execute_ad_control_live(body, self._session())
+                append_audit_log(self._session(), "execute_ad_control_live", "ad_control_rule_group", body.get("rule_group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/campaign-start/refresh":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, refresh_ad_control_campaign_start(self._read_json()))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/emergency-stop":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = ad_control_emergency_stop(
+                    self._read_json(), owner_user_id=ad_control_actor(self._session())
+                )
+                append_audit_log(self._session(), "ad_control_emergency_stop", "ad_control", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
         if screenshot_job_id and screenshot_action == "retry":
             if not self._require_module("cover_synthesis"):
@@ -88345,6 +101544,60 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 202, payload)
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/voiceover-drama/material-counts":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = voiceover_material_counts(self._read_json())
+                append_audit_log(self._session(), "voiceover_material_counts", "voiceover_drama", "", {"total": payload.get("total", 0)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/voiceover-drama/filter":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = voiceover_filter_materials(self._read_json())
+                append_audit_log(
+                    self._session(),
+                    "voiceover_filter_materials",
+                    "voiceover_drama",
+                    "",
+                    {
+                        "total": payload.get("total", 0),
+                        "groups": len(payload.get("groups") or []),
+                    },
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/voiceover-drama/design-tasks":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = create_voiceover_design_tasks(self._read_json(), self._session())
+                append_audit_log(
+                    self._session(),
+                    "create_voiceover_design_tasks",
+                    "voiceover_drama",
+                    "",
+                    {
+                        "created_count": payload.get("created_count", 0),
+                        "failed_count": payload.get("failed_count", 0),
+                    },
+                )
+                json_response(self, 200 if not payload.get("failed_count") else 207, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
             return
 
         if parsed.path == "/api/ad-material/tasks":
@@ -88494,6 +101747,55 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        retry_comment_match = re.fullmatch(r"/api/drama-material/youtube-publishes/([1-9][0-9]{0,18})/retry-comment", parsed.path)
+        if retry_comment_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                row = DRAMA_SYNTHESIS_STORE.retry_youtube_comment(int(retry_comment_match.group(1)))
+                append_audit_log(self._session(), "retry_drama_youtube_comment", "youtube_publish", str(row["id"]), {"status": row["comment_status"]})
+                json_response(self, 202, {"id": row["id"], "status": row["status"], "comment_status": row["comment_status"]})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            return
+        drama_action_match = re.fullmatch(
+            r"/api/drama-material/jobs/([0-9a-f]{32})/(short-links|youtube-publishes)",
+            parsed.path,
+        )
+        if drama_action_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            job_id, drama_action = drama_action_match.groups()
+            try:
+                if drama_action == "short-links":
+                    job = require_completed_drama_job(job_id)
+                    request_payload = self._read_json()
+                    material_kind, _source_url = drama_youtube_source(job, request_payload.get("material_kind"))
+                    payload = DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id, material_kind, str(job.get("content_id") or ""), DRAMA_SHORT_LINK_PUBLISHER)
+                    audit_action = "create_drama_short_link"
+                    response_payload = {
+                        key: payload.get(key)
+                        for key in ("id", "short_url", "long_url", "publish_state", "published_at_utc", "reused")
+                    }
+                else:
+                    request_payload = self._read_json()
+                    actor = self._session() or {}
+                    request_payload["_operator_user_id"] = actor.get("user_id", "")
+                    request_payload["_operator_name"] = actor.get("name", "")
+                    response_payload = enqueue_drama_youtube_publish(job_id, request_payload)
+                    audit_action = "enqueue_drama_youtube_publish"
+                append_audit_log(
+                    self._session(), audit_action, "job", job_id,
+                    {"status": response_payload.get("status") or response_payload.get("publish_state", "")},
+                )
+                json_response(self, 202 if drama_action == "youtube-publishes" else 200, response_payload)
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama synthesis action failed: %s", drama_action)
+                json_response(self, 500, {"code": "internal_error", "error": "操作失败"})
+            return
+
         if parsed.path == "/api/drama-material/jobs":
 
             if not self._require_module("drama_synthesis"):
@@ -88507,6 +101809,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 append_audit_log(self._session(), "create_job", "job", payload.get("job_id", ""), payload)
 
                 json_response(self, 202, payload)
+
+            except DramaSynthesisError as exc:
+
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
 
             except Exception as exc:
 
@@ -88538,6 +101844,20 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         json_response(self, 404, {"error": "not_found"})
 
+
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        x_post_schedule_paths = {
+            "/api/admin/x-posts/material-pool/schedule",
+            "/api/admin/x-posts/drama-pool/schedule",
+        }
+        if parsed.path in x_post_schedule_paths or re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority", parsed.path
+        ):
+            self.do_POST()
+            return
+        json_response(self, 404, {"error": "not_found"})
 
 
     def do_DELETE(self):
@@ -88573,6 +101893,147 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        x_pool_delete_match = re.fullmatch(
+            r"/api/admin/x-posts/material-pool/([0-9]+)",
+            parsed.path,
+        )
+        x_drama_pool_delete_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)",
+            parsed.path,
+        )
+        if x_drama_pool_delete_match:
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_drama_pool_delete_match.group(1)
+            try:
+                result = delete_x_post_drama_pool(
+                    pool_item_id,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                append_audit_log(
+                    session,
+                    "delete_x_post_drama_pool",
+                    "x_post_drama_pool",
+                    pool_item_id,
+                    {},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "delete_x_post_drama_pool_failed",
+                    "x_post_drama_pool",
+                    pool_item_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            return
+
+        if x_pool_delete_match:
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_pool_delete_match.group(1)
+            try:
+                result = delete_x_post_material_pool(
+                    pool_item_id,
+                    x_accounts_actor(session),
+                    navigation_item="xPostMaterialPool",
+                )
+                append_audit_log(
+                    session,
+                    "delete_x_post_material_pool",
+                    "x_post_material_pool",
+                    pool_item_id,
+                    {},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "delete_x_post_material_pool_failed",
+                    "x_post_material_pool",
+                    pool_item_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
+            return
+
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
+
+        account_group_id = ad_control_parse_account_group_path(parsed.path)
+        if account_group_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_account_group(
+                    account_group_id,
+                    owner_user_id=ad_control_actor(self._session()),
+                )
+                append_audit_log(self._session(), "delete_ad_control_account_group", "ad_control_account_group", account_group_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_rule_set(
+                    rule_set_id,
+                    owner_user_id=ad_control_actor(self._session()),
+                )
+                append_audit_log(self._session(), "delete_ad_control_rule_set", "ad_control_rule_set", rule_set_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_binding(
+                    binding_id, owner_user_id=ad_control_actor(self._session())
+                )
+                append_audit_log(self._session(), "delete_ad_control_binding", "ad_control_binding", binding_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_group_id = ad_control_parse_rule_group_path(parsed.path)
+        if rule_group_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_rule_group(
+                    rule_group_id, owner_user_id=ad_control_actor(self._session())
+                )
+                append_audit_log(self._session(), "delete_ad_control_rule_group", "ad_control_rule_group", rule_group_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
 
         ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
         if ad_task_id and not ad_action:
@@ -89144,10 +102605,13 @@ def main():
 
 
     ensure_job_table()
+    DRAMA_SYNTHESIS_STORE.ensure_storage()
 
     ensure_screenshot_job_table()
 
     ensure_ad_material_tables()
+
+    ensure_ad_control_tables()
 
 
 
@@ -89241,6 +102705,38 @@ def main():
 
     ensure_audit_log_table()
 
+    try:
+        cache = get_material_status_optimizer_cache()
+        start_material_status_mapping_cache_refresh_worker()
+        logging.info(
+            "material status optimizer cache worker started entries=%s refresh_seconds=%s",
+            cache.count(),
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS,
+        )
+    except Exception:
+        logging.exception(
+            "material status optimizer cache worker startup failed"
+        )
+
+    try:
+        start_material_status_worker()
+        logging.info(
+            "material status broadcast worker started configured=%s",
+            not bool(material_status_webhook_config_error()),
+        )
+    except Exception:
+        logging.exception("material status broadcast worker startup failed")
+
+    try:
+        replication_runtime = get_material_replication_runtime()
+        replication_runtime.start()
+        logging.info(
+            "material replication batch worker configured=%s",
+            replication_runtime.configured(),
+        )
+    except Exception:
+        logging.exception("material replication batch worker startup failed")
+
 
 
 
@@ -89322,6 +102818,25 @@ def main():
     recover_inflight_jobs()
     recover_inflight_screenshot_jobs()
     recover_inflight_ad_material_tasks()
+
+    resolver_warmup_started = time.perf_counter()
+    try:
+        if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+            resolver_warmed = TT_DRAMA_RESOURCE_SERVICE.warmup()
+        else:
+            resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
+        logging.info(
+            "TT drama resolver warmup source=%s ready=%s elapsed_ms=%.2f",
+            TT_DRAMA_RESOURCE_SOURCE,
+            resolver_warmed,
+            (time.perf_counter() - resolver_warmup_started) * 1000.0,
+        )
+    except Exception as exc:
+        logging.warning(
+            "TT drama resolver warmup unavailable: %s elapsed_ms=%.2f",
+            type(exc).__name__,
+            (time.perf_counter() - resolver_warmup_started) * 1000.0,
+        )
 
 
 
@@ -89418,151 +102933,5 @@ def main():
 
     server.serve_forever()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

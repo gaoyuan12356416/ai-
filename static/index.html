@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 
 
 
@@ -86,7 +86,8 @@
 
 
 
-  <script src="/quick-nav.js?v=20260519-qa-perf-nav"></script>
+  <script src="/quick-nav.js?v=20260522-voiceover-tasks"></script>
+  <script src="/drama-job-runtime.js?v=20260828-async-v1"></script>
   <script>
 
 
@@ -7225,6 +7226,322 @@
     }
 
     .stack { display: grid; gap: 12px; }
+    .voiceover-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .voiceover-grid .span-4 { grid-column: span 4; }
+    .voiceover-grid .span-6 { grid-column: span 6; }
+    .voiceover-grid .span-8 { grid-column: span 8; }
+    .voiceover-grid .span-12 { grid-column: span 12; }
+    .voiceover-panel {
+      overflow: hidden;
+      border: 1px solid rgba(213, 224, 238, 0.95);
+      box-shadow: 0 18px 44px rgba(15, 35, 70, 0.08);
+    }
+    .voiceover-panel .panel-head {
+      align-items: flex-start;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,251,255,0.98));
+    }
+    .voiceover-title-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .voiceover-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+    .voiceover-icon.query {
+      background: #e7eeff;
+      color: #2457ff;
+    }
+    .voiceover-icon.filter,
+    .voiceover-icon.result {
+      background: #e5f7f4;
+      color: #0f766e;
+    }
+    .voiceover-count-grid,
+    .voiceover-filter-grid {
+      display: grid;
+      grid-template-columns: minmax(340px, 430px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+    .voiceover-count-grid > .field,
+    .voiceover-filter-grid > .field,
+    .voiceover-field-grid > .field,
+    .voiceover-task-form > .field {
+      grid-column: auto;
+    }
+    .voiceover-input-card {
+      background: linear-gradient(180deg, #ffffff, #f7faff);
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      padding: 16px;
+      min-height: 176px;
+    }
+    .voiceover-input-card textarea {
+      min-height: 132px;
+      border: 0;
+      padding: 0;
+      resize: vertical;
+      background: transparent;
+      box-shadow: none;
+    }
+    .voiceover-result-card {
+      min-width: 0;
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      background: #fff;
+      padding: 16px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+    }
+    .voiceover-result-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .voiceover-result-card .table-wrap {
+      max-height: 220px;
+      border-radius: 10px;
+    }
+    .voiceover-field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      align-items: end;
+    }
+    .voiceover-config-card {
+      align-content: start;
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      background: #fff;
+      padding: 16px;
+    }
+    .voiceover-field-grid .actions-inline {
+      grid-column: 1 / -1;
+      align-self: end;
+      justify-content: flex-end;
+      border-top: 1px solid #edf2f8;
+      padding-top: 12px;
+    }
+    .voiceover-query-state,
+    .voiceover-form-status {
+      display: inline-flex;
+      align-items: center;
+      width: max-content;
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #f3f6fb;
+      color: #52627a;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .voiceover-form-status {
+      grid-column: 1 / -1;
+    }
+    .voiceover-query-state.is-loading,
+    .voiceover-form-status.is-loading {
+      background: #e8efff;
+      color: #2457ff;
+    }
+    .voiceover-query-state.is-success,
+    .voiceover-form-status.is-success {
+      background: #e9f8ef;
+      color: #127245;
+    }
+    .voiceover-query-state.is-error,
+    .voiceover-form-status.is-error {
+      background: #ffecec;
+      color: #b42318;
+    }
+    .voiceover-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .voiceover-stat {
+      border: 1px solid #dce6f3;
+      border-left: 4px solid var(--brand);
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      min-width: 0;
+    }
+    .voiceover-stat:nth-child(2) { border-left-color: #198754; }
+    .voiceover-stat:nth-child(3) { border-left-color: #d18a12; }
+    .voiceover-stat:nth-child(4) { border-left-color: #6b7891; }
+    .voiceover-stat strong {
+      display: block;
+      font-size: 22px;
+      color: var(--brand);
+      line-height: 1.1;
+    }
+    .voiceover-stat:nth-child(2) strong { color: #198754; }
+    .voiceover-stat:nth-child(3) strong { color: #d18a12; }
+    .voiceover-stat:nth-child(4) strong { color: #6b7891; }
+    .voiceover-stat span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .voiceover-result-table {
+      min-width: 1080px;
+      font-size: 12px;
+    }
+    .voiceover-count-table {
+      min-width: 660px;
+      font-size: 12px;
+    }
+    .voiceover-risk {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #fff3cd;
+      color: #9a6100;
+    }
+    .voiceover-modal-panel {
+      width: min(1040px, calc(100vw - 304px));
+      max-height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-radius: 18px;
+    }
+    .voiceover-modal-panel .panel-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .voiceover-modal-overview {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .voiceover-overview-item {
+      border: 1px solid #e1e8f2;
+      border-radius: 12px;
+      background: #f8fafd;
+      padding: 12px 14px;
+    }
+    .voiceover-overview-item strong {
+      display: block;
+      font-size: 18px;
+      color: var(--brand);
+    }
+    .voiceover-overview-item span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .voiceover-material-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      background: #fbfdff;
+      display: grid;
+      gap: 12px;
+    }
+    .voiceover-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .voiceover-task-form {
+      display: grid;
+      grid-template-columns: 132px minmax(220px, 1fr) 180px 240px;
+      gap: 10px 14px;
+      align-items: end;
+    }
+    .voiceover-task-form .voiceover-description-field {
+      grid-column: 2 / -1;
+    }
+    .voiceover-task-form textarea {
+      min-height: 54px;
+      resize: vertical;
+    }
+    .voiceover-stepper {
+      display: grid;
+      grid-template-columns: 40px 64px 40px;
+      align-items: stretch;
+    }
+    .voiceover-stepper button,
+    .voiceover-stepper input {
+      height: 40px;
+      border: 1px solid var(--line);
+      background: #fff;
+      text-align: center;
+      font-weight: 700;
+    }
+    .voiceover-stepper button:last-child {
+      background: #03a66a;
+      color: #fff;
+      border-color: #03a66a;
+    }
+    .voiceover-stepper button:first-child {
+      border-radius: 8px 0 0 8px;
+    }
+    .voiceover-stepper button:last-child {
+      border-radius: 0 8px 8px 0;
+    }
+    .voiceover-stepper input {
+      border-left: 0;
+      border-right: 0;
+    }
+    .voiceover-modal-footer {
+      border-top: 1px solid var(--line);
+      padding: 14px 18px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      background: #fff;
+    }
+    .voiceover-submit-status {
+      margin-top: 8px;
+    }
+    @media (max-width: 900px) {
+      .voiceover-count-grid,
+      .voiceover-filter-grid {
+        grid-template-columns: 1fr;
+      }
+      .voiceover-field-grid,
+      .voiceover-task-form,
+      .voiceover-modal-overview,
+      .voiceover-stats {
+        grid-template-columns: 1fr;
+      }
+      .voiceover-task-form .voiceover-description-field,
+      .voiceover-form-status {
+        grid-column: auto;
+      }
+      .voiceover-grid .span-4,
+      .voiceover-grid .span-6,
+      .voiceover-grid .span-8,
+      .voiceover-grid .span-12 {
+        grid-column: span 12;
+      }
+      .voiceover-modal-panel {
+        width: 100vw;
+        max-height: 100vh;
+        border-radius: 0;
+      }
+    }
 
 
 
@@ -7909,7 +8226,16 @@
 
 
 
+
+    /* Long async stage labels stay readable without changing other tables. */
+    .drama-jobs-table { min-width: 1840px; }
+    .drama-jobs-table th:nth-child(6), .drama-jobs-table td:nth-child(6) { min-width: 108px; }
+    .drama-jobs-table .status-pill { white-space: nowrap; }
+    .drama-jobs-table th:nth-child(7), .drama-jobs-table td:nth-child(7) { min-width: 210px; }
+    .drama-jobs-table th:nth-child(9), .drama-jobs-table td:nth-child(9) { min-width: 72px; }
+    .drama-jobs-table th:nth-child(12), .drama-jobs-table td:nth-child(12) { min-width: 290px; }
   </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
 
 
@@ -9109,7 +9435,7 @@
 
 
 
-                    <label class="check"><input id="outVideo" type="checkbox" checked /> 合集视频（含 BGM）</label>
+                    <label class="check"><input id="outVideo" type="checkbox" /> 合集视频（含 BGM）</label>
 
 
 
@@ -9125,7 +9451,7 @@
 
 
 
-                    <label class="check"><input id="outNoBgm" type="checkbox" checked /> 去 BGM 合集视频</label>
+                    <label class="check"><input id="outNoBgm" type="checkbox" /> 去 BGM 合集视频</label>
 
 
 
@@ -9141,7 +9467,9 @@
 
 
 
-                    <label class="check"><input id="outCover" type="checkbox" checked /> 16:9 封面图</label>
+                    <label class="check"><input id="outCover" type="checkbox" /> 16:9 封面图</label>
+
+                    <label class="check"><input id="outRandomTemplate" type="checkbox" /> 随机模板视频</label>
 
 
 
@@ -9173,6 +9501,22 @@
 
 
 
+                </div>
+
+                <div id="randomTemplateOptions" class="field wide hidden">
+                  <label>随机模板配置</label>
+                  <select id="randomTemplateSource"><option value="concat_video">合集视频（含 BGM）</option><option value="no_bgm_video">去 BGM 合集视频</option></select>
+                  <select id="randomTemplateMode">
+                    <option value="auto">自动随机</option>
+                    <option value="manual">手动选择子模板层级</option>
+                  </select>
+                  <div id="randomTemplateLayers" class="grid hidden" style="margin-top:10px;">
+                    <div class="field"><label>边框</label><select id="randomBorder"></select></div>
+                    <div class="field"><label>透明视频</label><select id="randomOpacityVideo"></select></div>
+                    <div class="field"><label>角标</label><select id="randomCorners"></select></div>
+                    <div class="field"><label>色彩</label><select id="randomTint"></select></div>
+                  </div>
+                  <div id="randomTemplateHint" class="hint">配方会在任务创建时冻结，重试继续复用同一版本。</div>
                 </div>
 
 
@@ -9301,119 +9645,6 @@
 
 
 
-                <div class="field">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                  <label>封面模板</label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                  <input id="coverTemplateInput" value="default" />
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <div class="field">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                  <label>命名规则</label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                  <input id="namingRuleInput" value="default" />
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                </div>
 
 
 
@@ -10151,7 +10382,7 @@
 
 
 
-              <table>
+              <table class="drama-jobs-table">
 
 
 
@@ -10933,6 +11164,150 @@
 
 
 
+      <section id="voiceoverTasksSection" class="section">
+        <div class="panel voiceover-panel">
+          <div class="panel-head">
+            <div class="voiceover-title-row">
+              <div class="voiceover-icon query">查</div>
+              <div>
+                <h3 class="panel-title">批量素材数查询</h3>
+                <div class="muted">输入 10-20 个剧 ID / content_id，自动去重后查询后台已有素材数量。</div>
+              </div>
+            </div>
+            <div class="actions-inline">
+              <button id="voiceoverCountBtn" class="btn btn-primary" type="button">确认查询</button>
+              <button id="voiceoverCountClearBtn" class="btn btn-secondary" type="button">清空</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-count-grid">
+              <div class="field voiceover-input-card">
+                <label>剧 ID / content_id 列表</label>
+                <textarea id="voiceoverCountContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
+              </div>
+              <div class="field voiceover-result-card">
+                <div class="voiceover-result-title">
+                  <label>查询结果</label>
+                  <span id="voiceoverCountStatus" class="voiceover-query-state">待查询</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="voiceover-count-table">
+                    <thead><tr><th>剧 ID</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
+                    <tbody id="voiceoverCountTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel voiceover-panel">
+          <div class="panel-head">
+            <div class="voiceover-title-row">
+              <div class="voiceover-icon filter">筛</div>
+              <div>
+                <h3 class="panel-title">筛选任务与配置</h3>
+                <div class="muted">批量填写剧 ID，系统按资源ID汇总该资源下全部素材。</div>
+              </div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-filter-grid">
+              <div class="field voiceover-input-card">
+                <label>批量剧 ID</label>
+                <textarea id="voiceoverFilterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
+              </div>
+              <div class="voiceover-field-grid voiceover-config-card">
+                <div class="field">
+                  <label>ROAS 阈值</label>
+                  <input id="voiceoverRoasThreshold" type="number" min="0" step="0.1" value="45" />
+                </div>
+                <div class="field">
+                  <label>候选素材数</label>
+                  <input id="voiceoverMinCandidates" type="number" min="0" max="50" value="15" />
+                </div>
+                <div id="voiceoverFilterStatus" class="voiceover-form-status">待筛选</div>
+                <div class="actions-inline">
+                  <button id="voiceoverFilterBtn" class="btn btn-primary" type="button">筛选候选素材</button>
+                  <button id="voiceoverClearBtn" class="btn btn-secondary" type="button">清空</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel voiceover-panel">
+          <div class="panel-head">
+            <div class="voiceover-title-row">
+              <div class="voiceover-icon result">结</div>
+              <div>
+                <h3 class="panel-title">候选素材筛选结果</h3>
+                <div class="muted" id="voiceoverResultSummary">尚未筛选</div>
+              </div>
+            </div>
+            <div class="actions-inline">
+              <button id="voiceoverExportBtn" class="btn btn-secondary" type="button" disabled>导出筛选明细</button>
+              <button id="voiceoverOpenCreateBtn" class="btn btn-primary" type="button" disabled>创建任务</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-stats" id="voiceoverStats">
+              <div class="voiceover-stat"><strong>0</strong><span>候选素材</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>ROAS达标</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>已选择</span></div>
+            </div>
+            <div class="table-wrap">
+              <table class="voiceover-result-table">
+                <thead>
+                  <tr>
+                    <th><input id="voiceoverSelectAll" type="checkbox" aria-label="选择全部素材" /></th>
+                    <th>素材 ID</th>
+                    <th>剧 ID</th>
+                    <th>剧名</th>
+                    <th>素材名称</th>
+                    <th>Category</th>
+                    <th>语种</th>
+                    <th>时长</th>
+                    <th>ROAS</th>
+                    <th>消耗</th>
+                    <th>入选原因</th>
+                    <th>风险</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="voiceoverResultTableBody"><tr><td colspan="13" class="muted">暂无筛选结果</td></tr></tbody>
+              </table>
+            </div>
+            <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；同一个剧可以出现多条素材。只对勾选素材提需求，未勾选素材不会进入创建弹窗。</div>
+          </div>
+        </div>
+
+        <div id="voiceoverTaskModal" class="modal-backdrop hidden">
+          <div class="modal-panel voiceover-modal-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">批量创建设计师任务</h3>
+                <div class="muted" id="voiceoverModalSummary">请逐条素材设置任务参数，确认后统一提交。</div>
+              </div>
+              <button id="voiceoverModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+            </div>
+            <div class="panel-body">
+              <div id="voiceoverModalOverview" class="voiceover-modal-overview"></div>
+              <div id="voiceoverTaskCards" class="stack"></div>
+            </div>
+            <div class="voiceover-modal-footer">
+              <div>
+                <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+                <div id="voiceoverSubmitStatus" class="voiceover-form-status voiceover-submit-status">待提交</div>
+              </div>
+              <div class="actions-inline">
+                <button id="voiceoverModalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+                <button id="voiceoverSubmitTasksBtn" class="btn btn-primary" type="button">确认创建全部任务</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
       <section id="adMaterialsSection" class="section">
         <div class="panel">
           <div class="panel-head">
@@ -12602,6 +12977,8 @@
 
 
 
+          <div id="jobDetailActions" class="actions-inline" style="margin-bottom:12px;"></div>
+          <div id="jobDetailYoutubePublishes" class="stack" style="margin-bottom:12px;"></div>
           <div id="jobDetailResults" class="stack"></div>
 
 
@@ -12730,6 +13107,35 @@
 
 
 
+  </div>
+
+  <div id="materialPickerModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <h3 class="panel-title">选择任务产物</h3>
+        <button id="materialPickerClose" class="btn btn-secondary" type="button">取消</button>
+      </div>
+      <div id="materialPickerOptions" class="panel-body stack"></div>
+    </div>
+  </div>
+
+  <div id="youtubePublishModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <h3 class="panel-title">发布到 YouTube</h3>
+        <button id="youtubePublishClose" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body stack">
+        <div class="field"><label>频道</label><select id="youtubeChannel" disabled></select></div>
+        <div id="youtubeChannelLoading" class="hint hidden" role="status" aria-live="polite">正在读取任务并校验 YouTube 可用频道，请稍候…</div>
+        <div class="field"><label>视频产物</label><select id="youtubeSourceKind"></select></div>
+        <div class="field"><label>标题</label><input id="youtubeTitle" maxlength="100" /></div>
+        <div class="field"><label>描述</label><textarea id="youtubeDescription" maxlength="5000"></textarea></div>
+        <div class="field"><label>首条评论（可选）</label><textarea id="youtubeComment" maxlength="10000"></textarea><div id="youtubeCommentHint" class="hint">仅视频确认发布成功后才会评论。</div></div>
+        <div id="youtubePublishError" class="error-box hidden"></div>
+        <div class="actions-inline"><button id="youtubePublishSubmit" class="btn btn-primary" type="button" disabled>加入异步发布队列</button></div>
+      </div>
+    </div>
   </div>
 
   <div id="adMaterialDetailPanel" class="detail-drawer">
@@ -12893,6 +13299,11 @@
 
 
       jobs: [],
+      voiceoverCountRows: [],
+      voiceoverMaterials: [],
+      voiceoverSelectedKeys: new Set(),
+      voiceoverDesigners: [],
+      voiceoverModalItems: [],
       adMaterialProducts: [],
       adMaterialCompetitorSources: [],
       adMaterialTasks: [],
@@ -12960,6 +13371,14 @@
 
 
       selectedJob: null,
+      randomTemplateCatalog: null,
+      youtubePublishJob: null,
+      youtubeOperationId: "",
+      youtubePublishRequestId: 0,
+      youtubePublishLoading: false,
+      youtubeChannelsRequest: null,
+      youtubeDetailPollTimer: null,
+      materialPickerResolve: null,
 
 
 
@@ -13461,6 +13880,25 @@
 
       outCover: document.getElementById("outCover"),
 
+      outRandomTemplate: document.getElementById("outRandomTemplate"),
+
+      randomTemplateOptions: document.getElementById("randomTemplateOptions"),
+
+      randomTemplateSource: document.getElementById("randomTemplateSource"),
+      randomTemplateMode: document.getElementById("randomTemplateMode"),
+
+      randomTemplateLayers: document.getElementById("randomTemplateLayers"),
+
+      randomBorder: document.getElementById("randomBorder"),
+
+      randomOpacityVideo: document.getElementById("randomOpacityVideo"),
+
+      randomCorners: document.getElementById("randomCorners"),
+
+      randomTint: document.getElementById("randomTint"),
+
+      randomTemplateHint: document.getElementById("randomTemplateHint"),
+
 
 
 
@@ -13476,38 +13914,6 @@
 
 
       overwriteInput: document.getElementById("overwriteInput"),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      coverTemplateInput: document.getElementById("coverTemplateInput"),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      namingRuleInput: document.getElementById("namingRuleInput"),
 
 
 
@@ -13767,6 +14173,7 @@
 
       jobDetailMeta: document.getElementById("jobDetailMeta"),
 
+      jobDetailActions: document.getElementById("jobDetailActions"),
 
 
 
@@ -13781,6 +14188,8 @@
 
 
 
+
+      jobDetailYoutubePublishes: document.getElementById("jobDetailYoutubePublishes"),
       jobDetailResults: document.getElementById("jobDetailResults"),
 
 
@@ -13798,6 +14207,30 @@
 
 
       jobDetailLog: document.getElementById("jobDetailLog"),
+
+      youtubePublishModal: document.getElementById("youtubePublishModal"),
+      materialPickerModal: document.getElementById("materialPickerModal"),
+      materialPickerClose: document.getElementById("materialPickerClose"),
+      materialPickerOptions: document.getElementById("materialPickerOptions"),
+
+      youtubePublishClose: document.getElementById("youtubePublishClose"),
+
+      youtubeChannel: document.getElementById("youtubeChannel"),
+      youtubeChannelLoading: document.getElementById("youtubeChannelLoading"),
+
+      youtubeSourceKind: document.getElementById("youtubeSourceKind"),
+
+      youtubeTitle: document.getElementById("youtubeTitle"),
+
+      youtubeDescription: document.getElementById("youtubeDescription"),
+
+      youtubeComment: document.getElementById("youtubeComment"),
+
+      youtubeCommentHint: document.getElementById("youtubeCommentHint"),
+
+      youtubePublishError: document.getElementById("youtubePublishError"),
+
+      youtubePublishSubmit: document.getElementById("youtubePublishSubmit"),
 
 
 
@@ -13831,6 +14264,31 @@
 
       logTableBody: document.getElementById("logTableBody"),
       adMaterialForm: document.getElementById("adMaterialForm"),
+      voiceoverCountContentIds: document.getElementById("voiceoverCountContentIds"),
+      voiceoverCountBtn: document.getElementById("voiceoverCountBtn"),
+      voiceoverCountClearBtn: document.getElementById("voiceoverCountClearBtn"),
+      voiceoverCountStatus: document.getElementById("voiceoverCountStatus"),
+      voiceoverCountTableBody: document.getElementById("voiceoverCountTableBody"),
+      voiceoverFilterContentIds: document.getElementById("voiceoverFilterContentIds"),
+      voiceoverRoasThreshold: document.getElementById("voiceoverRoasThreshold"),
+      voiceoverMinCandidates: document.getElementById("voiceoverMinCandidates"),
+      voiceoverFilterBtn: document.getElementById("voiceoverFilterBtn"),
+      voiceoverClearBtn: document.getElementById("voiceoverClearBtn"),
+      voiceoverFilterStatus: document.getElementById("voiceoverFilterStatus"),
+      voiceoverResultSummary: document.getElementById("voiceoverResultSummary"),
+      voiceoverStats: document.getElementById("voiceoverStats"),
+      voiceoverResultTableBody: document.getElementById("voiceoverResultTableBody"),
+      voiceoverSelectAll: document.getElementById("voiceoverSelectAll"),
+      voiceoverExportBtn: document.getElementById("voiceoverExportBtn"),
+      voiceoverOpenCreateBtn: document.getElementById("voiceoverOpenCreateBtn"),
+      voiceoverTaskModal: document.getElementById("voiceoverTaskModal"),
+      voiceoverModalOverview: document.getElementById("voiceoverModalOverview"),
+      voiceoverTaskCards: document.getElementById("voiceoverTaskCards"),
+      voiceoverModalSummary: document.getElementById("voiceoverModalSummary"),
+      voiceoverModalCloseBtn: document.getElementById("voiceoverModalCloseBtn"),
+      voiceoverModalResetBtn: document.getElementById("voiceoverModalResetBtn"),
+      voiceoverSubmitTasksBtn: document.getElementById("voiceoverSubmitTasksBtn"),
+      voiceoverSubmitStatus: document.getElementById("voiceoverSubmitStatus"),
       adMaterialProductSearch: document.getElementById("adMaterialProductSearch"),
       adMaterialProductOptions: document.getElementById("adMaterialProductOptions"),
       adMaterialProductHint: document.getElementById("adMaterialProductHint"),
@@ -14273,7 +14731,9 @@
         throw new Error("请先登录");
       }
       if (!response.ok) {
-        throw new Error(data.error || "请求失败");
+        const error = new Error(data.message || data.error || `请求失败 (${response.status})`);
+        Object.assign(error, data, { status: response.status });
+        throw error;
       }
       return data;
     }
@@ -14288,13 +14748,14 @@
     function firstAllowedView() {
       if (userCan("drama_synthesis")) return "tasks";
       if (userCan("cover_synthesis")) return "screenshots";
+      if (userCan("voiceover_drama_tasks")) return "voiceoverTasks";
       if (userCan("ad_material_tasks")) return "adMaterials";
       if (state.auth.user && state.auth.user.is_admin) return "settings";
       return "none";
     }
 
     async function loadAuthStatus() {
-      const data = await api("/api/auth/status");
+      const data = await api("/api/ui/topbar");
       state.auth = data;
       if (data.authenticated) writeCachedAuth(data);
       else clearCachedAuth();
@@ -14606,6 +15067,7 @@
       const canDrama = userCan("drama_synthesis");
       const canCover = userCan("cover_synthesis");
       const canAdMaterial = userCan("ad_material_tasks");
+      const canVoiceover = userCan("voiceover_drama_tasks");
 
 
 
@@ -14636,7 +15098,7 @@
 
 
 
-      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "adMaterials" && !canAdMaterial)) {
+      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "voiceoverTasks" && !canVoiceover) || (activeView === "adMaterials" && !canAdMaterial)) {
 
 
 
@@ -15611,6 +16073,409 @@
       return navText(JSON.stringify(String(value == null ? "" : value)));
     }
 
+    function parseVoiceoverIds(text) {
+      const ids = String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
+      return Array.from(new Set(ids));
+    }
+    function setVoiceoverStatus(element, text, type = "idle") {
+      if (!element) return;
+      element.textContent = text;
+      element.classList.remove("is-loading", "is-success", "is-error");
+      if (type && type !== "idle") element.classList.add(`is-${type}`);
+    }
+    function setVoiceoverButtonLoading(button, loading, loadingText) {
+      if (!button) return;
+      if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || "";
+      button.disabled = !!loading;
+      button.textContent = loading ? loadingText : button.dataset.defaultText;
+      button.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+    function voiceoverNextPaint() {
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    async function voiceoverRunLimited(items, limit, worker) {
+      const results = new Array(items.length);
+      let nextIndex = 0;
+      const workerCount = Math.min(Math.max(1, limit), items.length);
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const currentIndex = nextIndex++;
+          try {
+            results[currentIndex] = { status: "fulfilled", value: await worker(items[currentIndex], currentIndex) };
+          } catch (error) {
+            results[currentIndex] = { status: "rejected", reason: error };
+          }
+        }
+      }));
+      return results;
+    }
+    function voiceoverKey(item) {
+      return `${item.target_content_id || ""}::${item.material_id || ""}`;
+    }
+    function voiceoverSelectedItems() {
+      return state.voiceoverMaterials.filter(item => state.voiceoverSelectedKeys.has(voiceoverKey(item)));
+    }
+    function refreshVoiceoverButtons() {
+      const selectedCount = state.voiceoverSelectedKeys.size;
+      if (els.voiceoverExportBtn) els.voiceoverExportBtn.disabled = !state.voiceoverMaterials.length;
+      if (els.voiceoverOpenCreateBtn) els.voiceoverOpenCreateBtn.disabled = selectedCount < 1;
+      if (els.voiceoverSelectAll) {
+        const selectable = state.voiceoverMaterials.length;
+        els.voiceoverSelectAll.checked = selectable > 0 && selectedCount === selectable;
+        els.voiceoverSelectAll.indeterminate = selectedCount > 0 && selectedCount < selectable;
+      }
+      renderVoiceoverStats();
+    }
+    function renderVoiceoverStats() {
+      if (!els.voiceoverStats) return;
+      const total = state.voiceoverMaterials.length;
+      const defaults = state.voiceoverMaterials.filter(item => item.selected_by_default).length;
+      const selected = state.voiceoverSelectedKeys.size;
+      els.voiceoverStats.innerHTML = [
+        ["候选素材", total],
+        ["ROAS达标", defaults],
+        ["已选择", selected],
+      ].map(([label, value]) => `<div class="voiceover-stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    }
+    function renderVoiceoverCountRows() {
+      if (!els.voiceoverCountTableBody) return;
+      els.voiceoverCountTableBody.innerHTML = state.voiceoverCountRows.length
+        ? state.voiceoverCountRows.map(item => `
+          <tr>
+            <td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td>
+            <td>${navText(item.series_code || "-")}</td>
+            <td>${navText(item.series_content_count ?? "-")}</td>
+            <td>${navText(item.material_count ?? 0)}</td>
+            <td>${item.status === "ok" ? '<span class="status-pill status-done">成功</span>' : `<span class="status-pill status-failed">${navText(item.error || "失败")}</span>`}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
+    }
+    async function queryVoiceoverCounts() {
+      const contentIds = parseVoiceoverIds(els.voiceoverCountContentIds?.value || "");
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      setVoiceoverButtonLoading(els.voiceoverCountBtn, true, "查询中...");
+      setVoiceoverStatus(els.voiceoverCountStatus, `正在查询 ${contentIds.length} 个剧 ID，请稍候`, "loading");
+      if (els.voiceoverCountTableBody) {
+        els.voiceoverCountTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按资源ID汇总素材数...</td></tr>`;
+      }
+      await voiceoverNextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/material-counts", {
+          method: "POST",
+          body: JSON.stringify({ content_ids: contentIds })
+        });
+        state.voiceoverCountRows = data.items || [];
+        renderVoiceoverCountRows();
+        setVoiceoverStatus(els.voiceoverCountStatus, `完成 ${state.voiceoverCountRows.length} 条`, "success");
+        toast("素材数查询完成");
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverCountStatus, "查询失败", "error");
+        throw error;
+      } finally {
+        setVoiceoverButtonLoading(els.voiceoverCountBtn, false);
+      }
+    }
+    function clearVoiceoverCounts() {
+      if (els.voiceoverCountContentIds) els.voiceoverCountContentIds.value = "";
+      state.voiceoverCountRows = [];
+      setVoiceoverStatus(els.voiceoverCountStatus, "待查询");
+      renderVoiceoverCountRows();
+    }
+    function voiceoverRiskCell(item) {
+      if (item.risk_label === "替补素材") return `<span class="voiceover-risk">替补素材</span>`;
+      return "";
+    }
+    function renderVoiceoverResults() {
+      if (!els.voiceoverResultTableBody) return;
+      els.voiceoverResultTableBody.innerHTML = state.voiceoverMaterials.length
+        ? state.voiceoverMaterials.map(item => {
+            const key = voiceoverKey(item);
+            const checked = state.voiceoverSelectedKeys.has(key) ? "checked" : "";
+            const statusText = item.candidate_reason || item.candidate_status || "";
+            return `<tr>
+              <td><input type="checkbox" ${checked} onchange="toggleVoiceoverSelection(${inlineArg(key)}, this.checked)" /></td>
+              <td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td>
+              <td>${navText(item.target_content_id || "")}</td>
+              <td>${navText(item.target_drama_name || "-")}</td>
+              <td>${navText(item.name || item.resource_name || "")}</td>
+              <td>${navText(item.category || "-")}</td>
+              <td>${navText(item.language || "-")}</td>
+              <td>${navText(item.duration || 0)}s</td>
+              <td><strong>${navText(item.roas ?? 0)}</strong></td>
+              <td>${navText(item.spend ?? 0)}</td>
+              <td>${navText(statusText)}</td>
+              <td>${voiceoverRiskCell(item)}</td>
+              <td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td>
+            </tr>`;
+          }).join("")
+        : `<tr><td colspan="13" class="muted">暂无筛选结果</td></tr>`;
+      if (els.voiceoverResultSummary) {
+        els.voiceoverResultSummary.textContent = state.voiceoverMaterials.length
+          ? `共 ${state.voiceoverMaterials.length} 条素材，已选择 ${state.voiceoverSelectedKeys.size} 条`
+          : "尚未筛选";
+      }
+      refreshVoiceoverButtons();
+    }
+    async function filterVoiceoverMaterials() {
+      const contentIds = parseVoiceoverIds(els.voiceoverFilterContentIds?.value || "");
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      setVoiceoverButtonLoading(els.voiceoverFilterBtn, true, "筛选中...");
+      setVoiceoverStatus(els.voiceoverFilterStatus, `正在筛选 ${contentIds.length} 个剧 ID，请稍候`, "loading");
+      if (els.voiceoverResultSummary) els.voiceoverResultSummary.textContent = "筛选中...";
+      if (els.voiceoverResultTableBody) {
+        els.voiceoverResultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
+      }
+      await voiceoverNextPaint();
+      try {
+        const roasThreshold = Number(els.voiceoverRoasThreshold?.value || 45);
+        const minCandidates = Number(els.voiceoverMinCandidates?.value || 15);
+        const data = await api("/api/voiceover-drama/filter", {
+          method: "POST",
+          body: JSON.stringify({
+            content_ids: contentIds,
+            roas_threshold: roasThreshold,
+            min_candidates: minCandidates
+          })
+        });
+        state.voiceoverMaterials = data.items || [];
+        state.voiceoverSelectedKeys = new Set(state.voiceoverMaterials.filter(item => item.selected_by_default).map(voiceoverKey));
+        renderVoiceoverResults();
+        setVoiceoverStatus(
+          els.voiceoverFilterStatus,
+          `完成 ${state.voiceoverMaterials.length} 条候选素材`,
+          "success"
+        );
+        toast("素材筛选完成");
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverFilterStatus, "筛选失败", "error");
+        throw error;
+      } finally {
+        setVoiceoverButtonLoading(els.voiceoverFilterBtn, false);
+      }
+    }
+    function clearVoiceoverFilters() {
+      if (els.voiceoverFilterContentIds) els.voiceoverFilterContentIds.value = "";
+      state.voiceoverMaterials = [];
+      state.voiceoverSelectedKeys = new Set();
+      setVoiceoverStatus(els.voiceoverFilterStatus, "待筛选");
+      renderVoiceoverResults();
+    }
+    function toggleVoiceoverSelection(key, checked) {
+      if (checked) state.voiceoverSelectedKeys.add(String(key || ""));
+      else state.voiceoverSelectedKeys.delete(String(key || ""));
+      refreshVoiceoverButtons();
+      if (els.voiceoverResultSummary) {
+        els.voiceoverResultSummary.textContent = `共 ${state.voiceoverMaterials.length} 条素材，已选择 ${state.voiceoverSelectedKeys.size} 条`;
+      }
+    }
+    function toggleAllVoiceoverSelection(checked) {
+      state.voiceoverSelectedKeys = checked ? new Set(state.voiceoverMaterials.map(voiceoverKey)) : new Set();
+      renderVoiceoverResults();
+    }
+    async function loadVoiceoverDesigners() {
+      if (state.voiceoverDesigners.length || !userCan("voiceover_drama_tasks")) return state.voiceoverDesigners;
+      const data = await api("/api/voiceover-drama/designers");
+      state.voiceoverDesigners = data.items || [];
+      return state.voiceoverDesigners;
+    }
+    function voiceoverDesignerOptions(selectedValue = "") {
+      const designers = state.voiceoverDesigners || [];
+      if (!designers.length) return `<option value="">暂无可选设计师</option>`;
+      return [`<option value="">请选择设计师</option>`].concat(designers.map(item => {
+        const value = String(item.user_id || "");
+        const selected = value === String(selectedValue || "") ? "selected" : "";
+        return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
+      })).join("");
+    }
+    function resolveVoiceoverDefaultDesigner(item) {
+      const designers = state.voiceoverDesigners || [];
+      const candidates = [
+        item?.designer_id,
+        item?.designer,
+        item?.source_user_id,
+        item?.source_initiator,
+      ].map(value => String(value || "").trim()).filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+      for (const candidate of candidates) {
+        const exact = designers.find(designer =>
+          String(designer.user_id || "") === candidate || String(designer.sub_user_id || "") === candidate
+        );
+        if (exact) return String(exact.user_id || "");
+      }
+      const textCandidates = candidates.map(value => value.toLowerCase());
+      const fuzzy = designers.find(designer => {
+        const fields = [designer.name, designer.username, designer.email, designer.label]
+          .map(value => String(value || "").toLowerCase())
+          .filter(Boolean);
+        return textCandidates.some(candidate => fields.includes(candidate));
+      });
+      return fuzzy ? String(fuzzy.user_id || "") : "";
+    }
+    function renderVoiceoverModalOverview() {
+      if (!els.voiceoverModalOverview) return;
+      const items = state.voiceoverModalItems || [];
+      const selected = items.length;
+      let totalQuantity = 0;
+      let incomplete = 0;
+      items.forEach((item, index) => {
+        const input = document.getElementById(`voiceoverTaskNumber_${index}`);
+        totalQuantity += Math.max(1, Number(input?.value || 1));
+        const designer = document.getElementById(`voiceoverTaskDesigner_${index}`)?.value || "";
+        if (!designer) incomplete += 1;
+      });
+      els.voiceoverModalOverview.innerHTML = [
+        ["已选素材", selected],
+        ["预计创建任务", selected],
+        ["需求素材数", totalQuantity || selected],
+        ["未完成配置", incomplete],
+      ].map(([label, value]) => `<div class="voiceover-overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      if (els.voiceoverModalSummary) {
+        els.voiceoverModalSummary.textContent = `已选择 ${selected} 条素材；预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+      }
+    }
+    function renderVoiceoverTaskCards() {
+      if (!els.voiceoverTaskCards) return;
+      els.voiceoverTaskCards.innerHTML = state.voiceoverModalItems.map((item, index) => {
+        const key = voiceoverKey(item);
+        const defaultDesigner = resolveVoiceoverDefaultDesigner(item);
+        const designerHint = [item.designer, item.source_user_id].map(value => String(value || "").trim()).find(value => value && value !== "0" && value.toLowerCase() !== "null");
+        const description = item.roas_pass
+          ? `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`
+          : `该素材 ROAS 未达标，作为替补素材参考，请优先保留有效信息并优化创意表达。`;
+        return `<div class="voiceover-material-card" data-voiceover-task-card="${navText(key)}">
+          <div class="voiceover-card-head">
+            <div>
+              <strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong>
+              <div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div>
+            </div>
+            ${voiceoverRiskCell(item)}
+          </div>
+          <div class="voiceover-task-form">
+            <div class="field">
+              <label>任务数量</label>
+              <div class="voiceover-stepper">
+                <button type="button" onclick="stepVoiceoverTaskNumber(${index}, -1)">-</button>
+                <input id="voiceoverTaskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderVoiceoverModalOverview()" />
+                <button type="button" onclick="stepVoiceoverTaskNumber(${index}, 1)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>指定设计师</label>
+              <select id="voiceoverTaskDesigner_${index}" onchange="renderVoiceoverModalOverview()">${voiceoverDesignerOptions(defaultDesigner)}</select>
+            </div>
+            <div class="field">
+              <label>截止时间</label>
+              <input id="voiceoverTaskEndDate_${index}" type="date" />
+            </div>
+            <div class="field">
+              <label>是否使用原始素材名</label>
+              <div class="checks">
+                <label class="check"><input name="voiceoverOrigin_${index}" type="radio" value="1" checked /> 是</label>
+                <label class="check"><input name="voiceoverOrigin_${index}" type="radio" value="0" /> 否</label>
+              </div>
+            </div>
+            <div class="field voiceover-description-field">
+              <label>任务描述</label>
+              <textarea id="voiceoverTaskDescription_${index}" rows="2">${navText(description)}</textarea>
+            </div>
+          </div>
+        </div>`;
+      }).join("");
+      renderVoiceoverModalOverview();
+    }
+    async function openVoiceoverTaskModal() {
+      const items = voiceoverSelectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      setVoiceoverButtonLoading(els.voiceoverOpenCreateBtn, true, "打开中...");
+      try {
+        await loadVoiceoverDesigners();
+        if (!state.voiceoverDesigners.length) {
+          toast("未查询到授权设计师，请先确认用户组权限", "error");
+        }
+        state.voiceoverModalItems = items;
+        renderVoiceoverTaskCards();
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "待提交");
+        els.voiceoverTaskModal?.classList.remove("hidden");
+      } finally {
+        setVoiceoverButtonLoading(els.voiceoverOpenCreateBtn, false);
+      }
+    }
+    function closeVoiceoverTaskModal() {
+      state.voiceoverModalItems = [];
+      els.voiceoverTaskModal?.classList.add("hidden");
+      if (els.voiceoverTaskCards) els.voiceoverTaskCards.innerHTML = "";
+      setVoiceoverStatus(els.voiceoverSubmitStatus, "待提交");
+    }
+    function stepVoiceoverTaskNumber(index, delta) {
+      const input = document.getElementById(`voiceoverTaskNumber_${index}`);
+      if (!input) return;
+      const next = Math.max(1, Math.min(100, Number(input.value || 1) + delta));
+      input.value = String(next);
+      renderVoiceoverModalOverview();
+    }
+    async function submitVoiceoverTasks() {
+      const items = state.voiceoverModalItems.map((item, index) => {
+        const origin = document.querySelector(`input[name="voiceoverOrigin_${index}"]:checked`)?.value || "1";
+        return {
+          target_content_id: item.target_content_id,
+          material_id: item.material_id,
+          number: Number(document.getElementById(`voiceoverTaskNumber_${index}`)?.value || 1),
+          designer: document.getElementById(`voiceoverTaskDesigner_${index}`)?.value || "",
+          end_date: document.getElementById(`voiceoverTaskEndDate_${index}`)?.value || "",
+          origin_name: Number(origin),
+          description: document.getElementById(`voiceoverTaskDescription_${index}`)?.value || ""
+        };
+      });
+      if (!items.length) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "请先选择素材", "error");
+        return toast("请先选择素材", "error");
+      }
+      if (items.some(item => !item.designer)) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "每条素材都需要选择设计师", "error");
+        renderVoiceoverModalOverview();
+        return toast("每条素材都需要选择设计师", "error");
+      }
+      setVoiceoverButtonLoading(els.voiceoverSubmitTasksBtn, true, "创建中...");
+      setVoiceoverStatus(els.voiceoverSubmitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await voiceoverNextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", {
+          method: "POST",
+          body: JSON.stringify({ items })
+        });
+        setVoiceoverStatus(
+          els.voiceoverSubmitStatus,
+          `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`,
+          data.failed_count ? "error" : "success"
+        );
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeVoiceoverTaskModal();
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setVoiceoverButtonLoading(els.voiceoverSubmitTasksBtn, false);
+      }
+    }
+    function exportVoiceoverCsv() {
+      if (!state.voiceoverMaterials.length) return;
+      const headers = ["target_content_id", "target_drama_name", "material_id", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const csv = [headers.join(",")].concat(state.voiceoverMaterials.map(item => headers.map(key => {
+        const value = String(item[key] ?? "").replace(/"/g, '""');
+        return `"${value}"`;
+      }).join(","))).join("\n");
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `voiceover_materials_${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+    window.toggleVoiceoverSelection = toggleVoiceoverSelection;
+    window.stepVoiceoverTaskNumber = stepVoiceoverTaskNumber;
+    window.renderVoiceoverModalOverview = renderVoiceoverModalOverview;
     function inlineMarkdown(value) {
       let text = String(value == null ? "" : value);
       const inlineImages = [];
@@ -16756,7 +17621,7 @@
               ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
             </div>
           </div>
-          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "")}</div>
         </div>
         <div class="card">
           <label><strong>驳回原因</strong></label>
@@ -17223,14 +18088,7 @@
     }
 
     function formatJobElapsed(job) {
-      const status = String(job.status || "");
-      if (["queued", "validating", "downloading", "failed"].includes(status)) return "--";
-      const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
-      if (persistedSeconds !== null) return formatSeconds(persistedSeconds);
-      const start = actualDurationStart(job);
-      if (!start) return "--";
-      const end = status === "done" ? (actualDurationEnd(job) || new Date()) : new Date();
-      return formatSeconds((end.getTime() - start.getTime()) / 1000);
+      return DramaJobRuntime.elapsed(job);
     }
 
     function formatScreenshotElapsed(job) {
@@ -17275,6 +18133,12 @@ function buildJobRow(job) {
       const creatorName = job.creator_name || job.creator_user_id || job.creator_open_id || "--";
       const creatorMeta = job.creator_user_id || job.creator_open_id || "";
       const elapsed = formatJobElapsed(job);
+      const hasVideoMaterial = selectableMaterials(job, false).length > 0;
+      const materialActions = job.status === "done" ? `
+        <button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); copyMaterialUrl('${job.job_id}')">复制素材 URL</button>
+        <button class="btn btn-secondary mini" type="button" ${hasVideoMaterial ? `onclick="event.stopPropagation(); createShortLink('${job.job_id}')"` : "disabled"}>生成短链</button>
+        <button class="btn btn-secondary mini" type="button" ${hasVideoMaterial ? `onclick="event.stopPropagation(); openYoutubePublish('${job.job_id}')"` : "disabled"}>发布到 YouTube</button>
+      ` : "";
       const retryButton = job.status === "done"
 
 
@@ -17420,7 +18284,7 @@ function buildJobRow(job) {
 
 
 
-          <td><span class="status-pill ${statusClass(job.status)}">${job.status_label}</span></td>
+          <td><span class="status-pill ${statusClass(job.status)}">${job.remote_progress ? job.remote_progress.stage_label : job.status_label}</span></td>
 
 
 
@@ -17452,39 +18316,7 @@ function buildJobRow(job) {
 
 
 
-            <div>${job.progress}%</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <div class="progress"><span style="width:${job.progress}%"></span></div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <div class="muted" style="margin-top:6px;max-width:170px;">${job.progress_detail || "--"}</div>
+            ${DramaJobRuntime.progressHtml(job)}
 
 
 
@@ -17548,7 +18380,7 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_url, "video", "合集视频")}
+              ${(job.outputs || {}).concat_video ? previewCell(job.output_video_url, "video", "合集视频") : ""}
 
 
 
@@ -17564,7 +18396,9 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.output_video_no_bgm_url, "video", "去 BGM")}
+              ${(job.outputs || {}).no_bgm_video ? previewCell(job.output_video_no_bgm_url, "video", "去 BGM") : ""}
+
+              ${(job.outputs || {}).random_template_video ? previewCell(job.output_random_template_url, "video", "随机模板") : ""}
 
 
 
@@ -17580,7 +18414,7 @@ function buildJobRow(job) {
 
 
 
-              ${previewCell(job.cover_16x9_url, "image", "16:9 封面")}
+              ${(job.outputs || {}).cover_16x9 ? previewCell(job.cover_16x9_url, "image", "16:9 封面") : ""}
 
 
 
@@ -17629,7 +18463,7 @@ function buildJobRow(job) {
 
 
           <td>${creatorName}<div class="muted">${creatorMeta}</div></td>
-          <td class="time-cell">${elapsed}</td>
+          <td class="time-cell"><span data-drama-elapsed="${job.job_id}">${elapsed}</span></td>
           <td class="time-cell">${formatBeijingTime(job.created_at)}</td>
 
 
@@ -17695,6 +18529,7 @@ function buildJobRow(job) {
 
 
               <button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); downloadAll('${job.job_id}')">下载全部</button>
+              ${materialActions}
 
 
 
@@ -17838,6 +18673,96 @@ function buildJobRow(job) {
 
 
 
+    function youtubePublishStatusMeta(task) {
+      const status = String(task?.status || "");
+      const commentStatus = String(task?.comment_status || "");
+      const syncStatus = String(task?.sync_status || "");
+      if (task?.unknown_outcome || status === "unknown") return { label: "结果待核查", className: "status-failed", terminal: true };
+      if (status === "failed") return { label: "发布失败", className: "status-failed", terminal: true };
+      if (status === "queued") return { label: "排队中", className: "status-active", terminal: false };
+      if (["validating", "downloading", "uploading"].includes(status)) {
+        const labels = { validating: "校验中", downloading: "下载素材中", uploading: "上传中" };
+        return { label: labels[status], className: "status-active", terminal: false };
+      }
+      if (["submitted", "processing"].includes(status)) return { label: "YouTube 处理中", className: "status-active", terminal: false };
+      if (status === "published") {
+        if (commentStatus === "failed") return { label: "视频已发布，评论失败", className: "status-failed", terminal: !["pending", "syncing"].includes(syncStatus) };
+        if (["queued", "retry", "publishing"].includes(commentStatus)) return { label: "视频已发布，评论处理中", className: "status-active", terminal: false };
+        if (syncStatus === "failed") return { label: "已发布，记录同步失败", className: "status-failed", terminal: true };
+        if (["pending", "syncing"].includes(syncStatus)) return { label: "已发布，记录同步中", className: "status-active", terminal: false };
+        return { label: "发布成功", className: "status-done", terminal: true };
+      }
+      return { label: status || "状态待更新", className: "status-active", terminal: false };
+    }
+
+    function youtubePublishStepLabel(value, kind) {
+      const maps = {
+        video: { queued: "排队中", validating: "校验中", downloading: "下载中", uploading: "上传中", submitted: "已提交", processing: "处理中", published: "已发布", failed: "失败", unknown: "待核查" },
+        comment: { queued: "排队中", retry: "等待重试", publishing: "发布中", published: "已发布", skipped: "未要求评论", failed: "失败", unknown: "待核查" },
+        sync: { pending: "待同步", syncing: "同步中", synced: "已同步", failed: "同步失败" },
+      };
+      return maps[kind]?.[String(value || "")] || String(value || "--");
+    }
+
+    function youtubeSourceKindLabel(value) {
+      return ({ concat_video: "合集视频（含 BGM）", no_bgm_video: "去 BGM 合集视频", random_template: "随机模板视频" })[String(value || "")] || String(value || "视频");
+    }
+
+    function stopYoutubeDetailPolling() {
+      if (state.youtubeDetailPollTimer) clearTimeout(state.youtubeDetailPollTimer);
+      state.youtubeDetailPollTimer = null;
+    }
+
+    function scheduleYoutubeDetailRefresh(job) {
+      stopYoutubeDetailPolling();
+      const tasks = Array.isArray(job?.youtube_publish_tasks) ? job.youtube_publish_tasks : [];
+      if (!tasks.some(task => !youtubePublishStatusMeta(task).terminal) || !els.detailDrawer.classList.contains("open")) return;
+      const jobId = String(job.job_id || "");
+      state.youtubeDetailPollTimer = setTimeout(async () => {
+        state.youtubeDetailPollTimer = null;
+        if (!state.selectedJob || state.selectedJob.job_id !== jobId || !els.detailDrawer.classList.contains("open")) return;
+        try {
+          const fresh = await api(`/api/drama-material/jobs/${jobId}`);
+          if (!state.selectedJob || state.selectedJob.job_id !== jobId || !els.detailDrawer.classList.contains("open")) return;
+          state.selectedJob = fresh;
+          renderJobDetail(fresh);
+        } catch (_) {
+          scheduleYoutubeDetailRefresh(job);
+        }
+      }, 3000);
+    }
+
+    function renderYoutubePublishRecords(job) {
+      const tasks = Array.isArray(job?.youtube_publish_tasks) ? job.youtube_publish_tasks : [];
+      if (!tasks.length) {
+        els.jobDetailYoutubePublishes.innerHTML = "";
+        return;
+      }
+      const rows = tasks.map((task, index) => {
+        const status = youtubePublishStatusMeta(task);
+        const videoLink = task.video_id
+          ? `<a href="https://www.youtube.com/watch?v=${encodeURIComponent(task.video_id)}" target="_blank" rel="noopener">查看 YouTube 视频</a>`
+          : "";
+        const retryComment = task.video_state === "published" && task.comment_status === "failed" && !task.unknown_outcome
+          ? `<button class="btn btn-secondary mini" type="button" onclick="retryYoutubeComment(${Number(task.id)},'${job.job_id}')">仅重试评论</button>` : "";
+        return `<div class="card" data-youtube-publish-record="${Number(task.id)}">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+            <strong>${index === 0 ? "本次发布" : "历史发布"} #${Number(task.id)}</strong>
+            <span class="status-pill ${status.className}" data-youtube-publish-status>${navText(status.label)}</span>
+          </div>
+          <div style="margin-top:8px;line-height:1.8;">
+            <div>标题：${navText(task.title || "--")}</div>
+            <div>发布素材：${navText(youtubeSourceKindLabel(task.source_kind))}</div>
+            <div>创建时间：${navText(formatBeijingTime(task.created_at_utc))}</div>
+            <div>视频：${navText(youtubePublishStepLabel(task.video_state, "video"))} · 评论：${navText(youtubePublishStepLabel(task.comment_status, "comment"))} · 记录同步：${navText(youtubePublishStepLabel(task.sync_status, "sync"))}</div>
+            ${task.error_message ? `<div style="color:var(--bad);">失败原因：${navText(task.error_message)}</div>` : ""}
+          </div>
+          ${(videoLink || retryComment) ? `<div class="actions-inline" style="margin-top:8px;">${videoLink}${retryComment}</div>` : ""}
+        </div>`;
+      }).join("");
+      els.jobDetailYoutubePublishes.innerHTML = `<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;"><strong>YouTube 发布记录</strong><span class="hint">共 ${tasks.length} 条</span></div><div class="stack" style="margin-top:10px;">${rows}</div></div>`;
+    }
+
     function renderJobDetail(job) {
 
 
@@ -17856,6 +18781,8 @@ function buildJobRow(job) {
 
       if (!job) {
 
+        stopYoutubeDetailPolling();
+
 
 
 
@@ -17871,6 +18798,10 @@ function buildJobRow(job) {
 
 
         els.jobDetailMeta.innerHTML = `<div class="muted">点击列表里的“查看详情”查看任务详情。</div>`;
+
+        els.jobDetailActions.innerHTML = "";
+
+        els.jobDetailYoutubePublishes.innerHTML = "";
 
 
 
@@ -18094,7 +19025,7 @@ function buildJobRow(job) {
 
 
 
-            <div>进度：${job.progress}% / ${job.progress_detail || "--"}</div>
+            <div>${DramaJobRuntime.progressHtml(job)}</div>
 
 
 
@@ -18190,7 +19121,7 @@ function buildJobRow(job) {
 
 
 
-      els.jobDetailResults.innerHTML = [
+      const detailResultCards = [
 
 
 
@@ -18206,7 +19137,7 @@ function buildJobRow(job) {
 
 
 
-        resultCard("合集视频（含 BGM）", job.output_video_url, "video"),
+        (job.outputs || {}).concat_video ? resultCard("合集视频（含 BGM）", job.output_video_url, "video") : "",
 
 
 
@@ -18222,7 +19153,9 @@ function buildJobRow(job) {
 
 
 
-        resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video"),
+        (job.outputs || {}).no_bgm_video ? resultCard("去 BGM 合集视频", job.output_video_no_bgm_url, "video") : "",
+
+        (job.outputs || {}).random_template_video ? resultCard("随机模板视频", job.output_random_template_url, "video") : "",
 
 
 
@@ -18238,7 +19171,7 @@ function buildJobRow(job) {
 
 
 
-        resultCard("16:9 封面图", job.cover_16x9_url, "image")
+        (job.outputs || {}).cover_16x9 ? resultCard("16:9 封面图", job.cover_16x9_url, "image") : ""
 
 
 
@@ -18254,7 +19187,49 @@ function buildJobRow(job) {
 
 
 
-      ].join("");
+      ];
+      const frozenRecipe = job.random_template_recipe && typeof job.random_template_recipe === "object" ? job.random_template_recipe : null;
+      (job.short_links || []).forEach(link => {
+        const shortValue = link.short_url ? `<a href="${navText(link.short_url)}" target="_blank">${navText(link.short_url)}</a>` : navText(link.error_message || "短链尚未发布");
+        detailResultCards.push(`<div class="card"><strong>短链 · ${navText(link.material_kind || "视频")}</strong><div style="margin-top:8px;">状态：${navText(link.publish_state || "--")} · ${shortValue}</div></div>`);
+      });
+      els.jobDetailResults.innerHTML = detailResultCards.join("");
+      if (frozenRecipe) {
+        const auditText = value => ["string", "number", "boolean"].includes(typeof value) ? String(value) : "--";
+        const card = document.createElement("div");
+        card.className = "card";
+        card.dataset.recipeAudit = "true";
+        const title = document.createElement("strong");
+        title.textContent = "随机模板配方审计";
+        card.appendChild(title);
+        const body = document.createElement("div");
+        body.style.marginTop = "8px";
+        body.style.lineHeight = "1.8";
+        const addLine = (label, value) => {
+          const line = document.createElement("div");
+          line.textContent = `${label}：${auditText(value)}`;
+          body.appendChild(line);
+        };
+        addLine("资产版本", `${auditText(frozenRecipe.version)} / ${auditText(frozenRecipe.profile)}`);
+        addLine("源视频", frozenRecipe.source);
+        addLine("资产集合", frozenRecipe.asset_set_sha256);
+        const assets = frozenRecipe.assets && typeof frozenRecipe.assets === "object" ? frozenRecipe.assets : {};
+        ["border", "corners", "opacity_video", "tint"].forEach(key => {
+          const asset = assets[key];
+          addLine(key, asset && typeof asset === "object" ? asset.name : "--");
+        });
+        card.appendChild(body);
+        els.jobDetailResults.appendChild(card);
+      }
+      const hasVideoMaterial = selectableMaterials(job, false).length > 0;
+      els.jobDetailActions.innerHTML = job.status === "done" ? `
+        <button class="btn btn-secondary" type="button" onclick="copyMaterialUrl('${job.job_id}')">复制素材 URL</button>
+        <button class="btn btn-secondary" type="button" ${hasVideoMaterial ? `onclick="createShortLink('${job.job_id}')"` : "disabled"}>生成短链</button>
+        <button class="btn btn-primary" type="button" ${hasVideoMaterial ? `onclick="openYoutubePublish('${job.job_id}')"` : "disabled"}>发布到 YouTube</button>
+        ${hasVideoMaterial ? "" : '<span class="hint">无可用视频产物</span>'}
+      ` : "";
+      renderYoutubePublishRecords(job);
+      scheduleYoutubeDetailRefresh(job);
 
 
 
@@ -18322,6 +19297,7 @@ function buildJobRow(job) {
       const panel = els.detailDrawer.querySelector(".detail-panel");
       els.detailDrawer.classList.add("open");
       document.body.classList.add("drawer-open");
+      if (state.selectedJob) scheduleYoutubeDetailRefresh(state.selectedJob);
       if (panel) {
         panel.tabIndex = -1;
         panel.scrollTop = 0;
@@ -18331,6 +19307,8 @@ function buildJobRow(job) {
     }
 
     function closeDetailDrawer() {
+
+      stopYoutubeDetailPolling();
 
 
 
@@ -19045,6 +20023,23 @@ function buildJobRow(job) {
       return modules;
     }
 
+    function mergeBackendPermissionModules(modules) {
+      const merged = Array.isArray(modules) ? modules.slice() : [];
+      const seen = new Set(merged.map(module => String(module?.key || "").trim()).filter(Boolean));
+      const backendModules = (state.auth && state.auth.modules) || {};
+      Object.entries(backendModules).forEach(([key, label]) => {
+        const moduleKey = String(key || "").trim();
+        if (!moduleKey || seen.has(moduleKey)) return;
+        seen.add(moduleKey);
+        merged.push({
+          key: moduleKey,
+          label: String(label || moduleKey).trim() || moduleKey,
+          editable: moduleKey !== "settings",
+        });
+      });
+      return merged;
+    }
+
     async function loadPermissionModules() {
       let modules = [];
       try {
@@ -19053,6 +20048,7 @@ function buildJobRow(job) {
       } catch (error) {
         modules = [];
       }
+      modules = mergeBackendPermissionModules(modules);
       if (!modules.length) {
         const backendModules = (state.auth && state.auth.modules) || {};
         modules = Object.entries(backendModules).map(([key, label]) => ({
@@ -19126,6 +20122,8 @@ function buildJobRow(job) {
     }
 
     function renderScreenshotJobDetail(job) {
+      stopYoutubeDetailPolling();
+      els.jobDetailYoutubePublishes.innerHTML = "";
       if (!job) {
         els.jobDetailMeta.innerHTML = `<div class="muted">\u70b9\u51fb\u5217\u8868\u91cc\u7684\u201c\u67e5\u770b\u8be6\u60c5\u201d\u67e5\u770b\u4efb\u52a1\u8be6\u60c5\u3002</div>`;
         els.jobDetailResults.innerHTML = "";
@@ -20011,6 +21009,45 @@ function buildJobRow(job) {
 
 
 
+    async function loadRandomTemplateCatalog() {
+      if (state.randomTemplateCatalog) return state.randomTemplateCatalog;
+      els.randomTemplateHint.textContent = "正在读取 CPU 模板目录…";
+      const data = await api("/api/drama-material/random-template-catalog");
+      state.randomTemplateCatalog = data.item;
+      const mappings = [
+        ["border", els.randomBorder],
+        ["opacity_video", els.randomOpacityVideo],
+        ["corners", els.randomCorners],
+        ["tint", els.randomTint]
+      ];
+      mappings.forEach(([category, select]) => {
+        select.replaceChildren();
+        (state.randomTemplateCatalog.categories?.[category] || []).forEach(item => {
+          const option = document.createElement("option");
+          option.value = item.name;
+          option.textContent = item.name;
+          select.appendChild(option);
+        });
+      });
+      els.randomTemplateHint.textContent = `目录 v${state.randomTemplateCatalog.version}；配方会在创建时冻结，重试继续复用。`;
+      return state.randomTemplateCatalog;
+    }
+
+    async function syncRandomTemplateControls() {
+      const enabled = els.outRandomTemplate.checked;
+      els.randomTemplateOptions.classList.toggle("hidden", !enabled);
+      els.randomTemplateLayers.classList.toggle("hidden", !enabled || els.randomTemplateMode.value !== "manual");
+      if (enabled) {
+        try {
+          await loadRandomTemplateCatalog();
+        } catch (error) {
+          els.outRandomTemplate.checked = false;
+          els.randomTemplateOptions.classList.add("hidden");
+          showError("随机模板目录加载失败", error);
+        }
+      }
+    }
+
     function collectPayload() {
 
 
@@ -20155,7 +21192,8 @@ function buildJobRow(job) {
 
 
 
-          cover_16x9: els.outCover.checked
+          cover_16x9: els.outCover.checked,
+          random_template_video: els.outRandomTemplate.checked
 
 
 
@@ -20188,85 +21226,18 @@ function buildJobRow(job) {
 
 
         advanced_options: {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           overwrite_existing: els.overwriteInput.value === "true",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          cover_template: els.coverTemplateInput.value.trim(),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          naming_rule: els.namingRuleInput.value.trim(),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          output_resolution: els.resolutionInput.value
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+          output_resolution: els.resolutionInput.value,
+          random_template: els.outRandomTemplate.checked ? {
+            mode: els.randomTemplateMode.value,
+            source: els.randomTemplateSource.value,
+          layers: els.randomTemplateMode.value === "manual" ? {
+            border: els.randomBorder.value,
+            opacity_video: els.randomOpacityVideo.value,
+            corners: els.randomCorners.value,
+            tint: els.randomTint.value
+          } : {}
+        } : null
         }
 
 
@@ -20427,7 +21398,7 @@ function buildJobRow(job) {
 
 
 
-        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9) {
+        if (!payload.outputs.concat_video && !payload.outputs.no_bgm_video && !payload.outputs.cover_16x9 && !payload.outputs.random_template_video) {
 
 
 
@@ -21507,6 +22478,252 @@ function buildJobRow(job) {
 
 
 
+    function selectableMaterials(job, includeCover) {
+      return [
+        ["concat_video", "合集视频", job.output_video_url],
+        ["no_bgm_video", "去 BGM 视频", job.output_video_no_bgm_url],
+        ["random_template", "随机模板视频", job.output_random_template_url],
+        ...(includeCover ? [["cover_16x9", "16:9 封面", job.cover_16x9_url]] : [])
+      ].filter(item => item[2]);
+    }
+    function closeMaterialPicker(value = null) {
+      els.materialPickerModal.classList.add("hidden");
+      const resolve = state.materialPickerResolve;
+      state.materialPickerResolve = null;
+      if (resolve) resolve(value);
+    }
+    function chooseMaterial(job, includeCover) {
+      const items = selectableMaterials(job, includeCover);
+      if (!items.length) throw new Error(includeCover ? "当前任务没有可操作产物" : "无可用视频产物");
+      if (items.length === 1) return Promise.resolve(items[0]);
+      els.materialPickerOptions.replaceChildren();
+      items.forEach(item => {
+        const button = document.createElement("button");
+        button.className = "btn btn-secondary";
+        button.type = "button";
+        button.textContent = item[1];
+        button.onclick = () => closeMaterialPicker(item);
+        els.materialPickerOptions.appendChild(button);
+      });
+      els.materialPickerModal.classList.remove("hidden");
+      return new Promise(resolve => { state.materialPickerResolve = resolve; });
+    }
+    async function copyTextSafe(text) {
+      try { await navigator.clipboard.writeText(text); return; } catch (_) {}
+      const area = document.createElement("textarea");
+      area.value = text; area.setAttribute("readonly", ""); area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.appendChild(area); area.select();
+      try { if (!document.execCommand("copy")) throw new Error("copy failed"); }
+      finally { area.remove(); }
+    }
+    async function copyMaterialUrl(jobId) {
+      try {
+        const job = await api(`/api/drama-material/jobs/${jobId}`);
+        const material = await chooseMaterial(job, true);
+        if (!material) return;
+        const url = material[2];
+        if (!url) throw new Error("当前任务没有可复制的视频产物");
+        await copyTextSafe(url);
+        toast("素材 URL 已复制");
+      } catch (error) {
+        showError("复制失败", error);
+      }
+    }
+
+    async function createShortLink(jobId) {
+      try {
+        const job = await api(`/api/drama-material/jobs/${jobId}`);
+        const material = await chooseMaterial(job, false);
+        if (!material) return;
+        const data = await api(`/api/drama-material/jobs/${jobId}/short-links`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ material_kind: material[0] }) });
+        await copyTextSafe(data.short_url);
+        toast(data.reused ? "已复制已有短链" : "短链已生成并复制");
+        await viewJob(jobId);
+      } catch (error) {
+        showError("短链生成失败", error);
+      }
+    }
+
+    async function retryYoutubeComment(taskId, jobId) {
+      try {
+        await api(`/api/drama-material/youtube-publishes/${taskId}/retry-comment`, { method: "POST" });
+        toast("评论已重新加入队列，不会重复上传视频");
+        await viewJob(jobId);
+      } catch (error) {
+        showError("评论重试失败", error);
+      }
+    }
+
+    function newYoutubeOperationId() {
+      if (window.crypto?.randomUUID) return `yt:${window.crypto.randomUUID()}`;
+      return `yt:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    }
+
+    function selectedYoutubeChannel() {
+      const option = els.youtubeChannel.selectedOptions[0];
+      return option?.dataset?.item ? JSON.parse(option.dataset.item) : null;
+    }
+
+    function syncYoutubeCommentEligibility() {
+      const channel = selectedYoutubeChannel();
+      const eligible = !!channel?.comment_eligible;
+      els.youtubeComment.disabled = !eligible;
+      if (!eligible) els.youtubeComment.value = "";
+      els.youtubeCommentHint.textContent = eligible
+        ? "视频确认发布成功后才会评论；发布与评论状态分开记录。"
+        : "该频道授权不含 youtube.force-ssl，评论已禁用。";
+    }
+
+    function isCurrentYoutubePublish(requestId) {
+      return requestId === state.youtubePublishRequestId && !els.youtubePublishModal.classList.contains("hidden");
+    }
+
+    async function loadYoutubeChannels(appId, requestId) {
+      const key = String(appId);
+      // Reuse this product's in-flight read, and never overlap OAuth-backed reads.
+      while (state.youtubeChannelsRequest && state.youtubeChannelsRequest.appId !== key) {
+        try { await state.youtubeChannelsRequest.promise; } catch (_) {}
+        if (!isCurrentYoutubePublish(requestId)) return null;
+      }
+      let request = state.youtubeChannelsRequest;
+      if (!request) {
+        request = { appId: key, promise: null };
+        state.youtubeChannelsRequest = request;
+        request.promise = Promise.resolve()
+          .then(() => api(`/api/drama-material/youtube/channels?app_id=${encodeURIComponent(key)}`))
+          .finally(() => {
+            if (state.youtubeChannelsRequest === request) state.youtubeChannelsRequest = null;
+          });
+      }
+      return request.promise;
+    }
+
+    function closeYoutubePublish() {
+      state.youtubePublishRequestId++;
+      state.youtubePublishLoading = false;
+      state.youtubePublishJob = null;
+      state.youtubeOperationId = "";
+      els.youtubePublishModal.classList.add("hidden");
+      els.youtubePublishModal.setAttribute("aria-busy", "false");
+      els.youtubeChannelLoading.classList.add("hidden");
+      els.youtubeChannel.disabled = true;
+      els.youtubePublishSubmit.disabled = true;
+    }
+
+    async function openYoutubePublish(jobId) {
+      const requestId = ++state.youtubePublishRequestId;
+      state.youtubePublishJob = null;
+      state.youtubeOperationId = "";
+      state.youtubePublishLoading = true;
+      els.youtubeChannel.replaceChildren();
+      els.youtubeChannel.disabled = true;
+      els.youtubeSourceKind.replaceChildren();
+      els.youtubeSourceKind.disabled = true;
+      els.youtubeTitle.value = "";
+      els.youtubeDescription.value = "";
+      els.youtubeComment.value = "";
+      els.youtubeComment.disabled = true;
+      els.youtubeCommentHint.textContent = "频道加载完成后将确认评论权限。";
+      els.youtubePublishError.textContent = "";
+      els.youtubePublishError.classList.add("hidden");
+      els.youtubeChannelLoading.classList.remove("hidden");
+      els.youtubePublishSubmit.disabled = true;
+      els.youtubePublishModal.setAttribute("aria-busy", "true");
+      els.youtubePublishModal.classList.remove("hidden");
+      try {
+        const job = await api(`/api/drama-material/jobs/${jobId}`);
+        if (!isCurrentYoutubePublish(requestId)) return;
+        const videos = selectableMaterials(job, false);
+        if (!videos.length) throw new Error("无可用视频产物");
+        videos.forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          els.youtubeSourceKind.appendChild(option);
+        });
+        els.youtubeSourceKind.disabled = false;
+        els.youtubeTitle.value = job.drama_name || job.content_id || "DramaWave";
+        const channels = await loadYoutubeChannels(job.app_id, requestId);
+        if (!isCurrentYoutubePublish(requestId)) return;
+        if (!channels.items?.length) throw new Error("当前产品没有可用的 YouTube 上传频道");
+        channels.items.forEach(item => {
+          const option = document.createElement("option");
+          option.value = item.channel_id;
+          option.textContent = `${item.channel_name || item.channel_id}${item.comment_eligible ? "" : "（不可评论）"}`;
+          option.dataset.item = JSON.stringify(item);
+          els.youtubeChannel.appendChild(option);
+        });
+        state.youtubePublishJob = job;
+        state.youtubeOperationId = newYoutubeOperationId();
+        syncYoutubeCommentEligibility();
+        els.youtubeChannel.disabled = false;
+        els.youtubePublishSubmit.disabled = false;
+      } catch (error) {
+        if (!isCurrentYoutubePublish(requestId)) return;
+        state.youtubePublishJob = null;
+        els.youtubeChannel.replaceChildren();
+        els.youtubeChannel.disabled = true;
+        els.youtubePublishSubmit.disabled = true;
+        els.youtubePublishError.textContent = "YouTube 发布准备失败：" + errorText(error);
+        els.youtubePublishError.classList.remove("hidden");
+      } finally {
+        if (isCurrentYoutubePublish(requestId)) {
+          state.youtubePublishLoading = false;
+          els.youtubeChannelLoading.classList.add("hidden");
+          els.youtubePublishModal.setAttribute("aria-busy", "false");
+        }
+      }
+    }
+
+    async function submitYoutubePublish(duplicateConfirmed = false) {
+      const requestId = state.youtubePublishRequestId;
+      if (state.youtubePublishLoading || !isCurrentYoutubePublish(requestId)) return;
+      const job = state.youtubePublishJob;
+      const channel = selectedYoutubeChannel();
+      if (!job || !channel) return;
+      els.youtubePublishSubmit.disabled = true;
+      els.youtubePublishError.classList.add("hidden");
+      try {
+        const title = els.youtubeTitle.value.trim();
+        const description = els.youtubeDescription.value.trim();
+        if (!title || title.length > 100) throw new Error("标题必填且不能超过 100 个字符");
+        if (!description || new TextEncoder().encode(description).length > 5000) throw new Error("描述必填且 UTF-8 不能超过 5000 bytes");
+        const payload = {
+          operation_id: state.youtubeOperationId,
+          app_id: String(job.app_id || ""),
+          channel_local_id: channel.channel_local_id,
+          channel_id: channel.channel_id,
+          youtube_account_id: channel.youtube_account_id,
+          material_kind: els.youtubeSourceKind.value,
+          title,
+          description_template: description,
+          comment_text: els.youtubeComment.value,
+          duplicate_confirmed: duplicateConfirmed
+        };
+        const data = await api(`/api/drama-material/jobs/${job.job_id}/youtube-publishes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!isCurrentYoutubePublish(requestId)) return;
+        closeYoutubePublish();
+        toast(`YouTube 异步任务已入队（视频：${data.video_state}，评论：${data.comment_status}）`);
+        await viewJob(job.job_id);
+      } catch (error) {
+        if (!isCurrentYoutubePublish(requestId)) return;
+        if (error.code === "youtube_duplicate_confirmation_required" && !duplicateConfirmed) {
+          const confirmed = window.confirm("该任务已在此频道成功发布过。再次发布会创建重复视频，是否继续？");
+          if (confirmed) return await submitYoutubePublish(true);
+        }
+        els.youtubePublishError.textContent = errorText(error);
+        els.youtubePublishError.classList.remove("hidden");
+      } finally {
+        if (isCurrentYoutubePublish(requestId)) {
+          els.youtubePublishSubmit.disabled = state.youtubePublishLoading || !state.youtubePublishJob || !selectedYoutubeChannel();
+        }
+      }
+    }
+
     async function downloadAll(jobId) {
 
 
@@ -21555,7 +22772,7 @@ function buildJobRow(job) {
 
 
 
-        const urls = [job.output_video_url, job.output_video_no_bgm_url, job.cover_16x9_url].filter(Boolean);
+        const urls = [job.output_video_url, job.output_video_no_bgm_url, job.output_random_template_url, job.cover_16x9_url].filter(Boolean);
 
 
 
@@ -22131,7 +23348,14 @@ function buildJobRow(job) {
 
 
 
-    const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "adMaterials", "settings", "navigation", "users", "logs"]);
+    const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "voiceoverTasks", "adMaterials", "settings", "navigation", "users", "logs"]);
+    const STANDALONE_VIEW_PATHS = {
+      voiceoverTasks: "/voiceover-drama.html",
+    };
+
+    function standalonePathForView(view) {
+      return STANDALONE_VIEW_PATHS[view] || "";
+    }
 
     function viewFromDetailHash(hash) {
       const value = (hash || "").replace(/^#/, "");
@@ -22151,8 +23375,9 @@ function buildJobRow(job) {
       if (path === "/users.html") return "users";
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
+      if (path === "/voiceover-drama.html") return "voiceoverTasks";
       if (path === "/ad-materials.html") return "adMaterials";
-      if (path === "/tasks.html") return "tasks";
+      if (path === "/tasks.html" || path === "/drama-synthesis.html") return "tasks";
       return "tasks";
     }
 
@@ -22169,12 +23394,13 @@ function buildJobRow(job) {
       if (INTERNAL_VIEWS.has(hashView)) return hashView;
       const path = url.pathname.replace(/\/+$/, "") || "/";
       if (path === "/") return "tasks";
-      if (path === "/tasks.html") return "tasks";
+      if (path === "/tasks.html" || path === "/drama-synthesis.html") return "tasks";
       if (path === "/settings.html") return "settings";
       if (path === "/navigation.html") return "navigation";
       if (path === "/users.html") return "users";
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
+      if (path === "/voiceover-drama.html") return "voiceoverTasks";
       if (path === "/ad-materials.html") return "adMaterials";
       return "";
     }
@@ -22184,6 +23410,7 @@ function buildJobRow(job) {
       if (!link || !els.quickNav?.contains(link)) return;
       const view = viewFromInternalUrl(link.getAttribute("href") || "");
       if (!view) return;
+      if (standalonePathForView(view)) return;
       event.preventDefault();
       const target = new URL(link.getAttribute("href") || "/", window.location.origin);
       const nextPath = target.pathname + target.search + target.hash;
@@ -22194,6 +23421,12 @@ function buildJobRow(job) {
     }
 
     function switchView(view, options = {}) {
+      const standalonePath = standalonePathForView(view);
+      const currentPath = location.pathname.replace(/\/+$/, "") || "/";
+      if (standalonePath && currentPath !== standalonePath) {
+        location.href = standalonePath;
+        return;
+      }
 
 
 
@@ -22218,6 +23451,7 @@ function buildJobRow(job) {
 
 
         screenshots: ["\u622a\u56fe\u7d20\u6750", "\u6309\u4ea7\u54c1\u6279\u91cf\u63d0\u4ea4\u5267 ID\uff0c\u67e5\u770b\u4e09\u79cd\u56fe\u7247\u5c3a\u5bf8\u7684\u751f\u6210\u8fdb\u5ea6\u3002"],
+        voiceoverTasks: ["配音剧语种任务", "按剧 ID 查询系列素材，筛选候选素材并批量创建设计师需求。"],
         adMaterials: ["投放素材任务管理", "创建投放素材需求，审核需求和素材，并完成最终素材上报。"],
 
 
@@ -22269,6 +23503,7 @@ function buildJobRow(job) {
 
       if (view === "tasks" && !userCan("drama_synthesis")) view = firstAllowedView();
       if (view === "screenshots" && !userCan("cover_synthesis")) view = firstAllowedView();
+      if (view === "voiceoverTasks" && !userCan("voiceover_drama_tasks")) view = firstAllowedView();
       if (view === "adMaterials" && !userCan("ad_material_tasks")) view = firstAllowedView();
 
 
@@ -22371,6 +23606,10 @@ function buildJobRow(job) {
 
 
 
+      if (view === "voiceoverTasks") {
+        refreshVoiceoverButtons();
+        loadVoiceoverDesigners().catch(error => console.warn("加载设计师列表失败", error));
+      }
       if (view === "adMaterials") {
         Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
           if (els.adMaterialTableBody) {
@@ -22732,6 +23971,41 @@ function buildJobRow(job) {
       if (els.quickNav) {
         els.quickNav.addEventListener("click", handleQuickNavClick);
       }
+      if (els.voiceoverCountBtn) {
+        els.voiceoverCountBtn.onclick = () => queryVoiceoverCounts().catch(error => showError("查询素材数失败", error));
+      }
+      if (els.voiceoverCountClearBtn) {
+        els.voiceoverCountClearBtn.onclick = clearVoiceoverCounts;
+      }
+      if (els.voiceoverFilterBtn) {
+        els.voiceoverFilterBtn.onclick = () => filterVoiceoverMaterials().catch(error => showError("筛选素材失败", error));
+      }
+      if (els.voiceoverClearBtn) {
+        els.voiceoverClearBtn.onclick = clearVoiceoverFilters;
+      }
+      if (els.voiceoverSelectAll) {
+        els.voiceoverSelectAll.addEventListener("change", event => toggleAllVoiceoverSelection(event.target.checked));
+      }
+      if (els.voiceoverExportBtn) {
+        els.voiceoverExportBtn.onclick = exportVoiceoverCsv;
+      }
+      if (els.voiceoverOpenCreateBtn) {
+        els.voiceoverOpenCreateBtn.onclick = () => openVoiceoverTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
+      }
+      if (els.voiceoverModalCloseBtn) {
+        els.voiceoverModalCloseBtn.onclick = closeVoiceoverTaskModal;
+      }
+      if (els.voiceoverModalResetBtn) {
+        els.voiceoverModalResetBtn.onclick = renderVoiceoverTaskCards;
+      }
+      if (els.voiceoverSubmitTasksBtn) {
+        els.voiceoverSubmitTasksBtn.onclick = () => submitVoiceoverTasks().catch(error => showError("创建设计师任务失败", error));
+      }
+      if (els.voiceoverTaskModal) {
+        els.voiceoverTaskModal.addEventListener("click", event => {
+          if (event.target === els.voiceoverTaskModal) closeVoiceoverTaskModal();
+        });
+      }
       if (els.adMaterialForm) {
         els.adMaterialForm.addEventListener("submit", submitAdMaterialTask);
       }
@@ -22931,6 +24205,18 @@ function buildJobRow(job) {
 
 
       els.createForm.addEventListener("submit", createJob);
+      els.outRandomTemplate.addEventListener("change", syncRandomTemplateControls);
+      els.randomTemplateMode.addEventListener("change", syncRandomTemplateControls);
+      els.youtubeChannel.addEventListener("change", syncYoutubeCommentEligibility);
+      els.materialPickerClose.onclick = () => closeMaterialPicker();
+      els.materialPickerModal.addEventListener("click", event => {
+        if (event.target === els.materialPickerModal) closeMaterialPicker();
+      });
+      els.youtubePublishClose.onclick = closeYoutubePublish;
+      els.youtubePublishModal.addEventListener("click", event => {
+        if (event.target === els.youtubePublishModal) closeYoutubePublish();
+      });
+      els.youtubePublishSubmit.onclick = () => submitYoutubePublish(false);
       if (els.batchDeleteJobsBtn) els.batchDeleteJobsBtn.onclick = () => deleteSelectedJobs();
       if (els.selectAllJobs) els.selectAllJobs.onchange = event => toggleAllJobs(event.target.checked);
 
@@ -24471,6 +25757,12 @@ function buildJobRow(job) {
 
 
 
+
+    DramaJobRuntime.install({
+      getJobs: () => state.jobs,
+      refresh: () => loadJobs(),
+      canRead: () => userCan("drama_synthesis")
+    });
 
     init().catch(error => {
 

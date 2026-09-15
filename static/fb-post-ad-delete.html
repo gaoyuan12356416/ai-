@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FB Post/Ad 删除 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915a" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">删</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="title"><h1>FB Post/Ad 删除</h1><p>按剧 ID 查找 MoboReels Campaign、Ad、Post，并按 Post 优先、Ad 其次执行删除。</p></div>
+        <div id="topActions"></div>
+      </header>
+      <section id="loginGate" class="panel hidden"><div class="empty">请先登录后台后再访问此页面。<a href="/">返回登录</a></div></section>
+      <section id="permissionGate" class="panel hidden"><div class="empty">当前账号没有 AI自动规则调控权限。</div></section>
+      <section id="pageRoot" class="hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>剧 ID</h2>
+            <div class="actions">
+              <button class="btn" id="refreshJobsBtn" type="button">刷新记录</button>
+              <button class="btn primary" id="previewBtn" type="button">预览</button>
+            </div>
+          </div>
+          <div class="panel-body form-grid">
+            <label>
+              <span>每行一个剧 ID</span>
+              <textarea id="seriesInput" rows="7" placeholder="EN-XEY271&#10;EN-XEY251&#10;EN-XEY286"></textarea>
+            </label>
+            <label>
+              <span>产品口径</span>
+              <input id="productsInput" value="3443,3543,826" />
+            </label>
+          </div>
+        </section>
+
+        <section class="stats" id="stats"></section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>删除执行</h2>
+            <div class="actions">
+              <button class="btn danger" id="deletePostsBtn" type="button" disabled>先删除 Post</button>
+              <button class="btn danger" id="deleteAdsBtn" type="button" disabled>确认后删除 Ad</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div id="currentJob" class="current-job">暂无预览结果</div>
+            <div class="log" id="logBox"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>命中明细</h2><span id="detailCount"></span></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>剧 ID</th>
+                  <th>账号</th>
+                  <th>Campaign</th>
+                  <th>Ad ID</th>
+                  <th>Post ID</th>
+                  <th>状态</th>
+                  <th>预览</th>
+                </tr>
+              </thead>
+              <tbody id="detailBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>最近任务</h2></div>
+          <div class="panel-body"><div class="jobs" id="jobsBox"></div></div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js?v=20260915a"></script>
+  <script src="/fb-post-ad-delete.js?v=20260915a"></script>
+</body>
+</html>
