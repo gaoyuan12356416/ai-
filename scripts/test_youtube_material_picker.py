@@ -18,6 +18,7 @@ class MaterialPickerTests(unittest.TestCase):
         self.db = sqlite3.connect(':memory:')
         self.addCleanup(self.db.close)
         self.db.create_function('LOCATE', 2, lambda needle, value: value.find(needle) + 1)
+        self.db.create_function('CONCAT', -1, lambda *values: ''.join(str(v or '') for v in values))
         self.db.execute('CREATE TABLE materials (' + ','.join(c + ' TEXT' for c in COLUMNS) + ')')
         for i in range(1, 131):
             row = dict.fromkeys(COLUMNS, '')
