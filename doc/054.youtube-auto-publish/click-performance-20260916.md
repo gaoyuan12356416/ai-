@@ -2,7 +2,7 @@
 
 用户点击“查看详情 / 审核封面”后立即显示可关闭的加载弹窗，异步读取当前任务；读取失败留在弹窗内重试。完整详情返回前不展示审核动作，返回后使用最新版本，服务端权限、版本 CAS、频道 fresh-check 和发布流程保持原约束。关闭会中断初次读取，迟到响应不会重新打开弹窗。
 
-列表使用独立的 160×90 JPEG 缩略图（等比缩放，质量 75），大封面仅在详情需要时加载。缩略图按原始 SHA 保存在进程内 LRU，最多 128 项、最多两个并行解码；不新增磁盘缓存或修改任何原图。封面及缩略图都必须先校验当前 Cookie、模块权限、租户、owner / admin 权限及原文件 SHA。
+列表使用独立的最大 160×90 JPEG 缩略图（等比缩放，质量 75；部分历史图片为 160×89），大封面仅在详情需要时加载。缩略图按原始 SHA 保存在进程内 LRU，最多 128 项、最多两个并行解码；不新增磁盘缓存或修改任何原图。封面及缩略图都必须先校验当前 Cookie、模块权限、租户、owner / admin 权限及原文件 SHA。
 
 图片返回 `Cache-Control: private, no-cache, max-age=0, must-revalidate`、`Vary: Cookie` 和各自的 ETag。这里的 no-cache 允许浏览器存储，但每次复用须重新鉴权；匹配 ETag 后返回无正文的 304。匿名、无权限、其他 owner / tenant 和已变化的原文件仍返回原有拒绝结果，不能因 ETag 命中跳过校验。Nginx 关闭此路由的共享代理缓存，不再添加重复 no-store 头，由应用决定每种响应的缓存规则。
 
@@ -30,3 +30,22 @@ python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/<SHA>/scripts/deploy
 ```
 
 回滚拒绝覆盖后续漂移；只恢复代码和配置并移除这次新增的 covers.py，不恢复数据库、不删除原图、不修改已有发布或预约。
+
+
+## 生产验收（2026-09-16 18:44，北京时间）
+
+- 运行提交 `05a1271a32852fe188513efe687dde6f1bb91a07`，已推送 GitHub，CPU 从 GitHub fetch 相同 SHA 后部署。主机 `43.166.187.96`，运行目录 `/root/drama_material_service`，公开静态目录 `/usr/share/nginx/html`。
+- 备份 `/mnt/data-disk/deploy/youtube-auto-publish/backups/click-performance-20260916-184428-05a1271a3285`，包含 8 个目标的原始文件 / 新文件不存在标记、权限、旧新 SHA、服务状态、安装结果及只读测量。
+- CPU 完成同套 441 项：440 通过、1 个历史图片 fixture 跳过。API 重启到 PID 4040647，active / NRestarts 0；Nginx 语法检查与平滑重载通过。自动发布 worker PID 2955771、统一 writer PID 2937249 保持不变；原 inactive 旧 worker 保持 inactive。新 API 日志无 Traceback / ERROR。
+- 部署前后准备任务 52、封面资产 110、发布账本 58，三表全部行哈希一致。未创建测试发布、通知、预约或首评；后续验收只做 GET。
+- 真实管理员会话、公网 HTTPS、Accept-Encoding gzip 测量（服务器发起，不是用户浏览器端到端计时）：52 条任务完整 DTO 为 336,047 B；摘要 40,334 B，实际 gzip 传输 **8,742 B**；未变化轮询 **99 B**。任务数量和分类计数与完整 DTO 一致。详情 gzip 后 3,074 B。
+- 当前 51 张可用封面，原图总计 **28,084,665 B**，列表缩略图总计 **311,320 B**，减少 **98.89%**；中位数 6,143 B，最大 6,802 B。尺寸为 160×89 / 160×90，保留历史比例，每张原图 SHA 均与资产账本一致。
+- 缩略图及完整封面条件请求均返回 304 / 零正文；私有缓存头和 Vary: Cookie 正确，无重复 no-store；匿名带 ETag 访问仍为 401。摘要 JSON 保持 no-store，gzip 的 Vary: Accept-Encoding 正确。公网 HTML / JS 与 GitHub release、两份运行文件字节完全一致，版本 `20260916-click-performance-v1`。
+- 最终本地慢网络 UI 专项再次通过 12 项，点击后同步挂载弹窗，下一帧约 23.6 ms；这仍只是本地 UI 测量。防闪屏 29、预约 38 项已通过。桌面加载态和移动审核态截图人工检查通过。
+- 回滚检查已通过。实际回滚：
+
+```bash
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/05a1271a32852fe188513efe687dde6f1bb91a07/scripts/deploy_youtube_click_performance.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/click-performance-20260916-184428-05a1271a3285
+```
+
+上述命令只恢复此补丁的代码和配置，保留现有数据库、所有原图和发布事实；若已出现后续代码漂移，脚本拒绝覆盖。
