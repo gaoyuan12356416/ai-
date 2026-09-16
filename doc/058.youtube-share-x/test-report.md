@@ -1,0 +1,5 @@
+# 测试报告
+
+首轮主桥接17项、UI14项、Sidecar28项通过。既有YouTube HTTP18项、工作流45项、素材筛选6项、X应用契约30项通过。独立评审问题见bugs；最终回归和生产验收见release-result.md。
+
+本地组合基线：旧x_posts/service.py不接受当前线上OAuth使用的access_token_provider，X账号全套有1项旧依赖失败。以原始生产OAuth sha7ce8ee323de50de66ca93389650c9e99175863fa4a71430e455b9d1614080b6e离线复现相同TypeError。发布复制完整当前线上Sidecar，未下发旧依赖；部署环境另做回归确认。

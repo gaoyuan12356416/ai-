@@ -219,6 +219,8 @@ AUTO_TEMPLATE_ACTOR_LABEL = "x_auto_post_service"
 _DB_LOCK = threading.RLock()
 _ACCOUNT_LOCKS = {}
 _ACCOUNT_LOCKS_LOCK = threading.Lock()
+_YOUTUBE_SHARES_LOCK = threading.Lock()
+_YOUTUBE_SHARES = None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1541,6 +1543,41 @@ def _x_posts_api():
     except (ImportError, ModuleNotFoundError):
         raise ServiceError("x_posts_unavailable", "X发布服务暂不可用", 503) from None
     return XPostError, XPostStore, publish_canary
+
+
+def _youtube_share_account(account_id, actor, scope):
+    return row_to_item(find_scoped_account_row(account_id, actor, scope))
+
+
+def youtube_shares_service():
+    """Create the separate data-disk ledger without importing this module twice."""
+    global _YOUTUBE_SHARES
+    from features.x_accounts.youtube_shares import YouTubeShares, ledger_path
+
+    with _YOUTUBE_SHARES_LOCK:
+        if _YOUTUBE_SHARES is None:
+            _YOUTUBE_SHARES = YouTubeShares(
+                ledger_path(POST_STORAGE_ROOT, POST_STORAGE_MOUNT_ROOT),
+                normalize_scope=normalize_account_scope,
+                get_account=_youtube_share_account,
+                verify_account=verify_account,
+                publish_credentials=publish_credentials,
+            )
+        return _YOUTUBE_SHARES
+
+
+def youtube_share_request(action, payload):
+    from features.x_accounts.youtube_shares import YouTubeShareError
+
+    if action not in {"query", "create", "run"}:
+        raise ServiceError("invalid_request", "分享操作无效", 400)
+    try:
+        service = youtube_shares_service()
+        result = getattr(service, action)(payload)
+        service.start_worker()
+        return result
+    except YouTubeShareError as exc:
+        raise ServiceError(exc.code, str(exc), exc.status) from None
 
 
 def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False):
@@ -5206,6 +5243,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json(
                 request_body_limit
             )
+            youtube_share_match = re.fullmatch(
+                r"/internal/youtube-shares/(query|create|run)", parsed.path
+            )
+            if youtube_share_match:
+                self.send_json(
+                    202 if youtube_share_match.group(1) == "create" else 200,
+                    youtube_share_request(youtube_share_match.group(1), payload),
+                )
+                return
             if parsed.path == "/internal/posts/auto-template/accounts":
                 self.send_json(200, auto_template_accounts_request(payload))
                 return
@@ -5781,8 +5827,16 @@ def serve():
     cleanup_disconnected_token_artifacts()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
-    print("X account sidecar listening on %s:%s" % (LISTEN_HOST, LISTEN_PORT), flush=True)
-    server.serve_forever()
+    shares = None
+    try:
+        shares = youtube_shares_service()
+        shares.start_worker()
+        print("X account sidecar listening on %s:%s" % (LISTEN_HOST, LISTEN_PORT), flush=True)
+        server.serve_forever()
+    finally:
+        if shares is not None:
+            shares.stop_worker()
+        server.server_close()
 
 
 def main():

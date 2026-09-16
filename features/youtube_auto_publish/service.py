@@ -238,10 +238,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         preview=current or max(value['versions'],key=lambda v:int(v['number']),default=None)
         value['cover_preview']=({'url':preview['url'],'version':preview['number'],'is_current':preview['number']==body['current_version']} if preview else None)
         value['thumbnail_url']=preview['url']+'/thumbnail' if preview else ''
+        value['can_share_x']=bool(ledger and ledger.get('video_state')=='published' and re.fullmatch(r'[A-Za-z0-9_-]{11}',str(ledger.get('video_id') or '')))
         if summary:
             # Keep the list independent of private copy, history and notification
             # projections. Full details and all write gates remain authoritative.
-            row={key:value.get(key) for key in ('id','title','status','cover_source','created_at','publish_at','schedule_state','current_version','can_review','can_retry','thumbnail_url','cover_preview')}
+            row={key:value.get(key) for key in ('id','title','status','cover_source','created_at','publish_at','schedule_state','current_version','can_review','can_retry','thumbnail_url','cover_preview','can_share_x','video_id')}
             row['material']={'name':value['material'].get('name','')}
             row['channel']={key:value['channel'].get(key,'') for key in ('name','language')}
             row['schedule_control']={'state':(value.get('schedule_control') or {}).get('state','')}

@@ -177,7 +177,164 @@
   }
   const post = (path, body) => api(path,{method:'POST',body:JSON.stringify(body)});
   function toast(message, kind = 'success') { const node = document.createElement('div'); node.className = `toast toast-${kind}`; node.setAttribute('role','status'); node.innerHTML = `${icon(kind === 'success' ? 'check' : 'warning')}<span>${esc(message)}</span>`; $('#toast-root').replaceChildren(node); setTimeout(() => node.remove(),4800); }
-  function rememberCaret(el) { if (el?.matches?.('#draft-title,#draft-description,#draft-comment,#default-description')) carets.set(el.id,[el.selectionStart,el.selectionEnd]); }
+  function rememberCaret(el) { if (el?.matches?.('#draft-title,#draft-description,#draft-comment,#default-description,#x-share-description')) carets.set(el.id,[el.selectionStart,el.selectionEnd]); }
+  // Share drafts survive closing the dialog. An uncertain submit always keeps
+  // the same operation and body; only explicit user actions can submit it.
+  const shareXDrafts = new Map();
+  const shareXMacros = ['title','youtube_url','channel_name','channel_url','name','desc'];
+  const shareXItemStatuses = {queued:['等待转发','blue'],publishing:['正在转发','blue'],published:['转发成功','green'],failed:['转发失败','red'],unknown_outcome:['结果待核对','amber']};
+  function shareXBlockReason(t) {
+    if (!t) return '任务信息尚未加载';
+    // Compact list DTOs own this gate and do not carry the detailed steps.
+    if (t.can_share_x === true) return '';
+    if (t.can_share_x === false && t.share_x_block_reason) return String(t.share_x_block_reason);
+    if (!/^[A-Za-z0-9_-]{11}$/.test(String(t.video_id || ''))) return '尚未取得有效的 YouTube 视频链接';
+    if (typeof t.can_share_x !== 'boolean' && (['published','comment_failed'].includes(t.status) || (Array.isArray(t.steps) && t.steps.some(s => s.key === 'public' && ['complete','completed','success','done'].includes(s.status))))) return '';
+    if (t.status === 'cancelled') return '本次发布已取消';
+    if (t.status === 'scheduled') return '视频已预约，等待公开后可转发';
+    if (pendingSchedule(t)) return '预约变更待确认，尚未确认视频公开';
+    if (missedSchedule(t)) return '已错过预约时间，视频尚未公开';
+    if (t.status === 'thumbnail_failed') return '封面设置失败，视频仍为私享';
+    if (t.unknown_outcome) return 'YouTube 发布结果待核对';
+    return '视频尚未确认公开，完成公开后可转发';
+  }
+  function shareXButton(t) {
+    const reason = shareXBlockReason(t);
+    return `<div class="x-share-row-action"><button type="button" class="btn btn-secondary btn-sm" data-action="share-x" data-id="${esc(t.id)}"${reason ? ` disabled title="${esc(reason)}" aria-describedby="x-share-reason-${esc(t.id)}"` : ''}>转发到X平台</button>${reason ? `<span class="x-share-row-reason" id="x-share-reason-${esc(t.id)}">${esc(reason)}</span>` : ''}</div>`;
+  }
+  const shareXPath = v => '/tasks/' + encodeURIComponent(v.id) + '/x-share';
+  const shareXLocked = v => Boolean(v.pendingPayload || v.run || v.submitting);
+  const shareXAccountEligible = a => a.selectable === true && Number.isSafeInteger(Number(a.id)) && Number(a.id) > 0;
+  const shareXSelected = v => (v.accounts || []).filter(a => shareXAccountEligible(a) && v.selected.has(Number(a.id))).map(a => Number(a.id));
+  function shareXPreviewValid(v) {
+    return v.loaded && !v.loading && !v.contextError && !v.previewLoading && !v.previewError && v.previewFor === v.description && v.preview?.valid === true && typeof v.preview.text === 'string' && Number.isFinite(v.preview.weighted_length) && v.preview.weighted_length >= 0 && v.preview.weighted_length <= 280 && Array.isArray(v.preview.errors) && !v.preview.errors.length;
+  }
+  function shareXRender(v) { if (stack.includes(v)) renderModals(); }
+  function shareXRunItems(run) {
+    return `<div class="x-share-results">${(Array.isArray(run.items) ? run.items : []).map(item => {
+      const [label,color] = shareXItemStatuses[item.status] || ['状态待核对','amber'], link = safeUrl(item.post_url);
+      return `<div class="x-share-result"><div class="x-share-result-head"><strong>${esc(item.username ? '@' + String(item.username).replace(/^@/,'') : '账号 ' + item.account_id)}</strong><span class="badge badge-${color}">${label}</span></div>${item.duplicate ? '<span class="field-hint">沿用已有转发记录</span>' : ''}${item.message ? `<p>${esc(item.message)}</p>` : ''}${item.status === 'unknown_outcome' ? '<p class="x-share-unknown">需核对该账号的实际发布结果，系统不会自动重发。</p>' : ''}${link ? `<a class="text-button" href="${esc(link)}" target="_blank" rel="noopener noreferrer">查看 X 帖子 ${icon('arrow')}</a>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+  function shareXRunView(run) {
+    const items = Array.isArray(run.items) ? run.items : [], counts = items.reduce((out,item) => { out[item.status] = (out[item.status] || 0) + 1; return out; },{});
+    const finished = run.status === 'completed', attention = (counts.failed || 0) + (counts.unknown_outcome || 0);
+    const summary = [`成功 ${counts.published || 0}`,`失败 ${counts.failed || 0}`,`待核对 ${counts.unknown_outcome || 0}`];
+    if (!finished) summary.push(`处理中 ${(counts.queued || 0) + (counts.publishing || 0)}`);
+    return `<section class="x-share-run" aria-label="本次转发结果"><div class="note-box ${attention ? 'note-amber' : finished ? 'note-green' : 'note-blue'}" role="status"><strong>${finished ? attention ? '本次转发已结束，部分账号需要处理' : '本次转发已完成' : '正在处理本次转发'}</strong><span>${summary.join(' · ')}</span></div>${shareXRunItems(run)}</section>`;
+  }
+  function shareXPreviewView(v) {
+    const preview = v.preview, fixed = Boolean(v.run), current = v.previewFor === v.description && !v.previewLoading, errors = Array.isArray(preview?.errors) ? preview.errors : [];
+    return `<div class="x-share-preview-heading"><strong>发布预览</strong><span class="${current && !fixed && !shareXPreviewValid(v) ? 'error-message' : 'field-hint'}">${fixed ? '已提交内容' : v.previewLoading ? '正在更新…' : current && Number.isFinite(preview?.weighted_length) ? esc(preview.weighted_length) + ' / 280' : '等待校验'}</span></div><div class="x-share-post-preview" aria-busy="${Boolean(v.previewLoading)}"><div class="x-share-preview-account"><span class="x-share-mark" aria-hidden="true">𝕏</span><div><strong>所选 X 账号</strong><span>将向每个所选账号发布相同内容</span></div></div><div id="x-share-preview-text" class="x-share-preview-text">${esc(preview?.text || '填写描述后，这里将展示宏替换后的实际发布内容。')}</div></div><div class="x-share-preview-status" aria-live="polite">${v.previewError ? `<p class="error-message">${esc(v.previewError)}</p><button type="button" class="text-button" data-action="preview-share-x" ${shareXLocked(v) ? 'disabled' : ''}>重新校验预览</button>` : current && errors.length ? errors.map(error => `<p class="error-message">${esc(typeof error === 'string' ? error : error.message || error.code || '文案校验失败')}</p>`).join('') : current && preview?.valid === false ? '<p class="error-message">当前内容未通过校验，请修改描述。</p>' : ''}${current && preview?.appended_url ? '<p class="field-hint">描述中未包含视频链接，已自动补充 YouTube 原链接。</p>' : ''}${v.previewLoading ? '<p class="field-hint">等待最新预览完成后可确认转发。</p>' : ''}</div><p class="x-share-card-note">X 将发布文案和 YouTube 链接。卡片样式及能否直接播放由 YouTube 和 X 决定。</p>`;
+  }
+  function shareXView(v) {
+    if (!v.loaded) return shell(v,'转发到X平台','将已公开的 YouTube 视频链接分享给所选 X 账号。',v.loading ? '<div class="empty-state" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载转发信息</h3></div>' : '<div class="empty-state"><h3>转发信息加载失败</h3><button type="button" class="btn btn-secondary" data-action="reload-share-x">重新加载</button></div>','<button type="button" class="btn btn-secondary" data-action="close-modal">关闭</button>',true);
+    const locked = shareXLocked(v), source = v.source || {}, url = safeUrl(source.youtube_url), selected = v.pendingPayload?.account_ids || v.run?.account_ids || shareXSelected(v), search = String(v.accountSearch || '').trim().toLowerCase();
+    const accounts = v.accounts.filter(a => !search || `${a.username || ''} ${a.name || ''}`.toLowerCase().includes(search));
+    const sourceCard = `<div class="x-share-source">${image(source.thumbnail_url,'YouTube 视频封面','x-share-source-image')}<div><strong>${esc(source.title || 'YouTube 视频')}</strong><span>${esc(source.channel_name || '')}</span>${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频 ${icon('arrow')}</a>` : ''}</div></div>`;
+    const accountPicker = `<section class="field"><div class="x-share-section-heading"><span class="field-label">选择 X 账号 <span class="required">*</span></span><span class="field-hint">已选 ${selected.length} / 20 个</span></div><div class="x-share-account-toolbar"><input class="input" id="x-share-account-search" type="search" placeholder="搜索账号名称或 @用户名" aria-label="搜索 X 账号" value="${esc(v.accountSearch || '')}"/><button type="button" class="text-button" data-action="select-all-share-x" ${locked || !v.accounts.some(shareXAccountEligible) ? 'disabled' : ''}>${v.accounts.filter(shareXAccountEligible).length > 20 ? '选前 20 个可用账号' : '全选可用'}</button><button type="button" class="text-button" data-action="clear-share-x" ${locked || !selected.length ? 'disabled' : ''}>清空</button></div><div class="x-share-account-list" role="group" aria-label="可转发的 X 账号">${accounts.length ? accounts.map(a => { const eligible = shareXAccountEligible(a), handle = a.username ? '@' + String(a.username).replace(/^@/,'') : ''; return `<label class="x-share-account ${eligible ? '' : 'is-blocked'}"><input type="checkbox" id="x-share-account-${esc(a.id)}" data-share-account="${esc(a.id)}" ${v.selected.has(Number(a.id)) ? 'checked' : ''} ${locked || !eligible || (selected.length >= 20 && !v.selected.has(Number(a.id))) ? 'disabled' : ''}/><span><strong>${esc(a.name || handle || '账号 ' + a.id)}</strong>${handle ? `<span>${esc(handle)}</span>` : ''}${!eligible ? `<small>${esc(a.block_reason || '该账号当前不可用于发布')}</small>` : ''}</span>${eligible ? '<span class="badge badge-green">可发布</span>' : '<span class="badge badge-gray">不可用</span>'}</label>`; }).join('') : `<p class="x-share-empty">${v.accounts.length ? '没有匹配的账号' : '暂无可用的 X 账号，请先完成账号授权和发布审批。'}</p>`}</div></section>`;
+    const composer = `<section class="field">${label('转发描述',true,'x-share-description')}<textarea id="x-share-description" class="textarea" rows="6" aria-describedby="x-share-description-hint" ${locked ? 'disabled' : ''}>${esc(v.description)}</textarea><div class="macro-toolbar"><span>插入宏参数</span>${v.macros.filter(m => shareXMacros.includes(m.key)).map(m => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="x-share-description" data-macro="${esc(m.key)}" title="${esc(m.label || m.key)}" ${locked ? 'disabled' : ''}>${esc(m.label || m.key)} {${esc(m.key)}}</button>`).join('')}</div><p class="field-hint" id="x-share-description-hint">支持 280 字符；汉字、表情与链接由服务端计数，以最新预览校验为准。视频原链接将始终保留。</p></section>`;
+    const history = v.history.filter(run => run.id !== v.run?.id);
+    const historyView = history.length ? `<details class="x-share-history"><summary>历史转发记录（${history.length}）</summary>${history.map(run => `<section class="x-share-history-run"><div class="x-share-section-heading"><strong>${esc(time(run.created_at || run.created_at_utc))}</strong><span class="field-hint">${esc({queued:'等待处理',running:'处理中',completed:'已结束'}[run.status] || run.status || '')}</span></div>${run.text ? `<p class="x-share-history-text">${esc(run.text)}</p>` : ''}${shareXRunItems(run)}</section>`).join('')}</details>` : '';
+    const uncertain = v.uncertain ? '<div class="note-box note-amber x-share-notice" role="status"><strong>提交结果待确认</strong><span>已保留本次账号与文案。可先刷新核对；再次确认将核对同一次提交。</span></div>' : '';
+    const errors = v.contextError || v.pollError;
+    const footer = `<span class="footer-hint">${v.run ? '关闭后可从列表重新打开查看结果' : locked ? '本次提交内容已固定' : '仅点击确认转发后才会发布'}</span><div class="inline-actions"><button type="button" class="btn btn-secondary" data-action="close-modal">关闭</button>${v.run || v.uncertain || v.contextError ? `<button type="button" class="btn btn-secondary" data-action="check-share-x" ${v.checking || v.loading ? 'disabled' : ''}>${v.checking || v.loading ? '核对中…' : '刷新核对结果'}</button>` : ''}${v.run ? v.run.status === 'completed' ? '<button type="button" class="btn btn-primary" data-action="new-share-x">转发到其他账号</button>' : '' : `<button type="button" class="btn btn-primary" data-action="submit-share-x" ${v.submitting || v.checking || v.loading || (!v.uncertain && (!selected.length || selected.length > 20 || !shareXPreviewValid(v))) ? 'disabled' : ''}>${v.submitting ? '正在提交…' : v.uncertain ? '按原内容核对提交' : `确认转发到 ${selected.length} 个账号`}</button>`}</div>`;
+    return shell(v,'转发到X平台','选择账号并确认发布预览。',`${sourceCard}${uncertain}${errors ? `<div class="note-box note-amber x-share-notice" role="status">${esc(errors)}</div>` : ''}<div class="x-share-layout"><div class="x-share-compose">${accountPicker}${composer}</div><aside class="x-share-preview">${shareXPreviewView(v)}</aside></div>${v.run ? shareXRunView(v.run) : ''}${historyView}`,footer,true);
+  }
+  function shareXAcceptRun(v, run) {
+    if (!run || !/^[a-f0-9]{32}$/i.test(String(run.id || '')) || !['queued','running','completed'].includes(run.status) || !Array.isArray(run.items) || (v.pendingPayload && run.operation_id && run.operation_id !== v.pendingPayload.operation_id)) {
+      const error = new Error('转发结果响应不完整，请刷新核对本次提交。'); error.uncertain = true; throw error;
+    }
+    v.run = run; v.uncertain = false; v.error = ''; v.pollError = ''; v.pollFailures = 0;
+    if (typeof run.description_template === 'string') v.description = run.description_template;
+    if (Array.isArray(run.account_ids)) v.selected = new Set(run.account_ids.map(Number));
+    if (typeof run.text === 'string') { v.preview = {text:run.text,valid:true,weighted_length:run.weighted_length,errors:[],appended_url:false}; v.previewFor = v.description; v.previewLoading = false; }
+    v.history = [run,...(v.history || []).filter(item => item.id !== run.id)];
+  }
+  function scheduleShareXPoll(v) {
+    clearTimeout(v.pollTimer);
+    if (!stack.includes(v) || (!v.uncertain && !['queued','running'].includes(v.run?.status))) return;
+    v.pollTimer = setTimeout(() => { if (!document.hidden) void checkShareX(v); else scheduleShareXPoll(v); },Math.min(15000,(v.uncertain ? 5000 : 2000) * (1 + (v.pollFailures || 0))));
+  }
+  async function loadShareX(v) {
+    if (v.loading) return;
+    v.loading = true; v.error = ''; v.contextError = ''; shareXRender(v);
+    try {
+      const data = await api(shareXPath(v));
+      if (!data.source || !Array.isArray(data.accounts) || !Array.isArray(data.macros) || !Array.isArray(data.history)) throw new Error('转发信息响应不完整，请重新加载。');
+      v.source = data.source; v.accounts = data.accounts; v.macros = data.macros; v.history = data.history;
+      if (!v.loaded) v.description = String(data.default_template ?? '{title}\n\n{youtube_url}');
+      v.loaded = true; v.contextError = ''; v.pollError = ''; v.pollFailures = 0;
+      if (!shareXLocked(v)) v.selected = new Set(shareXSelected(v));
+      const previous = v.pendingPayload ? data.history.find(run => run.operation_id === v.pendingPayload.operation_id) : v.run ? data.history.find(run => run.id === v.run.id) : data.history.find(run => ['queued','running'].includes(run.status));
+      if (previous) shareXAcceptRun(v,previous);
+      if (!shareXLocked(v)) scheduleShareXPreview(v,0);
+    } catch (error) { if (v.loaded) v.contextError = error.message; else v.error = error.message; v.pollFailures = (v.pollFailures || 0) + 1; }
+    finally { v.loading = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  function scheduleShareXPreview(v, delay = 350) {
+    if (shareXLocked(v)) return;
+    clearTimeout(v.previewTimer); v.previewAbort?.abort();
+    const serial = ++v.previewSerial, description = v.description;
+    v.previewLoading = true; v.previewError = ''; shareXRender(v);
+    v.previewTimer = setTimeout(() => { if (stack.includes(v)) void updateShareXPreview(v,serial,description); },delay);
+  }
+  async function updateShareXPreview(v, serial, description) {
+    const controller = new AbortController(); v.previewAbort = controller;
+    try {
+      const preview = await api(shareXPath(v) + '/preview',{method:'POST',body:JSON.stringify({description_template:description}),signal:controller.signal});
+      if (serial !== v.previewSerial) return;
+      if (!preview || typeof preview.text !== 'string' || typeof preview.valid !== 'boolean' || !Array.isArray(preview.errors)) throw new Error('预览响应不完整，请重新校验。');
+      v.preview = preview; v.previewFor = description;
+    } catch (error) { if (serial === v.previewSerial) v.previewError = error.message; }
+    finally { if (serial === v.previewSerial) { v.previewLoading = false; v.previewAbort = null; shareXRender(v); } }
+  }
+  function openShareX(id) {
+    const t = state.tasks.find(item => String(item.id) === String(id)) || task(id), reason = shareXBlockReason(t);
+    if (reason || !/^[a-f0-9]{32}$/i.test(String(id))) { toast(reason || '任务标识无效','error'); return; }
+    let v = shareXDrafts.get(String(id));
+    if (!v) { v = {type:'shareX',id:String(id),loaded:false,loading:false,accounts:[],macros:[],history:[],selected:new Set(),description:'',operationId:uid(),previewSerial:0}; shareXDrafts.set(String(id),v); }
+    if (stack.includes(v)) return;
+    if (!stack.length) lastFocus = document.activeElement;
+    v.key = ++modalSerial; stack.push(v); renderModals(true); void loadShareX(v);
+    if (v.run) void checkShareX(v); else scheduleShareXPoll(v);
+  }
+  async function checkShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.checking) return;
+    v.checking = true; v.pollError = ''; shareXRender(v);
+    try {
+      if (!v.run) await loadShareX(v);
+      if (v.run) { const data = await api(shareXPath(v) + '/runs/' + encodeURIComponent(v.run.id)); shareXAcceptRun(v,data.run); }
+    } catch (error) { v.pollError = error.message; v.pollFailures = (v.pollFailures || 0) + 1; }
+    finally { v.checking = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  async function submitShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.submitting || v.run) return;
+    const wasUncertain = v.uncertain === true;
+    if (!v.pendingPayload) {
+      const accountIds = shareXSelected(v);
+      if (!accountIds.length || accountIds.length > 20 || !shareXPreviewValid(v)) return;
+      v.pendingPayload = Object.freeze({operation_id:v.operationId,account_ids:Object.freeze(accountIds),description_template:v.description});
+    } else if (!v.uncertain) return;
+    v.submitting = true; v.error = ''; v.pollError = ''; clearTimeout(v.pollTimer); shareXRender(v);
+    try {
+      const data = await post(shareXPath(v),v.pendingPayload);
+      shareXAcceptRun(v,data.run);
+    } catch (error) {
+      v.error = error.message;
+      // A later permission/validation rejection cannot disprove an earlier
+      // request whose response was lost. Keep that original operation frozen.
+      const operationConflict = ['operation_conflict','youtube_share_idempotency_conflict','idempotency_conflict'].includes(error.code);
+      if (wasUncertain || error.uncertain || operationConflict) v.uncertain = true;
+      else { v.pendingPayload = null; v.uncertain = false; v.operationId = uid(); }
+    } finally { v.submitting = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  function newShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.submitting || v.run?.status !== 'completed') return;
+    v.run = null; v.pendingPayload = null; v.uncertain = false; v.selected = new Set(); v.operationId = uid(); v.error = ''; v.pollError = '';
+    void loadShareX(v);
+  }
+  function stopShareX(v) { clearTimeout(v.pollTimer); clearTimeout(v.previewTimer); v.previewAbort?.abort(); ++v.previewSerial; v.previewAbort = null; v.previewLoading = false; }
   function resolve(template, source) {
     const missing = [], unknown = [], used = [];
     const value = String(template ?? '').replace(/\{+[^{}\r\n]*\}+/g, token => {
@@ -229,7 +386,7 @@
     }
     if (state.listLoaded) { setText($('#task-count'),state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`); setText($('#footer-total'),`已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`); }
     if (state.listError) { syncMarkup($('#task-table'),`<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`); return; }
-    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
+    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}${shareXButton(t)}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
   }
   async function loadTasks(quiet = false) {
     const serial = ++listSerial;
@@ -339,8 +496,8 @@
   function newDraft() { return {operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
   function releaseCover(cover) { if (cover?.preview) URL.revokeObjectURL(cover.preview); }
-  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
-  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
+  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'shareX') stopShareX(v); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
+  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
   function shell(v,title,subtitle,body,footer = '',large = false) { return `<div class="modal-overlay${top() !== v ? ' modal-behind' : ''}" data-modal-key="${v.key}" ${top() !== v ? 'inert aria-hidden="true"' : ''}><section class="modal${large ? ' modal-lg' : ''}" role="dialog" aria-modal="${top() === v}" aria-labelledby="modal-title-${v.key}" tabindex="-1"><header class="modal-header"><div><h2 class="modal-title" id="modal-title-${v.key}">${title}</h2><p class="modal-subtitle">${subtitle}</p></div><button class="icon-btn close-modal" data-action="close-modal" aria-label="关闭弹窗">${icon('x')}</button></header><div class="modal-body">${v.error ? `<div class="note-box note-error inline-error" role="alert">${esc(v.error)}</div>` : ''}${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`; }
   const label = (text,required = false,id = '') => `<label class="field-label"${id ? ` for="${id}"` : ''}>${text}${required ? '<span class="required">*</span>' : ''}</label>`;
   const fieldError = field => draft?.errors[field] ? `<span class="error-message" role="alert">${esc(draft.errors[field])}</span>` : '';
@@ -436,7 +593,7 @@
     const active = document.activeElement, activeId = active?.id;
     const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
     let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
-    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView};
+    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView,shareX:shareXView};
     const changed = syncMarkup(root,stack.map(v => v.loadingTask || v.taskLoadFailed ? taskLoadingView(v) : views[v.type](v)).join(''),String(busy));
     document.body.style.overflow = 'hidden';
     if (!changed && !focus) return;
@@ -603,6 +760,14 @@
     else if (action === 'close-modal') closeModal();
     else if (action === 'tab') { state.tab = id; state.status = 'all'; $('#status-filter').value = 'all'; loadTasks(); }
     else if (action === 'reload-tasks') loadTasks();
+    else if (action === 'share-x') openShareX(id);
+    else if (action === 'reload-share-x') void loadShareX(v);
+    else if (action === 'preview-share-x') scheduleShareXPreview(v,0);
+    else if (action === 'check-share-x') void checkShareX(v);
+    else if (action === 'submit-share-x') void submitShareX(v);
+    else if (action === 'new-share-x') newShareX(v);
+    else if (action === 'select-all-share-x' && !shareXLocked(v)) { v.selected = new Set(v.accounts.filter(shareXAccountEligible).slice(0,20).map(a => Number(a.id))); shareXRender(v); }
+    else if (action === 'clear-share-x' && !shareXLocked(v)) { v.selected = new Set(); shareXRender(v); }
     else if (action === 'reload-task') void refreshOpenTask(v);
     else if (action === 'reload-materials') loadMaterials(v,true);
     else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
@@ -629,8 +794,8 @@
     else if (action === 'retry') retryTask();
     else if (action === 'save-settings') saveSettings();
   });
-  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
-  document.addEventListener('change', event => { const el = event.target; if (el.id === 'material-uploader' && top()?.type === 'picker') { const v = top(); v.uploaderId = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); void loadMaterials(v); } if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') renderModals(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
+  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'x-share-description' && top()?.type === 'shareX' && !shareXLocked(top())) { top().description = el.value; top().error = ''; scheduleShareXPreview(top()); } if (el.id === 'x-share-account-search' && top()?.type === 'shareX') { top().accountSearch = el.value; shareXRender(top()); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
+  document.addEventListener('change', event => { const el = event.target; if (el.dataset.shareAccount && top()?.type === 'shareX' && !shareXLocked(top())) { const v = top(), accountId = Number(el.dataset.shareAccount), account = v.accounts.find(a => Number(a.id) === accountId); if (account && shareXAccountEligible(account)) { if (el.checked && v.selected.size < 20) v.selected.add(accountId); else v.selected.delete(accountId); shareXRender(v); } } if (el.id === 'material-uploader' && top()?.type === 'picker') { const v = top(); v.uploaderId = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); void loadMaterials(v); } if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') renderModals(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
   ['keyup','mouseup','select','focusout'].forEach(name => document.addEventListener(name,event => rememberCaret(event.target)));
   document.addEventListener('keydown', event => {
     if (!stack.length) return; if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
@@ -679,6 +844,6 @@
     } catch (error) { if (serial !== initSerial) return; $('#page-message').className = 'note-box note-error'; $('#page-message').innerHTML = `<strong>${error.status === 403 ? '暂无 YouTube 自动发布权限' : '发布工作台加载失败'}</strong><span>${esc(error.message)}</span><button type="button" class="btn btn-secondary btn-sm boot-retry" data-action="retry-init">重新加载工作台</button>`; }
     finally { if (serial === initSerial) initBusy = false; }
   }
-  window.addEventListener('pagehide', () => { clearTimeout(pollTimer); clearTimeout(channelPollTimer); clearTimeout(materialPollTimer); clearTimeout(materialTimer); releaseCover(draft?.cover); stack.forEach(v => releaseCover(v.manualCover)); });
+  window.addEventListener('pagehide', () => { clearTimeout(pollTimer); clearTimeout(channelPollTimer); clearTimeout(materialPollTimer); clearTimeout(materialTimer); releaseCover(draft?.cover); stack.forEach(v => { releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); }); });
   init();
 })();

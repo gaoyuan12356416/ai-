@@ -94258,6 +94258,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
         prefix = "/api/youtube-auto-publish"
         path = parsed.path[len(prefix):]
+        if "/x-share" in path:
+            from features.youtube_auto_publish.x_share import dispatch
+            if dispatch(self, parsed, actor, globals()):
+                return
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
         cover = re.fullmatch(r"/covers/([0-9a-f]{32})(/thumbnail)?", path)
         get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
