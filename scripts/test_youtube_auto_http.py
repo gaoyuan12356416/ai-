@@ -71,6 +71,11 @@ class ServiceSpy:
 
 
 class YouTubeHttpTests(unittest.TestCase):
+    def test_material_uploader_query_is_forwarded_with_search_and_refresh(self):
+        self.assertEqual(self.request('GET','/materials?search=video&uploader_id=789&refresh=1').status,200)
+        self.assertEqual(self.service.calls[-1][0],'list_materials')
+        self.assertEqual(self.service.calls[-1][2],{'search':'video','refresh':True,'uploader_id':'789'})
+
     def test_light_bootstrap_and_channels_contract(self):
         self.assertEqual(self.request('GET','/bootstrap?include_channels=0').status,200)
         self.assertEqual(self.service.calls[-1][2],{'include_channels':False})
@@ -231,7 +236,7 @@ class YouTubeHttpTests(unittest.TestCase):
 
     def test_queries_are_forwarded_with_bounds(self):
         self.request("GET", "/materials?search=hello%20world")
-        self.assertEqual(self.service.calls[-1][2], {"search": "hello world", "refresh": False})
+        self.assertEqual(self.service.calls[-1][2], {"search": "hello world", "refresh": False, "uploader_id": ""})
         self.request("GET", "/tasks?search=" + "x" * 240 + "&status=review")
         self.assertEqual(self.service.calls[-1][2], {"search": "x" * 200, "status": "review"})
         self.assertEqual(self.request("GET", "/tasks?" + "&".join("q%d=x" % x for x in range(10))).status, 400)

@@ -94271,7 +94271,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 elif path == "/channels":
                     result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
                 elif path == "/materials":
-                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1")
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1", uploader_id=query.get("uploader_id", [""])[0])
                 elif path == "/tasks":
                     result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
                 elif path == "/settings":

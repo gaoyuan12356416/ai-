@@ -195,8 +195,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         channels=self.channel_options(actor)['channels'] if include_channels else []
         return {'settings':self.settings(actor),'source':state,'channels':channels,'channels_loaded':bool(include_channels),'can_manage_settings':actor.get('role')=='admin','enabled':self.enabled}
 
-    def list_materials(self,actor,search='',*,refresh=False):
-        self._actor(actor);return self.source.list(search,refresh=refresh)
+    def list_materials(self,actor,search='',*,refresh=False,uploader_id=''):
+        self._actor(actor);return self.source.list(search,refresh=refresh,uploader_id=uploader_id)
 
     def verify_channel_thumbnail(self,actor,payload):
         self._actor(actor)

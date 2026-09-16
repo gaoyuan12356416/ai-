@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from .templates import WorkflowError, has_link_source, long_url
 from .cache import ReadCache
 
-COLUMNS = ('id','name','url','thumbnail_url','content_id','source_job_id','source_kind','macro_name','macro_desc','language','duration','size','app_id')
+COLUMNS = ('id','name','url','thumbnail_url','content_id','source_job_id','source_kind','macro_name','macro_desc','language','duration','size','app_id','uploader_id','uploader_name')
 DEFAULT_HOSTS = ('advertising-1306474899.cos.ap-hongkong.myqcloud.com','ai.yingliangads.com','gy.g2flow.com','socialkit-cdn.yingliang.tech')
 
 
@@ -36,6 +36,8 @@ class MaterialSource:
         self.lock = threading.Lock()
         self.cache = None
         self.read_cache = ReadCache() if async_cache else None
+        self.uploader_cache = ReadCache(workers=1) if async_cache else None
+        self.uploader_snapshot = None
 
     def configuration(self):
         if not self.sql_file:
@@ -52,7 +54,7 @@ class MaterialSource:
             return '', {'configured':False,'message':'素材筛选规则待配置，请等待管理员提供最终 SQL。'}
         return validate_sql(text), {'configured':True,'message':''}
 
-    def _read(self, sql, material_id='', search=''):
+    def _read(self, sql, material_id='', search='', uploader_id=''):
         projection = ','.join("'%s',COALESCE(CAST(pool.`%s` AS CHAR),'')" % (key,key) for key in COLUMNS)
         condition = "CAST(pool.app_id AS CHAR)='1479'"
         if material_id:
@@ -62,7 +64,9 @@ class MaterialSource:
         if search:
             literal=str(search).encode('utf-8').hex()
             condition += " AND LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(CONCAT(CAST(pool.id AS CHAR),' ',COALESCE(pool.name,''))))>0" % literal
-        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s LIMIT 100" % (projection,sql,condition)
+        if uploader_id:
+            condition += " AND CAST(pool.uploader_id AS CHAR)='%s'" % uploader_id
+        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY CAST(pool.id AS UNSIGNED) DESC LIMIT 100" % (projection,sql,condition)
         try:
             rows = self.query_runner(query)
             items = []
@@ -91,19 +95,46 @@ class MaterialSource:
         except Exception:
             raise WorkflowError('material_query_failed','素材查询失败，请联系管理员检查筛选配置',503) from None
 
-    def list(self, search='', *, refresh=False):
+    def _read_uploaders(self, sql):
+        # Read the entire configured pool, independently of the first 100 videos
+        # and the current keyword/uploader filter. Never expose unrelated users.
+        query = ("SELECT HEX(JSON_OBJECT('id',CAST(pool.uploader_id AS CHAR),'name',MAX(pool.uploader_name))) "
+                 "FROM (%s) AS pool WHERE CAST(pool.app_id AS CHAR)='1479' "
+                 "GROUP BY CAST(pool.uploader_id AS CHAR) ORDER BY MAX(pool.uploader_name),CAST(pool.uploader_id AS CHAR)" % sql)
+        try:
+            options = []
+            for row in self.query_runner(query):
+                item = json.loads(bytes.fromhex(row[0]).decode('utf-8'))
+                value = str(item.get('id') or '0')
+                if re.fullmatch(r'0|[1-9][0-9]{0,18}', value):
+                    name = str(item.get('name') or '').strip() or ('未知上传人' if value == '0' else '用户 ' + value)
+                    options.append({'id': value, 'name': name})
+            return options
+        except Exception:
+            raise WorkflowError('material_query_failed','上传人查询失败，请稍后刷新',503) from None
+
+    def list(self, search='', *, refresh=False, uploader_id=''):
+        uploader_id = str(uploader_id or '').strip()
+        if uploader_id and re.fullmatch(r'0|[1-9][0-9]{0,18}', uploader_id) is None:
+            raise WorkflowError('invalid_uploader_id','上传人筛选条件无效')
         sql, state = self.configuration()
-        if not sql: return dict(state,items=[])
+        if not sql: return dict(state,items=[],uploaders=[])
         search=str(search or '').strip().casefold()[:200]
-        cache_key=(sql,search)
+        cache_key=(sql,search,uploader_id)
         if self.read_cache is not None:
-            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search), refresh=refresh)
-            return dict(state,items=rows,cache=metadata)
+            uploaders, uploader_meta = self.uploader_cache.read(sql, lambda: self._read_uploaders(sql), refresh=refresh)
+            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search,uploader_id=uploader_id), refresh=refresh)
+            metadata['refreshing'] = metadata['refreshing'] or uploader_meta['refreshing']
+            metadata['error'] = metadata['error'] or uploader_meta['error']
+            return dict(state,items=rows,uploaders=uploaders,cache=metadata)
         with self.lock:
+            if refresh or not self.uploader_snapshot or self.uploader_snapshot[0]!=sql or time.monotonic()-self.uploader_snapshot[1]>300:
+                self.uploader_snapshot=(sql,time.monotonic(),self._read_uploaders(sql))
+            uploaders=[dict(row) for row in self.uploader_snapshot[2]]
             if refresh or not self.cache or self.cache[0]!=cache_key or time.monotonic()-self.cache[1]>20:
-                self.cache=(cache_key,time.monotonic(),self._read(sql,search=search))
+                self.cache=(cache_key,time.monotonic(),self._read(sql,search=search,uploader_id=uploader_id))
             rows=[dict(row) for row in self.cache[2]]
-        return dict(state,items=rows)
+        return dict(state,items=rows,uploaders=uploaders)
 
     def get(self, material_id):
         sql, state = self.configuration()

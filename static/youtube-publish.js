@@ -274,49 +274,53 @@
     return channelPromise;
   }
   async function loadTask(id) { const key = String(id), revision = taskRevisions.get(key) || 0, serial = (taskReads.get(key) || 0) + 1; taskReads.set(key,serial); const data = await api('/tasks/' + encodeURIComponent(id)); if ((taskRevisions.get(key) || 0) !== revision || taskReads.get(key) !== serial) { if (taskCache.has(key)) return taskCache.get(key); } return upsert(data.task); }
-  function readMaterials(search, force = false) {
-    if (materialRefreshes.has(search)) return materialRefreshes.get(search);
-    const pending = materialReads.get(search);
+  const materialKey = (search, uploaderId = '') => JSON.stringify([search,uploaderId]);
+  function readMaterials(search, force = false, uploaderId = '') {
+    const key = materialKey(search,uploaderId);
+    if (materialRefreshes.has(key)) return materialRefreshes.get(key);
+    const pending = materialReads.get(key);
     if (pending) {
       if (!force || pending.force) return pending.promise;
       // All force callers share exactly one refresh after the ordinary read,
       // including when that ordinary read fails. Never recursively queue it.
-      const refresh = pending.promise.catch(() => {}).then(() => startMaterialRead(search,true)).finally(() => materialRefreshes.delete(search));
-      materialRefreshes.set(search,refresh); return refresh;
+      const refresh = pending.promise.catch(() => {}).then(() => startMaterialRead(search,true,uploaderId)).finally(() => materialRefreshes.delete(key));
+      materialRefreshes.set(key,refresh); return refresh;
     }
-    const cached = materialCache.get(search), ttl = Math.min(60000,Math.max(0,Number(cached?.data.cache?.ttl_seconds ?? 60) - Number(cached?.data.cache?.age_seconds || 0)) * 1000);
+    const cached = materialCache.get(key), ttl = Math.min(60000,Math.max(0,Number(cached?.data.cache?.ttl_seconds ?? 60) - Number(cached?.data.cache?.age_seconds || 0)) * 1000);
     if (!force && cached && !cached.data.cache?.refreshing && !cached.data.cache?.stale && Date.now() - cached.at < ttl) return Promise.resolve(cached.data);
-    return startMaterialRead(search,force);
+    return startMaterialRead(search,force,uploaderId);
   }
-  function startMaterialRead(search, force) {
+  function startMaterialRead(search, force, uploaderId) {
+    const key = materialKey(search,uploaderId);
     const query = new URLSearchParams({search}); if (force) query.set('refresh','1');
+    if (uploaderId) query.set('uploader_id',uploaderId);
     const request = api('/materials?' + query).then(data => {
       if (!Array.isArray(data.items)) throw new Error('素材数据格式无效，请重试。');
-      materialCache.delete(search); materialCache.set(search,{data,at:Date.now()});
+      materialCache.delete(key); materialCache.set(key,{data,at:Date.now()});
       if (materialCache.size > 20) materialCache.delete(materialCache.keys().next().value);
       return data;
-    }).finally(() => materialReads.delete(search));
-    materialReads.set(search,{promise:request,force}); return request;
+    }).finally(() => materialReads.delete(key));
+    materialReads.set(key,{promise:request,force}); return request;
   }
   async function loadMaterials(view, force = false, polling = false) {
-    const search = view.search || '', serial = ++materialSerial;
+    const search = view.search || '', uploaderId = view.uploaderId || '', key = materialKey(search,uploaderId), serial = ++materialSerial;
     clearTimeout(materialPollTimer);
     if (!polling) view.pollUntil = Date.now() + 90000;
     view.loading = true; view.error = ''; view.pollExpired = false;
-    const cached = materialCache.get(search);
-    if (view.loadedSearch !== search) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
+    const cached = materialCache.get(key);
+    if (view.loadedKey !== key) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
     renderModals();
     try {
-      const data = await readMaterials(search,force);
-      if (serial !== materialSerial || !stack.includes(view) || view.search !== search) return;
-      state.materials = data.items; view.items = data.items; view.cache = data.cache; view.cacheAt = materialCache.get(search)?.at || Date.now(); view.loadedSearch = search;
+      const data = await readMaterials(search,force,uploaderId);
+      if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return;
+      state.materials = data.items; view.items = data.items; view.uploaders = data.uploaders || []; view.cache = data.cache; view.cacheAt = materialCache.get(key)?.at || Date.now(); view.loadedKey = key;
       state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource();
       if (data.cache?.refreshing) {
-        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && view.search === search) void loadMaterials(view,false,true); },2000);
+        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && materialKey(view.search || '',view.uploaderId || '') === key) void loadMaterials(view,false,true); },2000);
         else view.pollExpired = true;
       }
       renderModals();
-    } catch (error) { if (serial !== materialSerial || !stack.includes(view) || view.search !== search) return; view.loading = false; view.error = error.message; renderModals(); }
+    } catch (error) { if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return; view.loading = false; view.error = error.message; renderModals(); }
   }
   function newDraft() { return {operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
@@ -377,8 +381,11 @@
     const cacheStatus = v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
     const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
     const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>`;
-    const body = `<div class="picker-toolbar"><div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请修改关键词或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
-    return shell(v,'选择发布素材','每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.loading ? 'disabled' : ''}>确认选择</button></div>`,true);
+    const uploaders = [...(v.uploaders || [])];
+    if (v.uploaderId && !uploaders.some(u => String(u.id) === v.uploaderId)) uploaders.push({id:v.uploaderId,name:'用户 ' + v.uploaderId});
+    const uploaderFilter = `<label class="material-uploader-filter" for="material-uploader"><span>上传人</span><select class="select" id="material-uploader" aria-label="上传人筛选"><option value="">全部上传人</option>${uploaders.map(u => `<option value="${esc(u.id)}" ${String(u.id) === (v.uploaderId || '') ? 'selected' : ''}>${esc(u.name)}${String(u.id) === '0' ? '' : '（' + esc(u.id) + '）'}</option>`).join('')}</select></label>`;
+    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    return shell(v,'选择发布素材','按素材 ID 倒序排列，每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.loading ? 'disabled' : ''}>确认选择</button></div>`,true);
   }
   function previewView(v) { const m = v.material; return shell(v,'素材预览',esc(m.name),`${safeUrl(m.url) ? `<video class="material-video" controls preload="metadata" ${safeUrl(m.thumbnail_url) ? `poster="${esc(safeUrl(m.thumbnail_url))}"` : ''} src="${esc(safeUrl(m.url))}"></video>` : '<div class="note-box note-amber">该素材暂无可用的视频预览链接。</div>'}<div class="summary-grid"><div class="summary-item"><span>素材名称</span><strong>${esc(m.name)}</strong></div><div class="summary-item"><span>素材 ID</span><strong>${esc(m.id)}</strong></div><div class="summary-item"><span>时长 / 大小</span><strong>${esc(m.duration || '—')} / ${esc(m.size || '—')}</strong></div><div class="summary-item"><span>语言</span><strong>${esc(m.language || '—')}</strong></div></div>`,'<button class="btn btn-secondary" data-action="close-modal">返回素材列表</button>',true); }
   function reviewView(v) {
@@ -559,7 +566,7 @@
     else if (action === 'reload-tasks') loadTasks();
     else if (action === 'reload-materials') loadMaterials(v,true);
     else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
-    else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',loading:true}); loadMaterials(top()); }
+    else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',uploaderId:'',loading:true}); loadMaterials(top()); }
     else if (action === 'select-material') { v.selected = (v.items || state.materials).find(m => String(m.id) === String(id)); renderModals(); }
     else if (action === 'confirm-material') { draft.material = v.selected; if (!draft.title.trim()) draft.title = '{name}'; delete draft.errors.material; delete draft.errors.reference; closeModal(); }
     else if (action === 'preview-material') { const material = (v.items || state.materials).find(m => String(m.id) === String(id)); if (material) openModal('preview',{material}); }
@@ -583,7 +590,7 @@
     else if (action === 'save-settings') saveSettings();
   });
   document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
-  document.addEventListener('change', event => { const el = event.target; if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') renderModals(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
+  document.addEventListener('change', event => { const el = event.target; if (el.id === 'material-uploader' && top()?.type === 'picker') { const v = top(); v.uploaderId = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); void loadMaterials(v); } if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') renderModals(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
   ['keyup','mouseup','select','focusout'].forEach(name => document.addEventListener(name,event => rememberCaret(event.target)));
   document.addEventListener('keydown', event => {
     if (!stack.length) return; if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
