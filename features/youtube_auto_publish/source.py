@@ -101,7 +101,7 @@ class MaterialSource:
         # and the current keyword/uploader filter. Never expose unrelated users.
         query = ("SELECT HEX(JSON_OBJECT('id',CAST(pool.uploader_id AS CHAR),'name',MAX(pool.uploader_name))) "
                  "FROM (%s) AS pool WHERE CAST(pool.app_id AS CHAR)='1479' "
-                 "GROUP BY CAST(pool.uploader_id AS CHAR) ORDER BY MAX(pool.uploader_name),CAST(pool.uploader_id AS CHAR)" % sql)
+                 "GROUP BY pool.uploader_id ORDER BY MAX(pool.uploader_name),pool.uploader_id" % sql)
         try:
             options = []
             for row in self.query_runner(query):
