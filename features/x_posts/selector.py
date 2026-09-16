@@ -141,8 +141,8 @@ def material_key(material_id):
     if not _MATERIAL_ID.fullmatch(value):
         raise CandidateSelectionError("invalid material id")
     # The ledger's global key is the canonical positive decimal material ID.
-    # Dramawave is the only eligible product, so a product prefix would make
-    # the runner disagree with the store migration and its unique index.
+    # Source IDs are global across products. Keep the established identity so
+    # product metadata never changes the queue's automatic de-duplication key.
     parsed = int(value)
     if parsed <= 0 or parsed > 9223372036854775807:
         raise CandidateSelectionError("invalid material id")
@@ -508,7 +508,6 @@ class DramawaveCandidateSelector:
             key = material_key(candidate_id)
             if key != material_id:
                 raise CandidateSelectionError("material identity mismatch")
-            product = _text(row.get("product"), "product", limit=64)
             material_type = _integer(row.get("material_type"), "material_type")
             material_is_deleted = _integer(
                 row.get("material_is_deleted"), "material_is_deleted"
@@ -530,11 +529,8 @@ class DramawaveCandidateSelector:
                 "material_metadata_invalid",
                 "素材 %s 的基础信息不完整" % material_id,
             ) from None
-        if product != DEFAULT_PRODUCT:
-            raise PoolCandidateRejection(
-                "material_product_mismatch",
-                "素材 %s 不属于Dramawave" % material_id,
-            )
+        # Operator-selected material IDs may belong to any product. Product is
+        # source metadata, not an eligibility gate for pool or manual batches.
         source_duration = 0.0
         if material_type == 1:
             if not allow_images:

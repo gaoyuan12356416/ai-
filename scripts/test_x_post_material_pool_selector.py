@@ -580,24 +580,44 @@ class ManualPoolSelectorTests(unittest.TestCase):
             ["pool_item_invalid", "material_not_found"],
         )
 
-    def test_non_dramawave_material_is_rejected_fail_closed(self):
+    def test_pool_and_manual_selection_do_not_restrict_product(self):
+        for product in ("Dramawave", "OtherProduct", "Drama-社媒专用素材", "", None):
+            with self.subTest(product=product):
+                connection = PoolConnection([11, 12])
+                connection.materials["11"]["product"] = product
+                selected, rejections = select_pool_candidates(
+                    connection,
+                    [
+                        pool_item(1, 11, "2026-07-23T00:00:01Z"),
+                        pool_item(2, 12, "2026-07-23T00:00:00Z"),
+                    ],
+                    "2026-07-22",
+                    limit=1,
+                )
+                self.assertEqual(rejections, [])
+                self.assertEqual([item["material_id"] for item in selected], ["11"])
+                self.assertEqual(selected[0]["material_key"], "11")
+                selected, rejections = select_manual_candidates(
+                    connection, ["11", "12"], "2026-07-22", limit=2,
+                )
+                self.assertEqual(rejections, [])
+                self.assertEqual([item["material_id"] for item in selected], ["11", "12"])
+
+    def test_other_product_still_requires_duration_and_unambiguous_mapping(self):
         connection = PoolConnection([11, 12])
-        connection.materials["11"]["product"] = "OtherProduct"
-
-        selected, rejections = select_pool_candidates(
-            connection,
-            [
-                pool_item(1, 11, "2026-07-23T00:00:01Z"),
-                pool_item(2, 12, "2026-07-23T00:00:00Z"),
-            ],
-            "2026-07-22",
-            limit=1,
+        for row in connection.materials.values():
+            row["product"] = "OtherProduct"
+        connection.materials["11"]["video_duration"] = 0
+        connection.drama_rows["12"] = [
+            drama_row(12), drama_row(12, series_code="different-series"),
+        ]
+        selected, rejections = select_manual_candidates(
+            connection, ["11", "12"], "2026-07-22", limit=2,
         )
-
-        self.assertEqual([item["material_id"] for item in selected], ["12"])
+        self.assertEqual(selected, [])
         self.assertEqual(
             [item["error_code"] for item in rejections],
-            ["material_product_mismatch"],
+            ["material_duration_missing", "drama_mapping_ambiguous"],
         )
 
     def test_mysql_query_failure_aborts_instead_of_becoming_item_rejection(self):

@@ -1718,6 +1718,50 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         # Queue binding still fences all later automatic selection.
         self.assertEqual(self.store.available_pool_items(10), [])
 
+    def test_material_product_error_requires_revalidation_and_keeps_queue_dedupe(self):
+        self.save_schedule("material", [2], ["09:00"])
+        oldest, newest = self.store.add_pool_materials(
+            ["211", "212"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "211", "error_code": ""},
+                {
+                    "material_id": "212",
+                    "error_code": "material_product_mismatch",
+                    "error_message": "historical product restriction",
+                },
+            ],
+        )["items"]
+        self.assertEqual(
+            [item["material_id"] for item in self.store.available_pool_items(10)],
+            ["212", "211"],
+        )
+        row = self.store.query_pool({"material_id": "212"})["items"][0]
+        self.assertEqual(row["last_error_code"], "material_product_mismatch")
+        self.assertEqual(row["availability"], "validation_failed")
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material", "2026-07-27", "09:00", 2,
+                [self.material_candidate(oldest, 2)],
+            )
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2,
+            [self.material_candidate(newest, 2)],
+        )
+        self.assertTrue(plan["created"])
+        self.assertEqual(len(plan["queues"]), 1)
+        row = self.store.query_pool({"material_id": "212"})["items"][0]
+        self.assertEqual(row["last_error_code"], "")
+        self.assertEqual(row["last_error_message"], "")
+        self.assertTrue(row["last_checked_at"])
+        self.assertEqual(row["status"], "unpublished")
+        self.assertEqual(
+            [item["material_id"] for item in self.store.available_pool_items(10)],
+            ["211"],
+        )
+
     def test_material_schedule_atomically_clears_due_delivery_defer(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(
