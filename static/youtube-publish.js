@@ -51,8 +51,8 @@
     const control = t.schedule_control || {}, pending = pendingSchedule(t), missed = missedSchedule(t), cancelled = t.status === 'cancelled';
     return `<div class="schedule-card${pending || missed ? ' schedule-attention' : ''}" data-schedule-task="${esc(t.id)}"><div class="schedule-card-heading"><strong>发布安排</strong><span class="schedule-timezone">北京时间 UTC+8</span></div><p class="schedule-value">${esc(cancelled ? '已取消本次发布' : scheduleSummary(t))}</p>${pending ? `<div class="schedule-notice" role="status"><strong>${esc({reschedule:'修改预约时间待确认',immediate:'立即发布请求待确认',cancel:'取消发布请求待确认'}[control.action] || '预约变更待确认')}</strong>${control.action === 'reschedule' && control.publish_at ? `<span>申请改为：${esc(beijingTime(control.publish_at))}</span>` : ''}<span>${esc(control.message || '正在核对平台状态，确认前仍以原发布安排为准。')}</span></div>` : missed ? '<div class="schedule-notice" role="status">已错过预约时间。完成封面审核后，需重新定时或选择立即发布。</div>' : control.state === 'failed' ? `<div class="schedule-notice" role="status">${esc(control.message || '发布安排变更失败，请核对后重新操作。')}</div>` : cancelled ? '' : `<span class="field-hint">${t.publish_at ? '提前准备视频，等待指定时间公开。首评在确认视频公开后发送。' : '封面确认、上传及视频处理完成后公开。'}</span>`}${controls && canSchedule(t) ? '<div class="schedule-actions"><button class="btn btn-secondary btn-sm" data-action="schedule-reschedule">修改预约时间</button>' + (t.publish_at || missed ? '<button class="btn btn-secondary btn-sm" data-action="schedule-immediate">立即发布</button>' : '') + '<button class="btn btn-danger btn-sm" data-action="schedule-cancel">取消本次发布</button></div>' : ''}</div>`;
   }
-  const state = {auth:null,bootstrap:null,tasks:[],counts:{},total:0,bounded:false,limit:200,materials:[],source:null,search:'',status:'all',tab:'all',listError:'',listRefreshError:'',listLoading:false,listLoaded:false,ready:false,channels:{items:[],loaded:false,loading:false,error:'',loadedAt:0}};
-  let draft = null, stack = [], modalSerial = 0, lastFocus = null, busy = false, openingTask = false, listSerial = 0, listAbort = null, materialSerial = 0, pollTimer = null, searchTimer = null, materialTimer = null, channelPromise = null, channelSerial = 0, initSerial = 0, initBusy = false, pollInFlight = false;
+  const state = {auth:null,bootstrap:null,tasks:[],counts:{},total:0,bounded:false,limit:200,materials:[],source:null,search:'',status:'all',tab:'all',listError:'',listRefreshError:'',listLoading:false,listLoaded:false,listRevision:'',listKey:'',ready:false,channels:{items:[],loaded:false,loading:false,error:'',loadedAt:0}};
+  let draft = null, stack = [], modalSerial = 0, lastFocus = null, busy = false, listSerial = 0, listAbort = null, materialSerial = 0, pollTimer = null, searchTimer = null, materialTimer = null, channelPromise = null, channelSerial = 0, initSerial = 0, initBusy = false, pollInFlight = false;
   const carets = new Map();
   const taskCache = new Map(), taskRevisions = new Map(), taskReads = new Map();
   const materialCache = new Map(), materialReads = new Map(), materialRefreshes = new Map();
@@ -216,7 +216,7 @@
   }
   function linkHelp(m) { return `<details class="macro-link-help"><summary>查看 {url} 链接规则与长链</summary><div class="macro-link-details"><p>{url} 沿用剧集合成中 YouTube 发布的长链及跳转链接生成规则。</p>${m ? `<span class="field-hint">发布文案中的链接</span><code class="macro-link-value">${esc(m.macro_url || '提交时生成跳转链接')}</code><span class="field-hint">目标长链</span><code class="macro-link-value">${esc(m.long_url || '提交时由服务端根据剧集关联生成')}</code><div class="macro-link-meta"><span>源剧集 ID</span><code>${esc(m.content_id || '未关联')}</code><span>关联剧名</span><code>${esc(m.macro_name || m.drama_message || '未关联')}</code><span>源合成任务 ID</span><code>${esc(m.source_job_id || '独立素材（无需合成任务）')}</code><span>链接归因任务 ID</span><code>${esc(m.source_job_id || m.link_job_id || '提交时生成本次发布任务 ID')}</code></div>` : '<p class="field-hint">选择素材后查看对应链接与来源关联。</p>'}</div></details>`; }
   function refreshPreview(field, settings = false) { const input = $('#' + (settings ? 'default-description' : 'draft-' + field)); const el = $(`[data-macro-preview="${settings ? 'settings' : field}"]`); if (input && el) el.outerHTML = macroPreview(field,input.value,settings ? null : draft?.material,settings); }
-  function upsert(t, mutation = false) { if (!t?.id) throw new Error('服务端未返回有效任务，请刷新任务列表确认。'); const key = String(t.id); taskCache.set(key,t); if (mutation) taskRevisions.set(key,(taskRevisions.get(key) || 0) + 1); const i = state.tasks.findIndex(x => String(x.id) === key); if (i >= 0) state.tasks[i] = t; return t; }
+  function upsert(t, mutation = false) { if (!t?.id) throw new Error('服务端未返回有效任务，请刷新任务列表确认。'); const key = String(t.id); taskCache.set(key,t); if (mutation) { taskRevisions.set(key,(taskRevisions.get(key) || 0) + 1); state.listRevision = ''; } const i = state.tasks.findIndex(x => String(x.id) === key); if (i >= 0) state.tasks[i] = t; return t; }
   function showSource() { const source = state.source || state.bootstrap?.source; const el = $('#source-message'); el.classList.toggle('hidden',source?.configured !== false); el.innerHTML = source?.configured === false ? '<strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后即可选择视频素材。</span>' : ''; }
   function renderList() {
     const c = state.counts || {}, all = Number(c.all ?? state.total ?? 0), reviewed = Number(c.review ?? 0), published = Number(c.published ?? 0), failed = Number(c.failed ?? 0);
@@ -229,13 +229,27 @@
     }
     if (state.listLoaded) { setText($('#task-count'),state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`); setText($('#footer-total'),`已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`); }
     if (state.listError) { syncMarkup($('#task-table'),`<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`); return; }
-    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
+    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
   }
   async function loadTasks(quiet = false) {
     const serial = ++listSerial;
     listAbort?.abort(); listAbort = new AbortController();
+    const query = new URLSearchParams({search:state.search,status:state.status !== 'all' ? state.status : state.tab,compact:'1'}), key = query.toString();
+    const revision = state.listKey === key ? state.listRevision : '';
+    if (revision) query.set('since',revision);
     state.listLoading = true; if (!quiet || !state.listLoaded) { state.listError = ''; renderList(); }
-    try { const data = await api('/tasks?' + new URLSearchParams({search:state.search,status:state.status !== 'all' ? state.status : state.tab}),{signal:listAbort.signal}); if (serial !== listSerial) return; if (!Array.isArray(data.items)) throw new Error('任务数据格式无效，请重试。'); state.tasks = data.items; state.total = Number(data.total ?? state.tasks.length); state.counts = data.counts || {}; state.bounded = data.bounded === true; state.limit = Number(data.limit || 200); state.listError = ''; state.listRefreshError = ''; state.listLoaded = true; }
+    try {
+      const data = await api('/tasks?' + query,{signal:listAbort.signal});
+      if (serial !== listSerial) return;
+      if (data.unchanged === true) {
+        if (!revision || data.revision !== revision || state.listKey !== key) throw new Error('任务数据版本已变化，请重试。');
+      } else {
+        if (!Array.isArray(data.items)) throw new Error('任务数据格式无效，请重试。');
+        state.tasks = data.items; state.total = Number(data.total ?? state.tasks.length); state.counts = data.counts || {}; state.bounded = data.bounded === true; state.limit = Number(data.limit || 200);
+        state.listKey = key; state.listRevision = data.revision || '';
+      }
+      state.listError = ''; state.listRefreshError = ''; state.listLoaded = true;
+    }
     catch (error) { if (serial !== listSerial) return; if (!quiet || !state.listLoaded) state.listError = error.message; else state.listRefreshError = error.message; }
     finally { if (serial === listSerial) { state.listLoading = false; if (!quiet || !state.listLoaded || !state.listError) renderList(); } }
   }
@@ -273,7 +287,7 @@
     })();
     return channelPromise;
   }
-  async function loadTask(id) { const key = String(id), revision = taskRevisions.get(key) || 0, serial = (taskReads.get(key) || 0) + 1; taskReads.set(key,serial); const data = await api('/tasks/' + encodeURIComponent(id)); if ((taskRevisions.get(key) || 0) !== revision || taskReads.get(key) !== serial) { if (taskCache.has(key)) return taskCache.get(key); } return upsert(data.task); }
+  async function loadTask(id, options = {}) { const key = String(id), revision = taskRevisions.get(key) || 0, serial = (taskReads.get(key) || 0) + 1; taskReads.set(key,serial); const data = await api('/tasks/' + encodeURIComponent(id),options); if ((taskRevisions.get(key) || 0) !== revision || taskReads.get(key) !== serial) { if (taskCache.has(key)) return taskCache.get(key); } return upsert(data.task); }
   const materialKey = (search, uploaderId = '') => JSON.stringify([search,uploaderId]);
   function readMaterials(search, force = false, uploaderId = '') {
     const key = materialKey(search,uploaderId);
@@ -325,8 +339,8 @@
   function newDraft() { return {operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
   function releaseCover(cover) { if (cover?.preview) URL.revokeObjectURL(cover.preview); }
-  function closeModal() { if (busy) return; const v = stack.pop(); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) lastFocus?.focus(); }
-  function closeAll() { stack.forEach(v => releaseCover(v.manualCover)); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
+  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
+  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
   function shell(v,title,subtitle,body,footer = '',large = false) { return `<div class="modal-overlay${top() !== v ? ' modal-behind' : ''}" data-modal-key="${v.key}" ${top() !== v ? 'inert aria-hidden="true"' : ''}><section class="modal${large ? ' modal-lg' : ''}" role="dialog" aria-modal="${top() === v}" aria-labelledby="modal-title-${v.key}" tabindex="-1"><header class="modal-header"><div><h2 class="modal-title" id="modal-title-${v.key}">${title}</h2><p class="modal-subtitle">${subtitle}</p></div><button class="icon-btn close-modal" data-action="close-modal" aria-label="关闭弹窗">${icon('x')}</button></header><div class="modal-body">${v.error ? `<div class="note-box note-error inline-error" role="alert">${esc(v.error)}</div>` : ''}${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`; }
   const label = (text,required = false,id = '') => `<label class="field-label"${id ? ` for="${id}"` : ''}>${text}${required ? '<span class="required">*</span>' : ''}</label>`;
   const fieldError = field => draft?.errors[field] ? `<span class="error-message" role="alert">${esc(draft.errors[field])}</span>` : '';
@@ -423,7 +437,7 @@
     const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
     let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
     const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView};
-    const changed = syncMarkup(root,stack.map(v => views[v.type](v)).join(''),String(busy));
+    const changed = syncMarkup(root,stack.map(v => v.loadingTask || v.taskLoadFailed ? taskLoadingView(v) : views[v.type](v)).join(''),String(busy));
     document.body.style.overflow = 'hidden';
     if (!changed && !focus) return;
     if (busy) root.querySelectorAll('button,input,textarea,select').forEach(el => { el.disabled = true; });
@@ -484,11 +498,36 @@
     } catch (error) { v.error = error.message; }
     finally { busy = false; renderModals(); }
   }
+  function taskLoadingView(v) {
+    const title = v.requestedType === 'review' ? '审核封面' : '发布任务详情';
+    const cached = task(v.id);
+    return shell(v,title,esc(cached?.title || '正在读取最新任务…'),`<div class="empty-state task-detail-loading" role="status" aria-live="polite">${v.loadingTask ? '<span class="loading-spinner" aria-hidden="true"></span><h3>正在加载任务详情</h3><p>正在核对最新封面与发布状态，请稍候。</p>' : '<h3>任务详情暂未加载</h3><p>请重试读取最新状态。</p>'}</div>`,`<button class="btn btn-secondary" data-action="close-modal">关闭</button>${v.loadingTask ? '' : '<button class="btn btn-primary" data-action="reload-task">重新加载</button>'}`,true);
+  }
+  async function refreshOpenTask(v) {
+    if (!stack.includes(v) || v.readingTask) return;
+    v.readingTask = true; v.loadingTask = true; v.error = '';
+    v.readController = new AbortController(); renderModals();
+    try {
+      const t = await loadTask(v.id,{signal:v.readController.signal});
+      if (!stack.includes(v)) return;
+      v.type = v.requestedType === 'review' && t.can_review ? 'review' : 'details';
+      v.viewVersion = v.requestedVersion || t.current_version; v.version = t.current_version;
+      v.loadingTask = false; v.taskLoadFailed = false;
+      if (v.requestedVersion && Number(v.requestedVersion) !== Number(t.current_version)) v.error = '此审核链接对应历史版本。请查看当前版本后再处理。';
+    } catch (error) {
+      if (!stack.includes(v)) return;
+      v.loadingTask = false; v.taskLoadFailed = true; v.error = error.message;
+    } finally {
+      v.readingTask = false;
+      if (stack.includes(v)) renderModals();
+    }
+  }
   async function openTask(id,type = 'details',version = null) {
-    if (openingTask) return; openingTask = true;
-    try { const t = await loadTask(id); openModal(type === 'review' && t.can_review ? 'review' : 'details',{id:t.id,viewVersion:version || t.current_version,version:t.current_version}); if (version && Number(version) !== Number(t.current_version)) { top().error = '此审核链接对应历史版本。请查看当前版本后再处理。'; renderModals(); } }
-    catch (error) { toast(error.message,'warning'); }
-    finally { openingTask = false; }
+    // Render before starting the request; closing or choosing another task must
+    // never be blocked by a slow read, nor may a late response reopen a dialog.
+    if (state.listLoaded && state.listLoading) { ++listSerial; listAbort?.abort(); state.listLoading = false; }
+    openModal(type,{id,requestedType:type,requestedVersion:version,loadingTask:true});
+    await refreshOpenTask(top());
   }
   async function review(action) {
     const v = top(), t = task(v.id); if (busy || !(action === 'manual' ? t?.can_upload_cover || t?.can_review : t?.can_review)) return;
@@ -546,11 +585,11 @@
       pollInFlight = true;
       try {
         if (!state.ready || document.hidden) return;
-        if (!state.listLoading) await loadTasks(true);
         const v = top();
-        if (v && ['details','review'].includes(v.type) && !busy) {
+        // An open task owns the polling budget. Refresh the list on return.
+        if (v && ['details','review'].includes(v.type) && !busy && !v.loadingTask && !v.taskLoadFailed) {
           try { const old = task(v.id); const updated = await loadTask(v.id); if (!stack.includes(v)) return; if (v.type === 'details') renderModals(); else if (!v.mode && Number(updated.current_version) !== Number(v.version)) { v.error = '任务封面已更新，请查看最新版本后审核。'; v.version = updated.current_version; v.viewVersion = updated.current_version; renderModals(); } else if (old?.status !== updated.status || old?.schedule_version !== updated.schedule_version || old?.schedule_state !== updated.schedule_state || JSON.stringify(old?.schedule_control) !== JSON.stringify(updated.schedule_control) || !updated.can_review) renderModals(); } catch (_) {}
-        }
+        } else if (!v && !state.listLoading) await loadTasks(true);
       } finally { pollInFlight = false; if (state.ready) schedulePoll(); }
     },6000);
   }
@@ -564,6 +603,7 @@
     else if (action === 'close-modal') closeModal();
     else if (action === 'tab') { state.tab = id; state.status = 'all'; $('#status-filter').value = 'all'; loadTasks(); }
     else if (action === 'reload-tasks') loadTasks();
+    else if (action === 'reload-task') void refreshOpenTask(v);
     else if (action === 'reload-materials') loadMaterials(v,true);
     else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
     else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',uploaderId:'',loading:true}); loadMaterials(top()); }

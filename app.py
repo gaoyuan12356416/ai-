@@ -94249,7 +94249,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         prefix = "/api/youtube-auto-publish"
         path = parsed.path[len(prefix):]
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
-        cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
+        cover = re.fullmatch(r"/covers/([0-9a-f]{32})(/thumbnail)?", path)
         get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
         post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
         if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
@@ -94273,25 +94273,21 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 elif path == "/materials":
                     result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1", uploader_id=query.get("uploader_id", [""])[0])
                 elif path == "/tasks":
-                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
+                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64], compact=query.get("compact", ["0"])[0] == "1", since=query.get("since", [""])[0][:64])
                 elif path == "/settings":
                     result = service.settings(actor)
                 elif task:
                     result = service.get_task(actor, task.group(1))
                 else:
                     asset = service.asset(actor, cover.group(1))
-                    with open(asset["path"], "rb") as handle:
-                        data = handle.read(2 * 1024 * 1024 + 1)
-                    if len(data) > 2 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != asset["sha256"]:
-                        raise WorkflowError("cover_changed", "封面文件已变化，请重新上传", 409)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "image/jpeg")
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "private, no-store, max-age=0")
-                    self.send_header("Pragma", "no-cache")
-                    self.send_header("X-Content-Type-Options", "nosniff")
+                    from features.youtube_auto_publish.covers import cover_response
+                    status, headers, data = cover_response(asset, thumbnail=bool(cover.group(2)), if_none_match=self.headers.get("If-None-Match", ""))
+                    self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
                     self.end_headers()
-                    self.wfile.write(data)
+                    if data:
+                        self.wfile.write(data)
                     return
             elif path == "/tasks":
                 result = service.create_task(actor, payload)

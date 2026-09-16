@@ -238,13 +238,13 @@ class YouTubeHttpTests(unittest.TestCase):
         self.request("GET", "/materials?search=hello%20world")
         self.assertEqual(self.service.calls[-1][2], {"search": "hello world", "refresh": False, "uploader_id": ""})
         self.request("GET", "/tasks?search=" + "x" * 240 + "&status=review")
-        self.assertEqual(self.service.calls[-1][2], {"search": "x" * 200, "status": "review"})
+        self.assertEqual(self.service.calls[-1][2], {"search": "x" * 200, "status": "review", "compact": False, "since": ""})
         self.assertEqual(self.request("GET", "/tasks?" + "&".join("q%d=x" % x for x in range(10))).status, 400)
 
     def test_cover_ownership_integrity_and_private_headers(self):
         response = self.request("GET", "/covers/" + COVER_ID)
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.response_headers["Cache-Control"], "private, no-store, max-age=0")
+        self.assertEqual(response.response_headers["Cache-Control"], "private, no-cache, max-age=0, must-revalidate")
         self.assertEqual(response.response_headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.response_headers["Content-Type"], "image/jpeg")
         self.session["user_id"] = "other-owner"
@@ -254,6 +254,56 @@ class YouTubeHttpTests(unittest.TestCase):
         response = self.request("GET", "/covers/" + COVER_ID)
         self.assertEqual(response.status, 409)
         self.assertFalse(response.wfile.getvalue())
+
+    def test_private_cached_covers_revalidate_auth_and_integrity_before_304(self):
+        path = '/covers/' + COVER_ID
+        response = self.request('GET', path)
+        tag = response.response_headers['ETag']
+        self.assertEqual(response.response_headers['Vary'], 'Cookie')
+        headers = {'If-None-Match': 'W/' + tag}
+        cached = self.request('GET', path, headers=headers)
+        self.assertEqual(cached.status, 304)
+        self.assertEqual(cached.wfile.getvalue(), b'')
+        self.assertEqual(self.request('GET', path, headers=headers, cookie=False).status, 401)
+        self.session['user_id'] = 'other-owner'
+        self.assertEqual(self.request('GET', path, headers=headers).status, 404)
+        self.session['user_id'] = 'owner'
+        self.session['permissions']['youtube_auto_publish'] = False
+        self.assertEqual(self.request('GET', path, headers=headers).status, 403)
+        self.session['permissions']['youtube_auto_publish'] = True
+        Path(self.service.asset_record['path']).write_bytes(b'changed')
+        self.assertEqual(self.request('GET', path, headers=headers).status, 409)
+
+    def test_real_thumbnail_is_small_conditional_and_same_tenant_only(self):
+        from PIL import Image
+        import base64
+        self.real_service()
+        image = Image.effect_noise((1664, 936), 45).convert('RGB')
+        data = io.BytesIO(); image.save(data, 'JPEG', quality=90)
+        upload = self.request('POST', '/covers', body=json.dumps({'data':base64.b64encode(data.getvalue()).decode()}).encode())
+        self.assertEqual(upload.status, 200)
+        path = upload.payload['asset']['url'][len(PREFIX):]
+        original = self.request('GET', path)
+        thumbnail = self.request('GET', path + '/thumbnail')
+        self.assertEqual(thumbnail.status, 200)
+        self.assertEqual(Image.open(io.BytesIO(thumbnail.wfile.getvalue())).size, (160,90))
+        self.assertLess(len(thumbnail.wfile.getvalue()), len(original.wfile.getvalue()) / 10)
+        self.assertEqual(self.request('GET', path).wfile.getvalue(), original.wfile.getvalue())
+        self.assertNotEqual(original.response_headers['ETag'], thumbnail.response_headers['ETag'])
+        headers = {'If-None-Match':thumbnail.response_headers['ETag']}
+        self.assertEqual(self.request('GET', path + '/thumbnail', headers=headers).status, 304)
+        self.assertEqual(self.request('GET', path + '/thumbnail', headers=headers, cookie=False).status, 401)
+        self.session['user_id'] = 'other-owner'
+        self.assertEqual(self.request('GET', path + '/thumbnail', headers=headers).status, 404)
+        self.session['role'] = 'admin'
+        self.assertEqual(self.request('GET', path + '/thumbnail', headers=headers).status, 304)
+        self.session['tenant_key'] = 'other-tenant'
+        self.assertEqual(self.request('GET', path + '/thumbnail', headers=headers).status, 404)
+
+    def test_compact_poll_arguments_are_bounded(self):
+        response = self.request('GET', '/tasks?compact=1&since=' + 'a' * 90)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.service.calls[-1][2], {'search':'','status':'all','compact':True,'since':'a'*64})
 
     def test_service_errors_are_safe_and_unknown_routes_do_not_initialize(self):
         for path in ("/", "/tasks/../secret", "/covers/not-an-id", "/tasks/" + TASK_ID + "/approve"):

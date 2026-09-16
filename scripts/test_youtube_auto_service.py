@@ -64,6 +64,45 @@ class EngineStore:
 
 
 class WorkflowCase(unittest.TestCase):
+    def test_compact_poll_is_small_and_skips_detail_only_adapters(self):
+        task = self.create()
+        full = self.service.list_tasks(self.actor)
+        self.service.failure_status = Mock(side_effect=AssertionError('list must not query notification history'))
+        compact = self.service.list_tasks(self.actor, compact=True)
+        self.assertEqual(compact['counts'], full['counts'])
+        self.assertEqual(compact['items'][0]['id'], task['id'])
+        for key in ('description','comment','versions','steps','reference_cover','notification','failure_notification','creator','request'):
+            self.assertNotIn(key, compact['items'][0])
+        self.assertEqual(set(compact['items'][0]['material']), {'name'})
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(full)) * .6)
+        self.service.failure_status.assert_not_called()
+
+    def test_compact_revision_tracks_changes_and_filter_scope(self):
+        task = self.create()
+        first = self.service.list_tasks(self.actor, compact=True)
+        unchanged = self.service.list_tasks(self.actor, compact=True, since=first['revision'])
+        self.assertEqual(unchanged, {'unchanged':True,'revision':first['revision']})
+        self.assertNotIn('unchanged', self.service.list_tasks(self.actor, compact=True, search='missing', since=first['revision']))
+        with self.service.db(write=True) as c:
+            _, body = self.service._row(c, task['id']); body['current_version'] = 2
+            self.service._save(c, body, 'review')
+        changed = self.service.list_tasks(self.actor, compact=True, since=first['revision'])
+        self.assertNotIn('unchanged', changed)
+        self.assertEqual(changed['items'][0]['current_version'], 2)
+        self.assertEqual(changed['counts']['review'], 1)
+        self.assertNotEqual(changed['revision'], first['revision'])
+
+    def test_compact_rows_and_revisions_respect_owner_and_tenant(self):
+        own = self.create()
+        other = self.create(actor=self.other)
+        visible = self.service.list_tasks(self.actor, compact=True)
+        self.assertEqual([r['id'] for r in visible['items']], [own['id']])
+        hidden = self.service.list_tasks(self.other, compact=True, since=visible['revision'])
+        self.assertEqual([r['id'] for r in hidden['items']], [other['id']])
+        self.assertNotIn('unchanged', hidden)
+        self.assertEqual(self.service.list_tasks(self.foreign, compact=True)['items'], [])
+        self.assertEqual(self.service.list_tasks(self.admin, compact=True)['total'], 2)
+
     def test_light_bootstrap_never_queries_channels_or_materials(self):
         self.channels.side_effect=AssertionError('slow external dependency must not gate workspace')
         result=self.service.bootstrap(self.actor,include_channels=False)
