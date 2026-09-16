@@ -90,7 +90,8 @@ def assert_idle():
         with sqlite3.connect('file:' + str(ledger) + '?mode=ro', uri=True) as db:
             for table, in db.execute("SELECT name FROM sqlite_master WHERE type='table'"):
                 columns = [r[1] for r in db.execute('PRAGMA table_info("' + table.replace('"', '""') + '")')]
-                if 'status' in columns and db.execute('SELECT 1 FROM "' + table.replace('"', '""') + '" WHERE status IN (\'queued\',\'publishing\',\'running\') LIMIT 1').fetchone():
+                duplicate_filter = ' AND duplicate_of IS NULL' if 'duplicate_of' in columns else ''
+                if 'status' in columns and db.execute('SELECT 1 FROM "' + table.replace('"', '""') + '" WHERE status IN (\'queued\',\'publishing\',\'running\')' + duplicate_filter + ' LIMIT 1').fetchone():
                     raise RuntimeError('Accepted YouTube shares are still pending; wait before restart/rollback')
 
 
@@ -127,7 +128,6 @@ def main():
     with (BASE / 'youtube-share-x-deploy.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         timers = [unit for unit in TIMERS if run('systemctl', 'show', unit, '--property=ActiveState', '--value') == 'active']
-        healthy()
         if args.rollback:
             backup = args.rollback.resolve()
             if (BASE / 'backups').resolve() not in backup.parents: raise RuntimeError('Invalid backup path')
@@ -137,17 +137,22 @@ def main():
             if any(sha(row['target']) != row['after'] for row in manifest['files']):
                 raise RuntimeError('Newer main code exists; do not overwrite')
             assert_idle()
-            run('systemctl', 'stop', *timers)
             try:
+                if timers: run('systemctl', 'stop', *timers)
                 assert_idle()
-                run('systemctl', 'stop', API, SIDE)
+                run('systemctl', 'stop', API)
+                assert_idle()
+                run('systemctl', 'stop', SIDE)
                 restore(backup, manifest)
             finally:
-                run('systemctl', 'start', SIDE, API)
-                healthy()
-                if timers: run('systemctl', 'start', *timers)
+                try:
+                    run('systemctl', 'start', SIDE, API)
+                    healthy()
+                finally:
+                    if timers: run('systemctl', 'start', *timers)
             print(json.dumps({'rollback': str(backup), 'ledgers': 'retained'}))
             return
+        healthy()
         stage = Path(__file__).resolve().parents[1]
         if not args.commit or len(args.commit) != 40 or (stage / '.github-verified-commit').read_text().strip() != args.commit:
             raise RuntimeError('Must deploy an exact GitHub-fetched commit')
@@ -193,13 +198,15 @@ def main():
                     'old_release': str(OLD_RELEASE), 'new_release': str(release), 'timers': timers}
         (backup / 'manifest.json').write_text(json.dumps(manifest, indent=2))
         changed = False
-        run('systemctl', 'stop', *timers)
         try:
+            if timers: run('systemctl', 'stop', *timers)
             assert_idle(); baseline()
             backup_db(MAIN / 'data/drama_material_jobs.sqlite3', backup / 'jobs.sqlite3')
             backup_db('/var/lib/x-post-automation/accounts.sqlite3', backup / 'x-accounts.sqlite3')
             backup_db(STORAGE / 'ledger.sqlite3', backup / 'youtube-shares.sqlite3')
-            run('systemctl', 'stop', API, SIDE)
+            run('systemctl', 'stop', API)
+            assert_idle()
+            run('systemctl', 'stop', SIDE)
             baseline()
             changed = True
             for (source, target, _), row in zip(inputs, records): install(source, target, row['mode'])
