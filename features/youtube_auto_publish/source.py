@@ -36,7 +36,8 @@ class MaterialSource:
         self.lock = threading.Lock()
         self.cache = None
         self.read_cache = ReadCache() if async_cache else None
-        self.uploader_cache = ReadCache(workers=1) if async_cache else None
+        # Options and material reads share the existing two-worker budget.
+        self.uploader_cache = self.read_cache
         self.uploader_snapshot = None
 
     def configuration(self):
