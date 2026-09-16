@@ -766,6 +766,7 @@ from features.tt_drama_resources import (
     W2AHTMLClient,
     W2AResourceService,
 )
+from features.retired_modules import filter_navigation, retired_path, RETIRED_MESSAGE
 from features.material_status_broadcast import service as material_status_service
 from features.material_replication_broadcast import delivery as material_replication_delivery
 from features.material_replication_broadcast import service as material_replication_service
@@ -3670,6 +3671,7 @@ MODULE_PERMISSIONS = {
 
     "ad_control_center": "AI自动规则调控（旧版）",
     "ad_control_v3": "AI自动调控 V3",
+    "fb_ad_asset_delete": "Meta 剧集广告删除",
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
     "tt_posts": "TikTok 社媒发布",
@@ -3728,6 +3730,7 @@ DEFAULT_USER_PERMISSIONS = {
     "ad_material_tasks": False,
     "ad_control_center": False,
     "ad_control_v3": False,
+    "fb_ad_asset_delete": False,
     "voiceover_drama_tasks": False,
     "x_accounts": False,
     "tt_posts": False,
@@ -34526,7 +34529,7 @@ def list_ad_control_products(query="", limit=200):
     return {"items": items}
 
 
-def ad_control_run_mysql(query, timeout_seconds=None):
+def ad_control_run_mysql(query, timeout_seconds=None, via_stdin=False):
     timeout_seconds = max(3, int(timeout_seconds or AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS))
     mysql_env = os.environ.copy()
     if MYSQL_PASSWORD:
@@ -34535,7 +34538,8 @@ def ad_control_run_mysql(query, timeout_seconds=None):
     mysql_env["MYSQL_QUERY_TIMEOUT_KILL_AFTER"] = "3"
     mysql_env["MYSQL_MAX_EXECUTION_TIME_MS"] = str(timeout_seconds * 1000)
     proc = subprocess.run(
-        MYSQL_BASE_CMD + [query],
+        MYSQL_BASE_CMD[:-1] if via_stdin else MYSQL_BASE_CMD + [query],
+        input=(query + ";\n") if via_stdin else None,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -34842,6 +34846,8 @@ def ad_control_graph_set_status(token, object_id, status):
         raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
     return payload
 
+
+# Meta deletion V2 owns its own durable data-disk ledger. Legacy tasks are read-only.
 
 def ad_control_meta_fields(level):
     if level == "campaign":
@@ -40885,6 +40891,7 @@ def generate_ad_material_demand(task_id, reason=""):
 
 
 def run_ad_material_demand_async(task_id, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_demand, args=(task_id, reason), name="ad-demand-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41038,6 +41045,7 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
 
 
 def run_ad_material_generation_async(task_id, indexes=None, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_assets, args=(task_id, indexes, reason), name="ad-assets-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41176,6 +41184,8 @@ def recover_ad_material_generation_output(task, index, min_output_at=""):
 
 
 def recover_inflight_ad_material_tasks():
+    # Retain historical tasks without restarting discontinued generation work.
+    return {"status": "retired", "recovered": 0}
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -56720,7 +56730,7 @@ def delete_session(session_token):
 
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        return json.load(handle)
+        return filter_navigation(json.load(handle))
 
 
 def navigation_item_access(session, item_key, config):
@@ -56804,7 +56814,7 @@ def validate_navigation_config(config):
 
 
 def save_navigation_config(config):
-    config = validate_navigation_config(config)
+    config = filter_navigation(validate_navigation_config(config))
     directory = os.path.dirname(NAVIGATION_CONFIG_PATH)
     os.makedirs(directory, exist_ok=True)
     temp_path = NAVIGATION_CONFIG_PATH + ".tmp"
@@ -94249,7 +94259,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         prefix = "/api/youtube-auto-publish"
         path = parsed.path[len(prefix):]
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
-        cover = re.fullmatch(r"/covers/([0-9a-f]{32})", path)
+        cover = re.fullmatch(r"/covers/([0-9a-f]{32})(/thumbnail)?", path)
         get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
         post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
         if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
@@ -94271,27 +94281,23 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 elif path == "/channels":
                     result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
                 elif path == "/materials":
-                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1")
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1", uploader_id=query.get("uploader_id", [""])[0])
                 elif path == "/tasks":
-                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64])
+                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64], compact=query.get("compact", ["0"])[0] == "1", since=query.get("since", [""])[0][:64])
                 elif path == "/settings":
                     result = service.settings(actor)
                 elif task:
                     result = service.get_task(actor, task.group(1))
                 else:
                     asset = service.asset(actor, cover.group(1))
-                    with open(asset["path"], "rb") as handle:
-                        data = handle.read(2 * 1024 * 1024 + 1)
-                    if len(data) > 2 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != asset["sha256"]:
-                        raise WorkflowError("cover_changed", "封面文件已变化，请重新上传", 409)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "image/jpeg")
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "private, no-store, max-age=0")
-                    self.send_header("Pragma", "no-cache")
-                    self.send_header("X-Content-Type-Options", "nosniff")
+                    from features.youtube_auto_publish.covers import cover_response
+                    status, headers, data = cover_response(asset, thumbnail=bool(cover.group(2)), if_none_match=self.headers.get("If-None-Match", ""))
+                    self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
                     self.end_headers()
-                    self.wfile.write(data)
+                    if data:
+                        self.wfile.write(data)
                     return
             elif path == "/tasks":
                 result = service.create_task(actor, payload)
@@ -94937,6 +94943,33 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        if parsed.path in {
+            "/fb-post-ad-delete.html",
+            "/fb-post-ad-delete.css",
+            "/fb-post-ad-delete.js",
+        }:
+            static_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "static",
+                parsed.path.lstrip("/"),
+            )
+            try:
+                with open(static_path, "rb") as handle:
+                    data = handle.read()
+                self.send_response(200)
+                self.send_header("Content-Type", guess_content_type(static_path))
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:
+                json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
@@ -94975,34 +95008,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             self._dispatch_ad_control_v3(parsed)
             return
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        if parsed.path == "/api/fb-post-ad-delete" or parsed.path.startswith("/api/fb-post-ad-delete/"):
+            from features.fb_ad_asset_delete.bridge import dispatch
+            dispatch(self, parsed, globals())
+            return
 
 
         if parsed.path == "/api/auth/status":
@@ -98647,6 +98656,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
@@ -100701,6 +100713,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/fb-post-ad-delete" or parsed.path.startswith("/api/fb-post-ad-delete/"):
+            from features.fb_ad_asset_delete.bridge import dispatch
+            dispatch(self, parsed, globals())
+            return
+
         if parsed.path == "/api/ad-control/rules":
             if not self._require_module("ad_control_center"):
                 return
@@ -101249,6 +101266,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
         x_post_schedule_paths = {
             "/api/admin/x-posts/material-pool/schedule",
             "/api/admin/x-posts/drama-pool/schedule",
@@ -101294,6 +101314,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         x_pool_delete_match = re.fullmatch(
             r"/api/admin/x-posts/material-pool/([0-9]+)",
@@ -101973,9 +101996,8 @@ def main():
 
     ensure_dir(SCREENSHOT_PUBLIC_ROOT)
 
-    ensure_dir(AD_MATERIAL_WORK_ROOT)
+    # Ad-material work directories are retired; keep archived files in place.
 
-    ensure_dir(AD_MATERIAL_PUBLIC_ROOT)
 
 
 
@@ -102010,9 +102032,8 @@ def main():
 
     ensure_screenshot_job_table()
 
-    ensure_ad_material_tables()
+    # Historical ad-material and ad-control tables remain available for audit.
 
-    ensure_ad_control_tables()
 
 
 

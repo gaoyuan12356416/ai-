@@ -195,15 +195,15 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         channels=self.channel_options(actor)['channels'] if include_channels else []
         return {'settings':self.settings(actor),'source':state,'channels':channels,'channels_loaded':bool(include_channels),'can_manage_settings':actor.get('role')=='admin','enabled':self.enabled}
 
-    def list_materials(self,actor,search='',*,refresh=False):
-        self._actor(actor);return self.source.list(search,refresh=refresh)
+    def list_materials(self,actor,search='',*,refresh=False,uploader_id=''):
+        self._actor(actor);return self.source.list(search,refresh=refresh,uploader_id=uploader_id)
 
     def verify_channel_thumbnail(self,actor,payload):
         self._actor(actor)
         if self.channel_directory is None:raise WorkflowError('channel_check_unavailable','频道鉴权暂不可用',503)
         return self.channel_directory.verify_thumbnail(actor,payload)
 
-    def _dto(self,body,actor):
+    def _dto(self,body,actor,*,summary=False):
         value=json.loads(encode(body))
         value.pop('creator',None);value.pop('request',None);value.pop('lease_token',None)
         value['channel']={k:v for k,v in value['channel'].items() if k not in ('scopes','youtube_account_id')}
@@ -237,6 +237,15 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         value['cover_url']=current['url'] if current else ''
         preview=current or max(value['versions'],key=lambda v:int(v['number']),default=None)
         value['cover_preview']=({'url':preview['url'],'version':preview['number'],'is_current':preview['number']==body['current_version']} if preview else None)
+        value['thumbnail_url']=preview['url']+'/thumbnail' if preview else ''
+        if summary:
+            # Keep the list independent of private copy, history and notification
+            # projections. Full details and all write gates remain authoritative.
+            row={key:value.get(key) for key in ('id','title','status','cover_source','created_at','publish_at','schedule_state','current_version','can_review','can_retry','thumbnail_url','cover_preview')}
+            row['material']={'name':value['material'].get('name','')}
+            row['channel']={key:value['channel'].get(key,'') for key in ('name','language')}
+            row['schedule_control']={'state':(value.get('schedule_control') or {}).get('state','')}
+            return row
         value['failure_notification']=self.failure_status(body,ledger) if self.failure_status else None
         with self.db() as c:n=c.execute('SELECT state,message FROM youtube_auto_notification WHERE task_id=? AND version=?',(body['id'],body['current_version'])).fetchone()
         value['notification']={'status':n['state'],'message':n['message']} if n else {'status':'none','message':''}
@@ -313,11 +322,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             value['status']='schedule_missed';value['can_retry']=False
         if value['status']=='cancelled':value['can_review']=False;value['can_schedule']=False;value['can_retry']=False
 
-    def list_tasks(self,actor,search='',status='all'):
+    def list_tasks(self,actor,search='',status='all',*,compact=False,since=''):
         tenant,owner=self._actor(actor)
         with self.db() as c:
             rows=c.execute('SELECT body FROM youtube_auto_preparation WHERE tenant=?'+('' if actor.get('role')=='admin' else ' AND owner=?')+' ORDER BY created_at DESC LIMIT 200',(tenant,) if actor.get('role')=='admin' else (tenant,owner)).fetchall()
-        items=[self._dto(json.loads(row['body']),actor) for row in rows]
+        items=[self._dto(json.loads(row['body']),actor,summary=compact) for row in rows]
         counts={'all':len(items),'review':0,'running':0,'published':0,'failed':0,'cancelled':0}
         for item in items:
             key='cancelled' if item['status']=='cancelled' else 'review' if item['status']=='review' else 'published' if item['status']=='published' else 'failed' if item['status'].endswith('_failed') or item['status']=='schedule_missed' else 'running'
@@ -329,7 +338,12 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             if search and search not in (item['title']+' '+item['id']+' '+item['material']['name']).casefold():continue
             if status not in ('all','',item['status']) and not (status=='published' and item['status']=='comment_failed') and not (status=='running' and item['status'] in ('generating','queued_generation','enqueue_pending','uploading','scheduled','schedule_pending')) and not (status=='failed' and (item['status'].endswith('_failed') or item['status']=='schedule_missed')):continue
             selected.append(item)
-        return {'items':selected,'total':len(selected),'counts':counts,'limit':200,'bounded':len(items)==200}
+        result={'items':selected,'total':len(selected),'counts':counts,'limit':200,'bounded':len(items)==200}
+        if compact:
+            revision=hashlib.sha256(encode({'search':search,'status':status,'result':result}).encode()).hexdigest()
+            if since==revision:return {'unchanged':True,'revision':revision}
+            result['revision']=revision
+        return result
 
     def create_task(self,actor,payload):
         tenant,owner=self._actor(actor)
