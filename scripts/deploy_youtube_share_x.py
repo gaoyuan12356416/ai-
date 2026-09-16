@@ -216,11 +216,13 @@ def main():
             for row in records:
                 if sha(row['target']) != row['after']: raise RuntimeError('Installed hash mismatch')
         except BaseException:
-            if changed:
-                run('systemctl', 'stop', API, SIDE)
-                restore(backup, manifest)
-            run('systemctl', 'start', SIDE, API)
-            healthy()
+            try:
+                if changed:
+                    run('systemctl', 'stop', API, SIDE)
+                    restore(backup, manifest)
+            finally:
+                run('systemctl', 'start', SIDE, API)
+                healthy()
             raise
         finally:
             if timers: run('systemctl', 'start', *timers)
