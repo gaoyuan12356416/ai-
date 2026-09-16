@@ -14,9 +14,12 @@ from test_fb_ad_asset_delete_core_graph import FakeTransport, Response
 from test_fb_ad_asset_delete_video_direct import video
 
 
-def credential(uid="804", token="source-user-secret", relation="ad_source_user"):
+def credential(uid="804", token="source-user-secret", relation="publish_queue_user"):
     return dict(token=token, credential_kind="user", credential_user_id=uid,
-                credential_fb_user_id="90002", credential_relation=relation)
+                credential_fb_user_id="90002", credential_relation=relation,
+                credential_source_row_id="1", credential_ad_id="101", credential_product_id="1",
+                credential_source_user_id=uid if relation == "publish_queue_user" else "804",
+                credential_publish_queue_id="500", credential_default_token="-1" if relation == "publish_queue_user" else "1")
 
 
 def source_row(account="444", user="804", row="1", ad="101", product="1"):
@@ -24,72 +27,127 @@ def source_row(account="444", user="804", row="1", ad="101", product="1"):
 
 
 class AccountVideoSourceTests(unittest.TestCase):
-    def test_frozen_source_user_precedes_product_default_without_source_reread(self):
-        query = Mock(return_value=[("803", "90001", "default-secret"), ("804", "90002", "source-secret")])
-        obj = dict(video("pending"), video_account_sources=[source_row()])
-        result = SqlSource(query).video_account_credential(obj, "444")
-        self.assertEqual(result, credential(token="source-secret"))
-        query.assert_called_once()
-        sql, timeout = query.call_args.args
-        self.assertIn("ads_facebook_info", sql)
-        self.assertNotIn("ads_facebook_auto_created_data", sql)
-        self.assertNotIn("page", sql)
-        self.assertIn("FIELD(CAST(user_id AS CHAR)," + q("804") + "," + q("803") + ")", sql)
+    columns = ("source_row_id", "product_id", "ad_id", "account_id", "user_id", "publish_queue_id",
+               "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user")
+
+    def row(self, **updates):
+        row = dict(source_row(), publish_queue_id="500", queue_id="500", queue_product_id="1",
+                   queue_user_id="804", default_token="-1", setting_product_id="1", default_user="803")
+        row.update(updates)
+        return tuple(row[k] for k in self.columns)
+
+    def resolve(self, flag="-1", token_rows=None, obj=None, **row_updates):
+        query = Mock(side_effect=[[self.row(default_token=flag, **row_updates)],
+            token_rows if token_rows is not None else [("803" if flag == "1" else "804", "90002", "selected-secret")]])
+        result = SqlSource(query).video_account_credential(obj or video("pending"), "444")
+        return result, query
+
+    def test_default_queue_uses_product_default_instead_of_publishing_user(self):
+        result, query = self.resolve("1")
+        self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("803", "product_default_user"))
+        self.assertEqual(result["credential_source_user_id"], "804")
+        self.assertEqual(result["credential_default_token"], "1")
+        self.assertIn("user_id=" + q("803"), query.call_args.args[0])
+        self.assertNotIn(q("804"), query.call_args.args[0])
+
+    def test_nondefault_queue_uses_own_user_even_with_product_default_present(self):
+        result, query = self.resolve("-1")
+        self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("804", "publish_queue_user"))
+        self.assertEqual(result["credential_publish_queue_id"], "500")
+        self.assertIn("user_id=" + q("804"), query.call_args.args[0])
+        self.assertNotIn(q("803"), query.call_args.args[0])
+
+    def test_frozen_source_still_rereads_queue_flag_and_current_product_default(self):
+        obj = dict(video("failed"), video_account_sources=[source_row()])
+        result, query = self.resolve("1", [("999", "90009", "current-default")], obj, default_user="999")
+        self.assertEqual(result["credential_user_id"], "999")
+        sql, timeout = query.call_args_list[0].args
+        self.assertIn("ads_template_make_queue pq ON pq.id=a.publish_queue_id", sql)
+        self.assertIn("ads_apps_setting p ON p.id=a.product", sql)
+        self.assertIn("a.id IN (" + q("1") + ")", sql)
         self.assertEqual(timeout, 5)
 
-    def test_each_account_uses_its_own_frozen_source_user(self):
-        obj = dict(video("pending"), account_ids=["444", "555"],
-                   video_account_sources=[source_row("444", "804"), source_row("555", "803", row="2")])
-        query = Mock(return_value=[("803", "90001", "user-A"), ("804", "90002", "user-B")])
-        source = SqlSource(query)
-        self.assertEqual(source.video_account_credential(obj, "444")["credential_user_id"], "804")
-        self.assertEqual(source.video_account_credential(obj, "555")["credential_user_id"], "803")
-        self.assertEqual(query.call_count, 2)
-
-    def test_old_preview_recovers_pair_only_from_frozen_ads_products_account_and_users(self):
-        query = Mock(side_effect=[[("1", "1", "101", "act_444", "804")],
-                                  [("803", "90001", "default-secret"), ("804", "90002", "source-secret")]])
-        result = SqlSource(query).video_account_credential(video("failed"), "444")
-        self.assertEqual(result["credential_user_id"], "804")
+    def test_old_preview_recovers_only_exact_account_ad_product_scope(self):
+        _, query = self.resolve()
         sql = query.call_args_list[0].args[0]
-        self.assertIn("a.ad_id IN (" + q("101") + ")", sql)
-        self.assertIn("a.product IN (" + q("1") + ")", sql)
-        self.assertIn("a.ad_account_id IN (" + q("444") + "," + q("act_444") + ")", sql)
+        for clause in ("a.ad_id IN (" + q("101") + ")", "a.product IN (" + q("1") + ")",
+                       "a.ad_account_id IN (" + q("444") + "," + q("act_444") + ")"):
+            self.assertIn(clause, sql)
         self.assertNotIn("status=", sql)
         self.assertNotIn("LIKE", sql)
+        self.assertNotIn("page", sql)
 
-    def test_recovered_outside_users_and_cross_account_rows_cannot_set_preference(self):
-        rows = [("1", "1", "101", "act_555", "804"), ("2", "1", "101", "act_444", "999"),
-                ("3", "2", "101", "act_444", "804"), ("4", "1", "102", "act_444", "804")]
-        query = Mock(side_effect=[rows, [("803", "90001", "fallback-secret"), ("804", "90002", "other-secret")]])
-        result = SqlSource(query).video_account_credential(video("pending"), "444")
-        self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("803", "fallback"))
+    def test_outside_source_rows_cannot_authorize_a_token(self):
+        for updates in ({"account_id": "555"}, {"user_id": "999"}, {"product_id": "2"}, {"ad_id": "102"}):
+            with self.subTest(updates=updates), self.assertRaises(AssetError):
+                self.resolve(**updates)
 
-    def test_history_failure_keeps_frozen_user_fallback(self):
-        query = Mock(side_effect=[RuntimeError("source unavailable"), [("803", "90001", "fallback-secret")]])
-        result = SqlSource(query).video_account_credential(video("pending"), "444")
-        self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("803", "fallback"))
-
-    def test_missing_source_token_falls_back_before_single_write_selection(self):
-        query = Mock(return_value=[("803", "90001", "fallback-secret")])
+    def test_frozen_row_cannot_change_user_or_row_id(self):
         obj = dict(video("pending"), video_account_sources=[source_row()])
-        result = SqlSource(query).video_account_credential(obj, "444")
-        self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("803", "fallback"))
+        for updates in ({"user_id": "803", "queue_user_id": "803"}, {"source_row_id": "2"}):
+            with self.subTest(updates=updates), self.assertRaises(AssetError):
+                self.resolve(obj=obj, **updates)
 
-    def test_user_token_is_reloaded_for_every_account_attempt(self):
-        query = Mock(side_effect=[[("804", "90002", "first-secret")], [("804", "90002", "refreshed-secret")]])
+    def test_missing_or_mismatched_queue_never_reads_any_token(self):
+        for updates in ({"queue_id": "NULL"}, {"publish_queue_id": "501"},
+                        {"queue_product_id": "2"}, {"queue_user_id": "803"}):
+            query = Mock(return_value=[self.row(**updates)])
+            with self.subTest(updates=updates), self.assertRaises(AssetError):
+                SqlSource(query).video_account_credential(video("pending"), "444")
+            query.assert_called_once()
+
+    def test_unknown_flags_are_not_coerced_into_a_credential_choice(self):
+        for flag in ("0", "NULL", None, "2", "true"):
+            with self.subTest(flag=flag), self.assertRaises(AssetError) as caught:
+                self.resolve(flag)
+            self.assertEqual(caught.exception.code, "publish_token_rule_unknown")
+
+    def test_missing_product_default_never_substitutes_publishing_user(self):
+        for updates in ({"default_user": "0"}, {"default_user": "NULL"}, {"setting_product_id": "2"}):
+            with self.subTest(updates=updates), self.assertRaises(AssetError) as caught:
+                self.resolve("1", **updates)
+            self.assertEqual(caught.exception.code, "product_default_token_missing")
+
+    def test_missing_selected_token_never_substitutes_other_frozen_user(self):
+        for flag, other in (("1", "804"), ("-1", "803")):
+            with self.subTest(flag=flag), self.assertRaises(AssetError) as caught:
+                self.resolve(flag, [(other, "90002", "wrong-secret")])
+            self.assertEqual(caught.exception.code, "publishing_token_unavailable")
+            self.assertEqual(caught.exception.detail["credential_default_token"], flag)
+            self.assertNotIn("secret", json.dumps(caught.exception.detail))
+
+    def test_sql_failure_propagates_instead_of_returning_an_arbitrary_candidate(self):
+        query = Mock(side_effect=RuntimeError("private database message"))
+        with self.assertRaises(AssetError) as caught:
+            SqlSource(query).video_account_credential(video("pending"), "444")
+        self.assertEqual(caught.exception.code, "source_unavailable")
+        query.assert_called_once()
+
+    def test_every_attempt_rereads_queue_and_token_without_cache(self):
+        query = Mock(side_effect=[[self.row()], [("804", "90002", "first")],
+                                  [self.row(default_token="1")], [("803", "90001", "fresh")]])
         source = SqlSource(query)
         obj = dict(video("pending"), video_account_sources=[source_row()])
-        self.assertEqual(source.video_account_credential(obj, "444")["token"], "first-secret")
-        self.assertEqual(source.video_account_credential(obj, "444")["token"], "refreshed-secret")
-        self.assertEqual(query.call_count, 2)
+        self.assertEqual(source.video_account_credential(obj, "444")["token"], "first")
+        self.assertEqual(source.video_account_credential(obj, "444")["token"], "fresh")
+        self.assertEqual(query.call_count, 4)
 
-    def test_outside_account_and_empty_candidates_never_query(self):
+    def test_each_account_resolves_its_own_queue_rule(self):
+        obj = dict(video("pending"), account_ids=["444", "555"], video_account_sources=[
+            source_row(), source_row("555", "803", row="2")])
+        query = Mock(side_effect=[[self.row()], [("804", "90002", "own")],
+            [self.row(source_row_id="2", account_id="555", user_id="803", queue_user_id="803", default_token="1", default_user="999")],
+            [("999", "90009", "default")]])
+        source = SqlSource(query)
+        self.assertEqual(source.video_account_credential(obj, "444")["credential_user_id"], "804")
+        self.assertEqual(source.video_account_credential(obj, "555")["credential_user_id"], "999")
+
+    def test_outside_account_or_incomplete_scope_never_queries(self):
         query = Mock()
         source = SqlSource(query)
-        with self.assertRaises(AssetError):
-            source.video_account_credential(video("pending"), "555")
-        self.assertIsNone(source.video_account_credential(dict(video("pending"), user_ids=[]), "444"))
+        for obj, aid in ((video("pending"), "555"), (dict(video("pending"), user_ids=[]), "444")):
+            with self.assertRaises(AssetError):
+                source.video_account_credential(obj, aid)
         query.assert_not_called()
 
 
@@ -139,20 +197,38 @@ class AccountVideoGraphTests(unittest.TestCase):
         self.assertEqual([c["url"] for c in transport.calls],
                          ["https://graph.facebook.com/v25.0/act_444/advideos", "https://graph.facebook.com/v25.0/act_555/advideos"])
 
-    def test_source_failure_falls_back_without_reading_meta_nodes(self):
+    def test_source_failure_does_not_use_a_different_frozen_user(self):
         client, transport, _ = self.client([Response(True)], Mock(side_effect=RuntimeError("private SQL error")))
+        client.token_provider = Mock(return_value="wrong-token")
         status, result = client.delete_video_account(video("pending"), "444")
-        self.assertEqual((status, result["credential_relation"], result["credential_user_id"]), ("deleted", "fallback", "803"))
-        self.assertEqual([c["method"] for c in transport.calls], ["DELETE"])
+        self.assertEqual((status, result["code"]), ("failed", "credential_read_unavailable"))
+        self.assertEqual(transport.calls, [])
+        client.token_provider.assert_not_called()
         self.assertNotIn("private SQL", json.dumps(result))
 
-    def test_page_or_outside_user_provider_response_is_ignored_before_write(self):
+    def test_page_or_outside_user_provider_response_fails_without_write(self):
         for choice in (dict(credential(), credential_kind="page"), credential(uid="999")):
             with self.subTest(choice=choice["credential_kind"]):
                 client, transport, _ = self.client([Response(True)], Mock(return_value=choice))
                 status, result = client.delete_video_account(video("pending"), "444")
-                self.assertEqual((status, result["credential_user_id"]), ("deleted", "803"))
-                self.assertEqual(transport.calls[0]["headers"]["Authorization"], "Bearer fallback-user-secret-803")
+                self.assertEqual((status, result["code"]), ("failed", "publishing_token_unavailable"))
+                self.assertEqual(transport.calls, [])
+
+    def test_current_product_default_can_differ_from_frozen_default_user(self):
+        client, transport, _ = self.client([Response(True)], Mock(return_value=credential("999", relation="product_default_user")))
+        status, result = client.delete_video_account(video("pending"), "444")
+        self.assertEqual((status, result["credential_user_id"], result["credential_default_token"]), ("deleted", "999", "1"))
+        self.assertEqual(transport.calls[0]["headers"]["Authorization"], "Bearer source-user-secret")
+
+    def test_default_route_requires_matching_queue_product_ad_and_source_user(self):
+        for key, value in (("credential_product_id", "2"), ("credential_ad_id", "102"),
+                           ("credential_source_user_id", "999"), ("credential_publish_queue_id", ""),
+                           ("credential_default_token", "-1"), ("credential_source_row_id", "")):
+            with self.subTest(key=key):
+                choice = dict(credential("999", relation="product_default_user"), **{key: value})
+                client, transport, _ = self.client([], Mock(return_value=choice))
+                self.assertEqual(client.delete_video_account(video("pending"), "444")[0], "failed")
+                self.assertEqual(transport.calls, [])
 
     def test_permission_failure_never_rotates_credentials_or_rewrites(self):
         error = Response({"error": {"code": 200, "message": "Denied source-user-secret"}}, 400)

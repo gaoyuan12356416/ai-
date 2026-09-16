@@ -247,6 +247,8 @@
       frozen_user_fallback: "原冻结候选用户",
       fallback: "原冻结候选用户",
       ad_source_user: "投放记录用户",
+      product_default_user: "产品默认 Token（发布队列指定）",
+      publish_queue_user: "发布用户自己的 Token（发布队列指定）",
     })[credentialRelation] || credentialRelation;
     const deleteMode = scalar(credentialField("delete_mode"));
     const deleteScope = ({ ad_account_video: "广告账户中的视频素材", video_id_direct: "历史 Video ID 直删" })[deleteMode] || "";
@@ -276,6 +278,10 @@
       ["凭证记录 ID", scalar(credentialField("credential_row_id"))],
       ["Meta 用户 ID", credentialFbUserId],
       ["内部用户 ID", scalar(credentialField("credential_user_id"))],
+      ["发布队列 ID", scalar(credentialField("credential_publish_queue_id"))],
+      ["使用默认 Token", ({ "1": "是", "-1": "否" })[scalar(credentialField("credential_default_token"))] || ""],
+      ["Token 所属产品 ID", scalar(credentialField("credential_product_id"))],
+      ["源广告发布用户 ID", scalar(credentialField("credential_source_user_id"))],
       ["身份关联依据", relationLabel],
       ["凭证查找", lookupStatus],
       ["凭证查找说明", lookupMessage],

@@ -432,32 +432,57 @@ class GraphClient:
         return vid, aid
 
     def prepare_video_account_delete(self, obj, account_id):
-        """Select a current source User Token; no Meta GET is a write gate."""
+        """Select the queue's current credential; no Meta GET is a write gate."""
         _, aid = self._video_account_target(obj, account_id)
         users = list(dict.fromkeys(str(x) for x in obj.get("user_ids", []) if self._identity_id(x)))
         context = {"delete_mode": "ad_account_video", "delete_account_id": aid,
                    "delete_endpoint": "act_" + aid + "/advideos", "credential_kind": "user"}
         if self.video_account_credential_provider is not None:
+            route_fields = ("credential_source_row_id", "credential_ad_id", "credential_product_id",
+                            "credential_source_user_id", "credential_publish_queue_id", "credential_default_token")
             try:
                 credential = self.video_account_credential_provider(obj, aid)
                 if isinstance(credential, dict):
                     uid = self._identity_id(credential.get("credential_user_id"))
                     token = credential.get("token")
                     relation = credential.get("credential_relation")
-                    if (uid in users and credential.get("credential_kind") == "user" and
-                            isinstance(token, str) and token.strip() and relation in ("ad_source_user", "fallback")):
+                    route = {key: str(credential.get(key) or "") for key in route_fields}
+                    source_uid = route["credential_source_user_id"]
+                    source_id, product_id, ad_id = (route[key] for key in
+                        ("credential_source_row_id", "credential_product_id", "credential_ad_id"))
+                    scope_ok = (source_uid in users and product_id in obj.get("product_ids", []) and
+                        ad_id in obj.get("ad_ids", []) and self._identity_id(source_id) and
+                        self._identity_id(route["credential_publish_queue_id"]))
+                    frozen = obj.get("video_account_sources")
+                    if isinstance(frozen, list):
+                        scope_ok = scope_ok and any(isinstance(row, dict) and
+                            str(row.get("account_id", "")).removeprefix("act_") == aid and
+                            all(str(row.get(key)) == value for key, value in
+                                (("source_row_id", source_id), ("product_id", product_id),
+                                 ("ad_id", ad_id), ("user_id", source_uid))) for row in frozen)
+                    rule_ok = (relation == "product_default_user" and route["credential_default_token"] == "1" or
+                        relation == "publish_queue_user" and route["credential_default_token"] == "-1" and uid == source_uid)
+                    if (uid and scope_ok and rule_ok and credential.get("credential_kind") == "user" and
+                            isinstance(token, str) and token.strip()):
+                        context.update(route)
                         context.update(credential_user_id=uid, credential_relation=relation,
-                            credential_lookup="matched" if relation == "ad_source_user" else "fallback",
-                            credential_lookup_message="使用该账户源广告记录的投放用户凭证" if relation == "ad_source_user" else
-                                "源投放凭证不可用，使用原冻结候选用户的现有凭证")
+                            credential_lookup="matched", credential_lookup_message=
+                                "发布队列启用默认 Token，使用该产品当前配置的默认用户凭证" if relation == "product_default_user" else
+                                "发布队列未启用默认 Token，使用发布用户自己的凭证")
                         fbid = self._identity_id(credential.get("credential_fb_user_id"))
                         if fbid:
                             context["credential_fb_user_id"] = fbid
                         return token, context
+            except AssetError as exc:
+                detail = getattr(exc, "detail", {})
+                for key in route_fields + ("credential_user_id", "credential_relation", "credential_fb_user_id"):
+                    value = detail.get(key)
+                    if isinstance(value, (str, int)):
+                        context[key] = value
+                raise GraphError(exc.code, exc.message, detail=context) from None
             except Exception:
-                # Source recovery only improves credential selection. Do not
-                # turn missing history into a new account/video read gate.
-                pass
+                raise GraphError("credential_read_unavailable", "发布队列或指定 Token 读取未完成；未改用其他用户", detail=context) from None
+            raise GraphError("publishing_token_unavailable", "发布凭证与队列规则或冻结范围不匹配；未发送删除请求", detail=context)
         for uid in users:
             try:
                 token = self.token_provider([uid])

@@ -29,7 +29,8 @@ _VIDEO_ACCOUNT_MODE = "ad_account_video"
 _VIDEO_CREDENTIAL_FIELDS = _CREDENTIAL_FIELDS | frozenset(("delete_account_id", "delete_endpoint",
     "account_id", "video_id", "source_row_id", "source_row_ids", "source_user_id", "source_user_ids",
     "ad_id", "ad_ids", "credential_source_row_id", "credential_source_row_ids", "credential_ad_id",
-    "credential_ad_ids"))
+    "credential_ad_ids", "credential_product_id", "credential_source_user_id",
+    "credential_publish_queue_id", "credential_default_token"))
 _TABLE = "fb_asset_delete_v2_"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_rechecks (

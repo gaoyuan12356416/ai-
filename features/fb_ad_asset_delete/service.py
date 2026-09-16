@@ -7,7 +7,7 @@ import uuid
 from .core import (AssetError, PHASES, STATUSES, TERMINAL_SUCCESS, account_id, actor_key,
                    meta_id, normalize_input, normalize_phases, now, summary)
 from .graph import GraphError
-from .store import StoreError, _process_start
+from .store import StoreError, _process_start, _VIDEO_CREDENTIAL_FIELDS
 
 
 def public_product(product):
@@ -370,6 +370,9 @@ class Service:
                 prepared = graph.prepare_video_account_delete(obj, aid)
                 context = prepared[1]
             except AssetError as exc:
+                # Preserve the intended queue credential even when lookup fails;
+                # the durable claim and failed result must describe one identity.
+                context.update({k: v for k, v in getattr(exc, "detail", {}).items() if k in _VIDEO_CREDENTIAL_FIELDS})
                 error = self._error_result(exc)
             except Exception:
                 error = {"code": "credential_unavailable", "message": "投放凭证读取未完成，尚未发送删除请求"}

@@ -8,9 +8,18 @@ import uuid
 
 from features.fb_ad_asset_delete.core import PHASES
 from features.fb_ad_asset_delete.graph import GraphClient
+from features.fb_ad_asset_delete.source import SqlSource, q
 from features.fb_ad_asset_delete.service import Service
 from features.fb_ad_asset_delete.store import Store, StoreError
 from test_fb_ad_asset_delete_service import FakeSource, FakeGraph, GraphState, QueuedWorkers, SESSION, ad
+
+
+def queue_credential(obj, aid, token):
+    row = next(r for r in obj["video_account_sources"] if r["account_id"] == aid)
+    return dict(token=token, credential_kind="user", credential_user_id=row["user_id"],
+        credential_relation="publish_queue_user", credential_default_token="-1", credential_publish_queue_id="500",
+        credential_source_row_id=row["source_row_id"], credential_ad_id=row["ad_id"],
+        credential_product_id=row["product_id"], credential_source_user_id=row["user_id"])
 
 
 class AccountGraph(FakeGraph):
@@ -134,8 +143,7 @@ class VideoAccountServiceTests(unittest.TestCase):
                 return type("Response", (), {"status_code": status, "json": lambda inner: data})()
 
         self.service.graph_factory = lambda: GraphClient(lambda users: "publishing-user-token", transport=Transport(),
-            video_account_credential_provider=lambda obj, aid: dict(token="publishing-user-token", credential_kind="user",
-                credential_user_id="803", credential_relation="ad_source_user"))
+            video_account_credential_provider=lambda obj, aid: queue_credential(obj, aid, "publishing-user-token"))
         final = self.execute(job)
         first = next(o for o in final["objects"] if o["key"] == "video:301")
         child = first["video_account_results"][0]
@@ -159,6 +167,57 @@ class VideoAccountServiceTests(unittest.TestCase):
         self.assertEqual(obj["account_ids"], ["444", "555"])
         self.assertEqual([(item["account_id"], item["source_row_id"], item["user_id"]) for item in obj["video_account_sources"]],
                          [("444", "7", "803"), ("555", "8", "803")])
+
+    def run_queue_routes(self, missing_default=False):
+        job = self.preview()
+        calls = []
+
+        def query(sql, timeout):
+            if "ads_facebook_auto_created_data" in sql:
+                default = "a.id IN (" + q("7") + ")" in sql
+                return [("7" if default else "8", "1", "101" if default else "102",
+                    "444" if default else "555", "803", "500", "500", "1", "803",
+                    "1" if default else "-1", "1", "999")]
+            if "user_id=" + q("999") in sql:
+                return [] if missing_default else [("999", "90009", "product-secret")]
+            self.assertIn("user_id=" + q("803"), sql)
+            return [("803", "90003", "own-secret")]
+
+        outer = self
+        class Transport:
+            def request(self, method, url, **kwargs):
+                aid = url.rsplit("/", 2)[-2].removeprefix("act_")
+                child = next(r for r in outer.store.video_account_results(job["job_id"], "video:301") if r["account_id"] == aid)
+                expected = "product-secret" if aid == "444" else "own-secret"
+                outer.assertEqual(kwargs["headers"]["Authorization"], "Bearer " + expected)
+                outer.assertEqual(child["status"], "in_progress")
+                outer.assertEqual(child["result"]["credential_publish_queue_id"], "500")
+                outer.assertEqual(child["result"]["credential_user_id"], "999" if aid == "444" else "803")
+                calls.append((method, aid))
+                return type("Response", (), {"status_code": 200, "json": lambda inner: {"success": True}})()
+
+        source = SqlSource(query)
+        self.service.graph_factory = lambda: GraphClient(source.token, transport=Transport(),
+            video_account_credential_provider=source.video_account_credential)
+        final = self.execute(job)
+        rows = self.video(final)["video_account_results"]
+        self.assertEqual(rows[0]["result"]["credential_user_id"], "999")
+        self.assertEqual(rows[0]["result"]["credential_relation"], "product_default_user")
+        self.assertEqual(rows[1]["result"]["credential_relation"], "publish_queue_user")
+        self.assertEqual(calls, [("DELETE", "555")] if missing_default else [("DELETE", "444"), ("DELETE", "555")])
+        self.assertEqual(final["runs"][-1]["status"], "partial" if missing_default else "completed")
+        for secret in (b"product-secret", b"own-secret"):
+            self.assertNotIn(secret, Path(self.store.path).read_bytes())
+        return rows
+
+    def test_queue_routes_are_audited_before_using_exact_selected_tokens(self):
+        self.run_queue_routes()
+
+    def test_missing_selected_token_is_audited_and_next_account_continues(self):
+        rows = self.run_queue_routes(missing_default=True)
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertEqual(rows[0]["result"]["code"], "publishing_token_unavailable")
+        self.assertEqual(rows[1]["status"], "deleted")
 
     def test_each_account_has_prewrite_audit_and_failures_continue(self):
         job = self.preview()
@@ -259,8 +318,7 @@ class VideoAccountServiceTests(unittest.TestCase):
                 return type("Response", (), {"status_code": 200, "json": lambda inner: {"success": True}})()
 
         self.service.graph_factory = lambda: GraphClient(lambda users: "published-user-token", transport=Transport(),
-            video_account_credential_provider=lambda obj, aid: dict(token="published-user-token", credential_kind="user",
-                credential_user_id="803", credential_relation="ad_source_user"))
+            video_account_credential_provider=lambda obj, aid: queue_credential(obj, aid, "published-user-token"))
         final = self.execute(job)
         self.assertEqual(events, [("DELETE", "https://graph.facebook.com/v25.0/act_444/advideos")])
         self.assertEqual(self.video(final)["status"], "deleted")

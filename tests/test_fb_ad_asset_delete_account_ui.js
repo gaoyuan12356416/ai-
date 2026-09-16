@@ -186,7 +186,28 @@ test("ordinary confirmation submits only frozen preview, phases and the request 
 test("HTML keeps the ordinary three phases and the retired navigation version", () => {
   assert.equal((page.match(/type="checkbox"/g) || []).length, 3);
   assert.ok(page.includes("quick-nav.js?v=20260915retired"));
-  assert.equal((page.match(/20260915-meta-video-account-delete/g) || []).length, 2);
+  assert.ok(page.includes("fb-post-ad-delete.css?v=20260915-meta-video-account-delete"));
+  assert.ok(page.includes("fb-post-ad-delete.js?v=20260916-meta-video-token-routing"));
   assert.ok(!page.includes("Video 阶段删除视频对象"));
   assert.ok(page.includes("广告账户视频素材"));
+});
+
+test("queue rules distinguish publishing users from actual default token owners", () => {
+  const { ui } = harness();
+  for (const [flag, relation, label] of [["1", "product_default_user", "产品默认 Token"], ["-1", "publish_queue_user", "发布用户自己的 Token"]]) {
+    const html = ui.diagnosticDetails(pair("101", "failed", { credential_kind: "user", credential_user_id: "999",
+      credential_source_user_id: "803", credential_product_id: "456", credential_publish_queue_id: "500",
+      credential_default_token: flag, credential_relation: relation, token: "never-render-this" }));
+    for (const phrase of [label, "发布队列 ID", "500", "Token 所属产品 ID", "456", "源广告发布用户 ID", "803", "999", "使用默认 Token"]) assert.ok(html.includes(phrase));
+    assert.ok(html.includes(flag === "1" ? "<dd>是</dd>" : "<dd>否</dd>"));
+    assert.ok(!html.includes("never-render-this"));
+  }
+});
+
+test("failed selection details retain the intended queue identity", () => {
+  const { ui } = harness();
+  const html = ui.diagnosticDetails(pair("101", "failed", { detail: { credential_relation: "product_default_user",
+    credential_publish_queue_id: '<img src=x>', credential_default_token: "1", credential_user_id: "999" } }));
+  assert.ok(html.includes("产品默认 Token") && html.includes("999"));
+  assert.ok(html.includes("&lt;img src=x&gt;") && !html.includes("<img"));
 });

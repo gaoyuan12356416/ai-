@@ -314,63 +314,88 @@ class SqlSource:
         return next((by_id[x] for x in candidates if by_id.get(x)), "")
 
     def video_account_credential(self, obj, target_account):
-        """Dynamically read an account-specific source User Token, never a Page.
+        """Resolve the publishing queue's credential rule with fresh SQL reads.
 
-        Old previews have flat scope arrays. Exact source rows may recover the
-        account/user pairing, but missing history only changes credential
-        preference: it never enlarges targets or blocks the frozen-user fallback.
+        Frozen users describe source lineage, not necessarily the token owner.
+        A current product default may change after preview. Only an exact source
+        ad / queue / product link can authorize that default, never a flat list.
         """
         aid = account_id(target_account)
         if obj.get("kind") != "video" or aid not in {account_id(x) for x in obj.get("account_ids", [])}:
             raise AssetError("account_outside_preview", "账户不在该 Video 的冻结范围内", 409)
-        users = list(dict.fromkeys(str(x) for x in obj.get("user_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))))
-        ads = {str(x) for x in obj.get("ad_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))}
-        products = {str(x) for x in obj.get("product_ids", []) if re.fullmatch(r"[1-9][0-9]{0,31}", str(x))}
-        if not users:
-            return None
+        valid_id = lambda value: re.fullmatch(r"[1-9][0-9]{0,31}", str(value or "")) is not None
+        users = {str(x) for x in obj.get("user_ids", []) if valid_id(x)}
+        ads = {str(x) for x in obj.get("ad_ids", []) if valid_id(x)}
+        products = {str(x) for x in obj.get("product_ids", []) if valid_id(x)}
+        if not users or not ads or not products:
+            raise AssetError("credential_source_missing", "冻结记录缺少发布来源，无法确定应使用的 Token", 409)
 
-        def source_users(rows):
-            matched = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                uid, row_id = str(row.get("user_id") or ""), str(row.get("source_row_id") or "")
-                if (str(row.get("account_id", "")).removeprefix("act_") == aid and uid in users and
-                        str(row.get("ad_id")) in ads and str(row.get("product_id")) in products and
-                        re.fullmatch(r"[1-9][0-9]{0,31}", row_id)):
-                    matched.append((int(row_id), uid))
-            return list(dict.fromkeys(uid for _, uid in sorted(matched)))
+        def scoped(row):
+            return (isinstance(row, dict) and valid_id(row.get("source_row_id")) and
+                str(row.get("account_id", "")).removeprefix("act_") == aid and
+                str(row.get("user_id")) in users and str(row.get("ad_id")) in ads and
+                str(row.get("product_id")) in products)
 
         frozen = obj.get("video_account_sources")
-        preferred = source_users(frozen) if isinstance(frozen, list) else []
-        if not preferred and ads and products:
-            try:
-                rows = self.read("""SELECT CAST(a.id AS CHAR),a.product,a.ad_id,a.ad_account_id,CAST(a.user_id AS CHAR)
-                    FROM {s}.ads_facebook_auto_created_data a
-                    WHERE a.ad_id IN {ads} AND a.product IN {products} AND a.ad_account_id IN {accounts}
-                    ORDER BY a.id LIMIT 10001""".format(s=self.schema, ads=inside(sorted(ads)),
-                        products=inside(sorted(products)), accounts=inside([aid, "act_" + aid])),
-                    ("source_row_id", "product_id", "ad_id", "account_id", "user_id"), 5)
-                preferred = source_users(rows)
-            except Exception:
-                preferred = []
-        order = preferred + [uid for uid in users if uid not in preferred]
+        frozen_rows = {str(r["source_row_id"]): r for r in frozen if scoped(r)} if isinstance(frozen, list) else {}
+        if isinstance(frozen, list) and not frozen_rows:
+            raise AssetError("credential_source_missing", "没有该广告账户的冻结发布来源", 409)
+        row_filter = " AND a.id IN " + inside(sorted(frozen_rows)) if frozen_rows else ""
+        rows = self.read("""SELECT CAST(a.id AS CHAR),a.product,a.ad_id,a.ad_account_id,CAST(a.user_id AS CHAR),
+            CAST(a.publish_queue_id AS CHAR),CAST(pq.id AS CHAR),pq.product,CAST(pq.user_id AS CHAR),
+            CAST(pq.default_token AS CHAR),CAST(p.id AS CHAR),CAST(p.default_user AS CHAR)
+            FROM {s}.ads_facebook_auto_created_data a
+            LEFT JOIN {s}.ads_template_make_queue pq ON pq.id=a.publish_queue_id
+            LEFT JOIN {s}.ads_apps_setting p ON p.id=a.product
+            WHERE a.ad_id IN {ads} AND a.product IN {products} AND a.ad_account_id IN {accounts}{row_filter}
+            ORDER BY a.id LIMIT 10001""".format(s=self.schema, ads=inside(sorted(ads)),
+                products=inside(sorted(products)), accounts=inside([aid, "act_" + aid]), row_filter=row_filter),
+            ("source_row_id", "product_id", "ad_id", "account_id", "user_id", "publish_queue_id",
+             "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user"), 5)
+        if len(rows) > 10000:
+            raise AssetError("credential_source_overflow", "发布来源超出读取上限，无法确定 Token", 409)
+        matched = [row for row in rows if scoped(row) and (not frozen_rows or
+            str(row["source_row_id"]) in frozen_rows and all(str(row[key]) == str(frozen_rows[str(row["source_row_id"])][key])
+                for key in ("ad_id", "product_id", "user_id")))]
+        if not matched:
+            raise AssetError("credential_source_missing", "无法从冻结广告找到匹配的发布来源", 409)
+        # Deterministic first source; never try a second identity after failure.
+        row = min(matched, key=lambda item: int(item["source_row_id"]))
+        context = dict(credential_source_row_id=str(row["source_row_id"]), credential_ad_id=str(row["ad_id"]),
+            credential_product_id=str(row["product_id"]), credential_source_user_id=str(row["user_id"]))
+
+        def fail(code, message):
+            error = AssetError(code, message, 409)
+            error.detail = dict(context)
+            raise error
+
+        queue_id = str(row.get("queue_id") or "")
+        if not valid_id(queue_id) or queue_id != str(row.get("publish_queue_id")):
+            fail("publish_queue_missing", "源广告的发布队列不存在，无法确定 Token；未改用其他用户")
+        context["credential_publish_queue_id"] = queue_id
+        if str(row.get("queue_product_id")) != str(row["product_id"]) or str(row.get("queue_user_id")) != str(row["user_id"]):
+            fail("publish_queue_mismatch", "发布队列的产品或用户与源广告不一致，无法确定 Token")
+        flag = str(row.get("default_token"))
+        if flag not in ("1", "-1"):
+            fail("publish_token_rule_unknown", "发布队列的默认 Token 标记无法确定（需 1 或 -1）；未改用其他用户")
+        context["credential_default_token"] = flag
+        if flag == "1":
+            if str(row.get("setting_product_id")) != str(row["product_id"]) or not valid_id(row.get("default_user")):
+                fail("product_default_token_missing", "发布队列要求使用默认 Token，但产品未配置有效默认 Token 用户")
+            uid, relation = str(row["default_user"]), "product_default_user"
+        else:
+            uid, relation = str(row["queue_user_id"]), "publish_queue_user"
+        context.update(credential_kind="user", credential_user_id=uid, credential_relation=relation)
         rows = self.read("""SELECT CAST(user_id AS CHAR),CAST(facebookUserID AS CHAR),accessToken
-            FROM {s}.ads_facebook_info WHERE user_id IN {users} AND TRIM(accessToken)<>''
-            ORDER BY FIELD(CAST(user_id AS CHAR),{order})""".format(
-                s=self.schema, users=inside(order), order=",".join(q(uid) for uid in order)),
+            FROM {s}.ads_facebook_info WHERE user_id={uid} AND TRIM(accessToken)<>'' LIMIT 2""".format(s=self.schema, uid=q(uid)),
             ("user_id", "fb_user_id", "token"), 5)
-        by_id = {str(row.get("user_id")): row for row in rows if str(row.get("user_id")) in users and str(row.get("token") or "").strip()}
-        for uid in order:
-            row = by_id.get(uid)
-            if row:
-                result = dict(token=str(row["token"]).strip(), credential_kind="user", credential_user_id=uid,
-                              credential_relation="ad_source_user" if uid in preferred else "fallback")
-                fbid = str(row.get("fb_user_id") or "")
-                if re.fullmatch(r"[1-9][0-9]{0,31}", fbid):
-                    result["credential_fb_user_id"] = fbid
-                return result
-        return None
+        matches = [r for r in rows if str(r.get("user_id")) == uid and str(r.get("token") or "").strip()]
+        if len(matches) != 1:
+            fail("publishing_token_unavailable", "按发布队列选定的 Token 不可用或不唯一；未改用其他用户")
+        token_row = matches[0]
+        if valid_id(token_row.get("fb_user_id")):
+            context["credential_fb_user_id"] = str(token_row["fb_user_id"])
+        return dict(context, token=str(token_row["token"]).strip())
 
     def video_credential(self, user_ids, identity_id, relation):
         """Read one current credential for an exact identity and frozen users.
