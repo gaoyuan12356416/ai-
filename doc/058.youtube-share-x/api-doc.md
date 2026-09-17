@@ -18,3 +18,11 @@ Run有id/operation_id/task_id/video_id/account_ids/description_template/text/sta
 内部仅backend bearer可POST `/internal/youtube-shares/{query,create,run}`；daily/auto拒绝。actor/scope由服务端提供，源链接和正文中目标链接严格验证。独立SQLite自动建表，无MySQL DDL。
 
 参考：[X字符规则](https://docs.x.com/fundamentals/counting-characters)、[Create Posts](https://docs.x.com/x-api/posts/create-post)。
+
+## 2026-09-17 列表标记
+
+现有 GET `/api/youtube-auto-publish/tasks`（含 compact=1）及 GET `/tasks/{id}` 增加 `x_player_card`，非已公开视频为 null。对象字段为 `state,eligible,message,checked_at,expires_at` 及可选 `card_type`；state 为 ready/restricted/not_player/not_public/not_embeddable/unavailable/checking/pending。时间为 UTC ISO8601，页面显示北京时间。
+
+只有 fresh ready 且 eligible=true 显示绿色；过期、检查中、队列等待、错误都不是可用判定。地区/年龄限制为 restricted，不承诺对任意地区观众可播。字段进入既有 compact revision，因此异步检测完成后下一轮正常轮询得到更新；未变化仍返回 unchanged。接口不新增网络参数、不增加单行详情请求，不暴露授权凭据。
+
+此快照与转发弹窗的 `player_card` 不同：前者含缓存时间和公开视频/播放限制检查，后者仍是提交前实时检查的一部分。列表快照不作为任何平台写入的授权依据。

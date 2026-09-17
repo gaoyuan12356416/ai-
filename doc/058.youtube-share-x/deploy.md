@@ -13,3 +13,8 @@
 2026-09-17 短链宏增量用 `scripts/deploy_youtube_share_short_url.py --commit <GitHub精确commit> [--check]`：校验当前已部署的四份源文件，只更新主站 bridge/text helper 和 JS/HTML，静态资源双目录同步。先备份六个目标文件，再仅重启主 API。X sidecar 使用的 URL 校验/权重函数无改动，保持其 release 和运行进程，YouTube worker 同样持续运行。无数据库迁移、短链生成或平台发布。增量回滚入口为同一脚本 `--rollback <本次backup>`，可加 `--check` 仅验证回滚条件。
 
 同日播放器检查增量用 `scripts/deploy_youtube_share_player.py --commit <GitHub精确commit> [--check]`，新增主站 x_card 模块并更新 bridge/text helper/JS/HTML，共七个部署目标。只重启主 API，保留 sidecar 和 worker。备份 kind 为 youtube-share-player；同一脚本支持 `--rollback <backup> [--check]`。没有任务/短链/分享台账迁移，也不通过发布新帖验收。
+# 2026-09-17 播放器卡片标记增量
+
+使用 scripts/deploy_youtube_player_badges.py，从 GitHub 拉取准确 commit 后运行 --commit <SHA> --check，再运行 --commit <SHA>。部署脚本要求数据盘 UUID、GitHub commit 标记和九个目标的精确旧哈希；先备份后只重启 drama-material-api.service。X sidecar 与 YouTube worker 不切换、不重启。缓存仅在内存，不迁移或写入业务库。
+
+回滚使用同一 GitHub release 内脚本 --rollback <本次 backup>，加 --check 可先验证。只恢复对应代码/静态文件，保留全部业务记录；后续文件漂移时拒绝覆盖。实际 SHA、备份、接口检测和完整回滚命令见 player-badges-20260917.md。

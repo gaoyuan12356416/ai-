@@ -63,4 +63,5 @@ body{background:radial-gradient(circle at top left,rgba(36,87,255,.12),transpare
 .material-uploader-filter{display:flex;align-items:center;gap:8px;flex:0 1 270px;min-width:0;color:var(--text-muted,#64748b);font-size:12px}
 .material-uploader-filter>span{white-space:nowrap}
 .material-uploader-filter>.select{min-width:0;flex:1;width:100%;text-overflow:ellipsis}
+.player-card-mark{margin-top:8px;min-width:145px}.player-card-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 7px;border-radius:5px;font-size:10px;font-weight:550;line-height:1.4;white-space:nowrap}.player-card-badge svg{width:12px;height:12px;flex-shrink:0}.player-card-ready{color:#118564;background:#e9f8f1}.player-card-restricted{color:#a76800;background:#fff4d9}.player-card-muted{color:#718096;background:#f0f3f8}.player-card-stamp{display:block;margin-top:4px;color:#8896aa;font-size:9px;line-height:1.5;white-space:nowrap}
 @media(max-width:760px){.picker-toolbar{flex-wrap:wrap}.material-uploader-filter{flex:1 1 100%}.picker-toolbar>.search-input-wrap{flex:1 1 180px}.picker-toolbar>.btn{flex-shrink:0}}

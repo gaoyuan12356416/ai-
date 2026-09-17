@@ -24,7 +24,7 @@ function harness() {
   const sandbox = {document:doc,window:{addEventListener(){}},location:{origin:'https://local.invalid',search:''},URL,URLSearchParams,TextEncoder,AbortController,Event,crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++nextUuid).padStart(12,'0')}`},setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);},console};
   vm.createContext(sandbox);
   assert.ok(source.includes('\n  init();\n'));
-  vm.runInContext(source.replace('\n  init();\n',`\n  renderModals = () => {};\n  globalThis.ui = {state,carets,shareXDrafts,shareXBlockReason,shareXButton,shareXSelected,shareXPreviewValid,shareXRunItems,shareXRunView,shareXView,shareXAcceptRun,loadShareX,scheduleShareXPreview,updateShareXPreview,openShareX,checkShareX,submitShareX,newShareX,stopShareX,closeModal,top,rememberCaret,setApi:fn => { api = fn; },setStack:value => { stack = value; }};\n`),sandbox,{filename:'youtube-publish.js'});
+  vm.runInContext(source.replace('\n  init();\n',`\n  renderModals = () => {};\n  globalThis.ui = {state,carets,shareXDrafts,playerCardBadge,shareXBlockReason,shareXButton,shareXSelected,shareXPreviewValid,shareXRunItems,shareXRunView,shareXView,shareXAcceptRun,loadShareX,scheduleShareXPreview,updateShareXPreview,openShareX,checkShareX,submitShareX,newShareX,stopShareX,closeModal,top,rememberCaret,setApi:fn => { api = fn; },setStack:value => { stack = value; }};\n`),sandbox,{filename:'youtube-publish.js'});
   const ui=sandbox.ui;
   function view(extra={}) { const v={type:'shareX',id:taskId,key:1,loaded:true,loading:false,source:sourceContext,playerCard:contextData().player_card,accounts:plain(accounts),macros:contextData().macros,history:[],selected:new Set([1,3]),description:'{title}',operationId:sandbox.crypto.randomUUID(),previewSerial:0,preview:preview('A public video'),previewFor:'{title}',...extra};ui.setStack([v]);return v; }
   function emit(type,target) { for(const fn of listeners.get(type)||[])fn({target}); }
@@ -216,6 +216,28 @@ test('assets keep uploader selection and add the new modal through the existing 
   assert.match(source,/material-uploader/);assert.match(source,/uploader_id/);assert.match(source,/shareX:shareXView/);
   assert.match(source,/listRevision/);assert.match(source,/taskLoadingView\(v\)/);assert.match(source,/compact:'1'/);
   assert.match(source,/retained\.setSelectionRange\(\.\.\.selection\)/);assert.match(source,/shareXButton\(t\)/);
-  assert.match(html,/youtube-publish\.js\?v=20260917-share-player-v2/);assert.match(html,/youtube-publish\.css\?v=20260916-share-x-v1/);
+  assert.match(html,/youtube-publish\.js\?v=20260917-player-badges-v1/);assert.match(html,/youtube-publish\.css\?v=20260917-player-badges-v1/);
   assert.match(css,/@media\(max-width:760px\)\{\.x-share-layout\{grid-template-columns:1fr/);
+});
+
+test('task badge shows green only for fresh confirmed public candidates',() => {
+  const {ui}=harness(), expires_at=new Date(Date.now()+60000).toISOString(), checked_at=new Date().toISOString();
+  const task={can_share_x:true,x_player_card:{state:'ready',eligible:true,expires_at,checked_at}};
+  assert.match(ui.playerCardBadge(task),/player-card-ready/);
+  assert.match(ui.playerCardBadge(task),/可发播放器卡片/);
+  assert.match(ui.playerCardBadge(task),/player-card-stamp/);
+  assert.equal(ui.playerCardBadge({...task,can_share_x:false}),'');
+  assert.doesNotMatch(ui.playerCardBadge({...task,x_player_card:{...task.x_player_card,eligible:false}}),/player-card-ready/);
+  assert.doesNotMatch(ui.playerCardBadge({...task,x_player_card:{...task.x_player_card,expires_at:'2000-01-01T00:00:00Z'}}),/player-card-ready/);
+  assert.match(ui.playerCardBadge({...task,x_player_card:{...task.x_player_card,expires_at:'invalid'}}),/卡片待复查/);
+});
+
+test('restricted, unavailable and pending badges are distinct and escaped',() => {
+  const {ui}=harness(), base={eligible:false,expires_at:new Date(Date.now()+60000).toISOString(),checked_at:new Date().toISOString()};
+  for(const [state,label] of [['restricted','卡片播放受限'],['not_player','暂无播放器卡片'],['not_public','视频当前未公开'],['not_embeddable','不可嵌入播放'],['unavailable','卡片暂未确认'],['checking','卡片复查中'],['pending','卡片待检测']]) {
+    const html=ui.playerCardBadge({can_share_x:true,x_player_card:{...base,state,message:'<img src=x onerror="bad">'}});
+    assert.match(html,new RegExp(label));assert.doesNotMatch(html,/player-card-ready|<img/);assert.match(html,/&lt;img/);
+  }
+  assert.match(ui.playerCardBadge({can_share_x:true}),/卡片待检测/);
+  assert.match(source,/\$\{badge\(t.status\)\}\$\{playerCardBadge\(t\)\}/);
 });

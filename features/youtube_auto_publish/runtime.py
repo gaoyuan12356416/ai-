@@ -224,6 +224,8 @@ def build_service(app):
                           drama_resolver=DramaMetadataResolver(reader),async_cache=True)
     repository=YouTubeCredentialRepository(reader,schema=app.DB_NAME)
     directory=ChannelDirectory(repository,failures=ChannelFailures(app.JOB_DB_PATH,root/'failure-notifications.sqlite3'))
+    from .player_cards import PlayerCardStatusCache, YouTubeCardProbe
+    player_cards=PlayerCardStatusCache(YouTubeCardProbe(repository))
     def channels(actor):
         # Credential objects stay server-only; no refresh token or client configuration reaches a DTO.
         values=[];seen=set()
@@ -245,6 +247,6 @@ def build_service(app):
         return value['short_url']
     links=AttributionLinks(app.JOB_DB_PATH,app.DRAMA_SYNTHESIS_STORE,app.DRAMA_SHORT_LINK_PUBLISHER,attribution_user_resolver(app))
     return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,attribution_links=links,
-                           generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,
+                           generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,player_cards=player_cards,
                            notify=notify_factory(app),failure_status=lambda body,ledger:failure_notification_status(root/'failure-notifications.sqlite3',body,ledger),public_base=app.PUBLIC_BASE_URL.split('/drama-materials')[0],
                            enabled=os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1')
