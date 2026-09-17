@@ -207,7 +207,7 @@
   const shareXAccountEligible = a => a.selectable === true && Number.isSafeInteger(Number(a.id)) && Number(a.id) > 0;
   const shareXSelected = v => (v.accounts || []).filter(a => shareXAccountEligible(a) && v.selected.has(Number(a.id))).map(a => Number(a.id));
   function shareXPreviewValid(v) {
-    return v.loaded && !v.loading && !v.contextError && !v.previewLoading && !v.previewError && v.previewFor === v.description && v.preview?.valid === true && typeof v.preview.text === 'string' && Number.isFinite(v.preview.weighted_length) && v.preview.weighted_length >= 0 && v.preview.weighted_length <= 280 && Array.isArray(v.preview.errors) && !v.preview.errors.length;
+    return v.loaded && !v.loading && v.playerCard?.eligible === true && !v.contextError && !v.previewLoading && !v.previewError && v.previewFor === v.description && v.preview?.valid === true && typeof v.preview.text === 'string' && Number.isFinite(v.preview.weighted_length) && v.preview.weighted_length >= 0 && v.preview.weighted_length <= 280 && Array.isArray(v.preview.errors) && !v.preview.errors.length;
   }
   function shareXRender(v) { if (stack.includes(v)) renderModals(); }
   function shareXRunItems(run) {
@@ -225,7 +225,8 @@
   }
   function shareXPreviewView(v) {
     const preview = v.preview, fixed = Boolean(v.run), current = v.previewFor === v.description && !v.previewLoading, errors = Array.isArray(preview?.errors) ? preview.errors : [];
-    return `<div class="x-share-preview-heading"><strong>发布预览</strong><span class="${current && !fixed && !shareXPreviewValid(v) ? 'error-message' : 'field-hint'}">${fixed ? '已提交内容' : v.previewLoading ? '正在更新…' : current && Number.isFinite(preview?.weighted_length) ? esc(preview.weighted_length) + ' / 280' : '等待校验'}</span></div><div class="x-share-post-preview" aria-busy="${Boolean(v.previewLoading)}"><div class="x-share-preview-account"><span class="x-share-mark" aria-hidden="true">𝕏</span><div><strong>所选 X 账号</strong><span>将向每个所选账号发布相同内容</span></div></div><div id="x-share-preview-text" class="x-share-preview-text">${esc(preview?.text || '填写描述后，这里将展示宏替换后的实际发布内容。')}</div></div><div class="x-share-preview-status" aria-live="polite">${v.previewError ? `<p class="error-message">${esc(v.previewError)}</p><button type="button" class="text-button" data-action="preview-share-x" ${shareXLocked(v) ? 'disabled' : ''}>重新校验预览</button>` : current && errors.length ? errors.map(error => `<p class="error-message">${esc(typeof error === 'string' ? error : error.message || error.code || '文案校验失败')}</p>`).join('') : current && preview?.valid === false ? '<p class="error-message">当前内容未通过校验，请修改描述。</p>' : ''}${current && preview?.appended_url ? '<p class="field-hint">描述中未包含视频链接，已自动补充 YouTube 原链接。</p>' : ''}${v.previewLoading ? '<p class="field-hint">等待最新预览完成后可确认转发。</p>' : ''}</div><p class="x-share-card-note">X 将发布文案和 YouTube 链接。卡片样式及能否直接播放由 YouTube 和 X 决定。</p>`;
+    const card = v.playerCard, cardNotice = fixed ? '' : `<div class="note-box ${card?.eligible === true ? '' : 'note-amber'}" role="status"><strong>${card?.eligible === true ? 'YouTube 播放卡片已确认' : '暂不能以播放卡片转发'}</strong><span>${esc(card?.message || '尚未确认视频的播放卡片，请重新检查。')}</span>${card?.eligible === true ? '' : `<button type="button" class="text-button" data-action="reload-share-x" ${shareXLocked(v) || v.loading ? 'disabled' : ''}>重新检查播放器</button>`}</div>`;
+    return `${cardNotice}<div class="x-share-preview-heading"><strong>发布预览</strong><span class="${current && !fixed && !shareXPreviewValid(v) ? 'error-message' : 'field-hint'}">${fixed ? '已提交内容' : v.previewLoading ? '正在更新…' : current && Number.isFinite(preview?.weighted_length) ? esc(preview.weighted_length) + ' / 280' : '等待校验'}</span></div><div class="x-share-post-preview" aria-busy="${Boolean(v.previewLoading)}"><div class="x-share-preview-account"><span class="x-share-mark" aria-hidden="true">𝕏</span><div><strong>所选 X 账号</strong><span>将向每个所选账号发布相同内容</span></div></div><div id="x-share-preview-text" class="x-share-preview-text">${esc(preview?.text || '填写描述后，这里将展示宏替换后的实际发布内容。')}</div></div><div class="x-share-preview-status" aria-live="polite">${v.previewError ? `<p class="error-message">${esc(v.previewError)}</p><button type="button" class="text-button" data-action="preview-share-x" ${shareXLocked(v) ? 'disabled' : ''}>重新校验预览</button>` : current && errors.length ? errors.map(error => `<p class="error-message">${esc(typeof error === 'string' ? error : error.message || error.code || '文案校验失败')}</p>`).join('') : current && preview?.valid === false ? '<p class="error-message">当前内容未通过校验，请修改描述。</p>' : ''}${current && preview?.appended_url ? '<p class="field-hint">描述中未包含视频链接，已自动补充 YouTube 原链接。</p>' : ''}${v.previewLoading ? '<p class="field-hint">等待最新预览完成后可确认转发。</p>' : ''}</div><p class="x-share-card-note">X 将发布文案和 YouTube 链接。卡片样式及能否直接播放由 YouTube 和 X 决定。</p>`;
   }
   function shareXView(v) {
     if (!v.loaded) return shell(v,'转发到X平台','将已公开的 YouTube 视频链接分享给所选 X 账号。',v.loading ? '<div class="empty-state" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载转发信息</h3></div>' : '<div class="empty-state"><h3>转发信息加载失败</h3><button type="button" class="btn btn-secondary" data-action="reload-share-x">重新加载</button></div>','<button type="button" class="btn btn-secondary" data-action="close-modal">关闭</button>',true);
@@ -262,7 +263,7 @@
     try {
       const data = await api(shareXPath(v));
       if (!data.source || !Array.isArray(data.accounts) || !Array.isArray(data.macros) || !Array.isArray(data.history)) throw new Error('转发信息响应不完整，请重新加载。');
-      v.source = data.source; v.accounts = data.accounts; v.macros = data.macros; v.history = data.history;
+      v.source = data.source; v.accounts = data.accounts; v.macros = data.macros; v.history = data.history; v.playerCard = data.player_card;
       if (!v.loaded) v.description = String(data.default_template ?? '{title}\n\n{youtube_url}');
       v.loaded = true; v.contextError = ''; v.pollError = ''; v.pollFailures = 0;
       if (!shareXLocked(v)) v.selected = new Set(shareXSelected(v));
@@ -326,7 +327,10 @@
       // request whose response was lost. Keep that original operation frozen.
       const operationConflict = ['operation_conflict','youtube_share_idempotency_conflict','idempotency_conflict'].includes(error.code);
       if (wasUncertain || error.uncertain || operationConflict) v.uncertain = true;
-      else { v.pendingPayload = null; v.uncertain = false; v.operationId = uid(); }
+      else {
+        v.pendingPayload = null; v.uncertain = false; v.operationId = uid();
+        if (['youtube_player_unavailable','youtube_not_embeddable'].includes(error.code)) v.playerCard = {eligible:false,message:error.message};
+      }
     } finally { v.submitting = false; shareXRender(v); scheduleShareXPoll(v); }
   }
   function newShareX(v = top()) {

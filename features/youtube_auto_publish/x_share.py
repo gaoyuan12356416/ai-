@@ -10,6 +10,7 @@ import requests
 from features.x_accounts import client as x_client
 from features.x_accounts.youtube_share_text import DEFAULT_TEMPLATE, LIMIT, MACROS, canonical_url, preview
 from .templates import WorkflowError
+from .x_card import inspect_player_card
 
 
 def source_context(service, actor, task_id, *, require_public=True):
@@ -66,7 +67,11 @@ def verify_public(app, ledger, channel_id, video_id, *, repository=None, client=
         status = item.get('status') or {}
         if status.get('privacyStatus') != 'public' or status.get('uploadStatus') != 'processed':
             raise WorkflowError('youtube_not_public', 'YouTube 视频当前尚未公开或处理完成，不能转发', 409)
+        if status.get('embeddable') is not True:
+            raise WorkflowError('youtube_not_embeddable', '此视频不允许嵌入播放，不能按 YouTube 播放卡片转发', 409)
         return time.time()
+    except WorkflowError:
+        raise
     except (requests.RequestException, ValueError, TypeError, AttributeError):
         raise WorkflowError('youtube_source_unavailable', 'YouTube 视频状态查询失败，请稍后重试', 503) from None
     finally:
@@ -90,9 +95,10 @@ def _selection(payload):
     return sorted(ids), operation_id.lower(), template
 
 
-def handle(service, app, actor, task_id, action, payload=None, run_id='', *, x_request=None, source_check=None):
+def handle(service, app, actor, task_id, action, payload=None, run_id='', *, x_request=None, source_check=None, card_check=None):
     x_request = x_request or x_client.youtube_share_request
     source_check = source_check or verify_public
+    card_check = card_check or inspect_player_card
     scope = 'all' if actor.get('role') == 'admin' else 'mine'
     # Permission is checked even for polling, after deletion or status changes.
     source, values, ledger, channel_id = source_context(service, actor, task_id, require_public=action not in ('run', 'create'))
@@ -117,7 +123,8 @@ def handle(service, app, actor, task_id, action, payload=None, run_id='', *, x_r
             accounts.append({'id': account_id, 'username': str(account.get('username') or ''),
                              'name': str(account.get('name') or account.get('display_name') or ''),
                              'selectable': not reason, 'block_reason': reason})
-        return {'source': source, 'macros': [{'key': k, 'label': label, 'value': values[k]} for k, label in MACROS],
+        return {'source': source, 'player_card': card_check(source['video_id']),
+                'macros': [{'key': k, 'label': label, 'value': values[k]} for k, label in MACROS],
                 'default_template': DEFAULT_TEMPLATE, 'accounts': accounts, 'history': history, 'limit': LIMIT}
     if action == 'preview':
         return preview((payload or {}).get('description_template'), values)
@@ -133,6 +140,9 @@ def handle(service, app, actor, task_id, action, payload=None, run_id='', *, x_r
     if not rendered['valid']:
         raise WorkflowError('invalid_description', '；'.join(rendered['errors']), 400)
     verified_at = source_check(app, ledger, channel_id, source['video_id'])
+    card = card_check(source['video_id'])
+    if card.get('eligible') is not True:
+        raise WorkflowError('youtube_player_unavailable', card.get('message') or '暂时无法确认 YouTube 播放卡片', 409)
     return x_request('create', actor, scope=scope, task_id=task_id, video_id=source['video_id'],
                      youtube_url=source['youtube_url'], title=source['title'], text=rendered['text'],
                      description_template=template, operation_id=operation_id, account_ids=ids, source_verified_at=verified_at)

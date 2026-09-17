@@ -114,9 +114,13 @@ def preview(template, values):
         errors.append('宏参数格式无效，请使用单层花括号')
     text = unicodedata.normalize('NFC', text.strip())
     url = str(values.get('youtube_url') or '')
-    appended = bool(url and not any(found == url for _, _, found in _url_parts(text)))
+    urls = list(_url_parts(text))
+    appended = bool(url and not any(found == url for _, _, found in urls))
     if appended:
-        text = text + ('\n\n' if text else '') + url
+        # Prefer the video as the card source when a promotional link is used.
+        text = url + '\n\n' + text if urls else text + ('\n\n' if text else '') + url
+    elif urls and urls[0][2] != url:
+        errors.append('请将 {youtube_url} 放在其他链接之前，以 YouTube 视频作为卡片来源')
     if _INVALID.search(text): errors.append('描述含有不支持的控制字符')
     weight = weighted_length(text)
     if not text: errors.append('请填写描述')

@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(root,'static/youtube-publish.js'),'utf8
 const taskId = 'a'.repeat(32), runId = 'b'.repeat(32), videoId = 'abcDEF123_-';
 const sourceContext = {task_id:taskId,title:'A public video',video_id:videoId,youtube_url:'https://www.youtube.com/watch?v=' + videoId,channel_name:'Channel'};
 const accounts = [{id:1,name:'First',username:'first',selectable:true},{id:2,name:'Blocked',username:'blocked',selectable:false,block_reason:'授权已失效'},{id:3,name:'Third',username:'third',selectable:true}];
-const contextData = () => ({source:sourceContext,accounts,macros:[{key:'title',label:'标题',value:'A public video'},{key:'youtube_url',label:'视频链接',value:sourceContext.youtube_url},{key:'short_url',label:'推广短链',value:'https://example.invalid/short'}],default_template:'{title}\n\n{youtube_url}',history:[],limit:280});
+const contextData = () => ({source:sourceContext,accounts,player_card:{eligible:true,state:'ready'},macros:[{key:'title',label:'标题',value:'A public video'},{key:'youtube_url',label:'视频链接',value:sourceContext.youtube_url},{key:'short_url',label:'推广短链',value:'https://example.invalid/short'}],default_template:'{title}\n\n{youtube_url}',history:[],limit:280});
 const preview = text => ({text,weighted_length:45,limit:280,errors:[],appended_url:true,valid:true});
 const run = extra => ({id:runId,status:'queued',account_ids:[1,3],description_template:'{title}',text:'A public video\n\n' + sourceContext.youtube_url,items:[{account_id:1,username:'first',status:'queued'},{account_id:3,username:'third',status:'queued'}],...extra});
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -26,7 +26,7 @@ function harness() {
   assert.ok(source.includes('\n  init();\n'));
   vm.runInContext(source.replace('\n  init();\n',`\n  renderModals = () => {};\n  globalThis.ui = {state,carets,shareXDrafts,shareXBlockReason,shareXButton,shareXSelected,shareXPreviewValid,shareXRunItems,shareXRunView,shareXView,shareXAcceptRun,loadShareX,scheduleShareXPreview,updateShareXPreview,openShareX,checkShareX,submitShareX,newShareX,stopShareX,closeModal,top,rememberCaret,setApi:fn => { api = fn; },setStack:value => { stack = value; }};\n`),sandbox,{filename:'youtube-publish.js'});
   const ui=sandbox.ui;
-  function view(extra={}) { const v={type:'shareX',id:taskId,key:1,loaded:true,loading:false,source:sourceContext,accounts:plain(accounts),macros:contextData().macros,history:[],selected:new Set([1,3]),description:'{title}',operationId:sandbox.crypto.randomUUID(),previewSerial:0,preview:preview('A public video'),previewFor:'{title}',...extra};ui.setStack([v]);return v; }
+  function view(extra={}) { const v={type:'shareX',id:taskId,key:1,loaded:true,loading:false,source:sourceContext,playerCard:contextData().player_card,accounts:plain(accounts),macros:contextData().macros,history:[],selected:new Set([1,3]),description:'{title}',operationId:sandbox.crypto.randomUUID(),previewSerial:0,preview:preview('A public video'),previewFor:'{title}',...extra};ui.setStack([v]);return v; }
   function emit(type,target) { for(const fn of listeners.get(type)||[])fn({target}); }
   function click(action,id) { const button={disabled:false,dataset:{action,id},closest(){return this;}};emit('click',button); }
   return {ui,view,emit,click,nodes,timers,doc,sandbox,fire(ms){const pending=[...timers].filter(([,timer])=>timer.ms===ms);for(const [id,timer] of pending){timers.delete(id);timer.fn();}return pending.length;}};
@@ -93,8 +93,8 @@ test('out-of-order preview responses cannot overwrite the current server preview
 test('server validation, preview failure, and non-current content block submit',async () => {
   const h=harness(), v=h.view(), calls=[];
   h.ui.setApi(async(route,options)=>{calls.push({route,options});return {run:run()};});
-  for(const update of [{previewLoading:true},{previewFor:'old'},{contextError:'permissions changed'},{preview:{...preview('too long'),weighted_length:281}},{preview:{...preview('bad macro'),valid:false,errors:['未知宏参数']}},{preview:{...preview('bad format'),weighted_length:NaN}}]) {
-    Object.assign(v,{previewLoading:false,previewFor:v.description,contextError:'',preview:preview('Valid')},update);
+  for(const update of [{playerCard:{eligible:false,message:'播放卡片不可用'}},{previewLoading:true},{previewFor:'old'},{contextError:'permissions changed'},{preview:{...preview('too long'),weighted_length:281}},{preview:{...preview('bad macro'),valid:false,errors:['未知宏参数']}},{preview:{...preview('bad format'),weighted_length:NaN}}]) {
+    Object.assign(v,{playerCard:{eligible:true},previewLoading:false,previewFor:v.description,contextError:'',preview:preview('Valid')},update);
     assert.equal(h.ui.shareXPreviewValid(v),false);await h.ui.submitShareX(v);
   }
   assert.equal(calls.length,0);
@@ -152,11 +152,14 @@ test('a later authorization rejection never releases an earlier uncertain operat
 });
 
 test('an initial pre-enqueue 409 rejection restores editing and account selection',async () => {
-  for(const code of ['x_account_disabled','youtube_not_public']) {
+  for(const code of ['x_account_disabled','youtube_not_public','youtube_player_unavailable','youtube_not_embeddable']) {
     const h=harness(), v=h.view(), operation=v.operationId;
     h.ui.setApi(async()=>{throw Object.assign(new Error('尚未入队'),{status:409,code,uncertain:false});});
     await h.ui.submitShareX(v);
     assert.equal(v.uncertain,false);assert.equal(v.pendingPayload,null);assert.notEqual(v.operationId,operation);
+    if (['youtube_player_unavailable','youtube_not_embeddable'].includes(code)) {
+      assert.equal(v.playerCard.eligible,false);assert.match(h.ui.shareXView(v),/重新检查播放器/);
+    }
     h.emit('change',{dataset:{shareAccount:'1'},checked:false});
     h.emit('input',{id:'x-share-description',dataset:{},value:'Corrected text'});
     assert.equal(v.selected.has(1),false);assert.equal(v.description,'Corrected text');
@@ -213,6 +216,6 @@ test('assets keep uploader selection and add the new modal through the existing 
   assert.match(source,/material-uploader/);assert.match(source,/uploader_id/);assert.match(source,/shareX:shareXView/);
   assert.match(source,/listRevision/);assert.match(source,/taskLoadingView\(v\)/);assert.match(source,/compact:'1'/);
   assert.match(source,/retained\.setSelectionRange\(\.\.\.selection\)/);assert.match(source,/shareXButton\(t\)/);
-  assert.match(html,/youtube-publish\.js\?v=20260917-share-short-url-v1/);assert.match(html,/youtube-publish\.css\?v=20260916-share-x-v1/);
+  assert.match(html,/youtube-publish\.js\?v=20260917-share-player-v2/);assert.match(html,/youtube-publish\.css\?v=20260916-share-x-v1/);
   assert.match(css,/@media\(max-width:760px\)\{\.x-share-layout\{grid-template-columns:1fr/);
 });

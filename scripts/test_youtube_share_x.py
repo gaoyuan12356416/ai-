@@ -68,11 +68,12 @@ class BridgeTests(unittest.TestCase):
         self.network.start(); self.addCleanup(self.network.stop)
         self.x = Mock(return_value={})
         self.check = Mock(return_value=12345.0)
+        self.card = Mock(return_value={'eligible': True, 'state': 'ready'})
         self.payload = dict(operation_id='e602327e-c149-41b7-89ce-c111ae521cd4', account_ids=[7, 3], description_template='{title}\n{youtube_url}')
 
     def call(self, action='create', payload=None, actor=None):
         return share.handle(self.service, SimpleNamespace(), actor or self.actor, self.task['id'], action,
-                            payload if payload is not None else self.payload, x_request=self.x, source_check=self.check)
+                            payload if payload is not None else self.payload, x_request=self.x, source_check=self.check, card_check=self.card)
 
     def test_real_task_ownership_before_every_external_call(self):
         for actor in (self.fixture.other, self.fixture.foreign):
@@ -107,7 +108,7 @@ class BridgeTests(unittest.TestCase):
         payload = dict(self.payload, description_template='{short_url}')
         rendered = self.call('preview', payload=payload)
         self.assertTrue(rendered['valid'])
-        self.assertEqual(rendered['text'], short_url + '\n\n' + URL)
+        self.assertEqual(rendered['text'], URL + '\n\n' + short_url)
         self.assertEqual(rendered['weighted_length'], 48)
         self.call(payload=payload)
         self.assertEqual(self.x.call_args.args[0], 'create')
@@ -133,12 +134,21 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(WorkflowError): self.call()
         self.assertEqual([c.args[0] for c in self.x.call_args_list], ['query'])
 
+    def test_player_card_gate_is_exposed_and_rechecked_before_enqueue(self):
+        with patch.object(share.x_client, 'query_x_accounts', return_value={'items': []}):
+            self.assertTrue(self.call('options')['player_card']['eligible'])
+        self.card.return_value = {'eligible': False, 'state': 'not_player', 'message': '此视频只提供图片卡片'}
+        with self.assertRaises(WorkflowError) as error: self.call()
+        self.assertEqual(error.exception.code, 'youtube_player_unavailable')
+        self.assertTrue(all(c.args[0] != 'create' for c in self.x.call_args_list))
+
     def test_replay_uses_original_even_after_source_state_changes(self):
         run = dict(id='e'*32, account_ids=[3, 7], description_template=self.payload['description_template'])
         self.x.return_value = {'run': run}
         self.ledger['video_state'] = 'private'
         self.assertEqual(self.call(), {'run': run})
         self.check.assert_not_called()
+        self.card.assert_not_called()
         with self.assertRaises(WorkflowError): self.call(payload=dict(self.payload, account_ids=[3]))
 
     def test_no_premium_gate_and_blocked_accounts_show_reasons(self):
@@ -166,7 +176,7 @@ class SourceReadTests(unittest.TestCase):
     def test_live_source_identity_visibility_and_sanitized_failure(self):
         repository, client, session = Mock(), Mock(), Mock()
         client.refresh_access_token.return_value = 'DO_NOT_EXPOSE'
-        good = {'items': [{'id': VIDEO, 'snippet': {'channelId': CHANNEL}, 'status': {'privacyStatus': 'public', 'uploadStatus': 'processed'}}]}
+        good = {'items': [{'id': VIDEO, 'snippet': {'channelId': CHANNEL}, 'status': {'privacyStatus': 'public', 'uploadStatus': 'processed', 'embeddable': True}}]}
         def check(body):
             session.get.return_value = Mock(status_code=200, json=lambda: body)
             return share.verify_public(SimpleNamespace(), {}, CHANNEL, VIDEO, repository=repository, client=client, session_factory=lambda:session)
@@ -174,6 +184,10 @@ class SourceReadTests(unittest.TestCase):
         session.post.assert_not_called()
         for body in ({'items': []}, {'items': [dict(good['items'][0], id='wrong')]}, {'items': [dict(good['items'][0], status={'privacyStatus':'private','uploadStatus':'processed'})]}):
             with self.assertRaises(WorkflowError): check(body)
+        not_embeddable = copy.deepcopy(good)
+        not_embeddable['items'][0]['status']['embeddable'] = False
+        with self.assertRaises(WorkflowError) as error: check(not_embeddable)
+        self.assertEqual(error.exception.code, 'youtube_not_embeddable')
         self.assertFalse(session.trust_env)
         self.assertFalse(session.get.call_args.kwargs['allow_redirects'])
 
