@@ -181,7 +181,7 @@
   // Share drafts survive closing the dialog. An uncertain submit always keeps
   // the same operation and body; only explicit user actions can submit it.
   const shareXDrafts = new Map();
-  const shareXMacros = ['title','youtube_url','channel_name','channel_url','name','desc'];
+  const shareXMacros = ['title','youtube_url','short_url','channel_name','channel_url','name','desc'];
   const shareXItemStatuses = {queued:['等待转发','blue'],publishing:['正在转发','blue'],published:['转发成功','green'],failed:['转发失败','red'],unknown_outcome:['结果待核对','amber']};
   function shareXBlockReason(t) {
     if (!t) return '任务信息尚未加载';

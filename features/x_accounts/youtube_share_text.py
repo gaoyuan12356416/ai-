@@ -11,6 +11,7 @@ DEFAULT_TEMPLATE = '{title}\n\n{youtube_url}'
 LIMIT = 280
 MACROS = (
     ('title', '视频标题'), ('youtube_url', 'YouTube 视频链接'),
+    ('short_url', '推广短链'),
     ('channel_name', '频道名称'), ('channel_url', '频道链接'),
     ('name', '剧名'), ('desc', '剧情简介'),
 )

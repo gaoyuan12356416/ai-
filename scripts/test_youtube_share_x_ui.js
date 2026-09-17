@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(root,'static/youtube-publish.js'),'utf8
 const taskId = 'a'.repeat(32), runId = 'b'.repeat(32), videoId = 'abcDEF123_-';
 const sourceContext = {task_id:taskId,title:'A public video',video_id:videoId,youtube_url:'https://www.youtube.com/watch?v=' + videoId,channel_name:'Channel'};
 const accounts = [{id:1,name:'First',username:'first',selectable:true},{id:2,name:'Blocked',username:'blocked',selectable:false,block_reason:'授权已失效'},{id:3,name:'Third',username:'third',selectable:true}];
-const contextData = () => ({source:sourceContext,accounts,macros:[{key:'title',label:'标题',value:'A public video'},{key:'youtube_url',label:'视频链接',value:sourceContext.youtube_url}],default_template:'{title}\n\n{youtube_url}',history:[],limit:280});
+const contextData = () => ({source:sourceContext,accounts,macros:[{key:'title',label:'标题',value:'A public video'},{key:'youtube_url',label:'视频链接',value:sourceContext.youtube_url},{key:'short_url',label:'推广短链',value:'https://example.invalid/short'}],default_template:'{title}\n\n{youtube_url}',history:[],limit:280});
 const preview = text => ({text,weighted_length:45,limit:280,errors:[],appended_url:true,valid:true});
 const run = extra => ({id:runId,status:'queued',account_ids:[1,3],description_template:'{title}',text:'A public video\n\n' + sourceContext.youtube_url,items:[{account_id:1,username:'first',status:'queued'},{account_id:3,username:'third',status:'queued'}],...extra});
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -103,13 +103,16 @@ test('server validation, preview failure, and non-current content block submit',
 });
 
 test('macro insertion replaces the saved selection and restores the caret and input value',() => {
+  for (const macro of ['youtube_url','short_url']) {
   const h=harness(), v=h.view({description:'alpha replace omega'});
+  assert.ok(h.ui.shareXView(v).includes('data-macro="' + macro + '"'));
   const input={id:'x-share-description',dataset:{},value:v.description,disabled:false,selectionStart:6,selectionEnd:13,matches:()=>true,focus(){h.doc.activeElement=this;},setRangeText(text,start,end){this.value=this.value.slice(0,start)+text+this.value.slice(end);this.selectionStart=this.selectionEnd=start+text.length;},dispatchEvent(event){h.emit(event.type,this);}};
   h.nodes.set('#x-share-description',input);h.ui.rememberCaret(input);
-  const button={disabled:false,dataset:{action:'insert-macro',target:'x-share-description',macro:'youtube_url'},closest(){return this;}};
+  const button={disabled:false,dataset:{action:'insert-macro',target:'x-share-description',macro},closest(){return this;}};
   h.emit('click',button);
-  assert.equal(input.value,'alpha {youtube_url} omega');assert.equal(v.description,input.value);
-  assert.equal(input.selectionStart,19);assert.equal(input.selectionEnd,19);assert.equal(h.doc.activeElement,input);
+  assert.equal(input.value,'alpha {' + macro + '} omega');assert.equal(v.description,input.value);
+  assert.equal(input.selectionStart,8 + macro.length);assert.equal(input.selectionEnd,8 + macro.length);assert.equal(h.doc.activeElement,input);
+  }
 });
 
 test('uncertain submission freezes the exact operation and payload across close and reopen',async () => {
@@ -210,6 +213,6 @@ test('assets keep uploader selection and add the new modal through the existing 
   assert.match(source,/material-uploader/);assert.match(source,/uploader_id/);assert.match(source,/shareX:shareXView/);
   assert.match(source,/listRevision/);assert.match(source,/taskLoadingView\(v\)/);assert.match(source,/compact:'1'/);
   assert.match(source,/retained\.setSelectionRange\(\.\.\.selection\)/);assert.match(source,/shareXButton\(t\)/);
-  assert.match(html,/youtube-publish\.js\?v=20260916-share-x-v1/);assert.match(html,/youtube-publish\.css\?v=20260916-share-x-v1/);
+  assert.match(html,/youtube-publish\.js\?v=20260917-share-short-url-v1/);assert.match(html,/youtube-publish\.css\?v=20260916-share-x-v1/);
   assert.match(css,/@media\(max-width:760px\)\{\.x-share-layout\{grid-template-columns:1fr/);
 });

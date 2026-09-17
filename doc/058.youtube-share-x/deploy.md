@@ -9,3 +9,5 @@
 短暂暂停当前活动X manual/schedule/claim/auto runner/auto scheduler触发器，确认无发送中任务后切换；只重启API和X OAuth sidecar，YouTube worker保持运行。finally恢复此前活动触发器。不清空原台账。
 
 回滚用同一发布脚本 `--rollback <backup>`；校验当前版本未漂移且无待处理分享，恢复主文件并切回旧sidecar，保留所有数据库。健康检查失败自动回滚。具体commit和验证记录见release-result.md。
+
+2026-09-17 短链宏增量用 `scripts/deploy_youtube_share_short_url.py --commit <GitHub精确commit> [--check]`：校验当前已部署的四份源文件，只更新主站 bridge/text helper 和 JS/HTML，静态资源双目录同步。先备份六个目标文件，再仅重启主 API。X sidecar 使用的 URL 校验/权重函数无改动，保持其 release 和运行进程，YouTube worker 同样持续运行。无数据库迁移、短链生成或平台发布。增量回滚入口为同一脚本 `--rollback <本次backup>`，可加 `--check` 仅验证回滚条件。

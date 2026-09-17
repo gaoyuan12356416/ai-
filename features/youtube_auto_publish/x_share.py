@@ -33,7 +33,9 @@ def source_context(service, actor, task_id, *, require_public=True):
     }
     material = body.get('material') or {}
     values = {key: source.get(key, '') for key, _ in MACROS}
-    values.update(name=str(material.get('macro_name') or ''), desc=str(material.get('macro_desc') or ''))
+    # Reuse this task's frozen promotional link; never reserve or rebuild a link here.
+    values.update(short_url=str(material.get('macro_url') or ''),
+                  name=str(material.get('macro_name') or ''), desc=str(material.get('macro_desc') or ''))
     return source, values, ledger, channel_id
 
 

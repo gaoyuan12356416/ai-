@@ -97,6 +97,37 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(data['youtube_url'], URL); self.assertIn(URL, data['text'])
         self.check.assert_called_once()
 
+    def test_short_url_reuses_frozen_task_link_in_options_preview_and_create(self):
+        self.fixture.short_link.reset_mock()
+        self.fixture.short_link.side_effect = AssertionError('must not generate another link')
+        with patch.object(share.x_client, 'query_x_accounts', return_value={'items': []}):
+            options = self.call('options')
+        short_url = next(m['value'] for m in options['macros'] if m['key'] == 'short_url')
+        self.assertEqual(short_url, 'https://example.invalid/short-for-tests')
+        payload = dict(self.payload, description_template='{short_url}')
+        rendered = self.call('preview', payload=payload)
+        self.assertTrue(rendered['valid'])
+        self.assertEqual(rendered['text'], short_url + '\n\n' + URL)
+        self.assertEqual(rendered['weighted_length'], 48)
+        self.call(payload=payload)
+        self.assertEqual(self.x.call_args.args[0], 'create')
+        self.assertEqual(self.x.call_args.kwargs['text'], rendered['text'])
+        self.fixture.short_link.assert_not_called()
+
+    def test_missing_short_link_blocks_only_templates_that_use_it(self):
+        with self.service.db() as connection:
+            _, body = self.service._row(connection, self.task['id'], self.actor)
+            body['material'].pop('macro_url', None)
+            self.service._save(connection, body)
+        payload = dict(self.payload, description_template='{short_url}')
+        rendered = self.call('preview', payload=payload)
+        self.assertFalse(rendered['valid'])
+        self.assertIn('推广短链为空，请修改描述', rendered['errors'])
+        with self.assertRaises(WorkflowError): self.call(payload=payload)
+        self.check.assert_not_called()
+        self.assertTrue(all(c.args[0] != 'create' for c in self.x.call_args_list))
+        self.assertTrue(self.call('preview')['valid'])
+
     def test_live_public_failure_prevents_enqueue(self):
         self.check.side_effect = WorkflowError('youtube_not_public', 'private', 409)
         with self.assertRaises(WorkflowError): self.call()
