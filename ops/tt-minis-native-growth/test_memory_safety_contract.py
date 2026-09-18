@@ -76,6 +76,9 @@ class MemorySafetyContractTest(unittest.TestCase):
         self.module = load_generator()
         self.module.bj_now = lambda: datetime(2026, 8, 7, 16, 0, 0)
         self.validation = {"type": "skipped", "checks": [], "warnings": []}
+        self.module.cache_partition_revisions = lambda start, end: {
+            (level, day): {"refreshed_at": "2026-08-07 16:00:00", "row_count": 1}
+            for level in self.module.METRIC_LEVELS for day in self.module.each_date(start, end)}
         self.rows = [
             sample_row(self.module, "2026-08-06", "1001", "2001", 10.25),
             sample_row(self.module, "2026-08-06", "1001", "2001", 5.75),
@@ -255,7 +258,7 @@ class MemorySafetyContractTest(unittest.TestCase):
             paths = [item["path"] for files in manifest["data_files"].values() for item in files.values()]
             self.assertEqual(2, len(paths))
             for rel in paths:
-                self.assertRegex(rel, r"^data/20260807160000-\d+/(campaign|ad)/2026-08-07\.json$")
+                self.assertRegex(rel, r"^data/20260807160000-\d+-[0-9a-f]+/(campaign|ad)/2026-08-07\.json$")
                 self.assertTrue((output_dir / rel).is_file())
 
     def test_stale_cleanup_runs_after_grace_and_preserves_live_paths(self):

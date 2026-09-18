@@ -5,6 +5,7 @@
 import argparse
 import csv
 import collections
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -28,6 +30,7 @@ DEFAULT_DAYS = 60
 CACHE_REFRESH_DAYS = 2
 CACHE_RETENTION_DAYS = 60
 PUBLISHED_FILE_STALE_GRACE_SECONDS = 24 * 60 * 60
+PARTITION_FORMAT_VERSION = 1
 SAMPLE_VALIDATION_DAYS = 3
 SAMPLE_VALIDATION_TOP_ADS = 200
 DRAMAWAVE_TT_MINIS_PRODUCT_IDS = ("1479", "3346")
@@ -904,7 +907,7 @@ def missing_cache_dates(start_date, end_date, metric_level=DEFAULT_METRIC_LEVEL)
 
 def refresh_cache(start_date, end_date, metric_levels=None):
     levels = [normalize_metric_level(level) for level in (metric_levels or METRIC_LEVELS.keys())]
-    refreshed_at = bj_now().strftime("%Y-%m-%d %H:%M:%S")
+    refreshed_at = bj_now().strftime("%Y-%m-%d %H:%M:%S.%f")
     results = []
     with cache_conn() as conn:
         ensure_cache_schema(conn)
@@ -1319,17 +1322,80 @@ def published_data_version(payload):
     timestamp = re.sub(r"[^0-9]", "", generated_at)[:14]
     if not timestamp:
         timestamp = bj_now().strftime("%Y%m%d%H%M%S")
-    return "%s-%s" % (timestamp, os.getpid())
+    return "%s-%s-%s" % (timestamp, os.getpid(), uuid.uuid4().hex[:8])
+
+
+def cache_partition_revisions(start_date, end_date):
+    """Small read-only ledger query; never create/initialize a cache here."""
+    conn = sqlite3.connect(CACHE_DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        return {(level, day): {"refreshed_at": refreshed, "row_count": count}
+                for level, day, count, refreshed in conn.execute(
+                    "SELECT metric_level, dt, row_count, refreshed_at "
+                    "FROM tt_minis_multi_dim_refresh_log WHERE dt BETWEEN ? AND ?",
+                    (start_date, end_date))}
+    finally:
+        conn.close()
+
+
+def partition_revision(revision):
+    contract = [PARTITION_FORMAT_VERSION, SOURCE_COLUMNS, ROW_COLUMNS, DICT_COLUMNS,
+                DIMENSIONS, METRICS, revision]
+    return hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
+
+
+def read_previous_manifest(output_dir):
+    path = output_dir / "latest.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def detail_path(output_dir, rel):
+    """Reject traversal/symlink escapes in manifests before using their paths."""
+    path = output_dir / rel
+    root = (output_dir / "data").resolve()
+    if not rel.startswith("data/") or root not in path.resolve().parents:
+        raise RuntimeError("Invalid published detail path")
+    return path
+
+
+def commit_published_manifest(output_dir, manifest, payload):
+    # Retirement time, NOT detail mtime, starts the old-reader grace period.
+    previous = read_previous_manifest(output_dir)
+    if previous:
+        archive = output_dir / "manifest-history" / (uuid.uuid4().hex + ".json")
+        atomic_write(archive, json.dumps(previous, ensure_ascii=False, separators=(",", ":")))
+    # Prepare HTML before the manifest commit point; a failure preserves latest.
+    atomic_write(output_dir / "index.html", html_template(payload))
+    atomic_write(output_dir / "latest.json", json.dumps(manifest, ensure_ascii=False, separators=(",", ":")))
+    keep = {item["path"] for files in manifest["data_files"].values() for item in files.values()}
+    return prune_stale_published_files(output_dir / "data", keep)
 
 
 def prune_stale_published_files(data_dir, keep_paths, now=None):
     """Remove old unreferenced detail files only after a new manifest is live."""
     cutoff = (time.time() if now is None else now) - PUBLISHED_FILE_STALE_GRACE_SECONDS
     root = data_dir.parent
+    keep_paths = set(keep_paths)
+    expired_archives = []
+    try:
+        for archive in (root / "manifest-history").glob("*.json"):
+            if archive.stat().st_mtime <= cutoff:
+                expired_archives.append(archive)
+                continue
+            manifest = json.loads(archive.read_text(encoding="utf-8"))
+            for files in manifest["data_files"].values():
+                for item in files.values():
+                    detail_path(root, item["path"])
+                    keep_paths.add(item["path"])
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        print("Published file cleanup skipped: invalid manifest history (%s)" % type(exc).__name__, file=sys.stderr)
+        return 0
     removed = 0
     for old in data_dir.glob("**/*.json"):
         rel = old.relative_to(root).as_posix()
         if rel in keep_paths:
+            continue
+        if old.is_symlink() or data_dir.resolve() not in old.resolve().parents:
             continue
         try:
             if old.stat().st_mtime > cutoff:
@@ -1346,6 +1412,11 @@ def prune_stale_published_files(data_dir, keep_paths, now=None):
     for directory in directories:
         try:
             directory.rmdir()
+        except OSError:
+            pass
+    for archive in expired_archives:
+        try:
+            archive.unlink()
         except OSError:
             pass
     return removed
@@ -1512,15 +1583,12 @@ def publish(payload, output_dir, rows_by_level=None):
             rel = "data/%s/%s/%s.json" % (data_version, level, day)
             atomic_write(output_dir / rel, json.dumps(day_payload, ensure_ascii=False, separators=(",", ":")))
             manifest["data_files"][level][day] = {"path": rel, "row_count": len(grouped[day])}
-    data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
-    atomic_write(output_dir / "latest.json", data)
-    atomic_write(output_dir / "index.html", html_template(payload))
-    keep_paths = {item["path"] for files in manifest["data_files"].values() for item in files.values()}
-    prune_stale_published_files(data_dir, keep_paths)
+    commit_published_manifest(output_dir, manifest, payload)
     return output_dir / "index.html"
 
 
 def publish_from_cache(payload, output_dir, start_date, end_date):
+    started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -1529,10 +1597,27 @@ def publish_from_cache(payload, output_dir, start_date, end_date):
     manifest["dicts"] = {}
     manifest["data_files"] = {}
     data_version = published_data_version(payload)
+    previous = read_previous_manifest(output_dir)
+    revisions = cache_partition_revisions(start_date, end_date)
+    stats = {"written_partitions": 0, "reused_partitions": 0, "written_bytes": 0}
     for level in METRIC_LEVELS:
         manifest["data_files"][level] = {}
         for day in each_date(start_date, end_date):
+            revision = revisions.get((level, day))
+            if revision is None:
+                raise RuntimeError("Missing cache revision for %s/%s" % (level, day))
+            token = partition_revision(revision)
+            old = ((previous.get("data_files") or {}).get(level) or {}).get(day) or {}
+            if old.get("revision") == token and old.get("path"):
+                existing = detail_path(output_dir, old["path"])
+                if (existing.is_file() and existing.stat().st_size == old.get("bytes")
+                        and old.get("row_count") == revision["row_count"]):
+                    manifest["data_files"][level][day] = old
+                    stats["reused_partitions"] += 1
+                    continue
             day_rows = fetch_rows_from_cache(day, day, level)
+            if len(day_rows) != revision["row_count"]:
+                raise RuntimeError("Cache row count changed for %s/%s" % (level, day))
             if not day_rows:
                 continue
             day_payload = build_payload(
@@ -1543,16 +1628,22 @@ def publish_from_cache(payload, output_dir, start_date, end_date):
                 include_rows=True,
                 metric_level=level,
             )
+            day_payload["meta"]["source_refreshed_at"] = revision["refreshed_at"]
             rel = "data/%s/%s/%s.json" % (data_version, level, day)
             (output_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(output_dir / rel, json.dumps(day_payload, ensure_ascii=False, separators=(",", ":")))
-            manifest["data_files"][level][day] = {"path": rel, "row_count": len(day_rows)}
+            content = json.dumps(day_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            atomic_write(output_dir / rel, content, binary=True)
+            manifest["data_files"][level][day] = {"path": rel, "row_count": len(day_rows),
+                "revision": token, "bytes": len(content), "source_refreshed_at": revision["refreshed_at"]}
+            stats["written_partitions"] += 1
+            stats["written_bytes"] += len(content)
             del day_rows
-    data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
-    atomic_write(output_dir / "latest.json", data)
-    atomic_write(output_dir / "index.html", html_template(payload))
-    keep_paths = {item["path"] for files in manifest["data_files"].values() for item in files.values()}
-    prune_stale_published_files(data_dir, keep_paths)
+    if cache_partition_revisions(start_date, end_date) != revisions:
+        raise RuntimeError("Cache revisions changed during publication; previous manifest retained")
+    manifest["publication"] = stats
+    stats["removed_files"] = commit_published_manifest(output_dir, manifest, payload)
+    stats["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    print("partition_publish " + json.dumps(stats, sort_keys=True), file=sys.stderr)
     return output_dir / "index.html"
 
 

@@ -34,3 +34,49 @@ Validation must include mount refusal, low-space refusal, root-path refusal,
 an actual snapshot backup/check on the server, a SQLite write using the exec
 entrypoint, and post-migration filesystem usage. Do not send test business
 messages or rebuild/publish a report merely to test this storage change.
+
+## Snapshot lifecycle (2026-09-18)
+
+`snapshot --owner <analysis-task>` still prints exactly one SQLite path. Requests
+serialize on a kernel lock and reuse a validated snapshot when the source DB,
+WAL/journal and snapshot identity have not changed. A source changing during
+backup produces a valid snapshot but is deliberately ineligible for reuse.
+
+New snapshots have a 24-hour lease, seven-day idle retention, and a 40 GiB
+managed-pool ceiling. The latest two, open files, explicit pins, code/config
+references and active leases are protected. If the ceiling cannot be met safely,
+creation stops; it never evicts protected inputs or falls back to the root disk.
+Legacy/unregistered snapshots are excluded from automatic deletion and the
+managed-pool ceiling; retire those only from an explicitly audited inventory.
+
+For a longer analysis: `lease <snapshot> --owner <task> --hours 72`.
+For permanent evidence: `pin <snapshot> --owner <reason>`; remove that explicit
+pin with `unpin <snapshot> --owner <reason>` when no longer needed. References
+outside the configured code/config roots must use a lease/pin. Do not create
+new full copies manually or modify immutable registered snapshots.
+
+`prune` previews managed cleanup; `prune --apply` performs it. Hourly low-priority
+maintenance uses this entrypoint. All lifecycle operations share the same lock.
+`retire --manifest <audited.json>` previews legacy cleanup; adding `--apply`
+rechecks source references, latest two, active descriptors, leases/pins, exact
+inode/size/mtime/link count and path containment immediately before retirement.
+The audit inventory and execution receipt must be retained outside the snapshots.
+
+## Incremental publication
+
+The 60-day/two-level data contract and 24-hour reader grace stay unchanged.
+Each partition records a format/schema signature plus refresh-log timestamp and
+row count. An unchanged partition reuses its immutable path and is not read from
+SQLite again; historical backfills invalidate just the affected partitions.
+Missing/truncated files rebuild. Missing/changing revisions or mismatched row
+counts abort before replacing `latest.json`.
+
+The first upgraded publication builds the version index once. Old manifests are
+archived at retirement and protect all referenced files for another 24 hours,
+regardless of detail file age. Malformed history disables cleanup. Never run
+mtime-only cleanup independently against the shared immutable partition pool.
+Changing serialization/calculation semantics requires bumping
+`PARTITION_FORMAT_VERSION` even when columns do not change.
+
+`partition_publish` logs written/reused partitions, bytes, cleanup count and
+elapsed seconds. Snapshot retention does not change business-cache retention.
