@@ -26,7 +26,8 @@ class StorageGuardTests(unittest.TestCase):
     def test_root_database_is_rejected(self):
         with patch.object(storage.subprocess, 'check_output', return_value=storage.EXPECTED_UUID.encode()), patch.object(storage.os.path, 'ismount', return_value=True), patch.object(storage.os, 'access', return_value=True), patch.object(storage.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 10 * 1024**3})()):
             with self.assertRaisesRegex(RuntimeError, 'resolve'):
-                storage.prepare_storage(Path(tempfile.gettempdir()) / 'root-backed.sqlite3')
+                # Server tests intentionally set TMPDIR to the verified data disk.
+                storage.prepare_storage(Path('/root/root-backed.sqlite3'))
 
 
 if __name__ == '__main__':
