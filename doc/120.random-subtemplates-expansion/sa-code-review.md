@@ -1,3 +1,5 @@
 # 代码评审
 
-待实现与测试完成后记录最终结果。变更限定为新增资产/可信目录helper/TT旧ready复用/Drama入口选择，部署不替换CPU业务代码或FB并发版本。
+独立只读评审通过：Drama旧SHA选择、CPU严格manifest schema、TT独立版本搭配和共享helper一致性均符合约束。发现stage目录会受umask077影响，已显式设定assets父目录与staging目录0755，生产另以Drama服务UID读目录校验。
+
+变更限定为新增资产/可信目录helper/TT旧ready复用/Drama入口选择，部署不替换CPU业务代码或FB并发版本。Git中manifest使用-text保留精确字节，已验证Git blob SHA256与配置一致。

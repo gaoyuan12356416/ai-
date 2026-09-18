@@ -28,9 +28,13 @@ def main():
         assets = load_asset_set(target, metadata["manifest_sha256"])
         print(json.dumps({"reused": True, "root": str(target), "counts": {k: len(v) for k,v in assets["categories"].items()}}))
         return
+    if target.parent.is_symlink():
+        raise RuntimeError("stage_parent_symlink_invalid")
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    target.parent.chmod(0o755)
     staging = target.with_name(target.name + ".staging")
     staging.mkdir(mode=0o755)
+    staging.chmod(0o755)  # Remain readable by the Drama service under umask 077.
     for rows in base["categories"].values():
         for item in rows:
             shutil.copyfile(item["path"], staging / item["name"])
