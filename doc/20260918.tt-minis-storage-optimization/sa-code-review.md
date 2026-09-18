@@ -4,4 +4,4 @@
 
 确认边界：40 GiB 限额只覆盖新登记池，原有受保护历史输入不自动纳管/删除。外部新消费者应登记 lease/pin；不要绕过刷新入口修改在线主库。编码或计算语义改变要提升 PARTITION_FORMAT_VERSION。
 
-本地 69 项测试通过，其中 2 项 Linux 专属跳过。compileall 和 diff --check 通过。发布前服务器补测。
+本地 71 项测试通过，其中 2 项 Linux 专属跳过。compileall 和 diff --check 通过。服务器 71 项全部通过，含真实 FD 与并发 SQLite 备份。
