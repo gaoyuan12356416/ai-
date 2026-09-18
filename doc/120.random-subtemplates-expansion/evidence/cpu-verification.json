@@ -1,0 +1,51 @@
+{
+  "time": "2026-09-18T18:22:22+08:00",
+  "host": "VM-0-108-centos",
+  "services": {
+    "drama-material-api.service": "MainPID=1684761\nNRestarts=0\nActiveState=active",
+    "drama-material-job-worker.service": "MainPID=1684812\nNRestarts=0\nActiveState=active"
+  },
+  "catalogs": {
+    "drama-material-api.service": {
+      "border": 8,
+      "corners": 8,
+      "opacity_video": 10,
+      "tint": 12
+    },
+    "drama-material-job-worker.service": {
+      "border": 8,
+      "corners": 8,
+      "opacity_video": 10,
+      "tint": 12
+    }
+  },
+  "public_topbar_status": 200,
+  "maintenance_records": {
+    "tt-triggers.json": {
+      "restored": true,
+      "original": {
+        "tt-post-prepare.timer": "active",
+        "tt-post-prepare.path": "inactive",
+        "tt-post-runner.timer": "active",
+        "tt-post-runner.path": "inactive",
+        "tt-auto-post-scheduler.timer": "active",
+        "tt-auto-post-runner.timer": "active",
+        "tt-auto-post-runner.path": "inactive"
+      },
+      "current": {
+        "units": {
+          "tt-post-prepare.timer": "active",
+          "tt-post-prepare.path": "inactive",
+          "tt-post-runner.timer": "active",
+          "tt-post-runner.path": "inactive",
+          "tt-auto-post-scheduler.timer": "active",
+          "tt-auto-post-runner.timer": "active",
+          "tt-auto-post-runner.path": "inactive"
+        },
+        "cron": null
+      }
+    }
+  },
+  "fb_prepare_timer": "active",
+  "ok": true
+}

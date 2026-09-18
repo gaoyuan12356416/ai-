@@ -1,0 +1,68 @@
+{
+  "time": "2026-09-18T18:22:20+08:00",
+  "host": "VM-0-125-centos",
+  "services": {
+    "drama-synthesis-gpu-worker.service": "MainPID=1613067\nNRestarts=0\nActiveState=active",
+    "tt-gpu-publisher.service": "MainPID=1613076\nNRestarts=0\nActiveState=active",
+    "fb-page-random-overlay-gpu.service": "MainPID=1613078\nNRestarts=0\nActiveState=active"
+  },
+  "catalogs": {
+    "drama-synthesis-gpu-worker.service": {
+      "root": "/data/drama-synthesis-gpu/assets/catalog-24d6fad3174f",
+      "sha256": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+      "counts": {
+        "border": 8,
+        "corners": 8,
+        "light": 2,
+        "opacity_video": 10,
+        "tint": 12
+      },
+      "legacy_manifest_unchanged": true
+    },
+    "tt-gpu-publisher.service": {
+      "root": "/data/random-overlay-gpu/assets/catalog-24d6fad3174f",
+      "sha256": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+      "counts": {
+        "border": 8,
+        "corners": 8,
+        "light": 2,
+        "opacity_video": 10,
+        "tint": 12
+      },
+      "legacy_manifest_unchanged": true
+    },
+    "fb-page-random-overlay-gpu.service": {
+      "root": "/data/random-overlay-gpu/assets/catalog-24d6fad3174f",
+      "sha256": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+      "counts": {
+        "border": 8,
+        "corners": 8,
+        "light": 2,
+        "opacity_video": 10,
+        "tint": 12
+      }
+    }
+  },
+  "cache_coverage": {
+    "/data/random-overlay-gpu/asset-cache-v1": {
+      "entries": 38,
+      "bytes": 31489548494
+    },
+    "/data/drama-synthesis-gpu/assets/rgba-nut-demux-v2": {
+      "entries": 38,
+      "bytes": 31489547789
+    }
+  },
+  "drama_live_http_catalog": {
+    "border": 8,
+    "opacity_video": 10,
+    "corners": 8,
+    "tint": 12
+  },
+  "git": {
+    "/data/drama-synthesis-gpu/current": "9c4c3cb4eca260d46df8ab23443a32cda667c20c",
+    "/data/tt-post-gpu/random-current": "326e16defb8f0b1aec76e8f36d52bb6359275a98"
+  },
+  "fb_release": "/data/random-overlay-gpu/releases/e3bef98",
+  "ok": true
+}

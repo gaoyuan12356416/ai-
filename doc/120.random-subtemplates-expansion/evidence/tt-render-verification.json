@@ -1,0 +1,9 @@
+{
+  "lane": "tt",
+  "codec": "hevc",
+  "width": 720,
+  "height": 1280,
+  "seconds": 5.0,
+  "catalog": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+  "no_upload_or_publish": true
+}
