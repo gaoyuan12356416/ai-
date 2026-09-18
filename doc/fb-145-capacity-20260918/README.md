@@ -6,10 +6,16 @@ changing limits alone does not expand those immutable snapshots.
 
 The production publisher claimed only four tasks every two minutes. Its ten-minute
 late cutoff therefore skipped the last three Pages even in a 23-Page run. The
-publisher and reconciler now refill four bounded lanes until idle or a time budget.
+publisher now refills eight bounded lanes, and the reconciler four, until idle or a time budget.
 Preparation refills two lanes, ordered by the existing publish deadline. Every
 runner finishes in-flight requests before exiting; systemd timeouts exceed both
 the claim budget and the longest in-flight request.
+
+Ten production batches of four claims took 22.93–57.72 seconds on September 18.
+The expanded pool therefore uses a 30-minute automatic claim window, a 30-minute
+publisher drain budget and a 60-minute service timeout. The shared Graph request
+interval remains 0.5 seconds. Already skipped tasks stay terminal. Calendar
+prebuilding reaches the day after tomorrow, always ordered by publish deadline.
 
 Capacity defaults are 200 jobs per slot and 1000 per day. The GPU preparation-only
 worker supports at most two jobs with per-job serialization, a shared cleanup
