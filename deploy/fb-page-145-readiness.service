@@ -1,0 +1,17 @@
+[Unit]
+Description=Read-only readiness audit for September 18-19 FB Page experiment
+After=fb-auto-post-service.service
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=fb-auto-post
+Group=fb-auto-post
+WorkingDirectory=/opt/fb-auto-post/current
+ExecStart=/usr/bin/python3 scripts/fb_page_readiness_watch.py --db /mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3 --scope /mnt/data-disk/fb-auto-post-publisher/health/145-page/scope.json --output-dir /mnt/data-disk/fb-auto-post-publisher/health/145-page
+TimeoutStartSec=30
+CPUQuota=20%
+MemoryMax=256M
+Nice=10
+NoNewPrivileges=yes
+UMask=0077

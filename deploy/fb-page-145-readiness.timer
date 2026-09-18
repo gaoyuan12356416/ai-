@@ -1,0 +1,12 @@
+[Unit]
+Description=Finite server-side FB Page checks; no Codex automation
+
+[Timer]
+OnCalendar=2026-09-18 *:0/5:45 Asia/Shanghai
+OnCalendar=2026-09-19 *:0/5:45 Asia/Shanghai
+OnCalendar=2026-09-20 00:30:45 Asia/Shanghai
+Persistent=true
+Unit=fb-page-145-readiness.service
+
+[Install]
+WantedBy=timers.target
