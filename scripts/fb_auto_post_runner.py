@@ -22,7 +22,7 @@ from features.fb_auto_posts.validation import valid_internal_bearer
 
 ROUTE_TIMEOUT_SECONDS = {
     "/internal/fb-auto-post/tick": 50,
-    "/internal/fb-auto-post/plan-next": 1800,
+    "/internal/fb-auto-post/plan-next": 3600,
     "/internal/fb-auto-post/prepare-next": 9600,
     "/internal/fb-auto-post/execute-next": 1300,
     "/internal/fb-auto-post/reconcile-next": 1300,
