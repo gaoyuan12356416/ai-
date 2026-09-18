@@ -1,0 +1,159 @@
+{
+  "base_manifest_sha256": "028326ab211418934b026c227f2e3707553cce7560551dca3c0bfddc681d566f",
+  "manifest_sha256": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+  "dimensions": [
+    720,
+    1280
+  ],
+  "video_fps": 30,
+  "video_frames": 120,
+  "counts": {
+    "border": 8,
+    "corners": 8,
+    "light": 2,
+    "opacity_video": 10,
+    "tint": 12
+  },
+  "additions": [
+    {
+      "id": "B01",
+      "name": "香槟双线",
+      "category": "border",
+      "file": "border-04.png",
+      "sha256": "84f02beb94fd260f15fbb40878aa8f9a6b81b60a09d791805bd7bba3132df007"
+    },
+    {
+      "id": "B02",
+      "name": "冷银切角",
+      "category": "border",
+      "file": "border-05.png",
+      "sha256": "a6402912361bf02c300a1122d586a35317c3083bb3113faac70e5ae7478f7ab8"
+    },
+    {
+      "id": "B03",
+      "name": "奶油胶片",
+      "category": "border",
+      "file": "border-06.png",
+      "sha256": "89fa77c4041ef0c03304f932d2e96e47b1082200fb4580a4c7b2bc62a70cffa2"
+    },
+    {
+      "id": "B04",
+      "name": "雾紫柔边",
+      "category": "border",
+      "file": "border-07.png",
+      "sha256": "3a4bf302f51f501ea3aa4149a675ec406b58db4adc0f972317d5ca69d8f0b651"
+    },
+    {
+      "id": "B05",
+      "name": "青玉竹影",
+      "category": "border",
+      "file": "border-08.png",
+      "sha256": "0d122571962ae91fa99615a58f7018e36ef27413fbbd87d50ccc0ce62486d825"
+    },
+    {
+      "id": "V01",
+      "name": "金色浮尘",
+      "category": "opacity_video",
+      "file": "opacity-video-06.webm",
+      "sha256": "f4087bcb21eca2c566b8c778f7612491081a85617c74076ccb5031976fe75925"
+    },
+    {
+      "id": "V02",
+      "name": "玫瑰散景",
+      "category": "opacity_video",
+      "file": "opacity-video-07.webm",
+      "sha256": "c997a69e8db6559e89ca01780850edd086eba28294773ed240c6c7422703406f"
+    },
+    {
+      "id": "V03",
+      "name": "月蓝细雨",
+      "category": "opacity_video",
+      "file": "opacity-video-08.webm",
+      "sha256": "3d49119d05f5994931f1fe852823f9ed4d4bac21dd2f22163a66ba96872b4cb9"
+    },
+    {
+      "id": "V04",
+      "name": "青紫极光",
+      "category": "opacity_video",
+      "file": "opacity-video-09.webm",
+      "sha256": "aa37b68792e8c4f95a66f7c081cf47756c8ae1f4141850c3ab2658cd5e497f5d"
+    },
+    {
+      "id": "V05",
+      "name": "银白星屑",
+      "category": "opacity_video",
+      "file": "opacity-video-10.webm",
+      "sha256": "9b8b0ef3424f4c66a55c0eb70da78dd4d414bfe943c8237311b86dd16ea26c32"
+    },
+    {
+      "id": "C01",
+      "name": "金色星芒",
+      "category": "corners",
+      "file": "corners-04.webm",
+      "sha256": "9da3392ad28500837049e64112052c8068a0ac22bd810055472509bed8cfdfe6"
+    },
+    {
+      "id": "C02",
+      "name": "薄荷扫描",
+      "category": "corners",
+      "file": "corners-05.webm",
+      "sha256": "d0d2188f9a5bcb84598f97171f423874fef3fdcb091cb947cd203124a542362d"
+    },
+    {
+      "id": "C03",
+      "name": "玫瑰心跳",
+      "category": "corners",
+      "file": "corners-06.webm",
+      "sha256": "524f3ae037a4adf2fbaac2f90de2b85edefd07381189d3fcfa20c4abeb275ec0"
+    },
+    {
+      "id": "C04",
+      "name": "银月轨道",
+      "category": "corners",
+      "file": "corners-07.webm",
+      "sha256": "849fbbbac1b48e114d53d57392b55b4051fe8ec07c1e12e0b56ef8a64395c209"
+    },
+    {
+      "id": "C05",
+      "name": "琥珀纸签",
+      "category": "corners",
+      "file": "corners-08.webm",
+      "sha256": "dd852f4fd2d7b9021d353f0f565288920c505ca3bd3d7845367d03b981fd75ef"
+    },
+    {
+      "id": "T01",
+      "name": "琥珀暖光",
+      "category": "tint",
+      "file": "tint-08.png",
+      "sha256": "a497cc542c4f7527675060d09b3a9c67e419a219d41795e29502f9797ae189e9"
+    },
+    {
+      "id": "T02",
+      "name": "冰蓝冷调",
+      "category": "tint",
+      "file": "tint-09.png",
+      "sha256": "b68a1af7e27b7cdf161bd100ac897b0442a0008b8ac7b174be729df8ee7e10a5"
+    },
+    {
+      "id": "T03",
+      "name": "玫瑰柔粉",
+      "category": "tint",
+      "file": "tint-10.png",
+      "sha256": "b6fea6d8ad50372a285c8241792494741b916784fb3bccb2c7c38539c8bf438d"
+    },
+    {
+      "id": "T04",
+      "name": "青绿电影",
+      "category": "tint",
+      "file": "tint-11.png",
+      "sha256": "f3b47358a080d6a4bfe39e56387eee18bd81e8271d3b34fc8766958fd72dc8ff"
+    },
+    {
+      "id": "T05",
+      "name": "紫暮双色",
+      "category": "tint",
+      "file": "tint-12.png",
+      "sha256": "25677a81416e8e84aa4ed3d9425823d64127d6216ca9827266dacc2040c19d0b"
+    }
+  ]
+}

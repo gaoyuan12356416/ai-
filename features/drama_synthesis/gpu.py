@@ -1058,6 +1058,19 @@ def render_random_output(
     timeout: Optional[int] = None,
     runner=None,
 ) -> Dict[str, Any]:
+    # Jobs freeze this SHA at creation. Keep historical catalogs selectable
+    # from trusted deployment configuration when the default pool expands.
+    from features.random_overlay_catalog import AssetCatalogError, resolve_asset_catalog
+    try:
+        asset_root, manifest_sha256 = resolve_asset_catalog(
+            asset_root=asset_root,
+            manifest_sha256=manifest_sha256,
+            requested_sha256=recipe.get("asset_set_sha256"),
+        )
+    except AssetCatalogError as exc:
+        raise DramaSynthesisError(
+            "drama_template_catalog_unavailable", "随机模板目录版本不可用", 503
+        ) from exc
     backend = compositor_backend()
     if backend == "opencl_fused_v2":
         from .gpu_compositor import render_chunked_random_output
