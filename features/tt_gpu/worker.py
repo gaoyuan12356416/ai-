@@ -59,6 +59,7 @@ from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
 from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight
+from features.random_overlay_catalog import AssetCatalogError, configured_asset_catalogs
 
 from .random_overlay import (
     RandomOverlayError,
@@ -576,6 +577,11 @@ class WorkerConfig:
         repr=False,
         compare=False,
     )
+    random_overlay_catalog_assets: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_env(cls):
@@ -687,6 +693,7 @@ class WorkerConfig:
         random_overlay_root = Path("/")
         random_overlay_manifest_sha256 = ""
         random_overlay_assets = None
+        random_overlay_catalog_assets = None
         if media_mode == RANDOM_OVERLAY_MEDIA_MODE:
             random_overlay_root = _absolute_path(
                 os.environ.get("TT_POST_GPU_RANDOM_OVERLAY_ROOT", ""),
@@ -700,11 +707,18 @@ class WorkerConfig:
                 or ""
             ).strip().lower()
             try:
-                random_overlay_assets = load_asset_set(
-                    random_overlay_root,
-                    random_overlay_manifest_sha256,
+                catalogs = configured_asset_catalogs(
+                    asset_root=random_overlay_root,
+                    manifest_sha256=random_overlay_manifest_sha256,
                 )
-            except RandomOverlayError as exc:
+                random_overlay_catalog_assets = {
+                    fingerprint: load_asset_set(root, fingerprint)
+                    for fingerprint, root in catalogs.items()
+                }
+                random_overlay_assets = random_overlay_catalog_assets[
+                    random_overlay_manifest_sha256
+                ]
+            except (AssetCatalogError, RandomOverlayError) as exc:
                 raise TTGPUError(
                     "invalid_configuration",
                     "random overlay asset set is invalid: %s" % exc,
@@ -1034,6 +1048,7 @@ class WorkerConfig:
                 random_overlay_manifest_sha256
             ),
             random_overlay_assets=random_overlay_assets,
+            random_overlay_catalog_assets=random_overlay_catalog_assets,
             cos_secret_id=secret_id,
             cos_secret_key=secret_key,
             cos_bucket=bucket,
@@ -3718,6 +3733,20 @@ def _stable_hash(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _random_overlay_assets_for_sha(config, fingerprint):
+    """Select only a bundle verified from trusted configuration at startup."""
+    if not isinstance(fingerprint, str) or not HEX_64_RE.fullmatch(fingerprint):
+        raise RandomOverlayError("overlay catalog fingerprint is invalid")
+    if fingerprint == config.random_overlay_manifest_sha256:
+        assets = config.random_overlay_assets
+    else:
+        catalogs = config.random_overlay_catalog_assets
+        assets = catalogs.get(fingerprint) if isinstance(catalogs, dict) else None
+    if not isinstance(assets, dict) or assets.get("manifest_sha256") != fingerprint:
+        raise RandomOverlayError("overlay catalog fingerprint is not approved")
+    return assets
+
+
 def _prepare_response(manifest, reused, config, expected_job_id):
     video_contract = _delivery_video_contract(config)
     result = manifest.get("result") if isinstance(manifest, dict) else None
@@ -3860,13 +3889,18 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             )
         )
     elif config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+        recipe_asset_sha = ""
         try:
             request_source_size = int(stored_request.get("source_size"))
             request_trim = float(
                 stored_request.get("source_trim_tail_seconds")
             )
             stored_recipe = stored_request.get("random_overlay_recipe")
-            validate_recipe(stored_recipe, config.random_overlay_assets)
+            recipe_assets = _random_overlay_assets_for_sha(
+                config, stored_request.get("asset_set_sha256")
+            )
+            validate_recipe(stored_recipe, recipe_assets)
+            recipe_asset_sha = recipe_assets["manifest_sha256"]
         except (
             AttributeError,
             TypeError,
@@ -3894,7 +3928,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             and stored_request.get("profile") == config.profile
             and secrets.compare_digest(
                 str(stored_request.get("asset_set_sha256") or ""),
-                config.random_overlay_manifest_sha256,
+                recipe_asset_sha,
             )
             and isinstance(stored_recipe, dict)
             and result.get("random_overlay_recipe") == stored_recipe
@@ -3904,7 +3938,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             and request_trim == 0.0
         )
         response_assets = {
-            "asset_set_sha256": config.random_overlay_manifest_sha256,
+            "asset_set_sha256": recipe_asset_sha,
             "selected": stored_recipe.get("assets")
             if isinstance(stored_recipe, dict)
             else {},
@@ -4384,6 +4418,18 @@ class TTPostGPUProcessor:
             reuse_contract["media_mode"] = self.config.media_mode
         if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
             try:
+                # A completed job keeps its original catalog and deterministic
+                # recipe after the default changes. Existing manifests still
+                # pass the full request/reuse contract below; they are never
+                # overwritten or re-rendered on a mismatch.
+                recipe_assets = self.config.random_overlay_assets
+                existing = _read_json(manifest_path)
+                if existing is not None:
+                    stored = existing.get("request")
+                    recipe_assets = _random_overlay_assets_for_sha(
+                        self.config,
+                        stored.get("asset_set_sha256") if isinstance(stored, dict) else None,
+                    )
                 recipe = derive_recipe(
                     job_id=job_id,
                     content_id=request["content_id"],
@@ -4391,7 +4437,7 @@ class TTPostGPUProcessor:
                     source_url_sha256=reuse_contract[
                         "source_url_sha256"
                     ],
-                    asset_set=self.config.random_overlay_assets,
+                    asset_set=recipe_assets,
                 )
             except RandomOverlayError as exc:
                 raise TTGPUError(
@@ -4402,7 +4448,7 @@ class TTPostGPUProcessor:
             reuse_contract.update(
                 {
                     "asset_set_sha256": (
-                        self.config.random_overlay_manifest_sha256
+                        recipe_assets["manifest_sha256"]
                     ),
                     "random_overlay_recipe": recipe,
                     "transition": "none",
