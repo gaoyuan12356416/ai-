@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -58,27 +59,41 @@ def main() -> int:
     parser.add_argument("--lease-seconds", type=int, default=1200)
     parser.add_argument("--workers", type=int, default=int(os.environ.get("FB_AUTO_POST_WORKERS", "4")))
     parser.add_argument("--max-tasks", type=int, default=int(os.environ.get("FB_AUTO_POST_MAX_TASKS_PER_RUN", "100")))
+    parser.add_argument("--max-seconds", type=int, default=600, help="Stop new claims after this time; always finish in-flight work")
     args = parser.parse_args()
     max_lease = 10800 if args.mode == "prepare" else 3600
-    if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,120}", args.worker_id) or not 120 <= args.lease_seconds <= max_lease or not 1 <= args.workers <= 8 or not 1 <= args.max_tasks <= 1000:
+    if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,120}", args.worker_id) or not 120 <= args.lease_seconds <= max_lease or not 1 <= args.workers <= 8 or not 1 <= args.max_tasks <= 1000 or not 1 <= args.max_seconds <= 3600:
         raise SystemExit("runner参数无效")
     if args.mode == "tick":
         result = call("/internal/fb-auto-post/tick", {})
     else:
         path = {"plan": "/internal/fb-auto-post/plan-next", "prepare": "/internal/fb-auto-post/prepare-next", "execute": "/internal/fb-auto-post/execute-next", "reconcile": "/internal/fb-auto-post/reconcile-next"}[args.mode]
-        completed = []
-        def one(sequence: int) -> Dict[str, Any]:
-            return call(path, {"worker_id": f"{args.worker_id}-{sequence % args.workers}", "lease_seconds": args.lease_seconds})
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for batch_start in range(0, args.max_tasks, args.workers):
-                batch = list(pool.map(one, range(batch_start, min(batch_start + args.workers, args.max_tasks))))
-                completed.extend(batch)
-                terminal = {"plan": "no_due_slot", "prepare": "no_planned", "execute": "no_pending", "reconcile": "no_submitted"}[args.mode]
-                if all(item.get("status") == terminal for item in batch):
-                    break
+        terminal = {"plan": "no_due_slot", "prepare": "no_planned", "execute": "no_pending", "reconcile": "no_submitted"}[args.mode]
+        completed = drain(lambda lane: call(path, {"worker_id": f"{args.worker_id}-{lane}", "lease_seconds": args.lease_seconds}), workers=args.workers, max_tasks=args.max_tasks, max_seconds=args.max_seconds, terminal=terminal)
         result = {"ok": True, "mode": args.mode, "attempted": len(completed), "items": completed}
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def drain(one, *, workers, max_tasks, max_seconds, terminal, monotonic=time.monotonic):
+    """Refill each finished lane independently, without interrupting requests."""
+    deadline = monotonic() + max_seconds
+    completed, issued = [], 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {}
+        for lane in range(min(workers, max_tasks)):
+            pending[pool.submit(one, lane)] = lane
+            issued += 1
+        while pending:
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                lane = pending.pop(future)
+                item = future.result()
+                completed.append(item)
+                if item.get("status") != terminal and issued < max_tasks and monotonic() < deadline:
+                    pending[pool.submit(one, lane)] = lane
+                    issued += 1
+    return completed
 
 
 if __name__ == "__main__":

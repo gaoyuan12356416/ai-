@@ -118,6 +118,11 @@ class FBAutoPostStore:
           error_code TEXT NOT NULL DEFAULT '',created_at_utc TEXT NOT NULL,updated_at_utc TEXT NOT NULL,
           UNIQUE(template_id,slot_key)
         );
+        CREATE TABLE IF NOT EXISTS fb_auto_due_target_snapshot(
+          due_slot_id INTEGER PRIMARY KEY,template_id INTEGER NOT NULL,template_version INTEGER NOT NULL,
+          slot_key TEXT NOT NULL,trigger_type TEXT NOT NULL,planned_publish_at_utc TEXT NOT NULL,
+          expected_pages INTEGER NOT NULL,page_ids_json TEXT NOT NULL,captured_at_utc TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS fb_auto_scheduler_state(
           state_key TEXT PRIMARY KEY,watermark_minute_utc TEXT NOT NULL,updated_at_utc TEXT NOT NULL
         );
@@ -457,6 +462,18 @@ class FBAutoPostStore:
             raise StoreError("fb_auto_due_slot_lease_superseded", "计划租约已过期或被其他worker接管，本次结果不再落账", 409)
         return due
 
+    def snapshot_due_targets(self, *, due_slot_id: int, template_id: int, template_version: int,
+                             slot_key: str, trigger_type: str, planned_publish_at_utc: str,
+                             page_ids: Sequence[str]) -> None:
+        """Immutable reporting-only first target snapshot, including known empty sets."""
+        targets = sorted(set(str(page_id) for page_id in page_ids))
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO fb_auto_due_target_snapshot(due_slot_id,template_id,template_version,slot_key,trigger_type,planned_publish_at_utc,expected_pages,page_ids_json,captured_at_utc) VALUES(?,?,?,?,?,?,?,?,?)",
+                (int(due_slot_id), int(template_id), int(template_version), slot_key, trigger_type,
+                 planned_publish_at_utc, len(targets), json.dumps(targets), utc_iso(self.now_fn())),
+            )
+
     def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
             raise StoreError("invalid_request", "运行触发参数无效", 400)
@@ -484,6 +501,17 @@ class FBAutoPostStore:
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
             if existing and expected_template_version is None:
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
+            # Freeze the first observed target set before authorization, backlog,
+            # capacity and material preflight can prevent a run from being created.
+            # Reuse the same Page read below; audit data never drives publication.
+            page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+            if expected_due_id is not None:
+                self.snapshot_due_targets(
+                    due_slot_id=expected_due_id, template_id=template_id,
+                    template_version=int(template["current_version"]), slot_key=slot_key,
+                    trigger_type=trigger_type, planned_publish_at_utc=planned_publish_at_utc,
+                    page_ids=[page.page_id for page in page_rows],
+                )
             now_for_backlog = utc_iso(self.now_fn())
             active = conn.execute("SELECT DISTINCT r.id FROM fb_auto_run r JOIN fb_auto_task x ON x.run_id=r.id WHERE r.template_id=? AND x.status IN ('planned','preparing','ready','running') AND x.planned_publish_at_utc<=? LIMIT 1", (template_id, now_for_backlog)).fetchone()
             if active:
@@ -500,7 +528,6 @@ class FBAutoPostStore:
             error = StoreError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409)
             error.conflicts = exclusive
             raise error
-        page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
         page_ids = {page.page_id for page in page_rows}
         drift_conflicts: List[Dict[str, Any]] = []
         enabled_others = self.enabled_template_sources(template_id)

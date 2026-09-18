@@ -123,9 +123,9 @@ class WorkerTests(unittest.TestCase):
                 Path(command[-1]).write_bytes(b"output")
         with tempfile.TemporaryDirectory() as tmp:
             owner=type("Owner",(),{"downloads":0})(); processor=__import__("features.fb_gpu.prepare_worker",fromlist=["PrepareProcessor"]).PrepareProcessor.__new__(__import__("features.fb_gpu.prepare_worker",fromlist=["PrepareProcessor"]).PrepareProcessor)
-            processor.config=config(Path(tmp)); processor.assets={"manifest_sha256":"f"*64,"categories":{category:({"media_type":"image/png","name":category,"sha256":"1"*64,"size":1,"path":Path(tmp)/category},) for category in ("border","opacity_video","corners","tint")}}; processor.session_factory=lambda:Session(owner); processor.runner=Runner(); processor.object_store=Storage(); processor.lock=threading.Lock(); (Path(tmp)/"jobs").mkdir()
+            processor.config=config(Path(tmp)); processor.assets={"manifest_sha256":"f"*64,"categories":{category:({"media_type":"image/png","name":category,"sha256":"1"*64,"size":1,"path":Path(tmp)/category},) for category in ("border","opacity_video","corners","tint")}}; processor.session_factory=lambda:Session(owner); processor.runner=Runner(); processor.object_store=Storage(); processor.lock=threading.Lock(); processor.slots=threading.BoundedSemaphore(1); processor.job_locks=[threading.Lock() for _ in range(64)]; processor.active_jobs=set(); processor.last_cleanup_at=time.monotonic(); (Path(tmp)/"jobs").mkdir()
             probe={"duration":30,"has_audio":True,"video":{"codec_name":"h264","profile":"High","width":720,"height":1280},"audio":{}}
-            with patch("features.fb_gpu.prepare_worker._probe",return_value=probe):
+            with patch("features.fb_gpu.prepare_worker._probe",return_value=probe), patch("features.fb_gpu.prepare_worker.shutil.disk_usage",return_value=type("Disk",(),{"free":64*1024**3})()):
                 with self.assertRaises(PrepareWorkerError): processor.prepare(request())
                 result=processor.prepare(request())
             job_root=Path(tmp)/"jobs"/request()["job_id"]
@@ -150,9 +150,9 @@ class WorkerTests(unittest.TestCase):
             def __call__(self,command,**_kwargs): Path(command[-1]).write_bytes(b"output")
         with tempfile.TemporaryDirectory() as tmp:
             owner=type("Owner",(),{"calls":0})(); module=__import__("features.fb_gpu.prepare_worker",fromlist=["PrepareProcessor"]); processor=module.PrepareProcessor.__new__(module.PrepareProcessor)
-            processor.config=config(Path(tmp)); processor.assets={"manifest_sha256":"f"*64,"categories":{category:({"media_type":"image/png","name":category,"sha256":"1"*64,"size":1,"path":Path(tmp)/category},) for category in ("border","opacity_video","corners","tint")}}; processor.session_factory=lambda:Session(owner); processor.runner=Runner(); processor.object_store=Storage(); processor.lock=threading.Lock(); (Path(tmp)/"jobs").mkdir()
+            processor.config=config(Path(tmp)); processor.assets={"manifest_sha256":"f"*64,"categories":{category:({"media_type":"image/png","name":category,"sha256":"1"*64,"size":1,"path":Path(tmp)/category},) for category in ("border","opacity_video","corners","tint")}}; processor.session_factory=lambda:Session(owner); processor.runner=Runner(); processor.object_store=Storage(); processor.lock=threading.Lock(); processor.slots=threading.BoundedSemaphore(1); processor.job_locks=[threading.Lock() for _ in range(64)]; processor.active_jobs=set(); processor.last_cleanup_at=time.monotonic(); (Path(tmp)/"jobs").mkdir()
             probe={"duration":30,"has_audio":True,"video":{"codec_name":"h264","profile":"High","width":720,"height":1280},"audio":{}}
-            with patch("features.fb_gpu.prepare_worker._probe",return_value=probe):
+            with patch("features.fb_gpu.prepare_worker._probe",return_value=probe), patch("features.fb_gpu.prepare_worker.shutil.disk_usage",return_value=type("Disk",(),{"free":64*1024**3})()):
                 with self.assertRaises(ConnectionError): processor.prepare(request())
                 result=processor.prepare(request())
             job_root=Path(tmp)/"jobs"/request()["job_id"]

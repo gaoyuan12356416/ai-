@@ -27,8 +27,12 @@ class DeployContractTests(unittest.TestCase):
     def test_publish_and_reconcile_have_bounded_workers_and_long_runtime(self):
         for name in ("fb-auto-post-runner.service", "fb-auto-post-reconcile.service"):
             text = (ROOT / "deploy" / name).read_text(encoding="utf-8")
-            self.assertIn("--workers 4 --max-tasks 4 --lease-seconds 1200", text)
-            self.assertIn("TimeoutStartSec=1500", text)
+            self.assertIn("--workers 4 --max-tasks 1000 --max-seconds", text)
+            self.assertIn("--lease-seconds 1200", text)
+            self.assertIn("TimeoutStartSec=", text)
+            budget=int(text.split("--max-seconds ")[1].split()[0])
+            timeout=int(text.split("TimeoutStartSec=")[1].split()[0])
+            self.assertGreater(timeout,budget+1300)
         runner=(ROOT/"scripts"/"fb_auto_post_runner.py").read_text(encoding="utf-8")
         self.assertIn('"/internal/fb-auto-post/execute-next": 1300',runner)
         self.assertIn('"/internal/fb-auto-post/reconcile-next": 1300',runner)
@@ -44,7 +48,7 @@ class DeployContractTests(unittest.TestCase):
 
     def test_prepare_timeout_lease_and_unit_are_aligned(self):
         runner=(ROOT/"scripts"/"fb_auto_post_runner.py").read_text(encoding="utf-8"); unit=(ROOT/"deploy"/"fb-auto-post-prepare.service").read_text(encoding="utf-8")
-        self.assertIn('"/internal/fb-auto-post/prepare-next": 9600',runner); self.assertIn("--workers 1 --max-tasks 1 --lease-seconds 10200",unit); self.assertIn("TimeoutStartSec=10800",unit)
+        self.assertIn('"/internal/fb-auto-post/prepare-next": 9600',runner); self.assertIn("--workers 2 --max-tasks 1000 --max-seconds 1800 --lease-seconds 10200",unit); self.assertIn("TimeoutStartSec=12000",unit)
 
     def test_gpu_unit_points_to_versioned_repo_entrypoint(self):
         unit=(ROOT/"deploy"/"fb-page-random-overlay-gpu.service").read_text(encoding="utf-8")
