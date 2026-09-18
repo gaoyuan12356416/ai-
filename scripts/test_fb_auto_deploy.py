@@ -27,7 +27,8 @@ class DeployContractTests(unittest.TestCase):
     def test_publish_and_reconcile_have_bounded_workers_and_long_runtime(self):
         for name in ("fb-auto-post-runner.service", "fb-auto-post-reconcile.service"):
             text = (ROOT / "deploy" / name).read_text(encoding="utf-8")
-            self.assertIn("--workers 4 --max-tasks 1000 --max-seconds", text)
+            workers = 8 if name == "fb-auto-post-runner.service" else 4
+            self.assertIn(f"--workers {workers} --max-tasks 1000 --max-seconds", text)
             self.assertIn("--lease-seconds 1200", text)
             self.assertIn("TimeoutStartSec=", text)
             budget=int(text.split("--max-seconds ")[1].split()[0])

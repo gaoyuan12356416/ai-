@@ -97,6 +97,15 @@ def _https(value: Any) -> str:
     text = str(value or "").strip()
     try:
         parsed = urlsplit(text)
+        # Historical rows in this owned COS bucket use HTTP, while the same
+        # objects are available over verified TLS. Never fetch via HTTP or
+        # upgrade arbitrary hosts, credentials, ports or fragments.
+        if (parsed.scheme == "http"
+                and parsed.hostname == "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
+                and parsed.port is None and parsed.username is None
+                and parsed.password is None and parsed.fragment == ""):
+            parsed = parsed._replace(scheme="https")
+            text = parsed.geturl()
         valid = parsed.scheme == "https" and bool(parsed.hostname) and parsed.username is None and parsed.password is None and parsed.fragment == ""
     except ValueError:
         valid = False

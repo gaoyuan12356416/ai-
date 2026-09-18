@@ -60,8 +60,8 @@ class ContractTests(unittest.TestCase):
         list_page=(ROOT/"static"/"fb-auto-publish-templates.html").read_text(encoding="utf-8")
         form_page=(ROOT/"static"/"fb-auto-publish-template.html").read_text(encoding="utf-8")
         nginx=(ROOT/"deploy"/"nginx-fb-auto-publish.conf").read_text(encoding="utf-8")
-        for page in (list_page,form_page):
-            self.assertIn('/quick-nav.js?v=20260820-list-only-v2',page)
+        for page,nav_version in ((list_page,"20260820-list-only-v2"),(form_page,"20260915retired")):
+            self.assertIn('/quick-nav.js?v='+nav_version,page)
             self.assertIn('v=20260820-list-only-v2',page)
         for path in (
             "/fb-auto-publish-templates.html",
