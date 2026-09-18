@@ -47,3 +47,18 @@ python3 /mnt/data-disk/x-post-automation/backups/manual-next-batch-<UTC timestam
 ```
 
 回滚程序只在当前页面仍为本次版本时执行，避免覆盖后续发布；不重启服务。
+
+## 生产结果
+
+- 2026-09-18 18:17:39 北京时间，GitHub 提交 `be822e367ec29823c2acd28daf8bb2b0a2d95461` 已由服务器 fetch 后部署。
+- 公网 HTTP 200；公网文件、Nginx 文件、主应用静态副本及 GitHub blob 完全一致，SHA-256 为 `3da5586970738ba5106ef75de9a3e860b02c53675d540e2c6ed8b465bddecd35`。
+- 对公网返回的页面重新提取内联 JS，`node --check` 通过；新按钮、最近任务入口和版本标识均已生效。
+- 匿名访问任务详情仍返回 401；主 API 和 Sidecar 健康端点均为 200，手动发布 timer active。
+- 两个主进程 PID 未变化，无 restart/reload。部署前后手动任务、队列、发布日志、已发布计数和最后一笔未来定时任务快照完全一致；没有创建真实发布任务或触发 X Post。
+- 备份及精确回滚命令：
+
+```bash
+python3 /mnt/data-disk/x-post-automation/backups/manual-next-batch-20260918T101739Z/rollback.py
+```
+
+AI backend / X publishing 技能已同步连续操作、最近任务入口和过期轮询保护规则；通用记忆文件未修改。
