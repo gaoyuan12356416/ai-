@@ -128,8 +128,8 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
-    required = {"name", "group_ids", "language", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
-    optional = {"metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "app_id", "product", "metric_product", "metric_platform"}
+    required = {"name", "group_ids", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
+    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "app_id", "product", "metric_product", "metric_platform"}
     if "video_template" not in value or value.get("video_template") != "random_overlay":
         raise ValidationError(
             "fb_auto_video_template_required",
@@ -138,12 +138,10 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         )
     _keys(value, required, optional, "模板")
     name = str(value.get("name") or "").strip()
-    language = str(value.get("language") or "").strip().lower()
-    language = LANGUAGE_ALIASES.get(language, language)
     message = str(value.get("message_template") or "").replace("\r\n", "\n").strip()
     groups = value.get("group_ids")
-    if not 1 <= len(name) <= 120 or not LANGUAGE_RE.fullmatch(language) or not 1 <= len(message) <= 5000:
-        raise ValidationError("invalid_request", "模板名称、语言或发布文案无效")
+    if not 1 <= len(name) <= 120 or not 1 <= len(message) <= 5000:
+        raise ValidationError("invalid_request", "模板名称或发布文案无效")
     if re.search(r"(?i)(access[_ -]?token|refresh[_ -]?token|authorization\s*:|bearer\s+[A-Za-z0-9])", message):
         raise ValidationError("fb_auto_message_template_invalid", "发布文案疑似包含凭证信息")
     macros = MACRO_RE.findall(message)
@@ -163,7 +161,6 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     return {
         "name": name,
         "group_ids": group_ids,
-        "language": language,
         "message_template": message,
         "metric_window_days": _int(value.get("metric_window_days", 7), "指标窗口", 1, 30),
         "drama_launch_window_days": _int(value.get("drama_launch_window_days", 0), "上线窗口", 0, 3650),

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .links import FBPostLinkError, build_short_url, build_w2a_url
+from .languages import candidate_snapshots_for_pages,page_language
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
 
@@ -573,7 +574,11 @@ class FBAutoPostStore:
                     or (max_jobs_per_slot is not None and global_slot_jobs > int(max_jobs_per_slot))
                     or (max_daily_jobs is not None and publishable * daily_count > int(max_daily_jobs))):
                 raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，全局最坏同槽GPU任务 {global_slot_jobs}/{max_jobs_per_slot or '-'}，本模板每日任务 {publishable * daily_count}/{max_daily_jobs or '-'}", 409)
-        candidate_snapshot = materials.candidate_snapshot(config)
+        with self.connect() as conn:
+            max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
+        candidate_limit=min(5000,max(500,max_reserved+100))
+        candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit},page_rows,materials)
+        metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
         # growth, token loss, legacy enable, or sibling-template enable cannot
@@ -589,6 +594,8 @@ class FBAutoPostStore:
             error.conflicts = exclusive
             raise error
         page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+        if any(page_language(page.language) and page_language(page.language) not in candidate_snapshots for page in page_rows):
+            raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
         page_ids, global_slot_jobs = {page.page_id for page in page_rows}, sum(page.eligible_token_count > 0 for page in page_rows)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         drift_conflicts = []
@@ -646,7 +653,7 @@ class FBAutoPostStore:
                 error.conflicts = [{"run_id": int(active[0]), "status": "backlog"}]
                 raise error
             publish_at = planned_publish_at_utc or now
-            cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, int(template["current_version"]), slot_key, trigger_type, "queued", template["config_json"], total, publishable, missing, now, publish_at, json.dumps(list(candidate_snapshot.metric_generation_ids)), str(config["video_template"])))
+            cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, int(template["current_version"]), slot_key, trigger_type, "queued", template["config_json"], total, publishable, missing, now, publish_at, json.dumps(metric_generation_ids), str(config["video_template"])))
             run_id, queued, skipped = int(cur.lastrowid), 0, 0
             for page in page_rows:
                 # The final cooldown read and material choice share this
@@ -654,13 +661,17 @@ class FBAutoPostStore:
                 # planners therefore serialize, and a later slot sees the
                 # earlier planned/preparing/ready reservation before choosing.
                 unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status='unknown' LIMIT 1", (page.page_id,)).fetchone() is not None
-                pre_reason = "fb_auto_page_unknown_block" if unknown else ""
+                language=page_language(page.language)
+                pre_reason = "fb_auto_page_unknown_block" if unknown else ("" if language else "fb_auto_page_language_missing")
                 material = None
-                if page.eligible_token_count > 0 and not unknown:
-                    material = materials.choose_from(candidate_snapshot.candidates, self._cooldown_material_ids(conn, page.page_id, int(config["cooldown_days"])))
+                if page.eligible_token_count > 0 and not pre_reason:
+                    excluded=self._cooldown_material_ids(conn,page.page_id,int(config['cooldown_days']))
+                    if candidate_limit<5000 and len(excluded)>candidate_limit-50:
+                        raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
+                    material = materials.choose_from(candidate_snapshots[language].candidates, excluded)
                 reason = pre_reason or ("" if page.eligible_token_count > 0 else "fb_page_missing_eligible_token")
                 snapshot_status = "eligible" if not reason else "skipped"
-                conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, page.language, page.eligible_token_count, snapshot_status, reason))
+                conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, language, page.eligible_token_count, snapshot_status, reason))
                 status = "planned"
                 if reason:
                     status = "skipped"

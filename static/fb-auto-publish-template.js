@@ -35,7 +35,6 @@
     return {
       name: ui.byId("name").value,
       group_ids: Array.from(document.querySelectorAll('input[name="group"]:checked')).map(input => input.value),
-      language: ui.byId("language").value,
       message_template: ui.byId("message").value,
       video_template: ui.byId("videoTemplate").value,
       material_data_source: Number(ui.byId("dataSource").value),
@@ -101,7 +100,6 @@
     ui.byId("templateStatusBadge").textContent = (item.status === "enabled" ? "已启用" : "已停用") + " · v" + ui.templateVersion(item);
     ui.byId("templateStatusBadge").className = "badge " + (item.status === "enabled" ? "success" : "warning");
     ui.byId("name").value = config.name || item.name || "";
-    ui.byId("language").value = config.language || "en";
     ui.byId("message").value = config.message_template || "";
     ui.byId("videoTemplate").value = config.video_template;
     ui.byId("dataSource").value = Number(config.material_data_source || 6);

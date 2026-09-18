@@ -78,7 +78,7 @@ class RepositoryTests(unittest.TestCase):
             def load_metric_window(self, **_kwargs):
                 return MetricWindow((11,), ("2026-08-10",), {"d1":MetricTotals(Decimal("50"),Decimal("5")),"d2":MetricTotals(Decimal("100"),Decimal("5"))}, {("d1","1"):MetricTotals(Decimal("1"),Decimal("1")),("d2","6000"):MetricTotals(Decimal("10"),Decimal("1"))})
         raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc","spend_min":10,"resource_type_v2":["1"]}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"asc","spend_max":20})
-        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MaterialMySQL(); candidates=MaterialRepository(mysql,Metrics(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidates(config)
         sql=mysql.calls[0][0]
         self.assertEqual([item.material_id for item in candidates],["6000","1"])
@@ -104,7 +104,7 @@ class RepositoryTests(unittest.TestCase):
                 self.source_calls+=1
                 ids=list(range(start,start+1000)) if cursor<5000 else ([6001] if cursor==5000 else [])
                 return [{"material_id":str(i),"content_id":"top" if i==6001 else "zero","media_url":f"https://cdn.example/{i}.mp4","material_name":"m","drama_name":"d","language":"english","video_duration":30,"resource_type_v2":"1"} for i in ids]
-        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"desc"}); config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"desc"}); config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidate_snapshot(config)
         self.assertEqual(result.candidates[0].material_id,"6001"); self.assertEqual(mysql.source_calls,6); self.assertEqual(mysql.calls,12); self.assertLessEqual(len(result.candidates),5000)
 
@@ -133,7 +133,7 @@ class RepositoryTests(unittest.TestCase):
                 if "FORCE INDEX(PRIMARY)" in sql: raise AssertionError("full catalog scan must be skipped after an exact top-N proof")
                 return []
         raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"}); raw["material_rule"].update({"sort_by":"spend","sort_direction":"desc"})
-        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,metric_prefilter_batch_size=2,candidate_limit=3).candidate_snapshot(config)
         self.assertEqual([item.material_id for item in result.candidates],["4","3","2"])
         self.assertTrue(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
@@ -161,7 +161,7 @@ class RepositoryTests(unittest.TestCase):
                     ]
                 return []
         raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"desc"})
-        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MySQL(); result=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,metric_prefilter_batch_size=2,candidate_limit=3).candidate_snapshot(config)
         self.assertEqual([item.material_id for item in result.candidates],["9","2","1"])
         self.assertTrue(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
@@ -180,7 +180,7 @@ class RepositoryTests(unittest.TestCase):
                 if "FORCE INDEX(PRIMARY)" in sql: return [{"material_id":"1","content_id":"zero","media_url":"https://cdn.example/1.mp4","material_name":"m1","language":"en","video_duration":30}]
                 return []
         raw=payload(); raw["drama_rule"].update({"sort_by":"spend","sort_direction":"asc"})
-        config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MySQL(); MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),metric_prefilter_min_content_ids=2,candidate_limit=1).candidate_snapshot(config)
         self.assertFalse(any("FORCE INDEX(idx_source_type_source_id)" in sql for sql,_ in mysql.calls))
         self.assertTrue(any("FORCE INDEX(PRIMARY)" in sql for sql,_ in mysql.calls))
@@ -195,7 +195,7 @@ class RepositoryTests(unittest.TestCase):
                 return [{"material_id":str(i),"content_id":"d","media_url":f"https://cdn.example/{i}.mp4","material_name":"m","language":"en","video_duration":30} for i in range(1,1001)]
         ticks=iter((0,0,61))
         repository=MaterialRepository(MySQL(),Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc),monotonic_fn=lambda:next(ticks),catalog_deadline_seconds=60)
-        config=normalize_template_payload(payload()); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        config=normalize_template_payload(payload()); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         with self.assertRaises(RepositoryError) as caught: repository.candidate_snapshot(config)
         self.assertEqual(caught.exception.code,"fb_auto_catalog_scan_timeout")
 
@@ -213,7 +213,7 @@ class RepositoryTests(unittest.TestCase):
                 if "JOIN (SELECT d0.content_id" in sql:
                     return [{"content_id":"d1","drama_name":"Drama","resource_type_v2":"1","series_code":"s1"}]
                 return [{"material_id":"1","content_id":"d1","media_url":"https://cdn.example/1.mp4","material_name":"Material","material_tag":"hook","language":"en","video_duration":30}]
-        raw=payload(); raw["message_template"]="{{desc}}"; config=normalize_template_payload(raw); config.update({"app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
+        raw=payload(); raw["message_template"]="{{desc}}"; config=normalize_template_payload(raw); config.update({"language":"en","app_id":"1479","product":"Dramawave","metric_product":"Dramawave","metric_platform":0})
         mysql=MySQL(); candidates=MaterialRepository(mysql,Store(),now_fn=lambda:datetime(2026,8,17,tzinfo=timezone.utc)).candidates(config)
         self.assertEqual((candidates[0].drama_description,candidates[0].material_tag),("A short drama description","hook"))
         resource_call=next(item for item in mysql.calls if "ads_drama_resource" in item[0])

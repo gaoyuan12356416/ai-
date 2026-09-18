@@ -62,7 +62,7 @@
           <div class="section-head">
             <div>
               <h2>模板配置</h2>
-              <p>同一模板只能选择同一目标产品的 Page 池；素材产品由目标产品派生。</p>
+              <p>同一模板只能选择同一目标产品的 Page 池；素材产品由目标产品派生。剧和素材按每个 Page 在池内设置的语言筛选。</p>
             </div>
             <div class="actions">
               <span id="templateStatusBadge" class="badge warning">新模板</span>
@@ -75,22 +75,7 @@
               <label class="required" for="name">模板名称</label>
               <input id="name" required maxlength="120" autocomplete="off" />
             </div>
-            <div class="field">
-              <label class="required" for="language">语言</label>
-              <select id="language" required>
-                <option value="en" selected>英语 (en)</option>
-                <option value="es">西班牙语 (es)</option>
-                <option value="pt">葡萄牙语 (pt)</option>
-                <option value="id">印尼语 (id)</option>
-                <option value="ja">日语 (ja)</option>
-                <option value="th">泰语 (th)</option>
-                <option value="zh-tw">繁体中文 (zh-tw)</option>
-                <option value="fr">法语 (fr)</option>
-                <option value="de">德语 (de)</option>
-                <option value="ko">韩语 (ko)</option>
-                <option value="vi">越南语 (vi)</option>
-              </select>
-            </div>
+
             <div class="field">
               <label for="dataSource">素材来源</label>
               <input id="dataSource" type="number" value="6" readonly />
@@ -184,8 +169,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260820-list-only-v2"></script>
+  <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-template.js?v=20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-template.js?v=page-language-20260918-20260820-list-only-v2"></script>
 </body>
 </html>

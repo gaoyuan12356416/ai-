@@ -310,6 +310,9 @@ class MaterialRepository:
         return (low is None or value >= Decimal(str(low))) and (high is None or value <= Decimal(str(high)))
 
     def candidate_snapshot(self, config: Mapping[str, Any]) -> CandidateSnapshot:
+        # Trusted planner-only bound: retain enough ranked rows for every known
+        # Page cooldown plus the unchanged random choice among its first 50.
+        candidate_limit=max(1,min(int(config.get("_candidate_limit",self.candidate_limit)),self.candidate_limit))
         if self.metric_store is None:
             raise RepositoryError("fb_auto_metric_cache_not_configured", "FB指标缓存尚未配置", 503)
         days = int(config["metric_window_days"])
@@ -437,7 +440,7 @@ class MaterialRepository:
                 seen_material_ids.add(raw_id)
                 candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
             candidates.sort(key=cmp_to_key(compare))
-            del candidates[self.candidate_limit:]
+            del candidates[candidate_limit:]
 
         # The primary ordering is always drama-level.  For descending spend,
         # every positive-spend drama sorts before every zero-history drama; for
@@ -481,7 +484,7 @@ class MaterialRepository:
                 end_epoch = int(self.now_fn().timestamp())
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
-            if len(candidates) >= self.candidate_limit:
+            if len(candidates) >= candidate_limit:
                 return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
             candidates.clear()
             seen_material_ids.clear()

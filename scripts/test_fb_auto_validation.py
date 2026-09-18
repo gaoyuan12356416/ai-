@@ -14,11 +14,11 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result["material_type"], "video")
         self.assertEqual(result["material_data_source"], 6)
         self.assertEqual(result["video_template"], "random_overlay")
-        self.assertEqual(result["language"], "en")
+        self.assertNotIn("language",result)
 
     def test_bcp47_language_code_is_preserved(self):
         raw=payload(); raw["language"]="zh-tw"
-        self.assertEqual(normalize_template_payload(raw)["language"],"zh-tw")
+        self.assertNotIn("language",normalize_template_payload(raw))
 
     def test_video_template_is_strict_and_required(self):
         for value in (None, "", "legacy"):
