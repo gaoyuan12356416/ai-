@@ -6,3 +6,6 @@ scripts/render_playable_preview_docs.py text eol=lf
 scripts/test_playable_preview_docs.py text eol=lf
 scripts/publish_playable_preview_docs.py text eol=lf
 requirements-playable-docs.txt text eol=lf
+
+# Pinned catalog fingerprints must survive Windows and Linux checkouts.
+/assets/random-subtemplates/**/*.json -text
