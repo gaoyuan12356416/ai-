@@ -202,6 +202,7 @@
     .schedule-message { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .schedule-message.error { color: var(--red); }
     .add-actions { display: grid; gap: 8px; min-width: 150px; }
+    .manual-recent-runs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
     .manual-dialog {
       width: min(760px, calc(100vw - 32px));
       max-height: min(820px, calc(100vh - 32px));
@@ -501,6 +502,7 @@
               <button id="clearMaterials" class="button" type="button">清空输入</button>
             </div>
           </div>
+          <div id="manualRecentRuns" class="manual-recent-runs hidden" aria-label="最近手动发布任务"></div>
           <div class="template-box">
             <strong>素材 Post 描述模板</strong>
             <textarea id="materialPostTemplate" maxlength="2000" aria-describedby="materialPostTemplateHelp">🎬 {{drama_name}}
@@ -615,6 +617,7 @@
       <div id="manualRunPanel" class="manual-status-box hidden" aria-live="polite">
         <div id="manualRunTitle" class="manual-run-title"></div>
         <div id="manualRunCounts" class="manual-run-counts"></div>
+        <div class="helper">任务已交给后台处理，可继续发布下一批，无需等待本批完成。已有任务可从“最近手动任务”查看。</div>
         <div id="manualRunError" class="manual-run-error hidden"></div>
         <div id="manualQueueRows"></div>
         <a class="text-link" href="/x-post-logs.html">查看 X Post 发布日志</a>
@@ -622,6 +625,7 @@
     </div>
     <div class="manual-dialog-footer">
       <button id="manualDialogClose" class="button" type="button">取消</button>
+      <button id="manualPublishNext" class="button primary hidden" type="button">继续发布下一批</button>
       <button id="manualPublishSubmit" class="button danger" type="button" disabled>确认并立即发布</button>
     </div>
   </dialog>
@@ -630,7 +634,7 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
-  <script data-version="20260914-unpublished-status">
+  <script data-version="20260918-manual-next-batch">
     (() => {
       const state = {
         auth: null,
@@ -664,10 +668,13 @@
           run: null,
           terminal: false,
           pollTimer: null,
+          pollGeneration: 0,
+          recentRunIds: [],
         },
       };
       const byId = id => document.getElementById(id);
       const MANUAL_LAST_RUN_STORAGE_KEY = "xPostMaterialManualLastRunV1";
+      const MANUAL_RECENT_RUNS_STORAGE_KEY = "xPostMaterialManualRecentRunsV1";
       const MANUAL_DRAFT_STORAGE_KEY = "xPostMaterialManualDraftV1";
       const BEIJING_TIME_ZONE = "Asia/Shanghai";
       const MANUAL_TERMINAL_STATUSES = new Set([
@@ -1142,6 +1149,7 @@
         byId("manualSelectionPanel").classList.add("hidden");
         byId("manualRunPanel").classList.remove("hidden");
         byId("manualPublishSubmit").classList.add("hidden");
+        byId("manualPublishNext").classList.remove("hidden");
         setText(byId("manualDialogClose"), "关闭");
         const modeLabel = run.publish_mode === "scheduled" ? "定时发布" : "立即发布";
         setText(byId("manualRunTitle"), `任务 #${run.id} · ${modeLabel} · ${manualStatusLabel(run.status, run)}`, "");
@@ -1197,7 +1205,63 @@
             queueRows.appendChild(row);
           });
         }
-        if (state.manual.terminal) sessionRemove(MANUAL_LAST_RUN_STORAGE_KEY);
+      }
+      function stopManualTracking() {
+        if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
+        state.manual.pollTimer = null;
+        state.manual.pollGeneration += 1;
+      }
+      function renderRecentManualRuns() {
+        const container = byId("manualRecentRuns");
+        container.replaceChildren();
+        container.classList.toggle("hidden", !state.manual.recentRunIds.length);
+        if (!state.manual.recentRunIds.length) return;
+        const label = document.createElement("span");
+        label.className = "helper";
+        setText(label, "最近手动任务：");
+        container.appendChild(label);
+        state.manual.recentRunIds.forEach(runId => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "button small";
+          button.dataset.manualRunId = String(runId);
+          setText(button, `查看任务 #${runId}`);
+          container.appendChild(button);
+        });
+      }
+      function rememberManualRun(runId) {
+        state.manual.recentRunIds = [Number(runId), ...state.manual.recentRunIds]
+          .filter((id, index, all) => Number.isSafeInteger(id) && id > 0 && all.indexOf(id) === index)
+          .slice(0, 10);
+        sessionWrite(MANUAL_RECENT_RUNS_STORAGE_KEY, JSON.stringify(state.manual.recentRunIds));
+        renderRecentManualRuns();
+      }
+      function restoreRecentManualRuns() {
+        try {
+          const stored = JSON.parse(sessionRead(MANUAL_RECENT_RUNS_STORAGE_KEY) || "[]");
+          state.manual.recentRunIds = Array.isArray(stored) ? stored.map(Number) : [];
+        } catch (_) {
+          state.manual.recentRunIds = [];
+        }
+        rememberManualRun(Number(sessionRead(MANUAL_LAST_RUN_STORAGE_KEY)));
+      }
+      function viewManualRun(runId) {
+        if (state.manual.submitting || !Number.isSafeInteger(runId) || runId <= 0) return;
+        stopManualTracking();
+        state.manual.runId = runId;
+        state.manual.run = null;
+        state.manual.terminal = false;
+        byId("manualSelectionPanel").classList.add("hidden");
+        byId("manualRunPanel").classList.remove("hidden");
+        byId("manualPublishSubmit").classList.add("hidden");
+        byId("manualPublishNext").classList.remove("hidden");
+        setText(byId("manualDialogClose"), "关闭");
+        setText(byId("manualRunTitle"), `正在读取任务 #${runId}…`);
+        setText(byId("manualRunCounts"), "", "");
+        byId("manualRunError").classList.add("hidden");
+        byId("manualQueueRows").replaceChildren();
+        showManualDialog();
+        pollManualRun();
       }
       function scheduleManualPoll(delay = 2000) {
         if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
@@ -1213,11 +1277,12 @@
       }
       async function pollManualRun() {
         const runId = Number(state.manual.runId || 0);
+        const generation = state.manual.pollGeneration;
         if (!runId || state.manual.terminal) return;
         let nextDelay = 5000;
         try {
           const result = await api(`/api/admin/x-posts/material-pool/manual-runs/${encodeURIComponent(runId)}`);
-          if (runId !== state.manual.runId) return;
+          if (runId !== state.manual.runId || generation !== state.manual.pollGeneration) return;
           const run = scheduleItem(result);
           if (Number(run.id || 0) !== runId) throw new Error("手动发布任务响应不一致");
           const wasTerminal = state.manual.terminal;
@@ -1227,7 +1292,7 @@
           }
           nextDelay = manualPollDelay(run);
         } catch (error) {
-          if (runId !== state.manual.runId) return;
+          if (runId !== state.manual.runId || generation !== state.manual.pollGeneration) return;
           const errorNode = byId("manualRunError");
           setText(errorNode, `状态查询失败，将自动重试：${error.message}`, "");
           errorNode.classList.remove("hidden");
@@ -1235,7 +1300,7 @@
         scheduleManualPoll(state.manual.terminal ? 0 : nextDelay);
       }
       function resetManualSelection(materialIds) {
-        if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
+        stopManualTracking();
         state.manual.materialIds = materialIds.slice();
         state.manual.accountIds = new Set(
           Array.from(state.schedule.accountIds).filter(id => {
@@ -1252,6 +1317,7 @@
         byId("manualSelectionPanel").classList.remove("hidden");
         byId("manualRunPanel").classList.add("hidden");
         byId("manualPublishSubmit").classList.remove("hidden");
+        byId("manualPublishNext").classList.add("hidden");
         setText(byId("manualDialogClose"), "取消");
         byId("manualAccountSearch").value = "";
         const scheduledInput = byId("manualScheduledAt");
@@ -1262,14 +1328,6 @@
       }
       function openManualPublish() {
         if (state.busy || state.manual.submitting) return;
-        if (state.manual.runId && !state.manual.terminal) {
-          byId("manualSelectionPanel").classList.add("hidden");
-          byId("manualRunPanel").classList.remove("hidden");
-          byId("manualPublishSubmit").classList.add("hidden");
-          showManualDialog();
-          pollManualRun();
-          return;
-        }
         let materialIds;
         try {
           materialIds = parseMaterialIds(50, "手动发布");
@@ -1279,6 +1337,19 @@
         }
         resetManualSelection(materialIds);
         showManualDialog();
+      }
+      function continueManualPublish() {
+        if (state.manual.submitting) return;
+        stopManualTracking();
+        state.manual.runId = 0;
+        state.manual.run = null;
+        byId("manualPublishDialog").close();
+        if (byId("materialIds").value.trim()) {
+          openManualPublish();
+        } else {
+          byId("materialIds").focus();
+          showToast("请输入下一批素材 ID，然后点击手动发布。", false);
+        }
       }
       async function submitManualPublish() {
         if (state.manual.submitting) return;
@@ -1337,6 +1408,7 @@
           }
           sessionRemove(MANUAL_DRAFT_STORAGE_KEY);
           sessionWrite(MANUAL_LAST_RUN_STORAGE_KEY, String(run.id));
+          rememberManualRun(run.id);
           byId("materialIds").value = "";
           state.manual.submitting = false;
           renderManualRun(run);
@@ -1353,13 +1425,6 @@
           renderManualAccountOptions();
           showToast(`手动发布任务创建失败：${error.message}`, true);
         }
-      }
-      async function resumeManualRunTracking() {
-        const raw = sessionRead(MANUAL_LAST_RUN_STORAGE_KEY);
-        if (!/^\d+$/.test(raw) || Number(raw) <= 0) return;
-        state.manual.runId = Number(raw);
-        state.manual.terminal = false;
-        await pollManualRun();
       }
       function closeManualDialog() {
         if (state.manual.submitting) return;
@@ -2006,8 +2071,8 @@
           return;
         }
         byId("pageRoot").classList.remove("hidden");
+        restoreRecentManualRuns();
         await Promise.all([loadPool(), loadScheduleSettings()]);
-        await resumeManualRunTracking();
       }
 
       byId("accountSearch").addEventListener("input", renderAccountOptions);
@@ -2065,6 +2130,11 @@
       });
       byId("saveSchedule").addEventListener("click", saveSchedule);
       byId("manualPublish").addEventListener("click", openManualPublish);
+      byId("manualPublishNext").addEventListener("click", continueManualPublish);
+      byId("manualRecentRuns").addEventListener("click", event => {
+        const button = event.target.closest("button[data-manual-run-id]");
+        if (button) viewManualRun(Number(button.dataset.manualRunId));
+      });
       byId("addMaterials").addEventListener("click", addMaterials);
       byId("clearMaterials").addEventListener("click", () => {
         byId("materialIds").value = "";
