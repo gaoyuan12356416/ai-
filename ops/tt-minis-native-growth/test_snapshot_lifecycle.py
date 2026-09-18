@@ -150,6 +150,22 @@ class SnapshotLifecycleTests(unittest.TestCase):
         with patch.object(s, 'REFERENCE_ROOTS', [self.root / 'scripts']):
             self.assertEqual({name}, s.referenced_snapshots())
 
+    def test_extensionless_binary_is_not_treated_as_source(self):
+        tool = self.root / 'ffmpeg'
+        with tool.open('wb') as stream:
+            stream.write(b'\x7fELF')
+            stream.truncate(5 * 1024**2)
+        with patch.object(s, 'REFERENCE_ROOTS', [self.root]):
+            self.assertEqual(set(), s.referenced_snapshots())
+
+    def test_oversized_text_reference_scan_still_fails_closed(self):
+        text = self.root / 'huge.py'
+        with text.open('wb') as stream:
+            stream.truncate(5 * 1024**2)
+        with patch.object(s, 'REFERENCE_ROOTS', [self.root]):
+            with self.assertRaisesRegex(RuntimeError, 'scan limit'):
+                s.referenced_snapshots()
+
     def test_candidate_identity_revalidated_and_protected_files_retained(self):
         old = self.make(1, managed=False)
         self.make(2, age=2)

@@ -124,9 +124,14 @@ def referenced_snapshots():
                     # Configuration symlinks are common; read the actual content.
                     if not path.exists():
                         continue
+                if path.suffix == '':
+                    with path.open('rb') as stream:
+                        magic = stream.read(4)
+                    if magic.startswith((b'\x7fELF', b'MZ')):
+                        continue  # Executable binaries such as ffmpeg are not source/config.
                 count += 1
                 if count > 20000 or path.stat().st_size > 4 * 1024**2:
-                    raise RuntimeError('Reference scan limit reached; cleanup refused')
+                    raise RuntimeError('Reference scan limit reached; cleanup refused: ' + str(path))
                 refs.update(SNAPSHOT_NAME.findall(path.read_text(encoding='utf-8', errors='replace')))
     return refs
 
