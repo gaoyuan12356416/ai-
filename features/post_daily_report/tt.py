@@ -334,6 +334,8 @@ def _legacy(conn, window, output):
             periods = [(window.start, window.end, schedule)]
         periods_by_account[account_id] = periods
         for begin, finish, config in periods:
+            if finish <= window.start or begin >= window.end:
+                continue
             if not config.get("enabled"):
                 continue
             if config.get("schedule_mode") == "random":
@@ -428,6 +430,7 @@ def collect(paths: dict, window) -> dict:
             output["warnings"].append(f"TT {label} 数据读取不完整（{type(exc).__name__}），不可视为零发布。")
             missing = _row("unavailable:" + key, label + "·数据不可用", "未知")
             missing["expected"] = None
+            missing["data_available"] = False
             output["rows"].append(missing)
         finally:
             if conn is not None:

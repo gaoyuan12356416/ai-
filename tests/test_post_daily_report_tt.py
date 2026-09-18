@@ -129,6 +129,27 @@ class TTReportTests(unittest.TestCase):
         self.legacy.execute('INSERT INTO tt_post_daily_schedule_audit VALUES(1,?,?,?)', ('b','2026-09-06T18:00:00Z',json.dumps(snapshot)))
         self.assertIsNone(self.row('manual_material_schedule')['expected'])
 
+    def test_old_random_enabled_period_cannot_make_disabled_day_unknown(self):
+        self.legacy.execute('CREATE TABLE tt_post_daily_schedule_audit(id INTEGER,account_id TEXT,created_at TEXT,snapshot_json TEXT)')
+        # Both an earlier disable and one exactly at the Beijing-day boundary.
+        for index, disabled_at in enumerate(('2026-09-05T03:22:55Z', '2026-09-06T16:00:00Z')):
+            account = str(index)
+            self.legacy.execute('INSERT INTO tt_post_daily_schedule VALUES(?,0,2,?,?,?)', (account,'random','[]',disabled_at))
+            for enabled, stamp in ((1,'2026-09-01T00:00:00Z'), (0,disabled_at)):
+                snapshot = {'account_id':account,'enabled':enabled,'version':2-enabled,'schedule_mode':'random','publish_times_json':'[]'}
+                self.legacy.execute('INSERT INTO tt_post_daily_schedule_audit VALUES(?,?,?,?)', (index*2+enabled,account,stamp,json.dumps(snapshot)))
+        row = self.row('manual_material_schedule')
+        self.assertEqual((row['expected'], row['pending']), (0,0))
+        self.assertEqual(row['warnings'], [])
+
+    def test_overlapping_enabled_random_period_without_plan_remains_unknown(self):
+        self.legacy.execute('INSERT INTO tt_post_daily_schedule VALUES(?,0,2,?,?,?)', ('b','random','[]','2026-09-06T18:00:00Z'))
+        self.legacy.execute('CREATE TABLE tt_post_daily_schedule_audit(id INTEGER,account_id TEXT,created_at TEXT,snapshot_json TEXT)')
+        for index, (stamp, enabled) in enumerate([('2026-09-01T00:00:00Z',1),('2026-09-06T18:00:00Z',0)]):
+            snapshot = {'account_id':'b','enabled':enabled,'version':2-enabled,'schedule_mode':'random','publish_times_json':'[]'}
+            self.legacy.execute('INSERT INTO tt_post_daily_schedule_audit VALUES(?,?,?,?)', (index,'b',stamp,json.dumps(snapshot)))
+        self.assertIsNone(self.row('manual_material_schedule')['expected'])
+
     def test_audit_installed_today_preserves_yesterdays_persisted_plan(self):
         self.legacy.execute('INSERT INTO tt_post_daily_schedule VALUES(?,1,1,?,?,?)', ('b','random','[]','2026-08-01T00:00:00Z'))
         self.legacy.execute('INSERT INTO tt_post_random_daily_plan VALUES(?,?,1,?)', ('b','2026-09-07','["01:00","03:00"]'))
@@ -144,6 +165,7 @@ class TTReportTests(unittest.TestCase):
         report = self.report()
         row = next(r for r in report['rows'] if r['source'] == 'unavailable:tt')
         self.assertIsNone(row['expected'])
+        self.assertFalse(row['data_available'])
         self.assertTrue(report['warnings'])
         self.assertFalse(Path(self.paths['tt']).exists())
 

@@ -54,6 +54,31 @@ FB需排空入口后窄重启sidecar才能加载该方法。不能以整份本�
 群信息查询权限与群消息发送权限分开判断。
 程序没有发布、补发、停账号、改规则、重启业务服务的能力。
 
+### TT 读取与人工排期修正（2026-09-18）
+
+TT Auto 源库使用 WAL 模式。即使连接为 `mode=ro`，当辅助文件不存在时仍可能需要创建
+`-wal` / `-shm`；systemd 因此仅给 TT Auto 目录辅助文件权限，主库文件继续通过
+`ReadOnlyPaths` 保护。采集器保留 `mode=ro`、`query_only=ON` 和有界读取；不能对活动库使用
+`immutable=1` 绕过 WAL。人工排期历史先过滤不与统计日重叠的启用区间，再判断随机日计划
+是否缺失。真正缺少统计日历史仍显示未知。TT 来源读取失败通过 `data_available=false`
+标记，已发/补发和汇总也显示未知，不再把默认 0 展示为成功读取的结果。
+
+### 明确授权后的 TT 修正版
+
+原始日报、回执和发送去重状态保留不变。仅在操作员明确要求更正重发时执行：
+
+```bash
+python3 scripts/post_daily_report_correction.py --date 2026-09-17 --revision tt-fix-20260918 --preview
+python3 scripts/post_daily_report_correction.py --date 2026-09-17 --revision tt-fix-20260918 --send
+```
+
+脚本要求原消息已确认 sent 且回执一致；只重新采集 TT，保持原日期、次日 10:00 截止时间，
+FB/X 保留原日报数据。TT 仍不完整时拒绝发送。卡片标注 TT 修正版。
+更正归档位于 `corrections/<date>/<revision>/`，其中独立 `delivery.sqlite3` 使用
+`<date>/TT-correction/<revision>` 作为稳定投递键和 UUID 来源；重跑同一 revision 跳过 sent，
+sending/unknown 保持禁止盲重试。预览写入 `previews/<date>/corrections/<revision>/`。
+不得通过删除原 sent/unknown 记录强制重发，也不能改 revision 来绕过一次未确认的发送。
+
 ```bash
 systemctl status post-daily-report.timer post-daily-report.service
 journalctl -u post-daily-report.service -n 60 --no-pager

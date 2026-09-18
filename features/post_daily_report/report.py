@@ -40,12 +40,13 @@ def validate_channel(channel):
 
 
 def total(rows):
-    known = all(r.get("expected") is not None for r in rows)
+    available = all(r.get("data_available", True) for r in rows)
+    known = available and all(r.get("expected") is not None for r in rows)
     expected = sum(r.get("expected") or 0 for r in rows)
     published = sum(r.get("published", 0) for r in rows)
     late = sum(r.get("late", 0) for r in rows)
     return {"expected": expected if known else None, "known_expected": expected,
-            "published": published, "late": late,
+            "published": published if available else None, "late": late if available else None,
             "missing": expected - published - late if known else None}
 
 
@@ -77,11 +78,11 @@ def build_card(report):
             continue
         sums = total(rows)
         elements.append(_md("**%s｜应发 %s · 昨日已发 %s · 补发 %s · 未完成 %s**" %
-                            (channel["channel"], _n(sums["expected"]), sums["published"], sums["late"], _n(sums["missing"]))))
+                            (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]))))
         elements.append(_columns(["发布来源", "应发", "已发", "补发", "未完成"], True))
         for row in rows[:12]:
             counts = total([row])
-            elements.append(_columns([row.get("label", row["source"]), _n(counts["expected"]), counts["published"], counts["late"], _n(counts["missing"])]))
+            elements.append(_columns([row.get("label", row["source"]), _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]), _n(counts["missing"])]))
             forms = row.get("form_counts") or {}
             form_text = "、".join("%s %s" % (k, v) for k, v in forms.items()) if forms else row.get("form", "")
             states = []
@@ -115,9 +116,10 @@ def build_compact_card(report):
             continue
         rows = channel.get("rows", [])
         sums = total(rows)
-        elements.append(_md("**%s** 应发 %s｜已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), sums["published"], sums["late"], _n(sums["missing"]), channel.get("prior_completed", 0))))
+        elements.append(_md("**%s** 应发 %s｜已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
         for row in rows[:10]:
-            elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(row.get("expected")), row.get("published", 0), row.get("late", 0))))
+            counts = total([row])
+            elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]))))
         reasons = [r for row in rows for r in row.get("reasons", []) if r.get("count")]
         for r in sorted(reasons, key=lambda r: r["count"], reverse=True)[:2]:
             elements.append(_md("%s 条：%s%s；建议：%s" % (r["count"], r["reason"][:100], "（推测/待核实）" if r.get("confidence") != "confirmed" else "", r.get("suggestion", "核查发布记录")[:120])))

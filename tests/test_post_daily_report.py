@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from features.post_daily_report.common import Window, read_db, in_window
 from features.post_daily_report.delivery import DeliveryStore, DeliveryUnknown, DefiniteFailure, send_card
-from features.post_daily_report.report import total, build_card, collect_report, validate_channel
+from features.post_daily_report.report import total, build_card, build_compact_card, collect_report, validate_channel
 
 
 class ReportTests(unittest.TestCase):
@@ -34,6 +34,21 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(sums["expected"])
         self.assertIsNone(sums["missing"])
         self.assertEqual(sums["published"], 2)
+
+    def test_unavailable_tt_source_shows_unknown_counts_in_both_cards(self):
+        rows = [{"source": "unavailable:tt_auto", "label": "自动模板·数据不可用",
+                 "expected": None, "published": 0, "late": 0, "data_available": False},
+                {"source": "manual", "expected": 1, "published": 1, "late": 0}]
+        sums = total(rows)
+        for key in ('expected', 'published', 'late', 'missing'):
+            self.assertIsNone(sums[key])
+        report = {"date": "2026-09-17", "channels": [{"channel": "TT", "rows": rows}]}
+        full = json.dumps(build_card(report), ensure_ascii=False)
+        self.assertIn('昨日已发 未知', full)
+        self.assertNotIn('昨日已发 0', full)
+        compact = json.dumps(build_compact_card(report), ensure_ascii=False)
+        self.assertIn('已发 未知', compact)
+        self.assertIn('未知 / 未知 / 未知', compact)
 
     def test_channel_failure_isolated_and_visible(self):
         with patch("features.post_daily_report.report.importlib.import_module", side_effect=RuntimeError("secret-must-not-leak")):
