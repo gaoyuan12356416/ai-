@@ -32,8 +32,9 @@ from .composition import (
     compile_random_overlay_spec,
     composition_sha256,
     plan_chunks,
+    validate_composition_spec,
 )
-from .core import DramaSynthesisError, RECIPE_PROFILE
+from .core import DramaSynthesisError, RECIPE_PROFILE, validate_source_overlay
 from .local_checkpoint import (
     atomic_write_record,
     checkpoint_error,
@@ -54,6 +55,9 @@ DEFAULT_COMPOSITOR_LANES = 1
 DEFAULT_FILTER_THREADS = 2
 DEFAULT_RUNTIME_IDENTITY = "ffmpeg-opencl-nvenc-runtime-v1"
 KERNEL_TEMPLATE = Path(__file__).with_name("opencl") / "random_overlay_v2.cl"
+SOURCE_OVERLAY_KERNEL_TEMPLATE = Path(__file__).with_name("opencl") / "random_overlay_source_v1.cl"
+CUDA_KERNEL_TEMPLATE = Path(__file__).with_name("cuda") / "random_overlay_v1.cu"
+SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE = Path(__file__).with_name("cuda") / "random_overlay_source_v1.cu"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 _THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -266,7 +270,16 @@ def _clean_main_geometry(scale: float) -> Dict[str, int]:
     return {"main_width": main_width, "main_height": main_height}
 
 
+def kernel_template_path(spec: Mapping[str, Any], *, cuda: bool = False) -> Path:
+    """Keep frozen six-layer scenes on their original kernel and cache identity."""
+    validate_composition_spec(spec)
+    if len(spec["layers"]) == 7:
+        return SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE if cuda else SOURCE_OVERLAY_KERNEL_TEMPLATE
+    return CUDA_KERNEL_TEMPLATE if cuda else KERNEL_TEMPLATE
+
+
 def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = None) -> Dict[str, str]:
+    template_path = kernel_template_path(spec)
     main = spec["layers"][1]
     tint = spec["layers"][2]
     rotation = main["transform"]["rotation_millidegrees"] / 1000.0 * math.pi / 180.0
@@ -285,7 +298,14 @@ def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = Non
         "#define SCENE_TINT_OPACITY %.9ff" % opacity,
         "",
     ))
-    body = _safe_kernel_template() if template is None else str(template)
+    if len(spec["layers"]) == 7:
+        overlay = spec["layers"][6]
+        prefix += "\n".join((
+            "#define SCENE_SOURCE_OVERLAY_SCALE %.9ff" % (overlay["transform"]["scale_bp"] / 10000.0),
+            "#define SCENE_SOURCE_OVERLAY_OPACITY %.9ff" % (overlay["opacity_bp"] / 10000.0),
+            "",
+        ))
+    body = _safe_kernel_template(template_path) if template is None else str(template)
     if "__kernel void compose_random_overlay_v2" not in body:
         raise compositor_error()
     text = prefix + body
@@ -807,6 +827,7 @@ def _validate_recipe_and_assets(recipe: Mapping[str, Any], asset_root: Path, man
     actual_sha = hashlib.sha256(_canonical_recipe(recipe).encode("utf-8")).hexdigest()
     if not HEX.fullmatch(supplied_sha) or supplied_sha != actual_sha:
         raise DramaSynthesisError("drama_recipe_hash_invalid", "随机模板配方指纹无效", 409)
+    source_overlay = validate_source_overlay(recipe)
     try:
         assets = load_asset_set(asset_root, str(manifest_sha256 or "").lower())
     except Exception:
@@ -825,6 +846,8 @@ def _validate_recipe_and_assets(recipe: Mapping[str, Any], asset_root: Path, man
             "tint_opacity_bp": recipe.get("tint_opacity_bp"),
             "version": 1,
         }
+        if source_overlay is not None:
+            fb_recipe["source_overlay"] = source_overlay
         validate_recipe(fb_recipe, assets)
     except Exception:
         raise DramaSynthesisError("drama_recipe_asset_mismatch", "随机模板配方与GPU素材不一致", 409) from None
@@ -902,7 +925,7 @@ def render_chunked_random_output(
         "chunk_count": len(chunks),
     }
     if frame_pipeline() == "cuda":
-        content_identity["cuda_kernel"] = file_fingerprint(Path(__file__).with_name("cuda") / "random_overlay_v1.cu")
+        content_identity["cuda_kernel"] = file_fingerprint(kernel_template_path(spec, cuda=True))
     content_sha = hashlib.sha256(canonical_json(content_identity).encode("utf-8")).hexdigest()
     root = cache_root() / content_sha[:2] / content_sha
     chunks_root = root / "chunks"

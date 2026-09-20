@@ -27,6 +27,7 @@ from urllib.parse import quote, urlencode, urlsplit
 RECIPE_VERSION = 1
 RECIPE_PROFILE = "drama-random-overlay-h264-720x1280-v1"
 RECIPE_CATEGORIES = ("border", "opacity_video", "corners", "tint")
+SOURCE_OVERLAY_VERSION = 1
 UPLOAD_SCOPES = frozenset(
     {
         "https://www.googleapis.com/auth/youtube.upload",
@@ -250,6 +251,23 @@ def _stable_int(identity: Mapping[str, Any], label: str, low: int, high: int) ->
     return low + int.from_bytes(hashlib.sha256(raw).digest()[:8], "big") % (high - low + 1)
 
 
+def validate_source_overlay(recipe: Mapping[str, Any]) -> Optional[Dict[str, int]]:
+    """Validate the optional frozen layer without upgrading legacy recipes."""
+    if "source_overlay" not in recipe:
+        return None
+    overlay = recipe["source_overlay"]
+    if (
+        not isinstance(overlay, Mapping)
+        or set(overlay) != {"version", "opacity_bp", "scale_bp"}
+        or any(type(overlay.get(key)) is not int for key in ("version", "opacity_bp", "scale_bp"))
+        or overlay["version"] != SOURCE_OVERLAY_VERSION
+        or not 200 <= overlay["opacity_bp"] <= 500
+        or not 11000 <= overlay["scale_bp"] <= 15000
+    ):
+        raise DramaSynthesisError("drama_source_overlay_invalid", "原视频叠层配方无效", 409)
+    return dict(overlay)
+
+
 def freeze_random_recipe(
     *,
     job_id: str,
@@ -303,6 +321,11 @@ def freeze_random_recipe(
         "rotation_millidegrees": _stable_int(identity, "rotation", -2000, 2000),
         "scale_bp": _stable_int(identity, "scale", 9800, 10200),
         "tint_opacity_bp": _stable_int(identity, "tint-opacity", 100, 1000),
+        "source_overlay": {
+            "version": SOURCE_OVERLAY_VERSION,
+            "opacity_bp": _stable_int(identity, "source-overlay-opacity", 200, 500),
+            "scale_bp": _stable_int(identity, "source-overlay-scale", 11000, 15000),
+        },
     }
     recipe["recipe_sha256"] = _sha256_text(_canonical_json(recipe))
     return recipe
@@ -594,6 +617,7 @@ class DramaSynthesisStore:
             or str(recipe.get("profile") or "") != RECIPE_PROFILE
         ):
             raise DramaSynthesisError("drama_recipe_identity_invalid", "随机模板配方身份无效")
+        validate_source_overlay(recipe)
         encoded = _canonical_json(recipe)
         sha = str(recipe.get("recipe_sha256") or "")
         if sha != _sha256_text(_canonical_json({k: v for k, v in recipe.items() if k != "recipe_sha256"})):
@@ -1718,6 +1742,7 @@ __all__ = [
     "ImmutableFilesystemPublisher",
     "RECIPE_CATEGORIES",
     "RECIPE_PROFILE",
+    "SOURCE_OVERLAY_VERSION",
     "SHORT_BASE_URL",
     "W2A_BASE_URL",
     "build_long_url",
@@ -1725,4 +1750,5 @@ __all__ = [
     "normalize_channel_scopes",
     "render_wrapper_html",
     "scope_capabilities",
+    "validate_source_overlay",
 ]

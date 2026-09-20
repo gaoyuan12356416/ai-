@@ -28,7 +28,7 @@ from features.fb_gpu.random_overlay import (
     validate_recipe,
 )
 
-from .core import DramaSynthesisError, RECIPE_CATEGORIES, RECIPE_PROFILE
+from .core import DramaSynthesisError, RECIPE_CATEGORIES, RECIPE_PROFILE, validate_source_overlay
 from .local_checkpoint import (
     atomic_write_record, checkpoint_error, file_fingerprint, load_completed, read_record, save_completed,
 )
@@ -811,6 +811,7 @@ def _render_random_output_legacy(
     actual_sha = hashlib.sha256(_canonical(unsigned).encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[0-9a-f]{64}", supplied_sha) or supplied_sha != actual_sha:
         raise DramaSynthesisError("drama_recipe_hash_invalid", "随机模板配方指纹无效", 409)
+    source_overlay = validate_source_overlay(recipe)
     assets = load_asset_set(Path(asset_root), str(manifest_sha256 or "").lower())
     fb_recipe = {
         "asset_set_sha256": recipe.get("asset_set_sha256"),
@@ -820,6 +821,8 @@ def _render_random_output_legacy(
         "tint_opacity_bp": int(recipe.get("tint_opacity_bp") or 0),
         "version": 1,
     }
+    if source_overlay is not None:
+        fb_recipe["source_overlay"] = source_overlay
     try:
         validate_recipe(fb_recipe, assets)
     except Exception:
@@ -860,7 +863,7 @@ def _render_random_output_legacy(
     fd, temporary = tempfile.mkstemp(prefix=".random-render-", suffix=".mp4", dir=str(output_path.parent))
     os.close(fd)
     temporary_path = Path(temporary)
-    config = SimpleNamespace(ffmpeg=ffmpeg)
+    config = SimpleNamespace(ffmpeg=ffmpeg, compositor_backend="cpu_legacy")
     started_record = {"version": 1, "identity": identity, "artifact": None,
                       "result": None, "temporary_name": temporary_path.name}
     verified_render = False

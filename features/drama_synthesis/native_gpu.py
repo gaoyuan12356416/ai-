@@ -18,7 +18,7 @@ import time
 
 from .asset_cache import verified_entry
 from .composition import CANVAS_FPS, CANVAS_HEIGHT, CANVAS_WIDTH
-from .gpu_compositor import compile_opencl_kernel
+from .gpu_compositor import compile_opencl_kernel, kernel_template_path
 from .h264_headers import packet_dimensions
 
 KERNEL = Path(__file__).with_name("cuda") / "random_overlay_v1.cu"
@@ -195,7 +195,8 @@ def render(plan, progress=None):
     cp.cuda.Device(0).use()
     torch.set_num_threads(1)
     prefix = compile_opencl_kernel(plan["spec"])["source"].split("// FFmpeg program_opencl", 1)[0]
-    module = cp.RawModule(code=prefix + KERNEL.read_text(encoding="utf-8"), options=("--std=c++11",))
+    kernel_path = kernel_template_path(plan["spec"], cuda=True)
+    module = cp.RawModule(code=prefix + kernel_path.read_text(encoding="utf-8"), options=("--std=c++11",))
     convert = module.get_function("nv12_rgba")
     compose = module.get_function("compose")
     to_nv12 = module.get_function("rgba_nv12")
