@@ -1,0 +1,22 @@
+{
+  "pid": 2645876,
+  "start_ticks": "223285969",
+  "events": [
+    {
+      "signal": "SIGTERM",
+      "requested_at": 1789878322.2513218,
+      "output_unchanged": true
+    },
+    {
+      "signal": "SIGKILL",
+      "requested_at": 1789878337.2741854,
+      "output_unchanged": true
+    },
+    {
+      "exited": true,
+      "source_retained": true,
+      "no_ready_manifest": true,
+      "worker_removed_unfinished_output": true
+    }
+  ]
+}

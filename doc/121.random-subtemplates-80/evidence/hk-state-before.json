@@ -1,0 +1,12 @@
+{
+  "pointers": {
+    "/data/drama-synthesis-gpu/current": "/data/drama-synthesis-gpu/releases/9c4c3cb4eca260d46df8ab23443a32cda667c20c",
+    "/data/tt-post-gpu/random-current": "/data/tt-post-gpu/releases/326e16defb8f0b1aec76e8f36d52bb6359275a98-catalog",
+    "/opt/fb-page-random-overlay/current": "/data/random-overlay-gpu/releases/e3bef98"
+  },
+  "services": {
+    "drama-synthesis-gpu-worker.service": "MainPID=1613067\nNRestarts=0\nActiveState=active",
+    "tt-gpu-publisher.service": "MainPID=1613076\nNRestarts=0\nActiveState=active",
+    "fb-page-random-overlay-gpu.service": "MainPID=1613078\nNRestarts=0\nActiveState=active"
+  }
+}

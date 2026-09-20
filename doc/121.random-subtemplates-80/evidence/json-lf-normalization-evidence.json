@@ -1,0 +1,35 @@
+{
+  "reproducibility": {
+    "ok": true,
+    "file": "opacity-video-11.webm",
+    "sha256": "978b7d82282ca33e972fae42830035431399724faea5bf1161298061a46a2afd",
+    "clean_bitexact_rebuild_sha_matches": true,
+    "completed_receipt_reused_without_rewriting_asset_or_receipt": true,
+    "elapsed_seconds": 17.101
+  },
+  "build": {
+    "started_at": "2026-09-20T11:59:21.53168+08:00",
+    "finished_at": "2026-09-20T12:02:14.5528008+08:00",
+    "elapsed_seconds": 173.0211208,
+    "maximum_parallel_encoders": 2,
+    "controlled_restarts": 1,
+    "restart_reason": "Enabled bitexact mux/encoder and invalidated earlier encoding receipts before final build"
+  },
+  "validation_failures": [],
+  "new_assets_total_bytes": 74123601,
+  "decoded_video_frames": 2640,
+  "video_count": 22,
+  "png_count": 20,
+  "max_video_composite_mean_error": 0.03157011792063713,
+  "json_lf_normalization": {
+    "bug": "BUG002",
+    "description": "Windows text-mode JSON writes introduced CRLF; explicit UTF-8 bytes now ensure LF serialization across platforms",
+    "previous_manifest_sha256": "76db89f8b321f39bc25c5dac036f44bc297c3553d99e985e08af4af1cf72e5d9",
+    "manifest_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+    "normalized_json_files": 44,
+    "base_manifest_bytes_preserved": true,
+    "all_media_sha256_preserved": true,
+    "artwork_source_unchanged": true,
+    "media_reencoded": false
+  }
+}

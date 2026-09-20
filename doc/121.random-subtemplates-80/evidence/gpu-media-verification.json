@@ -1,0 +1,231 @@
+{
+  "ok": true,
+  "clips": [
+    {
+      "file": "drama-0.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4499823
+    },
+    {
+      "file": "drama-1.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4548015
+    },
+    {
+      "file": "drama-2.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4454687
+    },
+    {
+      "file": "drama-3.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4574433
+    },
+    {
+      "file": "drama-4.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4537431
+    },
+    {
+      "file": "drama-5.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4663058
+    },
+    {
+      "file": "drama-6.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4580245
+    },
+    {
+      "file": "drama-7.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4459221
+    },
+    {
+      "file": "drama-8.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4582814
+    },
+    {
+      "file": "drama-9.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4078961
+    },
+    {
+      "file": "drama-10.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4517360
+    },
+    {
+      "file": "drama-11.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4450609
+    },
+    {
+      "file": "drama-legacy.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 5206970
+    },
+    {
+      "file": "drama-previous.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4240127
+    },
+    {
+      "file": "tt.mp4",
+      "codec": "hevc",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 701351
+    },
+    {
+      "file": "fb.mp4",
+      "codec": "h264",
+      "video_frames": 150,
+      "fps": 30,
+      "video_seconds": 5.0,
+      "container_seconds": 5.0,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "audio_streams": 1,
+      "bytes": 4051890
+    }
+  ],
+  "private_local_only": true,
+  "no_upload_or_publish": true
+}

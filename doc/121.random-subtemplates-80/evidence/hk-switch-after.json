@@ -1,0 +1,70 @@
+{
+  "ok": true,
+  "catalog": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+  "code_pointers_preserved": {
+    "/data/drama-synthesis-gpu/current": "/data/drama-synthesis-gpu/releases/9c4c3cb4eca260d46df8ab23443a32cda667c20c",
+    "/data/tt-post-gpu/random-current": "/data/tt-post-gpu/releases/326e16defb8f0b1aec76e8f36d52bb6359275a98-catalog",
+    "/opt/fb-page-random-overlay/current": "/data/random-overlay-gpu/releases/e3bef98"
+  },
+  "health": {
+    "8787": {
+      "ok": true,
+      "role": "media-only",
+      "render_concurrency": 1,
+      "compositor_backend": "opencl_fused_v2",
+      "compositor_chunk_seconds": 120,
+      "compositor_lanes": 2,
+      "compositor_filter_threads": 2,
+      "asset_cache_enabled": true,
+      "frame_pipeline": "cuda",
+      "renderer_profile": "drama-opencl-fused-h264-720x1280-v4-fullbleed",
+      "kernel_template_sha256": "5e107f7a093ca39752b2532afb8a4204ddb2510f8e39405d721fb3e8b6a51c4d",
+      "release_sha": "9c4c3cb4eca260d46df8ab23443a32cda667c20c",
+      "runtime_identity": "nvdec-cuda-nvenc-rgba-demux-v2"
+    },
+    "8830": {
+      "asset_identity_ready": true,
+      "brand_overlay_review_required": false,
+      "compositor_backend": "opencl_fused_contain_v1",
+      "direct_post_eligible": true,
+      "gates": {
+        "TT_POST_DIRECT_AUDIT_APPROVED": true,
+        "TT_POST_LIVE_ENABLED": true,
+        "TT_POST_URL_PROPERTY_VERIFIED": true,
+        "ready": true
+      },
+      "local_origin_enabled": false,
+      "manual_canary": {
+        "active": false,
+        "enabled": false,
+        "privacy_level": "SELF_ONLY",
+        "test_bypass": false
+      },
+      "media_mode": "random_overlay",
+      "profile": "tt-post-random-overlay-hevc-720x1280-v3",
+      "random_overlay_asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+      "status": "ok",
+      "storage": {
+        "backend": "cos",
+        "cleanup": {
+          "status": "not_started"
+        },
+        "local_origin_enabled": false
+      },
+      "storage_backend": "cos",
+      "transition": "none"
+    },
+    "8836": {
+      "ok": true,
+      "service": "fb-page-prepare-gpu",
+      "profile": "tt-post-random-overlay-h264-720x1280-v3",
+      "prepare_only": true,
+      "compositor_backend": "opencl_fused_contain_v1"
+    }
+  },
+  "services": {
+    "drama-synthesis-gpu-worker.service": "MainPID=2690656\nNRestarts=0\nActiveState=active",
+    "tt-gpu-publisher.service": "MainPID=2690663\nNRestarts=0\nActiveState=active",
+    "fb-page-random-overlay-gpu.service": "MainPID=2690665\nNRestarts=0\nActiveState=active"
+  }
+}

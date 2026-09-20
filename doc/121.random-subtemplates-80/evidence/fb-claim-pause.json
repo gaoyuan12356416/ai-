@@ -1,0 +1,10 @@
+{
+  "pid": 3275787,
+  "unit": "fb-auto-post-prepare.service",
+  "paused": true,
+  "stop_requested": true,
+  "start_ticks": "378453104",
+  "initial_state": "S",
+  "purpose": "Pause only further CPU claims; accepted GPU media completes",
+  "state_after": "T"
+}

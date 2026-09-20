@@ -1,0 +1,6 @@
+{
+  "services": {
+    "drama-material-api.service": "MainPID=2668168\nNRestarts=0\nActiveState=active",
+    "drama-material-job-worker.service": "MainPID=1684812\nNRestarts=0\nActiveState=active"
+  }
+}

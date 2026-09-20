@@ -1,0 +1,38 @@
+{
+  "pid": 2645876,
+  "unit": "fb-page-random-overlay-gpu.service",
+  "identity": {
+    "state": "S",
+    "parent_pid": 1613078,
+    "start_ticks": "223285969"
+  },
+  "before": {
+    "bytes": 9175088,
+    "mtime_ns": 1789873016013120581,
+    "age_seconds": 5222.4935739040375
+  },
+  "backup_files": [
+    {
+      "name": "source.mp4",
+      "bytes": 17534428,
+      "sha256": "e112f5e875d8cbee35937e27bb10ca924422999a8b89ae71d1cbaaca713e4a7f"
+    },
+    {
+      "name": "output.tmp.mp4",
+      "bytes": 9175088,
+      "sha256": "2af10b4e29488da53d7ae547fe7c7fef09f1ea110b4617e26fae13b67e89f60a"
+    },
+    {
+      "name": "compositor-7942fa310135967662b4.cl",
+      "bytes": 3162,
+      "sha256": "7942fa310135967662b47de89540e859ad708623ceb60ef911788197c83c98be"
+    }
+  ],
+  "signal": "SIGINT",
+  "reason": "Unfinished preparation output unchanged for over one hour; no ready manifest exists",
+  "signal_requested": true,
+  "exited": false,
+  "source_retained": true,
+  "ready_manifest_exists": false,
+  "unfinished_output_exists": true
+}

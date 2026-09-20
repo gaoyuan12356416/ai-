@@ -1,0 +1,9 @@
+{
+  "lane": "fb",
+  "codec": "h264",
+  "width": 720,
+  "height": 1280,
+  "seconds": 5.0,
+  "catalog": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+  "no_upload_or_publish": true
+}
