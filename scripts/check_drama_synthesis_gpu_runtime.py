@@ -274,6 +274,7 @@ def compositor_pipeline_issues(env, asset_set, runner=subprocess.run, probe=None
                 "rotation_millidegrees": 0,
                 "scale_bp": 10000,
                 "tint_opacity_bp": 500,
+                "source_overlay": {"version": 1, "opacity_bp": 350, "scale_bp": 13000},
             }
             unsigned["recipe_sha256"] = hashlib.sha256(
                 canonical_json(unsigned).encode("utf-8")

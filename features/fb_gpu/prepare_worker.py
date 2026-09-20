@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file
+from features.random_gpu.compositor import validate_source_overlay
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 PREPARE_PATH="/internal/fb-page-media/prepare"; HEALTH_PATH="/health"
@@ -92,11 +93,20 @@ def _probe(config,path):
     return {"duration":duration,"has_audio":audio is not None,"video":video,"audio":audio}
 
 def build_command(config,source,output,info,recipe,assets):
+    source_overlay=validate_source_overlay(recipe)
     rotation=int(recipe["rotation_millidegrees"])/1000; scale=int(recipe["scale_bp"])/10000; opacity=int(recipe["tint_opacity_bp"])/10000
     command=[config.ffmpeg,"-y","-nostdin","-hide_banner","-loglevel","error","-i",str(source),"-loop","1","-i",str(assets["border"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["opacity_video"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["corners"]),"-loop","1","-i",str(assets["tint"])]
     if not info["has_audio"]: command += ["-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000"]
     audio="0:a:0" if info["has_audio"] else "5:a:0"
     graph=("[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,format=rgba,scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,rotate=%.6f*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];[4:v]scale=720:1280:flags=lanczos,format=rgba,colorchannelmixer=aa=%.4f,fps=30,setpts=PTS-STARTPTS[tint];[2:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[opacity];[1:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[border];[3:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[corners];[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,format=yuv420p[v]")%(scale,scale,rotation,opacity)
+    if source_overlay is not None:
+        graph=graph.replace("split=2[backraw][mainraw]","split=3[backraw][mainraw][sourceraw]",1)
+        graph=graph.removesuffix(",format=yuv420p[v]")+"[composite];"
+        graph+=("[sourceraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,"
+                "crop=720:1280,setsar=1,format=rgba,"
+                "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
+                "colorchannelmixer=aa=%.4f[sourceghost];"
+                "[composite][sourceghost]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat,format=yuv420p[v]")%(source_overlay["scale_bp"]/10000,source_overlay["scale_bp"]/10000,source_overlay["opacity_bp"]/10000)
     return command+["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-shortest","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
 
 class CosObjectStore:

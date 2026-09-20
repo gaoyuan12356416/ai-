@@ -30,9 +30,9 @@ if str(ROOT) not in sys.path:
 
 from features.drama_synthesis.core import freeze_random_recipe
 from features.drama_synthesis.gpu import catalog_from_assets
-from features.drama_synthesis.composition import RENDERER_PROFILE
+from features.drama_synthesis.composition import RENDERER_PROFILE, compile_random_overlay_spec
 from features.drama_synthesis.gpu_compositor import (
-    BACKEND, KERNEL_TEMPLATE, _video_contract, compositor_filter_threads, compositor_lanes,
+    BACKEND, kernel_template_path, _video_contract, compositor_filter_threads, compositor_lanes,
     render_chunked_random_output, runtime_identity,
 )
 
@@ -343,7 +343,7 @@ def main(argv=None):
         "renderer_backend": BACKEND,
         "renderer_profile": RENDERER_PROFILE,
         "runtime_identity": runtime_identity(),
-        "kernel_template_sha256": sha256_file(KERNEL_TEMPLATE),
+        "kernel_template_sha256": sha256_file(kernel_template_path(compile_random_overlay_spec(recipe, source_info), cuda=os.environ.get("DRAMA_GPU_FRAME_PIPELINE") == "cuda")),
         "asset_manifest_sha256": manifest,
         "compositor_lanes": compositor_lanes(),
         "compositor_filter_threads": compositor_filter_threads(),

@@ -9516,7 +9516,7 @@
                     <div class="field"><label>角标</label><select id="randomCorners"></select></div>
                     <div class="field"><label>色彩</label><select id="randomTint"></select></div>
                   </div>
-                  <div id="randomTemplateHint" class="hint">配方会在任务创建时冻结，重试继续复用同一版本。</div>
+                  <div id="randomTemplateHint" class="hint">自动叠加无声原视频：不透明度 2%–5%、放大 110%–150%，居中置于最上层。配方创建时冻结，重试复用。</div>
                 </div>
 
 
@@ -19213,6 +19213,10 @@ function buildJobRow(job) {
         addLine("资产版本", `${auditText(frozenRecipe.version)} / ${auditText(frozenRecipe.profile)}`);
         addLine("源视频", frozenRecipe.source);
         addLine("资产集合", frozenRecipe.asset_set_sha256);
+        const sourceOverlay = frozenRecipe.source_overlay;
+        if (sourceOverlay && typeof sourceOverlay === "object") {
+          addLine("原视频叠层", `不透明度 ${Number(sourceOverlay.opacity_bp) / 100}% · 放大 ${Number(sourceOverlay.scale_bp) / 100}% · 无声 · 居中置顶`);
+        }
         const assets = frozenRecipe.assets && typeof frozenRecipe.assets === "object" ? frozenRecipe.assets : {};
         ["border", "corners", "opacity_video", "tint"].forEach(key => {
           const asset = assets[key];
@@ -21029,7 +21033,7 @@ function buildJobRow(job) {
           select.appendChild(option);
         });
       });
-      els.randomTemplateHint.textContent = `目录 v${state.randomTemplateCatalog.version}；配方会在创建时冻结，重试继续复用。`;
+      els.randomTemplateHint.textContent = `目录 v${state.randomTemplateCatalog.version}；无声原视频叠层：不透明度 2%–5%、放大 110%–150%，居中置顶；配方创建时冻结，重试复用。`;
       return state.randomTemplateCatalog;
     }
 

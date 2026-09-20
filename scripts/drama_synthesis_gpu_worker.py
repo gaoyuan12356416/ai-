@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app as drama_app  # noqa: E402
-from features.drama_synthesis.core import DramaSynthesisError  # noqa: E402
+from features.drama_synthesis.core import DramaSynthesisError, SOURCE_OVERLAY_VERSION  # noqa: E402
 from features.drama_synthesis.async_runtime import AsyncRuntime, runtime_error, safe_error  # noqa: E402
 from features.drama_synthesis.youtube import YouTubeHTTPError  # noqa: E402
 from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  # noqa: E402
@@ -28,7 +28,8 @@ from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
 from features.drama_synthesis.prefetch import prefetch_episodes  # noqa: E402
 from features.drama_synthesis.media_pipeline import download_worker_count  # noqa: E402
 from features.drama_synthesis.gpu_compositor import (  # noqa: E402
-    KERNEL_TEMPLATE, compositor_filter_threads, compositor_lanes, runtime_identity,
+    KERNEL_TEMPLATE, SOURCE_OVERLAY_KERNEL_TEMPLATE, SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE,
+    compositor_filter_threads, compositor_lanes, runtime_identity,
 )
 
 
@@ -172,6 +173,9 @@ class Handler(BaseHTTPRequestHandler):
                 "frame_pipeline": os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl"),
                 "renderer_profile": RENDERER_PROFILE,
                 "kernel_template_sha256": KERNEL_TEMPLATE_SHA256,
+                "source_overlay_version": SOURCE_OVERLAY_VERSION,
+                "source_overlay_kernel_sha256": hashlib.sha256(SOURCE_OVERLAY_KERNEL_TEMPLATE.read_bytes()).hexdigest(),
+                "source_overlay_cuda_kernel_sha256": hashlib.sha256(SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE.read_bytes()).hexdigest(),
                 "release_sha": RELEASE_SHA,
                 "runtime_identity": RUNTIME_IDENTITY,
             })
