@@ -69,6 +69,8 @@ def verify():
                     recipe["source_overlay"] = {"version": 1, "opacity_bp": 500, "scale_bp": 15000}
                 output = root / f"output-{has_audio}-{enabled}.mp4"
                 command = build_command(cfg, source, output, {"has_audio": has_audio, "duration": 1}, recipe, assets)
+                assert "-shortest" not in command, command
+                assert command[-3:] == ["-t", "1.000000", str(output)], command
                 command[command.index("h264_nvenc")] = "libx264"
                 command[command.index("p5")] = "ultrafast"
                 for key in ("-rc", "-cq"):

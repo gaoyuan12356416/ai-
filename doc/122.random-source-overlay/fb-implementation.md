@@ -7,7 +7,7 @@ Date: 2026-09-20. Base: `e3bef98`. Branch: `codex/random-source-overlay-fb-20260
 - Every newly derived FB recipe includes exactly `source_overlay={version:1, opacity_bp:200..500, scale_bp:11000..15000}`. All three values are strict integers; bool, null, partial/extra keys and out-of-range values fail validation.
 - Draws use the existing stable identity and separate `source-overlay-opacity` / `source-overlay-scale` labels. Existing transform/asset draws, recipe version `1`, and profile `tt-post-random-overlay-h264-720x1280-v3` remain unchanged.
 - An absent `source_overlay` field selects the existing legacy graph. A present invalid field never falls back to legacy rendering. The legacy CPU graph SHA-256 for the fixed regression fixture remains `13f195cc37d7d78bac9e8eb8c4761fcb3a5bfdacdc27218840dc82674aa5ddd2`.
-- The new CPU graph splits the same source video timeline before template composition, aspect-covers and crops to 720x1280, enlarges and centers the unrotated source, applies alpha, and overlays it after corners. Input count, audio mapping, encoding profile and duration arguments are unchanged.
+- The new CPU graph splits the same source video timeline before template composition, aspect-covers and crops to 720x1280, enlarges and centers the unrotated source, applies alpha, and overlays it after corners. Input count, audio mapping, encoding profile and explicit source-duration `-t` bound remain unchanged.
 - Shared OpenCL code, copied unchanged from the TT worktree after its owner's ready notice, samples the existing source plane after corners. The compiled-kernel filename hashes the shader source, including both new parameters. COS continues to use the final video content hash.
 - `GET /health` now reports `source_overlay_version=1`.
 
@@ -37,7 +37,7 @@ Executed on Windows with Python 3.14 and FFmpeg 8.0.1:
 
 ```text
 python -m unittest scripts.test_fb_source_overlay scripts.test_fb_gpu_prepare_worker scripts.test_random_gpu_compositor scripts.test_random_gpu_asset_cache
-37 tests passed
+38 tests passed (the original 37 plus the explicit output-duration contract)
 
 python -m scripts.verify_fb_source_overlay_ffmpeg
 ok=true; 4 actual renders passed
@@ -61,6 +61,12 @@ The FFmpeg fixture substitutes libx264 only for NVENC encoder-specific options; 
 | Enabled source-stripe positions | RGB `(242,242,254)` at x=60/660, y=64/1216 |
 | Retry after upload failure, cleanup and catalog change | Exact frozen recipe/receipt and same FFmpeg command reused |
 | Changed source, invalid recipe/catalog, failed fsync | No new render/upload |
+
+## FB padded-audio stall correction
+
+The FB command now omits only the output-level `-shortest` option. The validated source duration still supplies the exact `-t` value, and `aresample=48000:async=1:first_pts=0,apad` continues to fill short or missing audio. Video filter `shortest=1` / `eof_action`, input looping, audio mapping, H264/NVENC encoding parameters and recipe semantics are unchanged. This addresses the parent task's reproduced early stall with padded audio; full-length production-source acceptance remains with that task.
+
+The regression test checks the `108.300000` second bound across CPU/OpenCL, legacy/new recipes and source-audio/silent inputs. After this change, all 38 related tests and the four actual CPU fixture renders passed again: each output remains 1.000000 seconds, 30 video frames and one audio stream; decoded audio is identical between legacy/new overlay variants.
 
 ## Integration and remaining acceptance
 

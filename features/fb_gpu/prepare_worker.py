@@ -111,7 +111,10 @@ def build_command(config,source,output,info,recipe,assets):
                 "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
                 "colorchannelmixer=aa=%.4f[sourceghost];"
                 "[composite][sourceghost]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat,format=yuv420p[v]")%(source_overlay["scale_bp"]/10000,source_overlay["scale_bp"]/10000,source_overlay["opacity_bp"]/10000)
-    command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-shortest","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
+    # The validated source duration already bounds output via -t; apad fills
+    # short or missing audio. Output -shortest can stall before that bound with
+    # padded audio, so retain the explicit duration as the output stop condition.
+    command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
     return fuse_command(command,recipe,output) if config.compositor_backend==BACKEND else command
 
 

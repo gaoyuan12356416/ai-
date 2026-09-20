@@ -202,6 +202,26 @@ class SourceOverlayTests(AssetFixture, unittest.TestCase):
         self.assertEqual(len(set(graphs)), 4)
         self.assertEqual(len(list(self.root.glob("compositor-*.cl"))), 4)
 
+    def test_output_duration_uses_explicit_bound_with_padded_audio(self):
+        paths = {name: self.root / (name + ".bin") for name in ("border", "opacity_video", "corners", "tint")}
+        legacy = {key: value for key, value in self.recipe.items() if key != "source_overlay"}
+        for compositor_backend in (worker.LEGACY, BACKEND):
+            for recipe in (legacy, self.recipe):
+                for has_audio in (True, False):
+                    with self.subTest(backend=compositor_backend, overlay="source_overlay" in recipe, audio=has_audio):
+                        cfg = replace(config(self.root), compositor_backend=compositor_backend)
+                        command = worker.build_command(cfg, self.root / "source.mp4", self.root / "output.mp4",
+                                                       {"duration": 108.3, "has_audio": has_audio}, recipe, paths)
+                        self.assertNotIn("-shortest", command)
+                        self.assertEqual(command.count("-t"), 1)
+                        self.assertEqual(command[-3:], ["-t", "108.300000", str(self.root / "output.mp4")])
+                        self.assertEqual(command[command.index("-af") + 1], "aresample=48000:async=1:first_pts=0,apad")
+                        self.assertIn("0:a:0" if has_audio else "5:a:0", command)
+                        graph = command[command.index("-filter_complex") + 1]
+                        # Output duration does not change any video framesync EOF policy.
+                        self.assertIn("shortest=1", graph)
+                        self.assertIn("eof_action=endall" if compositor_backend == BACKEND else "eof_action=repeat", graph)
+
 
 class FrozenRecipeTests(AssetFixture, unittest.TestCase):
     def setUp(self):
