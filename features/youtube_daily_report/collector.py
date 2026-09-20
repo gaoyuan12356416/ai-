@@ -144,7 +144,7 @@ def add_metrics(target, row):
         target[field] += int(value)
 
 
-def summarize(publications, links, metrics, report_date, publication_timezone="Asia/Shanghai"):
+def summarize(publications, links, metrics, report_date, publication_timezone="UTC"):
     if publication_timezone not in ("Asia/Shanghai", "UTC"):
         raise ValueError("unsupported_publication_timezone")
     day = date.fromisoformat(report_date)
@@ -230,7 +230,7 @@ def summarize(publications, links, metrics, report_date, publication_timezone="A
                         attribution="frozen_campaign_id_and_campaign_to_ledger_operator"))
 
 
-def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, publication_timezone="Asia/Shanghai"):
+def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, publication_timezone="UTC"):
     publications, links = load_ledger(db_path)
     try:
         metrics = collect_metrics(report_date, env_path)

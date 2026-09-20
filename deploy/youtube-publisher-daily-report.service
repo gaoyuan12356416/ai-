@@ -10,7 +10,7 @@ User=root
 WorkingDirectory=/opt/youtube-publisher-daily-report/current
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 /opt/youtube-publisher-daily-report/current/scripts/youtube_publisher_daily_report.py --send
+ExecStart=/usr/bin/python3 /opt/youtube-publisher-daily-report/current/scripts/youtube_publisher_daily_report.py --publication-timezone UTC --send
 TimeoutStartSec=180
 Nice=10
 IOSchedulingClass=idle

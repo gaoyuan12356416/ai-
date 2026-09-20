@@ -26,7 +26,7 @@ def main(argv=None):
     parser.add_argument("--state-dir", default="/mnt/data-disk/youtube-publisher-daily-report")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--env-file", default=ENV_PATH)
-    parser.add_argument("--publication-timezone", choices=["Asia/Shanghai", "UTC"], default="Asia/Shanghai")
+    parser.add_argument("--publication-timezone", choices=["Asia/Shanghai", "UTC"], default="UTC")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--send", action="store_true")
