@@ -46,7 +46,8 @@ import hashlib,json,os,sys,time
 from pathlib import Path
 sys.path.insert(0,os.environ['QA_CODE'])
 from features.drama_synthesis.catalog import catalog_from_manifest
-from features.drama_synthesis.core import canonical_json,freeze_random_recipe
+from features.drama_synthesis.core import freeze_random_recipe
+from features.drama_synthesis.gpu_compositor import canonical_json
 from features.drama_synthesis.gpu import render_random_output
 qa=Path(os.environ['QA_ROOT']);root=Path(os.environ['DRAMA_RANDOM_OVERLAY_ROOT']);sha=os.environ['DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256']
 catalog=catalog_from_manifest(root/'manifest.json',sha)

@@ -65,6 +65,7 @@ def cpu_disk():
     assert run(['findmnt','-n','-o','TARGET','--target','/mnt/data-disk'])=='/mnt/data-disk'
 
 def checkout(path, commit):
+    old_umask=os.umask(0o022)
     if not path.exists():
         path.mkdir(parents=True)
         run(['git','init',str(path)])
@@ -74,6 +75,8 @@ def checkout(path, commit):
     run(['git','-C',str(path),'fetch','--depth','1','origin',commit],600)
     run(['git','-C',str(path),'checkout','--detach',commit])
     assert run(['git','-C',str(path),'rev-parse','HEAD'])==commit
+    path.chmod(0o755)
+    os.umask(old_umask)
 
 def health(cpu=False):
     out={}
