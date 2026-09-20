@@ -19,7 +19,8 @@ def environment(unit):
     return dict(x.decode().split('=',1) for x in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in x)
 
 owner=pwd.getpwnam('drama-synthesis-gpu')
-qa.mkdir(mode=0o755,exist_ok=True);os.chown(str(qa),owner.pw_uid,owner.pw_gid)
+qa.mkdir(mode=0o755,exist_ok=True);qa.chmod(0o755);os.chown(str(qa),owner.pw_uid,owner.pw_gid)
+cache=qa/'cache';cache.mkdir(mode=0o755,exist_ok=True);os.chown(str(cache),owner.pw_uid,owner.pw_gid)
 if (qa/'report.json').exists():os.replace(str(qa/'report.json'),str(qa/('report-previous-%d.json'%time.time())))
 env=environment('drama-synthesis-gpu-worker.service')
 env.update(QA_ROOT=str(qa),QA_CODE=codes['drama'],DRAMA_GPU_RELEASE_SHA=releases['drama'],
