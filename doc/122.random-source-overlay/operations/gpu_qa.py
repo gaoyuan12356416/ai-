@@ -33,15 +33,29 @@ if not (qa/'source-short.mp4').exists():
         '-color_primaries','bt709','-color_trc','bt709','-color_range','tv',
         '-c:a','aac','-ac','2','-t','4',str(qa/'source-short.mp4')],check=True,timeout=60)
     (qa/'source-short.mp4').chmod(0o444)
-for pipeline in ['cuda','opencl']:
-    e=dict(env);e['DRAMA_GPU_FRAME_PIPELINE']=pipeline
-    log=qa/('preflight-'+pipeline+'.log')
-    with log.open('w') as f:
-        subprocess.run(['runuser','-u','drama-synthesis-gpu','--',
-            '/data/drama-synthesis-gpu/runtime/current/bin/python',
-            codes['drama']+'/scripts/check_drama_synthesis_gpu_runtime.py','--check-app-import'],
-            env=e,cwd=codes['drama'],stdout=f,stderr=subprocess.STDOUT,check=True,timeout=600)
-    print(json.dumps({'preflight':pipeline,'ok':True}),flush=True)
+reuse = sys.argv[2:] == ['--reuse-verified-preflight']
+if reuse:
+    baseline=Path('/data/drama-synthesis-gpu/releases/c38b76f9c89b7769c6e08a5950b92781f4c6c58b')
+    files=list((baseline/'features/drama_synthesis').rglob('*.py'))+list((baseline/'features/drama_synthesis').rglob('*.cl'))+list((baseline/'features/drama_synthesis').rglob('*.cu'))+[baseline/'scripts/check_drama_synthesis_gpu_runtime.py',baseline/'scripts/drama_synthesis_gpu_worker.py',baseline/'app.py']
+    for path in files:
+        relative=path.relative_to(baseline)
+        assert path.read_bytes()==(Path(codes['drama'])/relative).read_bytes(),str(relative)+' preflight code changed'
+    for pipeline in ['cuda','opencl']:
+        previous=json.loads((qa/('preflight-'+pipeline+'.log')).read_text())
+        assert previous['ok'] and previous['asset_cache_verified_count']==80
+        assert previous['runtime_fingerprint']['release_sha']==baseline.name
+    verify="import sys;sys.path.insert(0,"+repr(codes['drama'])+");from scripts.check_drama_synthesis_gpu_runtime import release_identity_issues,check_app_import;import os;assert not release_identity_issues(os.environ);check_app_import();print('new release identity and app import verified; unchanged native code and 80 immutable caches already verified')"
+    subprocess.run(['runuser','-u','drama-synthesis-gpu','--','/data/drama-synthesis-gpu/runtime/current/bin/python','-c',verify],env=env,cwd=codes['drama'],check=True,timeout=90)
+else:
+    for pipeline in ['cuda','opencl']:
+        e=dict(env);e['DRAMA_GPU_FRAME_PIPELINE']=pipeline
+        log=qa/('preflight-'+pipeline+'.log')
+        with log.open('w') as f:
+            subprocess.run(['runuser','-u','drama-synthesis-gpu','--',
+                '/data/drama-synthesis-gpu/runtime/current/bin/python',
+                codes['drama']+'/scripts/check_drama_synthesis_gpu_runtime.py','--check-app-import'],
+                env=e,cwd=codes['drama'],stdout=f,stderr=subprocess.STDOUT,check=True,timeout=600)
+        print(json.dumps({'preflight':pipeline,'ok':True}),flush=True)
 
 DRAMA=r'''
 import hashlib,json,os,sys,time
@@ -112,8 +126,8 @@ for lane,unit,python in [('tt','tt-gpu-publisher.service','/data/tt-post-gpu/run
     subprocess.run([python,'-c',LANE],env=e,cwd=codes[lane],check=True,timeout=600)
 
 outputs=[]
-for p in sorted(qa.glob('*.mp4')):
-    if p.name=='source-short.mp4':continue
+for name in ['drama-minute','drama-old','drama-min','drama-max-opencl','tt-old','tt-new','fb-old','fb-new','fb-previous-stalled-source']:
+    p=qa/(name+'.mp4')
     data=json.loads(subprocess.check_output([env['DRAMA_FFPROBE'],'-v','error','-count_frames','-show_streams','-show_format','-of','json',str(p)],timeout=90))
     videos=[s for s in data['streams'] if s['codec_type']=='video'];audio=[s for s in data['streams'] if s['codec_type']=='audio']
     assert len(videos)==len(audio)==1,p.name
@@ -128,5 +142,5 @@ for p in sorted(qa.glob('*.mp4')):
 assert len(outputs)==9
 e=environment('tt-gpu-publisher.service')
 subprocess.run(['/data/tt-post-gpu/runtime/bin/python',codes['tt']+'/scripts/check_random_gpu_timeline.py','--output',str(qa/'tt-timeline'),'--worker','tt','--ffmpeg',e['TT_POST_GPU_FFMPEG_BIN'],'--ffprobe',e['TT_POST_GPU_FFPROBE_BIN'],'--source-overlay'],env=e,cwd=codes['tt'],check=True,timeout=600)
-report={'ok':True,'releases':releases,'outputs':outputs,'preflight':['cuda','opencl'],'no_upload_or_publication':True}
+report={'ok':True,'releases':releases,'outputs':outputs,'preflight':['cuda','opencl'],'no_upload_or_publication':True,'preflight_reused_identical_native_code':reuse}
 (qa/'report.new.json').write_text(json.dumps(report,indent=2));os.replace(str(qa/'report.new.json'),str(qa/'report.json'));print(json.dumps(report,indent=2),flush=True)
