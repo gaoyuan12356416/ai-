@@ -20,6 +20,7 @@ def environment(unit):
 
 owner=pwd.getpwnam('drama-synthesis-gpu')
 qa.mkdir(mode=0o755,exist_ok=True);os.chown(str(qa),owner.pw_uid,owner.pw_gid)
+if (qa/'report.json').exists():os.replace(str(qa/'report.json'),str(qa/('report-previous-%d.json'%time.time())))
 env=environment('drama-synthesis-gpu-worker.service')
 env.update(QA_ROOT=str(qa),QA_CODE=codes['drama'],DRAMA_GPU_RELEASE_SHA=releases['drama'],
            DRAMA_GPU_COMPOSITOR_CACHE_ROOT=str(qa/'cache'))
@@ -90,12 +91,15 @@ assets=load_asset_set(Path('/data/random-overlay-gpu/assets/catalog-b5df776a88bd
 names={'border':'border-10.png','opacity_video':'opacity-video-16.webm','corners':'corners-20.webm','tint':'tint-13.png'}
 base={'version':1,'asset_set_sha256':assets['manifest_sha256'],'assets':{c:{key:next(item for item in assets['categories'][c] if item['name']==name)[key] for key in ['name','sha256','size','media_type']} for c,name in names.items()},'rotation_millidegrees':700,'scale_bp':10020,'tint_opacity_bp':1000}
 rows=[]
-for label,overlay in [('old',None),('new',{'version':1,'opacity_bp':350,'scale_bp':13000})]:
+cases=[('old',None,qa/'source-short.mp4',4),('new',{'version':1,'opacity_bp':350,'scale_bp':13000},qa/'source-short.mp4',4)]
+if lane=='fb':cases.append(('previous-stalled-source',{'version':1,'opacity_bp':350,'scale_bp':13000},Path('/var/lib/fb-page-random-overlay/jobs/fb-page-03e739bb938593abf39fbf5d4013467621e89d777fbce903/source.mp4'),108.3))
+for label,overlay,source,duration in cases:
     recipe=dict(base)
     if overlay is not None:recipe['source_overlay']=overlay
     paths=selected_asset_paths(recipe,assets);output=qa/(lane+'-'+label+'.mp4')
-    if lane=='tt':command=build_random_overlay_command(config,qa/'source-short.mp4',output,info,4,recipe,paths)
-    else:command=build_command(config,qa/'source-short.mp4',output,info,recipe,paths)
+    if lane=='fb':info=_probe(config,source)
+    if lane=='tt':command=build_random_overlay_command(config,source,output,info,duration,recipe,paths)
+    else:command=build_command(config,source,output,info,recipe,paths)
     started=time.monotonic()
     subprocess.run(command,check=True,timeout=180,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     rows.append({'name':output.stem,'source_overlay':overlay,'recipe':recipe,'elapsed_seconds':round(time.monotonic()-started,3)})
@@ -112,14 +116,16 @@ for p in sorted(qa.glob('*.mp4')):
     data=json.loads(subprocess.check_output([env['DRAMA_FFPROBE'],'-v','error','-count_frames','-show_streams','-show_format','-of','json',str(p)],timeout=90))
     videos=[s for s in data['streams'] if s['codec_type']=='video'];audio=[s for s in data['streams'] if s['codec_type']=='audio']
     assert len(videos)==len(audio)==1,p.name
-    v=videos[0];duration=60 if p.stem=='drama-minute' else 4
+    v=videos[0];duration=60 if p.stem=='drama-minute' else 108.3 if p.stem=='fb-previous-stalled-source' else 4
     assert (v['width'],v['height'],v['avg_frame_rate'])==(720,1280,'30/1'),p.name
     assert v['codec_name']==('hevc' if p.stem.startswith('tt-') else 'h264'),p.name
-    assert int(v['nb_read_frames'])==duration*30,p.name
+    assert int(v['nb_read_frames'])==round(duration*30),p.name
     assert abs(float(v['duration'])-duration)<.08,p.name
     assert audio[0]['channels']==2 and audio[0]['sample_rate']=='48000',p.name
     subprocess.run([ffmpeg,'-v','error','-xerror','-i',str(p),'-f','null','-'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=90)
     outputs.append({'file':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'frames':int(v['nb_read_frames']),'seconds':float(v['duration']),'audio_streams':len(audio),'codec':v['codec_name']})
-assert len(outputs)==8
+assert len(outputs)==9
+e=environment('tt-gpu-publisher.service')
+subprocess.run(['/data/tt-post-gpu/runtime/bin/python',codes['tt']+'/scripts/check_random_gpu_timeline.py','--output',str(qa/'tt-timeline'),'--worker','tt','--ffmpeg',e['TT_POST_GPU_FFMPEG_BIN'],'--ffprobe',e['TT_POST_GPU_FFPROBE_BIN'],'--source-overlay'],env=e,cwd=codes['tt'],check=True,timeout=600)
 report={'ok':True,'releases':releases,'outputs':outputs,'preflight':['cuda','opencl'],'no_upload_or_publication':True}
-(qa/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2),flush=True)
+(qa/'report.new.json').write_text(json.dumps(report,indent=2));os.replace(str(qa/'report.new.json'),str(qa/'report.json'));print(json.dumps(report,indent=2),flush=True)
