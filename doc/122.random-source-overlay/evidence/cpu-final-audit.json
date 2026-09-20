@@ -1,0 +1,133 @@
+{
+  "ok": true,
+  "sample_recipe": {
+    "version": 1,
+    "profile": "drama-random-overlay-h264-720x1280-v1",
+    "mode": "auto",
+    "source": "concat_video",
+    "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+    "assets": {
+      "border": {
+        "name": "border-10.png",
+        "sha256": "dbe659a8ca9abd7767c6e119def4b327ec027f438a66b055a793fb1c38fc33b0",
+        "media_type": "image/png",
+        "size": 85252
+      },
+      "opacity_video": {
+        "name": "opacity-video-07.webm",
+        "sha256": "c997a69e8db6559e89ca01780850edd086eba28294773ed240c6c7422703406f",
+        "media_type": "video/webm",
+        "size": 5723670
+      },
+      "corners": {
+        "name": "corners-18.webm",
+        "sha256": "329abc43ab1c40c23a70a2dd022384dea476a0b453c5f5b4a02179a5ec053a26",
+        "media_type": "video/webm",
+        "size": 50603
+      },
+      "tint": {
+        "name": "tint-12.png",
+        "sha256": "25677a81416e8e84aa4ed3d9425823d64127d6216ca9827266dacc2040c19d0b",
+        "media_type": "image/png",
+        "size": 6917
+      }
+    },
+    "rotation_millidegrees": -1764,
+    "scale_bp": 10177,
+    "tint_opacity_bp": 149,
+    "source_overlay": {
+      "version": 1,
+      "opacity_bp": 269,
+      "scale_bp": 13691
+    },
+    "recipe_sha256": "0bdc75ea4f3ba91941db893937600de34f4a438a3a5e1910c34fa799ed64839b"
+  },
+  "health": {
+    "18788": {
+      "ok": true,
+      "role": "media-only",
+      "render_concurrency": 1,
+      "compositor_backend": "opencl_fused_v2",
+      "compositor_chunk_seconds": 120,
+      "compositor_lanes": 2,
+      "compositor_filter_threads": 2,
+      "asset_cache_enabled": true,
+      "frame_pipeline": "cuda",
+      "renderer_profile": "drama-opencl-fused-h264-720x1280-v4-fullbleed",
+      "kernel_template_sha256": "5e107f7a093ca39752b2532afb8a4204ddb2510f8e39405d721fb3e8b6a51c4d",
+      "source_overlay_version": 1,
+      "source_overlay_kernel_sha256": "e453f2ac96de60a716b21fec3feb6d0248d6478eb708f818909afcb4f1558a7a",
+      "source_overlay_cuda_kernel_sha256": "5ae7c130e07d31ba6a67030ce524e9816478d47bfe47ab6eae60ed7a624406dd",
+      "release_sha": "223577b41466d03fd330625441ab3b7c1d86e843",
+      "runtime_identity": "nvdec-cuda-nvenc-rgba-demux-v2"
+    },
+    "18830": {
+      "asset_identity_ready": true,
+      "brand_overlay_review_required": false,
+      "compositor_backend": "opencl_fused_contain_v1",
+      "direct_post_eligible": true,
+      "gates": {
+        "TT_POST_DIRECT_AUDIT_APPROVED": true,
+        "TT_POST_LIVE_ENABLED": true,
+        "TT_POST_URL_PROPERTY_VERIFIED": true,
+        "ready": true
+      },
+      "local_origin_enabled": false,
+      "manual_canary": {
+        "active": false,
+        "enabled": false,
+        "privacy_level": "SELF_ONLY",
+        "test_bypass": false
+      },
+      "media_mode": "random_overlay",
+      "profile": "tt-post-random-overlay-hevc-720x1280-v3",
+      "random_overlay_asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+      "source_overlay_version": 1,
+      "status": "ok",
+      "storage": {
+        "backend": "cos",
+        "cleanup": {
+          "status": "not_started"
+        },
+        "local_origin_enabled": false
+      },
+      "storage_backend": "cos",
+      "transition": "none"
+    },
+    "18836": {
+      "ok": true,
+      "service": "fb-page-prepare-gpu",
+      "profile": "tt-post-random-overlay-h264-720x1280-v3",
+      "prepare_only": true,
+      "compositor_backend": "opencl_fused_contain_v1",
+      "source_overlay_version": 1
+    }
+  },
+  "services": {
+    "drama-material-api.service": "MainPID=3608346\nNRestarts=0\nActiveState=active",
+    "drama-material-job-worker.service": "MainPID=3608348\nNRestarts=0\nActiveState=active",
+    "fb-auto-post-prepare.timer": "ActiveState=active"
+  },
+  "ui_sha256": "c1cb017e1d0995af629691d2c60cdc6c96eadfb1e76e1b61fb235885d51dae17",
+  "public_ui_verified": true,
+  "no_business_job_created": true,
+  "resumed": {
+    "ok": true,
+    "fb_timer": "ActiveState=active\nSubState=running"
+  },
+  "tt_triggers": {
+    "tt-post-prepare.timer": "active",
+    "tt-post-prepare.path": "inactive",
+    "tt-post-runner.timer": "active",
+    "tt-post-runner.path": "inactive",
+    "tt-auto-post-scheduler.timer": "active",
+    "tt-auto-post-runner.timer": "active",
+    "tt-auto-post-runner.path": "inactive"
+  },
+  "tt_gate_removed": true,
+  "restored_prepare_clients": [
+    3465403,
+    3558700,
+    3561822
+  ]
+}

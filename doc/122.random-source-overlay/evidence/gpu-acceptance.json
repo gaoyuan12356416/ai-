@@ -1,0 +1,88 @@
+{
+  "ok": true,
+  "releases": {
+    "drama": "223577b41466d03fd330625441ab3b7c1d86e843",
+    "tt": "80acd8b4f082e121f8332dea2a34f23d739b1bb3",
+    "fb": "96dc90d1d59622098fa36493862e37e485b84545"
+  },
+  "outputs": [
+    {
+      "file": "drama-minute.mp4",
+      "sha256": "9d7a07c45ee4ee984128c9077a992fff533dc564aa4fb5fe8681b53662eaa469",
+      "frames": 1800,
+      "seconds": 60.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "drama-old.mp4",
+      "sha256": "bcb39c30ada18d58535788026b172df064fa7327eefd48cf165ae5d74c468498",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "drama-min.mp4",
+      "sha256": "b7637da5db5e5f91e1a47dd7c337b810df0560f02797dfe390d96a362e85f5fc",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "drama-max-opencl.mp4",
+      "sha256": "bb75dea38e2dc79111e4f3368e15b3165e52c6bd2cbe8bbb439ef2046fc3a0a5",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "tt-old.mp4",
+      "sha256": "d6562768b47dd8d9486c594eafbc16d674a27c1d13b92df8699f4ce6bcef3856",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "hevc"
+    },
+    {
+      "file": "tt-new.mp4",
+      "sha256": "fee579f48f1944f8cb27970797c7b50abc272604ab673f1a86a210af2468a131",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "hevc"
+    },
+    {
+      "file": "fb-old.mp4",
+      "sha256": "0c860eb39d43bcd7edb64cd9b58f4d14c47bc780cc82d51a6ca857aa9f8d0ca2",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "fb-new.mp4",
+      "sha256": "1540b060d9c873d4bf689edf6b46a9344b953ae1ae53cc936a94d70032c6d41b",
+      "frames": 120,
+      "seconds": 4.0,
+      "audio_streams": 1,
+      "codec": "h264"
+    },
+    {
+      "file": "fb-previous-stalled-source.mp4",
+      "sha256": "7c3ab579fc899d43c0d5175b2c969b876eee0167b1704d6e9252ff9ec9095f2f",
+      "frames": 3249,
+      "seconds": 108.3,
+      "audio_streams": 1,
+      "codec": "h264"
+    }
+  ],
+  "preflight": [
+    "cuda",
+    "opencl"
+  ],
+  "no_upload_or_publication": true,
+  "preflight_reused_identical_native_code": true
+}

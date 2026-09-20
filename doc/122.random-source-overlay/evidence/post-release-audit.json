@@ -1,0 +1,84 @@
+{
+  "observed_utc": "2026-09-20T09:49:12.875861Z",
+  "services": {
+    "drama": {
+      "MainPID": "2825393",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "recent_errors": []
+    },
+    "tt": {
+      "MainPID": "2825400",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "recent_errors": []
+    },
+    "fb": {
+      "MainPID": "2825402",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "recent_errors": []
+    }
+  },
+  "new_receipts": {
+    "tt": [
+      {
+        "receipt": "/data/tt-post-publisher/recipes/tttest-4cc499ac0f09014a7156eca234adf12f5e27ef1d4f8c691f.json",
+        "source_overlay": {
+          "opacity_bp": 222,
+          "scale_bp": 14724,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      },
+      {
+        "receipt": "/data/tt-post-publisher/recipes/ttauto-1779-1da21316730a68dca7120ee9b05b2c9b3489.json",
+        "source_overlay": {
+          "opacity_bp": 307,
+          "scale_bp": 13557,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      },
+      {
+        "receipt": "/data/tt-post-publisher/recipes/ttauto-1778-78b49c61f5d310ae18d984e0df9f4282cd05.json",
+        "source_overlay": {
+          "opacity_bp": 248,
+          "scale_bp": 14574,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      },
+      {
+        "receipt": "/data/tt-post-publisher/recipes/ttauto-1777-6af8410bbe4604f262da428dc098ba700c1e.json",
+        "source_overlay": {
+          "opacity_bp": 279,
+          "scale_bp": 11115,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      }
+    ],
+    "fb": [
+      {
+        "receipt": "/var/lib/fb-page-random-overlay/jobs/fb-page-4fc684e5182b6737cbb7c230154160d8f3fefcff44feb8ba/recipe.json",
+        "source_overlay": {
+          "opacity_bp": 351,
+          "scale_bp": 12314,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      },
+      {
+        "receipt": "/var/lib/fb-page-random-overlay/jobs/fb-page-c85a1236f867a90210484ae9fe2a9bb3446ac7d02d6555dd/recipe.json",
+        "source_overlay": {
+          "opacity_bp": 402,
+          "scale_bp": 12884,
+          "version": 1
+        },
+        "asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+      }
+    ]
+  },
+  "ok": true
+}

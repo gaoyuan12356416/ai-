@@ -1,0 +1,81 @@
+{
+  "drama": {
+    "ok": true,
+    "role": "media-only",
+    "render_concurrency": 1,
+    "compositor_backend": "opencl_fused_v2",
+    "compositor_chunk_seconds": 120,
+    "compositor_lanes": 2,
+    "compositor_filter_threads": 2,
+    "asset_cache_enabled": true,
+    "frame_pipeline": "cuda",
+    "renderer_profile": "drama-opencl-fused-h264-720x1280-v4-fullbleed",
+    "kernel_template_sha256": "5e107f7a093ca39752b2532afb8a4204ddb2510f8e39405d721fb3e8b6a51c4d",
+    "source_overlay_version": 1,
+    "source_overlay_kernel_sha256": "e453f2ac96de60a716b21fec3feb6d0248d6478eb708f818909afcb4f1558a7a",
+    "source_overlay_cuda_kernel_sha256": "5ae7c130e07d31ba6a67030ce524e9816478d47bfe47ab6eae60ed7a624406dd",
+    "release_sha": "223577b41466d03fd330625441ab3b7c1d86e843",
+    "runtime_identity": "nvdec-cuda-nvenc-rgba-demux-v2"
+  },
+  "tt": {
+    "asset_identity_ready": true,
+    "brand_overlay_review_required": false,
+    "compositor_backend": "opencl_fused_contain_v1",
+    "direct_post_eligible": true,
+    "gates": {
+      "TT_POST_DIRECT_AUDIT_APPROVED": true,
+      "TT_POST_LIVE_ENABLED": true,
+      "TT_POST_URL_PROPERTY_VERIFIED": true,
+      "ready": true
+    },
+    "local_origin_enabled": false,
+    "manual_canary": {
+      "active": false,
+      "enabled": false,
+      "privacy_level": "SELF_ONLY",
+      "test_bypass": false
+    },
+    "media_mode": "random_overlay",
+    "profile": "tt-post-random-overlay-hevc-720x1280-v3",
+    "random_overlay_asset_set_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+    "source_overlay_version": 1,
+    "status": "ok",
+    "storage": {
+      "backend": "cos",
+      "cleanup": {
+        "status": "not_started"
+      },
+      "local_origin_enabled": false
+    },
+    "storage_backend": "cos",
+    "transition": "none"
+  },
+  "fb": {
+    "ok": true,
+    "service": "fb-page-prepare-gpu",
+    "profile": "tt-post-random-overlay-h264-720x1280-v3",
+    "prepare_only": true,
+    "compositor_backend": "opencl_fused_contain_v1",
+    "source_overlay_version": 1
+  },
+  "process_identities": {
+    "drama": {
+      "pid": "2825393",
+      "cwd": "/data/drama-synthesis-gpu/releases/223577b41466d03fd330625441ab3b7c1d86e843",
+      "sha": "223577b41466d03fd330625441ab3b7c1d86e843",
+      "catalog": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+    },
+    "tt": {
+      "pid": "2825400",
+      "cwd": "/data/tt-post-gpu/releases/80acd8b4f082e121f8332dea2a34f23d739b1bb3",
+      "sha": "80acd8b4f082e121f8332dea2a34f23d739b1bb3",
+      "catalog": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+    },
+    "fb": {
+      "pid": "2825402",
+      "cwd": "/data/random-overlay-gpu/releases/96dc90d1d59622098fa36493862e37e485b84545",
+      "sha": "96dc90d1d59622098fa36493862e37e485b84545",
+      "catalog": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c"
+    }
+  }
+}
