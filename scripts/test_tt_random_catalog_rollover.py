@@ -5,11 +5,14 @@ import base64
 from dataclasses import replace
 import hashlib
 import json
+import http.client
 import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -66,7 +69,39 @@ class CatalogRolloverTests(unittest.TestCase):
         processor = self.processor(self.old_config,
             FakeRunner([input_probe(28.5), prepared_probe(28.5)]))
         result = processor.prepare(self.request)
-        return result, processor._prepare_manifest_path(JOB_ID)
+        # Emulate an actual pre-source-overlay completed manifest: no receipt,
+        # no optional field, and no migration/backfill at reuse time.
+        manifest = processor._prepare_manifest_path(JOB_ID)
+        stored = json.loads(manifest.read_text())
+        for section in ("request", "result"):
+            stored[section]["random_overlay_recipe"].pop("source_overlay")
+        result["random_overlay_recipe"].pop("source_overlay")
+        worker._atomic_write_json(manifest, stored)
+        processor._random_recipe_path(JOB_ID).unlink()
+        return result, manifest
+
+    def failed_old(self):
+        runner = FakeRunner([input_probe(28.5)])
+        def fail_render(command, **kwargs):
+            if "ffmpeg" in Path(command[0]).name.lower():
+                # The immutable choices and actual source hash must be durable
+                # before the first FFmpeg invocation, including failed renders.
+                frozen = json.loads(processor._random_recipe_path(JOB_ID).read_text())
+                self.assertIn("source_overlay", frozen["recipe"])
+                self.assertIn("source_sha256", frozen)
+                self.assertIn("source_size", frozen)
+                return SimpleNamespace(returncode=1, stdout="", stderr="fixture failure")
+            return runner(command, **kwargs)
+        processor = self.processor(self.old_config, fail_render)
+        with mock.patch.object(worker.shutil, "rmtree", wraps=shutil.rmtree) as cleanup:
+            with self.assertRaises(worker.TTGPUError) as caught:
+                processor.prepare(self.request)
+        self.assertEqual(caught.exception.code, "random_overlay_transcode_failed")
+        self.assertFalse(processor._prepare_manifest_path(JOB_ID).exists())
+        self.assertEqual(cleanup.call_count, 1)
+        self.assertEqual(Path(cleanup.call_args.args[0]).parent, processor.jobs_root)
+        path = processor._random_recipe_path(JOB_ID)
+        return processor, path, json.loads(path.read_text())
 
     def config_env(self):
         config = self.new_config
@@ -113,6 +148,7 @@ class CatalogRolloverTests(unittest.TestCase):
         reused = restarted.prepare(self.request)
         self.assertTrue(reused["reused"])
         self.assertEqual(reused["random_overlay_recipe"], original["random_overlay_recipe"])
+        self.assertNotIn("source_overlay", reused["random_overlay_recipe"])
         self.assertEqual(reused["assets"]["asset_set_sha256"], self.old_sha)
         self.assertEqual(reused["output_sha256"], original["output_sha256"])
         self.assertEqual(manifest.read_bytes(), before)
@@ -138,6 +174,140 @@ class CatalogRolloverTests(unittest.TestCase):
         result = processor.prepare(self.request)
         self.assertEqual(result["random_overlay_recipe"]["asset_set_sha256"], self.new_sha)
         self.assertEqual(result["assets"]["asset_set_sha256"], self.new_sha)
+        self.assertIn("source_overlay", result["random_overlay_recipe"])
+
+    def test_failed_recipe_survives_restart_catalog_change_and_cleanup(self):
+        processor, path, frozen = self.failed_old()
+        before = path.read_bytes()
+        processor.cleanup_due_media()
+        self.assertEqual(path.read_bytes(), before)
+        # The receipt itself records the trusted historical root, even if it
+        # is no longer the default or listed in the startup catalog mapping.
+        config = replace(self.new_config, random_overlay_catalog_assets={})
+        runner = FakeRunner([input_probe(28.5), prepared_probe(28.5)])
+        restarted = self.processor(config, runner)
+        with mock.patch.object(worker, "derive_recipe", side_effect=AssertionError("redrawn")):
+            result = restarted.prepare(self.request)
+        self.assertEqual(result["random_overlay_recipe"], frozen["recipe"])
+        self.assertEqual(result["assets"]["asset_set_sha256"], self.old_sha)
+        self.assertEqual(path.read_bytes(), before)
+        manifest = restarted._prepare_manifest_path(JOB_ID)
+        manifest_before = manifest.read_bytes()
+        again = self.processor(config, FakeRunner())
+        with mock.patch.object(worker, "derive_recipe", side_effect=AssertionError("redrawn")):
+            reused = again.prepare(self.request)
+        self.assertTrue(reused["reused"])
+        self.assertEqual(reused["random_overlay_recipe"], frozen["recipe"])
+        self.assertEqual(manifest.read_bytes(), manifest_before)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_download_failure_already_freezes_choices_for_retry(self):
+        processor = self.processor(self.old_config)
+        processor.downloader = mock.Mock(side_effect=worker.TTGPUError("source_download_failed", "fixture"))
+        with self.assertRaises(worker.TTGPUError):
+            processor.prepare(self.request)
+        path = processor._random_recipe_path(JOB_ID)
+        frozen = json.loads(path.read_text())
+        self.assertNotIn("source_sha256", frozen)
+        restarted = self.processor(self.new_config,
+            FakeRunner([input_probe(28.5), prepared_probe(28.5)]))
+        with mock.patch.object(worker, "derive_recipe", side_effect=AssertionError("redrawn")):
+            result = restarted.prepare(self.request)
+        self.assertEqual(result["random_overlay_recipe"], frozen["recipe"])
+        self.assertIn("source_sha256", json.loads(path.read_text()))
+
+    def test_frozen_legacy_receipt_keeps_original_graph_and_missing_field(self):
+        _, path, frozen = self.failed_old()
+        frozen["recipe"].pop("source_overlay")
+        worker._atomic_write_json(path, frozen)
+        before = path.read_bytes()
+        runner = FakeRunner([input_probe(28.5), prepared_probe(28.5)])
+        restarted = self.processor(self.new_config, runner)
+        with mock.patch.object(worker, "derive_recipe", side_effect=AssertionError("redrawn")):
+            result = restarted.prepare(self.request)
+        self.assertEqual(result["random_overlay_recipe"], frozen["recipe"])
+        self.assertNotIn("source_overlay", result["random_overlay_recipe"])
+        command = next(command for command in runner.commands if "-filter_complex" in command)
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("split=2[backraw][mainraw]", graph)
+        self.assertNotIn("sourceghost", graph)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unreadable_completed_manifest_is_never_overwritten(self):
+        _, manifest = self.prepared_old()
+        manifest.write_bytes(b"unreadable-completed-manifest")
+        before = manifest.read_bytes()
+        restarted = self.processor(self.new_config)
+        with mock.patch.object(worker, "derive_recipe", side_effect=AssertionError("redrawn")):
+            with self.assertRaises(worker.TTGPUError) as caught:
+                restarted.prepare(self.request)
+        self.assertEqual(caught.exception.code, "random_overlay_recipe_invalid")
+        self.assertEqual(manifest.read_bytes(), before)
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_failed_recipe_rejects_changed_source_before_probe_or_render(self):
+        _, path, _ = self.failed_old()
+        before = path.read_bytes()
+        runner = FakeRunner()
+        restarted = self.processor(self.new_config, runner)
+        def changed_source(url, destination, *args):
+            data = b"different-source-at-same-url"
+            Path(destination).write_bytes(data)
+            return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        restarted.downloader = changed_source
+        with self.assertRaises(worker.TTGPUError) as caught:
+            restarted.prepare(self.request)
+        self.assertEqual(caught.exception.code, "source_integrity_mismatch")
+        self.assertEqual(runner.commands, [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_recipe_rejects_changed_request_and_tampered_catalog(self):
+        _, path, _ = self.failed_old()
+        before = path.read_bytes()
+        restarted = self.processor(self.new_config)
+        with self.assertRaises(worker.TTGPUError) as caught:
+            restarted.prepare(dict(self.request, source_url="https://media.example.com/different.mp4"))
+        self.assertEqual(caught.exception.code, "prepare_idempotency_conflict")
+        next(self.old_config.random_overlay_root.glob("border-*.png")).write_bytes(b"tampered")
+        with self.assertRaises(worker.TTGPUError) as caught:
+            restarted.prepare(self.request)
+        self.assertEqual(caught.exception.code, "random_overlay_recipe_invalid")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_malformed_frozen_recipe_is_not_replaced_or_rendered(self):
+        _, path, frozen = self.failed_old()
+        cases = [b"not-json", json.dumps({**frozen, "version": True}).encode(),
+                 json.dumps({**frozen, "source_size": True}).encode(),
+                 json.dumps({**frozen, "recipe": {**frozen["recipe"], "source_overlay": None}}).encode()]
+        for content in cases:
+            with self.subTest(content=content[:30]):
+                path.write_bytes(content)
+                restarted = self.processor(self.new_config)
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    restarted.prepare(self.request)
+                self.assertEqual(caught.exception.code, "random_overlay_recipe_invalid")
+                self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_random_health_advertises_source_overlay_capability(self):
+        processor = self.processor(self.new_config)
+        server = worker.TTPostGPUHTTPServer(("127.0.0.1", 0), processor, self.new_config.internal_token)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+            connection.request("GET", worker.HEALTH_PATH)
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["source_overlay_version"], 1)
+            self.assertEqual(payload["profile"], worker.RANDOM_OVERLAY_PROFILE)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_unapproved_old_sha_blocks_reuse_and_fake_publish_before_any_api_write(self):
         _, manifest = self.prepared_old()

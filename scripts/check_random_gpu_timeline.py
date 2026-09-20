@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--worker", choices=("tt", "fb"), required=True)
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--ffprobe", required=True)
+    parser.add_argument("--source-overlay", action="store_true",
+                        help="Exercise the topmost source overlay at maximum opacity and zoom")
     args = parser.parse_args(); root = Path(args.output); root.mkdir(parents=True, exist_ok=True)
     if args.worker == "tt":
         from features.tt_gpu.worker import build_random_overlay_command
@@ -57,6 +59,8 @@ def main():
             build_cache(args.ffmpeg, source, cache, 16 * 1024**3)
         os.environ['RANDOM_GPU_ASSET_CACHE_ROOT'] = str(cache)
     recipe = {"rotation_millidegrees": 0, "scale_bp": 10000, "tint_opacity_bp": 100}
+    if args.source_overlay:
+        recipe["source_overlay"] = {"version": 1, "opacity_bp": 500, "scale_bp": 15000}
     cfg = SimpleNamespace(ffmpeg=args.ffmpeg, ffmpeg_bin=args.ffmpeg, video_encoder="hevc_nvenc", compositor_backend=BACKEND)
     def gray(path, duration):
         return list(run(["-reinit_filter", "0", "-threads", "2", "-i", str(path), "-map", "0:v:0", "-an",

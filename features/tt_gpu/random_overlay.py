@@ -9,6 +9,8 @@ import secrets
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
+from features.random_gpu.compositor import validate_source_overlay
+
 
 ASSET_CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
 CATEGORIES = ("border", "opacity_video", "corners", "tint")
@@ -173,6 +175,11 @@ def derive_recipe(
         "rotation_millidegrees": bounded("rotation", -2000, 2000),
         "scale_bp": bounded("scale", 9800, 10200),
         "tint_opacity_bp": bounded("tint-opacity", 100, 1000),
+        "source_overlay": {
+            "version": 1,
+            "opacity_bp": bounded("source-overlay-opacity", 200, 500),
+            "scale_bp": bounded("source-overlay-scale", 11000, 15000),
+        },
         "version": 1,
     }
     validate_recipe(recipe, asset_set)
@@ -182,15 +189,22 @@ def derive_recipe(
 def validate_recipe(recipe: Any, asset_set: Mapping[str, Any]) -> None:
     """Validate a stored recipe against the current immutable asset set."""
 
-    if not isinstance(recipe, dict) or set(recipe) != {
+    required_keys = {
         "asset_set_sha256",
         "assets",
         "rotation_millidegrees",
         "scale_bp",
         "tint_opacity_bp",
         "version",
-    }:
+    }
+    if not isinstance(recipe, dict) or set(recipe) not in (
+        required_keys, required_keys | {"source_overlay"}
+    ):
         raise RandomOverlayError("overlay recipe is invalid")
+    try:
+        validate_source_overlay(recipe)
+    except ValueError as exc:
+        raise RandomOverlayError(str(exc)) from exc
     if recipe.get("version") != 1 or not secrets.compare_digest(
         str(recipe.get("asset_set_sha256") or ""),
         str(asset_set.get("manifest_sha256") or ""),

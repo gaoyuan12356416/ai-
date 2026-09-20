@@ -58,7 +58,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
-from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight
+from features.random_gpu.compositor import (
+    BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay,
+)
 from features.random_overlay_catalog import AssetCatalogError, configured_asset_catalogs
 
 from .random_overlay import (
@@ -2307,6 +2309,7 @@ def build_random_overlay_command(
         rotation = int(recipe["rotation_millidegrees"]) / 1000.0
         scale = int(recipe["scale_bp"]) / 10000.0
         tint_opacity = int(recipe["tint_opacity_bp"]) / 10000.0
+        source_overlay = validate_source_overlay(recipe)
     except (KeyError, TypeError, ValueError, OverflowError):
         raise TTGPUError(
             "random_overlay_recipe_invalid",
@@ -2356,8 +2359,31 @@ def build_random_overlay_command(
     scale_text = "%.4f" % scale
     angle_text = "%.6f" % rotation
     opacity_text = "%.4f" % tint_opacity
+    source_split = "split=2[backraw][mainraw]"
+    source_filter = ""
+    final_filter = (
+        "[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,"
+        "format=yuv420p[v]"
+    )
+    if source_overlay is not None:
+        source_split = "split=3[backraw][mainraw][sourceraw]"
+        # Split the source before all transforms/assets and retain the same PTS.
+        # Normalize to cover, then zoom and center-crop; never rotate this layer.
+        source_filter = (
+            "[sourceraw]scale=720:1280:force_original_aspect_ratio=increase:"
+            "flags=lanczos,crop=720:1280,setsar=1,format=rgba,"
+            "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
+            "crop=720:1280,format=rgba,colorchannelmixer=aa=%.4f[sourceghost];"
+        ) % (source_overlay["scale_bp"] / 10000.0,
+             source_overlay["scale_bp"] / 10000.0,
+             source_overlay["opacity_bp"] / 10000.0)
+        final_filter = (
+            "[o3][corners]overlay=0:0:shortest=1:eof_action=repeat[decorated];"
+            "[decorated][sourceghost]overlay=0:0:shortest=1:eof_action=repeat,"
+            "format=yuv420p[v]"
+        )
     filter_complex = (
-        "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];"
+        "[0:v]setpts=PTS-STARTPTS,fps=30,%s;"
         "[backraw]scale=720:1280:force_original_aspect_ratio=increase:"
         "flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];"
         "[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:"
@@ -2374,12 +2400,13 @@ def build_random_overlay_command(
         "fps=30,setpts=PTS-STARTPTS[border];"
         "[3:v]scale=720:1280:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[corners];"
+        "%s"
         "[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];"
         "[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];"
         "[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];"
-        "[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,"
-        "format=yuv420p[v]"
-    ) % (scale_text, scale_text, angle_text, opacity_text)
+        "%s"
+    ) % (source_split, scale_text, scale_text, angle_text, opacity_text,
+         source_filter, final_filter)
     command.extend(
         [
             "-filter_complex",
@@ -3733,8 +3760,47 @@ def _stable_hash(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _random_overlay_assets_for_sha(config, fingerprint):
-    """Select only a bundle verified from trusted configuration at startup."""
+def _read_random_recipe_receipt(config, job_id, reuse_contract):
+    path = config.work_root / "recipes" / ("%s.json" % job_id)
+    receipt = _read_json(path)
+    if receipt is None:
+        if path.exists() or path.is_symlink():
+            raise RandomOverlayError("frozen random recipe is unreadable")
+        return None
+    keys = {"version", "request", "asset_root", "recipe"}
+    source_keys = {"source_sha256", "source_size"}
+    if (
+        set(receipt) not in (keys, keys | source_keys)
+        or type(receipt.get("version")) is not int
+        or receipt["version"] != 1
+        or not isinstance(receipt.get("asset_root"), str)
+        or not isinstance(receipt.get("recipe"), dict)
+    ):
+        raise RandomOverlayError("frozen random recipe is invalid")
+    identity = {"job_id": job_id, **{
+        key: reuse_contract.get(key) for key in (
+            "content_id", "profile", "source_trim_tail_seconds",
+            "source_url_sha256", "media_mode",
+        )
+    }}
+    if receipt.get("request") != identity:
+        raise TTGPUError(
+            "prepare_idempotency_conflict",
+            "job_id already belongs to a different frozen recipe",
+            409,
+        )
+    if source_keys.issubset(receipt) and (
+        not isinstance(receipt["source_sha256"], str)
+        or not HEX_64_RE.fullmatch(receipt["source_sha256"])
+        or type(receipt["source_size"]) is not int
+        or not 0 < receipt["source_size"] <= int(config.max_source_bytes)
+    ):
+        raise RandomOverlayError("frozen random source fingerprint is invalid")
+    return receipt
+
+
+def _random_overlay_assets_for_sha(config, fingerprint, *, job_id=None, stored_request=None):
+    """Select a configured catalog or reverify one pinned by a local receipt."""
     if not isinstance(fingerprint, str) or not HEX_64_RE.fullmatch(fingerprint):
         raise RandomOverlayError("overlay catalog fingerprint is invalid")
     if fingerprint == config.random_overlay_manifest_sha256:
@@ -3742,6 +3808,14 @@ def _random_overlay_assets_for_sha(config, fingerprint):
     else:
         catalogs = config.random_overlay_catalog_assets
         assets = catalogs.get(fingerprint) if isinstance(catalogs, dict) else None
+    if assets is None and job_id is not None and isinstance(stored_request, dict):
+        frozen = _read_random_recipe_receipt(config, job_id, stored_request)
+        if frozen is not None and (
+            frozen["recipe"] == stored_request.get("random_overlay_recipe")
+            and frozen.get("source_sha256") == stored_request.get("source_sha256")
+            and frozen.get("source_size") == stored_request.get("source_size")
+        ):
+            assets = load_asset_set(Path(frozen["asset_root"]), fingerprint)
     if not isinstance(assets, dict) or assets.get("manifest_sha256") != fingerprint:
         raise RandomOverlayError("overlay catalog fingerprint is not approved")
     return assets
@@ -3897,7 +3971,8 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             )
             stored_recipe = stored_request.get("random_overlay_recipe")
             recipe_assets = _random_overlay_assets_for_sha(
-                config, stored_request.get("asset_set_sha256")
+                config, stored_request.get("asset_set_sha256"),
+                job_id=expected_job_id, stored_request=stored_request,
             )
             validate_recipe(stored_recipe, recipe_assets)
             recipe_asset_sha = recipe_assets["manifest_sha256"]
@@ -4206,6 +4281,32 @@ class TTPostGPUProcessor:
     def _prepare_manifest_path(self, job_id):
         return self.manifest_root / ("%s.json" % job_id)
 
+    def _random_recipe_path(self, job_id):
+        # Separate from ephemeral job directories and completed manifests.
+        return self.config.work_root / "recipes" / ("%s.json" % job_id)
+
+    def _random_recipe_receipt(self, job_id, reuse_contract):
+        return _read_random_recipe_receipt(self.config, job_id, reuse_contract)
+
+    def _freeze_random_source(self, job_id, reuse_contract, source_sha, source_size):
+        try:
+            receipt = self._random_recipe_receipt(job_id, reuse_contract)
+            if receipt is None or receipt["recipe"] != reuse_contract["random_overlay_recipe"]:
+                raise RandomOverlayError("frozen random recipe is missing or changed")
+        except RandomOverlayError as exc:
+            raise TTGPUError("random_overlay_recipe_invalid", str(exc), 500) from None
+        if "source_sha256" in receipt:
+            if receipt["source_sha256"] != source_sha or receipt["source_size"] != source_size:
+                raise TTGPUError(
+                    "source_integrity_mismatch",
+                    "source content differs from the frozen random recipe",
+                    409,
+                )
+        else:
+            _atomic_write_json(self._random_recipe_path(job_id), {
+                **receipt, "source_sha256": source_sha, "source_size": source_size,
+            })
+
     def _publish_ledger_path(self, job_id):
         return self.publish_root / ("%s.json" % job_id)
 
@@ -4416,10 +4517,12 @@ class TTPostGPUProcessor:
         }
         if self.config.media_mode != BRANDED_PREVIEW_MEDIA_MODE:
             reuse_contract["media_mode"] = self.config.media_mode
+        recipe_assets = None
         if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
             try:
-                # A completed job keeps its original catalog and deterministic
-                # recipe after the default changes. Existing manifests still
+                # A completed job keeps its original catalog and frozen recipe,
+                # including the absence of a source overlay on legacy jobs.
+                # Existing manifests still
                 # pass the full request/reuse contract below; they are never
                 # overwritten or re-rendered on a mismatch.
                 recipe_assets = self.config.random_overlay_assets
@@ -4429,16 +4532,38 @@ class TTPostGPUProcessor:
                     recipe_assets = _random_overlay_assets_for_sha(
                         self.config,
                         stored.get("asset_set_sha256") if isinstance(stored, dict) else None,
+                        job_id=job_id, stored_request=stored,
                     )
-                recipe = derive_recipe(
-                    job_id=job_id,
-                    content_id=request["content_id"],
-                    profile=self.config.profile,
-                    source_url_sha256=reuse_contract[
-                        "source_url_sha256"
-                    ],
-                    asset_set=recipe_assets,
-                )
+                    recipe = stored.get("random_overlay_recipe")
+                    validate_recipe(recipe, recipe_assets)
+                else:
+                    if manifest_path.exists() or manifest_path.is_symlink():
+                        raise RandomOverlayError("completed random manifest is unreadable")
+                    frozen = self._random_recipe_receipt(job_id, reuse_contract)
+                    if frozen is not None:
+                        recipe = frozen["recipe"]
+                        # The local receipt pins the previously verified immutable
+                        # catalog. Reverify it even when the default has changed.
+                        recipe_assets = load_asset_set(
+                            Path(frozen["asset_root"]), recipe.get("asset_set_sha256")
+                        )
+                        validate_recipe(recipe, recipe_assets)
+                    else:
+                        recipe = derive_recipe(
+                            job_id=job_id,
+                            content_id=request["content_id"],
+                            profile=self.config.profile,
+                            source_url_sha256=reuse_contract[
+                                "source_url_sha256"
+                            ],
+                            asset_set=recipe_assets,
+                        )
+                        _atomic_write_json(self._random_recipe_path(job_id), {
+                            "version": 1,
+                            "request": {"job_id": job_id, **reuse_contract},
+                            "asset_root": str(recipe_assets["root"]),
+                            "recipe": recipe,
+                        })
             except RandomOverlayError as exc:
                 raise TTGPUError(
                     "random_overlay_recipe_invalid",
@@ -4514,6 +4639,7 @@ class TTPostGPUProcessor:
                 deadline,
                 reuse_contract,
                 manifest_path,
+                **({"recipe_assets": recipe_assets} if recipe_assets is not None else {}),
             )
         finally:
             self._prepare_slot.release()
@@ -4524,6 +4650,7 @@ class TTPostGPUProcessor:
         deadline,
         reuse_contract,
         manifest_path,
+        recipe_assets=None,
     ):
         job_id = request["job_id"]
         pipeline_started = self._monotonic_fn()
@@ -4565,7 +4692,7 @@ class TTPostGPUProcessor:
                 try:
                     selected = selected_asset_paths(
                         reuse_contract["random_overlay_recipe"],
-                        self.config.random_overlay_assets,
+                        recipe_assets,
                     )
                 except RandomOverlayError as exc:
                     raise TTGPUError(
@@ -4687,6 +4814,8 @@ class TTPostGPUProcessor:
                     "GPU source fingerprint is invalid",
                     500,
                 )
+            if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                self._freeze_random_source(job_id, reuse_contract, source_sha, source_size)
             request_fingerprint = {
                 **reuse_contract,
                 "source_sha256": source_sha,
@@ -5452,6 +5581,8 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                 ),
                 "compositor_backend": (self.server.processor.config.compositor_backend
                     if self.server.processor.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE else "not_applicable"),
+                "source_overlay_version": (1
+                    if self.server.processor.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE else None),
                 "media_mode": self.server.processor.config.media_mode,
                 "random_overlay_asset_set_sha256": (
                     self.server.processor.config
