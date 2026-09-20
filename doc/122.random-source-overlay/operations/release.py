@@ -96,6 +96,10 @@ if A.action=='stage-hk':
     print(json.dumps({'staged':RELEASES}))
 elif A.action=='stage-cpu':
     cpu_disk();checkout(STAGE,RELEASES['drama'])
+    api_pid=run(['systemctl','show','drama-material-api.service','-p','MainPID','--value'])
+    python=os.readlink('/proc/'+api_pid+'/exe')
+    run([python,'-c',"import ast;from pathlib import Path;ast.parse(Path("+repr(str(STAGE/'features/drama_synthesis/core.py'))+").read_text())"])
+
     assert not CPU.exists();CPU.mkdir(mode=0o700,parents=True);CPU.chmod(0o700)
     entries={}
     for name in CPU_FILES:
@@ -146,7 +150,19 @@ elif A.action=='switch-hk':
     run(['systemctl','daemon-reload'])
     for unit,_,_ in CONFIG.values():run(['systemctl','start',unit],600)
     for unit in ['drama-synthesis-gpu-tunnel.service','tt-gpu-reverse-tunnel.service','fb-page-random-overlay-tunnel.service']:run(['systemctl','restart',unit])
-    result=health();save(HK/'switch-after.json',result);print(json.dumps(result))
+    result=health()
+    identities={}
+    for lane,(unit,pointer,base) in CONFIG.items():
+        pid=run(['systemctl','show',unit,'-p','MainPID','--value'])
+        expected=str(Path(base)/RELEASES[lane])
+        assert str(Path(pointer).resolve())==expected
+        assert os.readlink('/proc/'+pid+'/cwd')==expected,lane+' running wrong cwd'
+        assert run(['git','-C',expected,'rev-parse','HEAD'])==RELEASES[lane]
+        prefix={'drama':'DRAMA','tt':'TT_POST_GPU','fb':'FB_PAGE_GPU'}[lane]
+        assert env(unit)[prefix+'_RANDOM_OVERLAY_MANIFEST_SHA256']==CATALOG
+        identities[lane]={'pid':pid,'cwd':expected,'sha':RELEASES[lane],'catalog':CATALOG}
+    result['process_identities']=identities
+    save(HK/'switch-after.json',result);print(json.dumps(result))
 elif A.action=='switch-cpu':
     cpu_disk();health(True)
     assert run(['systemctl','show','drama-material-job-worker.service','-p','MainPID','--value'])=='0'
