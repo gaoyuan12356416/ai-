@@ -16,7 +16,8 @@ class DeliveryUnknown(Exception):
 
 
 class DeliveryStore:
-    def __init__(self, path):
+    def __init__(self, path, namespace="post-daily-report"):
+        self.namespace = namespace
         self.db = sqlite3.connect(str(path), timeout=5)
         self.db.row_factory = sqlite3.Row
         self.db.execute("CREATE TABLE IF NOT EXISTS delivery (report_date TEXT NOT NULL, chat_id TEXT NOT NULL, request_uuid TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, message_id TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY(report_date,chat_id))")
@@ -38,7 +39,7 @@ class DeliveryStore:
         if row and row["attempts"] >= 3:
             self.db.rollback()
             raise DefiniteFailure("delivery_retry_limit")
-        request_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, "post-daily-report/" + report_date + "/" + chat_id))
+        request_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, self.namespace + "/" + report_date + "/" + chat_id))
         self.db.execute("INSERT INTO delivery(report_date,chat_id,request_uuid,status,attempts,updated_at) VALUES(?,?,?,'sending',1,?) ON CONFLICT(report_date,chat_id) DO UPDATE SET status='sending',attempts=delivery.attempts+1,updated_at=excluded.updated_at", (report_date, chat_id, request_uuid, datetime.now(timezone.utc).isoformat()))
         self.db.commit()
         return request_uuid

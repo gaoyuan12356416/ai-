@@ -1,0 +1,12 @@
+[Unit]
+Description=YouTube publisher report daily at 11:00 Beijing
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 Asia/Shanghai
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=youtube-publisher-daily-report.service
+
+[Install]
+WantedBy=timers.target

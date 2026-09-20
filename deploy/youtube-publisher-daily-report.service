@@ -1,0 +1,25 @@
+[Unit]
+Description=YouTube publisher performance daily report to Feishu
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/youtube-publisher-daily-report/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/youtube-publisher-daily-report/current/scripts/youtube_publisher_daily_report.py --send
+TimeoutStartSec=180
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/youtube-publisher-daily-report
+# The live WAL database must see current WAL records; protect its main file.
+ReadWritePaths=-/root/drama_material_service/data
+ReadOnlyPaths=/root/drama_material_service/data/drama_material_jobs.sqlite3
