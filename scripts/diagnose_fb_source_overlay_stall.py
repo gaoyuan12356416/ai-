@@ -10,6 +10,8 @@ scripts.diagnose_fb_source_overlay_stall --source /private/source.mp4
 Original files are an optional pair. Only their data is parsed, never executed.
 An optional third case changes only the FFmpeg binary for the new recipe;
 the FB H264 profile, input/filter settings and original FFprobe remain in use.
+Use --disable-asset-cache to compare the same assets' original media against
+cached NUT looping. This changes only this diagnostic process's environment.
 The output directory must be new. Each render has its own process group and a
 1..180 second deadline, followed by at most 10 seconds of TERM/KILL cleanup.
 Ctrl-C/SIGTERM also cleans up that test group. Partial media/logs are retained.
@@ -33,6 +35,7 @@ from features.fb_gpu.random_overlay import (
     validate_recipe,
 )
 from features.random_gpu.compositor import BACKEND, kernel_source, validate_source_overlay
+from features.random_gpu.asset_cache import ENV as ASSET_CACHE_ENV
 
 
 def save(path, value):
@@ -201,6 +204,7 @@ def main(argv=None):
     parser.add_argument("--original-kernel", type=Path)
     parser.add_argument("--original-command-nul", type=Path)
     parser.add_argument("--alternate-ffmpeg", type=Path, help="Optional third new-recipe case; preserves FB H264 output settings")
+    parser.add_argument("--disable-asset-cache", action="store_true", help="Read original catalog media instead of cached NUT inputs for all cases")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--opacity-bp", type=int, default=350)
     parser.add_argument("--scale-bp", type=int, default=13000)
@@ -218,10 +222,14 @@ def main(argv=None):
         parser.error("original OpenCL recovery requires the configured OpenCL backend")
     for value in (config.ffmpeg, config.ffprobe, *([str(args.alternate_ffmpeg)] if args.alternate_ffmpeg else [])):
         if not Path(value).is_absolute() or not Path(value).is_file(): parser.error("local absolute FFmpeg/FFprobe binaries required")
+    if args.disable_asset_cache:
+        os.environ.pop(ASSET_CACHE_ENV, None)
     os.umask(0o077)
     root.mkdir(mode=0o700, parents=True)
     report = {"ok": False, "profile": PROFILE, "backend": config.compositor_backend, "cases": [],
-              "no_network_upload_or_publication": True, "source": str(source)}
+              "no_network_upload_or_publication": True, "source": str(source),
+              "asset_cache_root": os.environ.get(ASSET_CACHE_ENV) or None,
+              "asset_cache_disabled_by_flag": args.disable_asset_cache}
     def interrupted(_signum, _frame): raise KeyboardInterrupt("diagnostic interrupted")
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
