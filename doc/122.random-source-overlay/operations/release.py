@@ -149,7 +149,12 @@ elif A.action=='switch-hk':
     for unit,_,_ in CONFIG.values():run(['systemctl','stop',unit],120)
     for lane,(_,pointer,base) in CONFIG.items():
         tmp=Path(pointer+'.source-overlay-new');assert not tmp.exists();tmp.symlink_to(base+'/'+RELEASES[lane]);os.replace(str(tmp),pointer)
-    write(dropin,'[Service]\nEnvironment=DRAMA_GPU_RELEASE_SHA='+RELEASES['drama']+'\n',0o644)
+    # EnvironmentFile overrides Environment= regardless of drop-in ordering.
+    # Append a final file so the previous catalog file cannot restore the old SHA.
+    release_env=Path('/etc/random-overlay-subtemplates/drama-source-overlay-20260920.env')
+    assert not release_env.exists()
+    write(release_env,'DRAMA_GPU_RELEASE_SHA='+RELEASES['drama']+'\n')
+    write(dropin,'[Service]\nEnvironmentFile='+str(release_env)+'\n',0o644)
     run(['systemctl','daemon-reload'])
     for unit,_,_ in CONFIG.values():run(['systemctl','start',unit],600)
     for unit in ['drama-synthesis-gpu-tunnel.service','tt-gpu-reverse-tunnel.service','fb-page-random-overlay-tunnel.service']:run(['systemctl','restart',unit])
