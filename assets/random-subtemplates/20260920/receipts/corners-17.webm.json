@@ -1,0 +1,28 @@
+{
+  "artwork_source_sha256": "ac88d465853be1754109afc7d492f3f59728fe3589496cd4ea057cac6d560ce9",
+  "category": "corners",
+  "contract_verified": true,
+  "design_index": 8,
+  "encoding_contract": "720x1280-rgba-png-or-vp9alpha-lossless-bitexact-30fps-120frames-v1",
+  "sha256": "770d590aa594f3b13840191fbaf78f7d0bf561fae35fa0a3d607eb3dd0398e06",
+  "size": 351368,
+  "verification": {
+    "alpha_max_error": 1.0,
+    "alpha_mode": 1,
+    "audio_streams": 0,
+    "bytes": 351368,
+    "center_clear": true,
+    "composite_mean_error_max": 0.01538753043860197,
+    "dimensions": [
+      720,
+      1280
+    ],
+    "file": "corners-17.webm",
+    "fps": 30,
+    "frames": 120,
+    "loop_periodic": true,
+    "seconds": 4,
+    "sha256": "770d590aa594f3b13840191fbaf78f7d0bf561fae35fa0a3d607eb3dd0398e06",
+    "verification": "container_and_first_frame"
+  }
+}

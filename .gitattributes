@@ -9,3 +9,6 @@ requirements-playable-docs.txt text eol=lf
 
 # Pinned catalog fingerprints must survive Windows and Linux checkouts.
 /assets/random-subtemplates/**/*.json -text
+
+# Build receipts pin the exact artwork source bytes as well as media bytes.
+/scripts/random_subtemplate_artwork_20260920.py -text

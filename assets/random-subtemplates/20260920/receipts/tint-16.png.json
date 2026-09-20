@@ -1,0 +1,21 @@
+{
+  "artwork_source_sha256": "ac88d465853be1754109afc7d492f3f59728fe3589496cd4ea057cac6d560ce9",
+  "category": "tint",
+  "contract_verified": true,
+  "design_index": 3,
+  "encoding_contract": "720x1280-rgba-png-or-vp9alpha-lossless-bitexact-30fps-120frames-v1",
+  "sha256": "595ee3bbccbffcc5edf890618d25457ece29e6a0e70fb6ca5e18372c8af37150",
+  "size": 44064,
+  "verification": {
+    "alpha_max": 255,
+    "alpha_min": 255,
+    "bytes": 44064,
+    "dimensions": [
+      720,
+      1280
+    ],
+    "file": "tint-16.png",
+    "pixels_match_design": true,
+    "sha256": "595ee3bbccbffcc5edf890618d25457ece29e6a0e70fb6ca5e18372c8af37150"
+  }
+}

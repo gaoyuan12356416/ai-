@@ -1,0 +1,46 @@
+# 新增样式目录
+
+| 分组 | 文件 | 样式 | 说明 |
+|---|---|---|---|
+| border | border-09.png | 折扇金边 | 细金线围合，四角展开装饰折扇 |
+| border | border-10.png | 邮票齿孔 | 奶油邮票边与均匀的半圆齿孔 |
+| border | border-11.png | 拱窗银框 | 四角哥特拱窗，细银线连接 |
+| border | border-12.png | 回纹细格 | 低饱和石青色连续回纹 |
+| border | border-13.png | 贝壳蕾丝 | 暖白贝壳扇形与花边小珠 |
+| border | border-14.png | 蜂巢侧栏 | 冰青蜂巢沿两侧排列 |
+| border | border-15.png | 交织缝线 | 陶土色交叉绣线与双针脚 |
+| border | border-16.png | 棱镜切面 | 低透明多边形折面，点亮四角 |
+| border | border-17.png | 海波轮廓 | 靛蓝多重海浪细线 |
+| border | border-18.png | 留白书签 | 不对称墨绿书刊线与角部色签 |
+| border | border-19.png | 珍珠串边 | 香槟珍珠链与小型中心宝石 |
+| border | border-20.png | 蔷薇藤蔓 | 粉金玫瑰与细叶藤蔓 |
+| opacity_video | opacity-video-11.webm | 轻雪漫舞 | 大小雪点沿侧边轻落，雪晶缓缓旋转 |
+| opacity_video | opacity-video-12.webm | 银杏秋语 | 扇形银杏叶在两侧翻转飘落 |
+| opacity_video | opacity-video-13.webm | 海光游弋 | 青蓝焦散光纹沿边缘周期游动 |
+| opacity_video | opacity-video-14.webm | 樱瓣轻落 | 不同姿态的半透明花瓣顺风飘落 |
+| opacity_video | opacity-video-15.webm | 萤火微轨 | 暖绿色萤火点沿弧形轨迹游走 |
+| opacity_video | opacity-video-16.webm | 绸带流光 | 珊瑚和珍珠色细绸带往复摆动 |
+| opacity_video | opacity-video-17.webm | 霜雾晶花 | 冷色薄雾中浮现六角霜花 |
+| opacity_video | opacity-video-18.webm | 透光泡泡 | 透明彩色气泡缓缓向上漂浮 |
+| opacity_video | opacity-video-19.webm | 棱彩碎片 | 三角与菱形彩片在两侧翻转 |
+| opacity_video | opacity-video-20.webm | 环形涟漪 | 边缘水纹同心环逐渐扩散消隐 |
+| corners | corners-09.webm | 折纸白鹤 | 浅蓝折纸鹤轻轻振翼 |
+| corners | corners-10.webm | 晨光雏菊 | 暖白花瓣围绕金色花蕊慢转 |
+| corners | corners-11.webm | 蝶翼轻颤 | 粉紫蝴蝶左右翅翼舒展 |
+| corners | corners-12.webm | 六角机芯 | 两层六角线框反向转动 |
+| corners | corners-13.webm | 轻音乐章 | 成组音符在短五线谱上轻跳 |
+| corners | corners-14.webm | 月桂花环 | 金绿色月桂枝沿角部舒展 |
+| corners | corners-15.webm | 水晶垂饰 | 细链悬挂的切面水晶摆动 |
+| corners | corners-16.webm | 暖灯轻摇 | 暖红纸灯笼与流苏轻轻摇摆 |
+| corners | corners-17.webm | 航海罗盘 | 青金罗盘与方向针缓缓摆动 |
+| corners | corners-18.webm | 纸翼远行 | 薄荷纸飞机与虚线飞行轨迹 |
+| corners | corners-19.webm | 丝带蝴结 | 柔粉缎带蝴蝶结随呼吸微动 |
+| corners | corners-20.webm | 春日郁金 | 三枝郁金香与嫩叶摇曳 |
+| tint | tint-13.png | 曙光放射 | 左上杏金光心向右下玫瑰与蓝灰过渡 |
+| tint | tint-14.png | 海陆斜映 | 青蓝与橘色沿对角线平滑交汇 |
+| tint | tint-15.png | 珊瑚紫晕 | 柔紫椭圆光心向珊瑚色四周扩散 |
+| tint | tint-16.png | 苔金回光 | 橄榄与浅金从不同方向交织 |
+| tint | tint-17.png | 暮蓝暖窗 | 冷蓝背景叠加偏右的暖色椭圆光域 |
+| tint | tint-18.png | 铜青交辉 | 铜色与青色光从相对角交叉映射 |
+| tint | tint-19.png | 绯紫丝光 | 桃粉底色上叠加柔和斜向紫色光带 |
+| tint | tint-20.png | 瓷白虹彩 | 低饱和瓷白底色上分布青粉金三个柔光域 |

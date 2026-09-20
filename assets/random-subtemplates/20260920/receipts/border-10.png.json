@@ -1,0 +1,21 @@
+{
+  "artwork_source_sha256": "ac88d465853be1754109afc7d492f3f59728fe3589496cd4ea057cac6d560ce9",
+  "category": "border",
+  "contract_verified": true,
+  "design_index": 1,
+  "encoding_contract": "720x1280-rgba-png-or-vp9alpha-lossless-bitexact-30fps-120frames-v1",
+  "sha256": "dbe659a8ca9abd7767c6e119def4b327ec027f438a66b055a793fb1c38fc33b0",
+  "size": 85252,
+  "verification": {
+    "alpha_max": 152,
+    "alpha_min": 0,
+    "bytes": 85252,
+    "dimensions": [
+      720,
+      1280
+    ],
+    "file": "border-10.png",
+    "pixels_match_design": true,
+    "sha256": "dbe659a8ca9abd7767c6e119def4b327ec027f438a66b055a793fb1c38fc33b0"
+  }
+}

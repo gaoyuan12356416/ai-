@@ -1,0 +1,28 @@
+{
+  "artwork_source_sha256": "ac88d465853be1754109afc7d492f3f59728fe3589496cd4ea057cac6d560ce9",
+  "category": "opacity_video",
+  "contract_verified": true,
+  "design_index": 2,
+  "encoding_contract": "720x1280-rgba-png-or-vp9alpha-lossless-bitexact-30fps-120frames-v1",
+  "sha256": "daa6d9c8471cc2c74c822cac205843d9a548e457c70fec89f5410bcf88c11f98",
+  "size": 23615005,
+  "verification": {
+    "alpha_max_error": 0.0,
+    "alpha_mode": 1,
+    "audio_streams": 0,
+    "bytes": 23615005,
+    "center_clear": true,
+    "composite_mean_error_max": 0.024453943595290184,
+    "dimensions": [
+      720,
+      1280
+    ],
+    "file": "opacity-video-13.webm",
+    "fps": 30,
+    "frames": 120,
+    "loop_periodic": true,
+    "seconds": 4,
+    "sha256": "daa6d9c8471cc2c74c822cac205843d9a548e457c70fec89f5410bcf88c11f98",
+    "verification": "container_and_first_frame"
+  }
+}

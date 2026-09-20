@@ -1,0 +1,788 @@
+{
+  "ok": true,
+  "manifest_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+  "base_manifest_sha256": "24d6fad3174f765d3433c9ab71322f04241b11acf0224a4e1392f138295adf0c",
+  "counts": {
+    "border": 20,
+    "corners": 20,
+    "light": 2,
+    "opacity_video": 20,
+    "tint": 20
+  },
+  "active_count": 80,
+  "new_assets": 42,
+  "original_rows_unchanged": true,
+  "original_top_level_metadata_unchanged": true,
+  "light_rows_unchanged": true,
+  "strict_cpu_catalog_accepted": true,
+  "random_selection_reaches_all_80_active_assets": true,
+  "recipe_repeatability_2000_seeds": true,
+  "no_duplicate_sha_within_any_category": true,
+  "all_new_assets_distinct": true,
+  "artwork_source_sha256": "ac88d465853be1754109afc7d492f3f59728fe3589496cd4ea057cac6d560ce9",
+  "results": [
+    {
+      "file": "border-09.png",
+      "sha256": "4d713d0e6932907049b02b50d74fa45e4dba826d53f8158ddcc490605ad89b20",
+      "bytes": 43080,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 229
+    },
+    {
+      "file": "border-10.png",
+      "sha256": "dbe659a8ca9abd7767c6e119def4b327ec027f438a66b055a793fb1c38fc33b0",
+      "bytes": 85252,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 152
+    },
+    {
+      "file": "border-11.png",
+      "sha256": "ad287083ba5972c56ec06771d15ab5b43cb41cfea811a14e7053f739b4e40034",
+      "bytes": 33195,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 225
+    },
+    {
+      "file": "border-12.png",
+      "sha256": "e0590f838e8e4a005412b7097fc42afa776ecee923d766b0d95f43b87bd6f1c5",
+      "bytes": 53583,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 166
+    },
+    {
+      "file": "border-13.png",
+      "sha256": "e3ca6ffb36e5d5169c82116c015be57385ebad8bca5f7830cf2d095daec643f1",
+      "bytes": 167727,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 198
+    },
+    {
+      "file": "border-14.png",
+      "sha256": "149acd70e7aaf4716d3ca0446e760fcfcd13e249defe53088f153394ca439673",
+      "bytes": 109901,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 139
+    },
+    {
+      "file": "border-15.png",
+      "sha256": "daac45fde7ea3135ced432e868b0113253be9c7cad149aa018c8732969b6db6d",
+      "bytes": 96329,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 255
+    },
+    {
+      "file": "border-16.png",
+      "sha256": "7d1afdf5cb1bd1503e7584ce6a90fcbf47ef06b83948413cd0f0a6b2a8823b03",
+      "bytes": 57458,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 187
+    },
+    {
+      "file": "border-17.png",
+      "sha256": "ed7ca33628cb57d5aaa29f654e3e1d7814510134e945569f59d41fa23578263e",
+      "bytes": 73380,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 128
+    },
+    {
+      "file": "border-18.png",
+      "sha256": "4e63b313194f2f678b1014b1430cdcf2b859bd35e16f439f29f6aa452706e287",
+      "bytes": 10332,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 195
+    },
+    {
+      "file": "border-19.png",
+      "sha256": "a9d2f3622f52bf8db988e6f4031da81bdec6a3c83f5f3fcb5ba59e96beb0cfc8",
+      "bytes": 52471,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 234
+    },
+    {
+      "file": "border-20.png",
+      "sha256": "8f221b79c4e25430c4b62502c8d499e882b68c93ad8d62dd05585486697bf067",
+      "bytes": 66793,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 0,
+      "alpha_max": 202
+    },
+    {
+      "file": "opacity-video-11.webm",
+      "sha256": "978b7d82282ca33e972fae42830035431399724faea5bf1161298061a46a2afd",
+      "bytes": 2372555,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.002507952507585287,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.7881597280502319,
+      "max_adjacent_alpha_mean_delta": 0.8283854126930237
+    },
+    {
+      "file": "opacity-video-12.webm",
+      "sha256": "c654ea6bea6eed3cf91a08d39247f473429d59e5f5991b5b7fc676b95fa5f5f2",
+      "bytes": 3391255,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.009969539940357208,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.9034374952316284,
+      "max_adjacent_alpha_mean_delta": 1.0193055868148804
+    },
+    {
+      "file": "opacity-video-13.webm",
+      "sha256": "daa6d9c8471cc2c74c822cac205843d9a548e457c70fec89f5410bcf88c11f98",
+      "bytes": 23615005,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 0.0,
+      "composite_mean_error_max": 0.02669401653110981,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.7192361354827881,
+      "max_adjacent_alpha_mean_delta": 0.922204852104187
+    },
+    {
+      "file": "opacity-video-14.webm",
+      "sha256": "f9ae9866b87964906c58a4185497ba5446fd09e231a541b5f166fe14e8d535a4",
+      "bytes": 2983921,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.005985847674310207,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 1.001319408416748,
+      "max_adjacent_alpha_mean_delta": 1.0072048902511597
+    },
+    {
+      "file": "opacity-video-15.webm",
+      "sha256": "dab2a60840dabe6618e21e337a4c0f0b32247b15628103753d9e13c607561394",
+      "bytes": 3303867,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.004792736377567053,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.14074653387069702,
+      "max_adjacent_alpha_mean_delta": 0.15784722566604614
+    },
+    {
+      "file": "opacity-video-16.webm",
+      "sha256": "5344a5ab265be43fc178ba2c818498216b23627cf22020e0cc9920c54f076e9e",
+      "bytes": 11967134,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 0.0,
+      "composite_mean_error_max": 0.03157011792063713,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.35310763120651245,
+      "max_adjacent_alpha_mean_delta": 0.3979340195655823
+    },
+    {
+      "file": "opacity-video-17.webm",
+      "sha256": "4c1c57a2b541f16e487a5f59b76443ae7d29aa01230adbdc4da2a106c7a8a5fe",
+      "bytes": 5730994,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 0.0,
+      "composite_mean_error_max": 0.009970352984964848,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.2829861044883728,
+      "max_adjacent_alpha_mean_delta": 0.2944791615009308
+    },
+    {
+      "file": "opacity-video-18.webm",
+      "sha256": "7a946559689e8453eb95664247707887b6003cdec1e384a5c82683ecf1930e2d",
+      "bytes": 3757450,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.009653585031628609,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.8193749785423279,
+      "max_adjacent_alpha_mean_delta": 1.1373090744018555
+    },
+    {
+      "file": "opacity-video-19.webm",
+      "sha256": "f3e03ad9259d8d09398eaf68ae4e58dabd81f64c5eb8f6e45396d12f888d069a",
+      "bytes": 2309215,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.006807325873523951,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.7319444417953491,
+      "max_adjacent_alpha_mean_delta": 0.867274284362793
+    },
+    {
+      "file": "opacity-video-20.webm",
+      "sha256": "3b19eb0c17c90e9dd0b3ac21be78a163accd3e2b76fb16282e6f443241724ead",
+      "bytes": 4568336,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 0.0,
+      "composite_mean_error_max": 0.0072218915447592735,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.07739583402872086,
+      "max_adjacent_alpha_mean_delta": 0.1548437476158142
+    },
+    {
+      "file": "corners-09.webm",
+      "sha256": "0eb258678cbf0b2aeee670b279aac7aaf5ae5c2832af914a986f9f9449f2f5a1",
+      "bytes": 205079,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.00985279306769371,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 52,
+      "loop_boundary_alpha_mean_delta": 0.0,
+      "max_adjacent_alpha_mean_delta": 0.06126736104488373
+    },
+    {
+      "file": "corners-10.webm",
+      "sha256": "8c20429f7c575bedbe2714c4c6a2a7baaf31548b52405a7be7b30c2ac47c40f9",
+      "bytes": 1052835,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.012616949155926704,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.045434027910232544,
+      "max_adjacent_alpha_mean_delta": 0.0707986131310463
+    },
+    {
+      "file": "corners-11.webm",
+      "sha256": "dca6b9fd0b89a07d6303adb01ead44ce9e865ffc27c8324960ec8d639ed150ea",
+      "bytes": 509651,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.01330872718244791,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 88,
+      "loop_boundary_alpha_mean_delta": 0.07842013984918594,
+      "max_adjacent_alpha_mean_delta": 0.1422569453716278
+    },
+    {
+      "file": "corners-12.webm",
+      "sha256": "4a6d7753bac1d3cffa168edcccc6666df9effecc52bf7db86f614add4bec49af",
+      "bytes": 4740521,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.010539859533309937,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 35,
+      "loop_boundary_alpha_mean_delta": 0.5311979055404663,
+      "max_adjacent_alpha_mean_delta": 0.5532464981079102
+    },
+    {
+      "file": "corners-13.webm",
+      "sha256": "e17e4583ef9b376f21a765ee8de8a2286ecbfa9b2d18ee49b7caeb0097f20218",
+      "bytes": 110695,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.007662739139050245,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 62,
+      "loop_boundary_alpha_mean_delta": 0.06093750149011612,
+      "max_adjacent_alpha_mean_delta": 0.07262152433395386
+    },
+    {
+      "file": "corners-14.webm",
+      "sha256": "d3501a38c8a90ff89117614cd46215a0c812879c76fca2afe2b591e605c1209e",
+      "bytes": 343610,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.010825321078300476,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.013472221791744232,
+      "max_adjacent_alpha_mean_delta": 0.026961805298924446
+    },
+    {
+      "file": "corners-15.webm",
+      "sha256": "552dd3977c44f1c6663d9977881f88d469795c96ae3b2a1db5c4c3a6cc785538",
+      "bytes": 387418,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.00833903905004263,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.265954852104187,
+      "max_adjacent_alpha_mean_delta": 0.28371527791023254
+    },
+    {
+      "file": "corners-16.webm",
+      "sha256": "73d7cb6b2e4bf8598563a678c01b39457c495adba403a980723f6262cbf57a62",
+      "bytes": 265280,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.013138068839907646,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 112,
+      "loop_boundary_alpha_mean_delta": 0.2387673556804657,
+      "max_adjacent_alpha_mean_delta": 0.25532984733581543
+    },
+    {
+      "file": "corners-17.webm",
+      "sha256": "770d590aa594f3b13840191fbaf78f7d0bf561fae35fa0a3d607eb3dd0398e06",
+      "bytes": 351368,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.01564687304198742,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.05836805701255798,
+      "max_adjacent_alpha_mean_delta": 0.08796875178813934
+    },
+    {
+      "file": "corners-18.webm",
+      "sha256": "329abc43ab1c40c23a70a2dd022384dea476a0b453c5f5b4a02179a5ec053a26",
+      "bytes": 50603,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.006545616313815117,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 64,
+      "loop_boundary_alpha_mean_delta": 0.20107638835906982,
+      "max_adjacent_alpha_mean_delta": 0.197256937623024
+    },
+    {
+      "file": "corners-19.webm",
+      "sha256": "3e0958a537bc359e805bcc8c92554a047fa0a82f34b7b146605b66f2190ff0dd",
+      "bytes": 149495,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.013288156129419804,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 48,
+      "loop_boundary_alpha_mean_delta": 0.07888888567686081,
+      "max_adjacent_alpha_mean_delta": 0.07993055880069733
+    },
+    {
+      "file": "corners-20.webm",
+      "sha256": "f6779ce3d18ba779e45956a24cc7ebd975db14d5843109e91ed26867632d3c98",
+      "bytes": 714317,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "frames": 120,
+      "fps": 30,
+      "seconds": 4,
+      "audio_streams": 0,
+      "alpha_mode": 1,
+      "alpha_max_error": 1.0,
+      "composite_mean_error_max": 0.014557857066392899,
+      "loop_periodic": true,
+      "center_clear": true,
+      "verification": "all_frames",
+      "unique_frames": 120,
+      "loop_boundary_alpha_mean_delta": 0.10071180760860443,
+      "max_adjacent_alpha_mean_delta": 0.14657986164093018
+    },
+    {
+      "file": "tint-13.png",
+      "sha256": "3ebd11377db1fc97d7c6aaf750565e17072dd27a9d77519996894b923cc5ed28",
+      "bytes": 44132,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-14.png",
+      "sha256": "625bfacdf1c43202f9ef65fcc6a00f91e268c60f2ed228848f3f6cd9534d61ac",
+      "bytes": 49444,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-15.png",
+      "sha256": "3855e9f66e3abe3a8a0bc9557d7d20fb1454c2fc21633b199ffe9495e9304ef6",
+      "bytes": 46179,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-16.png",
+      "sha256": "595ee3bbccbffcc5edf890618d25457ece29e6a0e70fb6ca5e18372c8af37150",
+      "bytes": 44064,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-17.png",
+      "sha256": "d64e941b5e003050edd0f5c6b1ad1b9461ccf6f407967ec5292cc0ee907a6e11",
+      "bytes": 66231,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-18.png",
+      "sha256": "6c6e0bb036d791c9852a61d4433a00116b1470a1adfadb033c2cf04b0d7eac06",
+      "bytes": 50848,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-19.png",
+      "sha256": "6d0cdb0c99ed8e25ae2744409d80d9db7581d64dea7bf76b335a681a58b7f52b",
+      "bytes": 42359,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    },
+    {
+      "file": "tint-20.png",
+      "sha256": "e5e725dd36acc425ce511e9779127220305957ef7e3c672a0d328afb0e124eb2",
+      "bytes": 50239,
+      "pixels_match_design": true,
+      "dimensions": [
+        720,
+        1280
+      ],
+      "alpha_min": 255,
+      "alpha_max": 255
+    }
+  ],
+  "verification_started_at_utc": "2026-09-20T04:04:53.139865+00:00",
+  "verification_elapsed_seconds": 36.077,
+  "ffmpeg_version": "ffmpeg version 8.0.1-full_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers",
+  "ffprobe_version": "ffprobe version 8.0.1-full_build-www.gyan.dev Copyright (c) 2007-2025 the FFmpeg developers",
+  "reproducibility": {
+    "ok": true,
+    "file": "opacity-video-11.webm",
+    "sha256": "978b7d82282ca33e972fae42830035431399724faea5bf1161298061a46a2afd",
+    "clean_bitexact_rebuild_sha_matches": true,
+    "completed_receipt_reused_without_rewriting_asset_or_receipt": true,
+    "elapsed_seconds": 17.101
+  },
+  "build": {
+    "started_at": "2026-09-20T11:59:21.53168+08:00",
+    "finished_at": "2026-09-20T12:02:14.5528008+08:00",
+    "elapsed_seconds": 173.0211208,
+    "maximum_parallel_encoders": 2,
+    "controlled_restarts": 1,
+    "restart_reason": "Enabled bitexact mux/encoder and invalidated earlier encoding receipts before final build"
+  },
+  "validation_failures": [],
+  "new_assets_total_bytes": 74123601,
+  "decoded_video_frames": 2640,
+  "video_count": 22,
+  "png_count": 20,
+  "max_video_composite_mean_error": 0.03157011792063713,
+  "json_lf_normalization": {
+    "bug": "BUG002",
+    "description": "Windows text-mode JSON writes introduced CRLF; explicit UTF-8 bytes now ensure LF serialization across platforms",
+    "previous_manifest_sha256": "76db89f8b321f39bc25c5dac036f44bc297c3553d99e985e08af4af1cf72e5d9",
+    "manifest_sha256": "b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c",
+    "normalized_json_files": 44,
+    "base_manifest_bytes_preserved": true,
+    "all_media_sha256_preserved": true,
+    "artwork_source_unchanged": true,
+    "media_reencoded": false,
+    "canonical_serialization_verified_files": 44,
+    "verification_rerun_passed": true
+  }
+}

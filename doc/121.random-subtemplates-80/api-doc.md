@@ -1,0 +1,3 @@
+# 接口影响
+
+不新增或更改API字段。CPU与GPU原目录接口仍返回version1和四个categories，各类别列表扩展到20；manifest_sha256切到新目录。配方仍冻结目录SHA及每个选定素材SHA。light仍不出现在活动分类中。未知目录SHA继续拒绝。
