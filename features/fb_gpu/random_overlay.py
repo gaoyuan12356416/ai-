@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib, json, re, secrets
 from pathlib import Path
 from typing import Any, Mapping
+from features.random_gpu.compositor import validate_source_overlay
 
 ASSET_CATEGORIES=("border","light","opacity_video","corners","tint")
 CATEGORIES=("border","opacity_video","corners","tint")
@@ -55,9 +56,13 @@ def derive_recipe(*,job_id,content_id,profile,source_url_sha256,asset_set):
     for category in CATEGORIES:
         rows=asset_set["categories"][category]; row=rows[_seed(identity,"asset:"+category)%len(rows)]; selected[category]={key:row[key] for key in ("media_type","name","sha256","size")}
     bounded=lambda label,low,high:low+_seed(identity,label)%(high-low+1)
-    recipe={"asset_set_sha256":identity["asset_set_sha256"],"assets":selected,"rotation_millidegrees":bounded("rotation",-2000,2000),"scale_bp":bounded("scale",9800,10200),"tint_opacity_bp":bounded("tint-opacity",100,1000),"version":1}; validate_recipe(recipe,asset_set); return recipe
+    recipe={"asset_set_sha256":identity["asset_set_sha256"],"assets":selected,"rotation_millidegrees":bounded("rotation",-2000,2000),"scale_bp":bounded("scale",9800,10200),"tint_opacity_bp":bounded("tint-opacity",100,1000),"version":1,
+            "source_overlay":{"version":1,"opacity_bp":bounded("source-overlay-opacity",200,500),"scale_bp":bounded("source-overlay-scale",11000,15000)}}; validate_recipe(recipe,asset_set); return recipe
 def validate_recipe(recipe,asset_set):
-    if not isinstance(recipe,dict) or set(recipe)!={"asset_set_sha256","assets","rotation_millidegrees","scale_bp","tint_opacity_bp","version"} or recipe["version"]!=1 or recipe["asset_set_sha256"]!=asset_set["manifest_sha256"]: raise RandomOverlayError("overlay recipe invalid")
+    keys={"asset_set_sha256","assets","rotation_millidegrees","scale_bp","tint_opacity_bp","version"}
+    if not isinstance(recipe,dict) or set(recipe) not in (keys,keys|{"source_overlay"}) or recipe["version"]!=1 or recipe["asset_set_sha256"]!=asset_set["manifest_sha256"]: raise RandomOverlayError("overlay recipe invalid")
+    try: validate_source_overlay(recipe)
+    except ValueError: raise RandomOverlayError("source overlay recipe invalid") from None
     if not -2000<=int(recipe["rotation_millidegrees"])<=2000 or not 9800<=int(recipe["scale_bp"])<=10200 or not 100<=int(recipe["tint_opacity_bp"])<=1000 or set(recipe["assets"])!=set(CATEGORIES): raise RandomOverlayError("overlay recipe values invalid")
     for category in CATEGORIES:
         row=recipe["assets"][category]; matches=[item for item in asset_set["categories"][category] if item["name"]==row.get("name")]

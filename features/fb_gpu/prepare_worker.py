@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 import requests
-from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight
-from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file
+from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay
+from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 PREPARE_PATH="/internal/fb-page-media/prepare"; HEALTH_PATH="/health"
@@ -66,6 +66,15 @@ def cleanup_stale_failed_jobs(config,*,now_fn=time.time,exclude_jobs=()):
             if resolved.parent!=jobs: continue
             newest=max((item.stat().st_mtime for item in child.rglob("*") if item.is_file() and not item.is_symlink()),default=child.stat().st_mtime)
             if now-newest<config.failed_job_retention_seconds: continue
+            if (child/"recipe.json").exists() or (child/"recipe.json").is_symlink():
+                # Keep the frozen identity across cleanup and catalog/releases.
+                # A retry may redownload media, but must match its recorded SHA.
+                cleaned=False
+                for item in child.iterdir():
+                    scratch=item.name in {"source.mp4","source.download.tmp","output.tmp.mp4","recipe.tmp","manifest.tmp"} or re.fullmatch(r"compositor-[a-f0-9]{20}\.cl",item.name)
+                    if scratch and item.is_file() and not item.is_symlink(): item.unlink(); cleaned=True
+                removed+=int(cleaned)
+                continue
             shutil.rmtree(resolved); removed+=1
         except (FileNotFoundError,OSError): continue
     return removed
@@ -88,11 +97,20 @@ def _probe(config,path):
     return {"duration":duration,"has_audio":audio is not None,"video":video,"audio":audio}
 
 def build_command(config,source,output,info,recipe,assets):
+    source_overlay=validate_source_overlay(recipe)
     rotation=int(recipe["rotation_millidegrees"])/1000; scale=int(recipe["scale_bp"])/10000; opacity=int(recipe["tint_opacity_bp"])/10000
     command=[config.ffmpeg,"-y","-nostdin","-hide_banner","-loglevel","error","-i",str(source),"-loop","1","-i",str(assets["border"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["opacity_video"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["corners"]),"-loop","1","-i",str(assets["tint"])]
     if not info["has_audio"]: command += ["-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000"]
     audio="0:a:0" if info["has_audio"] else "5:a:0"
     graph=("[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,format=rgba,scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,rotate=%.6f*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];[4:v]scale=720:1280:flags=lanczos,format=rgba,colorchannelmixer=aa=%.4f,fps=30,setpts=PTS-STARTPTS[tint];[2:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[opacity];[1:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[border];[3:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[corners];[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,format=yuv420p[v]")%(scale,scale,rotation,opacity)
+    if source_overlay is not None:
+        graph=graph.replace("split=2[backraw][mainraw]","split=3[backraw][mainraw][sourceraw]",1)
+        graph=graph.removesuffix(",format=yuv420p[v]")+"[composite];"
+        graph+=("[sourceraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,"
+                "crop=720:1280,setsar=1,format=rgba,"
+                "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
+                "colorchannelmixer=aa=%.4f[sourceghost];"
+                "[composite][sourceghost]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat,format=yuv420p[v]")%(source_overlay["scale_bp"]/10000,source_overlay["scale_bp"]/10000,source_overlay["opacity_bp"]/10000)
     command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-shortest","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
     return fuse_command(command,recipe,output) if config.compositor_backend==BACKEND else command
 
@@ -180,6 +198,39 @@ class PrepareProcessor:
                     digest.update(chunk); handle.write(chunk)
             return digest.hexdigest()
         finally: session.close()
+    def _recipe_for_job(self,root,request,source_sha):
+        path=root/"recipe.json"
+        if path.is_symlink(): raise PrepareWorkerError("fb_gpu_recipe_invalid","frozen recipe path invalid",409)
+        if path.exists():
+            try:
+                frozen=json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(frozen,dict) or set(frozen)!={"version","request","source_sha256","asset_root","recipe"} or type(frozen["version"]) is not int or frozen["version"]!=1:
+                    raise ValueError("frozen recipe contract invalid")
+            except Exception: raise PrepareWorkerError("fb_gpu_recipe_invalid","frozen recipe unreadable",409) from None
+            if frozen["request"]!=request: raise PrepareWorkerError("fb_gpu_job_conflict","job identity conflict",409)
+            if frozen["source_sha256"]!=source_sha: raise PrepareWorkerError("fb_gpu_source_conflict","source changed since recipe was frozen",409)
+            try:
+                recipe=frozen["recipe"]
+                # The old immutable catalog remains authoritative after changing
+                # the worker default. Never silently derive a replacement recipe.
+                assets=self.assets if recipe["asset_set_sha256"]==self.assets["manifest_sha256"] else load_asset_set(Path(frozen["asset_root"]),recipe["asset_set_sha256"])
+                validate_recipe(recipe,assets)
+            except Exception: raise PrepareWorkerError("fb_gpu_recipe_invalid","frozen recipe or catalog invalid",409) from None
+            return recipe,assets
+        assets=self.assets
+        recipe=derive_recipe(job_id=request["job_id"],content_id=request["content_id"],profile=PROFILE,source_url_sha256=hashlib.sha256(request["source_url"].encode()).hexdigest(),asset_set=assets)
+        frozen={"version":1,"request":request,"source_sha256":source_sha,"asset_root":str(assets.get("root",self.config.asset_root)),"recipe":recipe}
+        temporary=path.with_suffix(".tmp")
+        try:
+            with temporary.open("w",encoding="utf-8") as handle:
+                json.dump(frozen,handle,sort_keys=True,separators=(",",":")); handle.flush(); os.fsync(handle.fileno())
+            os.replace(temporary,path)
+            if os.name=="posix":
+                directory=os.open(root,os.O_RDONLY)
+                try: os.fsync(directory)
+                finally: os.close(directory)
+        finally: temporary.unlink(missing_ok=True)
+        return recipe,assets
     def prepare(self,raw):
         request=validate_request(raw,self.config); job=request["job_id"]; root=self.config.work_root/"jobs"/job; manifest=root/"manifest.json"
         with self.job_slot(job):
@@ -193,11 +244,12 @@ class PrepareProcessor:
                 try: source_sha=self._download(request["source_url"],download_tmp); os.replace(download_tmp,source)
                 except Exception:
                     download_tmp.unlink(missing_ok=True); raise
+            recipe,assets=self._recipe_for_job(root,request,source_sha)
             source_info=_probe(self.config,source)
-            recipe=derive_recipe(job_id=job,content_id=request["content_id"],profile=PROFILE,source_url_sha256=hashlib.sha256(request["source_url"].encode()).hexdigest(),asset_set=self.assets); output=root/"output.tmp.mp4"; output.unlink(missing_ok=True)
+            output=root/"output.tmp.mp4"; output.unlink(missing_ok=True)
             render_started=time.monotonic()
             try:
-                try: self.runner(build_command(self.config,source,output,source_info,recipe,selected_asset_paths(recipe,self.assets)),capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                try: self.runner(build_command(self.config,source,output,source_info,recipe,selected_asset_paths(recipe,assets)),capture_output=True,text=True,timeout=self.config.timeout,check=True)
                 except Exception: raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
                 render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
@@ -218,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
         try: loopback=ipaddress.ip_address(self.client_address[0]).is_loopback
         except ValueError: loopback=False
         if not loopback: self._json(404,{"ok":False,"code":"not_found"}); return
-        if self.path==HEALTH_PATH: self._json(200,{"ok":True,"service":"fb-page-prepare-gpu","profile":PROFILE,"prepare_only":True,"compositor_backend":self.server.processor.config.compositor_backend})
+        if self.path==HEALTH_PATH: self._json(200,{"ok":True,"service":"fb-page-prepare-gpu","profile":PROFILE,"prepare_only":True,"compositor_backend":self.server.processor.config.compositor_backend,"source_overlay_version":1})
         else: self._json(404,{"ok":False,"code":"not_found"})
     def do_POST(self):
         try: loopback=ipaddress.ip_address(self.client_address[0]).is_loopback

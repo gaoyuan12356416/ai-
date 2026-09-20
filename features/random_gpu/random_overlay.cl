@@ -65,5 +65,15 @@ __kernel void compose_random_overlay_v2(
     value = over(value, read_imagef(opacity_video, linear_clear, uv));
     value = over(value, read_imagef(border, linear_clear, uv));
     value = over(value, read_imagef(corners, linear_clear, uv));
+#ifdef SCENE_SOURCE_OVERLAY_OPACITY
+    // The existing source plane is the synchronous, unrotated aspect-cover
+    // input before any template layers. Zoom it about the center and composite
+    // it last without another decode, frame input, or audio stream.
+    float2 source_uv = (uv - (float2)(0.5f, 0.5f)) /
+                      SCENE_SOURCE_OVERLAY_SCALE + (float2)(0.5f, 0.5f);
+    float4 source_overlay = read_imagef(source, linear_edge, source_uv);
+    source_overlay.w = SCENE_SOURCE_OVERLAY_OPACITY;
+    value = over(value, source_overlay);
+#endif
     write_imagef(destination, coordinate, clamp(value, 0.0f, 1.0f));
 }

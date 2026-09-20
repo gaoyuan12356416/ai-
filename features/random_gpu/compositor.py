@@ -25,6 +25,22 @@ def backend(value=LEGACY):
     return value
 
 
+def validate_source_overlay(recipe):
+    """Return the frozen source overlay, or None for an unchanged legacy recipe."""
+    if "source_overlay" not in recipe:
+        return None
+    overlay = recipe["source_overlay"]
+    limits = {"version": (1, 1), "opacity_bp": (200, 500),
+              "scale_bp": (11000, 15000)}
+    if not isinstance(overlay, dict) or set(overlay) != set(limits):
+        raise ValueError("invalid source overlay recipe")
+    for key, (low, high) in limits.items():
+        value = overlay[key]
+        if type(value) is not int or not low <= value <= high:
+            raise ValueError("invalid source overlay parameters")
+    return overlay
+
+
 def kernel_source(recipe):
     limits = {"rotation_millidegrees": (-2000, 2000), "scale_bp": (9800, 10200),
               "tint_opacity_bp": (100, 1000)}
@@ -40,6 +56,12 @@ def kernel_source(recipe):
         "SCENE_ROTATION_RADIANS": "%.12ff" % (recipe["rotation_millidegrees"] * math.pi / 180000),
         "SCENE_TINT_OPACITY": "%.8ff" % (recipe["tint_opacity_bp"] / 10000),
     }
+    overlay = validate_source_overlay(recipe)
+    if overlay is not None:
+        definitions.update({
+            "SCENE_SOURCE_OVERLAY_OPACITY": "%.8ff" % (overlay["opacity_bp"] / 10000),
+            "SCENE_SOURCE_OVERLAY_SCALE": "%.8ff" % (overlay["scale_bp"] / 10000),
+        })
     return "".join("#define %s %s\n" % item for item in definitions.items()) + KERNEL.read_text(encoding="utf-8")
 
 
@@ -110,7 +132,9 @@ def preflight(ffmpeg, encoder, work_root):
     with tempfile.TemporaryDirectory(prefix="compositor-preflight-", dir=work_root) as tmp:
         path = Path(tmp) / "preflight.cl"
         path.write_text(kernel_source({"rotation_millidegrees": 0, "scale_bp": 10000,
-                                       "tint_opacity_bp": 100}), encoding="utf-8")
+                                       "tint_opacity_bp": 100,
+                                       "source_overlay": {"version": 1, "opacity_bp": 500,
+                                                          "scale_bp": 15000}}), encoding="utf-8")
         graph = ("format=rgba,hwupload,split=6[a][b][c][d][e][f];"
                  "[a][b][c][d][e][f]program_opencl=inputs=6:size=720x1280:"
                  "source='%s':kernel=compose_random_overlay_v2,hwdownload,"
