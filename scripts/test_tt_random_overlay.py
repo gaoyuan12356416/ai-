@@ -210,6 +210,36 @@ class RandomOverlayTests(unittest.TestCase):
                     build_random_overlay_command(config, Path("source.mp4"), Path("output.mp4"),
                         {"has_audio": has_audio}, 12.5, {**legacy, "source_overlay": invalid}, paths)
 
+    def test_random_output_bounds_padded_audio_without_output_shortest(self):
+        legacy = {"rotation_millidegrees": 1250, "scale_bp": 9900, "tint_opacity_bp": 500}
+        recipes = (legacy, {**legacy, "source_overlay": {
+            "version": 1, "opacity_bp": 500, "scale_bp": 15000}})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = {category: root / (category + ".png") for category in CATEGORIES}
+            for backend in ("cpu_legacy", "opencl_fused_contain_v1"):
+                for encoder in ("hevc_nvenc", "h264_nvenc"):
+                    config = SimpleNamespace(ffmpeg_bin="ffmpeg", video_encoder=encoder,
+                                             compositor_backend=backend)
+                    for has_audio in (True, False):
+                        for recipe in recipes:
+                            with self.subTest(backend=backend, encoder=encoder, audio=has_audio,
+                                              overlay="source_overlay" in recipe):
+                                command = build_random_overlay_command(config, root / "source.mp4",
+                                    root / "output.mp4", {"has_audio": has_audio}, 108.3, recipe, paths)
+                                self.assertNotIn("-shortest", command)
+                                self.assertEqual(command.count("-t"), 1)
+                                self.assertEqual(command[command.index("-t") + 1], "108.300000")
+                                self.assertEqual(command[command.index("-af") + 1],
+                                                 "aresample=48000:async=1:first_pts=0,apad")
+                                audio_map = command.index("-map", command.index("[v]")) + 1
+                                self.assertEqual(command[audio_map], "0:a:0" if has_audio else "5:a:0")
+                                for option, value in (("-c:a", "aac"), ("-profile:a", "aac_low"),
+                                                      ("-ar", "48000"), ("-ac", "2")):
+                                    self.assertEqual(command[command.index(option) + 1], value)
+                                graph = command[command.index("-filter_complex") + 1]
+                                self.assertIn("shortest=1:eof_action=", graph)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

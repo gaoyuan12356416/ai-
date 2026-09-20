@@ -2407,6 +2407,9 @@ def build_random_overlay_command(
         "%s"
     ) % (source_split, scale_text, scale_text, angle_text, opacity_text,
          source_filter, final_filter)
+    # The explicit -t below bounds both streams while apad fills short audio.
+    # Output -shortest is unnecessary here and can stall FFmpeg 7.1 midstream
+    # on discontinuous AAC input. Keep the filter-level EOF rules unchanged.
     command.extend(
         [
             "-filter_complex",
@@ -2417,7 +2420,6 @@ def build_random_overlay_command(
             audio_map,
             "-af",
             "aresample=48000:async=1:first_pts=0,apad",
-            "-shortest",
         ]
     )
     command.extend(_encoder_arguments(config))
