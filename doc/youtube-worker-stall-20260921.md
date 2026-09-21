@@ -32,3 +32,49 @@ validate its frozen reference, normalize using the existing crop rule and recove
 to review while retaining its 2026-09-22 02:57 UTC appointment.
 Publishing ledgers 167 and 168 must continue through the normal engine. Ledger
 167 already has video srU10gECYSQ; never create a replacement upload.
+
+
+## Production verification
+
+Deployed commit `7db11ae0f112fa033c4e8e96a8a9ad1bfd19b200` to CPU
+`43.166.187.96:/root/drama_material_service`, replacing only the three allowlisted
+files. Worker PID is 317191; API and unified-writer services stayed active.
+Linux: 104 tests, 103 passed and one historical fixture skipped. Windows: 104
+cases, 102 passed with the Linux process-group check and historical fixture skipped.
+Production runtime SHA256 equals the GitHub-fetched release.
+
+Backup: `/mnt/data-disk/deploy/youtube-auto-publish/backups/worker-stall-20260921-151652-7db11ae0f112`.
+Exact rollback command:
+
+```sh
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/worker-stall-20260921/scripts/deploy_youtube_worker_stall.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/worker-stall-20260921-151652-7db11ae0f112
+```
+
+The old generator did not exit on SIGTERM and systemd ended its worker cgroup
+at the existing 60-second stop deadline. No active video upload lease existed
+before the stop. The new process-group integration test covers the orphaned-child
+failure mode. No other service was restarted.
+
+Original ledger 167 was confirmed by authenticated API to be public, processed,
+channel-matched, with its approved thumbnail already successful and no schedule.
+The user-authorized incident recovery recorded that evidence, changed only the
+same-video readback phase, then invoked the existing retry method. The normal
+engine confirmed publication and posted its original first comment. Ledger 168
+completed through the normal worker. Both have exactly one upload attempt and one
+comment attempt. An early-public state is not generally safe to retry; retain the
+unknown fence for unverified videos and scheduled videos.
+
+Recovery backups and evidence:
+`/mnt/data-disk/youtube-auto-publish/recovery-20260921-1789975146` and
+`/mnt/data-disk/youtube-auto-publish/public-reconcile-167-1789975243`.
+
+A separate pre-existing unified-record backlog was discovered: the legacy
+publisher has been inactive since the September 15 period and held the outbox
+consumer. It was not re-enabled, and historical records were not replayed.
+Only the six original outbox entries for ledgers 167 and 168 were selected for
+controlled idempotent RPC synchronization.
+
+Final readback: all six selected outbox rows are synced with attempt_count=1;
+both publishing ledgers are published/synced. The SSH client timed out waiting
+for long command output, so completion was verified separately from SQLite and
+the production file hashes, rather than re-running any publication or sync.
