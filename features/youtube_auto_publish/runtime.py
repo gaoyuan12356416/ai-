@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 import requests
+from .worker_runtime import run_generator
 from .service import YouTubeWorkflow
 from .images import normalize_generated_cover
 from .source import MaterialSource,DEFAULT_HOSTS
@@ -139,7 +140,16 @@ def generate_cover_factory(root):
         # Do not expose application/MySQL/Feishu/Google environment secrets to the generator.
         env={key:os.environ[key] for key in ('PATH','HOME','USER','LANG','LC_ALL','TMPDIR','CODEX_HOME') if key in os.environ}
         try:
-            p=subprocess.run(cmd,input=prompt,env=env,capture_output=True,text=True,timeout=timeout)
+            try:
+                p=run_generator(cmd,input=prompt,env=env,timeout=timeout)
+            except subprocess.TimeoutExpired:
+                if not output.is_file() or output.is_symlink():raise
+                # Recover only a fully validated image after the process group
+                # stops. All reference and pixel checks below still apply.
+                p=subprocess.CompletedProcess(cmd,0)
+            final=result.read_text(encoding='utf-8',errors='replace')[:16384] if result.is_file() else ''
+            if any(marker in final.lower() for marker in ('safety system','safety filter','safety policy','安全过滤','安全系统','安全策略')):
+                raise WorkflowError('cover_generation_policy_blocked','生图工具安全过滤拒绝了本次请求；请更换合规参考图或手动上传封面',422)
             if p.returncode:
                 raise WorkflowError('cover_generation_failed','AI 生图进程执行失败，请重试生成或手动上传封面',503)
             if output.is_symlink():

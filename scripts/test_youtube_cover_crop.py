@@ -93,7 +93,7 @@ class CropCase(unittest.TestCase):
                 self.assertNotIn('exactly 1536x864 or 1920x1080', kwargs['input'])
                 self.assertIn('Never alter PNG IHDR', kwargs['input'])
                 return SimpleNamespace(returncode=0)
-            with patch('features.youtube_auto_publish.runtime.subprocess.run', side_effect=generate):
+            with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=generate):
                 output = generate_cover_factory(root)(task, {'number': 1})
             work = next((root/'generation'/task['id']).iterdir())
             self.assertEqual((work/'cover.png').read_bytes(), raw)

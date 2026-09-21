@@ -620,7 +620,7 @@ class RuntimeAdapterTests(unittest.TestCase):
                 self.assertEqual(reference.read_bytes(),original)
                 (work/'cover.png').write_bytes(png(1536,864))
                 return SimpleNamespace(returncode=0)
-            with patch.dict(os.environ,{'MYSQL_PASSWORD':'not-for-generator','FEISHU_SECRET':'not-for-generator'}), patch('features.youtube_auto_publish.runtime.subprocess.run',side_effect=run) as process:
+            with patch.dict(os.environ,{'MYSQL_PASSWORD':'not-for-generator','FEISHU_SECRET':'not-for-generator'}), patch('features.youtube_auto_publish.runtime.run_generator',side_effect=run) as process:
                 output=generate_cover_factory(root)(task,{'number':1})
             self.assertTrue(output.startswith(b'\x89PNG'))
             self.assertNotIn('MYSQL_PASSWORD',process.call_args.kwargs['env'])

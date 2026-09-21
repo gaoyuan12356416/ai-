@@ -216,7 +216,7 @@ class GeneratorReferenceCase(unittest.TestCase):
         return SimpleNamespace(returncode=0)
 
     def generate(self, task=None, number=1):
-        with patch('features.youtube_auto_publish.runtime.subprocess.run', side_effect=self.fake_run):
+        with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=self.fake_run):
             return generate_cover_factory(self.root)(task or self.task, {'number':number})
 
     def test_reference_is_real_attachment_and_imagegen_local_reference_is_required(self):
@@ -300,7 +300,7 @@ class GeneratorReferenceCase(unittest.TestCase):
             self.assertNotIn(key, env)
 
     def test_failed_generator_does_not_return_reference_as_output(self):
-        with patch('features.youtube_auto_publish.runtime.subprocess.run', return_value=SimpleNamespace(returncode=1)):
+        with patch('features.youtube_auto_publish.runtime.run_generator', return_value=SimpleNamespace(returncode=1)):
             with self.assertRaises(WorkflowError) as ctx:
                 generate_cover_factory(self.root)(self.task, {'number':1})
         self.assertEqual(ctx.exception.code, 'cover_generation_failed')
@@ -310,7 +310,7 @@ class GeneratorReferenceCase(unittest.TestCase):
             result = self.fake_run(command, **kwargs)
             Path(command[command.index('--image')+1]).write_bytes(picture(size=(250,360)))
             return result
-        with patch('features.youtube_auto_publish.runtime.subprocess.run', side_effect=corrupt_reference):
+        with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=corrupt_reference):
             with self.assertRaises(WorkflowError) as ctx:
                 generate_cover_factory(self.root)(self.task, {'number':1})
         self.assertEqual(ctx.exception.code, 'reference_cover_changed')

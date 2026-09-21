@@ -139,7 +139,7 @@ class GenerationFailureCase(unittest.TestCase):
                    'reference_cover':{'asset_id':asset_id,'sha256':hashlib.sha256(data).hexdigest()}}
 
     def run_generator(self, effect):
-        with patch('features.youtube_auto_publish.runtime.subprocess.run',side_effect=effect):
+        with patch('features.youtube_auto_publish.runtime.run_generator',side_effect=effect):
             return generate_cover_factory(self.root)(self.task,{'number':3})
 
     def assert_failure(self,effect,code):
@@ -170,6 +170,21 @@ class GenerationFailureCase(unittest.TestCase):
     def test_timeout_has_specific_error(self):
         def timeout(*args,**kwargs):raise subprocess.TimeoutExpired(args[0],1200,output='private-trace-secret')
         self.assert_failure(timeout,'cover_generation_timeout')
+
+    def test_timeout_recovers_only_fully_decoded_output(self):
+        def timeout(command,**kwargs):
+            (Path(command[command.index('-C')+1])/'cover.png').write_bytes(picture())
+            raise subprocess.TimeoutExpired(command,1200)
+        self.assertTrue(self.run_generator(timeout))
+
+    def test_safety_refusal_does_not_retry_missing_image(self):
+        calls=[]
+        def refusal(command,**kwargs):
+            calls.append(command)
+            (Path(command[command.index('-C')+1])/'result.txt').write_text('Generation blocked by the safety system.')
+            return SimpleNamespace(returncode=0)
+        self.assert_failure(refusal,'cover_generation_policy_blocked')
+        self.assertEqual(len(calls),1)
 
     def test_process_failure_and_missing_output_are_distinct(self):
         self.assert_failure(lambda *a,**k:SimpleNamespace(returncode=1),'cover_generation_failed')

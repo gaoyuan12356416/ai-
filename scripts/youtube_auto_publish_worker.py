@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 import app
+from features.youtube_auto_publish.worker_runtime import PreparationLane
 from features.youtube_auto_publish.runtime import build_service,readonly_runner
 from features.youtube_auto_publish.engine import ReviewedYouTubePublishEngine,ReviewedYouTubeHTTPClient
 from features.youtube_auto_publish.failure_notifications import build_failure_notifications
@@ -45,15 +46,16 @@ def main():
     app.DRAMA_SYNTHESIS_STORE.ensure_storage()
     workflow=build_service(app);engine=build_engine();failures=build_failure_notifications(app)
     worker_id='youtube-auto:%s:%s' % (socket.gethostname(),os.getpid())
+    preparation=PreparationLane()
     while not STOP:
         if os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1' and os.environ.get('YOUTUBE_LIVE_ENABLED','0')=='1':
             try:
                 # Give existing approved uploads a turn even when generation keeps arriving.
                 published=engine.run_once(worker_id)
                 notify_failures(failures)
-                prepared=workflow.run_once(worker_id)
+                prepared=preparation.tick(workflow,worker_id)
                 for result in (published,prepared):
-                    if result.get('claimed'):logging.info('YouTube auto task=%s processed',result.get('task_id',''))
+                    if result and result.get('claimed'):logging.info('YouTube auto task=%s processed',result.get('task_id',''))
             except Exception:
                 # Never log SQL, tokens, uploaded content or model output.
                 logging.error('YouTube auto worker iteration failed; inspect persisted task status')
@@ -61,6 +63,7 @@ def main():
         for _ in range(5):
             if STOP:break
             time.sleep(1)
+    preparation.close()
     return 0
 
 if __name__=='__main__':raise SystemExit(main())
