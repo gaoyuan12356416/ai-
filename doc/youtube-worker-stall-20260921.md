@@ -78,3 +78,12 @@ Final readback: all six selected outbox rows are synced with attempt_count=1;
 both publishing ledgers are published/synced. The SSH client timed out waiting
 for long command output, so completion was verified separately from SQLite and
 the production file hashes, rather than re-running any publication or sync.
+
+
+During verification, the operator approved the recovered cover at 07:21:42 UTC,
+creating ledger 169, and manually replaced/approved the blocked cover at 07:23:29
+UTC, creating ledger 170. Ledger 170 completed normally with video OoPTsq6AaGY.
+Ledger 169, video ik1OGCpINSE, is private and fully processed but its live native
+publishAt is 2026-09-22T17:45:00Z, different from the frozen requested
+2026-09-22T02:57:00Z. Keep its read-only reconciliation fence until the operator
+chooses the desired schedule; do not overwrite a possible Studio adjustment.
