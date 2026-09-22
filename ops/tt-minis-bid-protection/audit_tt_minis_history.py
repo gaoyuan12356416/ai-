@@ -63,7 +63,7 @@ def evidence(path, value):
     tmp = path.with_name(path.name + '.tmp')
     with gzip.open(str(tmp), 'wt', encoding='utf-8') as f:
         json.dump(value, f, ensure_ascii=False, default=str)
-    with tmp.open('rb') as f:
+    with tmp.open('r+b') as f:
         os.fsync(f.fileno())
     os.replace(str(tmp), str(path))
 
