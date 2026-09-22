@@ -11,6 +11,28 @@ import audit_tt_minis_history as audit
 
 
 class AuditTests(unittest.TestCase):
+    def test_range_response_can_revisit_seeded_business_key_without_double_counting(self):
+        db=sqlite3.connect(':memory:')
+        db.executescript('CREATE TABLE facts(day TEXT,account TEXT,qid TEXT,candidate_json TEXT,old_json TEXT,'
+                        'new_json TEXT,checked_at TEXT,request_id TEXT,api_missing INTEGER,task_id TEXT,'
+                        'PRIMARY KEY(day,account,qid)); CREATE TABLE tasks(id TEXT,status TEXT,error TEXT);')
+        p,e,response=self.fixture()
+        first=next(iter(e.values()))
+        second=dict(first,record_date='2026-08-19')
+        for c,tid,checked in [(first,'seed-prior','earlier'),(second,'current',None)]:
+            db.execute('INSERT INTO facts(day,account,qid,candidate_json,old_json,task_id,checked_at) VALUES(?,?,?,?,?,?,?)',
+                (*audit.key(c),audit.dump(c),audit.dump(c),tid,checked))
+        db.execute("INSERT INTO tasks VALUES('current','pending',NULL)")
+        response['request_id']='verified-request'
+        response['data']['bid_protection_records'].append(dict(response['data']['bid_protection_records'][0],record_date='2026-08-19'))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual((2,0,0),audit.record_result(db,Path(tmp),'current',p,response,'2026-09-22T04:00:00+00:00'))
+            self.assertEqual((2,0,0),audit.record_result(db,Path(tmp),'current',p,response,'2026-09-22T04:01:00+00:00'))
+        self.assertEqual(2,db.execute('SELECT COUNT(*) FROM facts').fetchone()[0])
+        self.assertEqual(2,db.execute('SELECT COUNT(*) FROM facts WHERE new_json IS NOT NULL').fetchone()[0])
+        self.assertEqual('done',db.execute("SELECT status FROM tasks WHERE id='current'").fetchone()[0])
+        db.close()
+
     def test_collection_checkpoints_are_idempotent(self):
         db=sqlite3.connect(':memory:')
         db.executescript('CREATE TABLE facts(day TEXT,account TEXT,qid TEXT,old_json TEXT,candidate_json TEXT);'

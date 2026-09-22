@@ -240,7 +240,13 @@ def normalize_response(params, payload, expected):
 
 def record_result(db, root, tid, params, payload, checked):
     evidence(root / 'api' / (tid + '.json.gz'), dict(params=params, response=payload, checked_at=checked))
-    rows = db.execute('SELECT day,account,qid,candidate_json,old_json FROM facts WHERE task_id=?', (tid,)).fetchall()
+    # A date window may cross a previously seeded date. Match its existing
+    # business keys too; task ownership is not the response's business scope.
+    ids = json.loads(params['query_ids'])
+    marks = ','.join(['?'] * len(ids))
+    rows = db.execute('SELECT day,account,qid,candidate_json,old_json FROM facts '
+        'WHERE account=? AND day BETWEEN ? AND ? AND qid IN (' + marks + ')',
+        (params['advertiser_id'], params['start_date'], params['end_date']) + tuple(ids)).fetchall()
     expected = {(r[0], r[1], r[2]): json.loads(r[3]) for r in rows}
     normalized, extras = normalize_response(params, payload, expected)
     absent_existing = [r[:3] for r in rows if r[4] and tuple(r[:3]) not in normalized]
@@ -253,6 +259,26 @@ def record_result(db, root, tid, params, payload, checked):
     db.execute("UPDATE tasks SET status='done',error=NULL WHERE id=?", (tid,))
     db.commit()
     return len(normalized), len(rows) - len(normalized), len(extras)
+
+
+def replay(db, root):
+    succeeded = 0
+    for tid, params_json in db.execute("SELECT id,params FROM tasks WHERE status<>'done'").fetchall():
+        path = root/'api'/(tid+'.json.gz')
+        if not path.exists():
+            continue
+        raw = read_evidence(path)
+        if raw['params'] != json.loads(params_json):
+            raise RuntimeError('saved API request differs from task scope')
+        try:
+            record_result(db,root,tid,raw['params'],raw['response'],raw['checked_at'])
+            succeeded += 1
+        except Exception as exc:
+            error=sync.redact_error(exc)
+            db.execute("UPDATE tasks SET status='failed',error=? WHERE id=?",(error,tid))
+            db.commit()
+            emit('replay_failed',task=tid,error=error)
+    emit('replay_complete',succeeded=succeeded)
 
 
 def audit(db, root, workers):
@@ -397,7 +423,7 @@ def summary(db, root):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action', choices=('collect','plan','audit','seed','apply','summary'))
+    p.add_argument('action', choices=('collect','plan','audit','seed','replay','apply','summary'))
     p.add_argument('--audit-dir', required=True)
     p.add_argument('--start-date', default='2026-07-24')
     p.add_argument('--end-date', default='2026-09-21')
@@ -443,6 +469,7 @@ def main():
         elif args.action=='plan': plan(db)
         elif args.action=='audit': audit(db,root,args.workers)
         elif args.action=='seed': seed(db,root,args.seed_file)
+        elif args.action=='replay': replay(db,root)
         elif args.action=='apply':
             with open('/tmp/tt_minis_bid_protection_sync.lock','a') as lock:
                 fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
