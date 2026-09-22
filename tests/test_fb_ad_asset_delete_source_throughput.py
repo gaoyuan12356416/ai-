@@ -53,7 +53,7 @@ class SelectedProductQueryTests(unittest.TestCase):
 
 
 class CredentialSqlTests(unittest.TestCase):
-    """Execute the combined SELECT with only MySQL literal/cast adaptation.
+    """Execute the combined SELECT with narrow MySQL-to-SQLite adaptation.
 
     This exercises joins, CASE, tuple scoping, ordering and both LIMITs instead
     of mocking a result which presupposes the desired credential was selected.
@@ -90,6 +90,11 @@ class CredentialSqlTests(unittest.TestCase):
             return "?"
         sql = re.sub(r"_utf8mb4 0x([0-9a-f]+)", literal, sql)
         sql = re.sub(r"CAST\((chosen\.[a-z_]+) AS BINARY\)", r"(CAST(\1 AS TEXT) COLLATE BINARY)", sql)
+        # SQLite versions shipped with the server's Python 3.9 accept row IN
+        # with a VALUES subquery but reject MySQL's multi-row literal list.
+        # Only adapt this fixture dialect; keep production tuple matching intact.
+        sql = sql.replace("(a.id,a.ad_id,a.product,a.user_id) IN (",
+                          "(a.id,a.ad_id,a.product,a.user_id) IN (VALUES ")
         return self.db.execute(sql, params).fetchall()
 
     def frozen(self, rid="1", aid="101", uid="804", pid="1"):
