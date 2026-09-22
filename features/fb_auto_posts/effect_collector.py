@@ -24,7 +24,7 @@ class FeedbackError(RuntimeError):
 
 
 def graph_created_at(value):
-    """Normalize Meta's +0000 offset on the production Python 3.10 runtime."""
+    """Normalize Meta's +0000 offset on Python runtimes before 3.11."""
     if not isinstance(value,str):
         raise FeedbackError('feedback_created_time_invalid')
     normalized = re.sub(r'([+-]\d{2})(\d{2})$',r'\1:\2',value.removesuffix('Z')+'+00:00' if value.endswith('Z') else value)
