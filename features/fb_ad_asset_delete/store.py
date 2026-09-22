@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import uuid
 
@@ -681,6 +682,64 @@ class Store:
                 account_attempt_id=attempt_id, credential=context))
             return dict(self._video_account_data(self._video_account(conn, row, account)), claimed=True)
 
+    @staticmethod
+    def _deferred_video_rejection(result):
+        """Only a definite invalid-ID response may wait for a shared read."""
+        if not isinstance(result, dict) or result.get("needs_account_verification") is not True:
+            return False
+        detail = result.get("detail")
+        status = detail.get("http_status") if isinstance(detail, dict) else None
+        error = result.get("delete_error")
+        return (result.get("code") == "100" and isinstance(result.get("message"), str) and
+            re.fullmatch(r"(?:\(#100\)\s*)?Param video_id is not a valid video ID\.?",
+                         result["message"].strip(), re.IGNORECASE) is not None and
+            isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 500 and
+            status not in (301, 302, 307, 308) and result.get("success") is not True and
+            result.get("confirmed_absent") is not True and isinstance(result.get("checked_at"), str) and
+            bool(result["checked_at"]) and isinstance(error, dict) and
+            error == {field: result.get(field) for field in ("code", "message", "detail", "checked_at")})
+
+    def defer_video_account_verification(self, job_id, key, run_id, account_id, account_attempt_id, result):
+        """Persist a rejected DELETE before batching its optional account read.
+
+        Keep the claim active, so another task cannot retry while verification
+        runs. Recovery can distinguish this definite rejection from an in-flight
+        request whose outcome is unknown.
+        """
+        if not self._deferred_video_rejection(result):
+            raise StoreError("Only an explicit invalid Video ID rejection can defer verification", "invalid_input")
+        with self._transaction() as conn:
+            row = self._active_video_parent(conn, job_id, key, run_id)
+            child = self._video_account(conn, row, account_id)
+            account = child["account_id"]
+            self._account_outcome(result, account, row["object_id"])
+            attempt = self._require(conn, "video_account_attempts", "account_attempt_id", account_attempt_id)
+            if ((attempt["job_id"], attempt["object_key"], attempt["account_id"], attempt["run_id"]) !=
+                    (job_id, key, account, run_id) or
+                    (child["run_id"], child["account_attempt_id"], child["status"], attempt["status"]) !=
+                    (run_id, account_attempt_id, "in_progress", "in_progress")):
+                raise StoreError("Only the active account attempt may defer verification", "claim_conflict")
+            context = json.loads(attempt["context"])
+            if (any(result.get(field) != value for field, value in context.items()) or
+                    any(field in result and result[field] != context.get(field)
+                        for field in _VIDEO_CREDENTIAL_FIELDS - {"account_id", "video_id"})):
+                raise StoreError("Deferred rejection cannot replace its selected identity", "credential_conflict")
+            encoded = _json(result)
+            previous = json.loads(attempt["result"])
+            if previous.get("needs_account_verification") is True:
+                if attempt["result"] != encoded:
+                    raise StoreError("A deferred DELETE rejection is immutable", "claim_conflict")
+                return self._video_account_data(child)
+            now = _now()
+            conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET result=? WHERE account_attempt_id=?",
+                         (encoded, account_attempt_id))
+            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                         (encoded, now, job_id, key, account))
+            self._refresh_video_result(conn, row)
+            self._audit(conn, job_id, "video_account_verification_deferred", dict(key=key, account_id=account,
+                run_id=run_id, account_attempt_id=account_attempt_id, result=result))
+            return self._video_account_data(self._video_account(conn, row, account))
+
     def finish_video_account(self, job_id, key, run_id, account_id, account_attempt_id, status, result):
         if status not in ("deleted", "already_deleted", "failed", "blocked", "unknown"):
             raise StoreError("Invalid account video outcome", "invalid_input")
@@ -694,6 +753,14 @@ class Store:
             attempt = self._require(conn, "video_account_attempts", "account_attempt_id", account_attempt_id)
             if (attempt["job_id"], attempt["object_key"], attempt["account_id"], attempt["run_id"]) != (job_id, key, account, run_id):
                 raise StoreError("Account attempt does not match its frozen claim", "claim_conflict")
+            previous = json.loads(attempt["result"])
+            if self._deferred_video_rejection(previous):
+                if status in SUCCESS_STATUSES:
+                    self._account_outcome(result, account, row["object_id"], require_absent=True)
+                if result.get("delete_error") != previous["delete_error"]:
+                    raise StoreError("Verification cannot replace the original DELETE rejection", "claim_conflict")
+                result = dict(result)
+                result.pop("needs_account_verification", None)
             context = json.loads(attempt["context"])
             if any(field in result and result[field] != context.get(field) for field in _VIDEO_CREDENTIAL_FIELDS -
                    {"account_id", "video_id"} if field in result):
@@ -883,13 +950,20 @@ class Store:
         children = conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key=? AND status='in_progress'",
                                 (row["job_id"], row["object_key"])).fetchall()
         for child in children:
-            result = dict(json.loads(child["result"]), reason=reason, requires_reconciliation=True)
+            saved = json.loads(child["result"])
+            rejected = self._deferred_video_rejection(saved)
+            status = "failed" if rejected else "unknown"
+            result = dict(saved, reason=reason, requires_reconciliation=not rejected)
+            if rejected:
+                result.pop("needs_account_verification", None)
+                result["verification_interrupted"] = True
             encoded, now = _json(result), _now()
-            conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET status='unknown',finished_at=?,result=? WHERE account_attempt_id=? AND status='in_progress'",
-                         (now, encoded, child["account_attempt_id"]))
-            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status='unknown',result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
-                         (encoded, now, row["job_id"], row["object_key"], child["account_id"]))
-            self._audit(conn, row["job_id"], "video_account_inflight_unknown", dict(key=row["object_key"],
+            conn.execute("UPDATE fb_asset_delete_v2_video_account_attempts SET status=?,finished_at=?,result=? WHERE account_attempt_id=? AND status='in_progress'",
+                         (status, now, encoded, child["account_attempt_id"]))
+            conn.execute("UPDATE fb_asset_delete_v2_video_accounts SET status=?,result=?,updated_at=? WHERE job_id=? AND object_key=? AND account_id=?",
+                         (status, encoded, now, row["job_id"], row["object_key"], child["account_id"]))
+            action = "video_account_verification_interrupted" if rejected else "video_account_inflight_unknown"
+            self._audit(conn, row["job_id"], action, dict(key=row["object_key"],
                 account_id=child["account_id"], account_attempt_id=child["account_attempt_id"], reason=reason))
         return self._settle_video_parent(conn, row, reason)
 

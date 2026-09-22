@@ -53,7 +53,7 @@ class FakeSource:
     def resolve_dramas(self, input_type, ids, products):
         return deepcopy(self.dramas), []
 
-    def resolve_ads(self, dramas, products):
+    def resolve_ads(self, dramas, products, progress=None):
         if self.resolve_error:
             raise self.resolve_error
         return deepcopy(self.ads), []

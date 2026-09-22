@@ -28,17 +28,23 @@ def source_row(account="444", user="804", row="1", ad="101", product="1"):
 
 class AccountVideoSourceTests(unittest.TestCase):
     columns = ("source_row_id", "product_id", "ad_id", "account_id", "user_id", "publish_queue_id",
-               "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user")
+               "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user",
+               "token_user_id", "fb_user_id", "token")
 
     def row(self, **updates):
         row = dict(source_row(), publish_queue_id="500", queue_id="500", queue_product_id="1",
                    queue_user_id="804", default_token="-1", setting_product_id="1", default_user="803")
         row.update(updates)
+        row.setdefault("token_user_id", row["default_user"] if row["default_token"] == "1" else row["queue_user_id"])
+        row.setdefault("fb_user_id", "90002")
+        row.setdefault("token", "selected-secret")
         return tuple(row[k] for k in self.columns)
 
     def resolve(self, flag="-1", token_rows=None, obj=None, **row_updates):
-        query = Mock(side_effect=[[self.row(default_token=flag, **row_updates)],
-            token_rows if token_rows is not None else [("803" if flag == "1" else "804", "90002", "selected-secret")]])
+        rows = [self.row(default_token=flag, **row_updates)] if token_rows is None else [
+            self.row(**dict(row_updates, default_token=flag, token_user_id=uid, fb_user_id=fbid, token=token))
+            for uid, fbid, token in token_rows or [(None, None, None)]]
+        query = Mock(return_value=rows)
         result = SqlSource(query).video_account_credential(obj or video("pending"), "444")
         return result, query
 
@@ -47,15 +53,15 @@ class AccountVideoSourceTests(unittest.TestCase):
         self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("803", "product_default_user"))
         self.assertEqual(result["credential_source_user_id"], "804")
         self.assertEqual(result["credential_default_token"], "1")
-        self.assertIn("user_id=" + q("803"), query.call_args.args[0])
-        self.assertNotIn(q("804"), query.call_args.args[0])
+        self.assertIn("WHEN chosen.default_token='1' THEN chosen.default_user", query.call_args.args[0])
+        query.assert_called_once()
 
     def test_nondefault_queue_uses_own_user_even_with_product_default_present(self):
         result, query = self.resolve("-1")
         self.assertEqual((result["credential_user_id"], result["credential_relation"]), ("804", "publish_queue_user"))
         self.assertEqual(result["credential_publish_queue_id"], "500")
-        self.assertIn("user_id=" + q("804"), query.call_args.args[0])
-        self.assertNotIn(q("803"), query.call_args.args[0])
+        self.assertIn("WHEN chosen.default_token='-1' THEN chosen.queue_user_id", query.call_args.args[0])
+        query.assert_called_once()
 
     def test_frozen_source_still_rereads_queue_flag_and_current_product_default(self):
         obj = dict(video("failed"), video_account_sources=[source_row()])
@@ -88,7 +94,7 @@ class AccountVideoSourceTests(unittest.TestCase):
             with self.subTest(updates=updates), self.assertRaises(AssetError):
                 self.resolve(obj=obj, **updates)
 
-    def test_missing_or_mismatched_queue_never_reads_any_token(self):
+    def test_missing_or_mismatched_queue_never_authorizes_any_token(self):
         for updates in ({"queue_id": "NULL"}, {"publish_queue_id": "501"},
                         {"queue_product_id": "2"}, {"queue_user_id": "803"}):
             query = Mock(return_value=[self.row(**updates)])
@@ -124,20 +130,20 @@ class AccountVideoSourceTests(unittest.TestCase):
         query.assert_called_once()
 
     def test_every_attempt_rereads_queue_and_token_without_cache(self):
-        query = Mock(side_effect=[[self.row()], [("804", "90002", "first")],
-                                  [self.row(default_token="1")], [("803", "90001", "fresh")]])
+        query = Mock(side_effect=[[self.row(token="first")],
+                                  [self.row(default_token="1", fb_user_id="90001", token="fresh")]])
         source = SqlSource(query)
         obj = dict(video("pending"), video_account_sources=[source_row()])
         self.assertEqual(source.video_account_credential(obj, "444")["token"], "first")
         self.assertEqual(source.video_account_credential(obj, "444")["token"], "fresh")
-        self.assertEqual(query.call_count, 4)
+        self.assertEqual(query.call_count, 2)
 
     def test_each_account_resolves_its_own_queue_rule(self):
         obj = dict(video("pending"), account_ids=["444", "555"], video_account_sources=[
             source_row(), source_row("555", "803", row="2")])
-        query = Mock(side_effect=[[self.row()], [("804", "90002", "own")],
-            [self.row(source_row_id="2", account_id="555", user_id="803", queue_user_id="803", default_token="1", default_user="999")],
-            [("999", "90009", "default")]])
+        query = Mock(side_effect=[[self.row(token="own")],
+            [self.row(source_row_id="2", account_id="555", user_id="803", queue_user_id="803",
+                default_token="1", default_user="999", fb_user_id="90009", token="default")]])
         source = SqlSource(query)
         self.assertEqual(source.video_account_credential(obj, "444")["credential_user_id"], "804")
         self.assertEqual(source.video_account_credential(obj, "555")["credential_user_id"], "999")
