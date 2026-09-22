@@ -9,6 +9,13 @@ import audit_tt_minis_history as audit
 
 
 class AuditTests(unittest.TestCase):
+    def test_pending_refresh_compares_api_utc_to_database_beijing_time(self):
+        new = {'protection_status':'CONFIRMING'}
+        old = {'sync_at':'2026-09-03 16:08:37'}
+        self.assertTrue(audit.pending_needs_refresh(old,new,'2026-09-22T03:11:01+00:00'))
+        self.assertFalse(audit.pending_needs_refresh({'sync_at':'2026-09-22 11:11:02'},new,'2026-09-22T03:11:01+00:00'))
+        self.assertFalse(audit.pending_needs_refresh(old,{'protection_status':'PAYMENT_COMPLETE'},'2026-09-22T03:11:01+00:00'))
+
     def test_plan_adds_later_collected_dates_without_replanning_checked_rows(self):
         db = sqlite3.connect(':memory:')
         db.executescript('CREATE TABLE facts(day TEXT,account TEXT,qid TEXT,checked_at TEXT,task_id TEXT);'

@@ -45,6 +45,14 @@ def signature(row):
     return tuple(Decimal(str(row.get(k) or 0)) if k in MONEY_FIELDS else row.get(k) for k in FACT_FIELDS)
 
 
+def pending_needs_refresh(actual, new, checked):
+    if not actual or new['protection_status'] not in sync.NON_TERMINAL_STATUSES:
+        return False
+    moment = datetime.datetime.fromisoformat(checked.replace('Z', '+00:00'))
+    cst = moment.astimezone(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+    return str(actual.get('sync_at') or '') < cst
+
+
 def key(row):
     return (str(row['record_date']), str(row['advertiser_id']), str(row['query_id']))
 
@@ -299,6 +307,7 @@ def apply_day(db, root, day):
         raise RuntimeError('unverified candidate rows on ' + day)
     current = table_day(day)
     wanted, changes, before, missing = [], [], [], []
+    business_changed, pending_refreshed = 0, 0
     for aid, qid, old_json, new_json, checked in db.execute('SELECT account,qid,old_json,new_json,checked_at FROM facts WHERE day=?', (day,)):
         k = (day, aid, qid)
         old = json.loads(old_json) if old_json else None
@@ -310,9 +319,13 @@ def apply_day(db, root, day):
             continue
         wanted.append(new)
         if signature(actual) == signature(new):
-            continue
-        if signature(actual) != signature(old):
-            raise RuntimeError('concurrent change for ' + str(k))
+            if not pending_needs_refresh(actual, new, checked):
+                continue
+            pending_refreshed += 1
+        else:
+            if signature(actual) != signature(old):
+                raise RuntimeError('concurrent change for ' + str(k))
+            business_changed += 1
         before.append(dict(key=k, row=actual))
         changes.append(new)
     if missing:
@@ -321,9 +334,12 @@ def apply_day(db, root, day):
     evidence(root / 'apply-backups' / (day + '_' + stamp + '.json.gz'), before)
     evidence(root / 'apply-plans' / (day + '_' + stamp + '.json.gz'), changes)
     # Serialized fixed-table writer, small batches; no DDL, deletes or SQL reads on 63353.
-    for batch in sync.chunks(changes, 100):
-        sync.write_history_rows(batch)
-        time.sleep(0.1)
+    prior_batch_size = sync.WRITE_BATCH_SIZE
+    try:
+        sync.WRITE_BATCH_SIZE = 100
+        sync.write_history_rows(changes)
+    finally:
+        sync.WRITE_BATCH_SIZE = prior_batch_size
     for attempt in range(4):
         actual = table_day(day)
         mismatches = [key(r) for r in wanted if signature(actual.get(key(r))) != signature(r)]
@@ -333,9 +349,10 @@ def apply_day(db, root, day):
     if mismatches:
         raise RuntimeError('readback mismatches: %d on %s' % (len(mismatches), day))
     db.execute('INSERT OR REPLACE INTO applied(day,changed,verified,at) VALUES(?,?,?,?)',
-        (day, len(changes), len(wanted), datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        (day, business_changed, len(wanted), datetime.datetime.now(datetime.timezone.utc).isoformat()))
     db.commit()
-    emit('day_applied', day=day, changed=len(changes), verified=len(wanted), readback_mismatches=0)
+    emit('day_applied', day=day, changed=business_changed, pending_refreshed=pending_refreshed,
+         written=len(changes), verified=len(wanted), readback_mismatches=0)
 
 
 def summary(db, root):
