@@ -1316,8 +1316,12 @@ def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accoun
         try:
             verified.append(_safe_account(sidecar.verify_account(account_id)))
         except SidecarError as exc:
-            if not skip_blocked or exc.status != 409 or exc.code not in {
+            if not skip_blocked or exc.unknown_outcome or exc.status != 409 or exc.code not in {
                 "x_post_account_needs_review", "x_post_account_locked",
+                "x_account_not_publishable", "x_account_disabled",
+                "x_account_publish_not_approved", "x_disconnect_pending",
+                "x_token_revoked", "x_token_missing", "x_token_invalid",
+                "x_identity_mismatch",
             }:
                 raise
             skipped.append({"account_id": int(account_id), "error_code": exc.code, "message": str(exc)})
@@ -2342,58 +2346,68 @@ def execute_schedule_tick(
                 sidecar, identity["account_ids"], skip_blocked=True,
                 skipped_accounts=skipped_accounts,
             )
-            source_date = previous_source_date(current)
-            timestamp = max(1, int(current.timestamp()))
-            if identity["source_type"] == "material":
-                material_loader_options = {
-                    "source_date": source_date,
-                    "connection_factory": connection_factory,
-                    "downloader": retrying_downloader,
-                    "prober": prober,
-                    "repair_client": repair_client,
-                    "timestamp": timestamp,
-                }
-                if material_candidate_loader is _material_candidates:
-                    material_loader_options["assignment_identity"] = identity
-                    material_loader_options["heartbeat"] = lambda: (
-                        _heartbeat_best_effort(sidecar, identity)
+            while True:
+                source_date = previous_source_date(current)
+                timestamp = max(1, int(current.timestamp()))
+                if identity["source_type"] == "material":
+                    material_loader_options = {
+                        "source_date": source_date,
+                        "connection_factory": connection_factory,
+                        "downloader": retrying_downloader,
+                        "prober": prober,
+                        "repair_client": repair_client,
+                        "timestamp": timestamp,
+                    }
+                    if material_candidate_loader is _material_candidates:
+                        material_loader_options["assignment_identity"] = identity
+                        material_loader_options["heartbeat"] = lambda: (
+                            _heartbeat_best_effort(sidecar, identity)
+                        )
+                    candidates = material_candidate_loader(
+                        config,
+                        sidecar,
+                        accounts,
+                        **material_loader_options,
                     )
-                candidates = material_candidate_loader(
-                    config,
-                    sidecar,
-                    accounts,
-                    **material_loader_options,
+                else:
+                    drama_scope_options = {}
+                    if drama_candidate_loader is _drama_candidates:
+                        drama_scope_options["configured_account_ids"] = identity["account_ids"]
+                    candidates = drama_candidate_loader(
+                        config,
+                        sidecar,
+                        accounts,
+                        source_date=source_date,
+                        connection_factory=connection_factory,
+                        downloader=downloader,
+                        prober=prober,
+                        repair_client=repair_client,
+                        timestamp=timestamp,
+                        **drama_scope_options,
+                    )
+                candidate_account_ids = [
+                    int(item["account_id"]) for item in candidates
+                ]
+                if not _is_ordered_account_subset(
+                    candidate_account_ids, identity["account_ids"]
+                ):
+                    raise ScheduleRunError(
+                        "candidate account order does not match frozen schedule",
+                        "x_post_schedule_account_mismatch",
+                    )
+                # Material preflight/repair may outlive an access token. Refresh
+                # the frozen subset immediately before the atomic plan transaction;
+                # each later publish also verifies its account.
+                rechecked = _verify_accounts(
+                    sidecar, candidate_account_ids, skip_blocked=True,
+                    skipped_accounts=skipped_accounts,
                 )
-            else:
-                drama_scope_options = {}
-                if drama_candidate_loader is _drama_candidates:
-                    drama_scope_options["configured_account_ids"] = identity["account_ids"]
-                candidates = drama_candidate_loader(
-                    config,
-                    sidecar,
-                    accounts,
-                    source_date=source_date,
-                    connection_factory=connection_factory,
-                    downloader=downloader,
-                    prober=prober,
-                    repair_client=repair_client,
-                    timestamp=timestamp,
-                    **drama_scope_options,
-                )
-            candidate_account_ids = [
-                int(item["account_id"]) for item in candidates
-            ]
-            if not _is_ordered_account_subset(
-                candidate_account_ids, identity["account_ids"]
-            ):
-                raise ScheduleRunError(
-                    "candidate account order does not match frozen schedule",
-                    "x_post_schedule_account_mismatch",
-                )
-            # Material preflight/repair may outlive an access token. Refresh
-            # the frozen subset immediately before the atomic plan transaction;
-            # each later publish also verifies its account.
-            _verify_accounts(sidecar, candidate_account_ids)
+                if len(rechecked) == len(candidate_account_ids):
+                    break
+                # No queue exists yet. Rebuild FIFO/language proofs instead of
+                # deleting prepared candidates. Each repeat removes an account.
+                excluded_ids = {item["account_id"] for item in skipped_accounts}
+                accounts = [item for item in accounts if item["id"] not in excluded_ids]
             sidecar.preflight_storage(config.storage_preflight_path)
             _heartbeat_best_effort(sidecar, identity)
         except Exception as exc:

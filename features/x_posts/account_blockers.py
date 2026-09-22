@@ -96,4 +96,25 @@ def read_account_publish_blockers(conn, account_ids):
             "code": "x_post_account_needs_review",
             "message": "账号%s绑定的短剧%s有待核对发布结果" % (account_id, row["content_id"]),
         })
+    # Use explicit authorization failures, never refreshable Access Token age.
+    # Legacy/split post-only databases retain their ledger-only behavior.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_authorized_account'"
+    ).fetchone():
+        for row in conn.execute(
+            "SELECT id,status,publish_approved FROM x_authorized_account "
+            "WHERE id IN (%s)" % placeholders, account_ids,
+        ).fetchall():
+            if row["status"] not in {
+                "revoked", "disabled", "disconnected", "revoke_pending",
+                "error", "token_missing", "scope_missing",
+            } and row["publish_approved"]:
+                continue
+            account_id = int(row["id"])
+            blockers.setdefault(account_id, {
+                "account_id": account_id, "account_username": str(account_id),
+                "queue_id": 0, "log_id": 0, "schedule_run_id": 0,
+                "code": "x_account_not_publishable",
+                "message": "账号%s授权或发布开关不可用，本批跳过" % account_id,
+            })
     return {account_id: blockers[account_id] for account_id in account_ids if account_id in blockers}

@@ -995,12 +995,11 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual([item["id"] for item in items], [japanese["id"]])
         self.assertEqual(items[0]["drama_language"], "ja")
         self.assertNotIn(english["id"], [item["id"] for item in items])
-        self.assertTrue(
-            all(
-                call.kwargs.get("allow_token_refresh", True) is True
-                for call in verify.call_args_list
-            )
-        )
+        verify.assert_not_called()
+        with mock.patch.object(service, "verify_account", side_effect=lambda aid, *_a, **_k: service.find_account(aid)) as refresh:
+            items = service._premium_relay_accounts("2026-08-14", refresh=True, drama_language="ja")
+        refresh.assert_called_once()
+        self.assertEqual([item["id"] for item in items], [japanese["id"]])
 
     def test_drama_language_update_supports_split_post_database_atomically(self):
         item = self.complete(username="split_language_guard")

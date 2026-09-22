@@ -3227,16 +3227,17 @@ def _premium_relay_accounts(run_date, *, refresh=False, drama_language=None):
             account.get("drama_language"), normalized_language
         ):
             continue
-        try:
-            account = verify_account(
-                int(account["id"]),
-                CANARY_ACTOR,
-                "all",
-                preserve_transient_status=True,
-                require_publish_approved=True,
-            )
-        except ServiceError:
-            continue
+        if refresh:
+            try:
+                account = verify_account(
+                    int(account["id"]),
+                    CANARY_ACTOR,
+                    "all",
+                    preserve_transient_status=True,
+                    require_publish_approved=True,
+                )
+            except ServiceError:
+                continue
         if normalized_language and not same_drama_language(
             account.get("drama_language"), normalized_language
         ):

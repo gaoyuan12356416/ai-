@@ -2504,6 +2504,66 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             self.assertIsNone(conn.execute("SELECT id FROM x_post_queue WHERE pool_item_id=?", (skipped_ja["id"],)).fetchone())
 
+    def test_account_holds_preserve_expired_refreshable_active_accounts(self):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("CREATE TABLE x_authorized_account(id INTEGER PRIMARY KEY,status TEXT,publish_approved INTEGER,access_expires_at TEXT)")
+            conn.executemany("INSERT INTO x_authorized_account VALUES(?,?,?,?)", [
+                (2, "active", 1, "2000-01-01T00:00:00Z"),
+                (3, "revoked", 1, "2000-01-01T00:00:00Z"),
+                (4, "active", 0, "2099-01-01T00:00:00Z"),
+            ])
+            conn.commit()
+        holds = self.store.schedule_account_blockers([2, 3, 4])
+        self.assertEqual(set(holds), {3, 4})
+        self.assertTrue(all(item["code"] == "x_account_not_publishable" for item in holds.values()))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_authorized_account SET status='active' WHERE id=3")
+            conn.commit()
+        self.assertEqual(set(self.store.schedule_account_blockers([2, 3, 4])), {4})
+
+    def test_revoked_account_excluded_from_fifo_capacity_without_releasing_material(self):
+        self.save_schedule("material", [2, 3, 4], ["09:00"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("CREATE TABLE x_authorized_account(id INTEGER PRIMARY KEY,username TEXT,status TEXT,publish_approved INTEGER)")
+            conn.executemany("INSERT INTO x_authorized_account VALUES(?,?,?,?)", [
+                (2, "healthy_en", "active", 1), (3, "revoked_ja", "revoked", 1),
+                (4, "healthy_ja", "active", 1),
+            ])
+            conn.commit()
+        selected_en, skipped_ja, selected_ja = self.store.add_pool_materials(
+            ["255", "256", "257"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": value, "error_code": ""} for value in ("255", "256", "257")],
+        )["items"]
+        candidates = [self.material_candidate(selected_en, 2), self.material_candidate(selected_ja, 4)]
+        candidates[1]["material_language"] = "ja"
+        self.store.due_schedule_slots(datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ))
+        with self.assertRaises(service.XPostError) as unproven:
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2, candidates)
+        self.assertEqual(unproven.exception.code, "x_post_pool_fifo_conflict")
+        self.store.record_pool_checks([{
+            "pool_item_id": skipped_ja["id"], "material_id": skipped_ja["material_id"],
+            "material_language": "ja", "proof_reason": "language_capacity_full", "error_code": "",
+        }])
+        proof = [{
+            "pool_item_id": skipped_ja["id"], "material_id": skipped_ja["material_id"],
+            "material_language": "ja", "reason": "language_capacity_full",
+        }]
+        with self.assertRaises(service.XPostError) as full_scope_capacity:
+            self.store.create_schedule_plan(
+                "material", "2026-07-27", "09:00", 2, candidates,
+                fifo_capacity_skips=proof, material_language_capacities={"en": 1, "ja": 2},
+            )
+        self.assertEqual(full_scope_capacity.exception.code, "x_post_pool_fifo_conflict")
+        plan = self.store.create_schedule_plan(
+            "material", "2026-07-27", "09:00", 2, candidates,
+            fifo_capacity_skips=proof, material_language_capacities={"en": 1, "ja": 1},
+        )
+        self.assertEqual(plan["account_ids"], [2, 3, 4])
+        self.assertEqual([item["pool_item_id"] for item in plan["queues"]], [selected_en["id"], selected_ja["id"]])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertIsNone(conn.execute("SELECT id FROM x_post_queue WHERE pool_item_id=?", (skipped_ja["id"],)).fetchone())
+
     def test_held_material_account_keeps_unfinished_drama_owner_in_configured_scope(self):
         self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
         unbound = self.add_drama(content_id="AVAILABLE", free_episode_count=1)

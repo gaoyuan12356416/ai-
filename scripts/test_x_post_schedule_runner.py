@@ -2614,7 +2614,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 self.assertEqual(payload["account_ids"], [13])
                 self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
 
-    def test_second_verification_new_hold_aborts_without_dropping_candidate(self):
+    def test_second_verification_new_hold_rebuilds_healthy_candidates(self):
         sidecar = FakeSidecar([due_item()])
         original_verify = sidecar.verify_account
         counts = {}
@@ -2628,11 +2628,11 @@ class ScheduleRunnerTests(unittest.TestCase):
 
         with mock.patch.object(sidecar, "verify_account", side_effect=verify):
             result = self.execute(sidecar)
-        self.assertEqual(result["batches"][0]["error_code"], "x_post_account_locked")
-        self.assertTrue(result["batches"][0]["failure_recorded"])
-        self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
-        failure = next(call for call in sidecar.calls if call[0] == "failure")
-        self.assertEqual(failure[5]["account_ids"], [11, 12])
+        self.assertEqual(result["status"], "published")
+        payload = next(call[2] for call in sidecar.calls if call[0] == "create")
+        self.assertEqual(payload["account_ids"], [11])
+        self.assertEqual(result["batches"][0]["skipped_accounts"][0]["account_id"], 12)
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 11, 12, 11])
 
     def test_all_held_accounts_record_failure_without_sources_or_plan_write(self):
         sidecar = FakeSidecar([due_item()])
@@ -2651,8 +2651,8 @@ class ScheduleRunnerTests(unittest.TestCase):
 
     def test_account_identity_token_and_noncanonical_hold_errors_are_not_skipped(self):
         for code, status in (
-            ("x_identity_mismatch", 409),
-            ("x_account_not_publishable", 409),
+            ("x_sidecar_unauthorized", 401),
+            ("x_upstream_error", 503),
             ("x_token_invalid", 401),
             ("x_post_account_locked", 503),
         ):
@@ -2667,6 +2667,35 @@ class ScheduleRunnerTests(unittest.TestCase):
                 loader.assert_not_called()
                 self.assertEqual(result["batches"][0]["error_code"], code)
                 self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
+
+    def test_account_authorization_failure_isolated_in_both_pools(self):
+        codes = ("x_account_not_publishable", "x_account_disabled",
+                 "x_account_publish_not_approved", "x_disconnect_pending",
+                 "x_token_revoked", "x_token_missing", "x_token_invalid",
+                 "x_identity_mismatch")
+        for source in ("material", "drama"):
+            for code in codes:
+                with self.subTest(source=source, code=code):
+                    sidecar = FakeSidecar([due_item(source_type=source, accounts=[11, 12, 13])])
+                    original = sidecar.verify_account
+                    def verify(aid):
+                        if aid == 12:
+                            raise SidecarError(code, "account unavailable", 409)
+                        return original(aid)
+                    with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+                        result = self.execute(sidecar)
+                    payload = next(call[2] for call in sidecar.calls if call[0] == "create")
+                    self.assertEqual(payload["account_ids"], [11, 13])
+                    self.assertEqual(result["batches"][0]["published_count"], 2)
+                    self.assertEqual(result["batches"][0]["skipped_accounts"][0]["error_code"], code)
+
+    def test_unknown_account_error_still_stops_batch(self):
+        sidecar = FakeSidecar([due_item()])
+        with mock.patch.object(sidecar, "verify_account", side_effect=SidecarError(
+            "x_account_not_publishable", "uncertain response", 409, True,
+        )):
+            result = self.execute(sidecar)
+        self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
 
     def test_drama_known_failure_continues_later_episode_queue(self):
         sidecar = FakeSidecar([due_item(source_type="drama")])
