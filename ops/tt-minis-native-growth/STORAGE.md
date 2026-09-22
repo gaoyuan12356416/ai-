@@ -42,12 +42,17 @@ serialize on a kernel lock and reuse a validated snapshot when the source DB,
 WAL/journal and snapshot identity have not changed. A source changing during
 backup produces a valid snapshot but is deliberately ineligible for reuse.
 
-New snapshots have a 24-hour lease, seven-day idle retention, and a 40 GiB
+New snapshots have a 24-hour lease, latest-two idle retention, and a 40 GiB
 managed-pool ceiling. The latest two, open files, explicit pins, code/config
 references and active leases are protected. If the ceiling cannot be met safely,
 creation stops; it never evicts protected inputs or falls back to the root disk.
 Legacy/unregistered snapshots are excluded from automatic deletion and the
 managed-pool ceiling; retire those only from an explicitly audited inventory.
+
+As authorized on 2026-09-22, keep two recent snapshots plus protected active
+inputs. Dated analysis scripts can be migrated with migrate_legacy_snapshot_refs.py
+to obtain a leased snapshot when run. Their exports and date filters are preserved,
+but reruns use current cached data rather than the retired historical snapshot.
 
 For a longer analysis: `lease <snapshot> --owner <task> --hours 72`.
 For permanent evidence: `pin <snapshot> --owner <reason>`; remove that explicit

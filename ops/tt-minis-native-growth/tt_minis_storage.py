@@ -19,7 +19,7 @@ EXPECTED_UUID = '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
 STORAGE = MOUNT / 'tt-minis-storage'
 CACHE_DB = MOUNT / 'projects/codex_test/data/tt_minis_multi_dim_dashboard_tti_app_revenue_cache.sqlite3'
 LEASE_SECONDS = 24 * 3600
-RETENTION_SECONDS = 7 * 24 * 3600
+RETAIN_LATEST = 2
 MANAGED_BUDGET_BYTES = 40 * 1024**3
 REFERENCE_ROOTS = [Path('/root/codex_test'), Path('/etc/cron.d'),
                    Path('/etc/systemd/system'), Path('/var/spool/cron')]
@@ -157,7 +157,7 @@ def protections(registry, now):
     protected = {name: 'source/config reference' for name in referenced_snapshots()}
     all_paths = sorted((STORAGE / 'analysis-snapshots').glob('*.sqlite3'),
                        key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in all_paths[:2]:
+    for path in all_paths[:RETAIN_LATEST]:
         protected[path.name] = 'latest two snapshots'
     opened = open_snapshot_inodes()
     for path in all_paths:
@@ -181,14 +181,22 @@ def cleanup_managed(registry, apply=False, required_bytes=0, now=None):
     total = sum(path.stat().st_size for _, _, path in existing)
     removed = []
     for name, rec, path in sorted(existing, key=lambda item: item[1]['created_at']):
-        expired = now - rec.get('last_used_at', rec['created_at']) >= RETENTION_SECONDS
-        if (not expired and total + required_bytes <= MANAGED_BUDGET_BYTES) or name in protected:
+        # Retain two recent snapshots plus independently protected active inputs.
+        # Do not accumulate another seven days of idle full-database copies.
+        if name in protected:
             continue
         if file_identity(path) != rec['identity']:
             protected[name] = 'identity changed'
             continue
         size = path.stat().st_size
         if apply:
+            st = path.stat()
+            if (st.st_dev, st.st_ino) in open_snapshot_inodes():
+                protected[name] = 'opened before cleanup'
+                continue
+            if file_identity(path) != rec['identity']:
+                protected[name] = 'identity changed before cleanup'
+                continue
             path.unlink()
             del records[name]
         total -= size

@@ -125,6 +125,24 @@ class SnapshotLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(result['removed']))
         self.assertTrue(old.exists())
 
+    def test_idle_third_snapshot_removed_even_when_recent_and_under_budget(self):
+        old = self.make(1, age=100)
+        self.make(2, age=2)
+        self.make(3, age=1)
+        result = s.cleanup_managed(s.load_registry(), apply=True)
+        self.assertEqual([old.name], [r['name'] for r in result['removed']])
+        self.assertFalse(old.exists())
+
+    def test_newly_opened_snapshot_is_not_removed(self):
+        old = self.make(1, age=100)
+        self.make(2, age=2)
+        self.make(3, age=1)
+        st = old.stat()
+        with patch.object(s, 'open_snapshot_inodes', side_effect=[set(), {(st.st_dev, st.st_ino)}]):
+            result = s.cleanup_managed(s.load_registry(), apply=True)
+        self.assertFalse(result['removed'])
+        self.assertTrue(old.exists())
+
     def test_budget_refuses_to_evict_protected_snapshots(self):
         self.make(1, age=2)
         self.make(2, age=1)
