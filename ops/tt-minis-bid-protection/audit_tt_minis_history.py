@@ -183,13 +183,11 @@ def plan_windows(day_ids):
 
 
 def plan(db):
-    if db.execute("SELECT COUNT(*) FROM tasks WHERE id NOT LIKE 'seed-%'").fetchone()[0]:
-        return
     total = 0
-    accounts = [r[0] for r in db.execute('SELECT DISTINCT account FROM facts WHERE checked_at IS NULL ORDER BY account')]
+    accounts = [r[0] for r in db.execute('SELECT DISTINCT account FROM facts WHERE checked_at IS NULL AND task_id IS NULL ORDER BY account')]
     for aid in accounts:
         day_ids = collections.defaultdict(set)
-        for day, qid in db.execute('SELECT day,qid FROM facts WHERE account=? AND checked_at IS NULL', (aid,)):
+        for day, qid in db.execute('SELECT day,qid FROM facts WHERE account=? AND checked_at IS NULL AND task_id IS NULL', (aid,)):
             day_ids[day].add(qid)
         for start, end, ids in plan_windows(day_ids):
             params = dict(advertiser_id=aid, data_level='CAMPAIGN', query_ids=dump(ids), start_date=start, end_date=end)
@@ -419,9 +417,7 @@ def main():
         CREATE TABLE IF NOT EXISTS applied(day TEXT PRIMARY KEY,changed INTEGER,verified INTEGER,at TEXT);
         ''')
         if args.action=='collect': collect(db,root,meta,chosen)
-        elif args.action=='plan':
-            if db.execute('SELECT COUNT(*) FROM days').fetchone()[0]!=len(dates): raise RuntimeError('collect all dates first')
-            plan(db)
+        elif args.action=='plan': plan(db)
         elif args.action=='audit': audit(db,root,args.workers)
         elif args.action=='seed': seed(db,root,args.seed_file)
         elif args.action=='apply':

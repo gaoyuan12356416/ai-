@@ -1,5 +1,6 @@
 import datetime
 import json
+import sqlite3
 import unittest
 from unittest import mock
 from decimal import Decimal
@@ -8,6 +9,22 @@ import audit_tt_minis_history as audit
 
 
 class AuditTests(unittest.TestCase):
+    def test_plan_adds_later_collected_dates_without_replanning_checked_rows(self):
+        db = sqlite3.connect(':memory:')
+        db.executescript('CREATE TABLE facts(day TEXT,account TEXT,qid TEXT,checked_at TEXT,task_id TEXT);'
+                        'CREATE TABLE tasks(id TEXT PRIMARY KEY,params TEXT,status TEXT);')
+        db.execute("INSERT INTO facts VALUES('2026-08-18','900','100','checked','seed-old')")
+        db.execute("INSERT INTO tasks VALUES('seed-old','{}','done')")
+        db.execute("INSERT INTO facts VALUES('2026-08-19','900','101',NULL,NULL)")
+        with mock.patch.object(audit,'emit'): audit.plan(db)
+        self.assertEqual(2,db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0])
+        db.execute("UPDATE facts SET checked_at='checked' WHERE day='2026-08-19'")
+        db.execute("INSERT INTO facts VALUES('2026-08-20','900','102',NULL,NULL)")
+        with mock.patch.object(audit,'emit'): audit.plan(db)
+        self.assertEqual(3,db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0])
+        self.assertEqual(0,db.execute('SELECT COUNT(*) FROM facts WHERE task_id IS NULL').fetchone()[0])
+        db.close()
+
     def test_literal_percent_query_has_no_empty_bind_tuple(self):
         c = mock.MagicMock()
         cursor = c.cursor.return_value.__enter__.return_value
