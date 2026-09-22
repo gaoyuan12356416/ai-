@@ -109,8 +109,6 @@ ORDER BY record_date, advertiser_id, data_level, query_id;
 Table rows alone cannot distinguish a genuine zero from a failed account because this requirement intentionally has no run-audit table. Check the cron process result and redacted log before declaring a daily load complete.
 Failed request candidates are retained in `/mnt/data-disk/tt-minis-bid-protection/state/failed_requests.json`; this is operational retry state, not a second business table.
 
-## Rollback
-
 ## Manual historical audit
 
 `audit_tt_minis_history.py` performs an operator-requested audit of at most 60 completed dates. It is not installed in cron. Use an audit directory below `/mnt/data-disk/tt-minis-bid-protection/audits/` and explicit start/end dates. Run `collect`, `plan`, `audit`, review `summary.json`, then `apply` only for an authorized correction. `summary` can be rerun after completion. `--dates` restricts collection or application to named dates. Same-day raw API evidence can be imported with `seed --seed-file <jsonl.gz>` after collecting those dates.

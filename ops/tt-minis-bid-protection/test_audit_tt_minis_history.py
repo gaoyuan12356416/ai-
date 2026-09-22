@@ -1,12 +1,23 @@
 import datetime
 import json
 import unittest
+from unittest import mock
 from decimal import Decimal
 
 import audit_tt_minis_history as audit
 
 
 class AuditTests(unittest.TestCase):
+    def test_literal_percent_query_has_no_empty_bind_tuple(self):
+        c = mock.MagicMock()
+        cursor = c.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = []
+        sql = "SELECT id FROM t WHERE value LIKE '%minis_id%'"
+        with mock.patch.object(audit, 'read_connection', return_value=c):
+            self.assertEqual([], audit.query(sql))
+        cursor.execute.assert_called_once_with(sql, None)
+        c.close.assert_called_once()
+
     def test_repeated_ids_pack_days_and_cover_every_pair_once(self):
         ids = {str(i) for i in range(1, 51)}
         days = {'2026-08-%02d' % i: set(ids) for i in range(1, 9)}

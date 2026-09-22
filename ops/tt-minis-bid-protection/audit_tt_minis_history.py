@@ -83,7 +83,7 @@ def query(sql, params=()):
     c = read_connection()
     try:
         with c.cursor() as q:
-            q.execute(sql, params)
+            q.execute(sql, params or None)
             return q.fetchall()
     finally:
         c.close()
