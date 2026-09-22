@@ -7,7 +7,7 @@ async (page) => {
   const reply = (route,data,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
   const cover = origin + '/schedule-qa-cover.svg';
   const material = {id:'material-1',name:'预约测试素材',macro_name:'测试剧名',macro_desc:'测试描述',drama_cover_status:'available',drama_cover_url:cover,thumbnail_url:cover,language:'英语',url:''};
-  const channel = {id:'channel-1',name:'测试频道',eligible:true,comment_eligible:true};
+  const channel = {id:'channel-1',channel_id:'UC1111111111111111111111',name:'测试频道',eligible:true,comment_eligible:true};
   const future = '2099-02-12T20:30', futureIso = '2099-02-12T12:30:00.000Z';
   const changed = '2099-07-01T00:15', changedIso = '2099-06-30T16:15:00.000Z';
   const record = (id,extra={}) => ({id,title:'测试视频 '+id,title_template:'测试视频',description:'说明',comment:'首评',material,channel,cover_source:'ai',requirements:'横版封面',current_version:1,versions:[{number:1,url:cover}],cover_preview:{url:cover,version:1,is_current:true},created_at:'2026-09-11T04:00:00Z',status:'review',can_review:true,can_retry:false,publish_at:futureIso,schedule_version:1,schedule_state:'requested',can_schedule:true,schedule_control:{},steps:[],...extra});
@@ -25,6 +25,7 @@ async (page) => {
     calls.push({path,method:request.method(),body});
     if (path === '/api/ui/topbar') return reply(route,{authenticated:true,user:{name:'测试用户',role:'admin',is_admin:true,permissions:{youtube_auto_publish:true}}});
     if (path.endsWith('/bootstrap')) return reply(route,{enabled:true,settings:{default_description:'默认描述'},source:{configured:true},channels_loaded:false});
+    if (path.endsWith('/channels/channel-1/template')) return reply(route,{template:{channel_id:channel.channel_id,version:0,title_template:'',description_template:'',comment_template:''}});
     if (path.endsWith('/channels')) return reply(route,{channels:[channel],checking:false});
     if (path.endsWith('/materials')) return reply(route,{configured:true,items:[material]});
     if (path.endsWith('/tasks') && request.method() === 'GET') return reply(route,{items:tasks,total:tasks.length,counts:{all:tasks.length,review:2,running:2,published:1,failed:1}});

@@ -136,6 +136,37 @@ class YouTubeHttpTests(unittest.TestCase):
         getattr(handler, "do_" + method)()
         return handler
 
+    def test_channel_template_routes_permission_and_dispatch(self):
+        cases = [('GET','/channel-list?refresh=1','channel_list'),
+                 ('GET','/channels/258/template','get_channel_template'),
+                 ('POST','/channels/258/template','save_channel_template')]
+        for method,path,name in cases:
+            self.assertEqual(self.request(method,path,cookie=False).status,401)
+            self.session['permissions']['youtube_auto_publish']=False
+            self.assertEqual(self.request(method,path).status,403)
+            self.session['permissions']['youtube_auto_publish']=True
+            self.assertEqual(self.request(method,path).status,200)
+            self.assertEqual(self.service.calls[-1][0],name)
+            self.assertEqual(self.service.calls[-1][1][0]['role'],'user')
+        self.assertEqual(self.request('POST','/channels/258/template',headers={'Origin':'https://evil.example'}).status,403)
+        self.assertEqual(self.request('POST','/channels/258/template',headers={'Content-Length':'32769'}).status,413)
+
+    def test_channel_navigation_is_independent_but_template_read_is_shared(self):
+        group=next(g for g in self.nav if g['key']=='youtube_platform')
+        publishing=next(i for i in group['items'] if i['key']=='youtubeAutoPublish')
+        listing=next(i for i in group['items'] if i['key']=='youtubeChannelList')
+        publishing['enabled']=False
+        self.assertEqual(self.request('GET','/bootstrap').status,403)
+        self.assertEqual(self.request('GET','/channel-list').status,200)
+        self.assertEqual(self.request('GET','/channels/258/template').status,200)
+        self.assertEqual(self.request('POST','/channels/258/template').status,200)
+        listing['enabled']=False
+        self.assertEqual(self.request('GET','/channels/258/template').status,403)
+        self.assertEqual(self.request('POST','/channels/258/template').status,403)
+        publishing['enabled']=True
+        self.assertEqual(self.request('GET','/channels/258/template').status,200)
+        self.assertEqual(self.request('POST','/channels/258/template').status,403)
+
     def test_every_route_requires_actual_cookie_even_with_auth_disabled(self):
         for method, paths in [("GET", GET_PATHS), ("POST", POST_PATHS)]:
             for path in paths:

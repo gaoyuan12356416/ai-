@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube 频道列表 · AI自动后台</title>
+<link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
+<link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
+<link rel="stylesheet" href="/youtube-channels.css?v=20260922-v1">
+</head><body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">剧</div><div><strong>AI自动后台</strong><small>内容制作与发布管理</small></div></div>
+    <nav id="quickNav" class="nav" aria-label="后台主导航"></nav>
+    <div class="sidebar-note"><strong>YouTube 频道列表</strong><span>频道信息与共用发布模板</span></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div><h1>YouTube 频道列表</h1><p>为每个频道配置文案，新建发布时自动带入。</p></div>
+      <div class="toolbar"><div class="user-card" id="userCard"></div><button class="btn btn-secondary" id="authButton">登录</button><button class="btn btn-secondary" id="refreshPage">刷新频道状态</button></div>
+    </header>
+    <div id="page-message" class="note-box note-blue" role="status">正在加载频道…</div>
+    <section id="channel-content" class="panel hidden" aria-label="YouTube 频道">
+      <div class="panel-heading"><div><h2>全部频道</h2><span id="channel-count"></span></div><a class="btn btn-primary" href="/youtube-publish.html">前往发布</a></div>
+      <div class="list-toolbar"><p class="channel-rule">共用模板 · 只覆盖已填写字段 · 单次发布仍可修改</p><label class="search-input"><input id="channel-search" placeholder="搜索频道名称或 ID" aria-label="搜索频道名称或 ID"></label></div>
+      <div class="table-scroll"><table class="task-list channel-list"><thead><tr><th>频道</th><th>发布授权</th><th>首评权限</th><th>自定义模板</th><th>最后修改</th><th>操作</th></tr></thead><tbody id="channel-table"></tbody></table></div>
+    </section>
+    <footer class="page-footer">AI自动后台 · YouTube 社媒</footer>
+  </main>
+</div>
+<dialog id="template-dialog" aria-labelledby="template-heading">
+  <form id="template-form">
+    <div class="editor-heading"><div><h2 id="template-heading">编辑频道模板</h2><p id="template-channel"></p></div><button type="button" class="btn btn-secondary" id="close-template" aria-label="关闭模板编辑">关闭</button></div>
+    <div class="note-box note-blue">同租户发布人共用此模板。留空表示不覆盖；全部清空后，新建发布保留原文案。</div>
+    <div id="template-message" role="status"></div>
+    <fieldset id="template-fields" disabled>
+      <div class="field"><label for="template-title">视频标题 <span class="optional-label">选填</span></label><input id="template-title" name="title_template" class="input" placeholder="例如：{name} | Watch the full story"><div class="template-macros" data-target="template-title"></div></div>
+      <div class="field"><label for="template-description">视频描述 <span class="optional-label">选填</span></label><textarea id="template-description" name="description_template" class="textarea" rows="5" placeholder="留空则保留发布表单当前描述"></textarea><div class="template-macros" data-target="template-description"></div></div>
+      <div class="field"><label for="template-comment">首条评论 <span class="optional-label">选填</span></label><textarea id="template-comment" name="comment_template" class="textarea" rows="3" placeholder="留空则保留发布表单当前首评"></textarea><div class="template-macros" data-target="template-comment"></div></div>
+      <p class="field-hint">{name} 为剧名，{desc} 为简介，{url} 为本次发布链接。按所选素材展开后校验：标题 100 字符、描述 5000 UTF-8 字节、首评 1000 字符。</p>
+    </fieldset>
+    <div class="editor-footer"><button type="button" class="btn btn-secondary" id="reload-template" hidden>载入最新模板（替换当前输入）</button><button type="submit" class="btn btn-primary" id="save-template" disabled>保存模板</button></div>
+  </form>
+</dialog>
+<div id="toast-root" aria-live="polite"></div>
+<script src="/quick-nav.js?v=20260922-channel-templates-v1"></script>
+<script src="/ui-topbar.js?v=20260903-1"></script>
+<script src="/youtube-channels.js?v=20260922-v1"></script>
+</body></html>

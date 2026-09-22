@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .images import decode_cover
 from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
+from .channel_templates import ChannelTemplateStore
 from .scheduling import normalize_publish_at, is_due
 
 MAX_IMAGE = 2 * 1024 * 1024
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
  lease_until REAL NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(task_id,version));
 ''')
+        self.channel_templates = ChannelTemplateStore(self.db)
 
     @contextmanager
     def db(self, write=False):
@@ -190,6 +192,36 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         channels=self.channels(actor) if state['configured'] else []
         safe=[{k:v for k,v in row.items() if k not in ('scopes','youtube_account_id')} for row in channels]
         return {'channels':safe}
+
+    def channel_list(self, actor, *, refresh=False):
+        tenant, _ = self._actor(actor)
+        result = self.channel_directory.options(actor, refresh=refresh) if self.channel_directory else {'channels': self.channels(actor)}
+        templates = self.channel_templates.all(tenant)
+        rows = []
+        for item in result['channels']:
+            row = {k: v for k, v in item.items() if k not in ('scopes', 'youtube_account_id')}
+            real_id = str(row.get('channel_id') or '')
+            row['channel_url'] = 'https://www.youtube.com/channel/' + real_id if re.fullmatch(r'UC[A-Za-z0-9_-]{22}', real_id) else ''
+            row['template'] = self.channel_templates.summary(templates.get(real_id) or self.channel_templates.empty(real_id))
+            rows.append(row)
+        return dict(result, channels=rows)
+
+    def _template_channel(self, actor, local_id):
+        self._actor(actor)
+        if self.channel_directory:
+            return self.channel_directory.template_identity(local_id)
+        row = next((r for r in self.channels(actor) if str(r['id']) == str(local_id)), None)
+        if row is None or not row.get('channel_id'):
+            raise WorkflowError('channel_unavailable', '频道不存在或已移除', 404)
+        return row
+
+    def get_channel_template(self, actor, local_id):
+        channel = self._template_channel(actor, local_id)
+        return {'template': self.channel_templates.get(actor['tenant_key'], channel['channel_id'])}
+
+    def save_channel_template(self, actor, local_id, payload):
+        channel = self._template_channel(actor, local_id)
+        return {'template': self.channel_templates.save(actor, channel['channel_id'], payload)}
 
     def bootstrap(self,actor,*,include_channels=True):
         self._actor(actor);_,state=self.source.configuration()
