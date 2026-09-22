@@ -16,6 +16,11 @@
 
   function scheduleText(config) {
     const schedule = config && config.schedule || {};
+    if (Array.isArray(config.page_daily_limits)) {
+      const maximum = schedule.mode === "fixed" ? (schedule.times || []).length : Number(schedule.daily_count || 0);
+      const total = config.page_daily_limits.reduce((sum,row) => sum + Math.min(maximum, Number(row.daily_count || 0)), 0);
+      return "已分档 Page 上限 " + total + " 条/日 · 同剧冷却 " + Number(config.drama_cooldown_hours || 0) + "h · " + (schedule.times || []).join(", ") + (config.stagger_minutes ? "（各时段后错峰 " + config.stagger_minutes + " 分钟）" : "");
+    }
     if (schedule.mode === "fixed") return (schedule.times || []).join(", ") || "未设置";
     if (schedule.mode === "random") {
       return "随机 " + Number(schedule.daily_count || 0) + " 次 / " + String(schedule.start || "—") + "-" + String(schedule.end || "—");
