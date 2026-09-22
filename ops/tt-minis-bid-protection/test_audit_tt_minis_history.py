@@ -1,6 +1,8 @@
 import datetime
 import json
 import sqlite3
+import tempfile
+from pathlib import Path
 import unittest
 from unittest import mock
 from decimal import Decimal
@@ -9,6 +11,22 @@ import audit_tt_minis_history as audit
 
 
 class AuditTests(unittest.TestCase):
+    def test_collection_checkpoints_are_idempotent(self):
+        db=sqlite3.connect(':memory:')
+        db.executescript('CREATE TABLE facts(day TEXT,account TEXT,qid TEXT,old_json TEXT,candidate_json TEXT);'
+                         'CREATE TABLE days(day TEXT PRIMARY KEY,source INTEGER,baseline INTEGER,candidates INTEGER);')
+        meta={'900':dict(product_id=3346,product_name='DramaWaveMinis',minis_id='mn1yi38ikcrqhitt')}
+        days=['2026-08-18','2026-08-30']
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(audit,'table_day',return_value={}) as old, mock.patch.object(
+                audit,'source_day',return_value=[dict(advertiser_id='900',query_id='100')]) as source, mock.patch.object(audit,'emit'):
+            audit.collect(db,Path(tmp),meta,days)
+            audit.collect(db,Path(tmp),meta,days)
+            self.assertEqual(2,old.call_count)
+            self.assertEqual(2,source.call_count)
+            self.assertEqual(2,db.execute('SELECT COUNT(*) FROM facts').fetchone()[0])
+            self.assertTrue((Path(tmp)/'baseline/2026-08-18.json.gz').exists())
+        db.close()
+
     def test_pending_refresh_compares_api_utc_to_database_beijing_time(self):
         new = {'protection_status':'CONFIRMING'}
         old = {'sync_at':'2026-09-03 16:08:37'}

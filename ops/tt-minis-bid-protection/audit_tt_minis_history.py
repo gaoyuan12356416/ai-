@@ -138,28 +138,34 @@ def candidate(day, aid, qid, meta):
 
 
 def collect(db, root, meta, dates):
-    for day in dates:
-        if db.execute('SELECT 1 FROM days WHERE day=?', (day,)).fetchone():
-            continue
+    remaining = [day for day in dates if not db.execute('SELECT 1 FROM days WHERE day=?', (day,)).fetchone()]
+    def prepare(day):
         old = table_day(day)
         evidence(root / 'baseline' / (day + '.json.gz'), list(old.values()))
         source = source_day(day, meta)
-        candidates = {}
-        for r in source:
-            aid, qid = sync.normalize_id(r['advertiser_id']), sync.normalize_id(r['query_id'])
-            candidates[(day, aid, qid)] = candidate(day, aid, qid, meta[aid])
-        for k, r in old.items():
-            if r['data_level'] != 'CAMPAIGN' or r['campaign_id'] != r['query_id'] or r['adgroup_id'] is not None:
-                raise RuntimeError('stored row violates campaign-only contract')
-            if r['advertiser_id'] not in meta or any(r[x] != meta[r['advertiser_id']][x] for x in ('product_id', 'minis_id')):
-                raise RuntimeError('historical account mapping needs review: ' + r['advertiser_id'])
-            candidates.setdefault(k, candidate(*k, meta[k[1]]))
-        db.executemany('INSERT INTO facts(day,account,qid,old_json,candidate_json) VALUES(?,?,?,?,?)',
-            [(k[0], k[1], k[2], dump(old[k]) if k in old else None, dump(v)) for k, v in candidates.items()])
-        db.execute('INSERT INTO days VALUES(?,?,?,?)', (day, len(source), len(old), len(candidates)))
-        db.commit()
-        emit('collected', day=day, source=len(source), baseline=len(old), candidates=len(candidates),
-             missing_from_table=len(set(candidates) - set(old)))
+        return day, old, source
+    # At most two manual reader connections; ledger commits stay on the main thread.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {pool.submit(prepare, day): day for day in remaining}
+        for future in concurrent.futures.as_completed(futures):
+            day, old, source = future.result()
+            del futures[future]
+            candidates = {}
+            for r in source:
+                aid, qid = sync.normalize_id(r['advertiser_id']), sync.normalize_id(r['query_id'])
+                candidates[(day, aid, qid)] = candidate(day, aid, qid, meta[aid])
+            for k, r in old.items():
+                if r['data_level'] != 'CAMPAIGN' or r['campaign_id'] != r['query_id'] or r['adgroup_id'] is not None:
+                    raise RuntimeError('stored row violates campaign-only contract')
+                if r['advertiser_id'] not in meta or any(r[x] != meta[r['advertiser_id']][x] for x in ('product_id', 'minis_id')):
+                    raise RuntimeError('historical account mapping needs review: ' + r['advertiser_id'])
+                candidates.setdefault(k, candidate(*k, meta[k[1]]))
+            db.executemany('INSERT INTO facts(day,account,qid,old_json,candidate_json) VALUES(?,?,?,?,?)',
+                [(k[0], k[1], k[2], dump(old[k]) if k in old else None, dump(v)) for k, v in candidates.items()])
+            db.execute('INSERT INTO days VALUES(?,?,?,?)', (day, len(source), len(old), len(candidates)))
+            db.commit()
+            emit('collected', day=day, source=len(source), baseline=len(old), candidates=len(candidates),
+                 missing_from_table=len(set(candidates) - set(old)))
 
 
 def plan_windows(day_ids):
