@@ -5,11 +5,12 @@ async (page) => {
   const reply=(route,data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
   const origin=page.url().match(/^http:\/\/127\.0\.0\.1:\d+/)?.[0] || 'http://127.0.0.1:8877',id='b'.repeat(32);
   let initialList,oldDetail,postList,detailCalls=0,listCalls=0,reviewed=false;
-  const reviewTask={id,title:'任务不在最近200条列表中',description:'测试详情缓存',comment:'',title_template:'任务不在最近200条列表中',description_template:'测试详情缓存',comment_template:'',material:{id:'1',name:'已冻结素材',thumbnail_url:'',macro_name:'测试',macro_desc:'简介'},channel:{id:'1',name:'测试频道'},cover_source:'ai',requirements:'16:9横版',status:'review',phase:'cover',created_at:'2026-09-10T10:00:00Z',current_version:1,cover_url:'',versions:[{number:1,url:'',feedback:'首次生成'}],steps:[],notification:{status:'sent',message:'已发送提醒'},can_review:true,can_retry:false};
+  const reviewTask={id,title:'任务不在最近200条列表中',description:'测试详情缓存',comment:'',title_template:'任务不在最近200条列表中',description_template:'测试详情缓存',comment_template:'',material:{id:'1',name:'已冻结素材',thumbnail_url:'',macro_name:'测试',macro_desc:'简介'},channel:{id:'1',name:'测试频道'},cover_source:'ai',requirements:'16:9横版',status:'review',phase:'cover',created_at:'2026-09-10T10:00:00Z',current_version:1,cover_url:origin+'/race-cover.svg',versions:[{number:1,url:origin+'/race-cover.svg',feedback:'首次生成'}],steps:[],notification:{status:'sent',message:'已发送提醒'},can_review:true,can_retry:false};
   const publishedTask={...reviewTask,status:'enqueue_pending',can_review:false,phase:'upload'};
   const empty={items:[],total:0,counts:{all:0,review:0,running:0,published:0,failed:0}};
   page.on('pageerror',e=>errors.push(e.message));
   await page.unrouteAll({behavior:'ignoreErrors'});
+  await page.route('**/race-cover.svg',route=>route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="#2457ff"/></svg>'}));
   await page.route('**/navigation.json',route=>reply(route,[]));
   await page.route('**/api/**',route=>{
     const request=route.request(),path=request.url().replace(/^https?:\/\/[^/]+/,'').split('?')[0];
