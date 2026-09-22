@@ -13,6 +13,7 @@ from typing import Any, Dict, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from .client import FB_AUTO_ADMIN_PREFIX, contains_sensitive_key
+from .strategy import daily_capacity
 from .core import ActorScope, FBAutoPostStore, StoreError
 from .gpu import GPUPrepareClient, PrepareExecutor
 from .publisher import AutoPostExecutor, RequestsGraphTransport
@@ -96,7 +97,10 @@ class Runtime:
         publishable = sum(page.eligible_token_count > 0 for page in pages)
         schedule = config["schedule"]
         daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
-        daily_jobs = publishable * daily_count
+        daily_jobs = daily_capacity(config, pages)
+        configured_ids = {p["page_id"] for p in config.get("page_daily_limits", [])}
+        if configured_ids - page_ids:
+            raise ServiceError("fb_auto_frequency_page_outside_pool", "分档Page不在当前Page池中，请更新频次列表", 409)
         with self.store.connect() as conn:
             enabled_count = int(conn.execute("SELECT COUNT(*) FROM fb_auto_template WHERE status='enabled' AND id<>?", (int(template["id"]),)).fetchone()[0])
         global_slot_jobs = publishable + other_slot_jobs

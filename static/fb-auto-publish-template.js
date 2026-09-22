@@ -7,6 +7,7 @@
     groups: [],
     template: null,
     busy: false,
+    pageLimits: [],
   };
 
   function range(prefix) {
@@ -41,6 +42,17 @@
       metric_window_days: Number(ui.byId("metricDays").value),
       drama_launch_window_days: Number(ui.byId("launchDays").value),
       cooldown_days: Number(ui.byId("cooldown").value),
+      drama_cooldown_hours: Number(ui.byId("dramaCooldown").value),
+      stagger_minutes: Number(ui.byId("staggerMinutes").value),
+      ...(ui.byId("pageLimitsEnabled").checked ? {
+        page_daily_limits: state.pageLimits.map(row => ({...row})),
+        default_daily_count: Number(ui.byId("defaultDailyCount").value),
+      } : {}),
+      feedback_selection: {
+        enabled: ui.byId("feedbackEnabled").checked,
+        rollout_percent: Number(ui.byId("feedbackRollout").value),
+        exploration_percent: Number(ui.byId("feedbackExploration").value),
+      },
       drama_rule: {
         ...range("d"),
         resource_type_v2: [],
@@ -106,6 +118,16 @@
     ui.byId("metricDays").value = Number(config.metric_window_days || 7);
     ui.byId("launchDays").value = Number(config.drama_launch_window_days || 0);
     ui.byId("cooldown").value = Number(config.cooldown_days || 0);
+    ui.byId("dramaCooldown").value = Number(config.drama_cooldown_hours || 0);
+    ui.byId("staggerMinutes").value = Number(config.stagger_minutes || 0);
+    ui.byId("pageLimitsEnabled").checked = Array.isArray(config.page_daily_limits) || config.default_daily_count !== undefined;
+    ui.byId("defaultDailyCount").value = config.default_daily_count ?? 0;
+    state.pageLimits = (config.page_daily_limits || []).map(row => ({...row}));
+    const feedback = config.feedback_selection || {};
+    ui.byId("feedbackEnabled").checked = feedback.enabled === true;
+    ui.byId("feedbackRollout").value = feedback.rollout_percent ?? 50;
+    ui.byId("feedbackExploration").value = feedback.exploration_percent ?? 20;
+    renderPageLimits();
     setRange("d", config.drama_rule);
     setRange("m", config.material_rule);
     const materialRule = config.material_rule || {};
@@ -132,7 +154,38 @@
     const frequency = ui.byId("scheduleMode").value === "fixed"
       ? ui.byId("fixedTimes").value.split(",").map(value => value.trim()).filter(Boolean).length
       : Number(ui.byId("randomCount").value || 0);
-    ui.byId("capacityEstimate").textContent = "预估：单时隙 " + pages + " 个 GPU 任务；每日 " + pages + " 个 Page × " + frequency + " 次 = " + (pages * frequency) + " 个 GPU 任务和 Graph 发布。最终以启用门禁去重统计为准。";
+    const custom = ui.byId("pageLimitsEnabled").checked;
+    const configured = state.pageLimits.reduce((sum,row) => sum + Math.min(frequency, row.daily_count), 0);
+    const daily = custom ? configured + Math.max(0, pages-state.pageLimits.length) * Math.min(frequency, Number(ui.byId("defaultDailyCount").value || 0)) : pages * frequency;
+    ui.byId("capacityEstimate").textContent = "每日发布上限约 " + daily + " 条" + (custom ? "（按 Page 频次）" : "（" + pages + " 个可发 Page × " + frequency + " 次）") + "。授权、候选与冷却会影响实际数量；启用时由后台复核。";
+  }
+
+  function renderPageLimits() {
+    ui.byId("pageLimitsPanel").classList.toggle("hidden", !ui.byId("pageLimitsEnabled").checked);
+    const query = ui.byId("pageLimitSearch").value.trim().toLowerCase();
+    ui.byId("pageLimitsBody").innerHTML = state.pageLimits.map((row,index) => {
+      if (query && ![row.page_id,row.name,row.tier].join(" ").toLowerCase().includes(query)) return "";
+      return '<tr><td>' + ui.escapeHtml(row.tier === "hold" ? "暂停" : row.tier || "—") + '</td><td>' + ui.escapeHtml(row.name || row.page_id) + '<br><small>' + ui.escapeHtml(row.page_id) + '</small></td><td><input style="width:85px" type="number" min="0" max="24" aria-label="' + ui.escapeHtml(row.page_id + "每日次数") + '" data-page-limit="' + index + '" value="' + Number(row.daily_count) + '" /></td></tr>';
+    }).join("") || '<tr><td colspan="3">没有匹配的 Page</td></tr>';
+    const active = state.pageLimits.filter(row => row.daily_count>0);
+    ui.byId("pageLimitsSummary").textContent = "已配置 " + state.pageLimits.length + " 个 Page；安排发布 " + active.length + " 个；每日合计上限 " + active.reduce((sum,row) => sum+row.daily_count,0) + " 条。";
+    estimate();
+  }
+
+  function importPageLimits() {
+    try {
+      const seen = new Set();
+      const rows = ui.byId("pageLimitsImport").value.trim().split(/\r?\n/).filter(Boolean).map(line => {
+        const [id,count,tier = "",...name] = line.split("\t").map(value => value.trim());
+        if (!/^[1-9][0-9]{0,30}$/.test(id) || seen.has(id) || !/^\d+$/.test(count) || Number(count)>24 || !["","A","B","C","hold"].includes(tier)) throw new Error("Page ID、次数、分档无效或存在重复行，请用 Tab 分隔。");
+        seen.add(id);
+        return {page_id:id,daily_count:Number(count),tier,name:name.join(" ")};
+      });
+      if (!rows.length || rows.length>1000) throw new Error("请导入1至1000个Page。");
+      state.pageLimits = rows;
+      renderPageLimits();
+      ui.showToast("已替换列表，保存模板后生效。");
+    } catch(error) { ui.showToast(error.message, true); }
   }
 
   function toggleSchedule() {
@@ -175,6 +228,18 @@
     ui.byId("fixedTimes").addEventListener("input", estimate);
     ui.byId("randomCount").addEventListener("input", estimate);
     ui.byId("poolList").addEventListener("change", estimate);
+    ui.byId("pageLimitsEnabled").addEventListener("change", renderPageLimits);
+    ui.byId("pageLimitSearch").addEventListener("input", renderPageLimits);
+    ui.byId("defaultDailyCount").addEventListener("input", estimate);
+    ui.byId("importPageLimits").addEventListener("click", importPageLimits);
+    ui.byId("pageLimitsBody").addEventListener("change", event => {
+      const index = event.target.dataset.pageLimit;
+      if (index === undefined) return;
+      const value = Number(event.target.value);
+      if (!Number.isInteger(value) || value<0 || value>24) { ui.showToast("每日次数必须为0至24的整数。",true); renderPageLimits(); return; }
+      state.pageLimits[Number(index)].daily_count = value;
+      renderPageLimits();
+    });
     ui.byId("resetForm").addEventListener("click", () => window.location.reload());
   }
 

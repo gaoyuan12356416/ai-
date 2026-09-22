@@ -360,6 +360,8 @@ class MaterialRepository:
         product, app_id = str(config["product"]), str(config["app_id"])
         allowed_type_set = set(allowed_types)
         uses_description = "{{desc}}" in str(config.get("message_template") or "")
+        from .strategy import diverse_candidates
+        per_drama_limit = 20 if int(config.get("drama_cooldown_hours", 0)) else 0
         candidates: List[MaterialCandidate] = []
         seen_material_ids: set[str] = set()
         drama_key = "drama_spend" if drama_rule["sort_by"] == "spend" else "drama_roas"
@@ -449,7 +451,7 @@ class MaterialRepository:
                 seen_material_ids.add(raw_id)
                 candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
             candidates.sort(key=cmp_to_key(compare))
-            del candidates[candidate_limit:]
+            candidates[:] = diverse_candidates(candidates, candidate_limit, per_drama_limit)
 
         # The primary ordering is always drama-level.  For descending spend,
         # every positive-spend drama sorts before every zero-history drama; for
@@ -493,7 +495,7 @@ class MaterialRepository:
                 end_epoch = int(self.now_fn().timestamp())
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
-            if len(candidates) >= candidate_limit:
+            if len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
                 return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
             candidates.clear()
             seen_material_ids.clear()

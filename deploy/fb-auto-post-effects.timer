@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh FB Post effects hourly
+
+[Timer]
+OnCalendar=*-*-* *:43:00
+RandomizedDelaySec=30
+Persistent=false
+Unit=fb-auto-post-effects.service
+
+[Install]
+WantedBy=timers.target

@@ -129,7 +129,7 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
     required = {"name", "group_ids", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
-    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "app_id", "product", "metric_product", "metric_platform"}
+    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
     if "video_template" not in value or value.get("video_template") != "random_overlay":
         raise ValidationError(
             "fb_auto_video_template_required",
@@ -158,7 +158,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         if not re.fullmatch(r"[1-9][0-9]{0,30}", text) or text in group_ids:
             raise ValidationError("invalid_request", "Page池ID无效或重复")
         group_ids.append(text)
-    return {
+    result = {
         "name": name,
         "group_ids": group_ids,
         "message_template": message,
@@ -176,6 +176,52 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "schedule": _schedule(value.get("schedule")),
         "material_type": "video",
     }
+    if "drama_cooldown_hours" in value:
+        result["drama_cooldown_hours"] = _strict_int(value["drama_cooldown_hours"], "同剧冷却小时", 0, 168)
+    if "stagger_minutes" in value:
+        result["stagger_minutes"] = _strict_int(value["stagger_minutes"], "Page错峰分钟", 0, 59)
+        if result["stagger_minutes"]:
+            schedule = result["schedule"]
+            if schedule["mode"] != "fixed":
+                raise ValidationError("invalid_request", "Page错峰只支持固定时段")
+            minutes = [int(t[:2]) * 60 + int(t[3:]) for t in schedule["times"]]
+            gaps = [b-a for a,b in zip(minutes, minutes[1:])] + [1440-minutes[-1]+minutes[0]]
+            if min(gaps) <= result["stagger_minutes"] or minutes[-1]+result["stagger_minutes"] >= 1440:
+                raise ValidationError("invalid_request", "错峰窗口不能跨越下一时段或北京时间零点")
+    maximum = len(result["schedule"]["times"]) if result["schedule"]["mode"] == "fixed" else result["schedule"]["daily_count"]
+    if "default_daily_count" in value:
+        result["default_daily_count"] = _strict_int(value["default_daily_count"], "未分档Page每日次数", 0, maximum)
+    if "page_daily_limits" in value:
+        rows = value["page_daily_limits"]
+        if not isinstance(rows, list) or len(rows) > 1000:
+            raise ValidationError("invalid_request", "Page频次列表最多1000行")
+        seen, normalized = set(), []
+        for row in rows:
+            row = _mapping(row, "Page频次")
+            _keys(row, {"page_id", "daily_count"}, {"name", "tier"}, "Page频次")
+            pid = str(row["page_id"])
+            if not re.fullmatch(r"[1-9][0-9]{0,30}", pid) or pid in seen:
+                raise ValidationError("invalid_request", "Page ID无效或重复")
+            seen.add(pid)
+            name = str(row.get("name") or "")
+            tier = str(row.get("tier") or "")
+            if len(name) > 200 or tier not in {"", "A", "B", "C", "hold"}:
+                raise ValidationError("invalid_request", "Page名称或分档无效")
+            normalized.append({"page_id": pid, "daily_count": _strict_int(row["daily_count"], "Page每日次数", 0, maximum), "name": name, "tier": tier})
+        result["page_daily_limits"] = sorted(normalized, key=lambda row: int(row["page_id"]))
+    if "feedback_selection" in value:
+        rule = _mapping(value["feedback_selection"], "Post效果选材")
+        _keys(rule, {"enabled", "rollout_percent", "exploration_percent"}, set(), "Post效果选材")
+        if not isinstance(rule["enabled"], bool):
+            raise ValidationError("invalid_request", "Post效果选材开关无效")
+        result["feedback_selection"] = {"enabled": rule["enabled"], "rollout_percent": _strict_int(rule["rollout_percent"], "效果选材试验比例", 0, 100), "exploration_percent": _strict_int(rule["exploration_percent"], "探索比例", 0, 100)}
+    return result
+
+
+def _strict_int(value, label, minimum, maximum):
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)):
+        raise ValidationError("invalid_request", f"{label}必须为整数")
+    return _int(value, label, minimum, maximum)
 
 
 def config_hash(value: Mapping[str, Any]) -> str:

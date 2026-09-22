@@ -1,0 +1,15 @@
+[Unit]
+Description=Collect read-only Meta Post feedback for FB automatic publishing
+After=fb-auto-post-service.service network-online.target
+
+[Service]
+Type=oneshot
+User=fb-auto-post
+Group=fb-auto-post
+WorkingDirectory=/opt/fb-auto-post/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 scripts/fb_auto_post_effect_runner.py
+TimeoutStartSec=3300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <title>创建 FB Page 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/fb-auto-publish.css?v=20260820-list-only-v2" />
+  <link rel="stylesheet" href="/fb-auto-publish.css?v=page-performance-20260922-v1" />
 </head>
 <body>
   <div class="app">
@@ -93,6 +93,11 @@
               <input id="cooldown" type="number" min="0" max="3650" value="30" />
             </div>
             <div class="field">
+              <label for="dramaCooldown">同 Page 同剧冷却（小时）</label>
+              <input id="dramaCooldown" type="number" min="0" max="168" value="0" />
+              <span class="helper">0 表示关闭。候选不足时跳过，不跨语言补量。</span>
+            </div>
+            <div class="field">
               <label for="metricDays">指标窗口（完整天）</label>
               <input id="metricDays" type="number" min="1" max="30" value="7" />
             </div>
@@ -152,6 +157,38 @@
                 <input id="randomEnd" type="time" value="23:00" aria-label="随机结束时间" />
               </div>
             </div>
+            <div class="field">
+              <label for="staggerMinutes">固定时段内 Page 错峰（分钟）</label>
+              <input id="staggerMinutes" type="number" min="0" max="59" value="0" />
+              <span class="helper">每个 Page 在时段起点后分散发布；0 表示不额外错峰。</span>
+            </div>
+            <div class="field wide">
+              <label class="strategy-toggle"><input id="pageLimitsEnabled" type="checkbox" /> 按 Page 设置每日次数</label>
+              <div id="pageLimitsPanel" class="hidden">
+                <div class="range-grid">
+                  <label>未列出 Page 每日次数 <input id="defaultDailyCount" type="number" min="0" max="24" value="0" /></label>
+                  <label>查找 Page <input id="pageLimitSearch" type="search" placeholder="名称、ID 或分档" /></label>
+                </div>
+                <p class="helper">次数为每日上限，自动分散到已配置时段；0 表示暂停。候选、授权或冷却不满足时，实际数量会减少。</p>
+                <div style="max-height:360px;overflow:auto;border:1px solid var(--border,#dce3ed);border-radius:10px">
+                  <table style="width:100%"><thead><tr><th>分档</th><th>Page</th><th>每日次数</th></tr></thead><tbody id="pageLimitsBody"></tbody></table>
+                </div>
+                <p id="pageLimitsSummary" class="helper"></p>
+                <details><summary>批量替换 Page 频次列表</summary>
+                  <p class="helper">每行填写：Page ID、每日次数、分档、名称，用 Tab 分隔。分档可为 A / B / C / hold，名称可省略。导入后点击保存模板才会生效。</p>
+                  <textarea id="pageLimitsImport" rows="5" aria-label="批量导入Page频次" placeholder="1014456238423538&#9;5&#9;A&#9;Stories you can’t stop watching"></textarea>
+                  <button id="importPageLimits" class="button" type="button">替换列表</button>
+                </details>
+              </div>
+            </div>
+            <div class="field wide">
+              <label class="strategy-toggle"><input id="feedbackEnabled" type="checkbox" /> 使用 Post 效果辅助选材</label>
+              <div class="range-grid">
+                <label>非探索任务中效果选材比例（%）<input id="feedbackRollout" type="number" min="0" max="100" value="50" /></label>
+                <label>全部任务探索比例（%）<input id="feedbackExploration" type="number" min="0" max="100" value="20" /></label>
+              </div>
+              <span class="helper">例如探索20%、效果选材50%：全部任务约20%探索、40%效果选材、40%原排序对照。仅用满48小时、至少5条且覆盖3个Page的同语言样本；按Page平衡后的点击/千次展示优先，发布日起前三个自然日新用户收入辅助比较。数据过期或样本不足时回到原排序。</span>
+            </div>
             <div class="field wide form-actions">
               <div id="capacityEstimate" class="helper">请选择 Page 池后查看每日预计 GPU 任务和 Graph 发布量。</div>
               <div class="actions">
@@ -171,6 +208,6 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-template.js?v=page-language-20260918-20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-template.js?v=page-performance-20260922-v1"></script>
 </body>
 </html>
