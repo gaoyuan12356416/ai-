@@ -141,8 +141,8 @@ def material_key(material_id):
     if not _MATERIAL_ID.fullmatch(value):
         raise CandidateSelectionError("invalid material id")
     # The ledger's global key is the canonical positive decimal material ID.
-    # Dramawave is the only eligible product, so a product prefix would make
-    # the runner disagree with the store migration and its unique index.
+    # Source IDs are global across products. Product metadata never changes
+    # the established automatic de-duplication identity.
     parsed = int(value)
     if parsed <= 0 or parsed > 9223372036854775807:
         raise CandidateSelectionError("invalid material id")
@@ -485,7 +485,8 @@ class DramawaveCandidateSelector:
         allow_long_duration=False,
         max_duration_seconds=None,
         allow_images=False,
-        allow_deleted_videos=False,
+        allow_deleted_materials=False,
+        require_dramawave_product=True,
     ):
         material_rows = self._pool_material_rows(
             material_id,
@@ -508,7 +509,10 @@ class DramawaveCandidateSelector:
             key = material_key(candidate_id)
             if key != material_id:
                 raise CandidateSelectionError("material identity mismatch")
-            product = _text(row.get("product"), "product", limit=64)
+            product = (
+                _text(row.get("product"), "product", limit=64)
+                if require_dramawave_product else None
+            )
             material_type = _integer(row.get("material_type"), "material_type")
             material_is_deleted = _integer(
                 row.get("material_is_deleted"), "material_is_deleted"
@@ -530,7 +534,7 @@ class DramawaveCandidateSelector:
                 "material_metadata_invalid",
                 "素材 %s 的基础信息不完整" % material_id,
             ) from None
-        if product != DEFAULT_PRODUCT:
+        if require_dramawave_product and product != DEFAULT_PRODUCT:
             raise PoolCandidateRejection(
                 "material_product_mismatch",
                 "素材 %s 不属于Dramawave" % material_id,
@@ -550,9 +554,9 @@ class DramawaveCandidateSelector:
                 "material_type_unsupported",
                 "素材 %s 的媒体类型不受支持" % material_id,
             )
-        if material_is_deleted != 0 and not (
-            media_kind == "video" and allow_deleted_videos
-        ):
+        # Exact operator-selected IDs may refer to soft-deleted source rows.
+        # The source record, media object and all downstream checks still apply.
+        if material_is_deleted != 0 and not allow_deleted_materials:
             raise PoolCandidateRejection(
                 (
                     "material_deleted_image_unsupported"
@@ -669,18 +673,24 @@ class DramawaveCandidateSelector:
                 series_code,
                 mapped_language.casefold(),
                 drama_name,
-                tuple(label.casefold() for label in labels),
                 description,
             )
-            canonical.setdefault(
+            mapped = canonical.setdefault(
                 canonical_key,
                 {
                     "series_code": series_code,
                     "drama_name": drama_name,
-                    "labels": labels,
+                    "labels": [],
                     "description": description,
                 },
             )
+            # Labels describe a drama; differences must not change its identity.
+            # Preserve the first source row's tag order and append unseen labels.
+            seen_labels = {label.casefold() for label in mapped["labels"]}
+            for label in labels:
+                if label.casefold() not in seen_labels:
+                    mapped["labels"].append(label)
+                    seen_labels.add(label.casefold())
         if len(canonical) != 1:
             raise PoolCandidateRejection(
                 "drama_mapping_ambiguous",
@@ -757,6 +767,8 @@ class DramawaveCandidateSelector:
         if not drama_rows:
             raise CandidateSelectionError("drama mapping is missing")
         canonical = set()
+        labels = []
+        seen_labels = set()
         for drama in drama_rows:
             mapped_content_id = _text(drama.get("content_id"), "drama content_id", limit=128)
             mapped_series_code = _text(drama.get("series_code"), "drama series_code", limit=128)
@@ -772,13 +784,19 @@ class DramawaveCandidateSelector:
                 or mapped_language.casefold() != material_language.casefold()
             ):
                 raise CandidateSelectionError("drama mapping identity mismatch")
+            row_labels = [item.strip() for item in drama_labels.split(",") if item.strip()]
+            if not row_labels:
+                raise CandidateSelectionError("drama labels are incomplete")
+            for label in row_labels:
+                if label.casefold() not in seen_labels:
+                    labels.append(label)
+                    seen_labels.add(label.casefold())
             canonical.add(
                 (
                     mapped_content_id,
                     mapped_series_code,
                     mapped_language.casefold(),
                     drama_name,
-                    drama_labels,
                     description,
                 )
             )
@@ -789,12 +807,8 @@ class DramawaveCandidateSelector:
             _mapped_series_code,
             _mapped_language,
             drama_name,
-            drama_labels,
             description,
         ) = next(iter(canonical))
-        labels = [item.strip() for item in drama_labels.split(",") if item.strip()]
-        if not labels:
-            raise CandidateSelectionError("drama labels are incomplete")
 
         return {
             "source_date": source_date,
@@ -949,7 +963,8 @@ class DramawaveCandidateSelector:
                     candidate_id,
                     source_date,
                     allow_images=True,
-                    allow_deleted_videos=True,
+                    allow_deleted_materials=True,
+                    require_dramawave_product=False,
                 )
             except CandidateQueryError:
                 raise
@@ -1019,7 +1034,8 @@ class DramawaveCandidateSelector:
                     source_date,
                     allow_long_duration=True,
                     allow_images=True,
-                    allow_deleted_videos=True,
+                    allow_deleted_materials=True,
+                    require_dramawave_product=False,
                 )
             except CandidateQueryError:
                 raise

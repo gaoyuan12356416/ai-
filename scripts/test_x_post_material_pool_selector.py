@@ -580,25 +580,78 @@ class ManualPoolSelectorTests(unittest.TestCase):
             ["pool_item_invalid", "material_not_found"],
         )
 
-    def test_non_dramawave_material_is_rejected_fail_closed(self):
+    def test_pool_and_manual_selection_do_not_restrict_product(self):
+        for product in ("Dramawave", "OtherProduct", "Drama-社媒专用素材", "", None):
+            with self.subTest(product=product):
+                connection = PoolConnection([11, 12])
+                connection.materials["11"]["product"] = product
+                selected, rejections = select_pool_candidates(
+                    connection,
+                    [
+                        pool_item(1, 11, "2026-07-23T00:00:01Z"),
+                        pool_item(2, 12, "2026-07-23T00:00:00Z"),
+                    ],
+                    "2026-07-22",
+                    limit=1,
+                )
+                self.assertEqual(rejections, [])
+                self.assertEqual([item["material_id"] for item in selected], ["11"])
+                self.assertEqual(selected[0]["material_key"], "11")
+                selected, rejections = select_manual_candidates(
+                    connection, ["11", "12"], "2026-07-22", limit=2,
+                )
+                self.assertEqual(rejections, [])
+                self.assertEqual([item["material_id"] for item in selected], ["11", "12"])
+
+    def test_other_product_still_requires_duration_and_unambiguous_mapping(self):
         connection = PoolConnection([11, 12])
-        connection.materials["11"]["product"] = "OtherProduct"
-
-        selected, rejections = select_pool_candidates(
-            connection,
-            [
-                pool_item(1, 11, "2026-07-23T00:00:01Z"),
-                pool_item(2, 12, "2026-07-23T00:00:00Z"),
-            ],
-            "2026-07-22",
-            limit=1,
+        for row in connection.materials.values():
+            row["product"] = "OtherProduct"
+        connection.materials["11"]["video_duration"] = 0
+        connection.drama_rows["12"] = [
+            drama_row(12), drama_row(12, series_code="different-series"),
+        ]
+        selected, rejections = select_manual_candidates(
+            connection, ["11", "12"], "2026-07-22", limit=2,
         )
-
-        self.assertEqual([item["material_id"] for item in selected], ["12"])
+        self.assertEqual(selected, [])
         self.assertEqual(
             [item["error_code"] for item in rejections],
-            ["material_product_mismatch"],
+            ["material_duration_missing", "drama_mapping_ambiguous"],
         )
+
+    def test_non_dramawave_soft_deleted_materials_pass_pool_and_manual(self):
+        for material_type in (1, 2):
+            with self.subTest(material_type=material_type):
+                connection = PoolConnection([11])
+                connection.materials["11"].update(
+                    product="OtherProduct", material_is_deleted=1,
+                    material_type=material_type,
+                    material_url="https://media.example.test/11." + (
+                        "png" if material_type == 1 else "mp4"
+                    ),
+                    video_duration=0 if material_type == 1 else 41,
+                )
+                for loader, inputs in (
+                    (select_pool_candidates, [pool_item(1, 11, "2026-09-22T00:00:00Z")]),
+                    (select_manual_candidates, ["11"]),
+                ):
+                    selected, rejected = loader(connection, inputs, "2026-09-21", limit=1)
+                    self.assertEqual(rejected, [])
+                    self.assertEqual([item["material_key"] for item in selected], ["11"])
+                    sql = next(sql for sql, _ in connection.calls if "ads_custom_source cs" in sql)
+                    where = sql.split("WHERE", 1)[1]
+                    self.assertNotIn("is_delete", where)
+                    self.assertNotIn("product", where)
+
+    def test_auto_template_keeps_product_restriction(self):
+        connection = PoolConnection([11])
+        connection.materials["11"]["product"] = "OtherProduct"
+        selected, rejected = select_auto_template_candidates(
+            connection, ["11"], "2026-09-21", limit=1,
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(rejected[0]["error_code"], "material_product_mismatch")
 
     def test_mysql_query_failure_aborts_instead_of_becoming_item_rejection(self):
         connection = PoolConnection([9, 10])
