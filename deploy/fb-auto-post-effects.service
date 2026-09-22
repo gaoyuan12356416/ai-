@@ -4,12 +4,16 @@ After=fb-auto-post-service.service network-online.target
 
 [Service]
 Type=oneshot
-User=fb-auto-post
+User=root
 Group=fb-auto-post
 WorkingDirectory=/opt/fb-auto-post/current
 EnvironmentFile=/etc/fb-auto-post.env
 ExecStart=/usr/bin/python3 scripts/fb_auto_post_effect_runner.py
 TimeoutStartSec=3300
-UMask=0077
+# The existing host SQL FIFO socket is root-only. Group-writable SQLite
+# sidecars retain access for the unprivileged publishing service.
+UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/fb-auto-post-publisher /var/lib/sql-connection-gate

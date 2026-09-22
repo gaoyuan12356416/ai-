@@ -20,6 +20,8 @@
 
 保存 24h、72h、7d 首次有效快照，允许目标时间后 6 小时窗口；错过窗口不补造历史快照。基线导入仅接受与发布台账 Page/video/真实 Post ID 一致的记录，作为 `baseline`。当前值每天刷新一次，固定年龄快照独立保存。收入等待前三个自然日结束并额外留三天回填，只统计已校验 task + Page + material 的站点 2049 记录。
 
+宿主机既有 FIFO socket 为 root:root 0660，采集 unit 因此使用 root 和 fb-auto-post 组，`ProtectSystem=strict` 仅放开本地反馈台账与 FIFO 会话锁目录。`UMask=0007` 让新建 WAL/SHM 仍可由 fb-auto-post 发布服务读写；不修改 Gate socket 权限，不给发布服务增加 root 组，也不绕过 Gate。
+
 ## 验证与发布
 
 1. `python -m unittest discover -s scripts -p 'test_fb*.py' -q`
