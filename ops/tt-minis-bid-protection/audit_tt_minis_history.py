@@ -365,13 +365,9 @@ def apply_day(db, root, day):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     evidence(root / 'apply-backups' / (day + '_' + stamp + '.json.gz'), before)
     evidence(root / 'apply-plans' / (day + '_' + stamp + '.json.gz'), changes)
-    # Serialized fixed-table writer, small batches; no DDL, deletes or SQL reads on 63353.
-    prior_batch_size = sync.WRITE_BATCH_SIZE
-    try:
-        sync.WRITE_BATCH_SIZE = 100
-        sync.write_history_rows(changes)
-    finally:
-        sync.WRITE_BATCH_SIZE = prior_batch_size
+    # Reuse the production writer's bounded batches (500 rows / 256 KiB),
+    # serialized by the same lock; no DDL, deletes or SQL reads on 63353.
+    sync.write_history_rows(changes)
     for attempt in range(4):
         actual = table_day(day)
         mismatches = [key(r) for r in wanted if signature(actual.get(key(r))) != signature(r)]
