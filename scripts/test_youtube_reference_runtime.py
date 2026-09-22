@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
+from scripts.youtube_cover_test_support import completed_generation
 from features.youtube_auto_publish import reference
 from features.youtube_auto_publish.runtime import generate_cover_factory
 from features.youtube_auto_publish.templates import WorkflowError
@@ -212,8 +213,8 @@ class GeneratorReferenceCase(unittest.TestCase):
         work = Path(command[command.index('-C')+1])
         attached = Path(command[command.index('--image')+1])
         self.calls.append((attached.read_bytes(), kwargs['input'], command, kwargs))
-        (work/'cover.png').write_bytes(picture('PNG', (1536,864)))
-        return SimpleNamespace(returncode=0)
+        (work/'cover.png').write_bytes(picture('PNG', (1536+16*len(self.calls),864+9*len(self.calls))))
+        return completed_generation(command, kwargs)
 
     def generate(self, task=None, number=1):
         with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=self.fake_run):

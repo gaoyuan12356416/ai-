@@ -15,6 +15,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image, ImageFile
+from scripts.youtube_cover_test_support import completed_generation
 from features.youtube_auto_publish.images import decode_cover
 from features.youtube_auto_publish.runtime import generate_cover_factory
 from features.youtube_auto_publish.templates import WorkflowError
@@ -152,7 +153,7 @@ class GenerationFailureCase(unittest.TestCase):
         def run(command,**kwargs):
             work=Path(command[command.index('-C')+1]);calls.append(work)
             (work/'cover.png').write_bytes(picture()[:-40] if len(calls)==1 else picture())
-            return SimpleNamespace(returncode=0)
+            return completed_generation(command, kwargs)
         self.assertTrue(self.run_generator(run))
         self.assertEqual(len(calls),2)
         self.assertNotEqual(calls[0],calls[1])
@@ -163,7 +164,7 @@ class GenerationFailureCase(unittest.TestCase):
         def run(command,**kwargs):
             calls.append(command)
             (Path(command[command.index('-C')+1])/'cover.png').write_bytes(picture()[:-40])
-            return SimpleNamespace(returncode=0)
+            return completed_generation(command, kwargs)
         self.assert_failure(run,'generated_cover_corrupt')
         self.assertEqual(len(calls),2)
 
@@ -174,7 +175,7 @@ class GenerationFailureCase(unittest.TestCase):
     def test_timeout_recovers_only_fully_decoded_output(self):
         def timeout(command,**kwargs):
             (Path(command[command.index('-C')+1])/'cover.png').write_bytes(picture())
-            raise subprocess.TimeoutExpired(command,1200)
+            raise subprocess.TimeoutExpired(command,1200,output=completed_generation(command, kwargs).stdout)
         self.assertTrue(self.run_generator(timeout))
 
     def test_safety_refusal_does_not_retry_missing_image(self):
@@ -182,7 +183,7 @@ class GenerationFailureCase(unittest.TestCase):
         def refusal(command,**kwargs):
             calls.append(command)
             (Path(command[command.index('-C')+1])/'result.txt').write_text('Generation blocked by the safety system.')
-            return SimpleNamespace(returncode=0)
+            return completed_generation(command, kwargs)
         self.assert_failure(refusal,'cover_generation_policy_blocked')
         self.assertEqual(len(calls),1)
 
@@ -194,7 +195,7 @@ class GenerationFailureCase(unittest.TestCase):
         def run(command,**kwargs):
             path=Path(command[command.index('-C')+1])/'cover.png'
             with path.open('wb') as target:target.truncate(32*1024*1024+1)
-            return SimpleNamespace(returncode=0)
+            return completed_generation(command, kwargs)
         self.assert_failure(run,'cover_generation_output_size')
 
     def test_audit_preserves_original_requirements_feedback_and_reference(self):
@@ -202,7 +203,7 @@ class GenerationFailureCase(unittest.TestCase):
             work=Path(command[command.index('-C')+1]);(work/'cover.png').write_bytes(picture())
             self.assertIn('Never alter PNG IHDR',kwargs['input'])
             self.assertIn('Keep the original request',kwargs['input'])
-            return SimpleNamespace(returncode=0)
+            return completed_generation(command, kwargs)
         with patch.dict(os.environ,{'MYSQL_PASSWORD':'private-trace-secret','FEISHU_SECRET':'private-trace-secret'}):self.run_generator(run)
         path=next((self.root/'generation').rglob('generation-request.json'));audit=json.loads(path.read_text(encoding='utf8'))
         self.assertEqual(audit['requirements'],self.task['requirements'])

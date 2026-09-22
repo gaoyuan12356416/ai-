@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
+from scripts.youtube_cover_test_support import completed_generation
 from features.youtube_auto_publish.images import decode_cover, normalize_generated_cover
 from features.youtube_auto_publish.runtime import generate_cover_factory
 from features.youtube_auto_publish.service import YouTubeWorkflow
@@ -92,7 +93,7 @@ class CropCase(unittest.TestCase):
                 self.assertIn('always save the actual generated image', kwargs['input'])
                 self.assertNotIn('exactly 1536x864 or 1920x1080', kwargs['input'])
                 self.assertIn('Never alter PNG IHDR', kwargs['input'])
-                return SimpleNamespace(returncode=0)
+                return completed_generation(command, kwargs)
             with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=generate):
                 output = generate_cover_factory(root)(task, {'number': 1})
             work = next((root/'generation'/task['id']).iterdir())

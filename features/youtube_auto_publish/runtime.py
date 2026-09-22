@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 import requests
 from .worker_runtime import run_generator
+from .cover_provenance import isolated_home, remove_private_auth, verify_generated_origin
 from .service import YouTubeWorkflow
 from .images import normalize_generated_cover
 from .source import MaterialSource,DEFAULT_HOSTS
@@ -98,7 +99,7 @@ def generate_cover_factory(root):
         if generation.is_symlink() or task_root.is_symlink() or task_root.resolve().parent != generation:
             raise WorkflowError('cover_generation_invalid','封面生成目录无效',503)
         work=task_root/('v%d-%s' % (version['number'],os.urandom(6).hex()))
-        work.mkdir(parents=True,exist_ok=False)
+        work.mkdir(parents=True,exist_ok=False,mode=0o700)
         reference_path=work/'reference-cover.jpg'
         fd=os.open(reference_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(fd,'wb') as image:image.write(reference)
@@ -133,20 +134,26 @@ def generate_cover_factory(root):
                 'Never alter PNG IHDR, chunk lengths, checksums, dimensions headers or metadata to make invalid output appear valid. '
                 'Do not rewrite generated image bytes to bypass format or aspect-ratio validation; retain the real generated dimensions. '
                 'Save the tool-returned original binary file with a filesystem copy. Never reconstruct image bytes from displayed text, truncated tool output or manually transcribed base64. Verify the saved file fully decodes before reporting completion. '
-                'Copy only the selected final generated raster image to '+str(output)+'. Do not run any other workflow. '
+                'Copy only the selected final generated raster image from this invocation\'s isolated CODEX_HOME/generated_images directory to '+str(output)+'. '
+                'Never search for, copy, reuse or fall back to historical images, other tasks, other versions, /root/.codex or sibling directories. '
+                'If this invocation produces no native image file, stop without creating cover.png. Do not run any other workflow. '
                 'Reply with a short completion message. Artistic input:\n'+json.dumps(facts,ensure_ascii=False))
-        cmd=[os.environ.get('YOUTUBE_AUTO_CODEX_BIN','/usr/bin/codex'),'-a','never','exec','--skip-git-repo-check','--ephemeral','--image',str(reference_path),
+        cmd=[os.environ.get('YOUTUBE_AUTO_CODEX_BIN','/usr/bin/codex'),'-a','never','exec','--skip-git-repo-check','--ephemeral','--json','--ignore-user-config','--ignore-rules',
+             '-m',os.environ.get('YOUTUBE_AUTO_CODEX_MODEL','gpt-5.6-terra'),'-c','model_reasoning_effort='+json.dumps(os.environ.get('YOUTUBE_AUTO_CODEX_REASONING','medium')),'--image',str(reference_path),
              '--sandbox','workspace-write','-C',str(work),'-o',str(result),'-c','features.apps=false','-c','features.plugins=false','-c','web_search="disabled"','-']
         # Do not expose application/MySQL/Feishu/Google environment secrets to the generator.
-        env={key:os.environ[key] for key in ('PATH','HOME','USER','LANG','LC_ALL','TMPDIR','CODEX_HOME') if key in os.environ}
+        env={key:os.environ[key] for key in ('PATH','HOME','USER','LANG','LC_ALL','TMPDIR') if key in os.environ}
+        home=isolated_home(work)
+        env['CODEX_HOME']=str(home)
+        started_at=time.time()
         try:
             try:
                 p=run_generator(cmd,input=prompt,env=env,timeout=timeout)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as timeout_error:
                 if not output.is_file() or output.is_symlink():raise
                 # Recover only a fully validated image after the process group
                 # stops. All reference and pixel checks below still apply.
-                p=subprocess.CompletedProcess(cmd,0)
+                p=subprocess.CompletedProcess(cmd,0,stdout=timeout_error.output)
             final=result.read_text(encoding='utf-8',errors='replace')[:16384] if result.is_file() else ''
             if any(marker in final.lower() for marker in ('safety system','safety filter','safety policy','安全过滤','安全系统','安全策略')):
                 raise WorkflowError('cover_generation_policy_blocked','生图工具安全过滤拒绝了本次请求；请更换合规参考图或手动上传封面',422)
@@ -172,6 +179,8 @@ def generate_cover_factory(root):
                 raise
             if len(normalized)>32*1024*1024:
                 raise WorkflowError('cover_generation_output_size','AI 生成的封面文件超过 32 MB，请重新生成',503)
+            output_audit['origin']=verify_generated_origin(getattr(p,'stdout',''),home,raw,started_at,generation)
+            output_audit['reference_sha256']=task['reference_cover']['sha256']
             if output_audit['cropped']:
                 fd=os.open(work/'cover-normalized.png',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
                 with os.fdopen(fd,'wb') as normalized_file:normalized_file.write(normalized)
@@ -184,6 +193,8 @@ def generate_cover_factory(root):
         except Exception:
             # Model output and tool traces may contain sensitive context; do not relay them to UI/logs.
             raise WorkflowError('cover_generation_failed','AI 封面生成执行异常，请重试生成或手动上传封面',503) from None
+        finally:
+            remove_private_auth(home)
     def generate(task,version):
         # Successful CLI exit is not proof of complete image pixels. Each
         # attempt has a separate workspace; no platform writes are retried.

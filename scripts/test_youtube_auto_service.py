@@ -619,7 +619,8 @@ class RuntimeAdapterTests(unittest.TestCase):
                 reference=Path(command[command.index('--image')+1])
                 self.assertEqual(reference.read_bytes(),original)
                 (work/'cover.png').write_bytes(png(1536,864))
-                return SimpleNamespace(returncode=0)
+                from scripts.youtube_cover_test_support import completed_generation
+                return completed_generation(command, kwargs)
             with patch.dict(os.environ,{'MYSQL_PASSWORD':'not-for-generator','FEISHU_SECRET':'not-for-generator'}), patch('features.youtube_auto_publish.runtime.run_generator',side_effect=run) as process:
                 output=generate_cover_factory(root)(task,{'number':1})
             self.assertTrue(output.startswith(b'\x89PNG'))

@@ -29,7 +29,7 @@ def run_generator(cmd, *, input, env, timeout):
                           start_new_session=(os.name == 'posix')) as process:
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
-        except BaseException:
+        except BaseException as error:
             # The Node launcher owns a native child. Killing only the launcher
             # leaves image generation running and can keep capture pipes open.
             if os.name == 'posix':
@@ -39,6 +39,8 @@ def run_generator(cmd, *, input, env, timeout):
                     pass
             else:
                 process.kill()
-            process.communicate()
+            stdout, stderr = process.communicate()
+            if isinstance(error, subprocess.TimeoutExpired):
+                error.output, error.stderr = stdout, stderr
             raise
         return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
