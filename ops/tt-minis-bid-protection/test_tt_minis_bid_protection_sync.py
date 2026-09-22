@@ -345,8 +345,10 @@ class SourceAndWriteContractTests(unittest.TestCase):
         self.assertIn("CAST(record_date AS CHAR)", captured[0])
         self.assertNotIn("%%", captured[0])
         self.assertIn("record_date = '2026-09-02'", captured[0])
-        for status in sync.TERMINAL_STATUSES:
+        for status in ("PAYMENT_COMPLETE", "TARGET_MET"):
             self.assertIn(status, captured[0])
+        self.assertNotIn("INELIGIBLE", captured[0])
+        self.assertIn("INELIGIBLE", sync.VALID_DAILY_STATUSES)
 
     def test_run_sync_skips_existing_terminal_candidate(self):
         args = mock.Mock(

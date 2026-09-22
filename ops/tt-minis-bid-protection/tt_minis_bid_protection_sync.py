@@ -44,6 +44,9 @@ DEFAULT_REFRESH_DAYS = 30
 NON_TERMINAL_STATUSES = ("UNDER_PROTECTION", "CONFIRMING")
 TERMINAL_STATUSES = ("INELIGIBLE", "PAYMENT_COMPLETE", "TARGET_MET")
 VALID_DAILY_STATUSES = set(NON_TERMINAL_STATUSES + TERMINAL_STATUSES)
+# TikTok can revise INELIGIBLE to TARGET_MET after the first daily result.
+# Keep it valid for reporting, but re-query it inside the rolling window.
+CACHED_TERMINAL_STATUSES = ("PAYMENT_COMPLETE", "TARGET_MET")
 VALID_DATA_LEVELS = ("CAMPAIGN",)
 RETRYABLE_API_CODES = {40016, 40100, 40133, 50000, 50002, 60001}
 MINIS_PRODUCT_MAP = {
@@ -438,7 +441,7 @@ def fetch_terminal_candidate_keys(day):
     """.format(
         table=TARGET_TABLE,
         day=sql_quote(day),
-        statuses=sql_in(TERMINAL_STATUSES),
+        statuses=sql_in(CACHED_TERMINAL_STATUSES),
     )
     out = set()
     for row in run_mysql_query(sql, timeout=180):
