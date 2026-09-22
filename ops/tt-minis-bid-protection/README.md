@@ -111,4 +111,14 @@ Failed request candidates are retained in `/mnt/data-disk/tt-minis-bid-protectio
 
 ## Rollback
 
+## Manual historical audit
+
+`audit_tt_minis_history.py` performs an operator-requested audit of at most 60 completed dates. It is not installed in cron. Use an audit directory below `/mnt/data-disk/tt-minis-bid-protection/audits/` and explicit start/end dates. Run `collect`, `plan`, `audit`, review `summary.json`, then `apply` only for an authorized correction. `summary` can be rerun after completion. `--dates` restricts collection or application to named dates. Same-day raw API evidence can be imported with `seed --seed-file <jsonl.gz>` after collecting those dates.
+
+Collection freezes account scope and retains per-day database backups. API planning combines dates only within the `query_ids * calendar_days <= 200` limit. The local SQLite ledger and gzip response evidence make retries resumable. The tool validates exact response scope, currency/amount scaling, duplicate responses and omitted existing rows. Positive credits outside the daily candidate set require review. Application uses the existing fixed target-table writer, serialized by the production lock, with bounded batches, additional pre-change backups, concurrent-change checks and complete readback through 63350. No DDL or deletion is performed on MySQL.
+
+An incomplete audit, failed requests or pending protection outcomes must never be reported as a final zero. A database row absent from a successful sparse API response is retained for investigation.
+
+## Rollback
+
 Remove only this exact cron line, restore the saved crontab, switch `current` back to the previous release, and restore the pre-rebuild table export only if the replacement dataset itself must be rolled back. If token rollback is needed, restore only the `native_growth_default` row with a compare-and-swap transaction and re-run Bid Protection status/history plus Native Growth read-only canaries; never overwrite the entire SQLite database.
