@@ -193,6 +193,19 @@ class ChannelDirectory:
         finally:
             with self.lock:self.running = False
 
+    def template_identity(self, local_id):
+        """Resolve current product/channel identity without requiring publish eligibility."""
+        if not re.fullmatch(r'[1-9][0-9]{0,18}', str(local_id)):
+            raise WorkflowError('channel_unavailable', '频道不存在或已移除', 404)
+        try:
+            credentials = self.repository._query('CAST(ch.app_id AS UNSIGNED)=1479 AND CAST(ch.id AS UNSIGNED)=' + str(local_id))
+        except Exception:
+            raise WorkflowError('channel_check_unavailable', '频道资料暂不可用，请稍后重试', 503) from None
+        if not credentials or not credentials[0].channel_id:
+            raise WorkflowError('channel_unavailable', '频道不存在或已移除', 404)
+        credential = credentials[0]
+        return {'id': credential.channel_local_id, 'channel_id': credential.channel_id, 'name': credential.channel_name}
+
     def validate(self, actor, channel_id, *, comment=False, expected=None, verify_thumbnail_at=None):
         if not re.fullmatch(r'[1-9][0-9]{0,18}', str(channel_id)):
             raise WorkflowError('channel_unavailable','请选择有效频道',409)

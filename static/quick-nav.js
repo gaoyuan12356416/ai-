@@ -342,6 +342,16 @@
           enabled: true,
           order: 10,
         },
+        {
+          key: "youtubeChannelList",
+          label: "YouTube 频道列表",
+          description: "查看频道信息并配置共用发布文案模板",
+          kind: "page",
+          href: "/youtube-channels.html",
+          module: "youtube_auto_publish",
+          enabled: true,
+          order: 20,
+        },
       ],
     },
     {

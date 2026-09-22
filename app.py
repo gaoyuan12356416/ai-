@@ -94181,7 +94181,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _youtube_auto_actor(self):
+    def _youtube_auto_actor(self, navigation_key="youtubeAutoPublish"):
         """Require a real Cookie even if legacy Feishu enforcement is disabled."""
         session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
         if not session or session.get("auth_type") == "api_token":
@@ -94194,12 +94194,15 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             json_response(self, 403, {"error": "permission_denied", "module": "youtube_auto_publish"}, no_store=True)
             return None
         try:
-            access = navigation_item_access(session, "youtubeAutoPublish", load_navigation_config())
+            navigation = load_navigation_config()
+            keys = (navigation_key,) if isinstance(navigation_key, str) else navigation_key
+            accesses = [navigation_item_access(session, key, navigation) for key in keys]
+            access = next((item for item in accesses if item.get("allowed")), accesses[0])
         except (OSError, ValueError, TypeError):
             json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
             return None
         if not access.get("allowed"):
-            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": "youtubeAutoPublish"}, no_store=True)
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": navigation_key}, no_store=True)
             return None
         actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
         actor["role"] = "admin" if session.get("role") == "admin" else "user"
@@ -94252,20 +94255,27 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         return payload
 
     def _dispatch_youtube_auto_publish(self, parsed):
-        actor = self._youtube_auto_actor()
+        prefix = "/api/youtube-auto-publish"
+        path = parsed.path[len(prefix):]
+        channel_template = re.fullmatch(r"/channels/([1-9][0-9]{0,18})/template", path)
+        # Reads from the publishing form keep its existing navigation authorization.
+        nav_key = "youtubeAutoPublish"
+        if path == "/channel-list" or (channel_template and self.command == "POST"):
+            nav_key = "youtubeChannelList"
+        elif channel_template:
+            nav_key = ("youtubeAutoPublish", "youtubeChannelList")
+        actor = self._youtube_auto_actor(nav_key)
         if actor is None:
             self.close_connection = True
             return
-        prefix = "/api/youtube-auto-publish"
-        path = parsed.path[len(prefix):]
         if "/x-share" in path:
             from features.youtube_auto_publish.x_share import dispatch
             if dispatch(self, parsed, actor, globals()):
                 return
         task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
         cover = re.fullmatch(r"/covers/([0-9a-f]{32})(/thumbnail)?", path)
-        get_route = path in ("/bootstrap", "/channels", "/materials", "/tasks", "/settings") or (task and not task.group(2)) or cover
-        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or (task and task.group(2))
+        get_route = path in ("/bootstrap", "/channels", "/channel-list", "/materials", "/tasks", "/settings") or channel_template or (task and not task.group(2)) or cover
+        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or channel_template or (task and task.group(2))
         if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
             self.close_connection = True
             json_response(self, 404, {"error": "not_found"}, no_store=True)
@@ -94284,6 +94294,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     result = service.bootstrap(actor, include_channels=query.get("include_channels", ["1"])[0] != "0")
                 elif path == "/channels":
                     result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
+                elif path == "/channel-list":
+                    result = service.channel_list(actor, refresh=query.get("refresh", ["0"])[0] == "1")
+                elif channel_template:
+                    result = service.get_channel_template(actor, channel_template.group(1))
                 elif path == "/materials":
                     result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1", uploader_id=query.get("uploader_id", [""])[0])
                 elif path == "/tasks":
@@ -94303,6 +94317,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     if data:
                         self.wfile.write(data)
                     return
+            elif channel_template:
+                result = service.save_channel_template(actor, channel_template.group(1), payload)
             elif path == "/tasks":
                 result = service.create_task(actor, payload)
             elif path == "/channels/verify-thumbnail":
