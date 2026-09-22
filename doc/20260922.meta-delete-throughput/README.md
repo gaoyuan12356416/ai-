@@ -30,7 +30,15 @@ python3 -m py_compile features/fb_ad_asset_delete/bridge.py features/fb_ad_asset
 git diff --check
 ```
 
-生产验收证据待本次实际发布后补充，包括：GitHub SHA、测试数量、备份路径、目标哈希、服务 PID/日志、只读页面/API 检查和历史台账逐行比对。尚未通过实际授权任务验证提速倍数，不承诺固定完成时间。
+2026-09-22 10:45（北京时间）已发布并验收。运行提交 `00f55957433db24de79778d6c3d99cc966894e4d`，分支 `codex/meta-delete-throughput-20260922`，GitHub 推送及服务器精确 fetch 均已核对。本地及服务器 Python 3.9.6 均通过 354 项模块测试；服务器 SQLite 3.26 的测试方言差异仅在测试适配器中修正，生产 MySQL SQL 未改变。
+
+- Release：`/mnt/data-disk/meta-ad-asset-delete/release-00f55957433d`。
+- 备份：`/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20260922T024404Z-00f55957433d`，其中 `acceptance.json` 保存本次验收、表行数及完整行摘要，`plan.json` 保存全部 6 个目标文件的前后哈希。
+- 主 API PID `3608346 → 1163352`，active；剧合成 worker PID `3608348` 未变化；全部原有 35 个 active timer 仍 active。启动日志没有导入、语法或 traceback 错误。
+- 6 个运行目标哈希与 release 一致；运行代码预算为全局 8、来源 SQL 4。页面/topbar/auth-status 返回 200，未登录删除 products/jobs 返回 401，原任务所有者只读 GET 返回 200、保留原 partial 状态。
+- 台账完整性及外键检查通过，所有历史表逐行摘要与备份完全一致：24 jobs、10 runs、10,668 objects、2,027 object attempts、1,448 receipts、1,077 video-account rows、1,080 video-account attempts、7,750 audits；没有新增删除请求或台账回写。
+- 两次只读线上 SQL 对比共覆盖 4 个冻结账户/视频对，包含 `default_token=-1` 和 `1`。新旧安全上下文及内存 Token 摘要比较全部一致，实际凭证查询由 2 次降到 1 次；所选产品查询返回由 329 行降到 4 行。EXPLAIN 通过，凭证来源及队列/产品使用主键、Token 使用用户唯一索引。报告在 `/mnt/data-disk/fb-ad-asset-delete/throughput-source-probe-20260922T024203Z.json` 和 `throughput-source-probe-20260922T024404Z.json`。
+- 模拟传输集成测试验证了 12 次账户 DELETE 后用 1 次读取完成合并核查，超时对象不进入明确拒绝核查、不自动重发。生产验收 Meta DELETE 数为 0；实际业务提速倍数留待下一次正常授权任务观察。
 
 ## 选择文件发布
 
@@ -62,6 +70,9 @@ journalctl -u drama-material-api.service -n 100 --no-pager
 本次回滚直接恢复已知可用的基线文件，无需旧版本的 Video 禁写补丁。先排空删除/预览/重核，再停止主 API。回滚只恢复代码，绝不恢复旧 SQLite，保留当前成功回执、失败、未知结果及锁。新增的 `execution.py` 保留原精确字节，旧入口不会导入它；备份 manifest 允许相同备份再次 apply 时匹配该精确哈希，任意漂移仍会拒绝。
 
 ```bash
+release_dir=/mnt/data-disk/meta-ad-asset-delete/release-00f55957433d
+backup_dir=/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20260922T024404Z-00f55957433d
+# 确认删除、预览、重核空闲后执行。
 systemctl stop drama-material-api.service
 python3 "$release_dir/scripts/deploy_meta_delete_throughput.py" rollback "$backup_dir"
 bash "$release_dir/scripts/safe_restart_drama_api.sh"
