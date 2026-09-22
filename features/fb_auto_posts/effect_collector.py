@@ -23,6 +23,20 @@ class FeedbackError(RuntimeError):
     pass
 
 
+def graph_created_at(value):
+    """Normalize Meta's +0000 offset on the production Python 3.10 runtime."""
+    if not isinstance(value,str):
+        raise FeedbackError('feedback_created_time_invalid')
+    normalized = re.sub(r'([+-]\d{2})(\d{2})$',r'\1:\2',value.removesuffix('Z')+'+00:00' if value.endswith('Z') else value)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            raise ValueError('timezone_required')
+        return parsed.astimezone(UTC).isoformat(timespec='seconds')
+    except ValueError:
+        raise FeedbackError('feedback_created_time_invalid') from None
+
+
 def ids_sql(values):
     items = [str(v) for v in values]
     if not items or len(items)>1000 or any(not re.fullmatch(r'[1-9][0-9]{0,30}',v) for v in items):
@@ -214,7 +228,7 @@ def collect(conn, reader, graph, *, now=None, max_posts=750):
                             native = str(item.get('post_id') or '')
                             if native and str(item.get('id')) == task['graph_post_id']:
                                 task['post_id'] = native if '_' in native else page_id+'_'+native
-                                task['created_at_utc'] = datetime.fromisoformat(item['created_time']).astimezone(UTC).isoformat(timespec='seconds')
+                                task['created_at_utc'] = graph_created_at(item.get('created_time'))
                     ready = [t for t in remaining.values() if t['post_id']]
                     if not ready:
                         raise FeedbackError('feedback_video_post_mapping_unavailable')

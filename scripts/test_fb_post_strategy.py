@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from features.fb_auto_posts.core import FBAutoPostStore,ActorScope
 from features.fb_auto_posts.effects import choose_material,write_effect,load_scores
-from features.fb_auto_posts.effect_collector import GatedReader,parse_metrics,FeedbackError
+from features.fb_auto_posts.effect_collector import GatedReader,parse_metrics,graph_created_at,FeedbackError
 from features.fb_auto_posts.strategy import daily_capacity,slot_indices,planned_time,cooldown_content_ids
 from features.fb_auto_posts.validation import normalize_template_payload,ValidationError
 from scripts.test_fb_auto_validation import payload
@@ -66,6 +66,12 @@ class StrategyRulesTests(unittest.TestCase):
         with self.assertRaises(FeedbackError):GatedReader({'FB_AUTO_MYSQL_HOST':'101.32.56.53','FB_AUTO_MYSQL_PORT':'63353'})
         reader=GatedReader({'FB_AUTO_MYSQL_HOST':'101.32.56.53','FB_AUTO_MYSQL_PORT':'63350'})
         with self.assertRaises(FeedbackError):reader.query('SELECT 1; DELETE FROM anything')
+
+    def test_graph_created_time_accepts_meta_offsets_and_rejects_missing_timezone(self):
+        for value in ('2026-09-01T06:04:25+0000','2026-09-01T06:04:25Z','2026-09-01T14:04:25+08:00'):
+            self.assertEqual(graph_created_at(value),'2026-09-01T06:04:25+00:00')
+        for value in (None,'','2026-09-01T06:04:25','not-a-date'):
+            with self.assertRaises(FeedbackError):graph_created_at(value)
 
 
 class PlanningTests(unittest.TestCase):

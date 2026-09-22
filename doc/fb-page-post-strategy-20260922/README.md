@@ -29,7 +29,7 @@
 3. 在 SQLite 在线备份上演练配置版本切换、效果基线导入、下个自然日排期，并比较已发布/未知/提交中任务、ledger、attempts 的校验值。
 4. 前端浏览器验证保存 145 行频次配置后仍为 526 条名义上限、14 天素材冷却、24 小时同剧冷却；保存失败保留表单。验证有权限与未登录状态。
 5. GitHub 提交并 push，服务器 fetch 验证同一 SHA。备份将覆盖的准确文件、环境、timer 状态与 SQLite；暂停领取并等待活跃准备/提交租约结束，避免中断 Graph 写。
-6. 仅替换 FB sidecar 的变更模块、新采集脚本和两个前端文件；前端同时更新 main runtime/static 与 `/usr/share/nginx/html`。保留线上其他文件，包括已发布的 GPU 模板、手工发布工具、导航和 runner 调度超时设置。
+6. 仅替换 FB sidecar 的变更模块、新采集脚本和五个前端文件；前端同时更新 main runtime/static 与 `/usr/share/nginx/html`。保留线上其他文件，包括已发布的 GPU 模板、手工发布工具、导航和 runner 调度超时设置。
 7. 只重启 `fb-auto-post-service.service`，启用新的 effects timer，恢复原 claimers。通过原管理 API 提交新模板版本并回读；确认自然 tick/plan 生成新版本任务，真实内容冷却、频次与错峰符合配置。
 
 ## 回滚
