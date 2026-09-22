@@ -392,7 +392,7 @@ class SourceAndWriteContractTests(unittest.TestCase):
         complete = [fields for event, fields in events if event == "sync_complete"][0]
         self.assertEqual(1, complete["terminal_skipped"])
 
-    def test_daily_mode_refreshes_latest_14_completed_days(self):
+    def test_daily_mode_refreshes_latest_30_completed_days(self):
         with tempfile.TemporaryDirectory() as directory:
             args = mock.Mock(
                 daily=True,
@@ -424,8 +424,8 @@ class SourceAndWriteContractTests(unittest.TestCase):
                 sync, "build_day_candidates", side_effect=build
             ), mock.patch.object(sync, "emit"):
                 self.assertEqual(0, sync.run_sync(args))
-        self.assertEqual(14, len(dates))
-        self.assertEqual("2026-08-20", dates[0])
+        self.assertEqual(30, len(dates))
+        self.assertEqual("2026-08-04", dates[0])
         self.assertEqual("2026-09-02", dates[-1])
 
     def test_partial_api_failure_is_logged_and_exits_nonzero(self):

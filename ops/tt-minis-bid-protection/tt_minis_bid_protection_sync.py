@@ -39,7 +39,7 @@ WRITE_MAX_STATEMENT_BYTES = 256 * 1024
 DEFAULT_WORKERS = 6
 DEFAULT_TIMEOUT = 45
 DEFAULT_BACKFILL_DAYS = 30
-DEFAULT_REFRESH_DAYS = 14
+DEFAULT_REFRESH_DAYS = 30
 
 NON_TERMINAL_STATUSES = ("UNDER_PROTECTION", "CONFIRMING")
 TERMINAL_STATUSES = ("INELIGIBLE", "PAYMENT_COMPLETE", "TARGET_MET")
@@ -841,7 +841,7 @@ def run_sync(args):
     client = TikTokBidProtectionClient(access_token, timeout=args.api_timeout)
     emit(
         "sync_start",
-        mode="rolling_14_days" if args.daily else "backfill",
+        mode="rolling_%d_days" % DEFAULT_REFRESH_DAYS if args.daily else "backfill",
         start_date=start_date,
         end_date=end_date,
         dry_run=bool(args.dry_run),
@@ -947,7 +947,7 @@ def build_parser():
     mode.add_argument(
         "--daily",
         action="store_true",
-        help="refresh the latest 14 completed Beijing calendar days",
+        help="refresh the latest 30 completed Beijing calendar days",
     )
     mode.add_argument("--backfill-days", type=int, help="backfill N completed days, maximum 30")
     mode.add_argument("--start-date", help="manual start date, YYYY-MM-DD")
