@@ -151,7 +151,7 @@ class VideoAccountServiceTests(unittest.TestCase):
         self.assertTrue(child["result"]["proof"]["complete"])
         self.assertEqual(child["result"]["delete_error"]["code"], "100")
         self.assertEqual(child["result"]["verification"]["status"], "already_deleted")
-        self.assertEqual([e[0] for e in events], ["DELETE", "GET", "DELETE", "DELETE"])
+        self.assertEqual([e[0] for e in events], ["DELETE", "DELETE", "DELETE", "GET"])
         self.assertEqual(final["runs"][-1]["status"], "partial")
         with store._transaction() as conn:
             self.assertIsNotNone(conn.execute("SELECT 1 FROM fb_asset_delete_v2_receipts WHERE object_key='video_account:444:301'").fetchone())
@@ -173,15 +173,13 @@ class VideoAccountServiceTests(unittest.TestCase):
         calls = []
 
         def query(sql, timeout):
-            if "ads_facebook_auto_created_data" in sql:
-                default = "a.id IN (" + q("7") + ")" in sql
-                return [("7" if default else "8", "1", "101" if default else "102",
-                    "444" if default else "555", "803", "500", "500", "1", "803",
-                    "1" if default else "-1", "1", "999")]
-            if "user_id=" + q("999") in sql:
-                return [] if missing_default else [("999", "90009", "product-secret")]
-            self.assertIn("user_id=" + q("803"), sql)
-            return [("803", "90003", "own-secret")]
+            self.assertIn("ads_facebook_auto_created_data", sql)
+            self.assertIn("ads_facebook_info", sql)
+            default = "a.id IN (" + q("7") + ")" in sql
+            credential = ((None, None, None) if missing_default else ("999", "90009", "product-secret")) if default else ("803", "90003", "own-secret")
+            return [("7" if default else "8", "1", "101" if default else "102",
+                "444" if default else "555", "803", "500", "500", "1", "803",
+                "1" if default else "-1", "1", "999") + credential]
 
         outer = self
         class Transport:
@@ -204,7 +202,7 @@ class VideoAccountServiceTests(unittest.TestCase):
         self.assertEqual(rows[0]["result"]["credential_user_id"], "999")
         self.assertEqual(rows[0]["result"]["credential_relation"], "product_default_user")
         self.assertEqual(rows[1]["result"]["credential_relation"], "publish_queue_user")
-        self.assertEqual(calls, [("DELETE", "555")] if missing_default else [("DELETE", "444"), ("DELETE", "555")])
+        self.assertCountEqual(calls, [("DELETE", "555")] if missing_default else [("DELETE", "444"), ("DELETE", "555")])
         self.assertEqual(final["runs"][-1]["status"], "partial" if missing_default else "completed")
         for secret in (b"product-secret", b"own-secret"):
             self.assertNotIn(secret, Path(self.store.path).read_bytes())
@@ -223,7 +221,7 @@ class VideoAccountServiceTests(unittest.TestCase):
         job = self.preview()
         self.state.account_outcomes[("444", "301")] = ("failed", {"code": "200", "message": "Denied"})
         final = self.execute(job)
-        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "444", "301"), ("DELETE_ACCOUNT", "555", "301")])
+        self.assertCountEqual(self.writes(), [("DELETE_ACCOUNT", "444", "301"), ("DELETE_ACCOUNT", "555", "301")])
         self.assertEqual(self.video(final)["status"], "failed")
         self.assertEqual([x["status"] for x in self.video(final)["video_account_results"]], ["failed", "deleted"])
         self.assertNotIn(b"secret-for", Path(self.store.path).read_bytes())
@@ -236,7 +234,7 @@ class VideoAccountServiceTests(unittest.TestCase):
         request_id = uuid.uuid4().hex
         final = self.execute(job, request_id=request_id)
         self.execute(job, request_id=request_id)
-        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "444", "301"), ("DELETE_ACCOUNT", "555", "301"), ("DELETE_ACCOUNT", "444", "301")])
+        self.assertCountEqual(self.writes(), [("DELETE_ACCOUNT", "444", "301"), ("DELETE_ACCOUNT", "555", "301"), ("DELETE_ACCOUNT", "444", "301")])
         self.assertEqual(self.video(final)["status"], "deleted")
 
     def test_account_a_receipt_never_skips_account_b_in_new_task(self):
@@ -280,6 +278,8 @@ class VideoAccountServiceTests(unittest.TestCase):
         self.assertEqual(self.video(final)["status"], "failed")
 
     def test_permission_revoked_between_accounts_preserves_original_error(self):
+        from features.fb_ad_asset_delete.execution import ExecutionBudget
+        self.service.execution_budget = ExecutionBudget(1)
         job = self.preview()
         self.state.after_delete = lambda obj: setattr(self.source, "allowed", False)
         final = self.execute(job)

@@ -1,5 +1,6 @@
 """Meta object adapter. GET uncertainty never implies successful deletion."""
 import json
+import math
 import re
 import time
 from copy import deepcopy
@@ -42,12 +43,15 @@ class GraphError(AssetError):
 
 class GraphClient:
     def __init__(self, token_provider, version="v25.0", transport=None, timeout=20, max_inventory=50000,
-                 video_credential_provider=None, video_account_credential_provider=None):
+                 video_credential_provider=None, video_account_credential_provider=None, response_observer=None,
+                 request_guard=None):
         if not re.fullmatch(r"v[0-9]+\.[0-9]+", version):
             raise ValueError("invalid graph version")
         self.token_provider = token_provider
         self.video_credential_provider = video_credential_provider
         self.video_account_credential_provider = video_account_credential_provider
+        self.response_observer = response_observer
+        self.request_guard = request_guard
         self.base = "https://graph.facebook.com/" + version + "/"
         self.http = transport or requests.Session()
         self.timeout = timeout
@@ -56,9 +60,67 @@ class GraphClient:
         self.credential_contexts = {}
         self.video_credential_creatives = {}
 
-    def request(self, method, path, token, params=None, timeout=None):
+    @staticmethod
+    def _usage_metrics(value):
+        """Only known numeric quota fields may leave the response adapter."""
+        fields = ("call_count", "total_cputime", "total_time", "acc_id_util_pct",
+                  "estimated_time_to_regain_access", "reset_time_duration")
+        return {key: value[key] for key in fields if isinstance(value, dict) and
+                isinstance(value.get(key), (int, float)) and not isinstance(value[key], bool) and
+                0 <= value[key] <= 1000000000 and math.isfinite(value[key])}
+
+    def _observe_response(self, method, path, response, data=None):
+        observer = self.response_observer
+        if not callable(observer):
+            return
+        try:
+            metadata = {"method": method, "account_id": path[4:].split("/")[0] if path.startswith("act_") else "",
+                        "http_status": response.status_code, "usage": {}, "error": {}}
+            error = data.get("error") if isinstance(data, dict) else None
+            if isinstance(error, dict):
+                for key in ("code", "error_subcode"):
+                    value = error.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000000000:
+                        metadata["error"][key] = value
+                if isinstance(error.get("is_transient"), bool):
+                    metadata["error"]["is_transient"] = error["is_transient"]
+            headers = getattr(response, "headers", {}) or {}
+            # Fake transports need no headers; real requests headers are case-insensitive.
+            for name in ("x-app-usage", "x-ad-account-usage", "x-business-use-case-usage"):
+                raw = headers.get(name)
+                if not isinstance(raw, str) or len(raw) > 65536:
+                    continue
+                try:
+                    usage = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if name == "x-business-use-case-usage":
+                    records = []
+                    if isinstance(usage, dict):
+                        for values in list(usage.values())[:100]:
+                            if isinstance(values, list):
+                                records.extend(self._usage_metrics(value) for value in values[:100])
+                    metadata["usage"][name] = [value for value in records if value][:100]
+                else:
+                    metadata["usage"][name] = self._usage_metrics(usage)
+            retry = headers.get("retry-after")
+            if isinstance(retry, str) and re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,3})?", retry.strip()):
+                metadata["retry_after_seconds"] = min(float(retry), 86400)
+            observer(metadata)
+        except Exception:
+            # Quota telemetry must never alter an already-sent write's outcome.
+            pass
+
+    def request(self, method, path, token, params=None, timeout=None, deadline=None):
         if not re.fullmatch(r"(?:act_)?[1-9][0-9]{0,31}(?:/(?:ads|advideos))?", path):
             raise GraphError("invalid_graph_path", "Meta 请求对象无效")
+        if callable(self.request_guard):
+            self.request_guard()
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GraphError("account_video_read_limit", "账户视频完整核实已达到时限")
+            timeout = min(self.timeout if timeout is None else timeout, remaining)
         try:
             response = self.http.request(method, self.base + path, params=params or {},
                 headers={"Authorization": "Bearer " + token}, timeout=self.timeout if timeout is None else timeout, allow_redirects=False)
@@ -70,7 +132,9 @@ class GraphClient:
         try:
             data = response.json()
         except (ValueError, TypeError):
+            self._observe_response(method, path, response)
             raise GraphError("invalid_graph_response", "Meta 返回无法解析，不能确认结果", method == "DELETE") from None
+        self._observe_response(method, path, response, data)
         error = data.get("error") if isinstance(data, dict) else None
         if response.status_code >= 300 or error:
             error = error if isinstance(error, dict) else {}
@@ -494,7 +558,7 @@ class GraphClient:
                 return token, context
         raise GraphError("missing_token", "冻结候选用户没有可用的 Meta User Token", detail=context)
 
-    def delete_video_account(self, obj, account_id, prepared=None):
+    def delete_video_account(self, obj, account_id, prepared=None, defer_verification=False):
         """One DELETE of the frozen (account, video), without token rotation."""
         context, delete_sent = {}, False
         try:
@@ -521,6 +585,8 @@ class GraphClient:
                 # error itself is not proof: read the complete account library
                 # with this exact prepared credential, without another DELETE.
                 delete_error = {key: deepcopy(result[key]) for key in ("code", "message", "detail", "checked_at")}
+                if defer_verification:
+                    return "failed", dict(result, delete_error=delete_error, needs_account_verification=True)
                 verified_state, verification = self._read_video_account_absence(vid, aid, (token, context), seconds=10)
                 evidence = dict(verification, status=verified_state)
                 if verified_state == "already_deleted":
@@ -535,6 +601,76 @@ class GraphClient:
         """Match the explicit parameter error, never a generic code 100 denial."""
         return (isinstance(exc, GraphError) and not exc.uncertain and exc.code == "100" and
             re.fullmatch(r"(?:\(#100\)\s*)?Param video_id is not a valid video ID\.?", exc.message.strip(), re.IGNORECASE) is not None)
+
+    def verify_video_accounts(self, account_id, entries):
+        """Fresh shared GET proof, only for this batch's explicitly rejected DELETEs.
+
+        Entries are (object, prepared credential, original deferred result). The
+        token comparison is process-local; it is never included in diagnostics.
+        Call only after every DELETE in this account/credential batch has ended.
+        """
+        entries = list(entries)
+        if not entries:
+            return []
+        aid = self._video_account_target(entries[0][0], account_id)[1]
+        token, normalized = None, []
+        for obj, prepared, original in entries:
+            vid, target = self._video_account_target(obj, aid)
+            selected, context = prepared
+            endpoint = "act_" + aid + "/advideos"
+            if (not isinstance(selected, str) or not selected or
+                    (token is not None and token != selected) or
+                    context.get("delete_mode") != "ad_account_video" or context.get("delete_account_id") != aid or
+                    context.get("delete_endpoint") != endpoint or context.get("credential_kind") != "user"):
+                raise GraphError("verification_batch_mismatch", "合并核实必须使用同一广告账户和原删除凭证")
+            detail = original.get("detail", {})
+            status = detail.get("http_status") if isinstance(detail, dict) else None
+            eligible = GraphError(original.get("code", ""), original.get("message", ""), detail=detail)
+            if (original.get("needs_account_verification") is not True or
+                    original.get("account_id") != target or original.get("video_id") != vid or
+                    original.get("delete_scope") != "ad_account_video" or
+                    not isinstance(status, int) or isinstance(status, bool) or not 200 <= status < 500 or
+                    status in (301, 302, 307, 308) or original.get("success") is True or
+                    original.get("confirmed_absent") is True or
+                    original.get("delete_error") != {key: original.get(key) for key in ("code", "message", "detail", "checked_at")} or
+                    not self._invalid_account_video_id(eligible) or
+                    any(original.get(key) != value for key, value in context.items())):
+                raise GraphError("verification_not_eligible", "只有本批明确拒绝 Video ID 的删除结果可以合并核实")
+            token = selected
+            normalized.append((vid, deepcopy(context), deepcopy(original)))
+        try:
+            library = self._read_video_account_inventory(aid, token, seconds=10)
+            failure = None
+        except AssetError as exc:
+            library = None
+            failure = dict(code=exc.code, message=exc.message, detail=getattr(exc, "detail", {}))
+        except Exception:
+            library = None
+            failure = dict(code="account_video_read_incomplete", message="账户视频读取未完整结束，不能确认该账户已无此 Video")
+        outcomes = []
+        for vid, context, original in normalized:
+            result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video", checked_at=now())
+            if failure is not None:
+                verification = dict(result, status="unknown", **failure)
+            elif vid in library["ids"]:
+                verification = dict(result, status="unknown", code="account_video_present",
+                    message="该账户下仍能读取此 Video，不能确认该账户视频已移除")
+            else:
+                proof = dict(account_id=aid, video_id=vid, complete=True, pages=library["pages"], items=len(library["ids"]))
+                verification = dict(result, status="already_deleted", confirmed_absent=True, proof=proof,
+                    message="完整读取该账户视频库后确认已无此 Video")
+            delete_error = {key: deepcopy(original[key]) for key in ("code", "message", "detail", "checked_at")}
+            if verification["status"] == "already_deleted":
+                final = dict(verification, delete_error=delete_error, verification=verification,
+                    message="Meta 拒绝此 Video ID；完整读取该账户视频库后确认已无此 Video")
+                final.pop("status", None)
+                outcomes.append(("already_deleted", final))
+            else:
+                original.pop("needs_account_verification", None)
+                original.update(delete_error=delete_error, verification=verification,
+                    message=redact(original["message"] + "；删除后核实：" + verification["message"]))
+                outcomes.append(("failed", original))
+        return outcomes
 
     def reconcile_video_account(self, obj, account_id):
         """Only a complete account-library read can prove this pair is absent."""
@@ -553,37 +689,12 @@ class GraphClient:
         token, context = prepared
         result = dict(context, account_id=aid, video_id=vid, delete_scope="ad_account_video")
         try:
-            params, seen, cursors, pages = {"fields": "id", "limit": "100"}, set(), set(), 0
-            deadline = time.monotonic() + seconds
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise GraphError("account_video_read_limit", "账户视频完整核实已达到时限")
-                data = self.request("GET", "act_" + aid + "/advideos", token, params, timeout=min(self.timeout, 5, remaining))
-                pages += 1
-                if not isinstance(data, dict) or not isinstance(data.get("data"), list):
-                    raise GraphError("account_video_read_incomplete", "账户视频列表未完整返回")
-                for item in data["data"]:
-                    ident = self._identity_id(item.get("id")) if isinstance(item, dict) else ""
-                    if not ident or ident in seen:
-                        raise GraphError("account_video_read_incomplete", "账户视频列表含无法核实或重复的记录")
-                    if ident == vid:
-                        return "unknown", dict(result, code="account_video_present", message="该账户下仍能读取此 Video，不能确认该账户视频已移除", checked_at=now())
-                    seen.add(ident)
-                    if len(seen) > self.max_inventory:
-                        raise GraphError("account_video_read_limit", "账户视频列表超过完整核实上限")
-                paging = data.get("paging", {})
-                if not isinstance(paging, dict):
-                    raise GraphError("account_video_read_incomplete", "账户视频分页信息无效")
-                if not paging.get("next"):
-                    proof = {"account_id": aid, "video_id": vid, "complete": True, "pages": pages, "items": len(seen)}
-                    return "already_deleted", dict(result, confirmed_absent=True, proof=proof,
-                        message="完整读取该账户视频库后确认已无此 Video", checked_at=now())
-                after = (paging.get("cursors") or {}).get("after") if isinstance(paging.get("cursors", {}), dict) else None
-                if not isinstance(after, str) or not after or len(after) > 4096 or after in cursors or pages >= min(self.max_inventory, 500):
-                    raise GraphError("account_video_read_incomplete", "账户视频分页不完整或已达到上限")
-                cursors.add(after)
-                params["after"] = after
+            library = self._read_video_account_inventory(aid, token, seconds, stop_video=vid)
+            if vid in library["ids"]:
+                return "unknown", dict(result, code="account_video_present", message="该账户下仍能读取此 Video，不能确认该账户视频已移除", checked_at=now())
+            proof = {"account_id": aid, "video_id": vid, "complete": True, "pages": library["pages"], "items": len(library["ids"])}
+            return "already_deleted", dict(result, confirmed_absent=True, proof=proof,
+                message="完整读取该账户视频库后确认已无此 Video", checked_at=now())
         except AssetError as exc:
             return "unknown", dict(result, code=exc.code,
                 message=exc.message, detail=getattr(exc, "detail", {}), checked_at=now())
@@ -592,6 +703,39 @@ class GraphClient:
             # with a new unknown write outcome or interrupt later objects.
             return "unknown", dict(result, code="account_video_read_incomplete",
                 message="账户视频读取未完整结束，不能确认该账户已无此 Video", checked_at=now())
+
+    def _read_video_account_inventory(self, aid, token, seconds, stop_video=None):
+        """A new bounded scan, never a cached pre-delete inventory snapshot."""
+        params, seen, cursors, pages = {"fields": "id", "limit": "100"}, set(), set(), 0
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GraphError("account_video_read_limit", "账户视频完整核实已达到时限")
+            data = self.request("GET", "act_" + aid + "/advideos", token, params,
+                                timeout=min(self.timeout, 5, remaining), deadline=deadline)
+            pages += 1
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise GraphError("account_video_read_incomplete", "账户视频列表未完整返回")
+            for item in data["data"]:
+                ident = self._identity_id(item.get("id")) if isinstance(item, dict) else ""
+                if not ident or ident in seen:
+                    raise GraphError("account_video_read_incomplete", "账户视频列表含无法核实或重复的记录")
+                seen.add(ident)
+                if ident == stop_video:
+                    return {"ids": seen, "pages": pages, "complete": False}
+                if len(seen) > min(self.max_inventory, 50000):
+                    raise GraphError("account_video_read_limit", "账户视频列表超过完整核实上限")
+            paging = data.get("paging", {})
+            if not isinstance(paging, dict):
+                raise GraphError("account_video_read_incomplete", "账户视频分页信息无效")
+            if not paging.get("next"):
+                return {"ids": seen, "pages": pages, "complete": True}
+            after = (paging.get("cursors") or {}).get("after") if isinstance(paging.get("cursors", {}), dict) else None
+            if not isinstance(after, str) or not after or len(after) > 4096 or after in cursors or pages >= min(self.max_inventory, 500):
+                raise GraphError("account_video_read_incomplete", "账户视频分页不完整或已达到上限")
+            cursors.add(after)
+            params["after"] = after
 
     def delete(self, obj, prepared=None):
         """Call only after a durable attempt has been claimed by the service."""

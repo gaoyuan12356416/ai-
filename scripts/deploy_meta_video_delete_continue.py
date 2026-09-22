@@ -9,9 +9,10 @@ import deploy_meta_asset_recovery as rollout
 
 def guard_video_rollback(source):
     """Pause both Video write entries when restoring the known-broken runner."""
-    for marker in ("    def delete_video_account(self, obj, account_id, prepared=None):\n",
+    account_marker = next((line + "\n" for line in source.splitlines() if line.startswith("    def delete_video_account(")), "")
+    for marker in (account_marker,
                    "    def delete(self, obj, prepared=None):\n"):
-        assert source.count(marker) == 1, "rollback Graph adapter drift"
+        assert marker and source.count(marker) == 1, "rollback Graph adapter drift"
         source = source.replace(marker, marker +
             '        if obj.get("kind") == "video":\n'
             '            raise GraphError("video_execution_rolled_back", "Video execution is paused after rollback; restore the batch-continuation fix before retrying")\n', 1)

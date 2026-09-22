@@ -1,5 +1,6 @@
 """Scope contract tests; the source callback is always an in-memory fake."""
 from copy import deepcopy
+import re
 import unittest
 import tempfile
 from unittest.mock import Mock
@@ -44,6 +45,20 @@ class FixtureSource(SqlSource):
         self.reads.append((sql, columns, timeout))
         if columns == ("max_id",):
             return [{"max_id": "100"}]
+        if columns in (("max_id", "row_count"), ("row_count",), self.AD_SCAN_COLUMNS):
+            pid = bytes.fromhex(re.search(r"a.product=_utf8mb4 0x([0-9a-f]+)", sql)[1]).decode("utf-8")
+            rows = sorted((r for r in self.fixtures.get("ads", []) if r["product_id"] == pid), key=lambda r: int(r["row_id"]))
+            if columns == ("max_id", "row_count"):
+                return [dict(max_id=str(max([int(r["row_id"]) for r in rows], default=0)), row_count=str(len(rows)))]
+            high = int(re.search(r"a.id<=(\d+)", sql)[1])
+            rows = [r for r in rows if int(r["row_id"]) <= high]
+            if columns == ("row_count",):
+                return [dict(row_count=str(len(rows)))]
+            cursor, size = int(re.search(r"a.id>(\d+)", sql)[1]), int(re.search(r"LIMIT (\d+)", sql)[1])
+            return [{key: r[key] for key in columns} for r in rows if int(r["row_id"]) > cursor][:size]
+        if columns == self.AD_COLUMNS:
+            ids = {bytes.fromhex(value).decode("utf-8") for value in re.findall(r"_utf8mb4 0x([0-9a-f]+)", sql)}
+            return deepcopy([r for r in self.fixtures.get("ads", []) if r["row_id"] in ids])
         if ".ads_drama_info" in sql:
             bucket = "dramas"
         elif ".ads_custom_source" in sql:
@@ -100,14 +115,14 @@ class SourceTests(unittest.TestCase):
         source = SqlSource(query, lookup_actor=lambda _: {})
         self.assertEqual(source.list_products({"role": "user", "user_id": "unmapped"}), [])
         query.assert_not_called()
-        source.list_products = Mock(return_value=[product()])
+        source._products = Mock(return_value=[product()])
         with self.assertRaises(AssetError) as error:
             source.selected_products({"role": "admin"}, ["826"])
         self.assertEqual((error.exception.code, error.exception.status), ("product_permission_denied", 403))
 
     def test_w2a_is_selected_independently_without_adding_parent_app(self):
         source = SqlSource(Mock())
-        source.list_products = Mock(return_value=[product(), product("401", "301", "W2A")])
+        source._products = Mock(return_value=[product("401", "301", "W2A")])
         selected = source.selected_products({}, ["401"])
         self.assertEqual([p["id"] for p in selected], ["401"])
         self.assertEqual(selected[0]["parent_id"], "301")
@@ -153,8 +168,9 @@ class SourceTests(unittest.TestCase):
         self.assertEqual((rows[0]["content_ids"], rows[0]["account_id"], rows[0]["reason"]), (["101"], "444", ""))
         self.assertEqual(rows[0]["local_status"], "DELETED")
         self.assertEqual(rows[0]["video_ids"], ["3001"])
-        ad_queries = [sql for sql, columns, _ in source.reads if columns == source.AD_COLUMNS]
-        self.assertTrue(all("a.product IN (" + q("301") + ")" in sql for sql in ad_queries))
+        ad_queries = [sql for sql, columns, _ in source.reads if columns == source.AD_SCAN_COLUMNS]
+        self.assertTrue(ad_queries)
+        self.assertTrue(all("a.product=" + q("301") in sql for sql in ad_queries))
         self.assertTrue(all("a.status=" not in sql for sql in ad_queries))
 
     def test_historical_complete_markers_are_accepted_but_substrings_are_not(self):
@@ -171,8 +187,9 @@ class SourceTests(unittest.TestCase):
                                                           ad("2", "1002", pid="301", original="501")])
         rows, _ = self.resolve(source, [drama(pid="401")], [product("401", "301", "W2A")])
         self.assertEqual([row["ad_id"] for row in rows], ["1001"])
-        ad_queries = [sql for sql, columns, _ in source.reads if columns == source.AD_COLUMNS]
-        self.assertTrue(all("a.product IN (" + q("401") + ")" in sql for sql in ad_queries))
+        ad_queries = [sql for sql, columns, _ in source.reads if columns == source.AD_SCAN_COLUMNS]
+        self.assertTrue(ad_queries)
+        self.assertTrue(all("a.product=" + q("401") in sql for sql in ad_queries))
 
     def test_mismatched_material_product_or_language_is_blocked(self):
         for source_material in (material(pid="999"), material(language="fr")):
@@ -242,7 +259,7 @@ class SourceTests(unittest.TestCase):
         self.assertTrue(all(row["reason"] for row in rows))
 
     def test_too_many_ad_candidates_stop_instead_of_returning_partial_scope(self):
-        source = FixtureSource(ads=[ad(str(n), str(10000 + n)) for n in range(10001)])
+        source = FixtureSource(ads=[ad(str(n), str(10000 + n)) for n in range(1, 10002)])
         with self.assertRaises(AssetError) as error:
             self.resolve(source)
         self.assertEqual(error.exception.code, "too_many_ads")

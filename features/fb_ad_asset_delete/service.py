@@ -5,10 +5,13 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 from .core import (AssetError, PHASES, STATUSES, TERMINAL_SUCCESS, account_id, actor_key,
                    meta_id, normalize_input, normalize_phases, now, summary)
 from .graph import GraphError
 from .store import StoreError, _process_start, _VIDEO_CREDENTIAL_FIELDS
+from .execution import EXECUTION_BUDGET
 
 
 def public_product(product):
@@ -23,10 +26,11 @@ def public_object(obj):
 
 
 class Service:
-    def __init__(self, store, source, graph_factory, spawn=None, authorize=None):
+    def __init__(self, store, source, graph_factory, spawn=None, authorize=None, execution_budget=None):
         self.store, self.source, self.graph_factory = store, source, graph_factory
         self.spawn = spawn or self._spawn
         self.authorize = authorize or (lambda session: session)
+        self.execution_budget = execution_budget or EXECUTION_BUDGET
         self.store.recover_interrupted()
         self.store.recover_rechecks()
         for job in self.store.list_jobs(limit=500):
@@ -329,133 +333,261 @@ class Service:
                 raise AssetError("worker_unavailable", "后台执行未启动，进度已保留，请人工恢复", 503) from None
         return {k: run[k] for k in ("job_id", "run_id", "status", "duplicate")}
 
+    def _parallel_groups(self, groups, work, stop):
+        errors, error_lock = [], threading.Lock()
+
+        def run(accounts, objects):
+            try:
+                with self.execution_budget.account_scope(accounts, stop):
+                    self.execution_budget.check(stop)
+                    work(accounts, objects)
+            except Exception as exc:
+                with error_lock:
+                    errors.append(exc)
+                stop.set()
+
+        # All futures drain before the caller fences unfinished durable claims.
+        with ThreadPoolExecutor(max_workers=self.execution_budget.concurrency,
+                                thread_name_prefix="meta-delete-account") as pool:
+            futures = [pool.submit(run, accounts, objects) for accounts, objects in groups.items()]
+            for future in as_completed(futures):
+                future.result()
+        if errors:
+            raise next((e for e in errors if getattr(e, "code", "") != "execution_stopped"), errors[0])
+
+    def _worker_graph(self, accounts, stop, session, job):
+        graph = self.graph_factory()
+        graph.response_observer = lambda metadata: self.execution_budget.observe(accounts, metadata)
+
+        def guard():
+            if self.execution_budget.wait(accounts, stop):
+                try:
+                    self._allowed(self.authorize(session), job)
+                except Exception:
+                    stop.set()
+                    raise
+            self.execution_budget.check(stop)
+
+        graph.request_guard = guard
+        return graph
+
+    @staticmethod
+    def _close_graph(graph):
+        close = getattr(getattr(graph, "http", None), "close", None)
+        if callable(close):
+            close()
+
     def _run(self, job_id, run_id, phases, session):
+        stop = threading.Event()
         try:
             job = self.store.get_job(job_id)
-            graph = self.graph_factory()
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
             for phase in phases:
-                fresh_session = self.authorize(session)
-                self._allowed(fresh_session, job)
-                self.store.update_job(job_id, current_phase=phase)
+                self._allowed(self.authorize(session), job)
+                self.store.update_job(job_id, current_phase=phase, execution_concurrency=self.execution_budget.concurrency)
+                objects = [o for o in job["objects"] if o["kind"] == phase and
+                           (o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
+                probe = self.graph_factory()
+                account_mode = phase == "video" and callable(getattr(probe, "prepare_video_account_delete", None))
+                self._close_graph(probe)
+                if account_mode:
+                    self._run_video_phase(job, run_id, objects, session, stop)
+                    continue
                 refs_error, outside_keys = None, set()
                 if phase == "creative":
                     try:
-                        phase_objects = [o for o in job["objects"] if o["kind"] == phase and o["status"] in ("pending", "failed")]
-                        refs = self.source.shared_references(phase_objects, progress=lambda kind, done, total:
+                        refs = self.source.shared_references(objects, progress=lambda kind, done, total:
                             self.store.update_job(job_id, execution_step=self._reference_step(kind, done, total)))
                         outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
                     except AssetError as exc:
                         refs_error = exc
-                for obj in job["objects"]:
-                    eligible = obj["status"] in ("pending", "failed") or phase == "video" and obj["status"] == "blocked"
-                    if obj["kind"] != phase or not eligible:
-                        continue
-                    self._allowed(self.authorize(session), job)
-                    # Claim first: the lock covers the final read check and the
-                    # mutation, so a concurrent task cannot change the same node.
-                    claim = self.store.claim_object(job_id, obj["key"], run_id)
-                    if not claim["claimed"]:
-                        if phase == "creative" and claim["status"] in TERMINAL_SUCCESS:
-                            deleted_creatives.add(obj["object_id"])
-                        continue
+                groups, successes, success_lock = defaultdict(list), set(), threading.Lock()
+                for obj in objects:
+                    groups[tuple(sorted({account_id(a) for a in obj.get("account_ids", [])}))].append(obj)
+
+                def nodes(accounts, entries):
+                    graph = self._worker_graph(accounts, stop, session, job)
                     try:
-                        if phase == "video":
-                            if callable(getattr(graph, "prepare_video_account_delete", None)):
-                                state, result = self._run_video_accounts(graph, obj, job, run_id, session)
-                            elif callable(getattr(graph, "prepare_video_delete", None)):
-                                prepared = graph.prepare_video_delete(obj)
-                                self.store.record_object_credential(job_id, obj["key"], run_id, prepared[1])
+                        for obj in entries:
+                            with self.execution_budget.operation(accounts, stop):
                                 self._allowed(self.authorize(session), job)
-                                state, result = graph.delete(obj, prepared=prepared)
-                            else:
-                                state, result = graph.delete(obj)
-                        else:
-                            if refs_error:
-                                raise refs_error
-                            if obj["key"] in outside_keys:
-                                raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
-                            state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
-                            if state == "pending":
-                                state, result = graph.delete(obj)
-                    except StoreError:
-                        # Failure to record the selected identity stops new
-                        # writes, including the very first request of this item.
-                        raise
-                    except AssetError as exc:
-                        if phase == "video" and callable(getattr(graph, "prepare_video_account_delete", None)):
-                            # Account attempts already retain their own outcomes.
-                            # Stop the run with the original authorization/input
-                            # error instead of overwriting its account progress.
-                            raise
-                        state, result = "failed" if phase == "video" else "blocked", self._error_result(exc)
-                    except Exception:
-                        if phase == "video" and callable(getattr(graph, "prepare_video_account_delete", None)):
-                            raise
-                        # Unexpected adapter failure may occur after a request.
-                        state, result = "unknown", {"code": "unexpected_outcome", "message": "对象处理未正常返回，需要核实", "checked_at": now()}
-                    # If persistence fails, propagate and stop the entire run;
-                    # never start another deletion without a writable ledger.
-                    self.store.finish_object(job_id, obj["key"], run_id, state, result)
-                    if phase == "creative" and state in TERMINAL_SUCCESS:
-                        deleted_creatives.add(obj["object_id"])
+                                claim = self.store.claim_object(job_id, obj["key"], run_id)
+                                if not claim["claimed"]:
+                                    if phase == "creative" and claim["status"] in TERMINAL_SUCCESS:
+                                        with success_lock:
+                                            successes.add(obj["object_id"])
+                                    continue
+                                try:
+                                    if phase == "video":
+                                        if callable(getattr(graph, "prepare_video_delete", None)):
+                                            prepared = graph.prepare_video_delete(obj)
+                                            self.store.record_object_credential(job_id, obj["key"], run_id, prepared[1])
+                                            self._allowed(self.authorize(session), job)
+                                            self.execution_budget.check(stop)
+                                            state, result = graph.delete(obj, prepared=prepared)
+                                        else:
+                                            self.execution_budget.check(stop)
+                                            state, result = graph.delete(obj)
+                                    else:
+                                        if refs_error:
+                                            raise refs_error
+                                        if obj["key"] in outside_keys:
+                                            raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
+                                        state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
+                                        if state == "pending":
+                                            # Revalidate after reads, immediately before the write.
+                                            self._allowed(self.authorize(session), job)
+                                            self.execution_budget.check(stop)
+                                            state, result = graph.delete(obj)
+                                except StoreError:
+                                    raise
+                                except AssetError as exc:
+                                    if exc.code in ("execution_stopped", "permission_revoked", "product_permission_denied", "product_mapping_changed", "job_forbidden"):
+                                        self.store.finish_object(job_id, obj["key"], run_id, "blocked",
+                                            dict(self._error_result(exc), delete_not_sent=True))
+                                        raise
+                                    state, result = "failed" if phase == "video" else "blocked", self._error_result(exc)
+                                except Exception:
+                                    state, result = "unknown", {"code": "unexpected_outcome", "message": "对象处理未正常返回，需要核实", "checked_at": now()}
+                                self.store.finish_object(job_id, obj["key"], run_id, state, result)
+                                if result.get("code") in ("execution_stopped", "permission_revoked", "product_permission_denied", "product_mapping_changed", "job_forbidden"):
+                                    raise AssetError(result["code"], result.get("message", "执行权限已失效"), 403)
+                                if phase == "creative" and state in TERMINAL_SUCCESS:
+                                    with success_lock:
+                                        successes.add(obj["object_id"])
+                    finally:
+                        self._close_graph(graph)
+
+                self._parallel_groups(groups, nodes, stop)
+                deleted_creatives.update(successes)
             final = self.store.get_job(job_id)
             totals, stages = summary(final["objects"])
             self.store.finish_run(run_id, "completed", {"summary": totals, "phase_results": stages})
         except Exception as exc:
+            stop.set()
             error = {"code": exc.code, "message": exc.message} if isinstance(exc, AssetError) else {"code": "ledger_or_worker_interrupted", "message": "台账或执行中断，已停止新增删除请求，请人工恢复"}
             try:
                 self.store.finish_run(run_id, "interrupted", error)
             except Exception:
                 pass  # restart recovery fences the durable active claim
 
-    def _run_video_accounts(self, graph, obj, job, run_id, session):
-        """Each account has its own durable attempt and success receipt."""
-        job_id, key, video_id = job["job_id"], obj["key"], obj["object_id"]
-        accounts = sorted({account_id(value) for value in obj.get("account_ids", [])})
-        if not accounts:
-            return "failed", dict(delete_mode="ad_account_video", code="missing_ad_account",
-                message="冻结记录缺少广告账户，无法构造账户视频删除请求", account_results=[], checked_at=now())
-        self.store.begin_video_accounts(job_id, key, run_id)
-        for aid in accounts:
-            self._allowed(self.authorize(session), job)
-            prepared, error = None, None
-            context = dict(delete_mode="ad_account_video", delete_account_id=aid,
-                delete_endpoint="act_" + aid + "/advideos")
-            try:
-                prepared = graph.prepare_video_account_delete(obj, aid)
-                context = prepared[1]
-            except AssetError as exc:
-                # Preserve the intended queue credential even when lookup fails;
-                # the durable claim and failed result must describe one identity.
-                context.update({k: v for k, v in getattr(exc, "detail", {}).items() if k in _VIDEO_CREDENTIAL_FIELDS})
-                error = self._error_result(exc)
-            except Exception:
-                error = {"code": "credential_unavailable", "message": "投放凭证读取未完成，尚未发送删除请求"}
-            claim = self.store.claim_video_account(job_id, key, run_id, aid, context)
-            if not claim["claimed"]:
-                continue
-            if error is not None:
-                state, result = "failed", dict(context, **error)
-            else:
-                try:
+    def _run_video_phase(self, job, run_id, objects, session, stop):
+        job_id = job["job_id"]
+        groups, initialized, init_lock = defaultdict(list), {}, threading.Lock()
+        remaining, finished = {}, set()
+
+        def account_done(obj, aid):
+            # Publish each parent outcome as soon as all its account work settles.
+            # Failed children from an older run still count until this run visits them.
+            with init_lock:
+                remaining[obj["key"]].discard(aid)
+                if remaining[obj["key"]] or obj["key"] in finished:
+                    return
+                results = self.store.video_account_results(job_id, obj["key"])
+                states = {item["status"] for item in results}
+                state = "unknown" if states & {"unknown", "in_progress"} else "deleted" if results and states.issubset(TERMINAL_SUCCESS) else "failed"
+                self.store.finish_object(job_id, obj["key"], run_id, state, dict(
+                    delete_mode="ad_account_video", delete_scope="ad_account_video", video_id=obj["object_id"],
+                    account_results=results, success=state == "deleted", checked_at=now(),
+                    message="所列广告账户的视频素材已删除" if state == "deleted" else "部分账户尚未完成，请查看逐账户结果"))
+                finished.add(obj["key"])
+        for obj in objects:
+            accounts = sorted({account_id(a) for a in obj.get("account_ids", [])})
+            for aid in accounts:
+                groups[(aid,)].append(obj)
+            if not accounts:
+                # Keep malformed historical rows visible as explicit failures.
+                with self.execution_budget.operation((), stop):
                     self._allowed(self.authorize(session), job)
-                    state, result = graph.delete_video_account(obj, aid, prepared=prepared)
-                except AssetError as exc:
-                    state, result = "failed", dict(context, **self._error_result(exc))
-                except Exception:
-                    state, result = "unknown", dict(context, code="unexpected_outcome",
-                        message="账户视频请求未正常返回，需要核实后再处理")
-            result = dict(result, delete_mode="ad_account_video", delete_scope="ad_account_video",
-                account_id=aid, video_id=video_id, checked_at=now())
-            self.store.finish_video_account(job_id, key, run_id, aid, claim["account_attempt_id"], state, result)
-        results = self.store.video_account_results(job_id, key)
-        states = {item["status"] for item in results}
-        state = "unknown" if states & {"unknown", "in_progress"} else "deleted" if results and states.issubset(TERMINAL_SUCCESS) else "failed"
-        return state, dict(delete_mode="ad_account_video", delete_scope="ad_account_video", video_id=video_id,
-            account_results=results, success=state == "deleted", checked_at=now(),
-            message="所列广告账户的视频素材已删除" if state == "deleted" else "部分账户尚未完成，请查看逐账户结果")
+                    claim = self.store.claim_object(job_id, obj["key"], run_id)
+                    if claim["claimed"]:
+                        self.store.finish_object(job_id, obj["key"], run_id, "failed", dict(
+                            delete_mode="ad_account_video", delete_scope="ad_account_video", video_id=obj["object_id"],
+                            code="missing_ad_account", message="冻结记录缺少广告账户", account_results=[]))
+
+        def videos(accounts, entries):
+            aid = accounts[0]
+            graph, deferred = self._worker_graph(accounts, stop, session, job), defaultdict(list)
+            try:
+                for obj in entries:
+                    with self.execution_budget.operation(accounts, stop):
+                        self._allowed(self.authorize(session), job)
+                        with init_lock:
+                            if obj["key"] not in initialized:
+                                claim = self.store.claim_object(job_id, obj["key"], run_id)
+                                initialized[obj["key"]] = obj if claim["claimed"] else None
+                                if claim["claimed"]:
+                                    self.store.begin_video_accounts(job_id, obj["key"], run_id)
+                                    remaining[obj["key"]] = {account_id(a) for a in obj.get("account_ids", [])}
+                            claimed = initialized[obj["key"]] is not None
+                        if not claimed:
+                            continue
+                        current = next(r for r in self.store.video_account_results(job_id, obj["key"]) if r["account_id"] == aid)
+                        if current["status"] not in ("pending", "failed"):
+                            account_done(obj, aid)
+                            continue
+                        prepared, error = None, None
+                        context = dict(delete_mode="ad_account_video", delete_account_id=aid, delete_endpoint="act_" + aid + "/advideos")
+                        try:
+                            prepared = graph.prepare_video_account_delete(obj, aid)
+                            context = prepared[1]
+                        except AssetError as exc:
+                            context.update({k: v for k, v in getattr(exc, "detail", {}).items() if k in _VIDEO_CREDENTIAL_FIELDS})
+                            error = self._error_result(exc)
+                        except Exception:
+                            error = {"code": "credential_unavailable", "message": "投放凭证读取未完成，尚未发送删除请求"}
+                        claim = self.store.claim_video_account(job_id, obj["key"], run_id, aid, context)
+                        if not claim["claimed"]:
+                            account_done(obj, aid)
+                            continue
+                        if error is not None:
+                            state, result = "failed", dict(context, **error)
+                        else:
+                            try:
+                                self._allowed(self.authorize(session), job)
+                                self.execution_budget.check(stop)
+                            except AssetError as exc:
+                                self.store.finish_video_account(job_id, obj["key"], run_id, aid, claim["account_attempt_id"], "failed",
+                                    dict(context, **self._error_result(exc), delete_mode="ad_account_video",
+                                         delete_scope="ad_account_video", account_id=aid, video_id=obj["object_id"], delete_not_sent=True))
+                                raise
+                            try:
+                                if callable(getattr(graph, "verify_video_accounts", None)):
+                                    state, result = graph.delete_video_account(obj, aid, prepared=prepared, defer_verification=True)
+                                else:
+                                    state, result = graph.delete_video_account(obj, aid, prepared=prepared)
+                            except AssetError as exc:
+                                state, result = "unknown" if getattr(exc, "uncertain", False) else "failed", dict(context, **self._error_result(exc))
+                            except Exception:
+                                state, result = "unknown", dict(context, code="unexpected_outcome", message="账户视频请求未正常返回，需要核实后再处理")
+                        result = dict(result, delete_mode="ad_account_video", delete_scope="ad_account_video", account_id=aid, video_id=obj["object_id"], checked_at=result.get("checked_at", now()))
+                        attempt = claim["account_attempt_id"]
+                        if state == "failed" and prepared is not None and result.get("needs_account_verification") is True:
+                            self.store.defer_video_account_verification(job_id, obj["key"], run_id, aid, attempt, result)
+                            # Token never enters a ledger or a diagnostic. Group only identical current credentials.
+                            group_key = (prepared[0], context.get("credential_kind"), context.get("credential_user_id"), context.get("credential_fb_user_id"))
+                            deferred[group_key].append((obj, prepared, result, attempt))
+                        else:
+                            self.store.finish_video_account(job_id, obj["key"], run_id, aid, attempt, state, result)
+                            account_done(obj, aid)
+                            if result.get("code") in ("execution_stopped", "permission_revoked", "product_permission_denied", "product_mapping_changed", "job_forbidden"):
+                                raise AssetError(result["code"], result.get("message", "执行权限已失效"), 403)
+                for batch in deferred.values():
+                    with self.execution_budget.operation(accounts, stop):
+                        self._allowed(self.authorize(session), job)
+                        results = graph.verify_video_accounts(aid, [(obj, prepared, result) for obj, prepared, result, attempt in batch])
+                        if len(results) != len(batch):
+                            raise StoreError("Incomplete merged verification results", "invalid_input")
+                        for (obj, prepared, original, attempt), (state, result) in zip(batch, results):
+                            self.store.finish_video_account(job_id, obj["key"], run_id, aid, attempt, state, result)
+                            account_done(obj, aid)
+            finally:
+                self._close_graph(graph)
+
+        self._parallel_groups(groups, videos, stop)
+        if any(obj is not None and key not in finished for key, obj in initialized.items()):
+            raise StoreError("Account workers did not settle every claimed video", "invalid_state")
 
     def reconcile(self, session, job_id, payload):
         job = self.store.get_job(job_id)

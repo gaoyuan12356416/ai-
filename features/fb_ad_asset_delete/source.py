@@ -93,7 +93,8 @@ class SqlSource:
                         message="查询短暂中断，正在自动重试（%d/%d）" % (attempt + 1, self.PREVIEW_READ_ATTEMPTS - 1)))
                 time.sleep(0.25 * (attempt + 1))
 
-    def list_products(self, session):
+    def _products(self, session, ids=None):
+        """Read current ACL/default mapping, optionally only for explicit IDs."""
         permission = "1=1"
         if session.get("role") != "admin":
             group = self.lookup_actor(session) or {}
@@ -103,13 +104,15 @@ class SqlSource:
             permission = """EXISTS (SELECT 1 FROM {s}.admin_role_users aru
                 JOIN {s}.admin_role_apps ara ON ara.id=aru.role_app_id
                 WHERE aru.user_id={uid} AND (ara.is_all=1 OR FIND_IN_SET(CAST(a.id AS CHAR),REPLACE(ara.values,' ',''))))""".format(s=self.schema, uid=q(sub_id))
+        selection = " AND a.id IN " + inside(ids) if ids is not None else ""
         rows = self.read("""SELECT CAST(a.id AS CHAR),a.name,CAST(a.app_type AS CHAR),
             CAST(CASE WHEN a.app_type=14 THEN a.id ELSE COALESCE(p.id,0) END AS CHAR),
             CASE WHEN a.app_type=14 THEN a.name ELSE COALESCE(p.name,'') END,
             CAST(COALESCE(a.default_user,0) AS CHAR)
             FROM {s}.ads_apps_setting a LEFT JOIN {s}.ads_apps_setting p ON p.id=a.ads_app_id AND p.app_type=14
             WHERE (a.app_type=14 OR (a.app_type IN (10000,10001) AND (a.landing_app_type=14 OR p.id IS NOT NULL)))
-            AND ({permission}) ORDER BY a.name,a.id LIMIT 5001""".format(s=self.schema, permission=permission),
+            AND ({permission}){selection} ORDER BY a.name,a.id LIMIT 5001""".format(
+                s=self.schema, permission=permission, selection=selection),
             ("id", "name", "app_type", "parent_id", "parent_name", "default_user"))
         if len(rows) > 5000:
             raise AssetError("too_many_products", "短剧产品目录超出可读取范围", 503)
@@ -119,8 +122,14 @@ class SqlSource:
             row["parent_id"] = str(row["parent_id"])
         return rows
 
+    def list_products(self, session):
+        return self._products(session)
+
     def selected_products(self, session, ids):
-        allowed = {row["id"]: row for row in self.list_products(session)}
+        ids = list(ids)
+        if not ids:
+            return []
+        allowed = {row["id"]: row for row in self._products(session, list(dict.fromkeys(ids)))}
         if any(pid not in allowed for pid in ids):
             raise AssetError("product_permission_denied", "所选产品不属于可访问的短剧投放产品", 403)
         return [allowed[pid] for pid in ids]
@@ -471,20 +480,44 @@ class SqlSource:
         frozen_rows = {str(r["source_row_id"]): r for r in frozen if scoped(r)} if isinstance(frozen, list) else {}
         if isinstance(frozen, list) and not frozen_rows:
             raise AssetError("credential_source_missing", "没有该广告账户的冻结发布来源", 409)
-        row_filter = " AND a.id IN " + inside(sorted(frozen_rows)) if frozen_rows else ""
-        rows = self.read("""SELECT CAST(a.id AS CHAR),a.product,a.ad_id,a.ad_account_id,CAST(a.user_id AS CHAR),
-            CAST(a.publish_queue_id AS CHAR),CAST(pq.id AS CHAR),pq.product,CAST(pq.user_id AS CHAR),
-            CAST(pq.default_token AS CHAR),CAST(p.id AS CHAR),CAST(p.default_user AS CHAR)
-            FROM {s}.ads_facebook_auto_created_data a
-            LEFT JOIN {s}.ads_template_make_queue pq ON pq.id=a.publish_queue_id
-            LEFT JOIN {s}.ads_apps_setting p ON p.id=a.product
-            WHERE a.ad_id IN {ads} AND a.product IN {products} AND a.ad_account_id IN {accounts}{row_filter}
-            ORDER BY a.id LIMIT 10001""".format(s=self.schema, ads=inside(sorted(ads)),
-                products=inside(sorted(products)), accounts=inside([aid, "act_" + aid]), row_filter=row_filter),
-            ("source_row_id", "product_id", "ad_id", "account_id", "user_id", "publish_queue_id",
-             "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user"), 5)
-        if len(rows) > 10000:
-            raise AssetError("credential_source_overflow", "发布来源超出读取上限，无法确定 Token", 409)
+        row_filter = ""
+        if frozen_rows:
+            # Match each complete frozen tuple before selecting the first row;
+            # independent IN lists could accept a newly crossed association.
+            tuples = ["(" + ",".join(q(frozen_rows[rid][key]) for key in
+                ("source_row_id", "ad_id", "product_id", "user_id")) + ")" for rid in sorted(frozen_rows)]
+            row_filter = " AND a.id IN %s AND (a.id,a.ad_id,a.product,a.user_id) IN (%s)" % (
+                inside(sorted(frozen_rows)), ",".join(tuples))
+        columns = ("source_row_id", "product_id", "ad_id", "account_id", "user_id", "publish_queue_id",
+            "queue_id", "queue_product_id", "queue_user_id", "default_token", "setting_product_id", "default_user")
+        rows = self.read("""SELECT chosen.*,CAST(f.user_id AS CHAR),CAST(f.facebookUserID AS CHAR),f.accessToken
+            FROM (SELECT CAST(a.id AS CHAR) AS source_row_id,a.product AS product_id,a.ad_id,
+                a.ad_account_id AS account_id,CAST(a.user_id AS CHAR) AS user_id,
+                CAST(a.publish_queue_id AS CHAR) AS publish_queue_id,CAST(pq.id AS CHAR) AS queue_id,
+                pq.product AS queue_product_id,CAST(pq.user_id AS CHAR) AS queue_user_id,
+                CAST(pq.default_token AS CHAR) AS default_token,CAST(p.id AS CHAR) AS setting_product_id,
+                CAST(p.default_user AS CHAR) AS default_user
+                FROM {s}.ads_facebook_auto_created_data a
+                LEFT JOIN {s}.ads_template_make_queue pq ON pq.id=a.publish_queue_id
+                LEFT JOIN {s}.ads_apps_setting p ON p.id=a.product
+                WHERE a.ad_id IN {ads} AND a.product IN {products} AND a.user_id IN {users}
+                    AND a.ad_account_id IN {accounts}{row_filter}
+                ORDER BY a.id LIMIT 1) chosen
+            LEFT JOIN {s}.ads_facebook_info f ON f.user_id=CASE
+                WHEN chosen.default_token='1' THEN chosen.default_user
+                WHEN chosen.default_token='-1' THEN chosen.queue_user_id ELSE NULL END
+                AND CAST(chosen.queue_id AS BINARY)=CAST(chosen.publish_queue_id AS BINARY)
+                AND CAST(chosen.queue_product_id AS BINARY)=CAST(chosen.product_id AS BINARY)
+                AND CAST(chosen.queue_user_id AS BINARY)=CAST(chosen.user_id AS BINARY)
+                AND TRIM(f.accessToken)<>''
+            LIMIT 2""".format(s=self.schema, ads=inside(sorted(ads)), products=inside(sorted(products)),
+                users=inside(sorted(users)), accounts=inside([aid, "act_" + aid]), row_filter=row_filter),
+            columns + ("token_user_id", "fb_user_id", "token"), 5)
+        # SQL returns one chosen source and at most two nonempty credentials.
+        # This replaces the old 10,001-source scan without relaxing lineage,
+        # queue diagnostics or duplicate-credential rejection.
+        if len(rows) > 2:
+            raise AssetError("credential_source_overflow", "发布来源查询返回超出上限，无法确定 Token", 409)
         matched = [row for row in rows if scoped(row) and (not frozen_rows or
             str(row["source_row_id"]) in frozen_rows and all(str(row[key]) == str(frozen_rows[str(row["source_row_id"])][key])
                 for key in ("ad_id", "product_id", "user_id")))]
@@ -517,10 +550,11 @@ class SqlSource:
         else:
             uid, relation = str(row["queue_user_id"]), "publish_queue_user"
         context.update(credential_kind="user", credential_user_id=uid, credential_relation=relation)
-        rows = self.read("""SELECT CAST(user_id AS CHAR),CAST(facebookUserID AS CHAR),accessToken
-            FROM {s}.ads_facebook_info WHERE user_id={uid} AND TRIM(accessToken)<>'' LIMIT 2""".format(s=self.schema, uid=q(uid)),
-            ("user_id", "fb_user_id", "token"), 5)
-        matches = [r for r in rows if str(r.get("user_id")) == uid and str(r.get("token") or "").strip()]
+        # The second joined row must describe the very same source. Never let
+        # a malformed transport result hide a duplicate or switch identities.
+        matches = [r for r in matched if str(r.get("token_user_id")) == uid and str(r.get("token") or "").strip()]
+        if any(any(str(other.get(key)) != str(row.get(key)) for key in columns) for other in rows):
+            fail("credential_source_changed", "发布来源查询返回不一致，无法确定 Token；未改用其他用户")
         if len(matches) != 1:
             fail("publishing_token_unavailable", "按发布队列选定的 Token 不可用或不唯一；未改用其他用户")
         token_row = matches[0]
