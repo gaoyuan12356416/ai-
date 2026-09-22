@@ -30,7 +30,7 @@ python3 -m py_compile features/fb_ad_asset_delete/bridge.py features/fb_ad_asset
 git diff --check
 ```
 
-2026-09-22 10:45（北京时间）已发布并验收。运行提交 `00f55957433db24de79778d6c3d99cc966894e4d`，分支 `codex/meta-delete-throughput-20260922`，GitHub 推送及服务器精确 fetch 均已核对。本地及服务器 Python 3.9.6 均通过 354 项模块测试；服务器 SQLite 3.26 的测试方言差异仅在测试适配器中修正，生产 MySQL SQL 未改变。
+2026-09-22 10:45（北京时间）已发布并验收。运行提交 `00f55957433db24de79778d6c3d99cc966894e4d`，分支 `codex/meta-delete-throughput-20260922`，GitHub 推送及服务器精确 fetch 均已核对。本地及服务器均通过 354 项模块测试，服务器运行 Python 3.9.6；服务器 SQLite 3.26 的测试方言差异仅在测试适配器中修正，生产 MySQL SQL 未改变。
 
 - Release：`/mnt/data-disk/meta-ad-asset-delete/release-00f55957433d`。
 - 备份：`/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20260922T024404Z-00f55957433d`，其中 `acceptance.json` 保存本次验收、表行数及完整行摘要，`plan.json` 保存全部 6 个目标文件的前后哈希。
