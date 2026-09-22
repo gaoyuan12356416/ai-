@@ -3,6 +3,7 @@ import copy
 import os
 import re
 import threading
+import time
 import uuid
 from .core import (AssetError, PHASES, STATUSES, TERMINAL_SUCCESS, account_id, actor_key,
                    meta_id, normalize_input, normalize_phases, now, summary)
@@ -35,6 +36,7 @@ class Service:
                 if alive is False or alive is True and identity != owner.get("identity"):
                     self.store.update_job(job["job_id"], status="failed", error={"code": "preview_interrupted", "message": "预览进程已中断，请重新预览；未执行删除"})
         self.preview_slots = threading.BoundedSemaphore(2)
+        self.preview_lock = threading.Lock()
 
     @staticmethod
     def _spawn(fn, *args):
@@ -107,19 +109,54 @@ class Service:
 
     def preview(self, session, payload):
         input_type, ids, product_ids = normalize_input(payload)
-        products = self.source.selected_products(session, product_ids)
-        if not self.preview_slots.acquire(blocking=False):
-            raise AssetError("preview_busy", "已有两个预览正在查询，请稍后重试", 429)
-        try:
-            job = self.store.create_job(dict(job_id=uuid.uuid4().hex, preview_id=uuid.uuid4().hex,
-                actor=actor_key(session), actor_name=str(session.get("name") or ""), input_type=input_type,
-                ids=ids, products=products, status="previewing", preview_started_at=now(), objects=[],
-                preview_owner={"pid": os.getpid(), "identity": _process_start(os.getpid())[1]}))
-            self.spawn(self._build_preview, job["job_id"])
-        except Exception:
-            self.preview_slots.release()
-            raise
-        return self._public(job)
+        actor = actor_key(session)
+        request_id = payload.get("request_id", "")
+        if not isinstance(request_id, str) or request_id and not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
+            raise AssetError("invalid_request_id", "预览请求编号无效，请重新提交")
+        job_id = uuid.uuid5(uuid.NAMESPACE_URL, "fb-asset-preview:" + actor + ":" + request_id).hex if request_id else uuid.uuid4().hex
+
+        def existing():
+            try:
+                job = self.store.get_job(job_id)
+            except StoreError as exc:
+                if exc.code == "not_found":
+                    return None
+                raise
+            if job["actor"] != actor or job["input_type"] != input_type or set(job["ids"]) != set(ids) or {p["id"] for p in job["products"]} != set(product_ids):
+                raise AssetError("request_conflict", "此预览请求编号已用于其他范围，请重新提交", 409)
+            self._allowed(session, job)
+            return self._public(job)
+
+        # Serialize submission only; querying and Meta verification stay in the
+        # worker. The durable ID also makes a lost HTTP response safe to retry.
+        with self.preview_lock:
+            if request_id:
+                previous = existing()
+                if previous is not None:
+                    return previous
+            products = self.source.selected_products(session, product_ids)
+            if not self.preview_slots.acquire(blocking=False):
+                raise AssetError("preview_busy", "已有两个预览正在查询，请稍后重试", 429)
+            created = False
+            try:
+                job = self.store.create_job(dict(job_id=job_id, preview_id=uuid.uuid4().hex,
+                    actor=actor, actor_name=str(session.get("name") or ""), input_type=input_type,
+                    ids=ids, products=products, request_id=request_id, status="previewing",
+                    preview_step="正在准备查询", preview_started_at=now(), objects=[],
+                    preview_owner={"pid": os.getpid(), "identity": _process_start(os.getpid())[1]}))
+                created = True
+                self.spawn(self._build_preview, job["job_id"])
+            except Exception as exc:
+                self.preview_slots.release()
+                if isinstance(exc, StoreError) and exc.code == "conflict" and request_id:
+                    previous = existing()
+                    if previous is not None:
+                        return previous
+                if created:
+                    self.store.update_job(job_id, status="failed", preview_step="查询暂未完成",
+                        error={"code": "preview_interrupted", "message": "预览未能启动，请重新预览；未执行删除", "retryable": True})
+                raise
+            return self._public(job)
 
     @staticmethod
     def _block(obj, code, message):
@@ -144,9 +181,21 @@ class Service:
     def _build_preview(self, job_id):
         try:
             job = self.store.get_job(job_id)
+            last_progress = [0.0, None]
+
+            def progress(data):
+                current = time.monotonic()
+                message = str(data.get("message") or "正在查询关联广告")
+                stage = (data.get("stage"), data.get("kind"), data.get("product_id"), data.get("retry_count", 0))
+                if current - last_progress[0] < 1 and stage == last_progress[1]:
+                    return
+                self.store.update_job(job_id, preview_step=message,
+                    preview_progress=dict(data, updated_at=now()))
+                last_progress[:] = [current, stage]
+
             dramas, blockers = self.source.resolve_dramas(job["input_type"], job["ids"], job["products"])
             self.store.update_job(job_id, preview_step="查找精确关联的 Meta 广告", dramas=dramas, blockers=blockers)
-            ads, issues = self.source.resolve_ads(dramas, job["products"])
+            ads, issues = self.source.resolve_ads(dramas, job["products"], progress=progress)
             blockers.extend(issues)
             if len(ads) > 10000:
                 raise AssetError("too_many_ads", "命中超过 10,000 个 Ad，请缩小范围")
@@ -186,10 +235,13 @@ class Service:
                     add("video", vid, ad)
             graph = self.graph_factory()
             allowed_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] != "blocked"}
-            self.store.update_job(job_id, preview_step="核验 Meta 对象及广告账户关系")
+            self.store.update_job(job_id, preview_step="核验 Meta 对象及广告账户关系",
+                                  preview_progress={"stage": "verify", "message": "核验 Meta 对象及广告账户关系"})
             # Verify ads first so changed creatives cannot authorize deleting the
             # old source record's assets. Freeze any discovered video IDs here.
             for kind in ("ad", "creative"):
+                verified_count = 0
+                verification_total = sum(1 for obj in objects.values() if obj["kind"] == kind and obj["status"] != "blocked")
                 for obj in list(objects.values()):
                     if obj["kind"] != kind or obj["status"] == "blocked":
                         continue
@@ -213,6 +265,9 @@ class Service:
                     except AssetError as exc:
                         self._block(obj, exc.code, exc.message)
                         obj["result"] = self._error_result(exc)
+                    verified_count += 1
+                    progress(dict(stage="verify", kind=kind, checked=verified_count, total=verification_total,
+                        message="核验%s：%d / %d" % ("广告" if kind == "ad" else "素材", verified_count, verification_total)))
             # Creative retains ownership checks. Matched Video IDs are frozen
             # for direct deletion, independently of Meta read availability.
             bad_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] == "blocked"}
@@ -221,7 +276,8 @@ class Service:
                     self._block(obj, "ad_ownership_unverified", "关联广告归属或当前 Creative 无法确认，请查看对应 Ad 阻止原因")
             allowed_ads -= bad_ads
             assets = [o for o in objects.values() if o["kind"] == "creative" and o["status"] == "pending"]
-            self.store.update_job(job_id, preview_step="核验所选范围之外的共享引用")
+            self.store.update_job(job_id, preview_step="核验所选范围之外的共享引用",
+                                  preview_progress={"stage": "references", "message": "核验所选范围之外的共享引用"})
             for asset_kind in ("creative",):
                 kind_assets = [o for o in assets if o["kind"] == asset_kind]
                 try:
@@ -244,9 +300,10 @@ class Service:
                     obj["result"] = self._error_result(exc)
             ordered = sorted(objects.values(), key=lambda o: (PHASES.index(o["kind"]), o["object_id"]))
             self.store.update_job(job_id, status="ready", objects=ordered, dramas=dramas, blockers=blockers,
-                                  preview_step="预览完成", preview_completed_at=now())
+                                  preview_step="预览完成", preview_progress={"stage": "complete", "message": "预览完成"}, preview_completed_at=now())
         except Exception as exc:
             error = {"code": exc.code, "message": exc.message} if isinstance(exc, AssetError) else {"code": "preview_failed", "message": "预览未完成，请重新预览；未执行删除"}
+            error["retryable"] = bool(getattr(exc, "retryable", error["code"] in ("source_unavailable", "preview_interrupted", "ad_scan_changed", "ad_scan_incomplete")))
             try:
                 self.store.update_job(job_id, status="failed", error=error, preview_step="预览失败")
             except Exception:
