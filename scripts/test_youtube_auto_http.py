@@ -26,6 +26,8 @@ TASK_ID = "a" * 32
 COVER_ID = "b" * 32
 GET_PATHS = ["/bootstrap", "/bootstrap?include_channels=0", "/channels", "/materials", "/tasks", "/settings", "/tasks/" + TASK_ID, "/covers/" + COVER_ID]
 POST_PATHS = ["/channels/verify-thumbnail", "/tasks", "/covers", "/covers/upload", "/settings", "/tasks/" + TASK_ID + "/review", "/tasks/" + TASK_ID + "/retry", "/tasks/" + TASK_ID + "/schedule"]
+GET_PATHS += ['/short-links/channels','/short-links/dramas?search=Drama','/short-links/11111111-1111-4111-8111-111111111111']
+POST_PATHS += ['/short-links']
 
 
 def load_contract():
@@ -72,6 +74,23 @@ class ServiceSpy:
 
 
 class YouTubeHttpTests(unittest.TestCase):
+    def test_manual_links_exact_routes_and_same_origin(self):
+        links = mock.Mock()
+        links.channels.options.return_value={'channels':[]}
+        links.catalog.search.return_value={'items':[]}
+        links.create.return_value={'link':{'status':'published'}}
+        links.get.return_value={'link':{'status':'pending'}}
+        with mock.patch('features.youtube_auto_publish.manual_link_routes.service',return_value=links):
+            self.assertEqual(self.request('GET','/short-links/channels').status,200)
+            self.assertEqual(self.request('GET','/short-links/dramas?search=Drama&page=2').status,200)
+            links.catalog.search.assert_called_once_with('Drama',2)
+            self.assertEqual(self.request('GET','/short-links/11111111-1111-4111-8111-111111111111').status,200)
+            self.assertEqual(self.request('POST','/short-links').status,200)
+            self.assertEqual(self.request('POST','/short-links',headers={'Origin':'https://evil.example'}).status,403)
+            self.assertEqual(self.request('POST','/short-links',headers={'Content-Length':'32769'}).status,413)
+            self.assertEqual(self.request('GET','/short-links/dramas?page=bad').status,400)
+            self.assertEqual(self.request('POST','/short-links/channels').status,404)
+
     def test_material_uploader_query_is_forwarded_with_search_and_refresh(self):
         self.assertEqual(self.request('GET','/materials?search=video&uploader_id=789&refresh=1').status,200)
         self.assertEqual(self.service.calls[-1][0],'list_materials')
@@ -256,6 +275,7 @@ class YouTubeHttpTests(unittest.TestCase):
         expected_post = ["verify_channel_thumbnail", "create_task", "upload_cover", "upload_cover", "save_settings", "review", "retry", "schedule"]
         body = json.dumps({"actor": {"role": "admin", "user_id": "attacker"}, "creator": "fake", "role": "admin", "user_id": "fake", "is_admin": True, "title": "Allowed"}).encode()
         for method, paths, names in [("GET", GET_PATHS, expected_get), ("POST", POST_PATHS, expected_post)]:
+            paths = [p for p in paths if not p.startswith('/short-links')]
             self.assertEqual(len(paths), len(names))
             for path, name in zip(paths, names):
                 self.assertEqual(self.request(method, path, body=body).status, 200)
