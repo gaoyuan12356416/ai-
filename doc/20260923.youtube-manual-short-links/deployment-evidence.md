@@ -1,5 +1,7 @@
 # Production evidence - 2026-09-23
 
+The subsequent manual attribution parameter update is documented in [params-update.md](params-update.md); the evidence below describes the initial feature deployment.
+
 - Runtime commit: `393e3e280e2ce030c556f8204b512f52bf146ad4`.
 - Branch: `codex/youtube-manual-short-links-20260923`; draft PR: https://github.com/gaoyuan12356416/ai-/pull/5 .
 - CPU host: `43.166.187.96`; runtime `/root/drama_material_service`; public static `/usr/share/nginx/html`.
