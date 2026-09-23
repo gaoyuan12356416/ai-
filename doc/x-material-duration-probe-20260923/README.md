@@ -35,3 +35,13 @@ states after health, hash and ledger verification. Do not publish a test Post.
 Rollback restores the previous release, main API files and dedicated main API
 allowlist drop-in, then restarts the affected services. Preserve current SQLite,
 tokens and publication facts. Private production evidence stays outside Git.
+
+## Acceptance
+
+The source-duration release was deployed to both CPU runtimes with matching
+hashes, healthy services, and restored prior timer states. Local focused tests
+passed 206 cases; Linux composite tests passed 207. The final range-coalescing
+change passed 33 focused cases on both systems. Exact operator-requested media
+revalidation cleared all missing-duration errors, preserving future delivery-time
+holds. Publishing ledger and token state were unchanged. Full backup, readback
+and rollback evidence is retained privately with the task.
