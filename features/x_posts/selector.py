@@ -12,6 +12,9 @@ import math
 import re
 from datetime import date, datetime, timedelta, timezone
 
+from features.x_posts.source_duration import probe_source_duration
+from features.x_posts.service import XPostError
+
 
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 DEFAULT_SCHEMA = "kunlunads_dev"
@@ -568,7 +571,7 @@ class DramawaveCandidateSelector:
         if media_kind == "video":
             try:
                 source_duration = _float(
-                    row.get("video_duration"), "video_duration"
+                    row.get("video_duration") or 0, "video_duration"
                 )
             except CandidateSelectionError:
                 raise PoolCandidateRejection(
@@ -576,10 +579,17 @@ class DramawaveCandidateSelector:
                     "素材 %s 的视频时长数据无效" % material_id,
                 ) from None
             if source_duration <= 0:
-                raise PoolCandidateRejection(
-                    "material_duration_missing",
-                    "素材 %s 的视频时长缺失或为0秒" % material_id,
-                )
+                try:
+                    source_duration = _float(probe_source_duration(material_url), "video_duration")
+                    if source_duration <= 0:
+                        raise CandidateSelectionError("empty measured duration")
+                except (XPostError, OSError, CandidateSelectionError):
+                    # Do not expose a signed media URL or subprocess details.
+                    # Failure stays item-local and is eligible for later recheck.
+                    raise PoolCandidateRejection(
+                        "material_duration_missing",
+                        "素材 %s 的视频时长缺失，读取视频文件时长失败，请稍后重试" % material_id,
+                    ) from None
             if max_duration_seconds is None:
                 max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
             try:

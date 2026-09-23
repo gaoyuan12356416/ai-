@@ -463,6 +463,8 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
         "material_not_video",
         "material_inactive",
         "material_deleted_image_unsupported",
+        # Missing database durations can now be measured from the media file.
+        "material_duration_missing",
         # Media-only failures are safe to revisit. The current source metadata
         # and final publish-time download/probe decide whether the item is now
         # usable; other identity/mapping and unknown-result errors remain
