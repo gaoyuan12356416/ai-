@@ -6,4 +6,4 @@ Browser mocks: manual short links 22, channel templates 20, schedule 38, loading
 
 Live 63350 replica: exact content ID 1.98s, English title prefix 5.41s (23 dramas), Traditional Chinese title prefix 1.90s (1 drama), exact content/language resolve succeeded. Queries use existing indexed columns and bounded timeouts. The initial Chinese command input used the wrong console encoding; rerun with explicit UTF-8/unicode escapes confirmed the actual behavior.
 
-Three identified issues were fixed and verified; see bugs/. GitHub deployment and production readback pending; their final evidence is recorded separately.
+Three identified issues were fixed and verified; see bugs/. Release is deployed and verified. Linux: 530 passed, one historical fixture skip. Real ordinary-user API search and completed channel readback passed; public assets match. Exact release, preserved data and rollback evidence are in deployment-evidence.md.
