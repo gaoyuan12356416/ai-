@@ -2,6 +2,7 @@
 
 import math
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,7 @@ class DurationMediaTests(unittest.TestCase):
         self.addCleanup(self.root.cleanup)
         (Path(self.root.name) / "media-work").mkdir()
         for p in (
+            patch.object(source_duration, "_mp4_metadata_duration", side_effect=ValueError("not MP4")),
             patch.object(service, "DEFAULT_STORAGE_ROOT", self.root.name),
             patch.object(service, "preflight_post_storage"),
             patch.dict(os.environ, {"X_POST_SOURCE_DURATION_ALLOWED_HOSTS": "media.example.test"}),
@@ -111,6 +113,43 @@ class DurationMediaTests(unittest.TestCase):
         with self.assertRaises(service.XPostError) as raised:
             source_duration.probe_source_duration("https://127.0.0.1/source.mp4")
         self.assertEqual(raised.exception.code, "media_host_not_allowed")
+
+
+class MP4MetadataTests(unittest.TestCase):
+    @staticmethod
+    def box(kind, data):
+        return struct.pack(">I4s", len(data) + 8, kind) + data
+
+    def movie(self, video=True, version=0):
+        mvhd = (bytes(12) + struct.pack(">II", 1000, 843098)) if version == 0 else (b"\x01" + bytes(19) + struct.pack(">IQ", 1000, 843098))
+        hdlr = bytes(8) + (b"vide" if video else b"soun")
+        return self.box(b"mvhd", mvhd) + self.box(b"trak", self.box(b"mdia", self.box(b"hdlr", hdlr)))
+
+    def test_movie_versions_and_video_identity(self):
+        for version in (0, 1):
+            self.assertAlmostEqual(source_duration._movie_duration(self.movie(version=version)), 843.098)
+        with self.assertRaises(ValueError):
+            source_duration._movie_duration(self.movie(video=False))
+
+    def test_range_seek_skips_media_body_and_checks_etag(self):
+        from unittest.mock import MagicMock
+        data = self.box(b"ftyp", b"isom0000") + self.box(b"mdat", bytes(10000)) + self.box(b"moov", self.movie())
+        requests = []
+        def request(method, url, *, headers, **kwargs):
+            first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            last = min(last, len(data)-1)
+            requests.append((first, last))
+            response = MagicMock()
+            response.status = 206
+            response.headers = {"content-range": "bytes %d-%d/%d" % (first, last, len(data)), "etag": '"source1"'}
+            response.iter_bytes.return_value = [data[first:last+1]]
+            if len(requests) > 1:
+                self.assertEqual(headers["If-Match"], '"source1"')
+            return response
+        with patch.object(service.UrllibHttpClient, "request", side_effect=request):
+            duration = source_duration._mp4_metadata_duration("https://media.example.test/x.mp4", ("media.example.test",))
+        self.assertAlmostEqual(duration, 843.098)
+        self.assertLess(sum(last-first+1 for first,last in requests), 256)
 
 
 if __name__ == "__main__":
