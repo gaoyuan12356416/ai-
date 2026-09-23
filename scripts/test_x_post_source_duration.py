@@ -133,7 +133,7 @@ class MP4MetadataTests(unittest.TestCase):
 
     def test_range_seek_skips_media_body_and_checks_etag(self):
         from unittest.mock import MagicMock
-        data = self.box(b"ftyp", b"isom0000") + self.box(b"mdat", bytes(10000)) + self.box(b"moov", self.movie())
+        data = self.box(b"ftyp", b"isom0000") + self.box(b"mdat", bytes(256000)) + self.box(b"moov", self.movie())
         requests = []
         def request(method, url, *, headers, **kwargs):
             first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
@@ -149,7 +149,8 @@ class MP4MetadataTests(unittest.TestCase):
         with patch.object(service.UrllibHttpClient, "request", side_effect=request):
             duration = source_duration._mp4_metadata_duration("https://media.example.test/x.mp4", ("media.example.test",))
         self.assertAlmostEqual(duration, 843.098)
-        self.assertLess(sum(last-first+1 for first,last in requests), 256)
+        self.assertEqual(len(requests), 2)
+        self.assertLess(sum(last-first+1 for first,last in requests), 66000)
 
 
 if __name__ == "__main__":

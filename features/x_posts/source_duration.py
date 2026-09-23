@@ -78,8 +78,10 @@ def _mp4_metadata_duration(url, allowed):
     client = service.UrllibHttpClient()
     total_size = None
     validator = None
+    window_start = -1
+    window = b""
 
-    def read_range(start, length):
+    def remote_range(start, length):
         nonlocal total_size, validator
         headers = {"Range": "bytes=%d-%d" % (start, start + length - 1), "Accept-Encoding": "identity"}
         if validator:
@@ -106,6 +108,16 @@ def _mp4_metadata_duration(url, allowed):
             if len(body) != last - first + 1:
                 raise ValueError("incomplete range")
             return bytes(body)
+
+    def read_range(start, length):
+        nonlocal window_start, window
+        if window_start <= start and start + length <= window_start + len(window):
+            return window[start - window_start:start - window_start + length]
+        # Coalesce adjacent headers and small moov boxes into one HTTPS request.
+        # Long mdat boxes are still skipped by their declared size.
+        window = remote_range(start, max(length, 64 * 1024))
+        window_start = start
+        return window[:length]
 
     offset = 0
     for _ in range(32):
