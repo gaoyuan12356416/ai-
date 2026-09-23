@@ -7,7 +7,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 import uuid
 
@@ -39,8 +39,8 @@ class ManualLinkTests(unittest.TestCase):
         q=parse_qs(urlsplit(row['long_url']).query)
         self.assertEqual(set(q),{'c','af_adset','af_adset_id','af_ad','af_ad_id','af_channel','af_c_id','af_dp'})
         self.assertEqual(q['af_channel'],['789']);self.assertEqual(q['af_dp'],['Abc1234567'])
-        self.assertEqual(q['af_c_id'],['yt_manual_'+self.payload['operation_id']])
-        self.assertEqual(q['af_ad_id'],['none']);self.assertIn('*none*manual_1',q['c'][0])
+        self.assertEqual(q['af_c_id'],[self.payload['operation_id']])
+        self.assertEqual(q['af_ad_id'],['yt_manual']);self.assertIn('*none*manual_1',q['c'][0])
         self.assertIn('nonezh-tw*繁體劇名 & Friends',q['c'][0])
         self.assertIn(html.escape(row['long_url'],quote=True),(self.root/'public/1.html').read_text())
         self.assertEqual(self.rows('drama_youtube_publish'),[])
@@ -50,6 +50,35 @@ class ManualLinkTests(unittest.TestCase):
         self.channels.validate.side_effect=AssertionError('must return already completed link')
         self.assertEqual(self.links.create(self.actor,self.payload),first)
         self.assertEqual(len(self.rows('drama_material_short_link')),1)
+
+    def test_legacy_published_link_is_unchanged_after_upgrade(self):
+        with patch('features.youtube_auto_publish.manual_links.VERSION', 'youtube-manual-link-v1'):
+            original=self.links.create(self.actor,self.payload)
+        rows=self.rows('drama_material_short_link')
+        saved=(self.root/'public/1.html').read_bytes()
+        self.assertEqual(self.links.create(self.actor,self.payload),original)
+        self.assertEqual(self.rows('drama_material_short_link'),rows)
+        self.assertEqual((self.root/'public/1.html').read_bytes(),saved)
+        self.links.create(self.actor,dict(self.payload,operation_id=str(uuid.uuid4())))
+        q=parse_qs(urlsplit(self.rows('drama_material_short_link')[1]['long_url']).query)
+        self.assertEqual(q['af_ad_id'],['yt_manual'])
+        self.assertFalse(q['af_c_id'][0].startswith('yt_manual_'))
+
+    def test_legacy_failed_operation_retries_with_frozen_parameters(self):
+        def lost(*args):self.publisher.publish(*args);raise OSError('lost')
+        self.links.publisher=Mock();self.links.publisher.publish.side_effect=lost
+        with patch('features.youtube_auto_publish.manual_links.VERSION', 'youtube-manual-link-v1'):
+            with self.assertRaises(WorkflowError):self.links.create(self.actor,self.payload)
+        old=self.rows('drama_material_short_link')[0]
+        saved=(self.root/'public/1.html').read_bytes()
+        q=parse_qs(urlsplit(old['long_url']).query)
+        self.assertEqual(q['af_c_id'],['yt_manual_'+self.payload['operation_id']])
+        self.assertEqual(q['af_ad_id'],['none'])
+        self.links.publisher=self.publisher
+        self.assertEqual(self.links.create(self.actor,self.payload)['link']['status'],'published')
+        self.assertEqual(len(self.rows('drama_material_short_link')),1)
+        self.assertEqual(self.rows('drama_material_short_link')[0]['long_url'],old['long_url'])
+        self.assertEqual((self.root/'public/1.html').read_bytes(),saved)
 
     def test_new_operation_new_link(self):
         first=self.links.create(self.actor,self.payload)

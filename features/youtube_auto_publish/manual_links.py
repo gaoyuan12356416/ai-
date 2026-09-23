@@ -12,6 +12,8 @@ from features.drama_synthesis.core import SHORT_BASE_URL, render_wrapper_html, u
 from .attribution import BASE_URL, mapped_user_id, text
 from .templates import WorkflowError
 
+VERSION = 'youtube-manual-link-v2'
+
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
@@ -95,13 +97,15 @@ class DramaCatalog:
 
 
 def build_manual_url(context, link_id, created_at):
+    # Retry with the attribution contract frozen when this operation was created.
+    legacy = context.get('version', 'youtube-manual-link-v1') == 'youtube-manual-link-v1'
     stamp = int(datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp())
     campaign = 'yingliang_post_CLV_VL_youtube_%s*%snone%s*%s*none*manual_%s' % (
         context['channel_id'], stamp, context['language'], context['drama_name'], link_id)
     return BASE_URL + '?' + urlencode([
         ('c', campaign), ('af_adset', context['channel_name']), ('af_adset_id', context['channel_id']),
-        ('af_ad', context['drama_name']+'_contentid['+context['content_id']+']'), ('af_ad_id', 'none'),
-        ('af_channel', context['sub_user_id']), ('af_c_id', 'yt_manual_'+context['operation_id']),
+        ('af_ad', context['drama_name']+'_contentid['+context['content_id']+']'), ('af_ad_id', 'none' if legacy else 'yt_manual'),
+        ('af_channel', context['sub_user_id']), ('af_c_id', ('yt_manual_' if legacy else '')+context['operation_id']),
         ('af_dp', context['content_id']),
     ], quote_via=quote, safe='*')
 
@@ -173,7 +177,7 @@ class ManualLinks:
             if channel['channel_id'] != context['channel_id']:
                 raise WorkflowError('channel_identity_changed', '频道身份已变化，不能继续本次生成', 409)
         else:
-            context = dict(request, operation_id=op, version='youtube-manual-link-v1',
+            context = dict(request, operation_id=op, version=VERSION,
                            channel_id=text(channel['channel_id'], 'channel_id', True),
                            channel_name=text(channel['name'], 'channel_name'),
                            drama_name=text(drama['name'], 'drama_name', True),
