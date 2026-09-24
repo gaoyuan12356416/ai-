@@ -27,11 +27,17 @@ def atomic(data):
 
 
 def check_http(expected):
-    try:
-        with urllib.request.urlopen('https://ai.yingliangads.com/api/youtube-analytics/options',timeout=15) as response:
-            status=response.status
-    except urllib.error.HTTPError as exc:status=exc.code
-    if status!=expected:raise RuntimeError('Public anonymous route unexpected status: '+str(status))
+    status=None
+    # systemctl reload returns before every old Nginx worker has drained.
+    for _ in range(10):
+        try:
+            with urllib.request.urlopen('https://ai.yingliangads.com/api/youtube-analytics/options',timeout=3) as response:
+                status=response.status
+        except urllib.error.HTTPError as exc:status=exc.code
+        except (urllib.error.URLError,TimeoutError):status=None
+        if status==expected:return
+        time.sleep(1)
+    raise RuntimeError('Public anonymous route unexpected status: '+str(status))
 
 
 def main():
