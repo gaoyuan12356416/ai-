@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube 数据报表 · AI自动后台</title>
+  <link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
+  <link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
+  <link rel="stylesheet" href="/youtube-analytics.css?v=20260924-v1">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">剧</div><div><strong>AI自动后台</strong><small>内容制作与发布管理</small></div></div>
+    <nav id="quickNav" class="nav" aria-label="后台主导航"></nav>
+    <div class="sidebar-note"><strong>YouTube 数据报表</strong><span>从链接点击到付费转化</span></div>
+  </aside>
+  <main class="main analytics-main">
+    <header class="topbar">
+      <div><div class="analytics-eyebrow"><span class="youtube-dot">▶</span> YOUTUBE · ANALYTICS</div><h1>YouTube 数据报表</h1><p>了解每位生成人、每部剧与每个频道带来的转化。</p></div>
+      <div class="toolbar"><div class="user-card" id="userCard"></div><button type="button" class="btn btn-secondary" id="authButton">登录</button><button type="button" class="btn btn-secondary" id="refreshPage">刷新数据</button></div>
+    </header>
+
+    <div class="scope-strip"><span id="scope-label">正在核验数据权限</span><span>UTC 自然日 · 金额 USD</span></div>
+    <div id="page-message" class="analytics-message" role="status" aria-live="polite">正在加载报表…</div>
+    <form id="report-filters" class="analytics-panel filter-panel" aria-label="报表筛选">
+      <fieldset id="filter-fields" disabled>
+        <div class="filter-heading"><h2>筛选与分组</h2><span>多条件组合，聚焦你关心的数据</span></div>
+        <div class="date-search-row">
+          <div class="date-field"><label for="date-start">开始日期 <small>UTC</small></label><input type="date" id="date-start" required></div>
+          <span class="date-separator" aria-hidden="true">—</span>
+          <div class="date-field"><label for="date-end">结束日期 <small>UTC</small></label><input type="date" id="date-end" required></div>
+          <div class="date-shortcuts" aria-label="日期快捷选择"><button type="button" data-days="7">近 7 天</button><button type="button" data-days="30">近 30 天</button></div>
+          <label class="report-search"><span>搜索剧目</span><input type="search" id="report-search" placeholder="输入剧名或剧 ID" maxlength="200"></label>
+        </div>
+        <div id="dimension-filters" class="dimension-filters"></div>
+        <div class="group-row"><span class="group-label" id="group-label">分组维度 <small>最多 3 项</small></span><div class="group-choices" id="group-choices" role="group" aria-labelledby="group-label"></div></div>
+        <div class="filter-actions"><span id="filter-hint">默认近 7 个完整自然日，截至昨日（UTC）。</span><button type="button" class="btn btn-secondary" id="reset-filters">重置</button><button type="submit" class="btn btn-primary" id="apply-filters">应用筛选</button></div>
+      </fieldset>
+    </form>
+
+    <section id="report-content" class="report-content hidden" aria-label="YouTube 统计结果" aria-busy="false">
+      <div class="report-context"><div><strong id="report-period"></strong><span id="report-updated"></span></div><button type="button" class="btn btn-secondary" id="export-report" disabled><span aria-hidden="true">↓</span> 导出全部分组 CSV</button></div>
+      <div id="quality-message" class="analytics-message warning" role="status" hidden></div>
+      <div id="kpi-grid" class="kpi-grid" aria-label="核心指标"></div>
+      <div class="chart-grid">
+        <section class="analytics-panel trend-panel" aria-labelledby="trend-heading">
+          <div class="chart-heading"><div><h2 id="trend-heading">每日趋势</h2><p>当前筛选范围 · 按 UTC 自然日汇总</p></div><label class="metric-selector"><span class="sr-only">趋势指标</span><select id="trend-metric"></select></label></div>
+          <div id="trend-chart" class="trend-chart"></div><div id="trend-caption" class="chart-caption"></div>
+        </section>
+        <section class="analytics-panel funnel-panel" aria-labelledby="funnel-heading">
+          <div class="chart-heading"><div><h2 id="funnel-heading">转化概览</h2><p>点击 → 安装 → 付费转化</p></div><span class="chart-tag">总量 / 比例</span></div>
+          <div id="conversion-chart" class="conversion-chart"></div>
+          <p class="chart-caption">各环节为所选日期的汇总，非同一批用户的逐人追踪；付费转化按每日充值人数累加，跨日不去重。</p>
+        </section>
+      </div>
+      <section class="analytics-panel ranking-panel" aria-labelledby="ranking-heading">
+        <div class="chart-heading"><div><h2 id="ranking-heading">分组表现 TOP 10</h2><p id="ranking-caption"></p></div><label class="metric-selector"><span class="sr-only">排名指标</span><select id="ranking-metric"></select></label></div>
+        <div id="ranking-chart" class="ranking-chart"></div>
+      </section>
+      <section class="analytics-panel detail-panel" aria-labelledby="detail-heading">
+        <div class="chart-heading"><div><h2 id="detail-heading">分组数据明细</h2><p id="table-description"></p></div><label class="page-size-label">每页 <select id="page-size"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select> 组</label></div>
+        <div class="analytics-table-scroll" tabindex="0" role="region" aria-label="可横向滚动的报表明细"><table class="analytics-table"><caption class="sr-only">分组指标，可点击列标题排序；金额单位为美元，比例单位为百分比。</caption><thead id="report-head"></thead><tbody id="report-body"></tbody></table></div>
+        <div class="report-pagination"><span id="page-summary"></span><div><button type="button" class="btn btn-secondary btn-sm" id="previous-page" disabled>上一页</button><span id="page-number"></span><button type="button" class="btn btn-secondary btn-sm" id="next-page" disabled>下一页</button></div></div>
+      </section>
+      <details class="metric-definitions"><summary>指标口径与数据说明</summary><div><p><strong>点击 / 访问：</strong>落地页点击次数与访问次数，不代表 YouTube 曝光或视频播放量。效果指标统计全部历史链接在所选日期产生的效果。</p><p><strong>安装 / 付费转化：</strong>取自归因报表；付费转化为充值人数，所选日期的每日人数相加，跨日不去重。安装率 = 安装 ÷ 点击；付费率 = 付费转化 ÷ 安装。分母为 0 或数据未知时显示「—」。</p><p><strong>收入 / 退款：</strong>金额单位 USD，分别展示，不自动冲抵。</p><p><strong>生成链接数：</strong>当前筛选下，在所选 UTC 日期内创建且已发布的短链数量；与效果指标按效果发生日期统计的口径不同。</p><p><strong>数据完整性：</strong>未同步日期显示「—」，不作为 0 计入；存在缺失日期时汇总仅包含已有日期的数据。未匹配数据不计入可归属的报表指标。管理员查看同租户数据，普通用户仅查看本人数据。</p></div></details>
+    </section>
+    <footer class="page-footer">AI自动后台 · YouTube 社媒数据</footer>
+  </main>
+</div>
+<script src="/quick-nav.js?v=20260924-youtube-analytics-v1"></script>
+<script src="/ui-topbar.js?v=20260903-1"></script>
+<script src="/youtube-analytics.js?v=20260924-v1"></script>
+</body>
+</html>

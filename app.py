@@ -94994,6 +94994,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 404, {"error": "not_found"}, no_store=True)
             return
 
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.youtube_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
+
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
             return
@@ -98682,6 +98686,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
+
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.youtube_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
