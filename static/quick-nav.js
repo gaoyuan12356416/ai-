@@ -352,6 +352,16 @@
           enabled: true,
           order: 20,
         },
+        {
+          key: "youtubeAnalytics",
+          label: "YouTube 数据报表",
+          description: "按生成人、剧目和频道分析点击、安装和付费转化",
+          kind: "page",
+          href: "/youtube-analytics.html",
+          module: "youtube_auto_publish",
+          enabled: true,
+          order: 30,
+        },
       ],
     },
     {
