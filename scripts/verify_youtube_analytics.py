@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from features.youtube_analytics.report import parameters,read_catalog,summarize,unique_catalog,visible,empty,add
+from features.youtube_analytics.report import parameters,read_catalog,summarize,unique_catalog,visible,empty,add,campaign_index,resolved_campaign
 from features.youtube_analytics.routes import query_metrics
 
 
@@ -26,12 +26,13 @@ def main():
             k,v=line.split('=',1);config[k]=v.strip().strip('"').strip("'")
     params=parameters(dict(start=[args.start],end=[args.end],group_by=['owner,drama,channel']))
     catalog=read_catalog(db);metrics=query_metrics(config,params['start'],params['end'])
-    unique,_=unique_catalog(catalog);seen=set();source=empty();matched=empty();unmatched=empty()
+    unique,_=unique_catalog(catalog);by_id=campaign_index(catalog)
+    seen=set();source=empty();matched=empty();unmatched=empty()
     for row in metrics:
         key=(row.get('campaign_id') or '',row.get('campaign') or '')
         assert (row['date'],key) not in seen
         seen.add((row['date'],key));add(source,row)
-        add(matched if key in unique else unmatched,row)
+        add(matched if resolved_campaign(by_id.get(key[0],[])) else unmatched,row)
     for k in source:assert source[k]==matched[k]+unmatched[k]
     tenants=sorted({r['tenant'] for r in unique.values()})
     checks=[]
@@ -40,10 +41,12 @@ def main():
         report=summarize(catalog,metrics,actor,params,'acceptance')
         expected=empty()
         for m in metrics:
-            dim=unique.get((m.get('campaign_id') or '',m.get('campaign') or ''))
+            dim=resolved_campaign(by_id.get(m.get('campaign_id') or '',[]))
             if dim and visible(dim,actor):add(expected,m)
         if metrics:
             for k in ('clicks','views','installs','conversions'):assert report['totals'][k]==expected[k]
+            assert round(report['totals']['revenue']*100)==expected['revenue_cents']
+            assert round(report['totals']['refunds']*100)==expected['refund_cents']
         checks.append(dict(scope='tenant',groups=report['pagination']['total'],clicks=report['totals']['clicks']))
         for owner in {r['owner'] for r in unique.values() if r['tenant']==tenant}:
             personal=summarize(catalog,metrics,dict(tenant_key=tenant,user_id=owner,role='user'),params,'acceptance')

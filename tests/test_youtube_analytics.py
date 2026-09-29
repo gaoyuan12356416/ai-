@@ -198,10 +198,10 @@ class AggregationTests(unittest.TestCase):
         return report.summarize(catalog if catalog is not None else [catalog_row()],
                                 metrics if metrics is not None else [metric()], actor, params(**kwargs), 'synthetic-fetch')
 
-    def test_attribution_requires_both_case_sensitive_campaign_parts(self):
+    def test_attribution_requires_case_sensitive_id_but_ignores_campaign_name(self):
         rows = [metric(), metric('task-a', 'Campaign-a', clicks=999),
                 metric('TASK-A', 'campaign-a', clicks=999), metric('task-other', 'campaign-a', clicks=999)]
-        self.assertEqual(self.summarize(metrics=rows)['totals']['clicks'], 100)
+        self.assertEqual(self.summarize(metrics=rows)['totals']['clicks'], 1099)
 
     def test_url_key_decodes_unicode_and_rejects_duplicates_or_missing_parts(self):
         self.assertEqual(report.attribution_key(link_url('TaskA', '剧甲 * 支付')), ('TaskA', '剧甲 * 支付'))
@@ -349,6 +349,208 @@ class AggregationTests(unittest.TestCase):
         self.assertIn('未跨日去重', row['转化口径'])
 
 
+class CampaignIdentityTests(unittest.TestCase):
+    """Synthetic regressions for campaign-ID attribution and truncated source IDs."""
+
+    PREFIX = 'campaign-prefix-abcdefghijklmnop'
+    LONG_A = PREFIX + '-one'
+    LONG_B = PREFIX + '-two'
+
+    def summarize(self, catalog, metrics, actor=ADMIN, **kwargs):
+        return report.summarize(catalog, metrics, actor, params(**kwargs), 'synthetic-fetch')
+
+    def test_fixture_prefix_is_exactly_the_source_width(self):
+        self.assertEqual(len(self.PREFIX), 32)
+        self.assertGreater(len(self.LONG_A), 32)
+
+    def test_wrong_name_and_raw_owner_cannot_override_frozen_dimensions(self):
+        catalog = [catalog_row(('manual-left', 'left-name'), link_type='manual'),
+                   catalog_row(('manual-right', 'right-name'), 2, owner='bob',
+                               channel='channel-b', drama='drama-b', link_type='manual')]
+        metrics = [metric('manual-left', 'right-name', channel='bob', owner='bob',
+                          clicks=19, revenue_cents=1700),
+                   metric('manual-left', '', channel='', owner='',
+                          clicks=23, revenue_cents=600),
+                   metric('manual-right', 'left-name', channel='alice', owner='alice',
+                          clicks=7, revenue_cents=300)]
+        value = self.summarize(catalog, metrics, group_by='owner,drama,channel')
+        actual = {row['owner']: row for row in value['rows']}
+        self.assertEqual((actual['alice']['drama'], actual['alice']['channel'],
+                          actual['alice']['clicks'], actual['alice']['revenue']),
+                         ('drama-a', 'channel-a', 42, 23.0))
+        self.assertEqual((actual['bob']['drama'], actual['bob']['channel'],
+                          actual['bob']['clicks'], actual['bob']['revenue']),
+                         ('drama-b', 'channel-b', 7, 3.0))
+        self.assertEqual(value['totals']['links'], 2)
+        self.assertEqual(value['totals']['revenue'], 26.0)
+
+    def test_unique_truncated_id_and_full_id_use_same_frozen_campaign(self):
+        catalog = [catalog_row((self.LONG_A, 'frozen-name'))]
+        metrics = [metric(self.PREFIX, 'wrong-name', clicks=31),
+                   metric(self.LONG_A, '', day=END, clicks=47)]
+        value = self.summarize(catalog, metrics, group_by='date')
+        self.assertEqual(value['totals']['clicks'], 78)
+        self.assertEqual(value['totals']['links'], 1)
+        self.assertEqual(value['quality']['missing_dates'], ['2026-09-21'])
+        self.assertIsNone(next(r for r in value['trend'] if r['date'] == '2026-09-21')['clicks'])
+
+    def test_alias_matches_only_exactly_32_case_sensitive_characters(self):
+        catalog = [catalog_row((self.LONG_A, 'frozen-name'))]
+        metrics = [metric(self.PREFIX, 'wrong-name', clicks=7),
+                   metric(self.PREFIX.upper(), 'frozen-name', clicks=1000),
+                   metric(self.LONG_A[:31], 'frozen-name', clicks=1000),
+                   metric(self.LONG_A[:33], 'frozen-name', clicks=1000)]
+        self.assertEqual(self.summarize(catalog, metrics)['totals']['clicks'], 7)
+
+    def test_short_ids_never_receive_prefix_aliases(self):
+        catalog = [catalog_row(('short-campaign-id', 'frozen-name'))]
+        metrics = [metric('short-campaign-id', 'other-name', clicks=9),
+                   metric('short-campaign', 'frozen-name', clicks=999)]
+        self.assertEqual(self.summarize(catalog, metrics)['totals']['clicks'], 9)
+
+    def test_shared_prefix_rejected_even_when_dimensions_and_name_agree(self):
+        catalog = [catalog_row((self.LONG_A, 'name-one')),
+                   catalog_row((self.LONG_B, 'name-two'), 2)]
+        value = self.summarize(catalog, [metric(self.PREFIX, 'name-one', clicks=13)])
+        self.assertEqual(value['totals']['clicks'], 0)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 13)
+        self.assertEqual(value['quality']['unmatched_campaigns'], 1)
+
+    def test_full_long_ids_remain_separate_when_their_prefix_collides(self):
+        catalog = [catalog_row((self.LONG_A, 'name-one')),
+                   catalog_row((self.LONG_B, 'name-two'), 2, owner='bob')]
+        metrics = [metric(self.LONG_A, 'name-two', clicks=11),
+                   metric(self.LONG_B, 'name-one', clicks=17),
+                   metric(self.PREFIX, 'name-one', clicks=999)]
+        value = self.summarize(catalog, metrics)
+        self.assertEqual({r['owner']: r['clicks'] for r in value['rows']}, {'alice': 11, 'bob': 17})
+        self.assertEqual(value['totals']['clicks'], 28)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 999)
+        own = self.summarize(catalog, metrics, actor=OWNER)
+        self.assertEqual(own['totals']['clicks'], 11)
+        self.assertEqual(own['quality']['unmatched_totals']['clicks'], 0)
+
+    def test_a_32_character_complete_id_cannot_disambiguate_a_long_prefix(self):
+        catalog = [catalog_row((self.PREFIX, 'short-name')),
+                   catalog_row((self.LONG_A, 'long-name'), 2, owner='bob')]
+        metrics = [metric(self.PREFIX, 'short-name', clicks=999),
+                   metric(self.LONG_A, 'wrong-name', clicks=17)]
+        value = self.summarize(catalog, metrics)
+        self.assertEqual(value['totals']['clicks'], 17)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 999)
+
+    def test_conflicting_dimensions_on_one_id_rejected_despite_distinct_names(self):
+        variations = [dict(owner='bob'), dict(drama='drama-b'), dict(channel='channel-b'),
+                      dict(language='en'), dict(link_type='manual'), dict(excluded=True)]
+        for variation in variations:
+            with self.subTest(variation=variation):
+                catalog = [catalog_row(), catalog_row(('task-a', 'other-name'), 2, **variation)]
+                value = self.summarize(catalog, [metric()])
+                self.assertEqual(value['rows'], [])
+                self.assertEqual(value['totals']['clicks'], 0)
+                self.assertEqual(value['totals']['links'], 0)
+                self.assertEqual(value['quality']['unmatched_totals']['clicks'], 100)
+                self.assertEqual(report.options(catalog, ADMIN)['options']['owner'], [])
+
+    def test_conflicting_long_id_dimensions_also_reject_its_truncated_alias(self):
+        catalog = [catalog_row((self.LONG_A, 'name-one')),
+                   catalog_row((self.LONG_A, 'name-two'), 2, owner='bob')]
+        value = self.summarize(catalog, [metric(self.PREFIX, 'name-one')])
+        self.assertEqual(value['rows'], [])
+        self.assertEqual(value['totals']['clicks'], 0)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 100)
+
+    def test_filters_cannot_resolve_either_same_id_or_shared_prefix_conflicts(self):
+        for first_id, second_id, source_id in [('task-a', 'task-a', 'task-a'),
+                                               (self.LONG_A, self.LONG_B, self.PREFIX)]:
+            with self.subTest(source_id=source_id):
+                catalog = [catalog_row((first_id, 'name-one')),
+                           catalog_row((second_id, 'name-two'), 2, owner='bob',
+                                       channel='channel-b', drama='drama-b')]
+                metrics = [metric(source_id, 'name-one')]
+                value = self.summarize(catalog, metrics, owner='alice', channel='channel-a',
+                                       drama='drama-a', search='短剧甲')
+                self.assertEqual(value['totals']['clicks'], 0)
+
+    def test_cross_tenant_conflicts_never_leak_unmatched_money(self):
+        for first_id, second_id, source_id in [('task-a', 'task-a', 'task-a'),
+                                               (self.LONG_A, self.LONG_B, self.PREFIX)]:
+            with self.subTest(source_id=source_id):
+                catalog = [catalog_row((first_id, 'name-one')),
+                           catalog_row((second_id, 'name-two'), 2, tenant='tenant-b', owner='eve')]
+                value = self.summarize(catalog, [metric(source_id, 'name-one')], owner='alice')
+                self.assertEqual(value['totals']['clicks'], 0)
+                self.assertEqual(value['quality']['unmatched_campaigns'], 0)
+                self.assertEqual(value['quality']['unmatched_totals']['clicks'], 0)
+                self.assertEqual(value['quality']['unmatched_totals']['revenue'], 0)
+
+    def test_full_long_id_can_match_even_if_other_tenant_shares_prefix(self):
+        catalog = [catalog_row((self.LONG_A, 'name-one')),
+                   catalog_row((self.LONG_B, 'name-two'), 2, tenant='tenant-b', owner='eve')]
+        metrics = [metric(self.LONG_A, 'name-two', clicks=13),
+                   metric(self.LONG_B, 'name-one', clicks=999),
+                   metric(self.PREFIX, 'name-one', clicks=999)]
+        value = self.summarize(catalog, metrics)
+        self.assertEqual(value['totals']['clicks'], 13)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 0)
+        self.assertEqual({r['owner'] for r in value['rows']}, {'alice'})
+
+    def test_unresolved_tenant_poisoned_prefix_is_not_visible_as_tenant_money(self):
+        catalog = [catalog_row((self.LONG_A, 'name-one')),
+                   catalog_row((self.LONG_B, 'name-two'), 2, tenant='')]
+        value = self.summarize(catalog, [metric(self.PREFIX, 'name-one')])
+        self.assertEqual(value['totals']['clicks'], 0)
+        self.assertEqual(value['quality']['unmatched_totals']['clicks'], 0)
+
+    def test_duplicate_catalog_names_do_not_multiply_events_or_distinct_links(self):
+        catalog = [catalog_row(), catalog_row(('task-a', 'renamed')),
+                   catalog_row(('task-a', 'another-name'), 2)]
+        metrics = [metric('task-a', 'wrong-one', clicks=11, revenue_cents=300),
+                   metric('task-a', 'wrong-two', clicks=17, revenue_cents=400)]
+        value = self.summarize(catalog, metrics)
+        self.assertEqual(value['totals']['clicks'], 28)
+        self.assertEqual(value['totals']['revenue'], 7.0)
+        self.assertEqual(value['totals']['links'], 2)
+        self.assertEqual(len(value['rows']), 1)
+        unique, conflicts = report.unique_catalog(catalog)
+        self.assertEqual(set(unique), {row['key'] for row in catalog})
+        self.assertEqual(conflicts, {})
+
+    def test_identical_source_date_id_and_name_still_fails_closed(self):
+        catalog = [catalog_row((self.LONG_A, 'frozen-name'))]
+        for campaign_id in (self.PREFIX, self.LONG_A):
+            with self.subTest(campaign_id=campaign_id), self.assertRaises(report.ReportError) as error:
+                self.summarize(catalog, [metric(campaign_id, 'source-name'),
+                                         metric(campaign_id, 'source-name', clicks=10)])
+            self.assertEqual(error.exception.status, 503)
+
+
+class ManualCampaignIntegrationTests(CatalogFixture, unittest.TestCase):
+    def test_frozen_manual_ledger_reconciles_misnamed_metrics_without_reassigning_channels(self):
+        campaign_a = '11111111-aaaa-bbbb-cccc-111111111111'
+        campaign_b = '22222222-aaaa-bbbb-cccc-222222222222'
+        campaign_c = '33333333-aaaa-bbbb-cccc-333333333333'
+        for number, campaign_id, owner in [(1, campaign_a, 'alice'),
+                                            (2, campaign_b, 'alice'),
+                                            (3, campaign_c, 'bob')]:
+            self.add_link(number, kind='manual', owner=owner, campaign_id=campaign_id,
+                          campaign='frozen-manual-' + str(number))
+        catalog = report.read_catalog(self.db_path)
+        before = hashlib.sha256(self.db_path.read_bytes()).digest()
+        metrics = [metric(campaign_a[:32], 'frozen-manual-3', clicks=0, revenue_cents=1100, channel=''),
+                   metric(campaign_a[:32], 'frozen-manual-1', clicks=37, revenue_cents=0, channel='bob'),
+                   metric(campaign_b[:32], 'frozen-manual-3', clicks=3, revenue_cents=200, channel=''),
+                   metric(campaign_c[:32], 'frozen-manual-1', clicks=5, revenue_cents=700, channel='alice')]
+        value = report.summarize(catalog, metrics, ADMIN, params(group_by='owner,channel'), 'synthetic-fetch')
+        actual = {(r['owner'], r['channel']): (r['clicks'], r['revenue'], r['links']) for r in value['rows']}
+        self.assertEqual(actual, {('alice', 'channel-1'): (37, 11.0, 1),
+                                  ('alice', 'channel-2'): (3, 2.0, 1),
+                                  ('bob', 'channel-3'): (5, 7.0, 1)})
+        self.assertEqual(value['totals']['revenue'], 20.0)
+        self.assertEqual(value['quality']['unmatched_totals']['revenue'], 0)
+        self.assertEqual(hashlib.sha256(self.db_path.read_bytes()).digest(), before)
+
+
 class ParameterTests(unittest.TestCase):
     def test_invalid_dates_pagination_dimensions_filters_and_sort_are_rejected(self):
         invalid = [dict(start='2026-02-30'), dict(start=END, end=START), dict(end='2999-01-01'),
@@ -489,6 +691,12 @@ class SourceQueryTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         exact = next(r for r in result if r['campaign_id'] == 'task-a' and r['campaign'] == 'campaign-a')
         self.assertEqual((exact['clicks'], exact['installs'], exact['conversions'], exact['revenue_cents']), (12, 4, 2, 675))
+        # Keep source names distinct to detect duplicate source rows, then join
+        # all variants of the same case-sensitive ID to the frozen publisher.
+        value = report.summarize([catalog_row()], result, OWNER, params(), 'synthetic-fetch')
+        self.assertEqual(value['totals']['clicks'], 1011)
+        self.assertEqual(value['totals']['revenue'], 6.75)
+        self.assertEqual(value['totals']['links'], 1)
 
     def app(self):
         return dict(ADMIN_MAPPING_MYSQL_HOST='101.32.56.53', ADMIN_MAPPING_MYSQL_PORT='63350',
