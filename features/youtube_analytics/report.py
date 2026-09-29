@@ -158,17 +158,46 @@ def visible(row, actor):
             and (actor.get('role')=='admin' or row['owner']==actor['user_id']))
 
 
-def unique_catalog(catalog):
-    by_key = defaultdict(list)
+def campaign_index(catalog):
+    """Index immutable IDs before applying tenant/owner filters.
+
+    The statistics source stores campaign_id in varchar(32). A longer frozen
+    ID therefore has one known storage alias, its first 32 characters. Never
+    strip punctuation, fold case or use campaign names to resolve collisions.
+    """
+    result = defaultdict(list)
     for row in catalog:
-        by_key[row['key']].append(row)
+        campaign_id = row['key'][0]
+        if not campaign_id:
+            continue
+        result[campaign_id].append(row)
+        if len(campaign_id) > 32:
+            result[campaign_id[:32]].append(row)
+    return result
+
+
+def resolved_campaign(rows):
+    if not rows or len({r['key'][0] for r in rows}) != 1:
+        return None
+    identities = {tuple(r.get(k) for k in ('tenant', 'owner', 'drama', 'channel', 'language', 'link_type', 'excluded')) for r in rows}
+    first = rows[0]
+    if len(identities) == 1 and first['tenant'] and first['owner'] and not first['excluded']:
+        return first
+    return None
+
+
+def unique_catalog(catalog):
+    by_id = campaign_index(catalog)
+    resolved_ids = {key: resolved_campaign(rows) for key, rows in by_id.items()}
     unique, conflicts = {}, {}
-    for key, rows in by_key.items():
-        identities = {tuple(r.get(k) for k in ('tenant', 'owner', 'drama', 'channel', 'language', 'link_type', 'excluded')) for r in rows}
-        if len(identities)==1 and rows[0]['tenant'] and rows[0]['owner'] and not rows[0]['excluded']:
-            unique[key] = rows[0]
+    for row in catalog:
+        key = row['key']
+        candidates = by_id.get(key[0], [])
+        resolved = resolved_ids.get(key[0])
+        if resolved:
+            unique[key] = row
         else:
-            conflicts[key] = rows
+            conflicts[key] = candidates
     return unique, conflicts
 
 
@@ -207,7 +236,9 @@ def dto(value, available=True):
 
 
 def summarize(catalog, metrics, actor, params, fetched_at):
-    unique, conflicts = unique_catalog(catalog)
+    unique, _ = unique_catalog(catalog)
+    by_id = campaign_index(catalog)
+    resolved_ids = {key: resolved_campaign(rows) for key, rows in by_id.items()}
     def selected(row):
         return visible(row, actor) and all(not values or row[k] in values for k,values in params['filters'].items()) and (
             not params['search'] or params['search'] in (row['drama_label']+' '+row['drama']).casefold())
@@ -222,6 +253,7 @@ def summarize(catalog, metrics, actor, params, fetched_at):
         add(groups[key], value); add(totals, value); add(trend[dim['date']], value)
     seen, populated, source_updated = set(), set(), ''
     unmatched_keys, excluded_keys, unmatched = set(), set(), empty()
+    corrected_keys = set()
     for metric in metrics:
         day = metric['date']
         if day not in trend:
@@ -233,13 +265,17 @@ def summarize(catalog, metrics, actor, params, fetched_at):
         # Validate every row before trusting source completeness.
         add(empty(), metric)
         source_updated = max(source_updated, str(metric.get('updated_at') or ''))
-        if key in selected_rows:
-            emit(dict(selected_rows[key], date=day), metric)
-        elif key in conflicts and any(selected(r) for r in conflicts[key]):
+        candidates = by_id.get(key[0], [])
+        resolved = resolved_ids.get(key[0])
+        if resolved and selected(resolved):
+            emit(dict(resolved, date=day), metric)
+            if key != resolved['key']:
+                corrected_keys.add(key)
+        elif candidates and not resolved and any(selected(r) for r in candidates):
             # Counts and money are only visible to a same-tenant admin when all
             # candidates belong to that tenant; never leak another owner's data.
-            if actor.get('role')=='admin' and all(r['tenant']==actor['tenant_key'] for r in conflicts[key]):
-                if all(r['excluded'] for r in conflicts[key]):
+            if actor.get('role')=='admin' and all(r['tenant']==actor['tenant_key'] for r in candidates):
+                if all(r['excluded'] for r in candidates):
                     excluded_keys.add(key)
                 else:
                     unmatched_keys.add(key); add(unmatched, metric)
@@ -263,7 +299,10 @@ def summarize(catalog, metrics, actor, params, fetched_at):
     ranking = sorted(rows, key=lambda r: sort_key(r,params['ranking_metric']), reverse=True)[:10]
     ranking = [dict(r,label=' / '.join(str(r.get(k+'_label',r[k])) for k in params['groups'])) for r in ranking]
     missing = [d for d in days if d not in populated]
-    warnings = ['转化数采用源表充值人数；跨日期累加每日人数，未做跨日用户去重。']
+    warnings = ['转化数采用源表充值人数；跨日期累加每日人数，未做跨日用户去重。',
+                '按 campaign ID 唯一关联后台发布或手动短链记录；生成人、剧名和频道采用生成时保存的信息。']
+    if corrected_keys:
+        warnings.append('部分统计记录的 ID 被截断或名称与后台不一致，已按唯一 campaign ID 关联；未改写原始统计数据。')
     if missing:
         warnings.append('部分日期源表暂无记录，标为未同步；合计仅含已有日期，不能将缺失日期判为零。')
     if params['end']==datetime.now(timezone.utc).date().isoformat():
@@ -275,10 +314,11 @@ def summarize(catalog, metrics, actor, params, fetched_at):
     return dict(totals=dto(totals,available), rows=rows[offset:offset+params['page_size']], all_rows=rows,
         trend=[dict(dto(trend[d],d in populated),date=d) for d in days], ranking=ranking,
         pagination=dict(page=page,page_size=params['page_size'],total=total_rows,pages=pages), group_by=params['groups'],
-        quality=dict(missing_dates=missing, unmatched_campaigns=len(unmatched_keys),unmatched_totals=dto(unmatched,available),excluded_campaigns=len(excluded_keys)),
+        quality=dict(missing_dates=missing, unmatched_campaigns=len(unmatched_keys),unmatched_totals=dto(unmatched,available),excluded_campaigns=len(excluded_keys),
+                     corrected_campaigns=len(corrected_keys)),
         meta=dict(start=params['start'],end=params['end'],timezone='UTC',currency='USD',fetched_at=fetched_at,
                   source_updated_at=source_updated,scope='tenant' if actor.get('role')=='admin' else 'own',
-                  conversion_label=LABELS['conversions']), warnings=warnings)
+                  conversion_label=LABELS['conversions'], attribution='unique_frozen_campaign_id_v2'), warnings=warnings)
 
 
 def csv_export(report):
