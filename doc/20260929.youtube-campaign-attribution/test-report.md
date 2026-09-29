@@ -4,4 +4,4 @@ Local completed: Python compile passed for matcher, acceptance script and deploy
 
 True-source snapshot replay: all revenue reconciles on the three inspected UTC dates; split/mislabeled manual rows recover to frozen campaign identities without source writes. Tenant and owner filtering are applied only after global resolution. Detailed private evidence remains outside Git under D:/codex/audits/youtube-attribution-20260929.
 
-Production deployment and authenticated readback are pending; do not treat this document as production success until deployment-evidence.md records the exact release and completed checks.
+Production deployment completed. Linux also passed 69/69; authenticated loopback and public HTTPS readback passed, caches refreshed, worker PIDs and frozen links preserved. See deployment-evidence.md for exact release and rollback.
