@@ -236,6 +236,47 @@ class FrozenRecipeTests(AssetFixture, unittest.TestCase):
     def processor(self, **kwargs):
         return make_processor(self.root, self.assets, **kwargs)
 
+    def test_stall_normalizes_once_without_redrawing_recipe(self):
+        processor = self.processor()
+        original = processor.runner
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise worker.RenderStalled(command, 180)
+            return original(command, **kwargs)
+        processor.runner = run
+        result = processor.prepare(request())
+        root = self.root / "jobs" / request()["job_id"]
+        receipt = json.loads((root / "recipe.json").read_text())
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(processor.downloads, 1)
+        self.assertEqual(processor.uploads, 1)
+        self.assertIn("source.normalized.tmp.mp4", calls[1][-1])
+        self.assertEqual(calls[2][calls[2].index("-i") + 1], calls[1][-1])
+        self.assertFalse((root / "source.normalized.tmp.mp4").exists())
+        self.assertEqual(result["random_overlay_recipe"], receipt["recipe"])
+
+    def test_second_stall_does_not_retry_or_upload(self):
+        processor = self.processor()
+        original = processor.runner
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if len(calls) in (1, 3):
+                raise worker.RenderStalled(command, 180)
+            return original(command, **kwargs)
+        processor.runner = run
+        with self.assertRaises(worker.PrepareWorkerError):
+            processor.prepare(request())
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(processor.uploads, 0)
+        root = self.root / "jobs" / request()["job_id"]
+        self.assertTrue((root / "source.mp4").exists())
+        self.assertTrue((root / "recipe.json").exists())
+        self.assertFalse((root / "source.normalized.tmp.mp4").exists())
+
     def test_completed_legacy_manifest_reused_verbatim(self):
         processor = self.processor()
         root = self.root / "jobs" / request()["job_id"]

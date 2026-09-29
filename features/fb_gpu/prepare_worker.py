@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 import requests
 from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
+from .render_process import RenderStalled, run_render
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 PREPARE_PATH="/internal/fb-page-media/prepare"; HEALTH_PATH="/health"
@@ -71,7 +72,7 @@ def cleanup_stale_failed_jobs(config,*,now_fn=time.time,exclude_jobs=()):
                 # A retry may redownload media, but must match its recorded SHA.
                 cleaned=False
                 for item in child.iterdir():
-                    scratch=item.name in {"source.mp4","source.download.tmp","output.tmp.mp4","recipe.tmp","manifest.tmp"} or re.fullmatch(r"compositor-[a-f0-9]{20}\.cl",item.name)
+                    scratch=item.name in {"source.mp4","source.download.tmp","source.normalized.tmp.mp4","output.tmp.mp4","recipe.tmp","manifest.tmp"} or re.fullmatch(r"compositor-[a-f0-9]{20}\.cl",item.name)
                     if scratch and item.is_file() and not item.is_symlink(): item.unlink(); cleaned=True
                 removed+=int(cleaned)
                 continue
@@ -169,7 +170,7 @@ class CosObjectStore:
         return {"url":url,"key":key,"reused":reused}
 
 class PrepareProcessor:
-    def __init__(self,config,*,session_factory=requests.Session,runner=subprocess.run,object_store=None):
+    def __init__(self,config,*,session_factory=requests.Session,runner=run_render,object_store=None):
         self.config=config; self.assets=load_asset_set(config.asset_root,config.asset_manifest_sha256); self.session_factory=session_factory; self.runner=runner; self.object_store=object_store or CosObjectStore(config); self.lock=threading.Lock(); (config.work_root/"jobs").mkdir(parents=True,exist_ok=True); cleanup_stale_failed_jobs(config); self.last_cleanup_at=time.monotonic()
         self.slots=threading.BoundedSemaphore(config.max_jobs)
         self.job_locks=[threading.Lock() for _ in range(64)]
@@ -252,7 +253,29 @@ class PrepareProcessor:
             output=root/"output.tmp.mp4"; output.unlink(missing_ok=True)
             render_started=time.monotonic()
             try:
-                try: self.runner(build_command(self.config,source,output,source_info,recipe,selected_asset_paths(recipe,assets)),capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                try:
+                    paths=selected_asset_paths(recipe,assets)
+                    try:
+                        self.runner(build_command(self.config,source,output,source_info,recipe,paths),capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                    except RenderStalled:
+                        # Some source timestamp/interleaving combinations stall
+                        # multi-input framesync. Normalize only after a proven
+                        # stall, retaining the frozen source hash and recipe.
+                        normalized=root/"source.normalized.tmp.mp4"
+                        try:
+                            video=source_info["video"]
+                            width,height=int(video["width"]),int(video["height"])
+                            sar=str(video.get("sample_aspect_ratio") or "1:1")
+                            if not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*",sar): sar="1:1"
+                            normalize=[self.config.ffmpeg,"-y","-nostdin","-hide_banner","-loglevel","error","-i",str(source),"-map","0:v:0","-map","0:a:0?","-vf",f"scale={width}:{height}:eval=frame,setsar={sar.replace(':','/')},fps=30","-c:v","h264_nvenc","-preset","p5","-cq","18","-b:v","0","-pix_fmt","yuv420p","-c:a","aac","-af","aresample=48000:async=1:first_pts=0","-t","%.6f"%source_info["duration"],str(normalized)]
+                            self.runner(normalize,capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                            normalized_info=_probe(self.config,normalized)
+                            if abs(normalized_info["duration"]-source_info["duration"])>1:
+                                raise PrepareWorkerError("fb_gpu_normalized_duration_invalid","normalized duration mismatch",502)
+                            output.unlink(missing_ok=True)
+                            self.runner(build_command(self.config,normalized,output,normalized_info,recipe,paths),capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                        finally:
+                            normalized.unlink(missing_ok=True)
                 except Exception: raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
                 render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
