@@ -203,6 +203,20 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual(http_limit.exception.code, "x_post_rate_limited")
         self.assertEqual(http_limit.exception.status, 429)
 
+    def test_profile_suspension_is_account_local_but_generic_403_is_not(self):
+        for url, payload, code, status in (
+            (service.USERS_ME_URL, {"type": "https://api.x.com/2/problems/user-suspended"}, "x_account_suspended", 409),
+            (service.USERS_ME_URL, {"title": "Forbidden"}, "x_upstream_error", 502),
+            (service.USERS_ME_URL, {"type": "https://api.x.com/2/problems/usage-capped"}, "x_post_rate_limited", 429),
+            (service.TOKEN_URL, {"type": "https://api.x.com/2/problems/user-suspended"}, "x_upstream_error", 502),
+        ):
+            with self.subTest(url=url, code=code):
+                error = urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(json.dumps(payload).encode()))
+                with mock.patch.object(service._NO_REDIRECT_OPENER, "open", side_effect=error):
+                    with self.assertRaises(service.ServiceError) as caught:
+                        service.http_json(url)
+                self.assertEqual((caught.exception.code, caught.exception.status), (code, status))
+
     def new_state(self, actor=None):
         result = service.create_authorization(actor or self.owner)
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(result["authorization_url"]).query)

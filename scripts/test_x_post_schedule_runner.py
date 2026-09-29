@@ -2672,7 +2672,7 @@ class ScheduleRunnerTests(unittest.TestCase):
         codes = ("x_account_not_publishable", "x_account_disabled",
                  "x_account_publish_not_approved", "x_disconnect_pending",
                  "x_token_revoked", "x_token_missing", "x_token_invalid",
-                 "x_identity_mismatch")
+                 "x_identity_mismatch", "x_account_suspended")
         for source in ("material", "drama"):
             for code in codes:
                 with self.subTest(source=source, code=code):

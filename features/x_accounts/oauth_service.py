@@ -624,6 +624,16 @@ def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, a
         upstream_code = clean_text(payload.get("error") or payload.get("title") or "http_%s" % exc.code, 64)
         if exc.code == 429 or is_x_rate_limit_payload(payload):
             raise ServiceError("x_post_rate_limited", "X API触发限流或用量上限", 429) from None
+        if (
+            method == "GET"
+            and urllib.parse.urlsplit(url)._replace(query="").geturl()
+            == "https://api.x.com/2/users/me"
+            and exc.code == 403
+            and payload.get("type") == "https://api.x.com/2/problems/user-suspended"
+        ):
+            raise ServiceError(
+                "x_account_suspended", "X账号已被平台暂停，请登录X处理申诉后重新校验", 409
+            ) from None
         if allow_revoked and upstream_code.lower() in {"invalid_token", "invalid_grant", "token_revoked"}:
             return {"revoked": True}
         if exc.code in {400, 401, 403} and upstream_code.lower() in {"invalid_grant", "unauthorized", "client forbidden"}:
