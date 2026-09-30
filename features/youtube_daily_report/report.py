@@ -29,6 +29,8 @@ def build_card(report):
     pub_zone = "北京时间" if report["publication_timezone"] == "Asia/Shanghai" else "UTC"
     blocks = ["**统计日：%s**\n发布量：%s自然日｜效果：UTC 自然日\n效果覆盖每个人全部历史内容在统计日产生的数据。" % (day, pub_zone),
               "**合计｜成功发布 %s 条**\n%s" % (number(report["totals"]["published"]), metrics_line(report["totals"]))]
+    if report.get('correction'):
+        blocks.insert(1, '**更正说明**\n本报表替代同日旧版效果数据，已补入手动短链，按 campaign ID 重新核对归属。')
     for row in report["rows"]:
         blocks.append("**%s｜成功发布 %s 条**\n%s" % (safe_name(row["name"]), number(row["published"]), metrics_line(row)))
     if report["unmatched"]["campaigns"]:
@@ -38,6 +40,7 @@ def build_card(report):
     blocks.append("**指标说明**\n收入为归因内购收入（USD）；激活为安装事件数；点击/访问为落地页数据。"
         "\n**YouTube 曝光：未接入有效日数据，暂不展示数值。**"
         "\n发布量仅计已确认公开的视频，按视频去重；不含排队、上传中或结果未知的任务。"
+        "\n效果按唯一 campaign ID 关联后台发布及手动短链记录，归属采用生成时保存的信息。"
         "\n效果数据会随回传更新；UTC 统计日对应北京时间当天 08:00 至次日 08:00。")
     if report["totals"]["refund_cents"]:
         blocks.append("当日退款：%s（单列，未从收入扣除）" % money(report["totals"]["refund_cents"]))
@@ -49,7 +52,7 @@ def build_card(report):
     blocks.append(suffix)
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "blue" if report["metrics_available"] else "orange",
-                       "title": {"tag": "plain_text", "content": "YouTube 发布人日报 · " + day}},
+                       "title": {"tag": "plain_text", "content": "YouTube 发布人日报 · " + day + ('（更正版）' if report.get('correction') else '')}},
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text}} for text in blocks]}
 
 

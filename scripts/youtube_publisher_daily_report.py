@@ -23,6 +23,7 @@ CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", help="Report date YYYY-MM-DD, default yesterday")
+    parser.add_argument("--correction", choices=['campaign-id-v2'], help="Explicit, independently deduplicated correction edition")
     parser.add_argument("--state-dir", default="/mnt/data-disk/youtube-publisher-daily-report")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--env-file", default=ENV_PATH)
@@ -32,6 +33,8 @@ def main(argv=None):
     mode.add_argument("--send", action="store_true")
     mode.add_argument("--preview", action="store_true")
     args = parser.parse_args(argv)
+    if args.correction and not args.date:
+        parser.error('--correction requires --date')
     now = datetime.now(BEIJING)
     day = args.date or (now.date() - timedelta(days=1)).isoformat()
     cutoff = datetime.fromisoformat(day).replace(tzinfo=BEIJING) + timedelta(days=1, hours=11)
@@ -40,6 +43,9 @@ def main(argv=None):
     os.umask(0o077)
     state = Path(args.state_dir)
     ensure_storage(state)
+    edition = state / 'corrections' / args.correction if args.correction else state
+    edition.mkdir(parents=True, exist_ok=True)
+    namespace = 'youtube-publisher-daily-report' + ('/correction/' + args.correction if args.correction else '')
     handle = None
     store = None
     try:
@@ -52,7 +58,7 @@ def main(argv=None):
                 print(json.dumps({"status": "already_running"}))
                 return 0
         if args.send:
-            store = DeliveryStore(state / "delivery.sqlite3", namespace="youtube-publisher-daily-report")
+            store = DeliveryStore(edition / "delivery.sqlite3", namespace=namespace)
             prior = store.get(day, CHAT_ID)
             if prior and prior["status"] == "sent":
                 print(json.dumps(dict(status="already_sent", date=day, message_id=prior["message_id"])))
@@ -60,13 +66,17 @@ def main(argv=None):
             if prior and prior["status"] in ("sending", "unknown"):
                 raise DeliveryUnknown("prior_delivery_unconfirmed")
         report = collect(day, args.db, args.env_file, args.publication_timezone)
+        if args.correction:
+            report['correction'] = args.correction
+            if args.send and not report['metrics_available']:
+                raise RuntimeError('correction_requires_available_metrics')
         card = build_card(report)
         card_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
         payload_size = len(json.dumps(dict(receive_id=CHAT_ID, msg_type="interactive", content=card_json,
             uuid="0"*36), ensure_ascii=False).encode("utf-8"))
         if payload_size > 29000:
             raise RuntimeError("report_card_exceeds_safe_payload_limit")
-        folder = state / ("reports" if args.send else "previews") / day
+        folder = edition / ("reports" if args.send else "previews") / day
         folder.mkdir(parents=True, exist_ok=True)
         atomic_write(folder / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
         atomic_write(folder / "card.json", card_json)

@@ -10,7 +10,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from features.youtube_analytics.report import read_catalog, campaign_index, resolved_campaign
 
 BEIJING = timezone(timedelta(hours=8))
 SITE_ID = "2284"
@@ -42,33 +42,8 @@ def load_ledger(path):
             video_id,video_state,privacy_status,public_status,workflow,
             video_published_at_utc,status,created_at_utc
             FROM drama_youtube_publish ORDER BY id""")]
-        links = [dict(r) for r in connection.execute("""SELECT
-            job_id,material_kind,long_url FROM drama_material_short_link""")]
         connection.rollback()
-    return publications, links
-
-
-def campaign_keys(publications, links):
-    by_link = {}
-    for link in links:
-        parsed = urlsplit(link["long_url"] or "")
-        if parsed.hostname != "www.dramawavew2a.com" or parsed.path != "/ads/101/2284/view":
-            continue
-        query = parse_qs(parsed.query)
-        # A duplicate attribution parameter is ambiguous, even if one value matches.
-        if len(query.get("af_c_id", [])) != 1 or len(query.get("c", [])) != 1:
-            continue
-        by_link.setdefault((link["job_id"], link["material_kind"]), set()).add(
-            (query["af_c_id"][0], query["c"][0]))
-    owners, canary = {}, set()
-    for row in publications:
-        keys = by_link.get((row["job_id"], row["source_kind"]), set())
-        if row["operator_name"] == "internal-deployment-canary":
-            canary.update(keys)
-            continue
-        for key in keys:
-            owners.setdefault(key, set()).add(row["operator_user_id"])
-    return owners, canary
+    return publications, read_catalog(path)
 
 
 def read_settings(path):
@@ -95,7 +70,7 @@ def collect_metrics(report_date, env_path=ENV_PATH):
         SET TRANSACTION READ ONLY;
         START TRANSACTION WITH CONSISTENT SNAPSHOT;
         SELECT JSON_OBJECT('kind','connection','read_only',@@read_only);
-        SELECT JSON_OBJECT('kind','metric','campaign_id',campaign_id,'campaign',campaign,
+        SELECT JSON_OBJECT('kind','metric','campaign_id',MIN(campaign_id),'campaign',MIN(campaign),
           'revenue_cents',CAST(ROUND(SUM(COALESCE(revenue,0))*100) AS SIGNED),
           'refund_cents',CAST(ROUND(SUM(COALESCE(refund_revenue,0))*100) AS SIGNED),
           'installs',SUM(COALESCE(installs,0)),'views',SUM(COALESCE(views,0)),
@@ -104,7 +79,7 @@ def collect_metrics(report_date, env_path=ENV_PATH):
           'source_rows',COUNT(*),'updated_at_utc',CAST(MAX(updated_at) AS CHAR))
         FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
         WHERE site_id='2284' AND dt='%s'
-        GROUP BY campaign_id,campaign;
+        GROUP BY BINARY campaign_id,BINARY campaign;
         ROLLBACK;
     """ % day
     env = dict(os.environ)
@@ -144,36 +119,48 @@ def add_metrics(target, row):
         target[field] += int(value)
 
 
-def summarize(publications, links, metrics, report_date, publication_timezone="UTC"):
+def summarize(publications, catalog, metrics, report_date, publication_timezone="UTC"):
     if publication_timezone not in ("Asia/Shanghai", "UTC"):
         raise ValueError("unsupported_publication_timezone")
     day = date.fromisoformat(report_date)
     zone = BEIJING if publication_timezone == "Asia/Shanghai" else timezone.utc
     start = datetime.combine(day, datetime.min.time(), zone).astimezone(timezone.utc)
     end = start + timedelta(days=1)
-    owners, canary = campaign_keys(publications, links)
+    by_id = campaign_index(catalog)
+    resolved_ids = {key: resolved_campaign(rows) for key, rows in by_id.items()}
     people, video_owners = {}, {}
+    owner_tenants = {}
+    for row in catalog:
+        if row['owner'] and row['tenant'] and not row['excluded']:
+            owner_tenants.setdefault(row['owner'], set()).add(row['tenant'])
+    def person(tenant, owner, name):
+        return people.setdefault((tenant, owner), dict(tenant=tenant, owner_id=owner,
+            name=name or owner, published=0, publication_ids=[], **empty_metrics()))
+    for row in resolved_ids.values():
+        if row:
+            person(row['tenant'], row['owner'], row['owner_label'])
     warnings = []
     for row in publications:
         if row["operator_name"] == "internal-deployment-canary":
             continue
         owner = row["operator_user_id"] or "unidentified"
-        person = people.setdefault(owner, dict(owner_id=owner, name=row["operator_name"] or owner,
-            published=0, publication_ids=[], **empty_metrics()))
-        person["name"] = row["operator_name"] or person["name"]
+        tenants = owner_tenants.get(owner, set())
+        tenant = next(iter(tenants)) if len(tenants) == 1 else ''
+        person(tenant, owner, row['operator_name'])
         when = instant(row["video_published_at_utc"])
         confirmed = (row["video_state"] == "published" and row["video_id"]
             and row["privacy_status"] == "public" and when
             and (row["workflow"] != "reviewed_thumbnail" or row["public_status"] == "succeeded"))
         if confirmed and start <= when < end:
-            video_owners.setdefault(row["video_id"], []).append((owner, row["id"]))
+            video_owners.setdefault(row["video_id"], []).append(((tenant, owner), row["id"]))
     for video_id, entries in video_owners.items():
         if len({owner for owner, _ in entries}) != 1:
             raise ValueError("publication_owner_ambiguous")
         owner, publish_id = entries[0]
         people[owner]["published"] += 1
         people[owner]["publication_ids"].append(publish_id)
-    matched = []
+    matched, unmatched_metrics = [], []
+    corrected = set()
     unmapped = dict(campaigns=0, source_rows=0, **empty_metrics())
     excluded = dict(campaigns=0, source_rows=0, **empty_metrics())
     metric_keys = set()
@@ -182,15 +169,20 @@ def summarize(publications, links, metrics, report_date, publication_timezone="U
         if key in metric_keys:
             raise ValueError("duplicate_metric_key")
         metric_keys.add(key)
-        if key in canary and key not in owners:
+        candidates = by_id.get(key[0], [])
+        resolved = resolved_ids.get(key[0])
+        if candidates and all(row['excluded'] for row in candidates):
             bucket = excluded
-        elif len(owners.get(key, set())) == 1:
-            owner = next(iter(owners[key])) or "unidentified"
-            add_metrics(people[owner], metric)
-            matched.append(dict(owner_id=owner, **metric))
+        elif resolved:
+            add_metrics(people[(resolved['tenant'], resolved['owner'])], metric)
+            matched.append(dict(metric, owner_id=resolved['owner'], tenant=resolved['tenant'],
+                                frozen_campaign_id=resolved['key'][0], link_id=resolved['link_id']))
+            if key != resolved['key']:
+                corrected.add(key)
             continue
         else:
             bucket = unmapped
+            unmatched_metrics.append(dict(metric, reason='ambiguous_campaign_id' if candidates else 'unknown_campaign_id'))
         bucket["campaigns"] += 1
         bucket["source_rows"] += int(metric["source_rows"])
         add_metrics(bucket, metric)
@@ -213,7 +205,7 @@ def summarize(publications, links, metrics, report_date, publication_timezone="U
     if not available:
         for row in rows + [totals]:
             row.update(dict.fromkeys(METRICS, None))
-    return dict(schema_version=1, report_date=report_date,
+    return dict(schema_version=2, report_date=report_date,
         generated_at=datetime.now(timezone.utc).isoformat(),
         publication_timezone=publication_timezone, metric_timezone="UTC",
         publication_window_utc=[start.isoformat(), end.isoformat()],
@@ -225,18 +217,19 @@ def summarize(publications, links, metrics, report_date, publication_timezone="U
         unmatched=unmapped, excluded_canary=excluded, source_totals=source_totals,
         source_campaigns=len(metrics), matched_campaigns=len(matched),
         source_updated_at_utc=max((m["updated_at_utc"] or "" for m in metrics), default=""),
-        warnings=warnings, matched_metrics=matched,
+        warnings=warnings, matched_metrics=matched, unmatched_metrics=unmatched_metrics,
+        corrected_campaigns=len(corrected),
         validation=dict(readonly=True, source_totals_reconciled=True,
-                        attribution="frozen_campaign_id_and_campaign_to_ledger_operator"))
+                        attribution="unique_frozen_campaign_id_v2"))
 
 
 def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, publication_timezone="UTC"):
-    publications, links = load_ledger(db_path)
+    publications, catalog = load_ledger(db_path)
     try:
         metrics = collect_metrics(report_date, env_path)
     except Exception as exc:
-        report = summarize(publications, links, [], report_date, publication_timezone)
+        report = summarize(publications, catalog, [], report_date, publication_timezone)
         report["warnings"] = ["效果数据查询失败（%s），本次显示待核实，不按零播报。" % type(exc).__name__]
         report["metric_error"] = type(exc).__name__
         return report
-    return summarize(publications, links, metrics, report_date, publication_timezone)
+    return summarize(publications, catalog, metrics, report_date, publication_timezone)
