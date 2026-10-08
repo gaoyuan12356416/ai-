@@ -18,7 +18,7 @@ from pathlib import Path
 import requests
 
 from features.drama_synthesis.core import REVIEWED_SCOPES, normalize_channel_scopes, scope_capabilities
-from features.drama_synthesis.youtube import CHANNELS_URL, TOKEN_URL
+from features.drama_synthesis.youtube import TOKEN_URL, channel_read_auth_error, read_authorized_channels
 from .templates import WorkflowError
 
 
@@ -56,12 +56,27 @@ class ChannelProbe:
             capabilities = scope_capabilities(scopes)
             if not REVIEWED_SCOPES.intersection(scopes) or not capabilities['identity_eligible']:
                 return verdict('blocked', '当前 Token 的发布权限不足，请重新授权')
-            response = session.get(CHANNELS_URL, params={'part':'id,snippet,status', 'mine':'true'},
-                headers={'Authorization':'Bearer '+payload['access_token']}, timeout=(3,8), allow_redirects=False)
+            response = read_authorized_channels(session, payload['access_token'],
+                part='id,snippet,status', timeout=(3,8))
             data = response.json()
             if response.status_code != 200:
-                return verdict('blocked' if response.status_code in (401,403) else 'unknown',
-                    '无法读取授权频道，请检查权限后重新鉴权')
+                if channel_read_auth_error(response):
+                    return verdict('unknown', '频道接口暂未接受刷新后的凭证，已重试，请稍后重新检查',
+                        auth_error_code='authError', http_status=401)
+                error = data.get('error', {}) if isinstance(data, dict) else {}
+                errors = error.get('errors', []) if isinstance(error, dict) else []
+                reasons = {item.get('reason') for item in errors if isinstance(item, dict)} if isinstance(errors, list) else set()
+                if reasons.intersection({'quotaExceeded','dailyLimitExceeded','rateLimitExceeded','userRateLimitExceeded'}) or response.status_code in (429,500,502,503,504):
+                    return verdict('unknown', 'YouTube 接口限额或服务暂不可用，请稍后重新检查',
+                        auth_error_code='channel_api_unavailable', http_status=response.status_code)
+                if response.status_code == 401:
+                    return verdict('blocked', 'YouTube 未接受频道凭证，请重新授权',
+                        auth_error_code='channel_unauthorized', http_status=401)
+                if response.status_code == 403:
+                    return verdict('blocked', 'YouTube 拒绝读取频道，请检查频道及应用权限',
+                        auth_error_code='channel_forbidden', http_status=403)
+                return verdict('unknown', '频道接口读取暂时失败，请稍后重新检查',
+                    auth_error_code='channel_read_failed', http_status=response.status_code)
             items = data.get('items')
             if not isinstance(items, list) or len(items) != 1 or items[0].get('id') != credential.channel_id:
                 return verdict('blocked', 'Token 对应频道与配置不一致，请重新授权正确频道')
