@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import urlsplit, urlunsplit
 
 from .languages import page_language
 from .repositories import MaterialCandidate
@@ -15,6 +16,7 @@ from .repositories import MaterialCandidate
 KIND = "exact_material_round_robin_v1"
 LANGUAGE_ORDER = ("en", "es", "zh-tw", "id", "th")
 WAITING = ("planned", "preparing", "ready", "running")
+COS_SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
 
 
 class BatchError(RuntimeError):
@@ -27,6 +29,16 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def prepare_source_url(value):
+    """The same known COS object over TLS; preserve the original source receipt."""
+    parsed = urlsplit(str(value or ""))
+    if (parsed.scheme not in {"http", "https"} or parsed.hostname != COS_SOURCE_HOST
+            or parsed.port is not None or parsed.username or parsed.password or parsed.fragment
+            or not parsed.path.lower().endswith(".mp4")):
+        raise BatchError("Manual source must be an MP4 on the configured COS source host")
+    return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, ""))
 
 
 def build_manifest(conn, template, pages, materials, input_ids, operation_id,

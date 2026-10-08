@@ -4,9 +4,10 @@ import unittest
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from features.fb_auto_posts.core import ActorScope, FBAutoPostStore
-from features.fb_auto_posts.manual_batch import BatchError, build_manifest, canonical, digest, reserve_batch, task_policy
+from features.fb_auto_posts.manual_batch import BatchError, COS_SOURCE_HOST, build_manifest, canonical, digest, prepare_source_url, reserve_batch, task_policy
 from features.fb_auto_posts.repositories import PageTarget
 from scripts.test_fb_auto_validation import payload
 
@@ -135,6 +136,65 @@ class ManualBatchTests(unittest.TestCase):
         with self.store.connect() as c:
             row = c.execute("SELECT status,skip_reason FROM fb_auto_task WHERE id=?", (tid,)).fetchone()
             self.assertEqual(row[:], ("skipped", "fb_auto_drama_cooldown_at_publish"))
+
+    def test_https_normalization_preserves_object_and_rejects_other_sources(self):
+        source = "http://" + COS_SOURCE_HOST + "/custom/source/clip.mp4?version=1"
+        self.assertEqual(prepare_source_url(source), source.replace("http:", "https:", 1))
+        self.assertEqual(prepare_source_url(prepare_source_url(source)), prepare_source_url(source))
+        for bad in ["https://example.com/clip.mp4", "https://user@" + COS_SOURCE_HOST + "/clip.mp4", "http://" + COS_SOURCE_HOST + ":80/clip.mp4", source + "#fragment"]:
+            with self.assertRaises(BatchError):
+                prepare_source_url(bad)
+
+    def test_manual_preparation_uses_https_without_changing_frozen_source_or_job(self):
+        from features.fb_auto_posts.gpu import PrepareExecutor
+        for material in self.materials.values():
+            material["media_url"] = "http://" + COS_SOURCE_HOST + "/" + material["material_id"] + ".mp4"
+        self.reserve()
+        with self.store.connect() as c:
+            original = dict(c.execute("SELECT * FROM fb_auto_task ORDER BY id LIMIT 1").fetchone())
+        gpu = Mock()
+        gpu.prepare.return_value = {"profile": "tt-post-random-overlay-h264-720x1280-v3", "media_url": "https://cdn.example/p.mp4", "sha256": "a" * 64, "size_bytes": 100, "duration_seconds": "715"}
+        PrepareExecutor(self.store, gpu, live_enabled=True).prepare_next("prepare-worker")
+        self.assertEqual(gpu.prepare.call_args.kwargs["source_url"], prepare_source_url(original["source_media_url"]))
+        self.assertEqual(gpu.prepare.call_args.kwargs["job_id"], original["gpu_job_id"])
+        with self.store.connect() as c:
+            current = dict(c.execute("SELECT * FROM fb_auto_task WHERE id=?", (original["id"],)).fetchone())
+            self.assertEqual(current["source_media_url"], original["source_media_url"])
+            self.assertTrue(task_policy(c, current))
+
+    def recovery_fixture(self):
+        from scripts.fb_auto_post_manual_material_batch import recover_unattempted_preparation
+        for material in self.materials.values():
+            material["media_url"] = "http://" + COS_SOURCE_HOST + "/" + material["material_id"] + ".mp4"
+            material["media_info"] = {"size_bytes": 100, "etag": '"same-object"'}
+        self.reserve()
+        with self.store.connect() as c:
+            c.execute("UPDATE fb_auto_task SET status='failed',error_code='fb_auto_prepared_response_invalid',completed_at_utc=?", (self.now.isoformat(),))
+        response = Mock(status_code=200, headers={"Content-Type": "video/mp4", "Content-Length": "100", "ETag": '"same-object"'})
+        return recover_unattempted_preparation, response, {"FB_AUTO_POST_DB_PATH": self.store.path}
+
+    def test_recovery_is_in_place_and_idempotent(self):
+        recover, response, env = self.recovery_fixture()
+        with self.store.connect() as c:
+            before = [tuple(r) for r in c.execute("SELECT id,page_id,material_id,gpu_job_id FROM fb_auto_task ORDER BY id")]
+        with patch("requests.head", return_value=response):
+            self.assertEqual(recover(env, "test-batch", str(Path(self.tmp.name) / "audit.json"))["recovered"], 107)
+            self.assertEqual(recover(env, "test-batch", str(Path(self.tmp.name) / "repeat.json"))["recovered"], 0)
+        with self.store.connect() as c:
+            self.assertEqual([tuple(r) for r in c.execute("SELECT id,page_id,material_id,gpu_job_id FROM fb_auto_task ORDER BY id")], before)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM fb_auto_task WHERE status='planned'").fetchone()[0], 107)
+
+    def test_recovery_refuses_any_publication_or_unknown_without_partial_reset(self):
+        recover, response, env = self.recovery_fixture()
+        with self.store.connect() as c:
+            c.execute("UPDATE fb_auto_task SET unknown_outcome=1 WHERE id=(SELECT MAX(id) FROM fb_auto_task)")
+        with patch("requests.head", return_value=response), self.assertRaises(BatchError):
+            recover(env, "test-batch", str(Path(self.tmp.name) / "blocked.json"))
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM fb_auto_task WHERE status='failed'").fetchone()[0], 107)
+            c.execute("UPDATE fb_auto_task SET unknown_outcome=0,attempt_count=1 WHERE id=(SELECT MAX(id) FROM fb_auto_task)")
+        with patch("requests.head", return_value=response), self.assertRaises(BatchError):
+            recover(env, "test-batch", str(Path(self.tmp.name) / "blocked-attempt.json"))
 
 
 if __name__ == "__main__":

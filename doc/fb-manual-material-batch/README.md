@@ -37,6 +37,17 @@ All batches retain same-material reservations and unknown-result Page holds.
 The root-only entry point is the trust boundary for approved exceptions; a
 client cannot request these flags through the existing run-now API.
 
+Manual COS sources saved as HTTP are verified over HTTPS on the configured
+source host before reservation. The immutable original URL is retained in the
+receipt; only a validated manual task uses the deterministic HTTPS transport
+URL. Existing automatic source handling and the GPU host allowlist stay intact.
+
+`--recover-unattempted-preparation OPERATION_ID --output AUDIT` permits an
+in-place retry of this specific pre-upload URL validation failure. It verifies
+HTTPS size/ETag against the original receipt, checks exact task identity and
+requires no Graph attempt, ledger, unknown flag or Post ID. It retains original
+task/job IDs and saves the prior failure state rather than recreating the batch.
+
 Rollback restores only the changed code and cancels only batch tasks with no
 Graph attempt. Preserve the current SQLite, submissions, attempts, wrappers
 and frozen recipes. Never restore the old database over new publishing facts.

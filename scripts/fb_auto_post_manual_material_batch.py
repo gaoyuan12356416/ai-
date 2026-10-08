@@ -8,11 +8,12 @@ import sqlite3
 import subprocess
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from features.fb_auto_posts.manual_batch import BatchError, build_manifest, canonical, digest, reserve_batch, summary
+from features.fb_auto_posts.manual_batch import BatchError, build_manifest, canonical, digest, prepare_source_url, reserve_batch, summary, task_policy
 from features.fb_auto_posts.repositories import PagePoolRepository, ReadOnlyMySQL
 from features.fb_auto_posts.strategy import daily_capacity
 
@@ -24,11 +25,15 @@ def service_environment():
     return dict(x.split("=", 1) for x in Path("/proc", pid, "environ").read_bytes().decode().split("\0") if "=" in x)
 
 
+@contextmanager
 def read_db(env):
     conn = sqlite3.connect("file:" + env["FB_AUTO_POST_DB_PATH"] + "?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def mysql_repository(env):
@@ -77,12 +82,13 @@ def load_materials(repo, input_ids, app_id, pages, waived_series):
         duration = str(row["video_duration"])
         media_info = {}
         if row["language"] in languages:
-            r = requests.head(row["media_url"], timeout=(5, 20), allow_redirects=True)
+            normalized_source = prepare_source_url(row["media_url"])
+            r = requests.head(normalized_source, timeout=(5, 20), allow_redirects=False)
             if r.status_code != 200 or "video/mp4" not in r.headers.get("Content-Type", "").lower() or int(r.headers.get("Content-Length", "0")) <= 0:
                 raise BatchError("Material media HEAD failed: " + row["material_id"])
-            media_info = {"size_bytes": int(r.headers["Content-Length"]), "etag": r.headers.get("ETag", "")}
+            media_info = {"size_bytes": int(r.headers["Content-Length"]), "etag": r.headers.get("ETag", ""), "prepare_source_url": normalized_source}
             if float(duration) <= 0:
-                probe = subprocess.run(["ffprobe", "-v", "error", "-rw_timeout", "10000000", "-show_entries", "format=duration", "-of", "json", row["media_url"]], capture_output=True, text=True, timeout=40)
+                probe = subprocess.run(["ffprobe", "-v", "error", "-rw_timeout", "10000000", "-show_entries", "format=duration", "-of", "json", normalized_source], capture_output=True, text=True, timeout=40)
                 if probe.returncode != 0:
                     raise BatchError("Material duration probe failed: " + row["material_id"])
                 duration = str(json.loads(probe.stdout)["format"]["duration"])
@@ -160,7 +166,10 @@ def verify(env, report):
                 error = body.get("error", {})
                 result = {"verified": False, "error_code": error.get("code"), "error_subcode": error.get("error_subcode")}
                 continue
-            result = {"verified": body.get("published") is True, "published": body.get("published"), "status": body.get("status"), "permalink_url": body.get("permalink_url", ""), "object_id": body.get("id", "")}
+            link = str(body.get("permalink_url") or "")
+            if link.startswith("/"):
+                link = "https://www.facebook.com" + link
+            result = {"verified": body.get("published") is True and bool(link), "published": body.get("published"), "status": body.get("status"), "permalink_url": link, "object_id": body.get("id", "")}
             break
         task["meta_readback"] = result
     session.close()
@@ -177,6 +186,45 @@ def write_json(path, value):
     os.replace(temporary, target)
 
 
+def recover_unattempted_preparation(env, operation_id, output):
+    """Audited in-place retry only for failed preparation with no Graph attempt."""
+    import requests
+    from features.fb_auto_posts.core import FBAutoPostStore
+    report = status(env, operation_id)
+    original = existing_manifest(env, operation_id)
+    receipt = json.loads(original["config_json"])["operator_material_batch"]
+    manifest = receipt["manifest"]
+    if digest(manifest) != receipt["sha256"]:
+        raise BatchError("Frozen batch receipt is invalid")
+    candidates = [t for t in report["tasks"] if t["status"] == "failed" and t["error_code"] == "fb_auto_prepared_response_invalid"]
+    for mid in sorted({t["material_id"] for t in candidates}):
+        raw = manifest["materials"][mid]
+        r = requests.head(prepare_source_url(raw["media_url"]), timeout=(5, 20), allow_redirects=False)
+        frozen = raw["media_info"]
+        if (r.status_code != 200 or "video/mp4" not in r.headers.get("Content-Type", "").lower()
+                or int(r.headers.get("Content-Length", "0")) != frozen["size_bytes"]
+                or r.headers.get("ETag", "") != frozen["etag"]):
+            raise BatchError("HTTPS source differs from the frozen COS object")
+    write_json(output, {"before": report, "recovered_task_ids": [t["id"] for t in candidates]})
+    store = FBAutoPostStore(env["FB_AUTO_POST_DB_PATH"])
+    with store._lock, store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for task in candidates:
+            row = dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (task["id"],)).fetchone())
+            if (row["status"] != "failed" or row["error_code"] != "fb_auto_prepared_response_invalid"
+                    or row["attempt_count"] != 0 or row["unknown_outcome"] or row["graph_post_id"]
+                    or conn.execute("SELECT 1 FROM fb_auto_publish_attempt WHERE task_id=?", (row["id"],)).fetchone()
+                    or conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE task_id=?", (row["id"],)).fetchone()):
+                raise BatchError("Recovery target has changed or has a publication attempt")
+            if task_policy(conn, row) is None:
+                raise BatchError("Recovery target is not in the frozen manual batch")
+            conn.execute("UPDATE fb_auto_task SET status='planned',completed_at_utc='',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='' WHERE id=?", (row["id"],))
+        if candidates:
+            conn.execute("UPDATE fb_auto_run SET status='queued',completed_at_utc='' WHERE id=?", (report["run_id"],))
+        conn.commit()
+    return {"run_id": report["run_id"], "operation_id": operation_id, "recovered": len(candidates), "receipt": output, "frozen_sha256": receipt["sha256"]}
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
@@ -184,6 +232,7 @@ def main():
     modes.add_argument("--apply", metavar="MANIFEST")
     modes.add_argument("--status", metavar="OPERATION_ID")
     modes.add_argument("--verify", metavar="OPERATION_ID")
+    modes.add_argument("--recover-unattempted-preparation", metavar="OPERATION_ID")
     parser.add_argument("--template-id", type=int, default=1)
     parser.add_argument("--material-ids", nargs="+")
     parser.add_argument("--operation-id")
@@ -214,6 +263,10 @@ def main():
             result = reserve_batch(FBAutoPostStore(env["FB_AUTO_POST_DB_PATH"]), manifest, max_jobs=int(env["FB_AUTO_MAX_JOBS_PER_SLOT"]), max_daily_jobs=int(env["FB_AUTO_MAX_DAILY_JOBS"]), automatic_daily_jobs=capacity)
         if args.output:
             write_json(args.output, result)
+    elif args.recover_unattempted_preparation:
+        if not args.output:
+            parser.error("Recovery requires an audit output file")
+        result = recover_unattempted_preparation(env, args.recover_unattempted_preparation, args.output)
     else:
         result = status(env, args.status or args.verify)
         if args.verify:
