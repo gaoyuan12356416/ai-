@@ -52,6 +52,33 @@ class MetadataCase(unittest.TestCase):
         self.assertEqual((result['macro_name'], result['macro_desc']), ('', ''))
         self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('missing', ''))
 
+    def test_many_drama_ids_are_bounded_without_changing_results(self):
+        materials = [self.material(content_id='drama%03d' % i) for i in range(45)]
+        def query(sql):
+            values = []
+            ids = set()
+            for material in materials:
+                content_id = material['content_id']
+                literal = 'CONVERT(0x%s USING utf8mb4)' % content_id.encode().hex()
+                if literal in sql:
+                    ids.add(content_id)
+                    values.append(self.resource(content_id=content_id))
+            self.assertLessEqual(len(ids), 20)
+            return encoded(*values)
+        query = Mock(side_effect=query)
+        result = DramaMetadataResolver(query)(materials)
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(len(result), 45)
+        self.assertTrue(all(row['drama_status'] == 'matched' for row in result))
+
+    def test_total_ambiguity_bound_applies_across_batches(self):
+        materials = [self.material(content_id='drama%03d' % i) for i in range(21)]
+        batches = [encoded(*(self.resource(desc=str(i)) for i in range(600))),
+                   encoded(*(self.resource(desc=str(i)) for i in range(600, 1001)))]
+        with self.assertRaises(WorkflowError) as caught:
+            DramaMetadataResolver(Mock(side_effect=batches))(materials)
+        self.assertEqual(caught.exception.code, 'drama_query_failed')
+
     def test_conflicting_metadata_is_visible_and_not_randomly_selected(self):
         query = Mock(return_value=encoded(self.resource(), self.resource(desc='Different description')))
         result = DramaMetadataResolver(query)([self.material()])[0]

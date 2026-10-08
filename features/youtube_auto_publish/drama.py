@@ -6,6 +6,10 @@ from .templates import WorkflowError
 
 
 class DramaMetadataResolver:
+    # A hundred videos may span ~80 dramas and tens of thousands of episode
+    # rows. Bound each index-range read without weakening the 8-second timeout.
+    CONTENT_IDS_PER_QUERY = 20
+
     def __init__(self, query_runner, schema='kunlunads_dev'):
         if not re.fullmatch(r'[A-Za-z0-9_]+', schema):
             raise ValueError('Invalid drama schema')
@@ -21,18 +25,26 @@ class DramaMetadataResolver:
             # Resource rows repeat per episode. DISTINCT collapses identical metadata,
             # while conflicting versions remain visible and must not be guessed.
             literal = lambda value: 'CONVERT(0x%s USING utf8mb4) COLLATE utf8mb4_unicode_ci' % value.encode('utf-8').hex()
-            ids = ','.join(literal(value) for value in sorted({key[0] for key in pairs}))
+            content_ids = sorted({key[0] for key in pairs})
             languages = ','.join(literal(value) for value in sorted({key[1] for key in pairs}))
-            sql = ("SELECT DISTINCT HEX(JSON_OBJECT('content_id',r.content_id,"
+            sql_template = ("SELECT DISTINCT HEX(JSON_OBJECT('content_id',r.content_id,"
                    "'language',LOWER(TRIM(r.language)),'name',TRIM(COALESCE(r.name,'')),"
                    "'desc',TRIM(COALESCE(r.`desc`,'')),'cover',TRIM(COALESCE(r.cover,'')))) "
                    "FROM `%s`.ads_drama_resource r FORCE INDEX (content_id) "
                    "WHERE r.content_id IN (%s) AND LOWER(TRIM(r.language)) IN (%s) LIMIT 1001"
-                   % (self.schema, ids, languages))
+                   )
             try:
-                rows = self.query_runner(sql)
-                if len(rows) > 1000:
-                    raise ValueError('Ambiguous metadata result exceeds bound')
+                unique_rows = {}
+                for start in range(0, len(content_ids), self.CONTENT_IDS_PER_QUERY):
+                    ids = ','.join(literal(value) for value in content_ids[start:start + self.CONTENT_IDS_PER_QUERY])
+                    rows = self.query_runner(sql_template % (self.schema, ids, languages))
+                    if len(rows) > 1000:
+                        raise ValueError('Ambiguous metadata result exceeds bound')
+                    for row in rows:
+                        unique_rows[row[0]] = row
+                    if len(unique_rows) > 1000:
+                        raise ValueError('Ambiguous metadata result exceeds bound')
+                rows = unique_rows.values()
                 for row in rows:
                     value = json.loads(bytes.fromhex(row[0]).decode('utf-8'))
                     key = (str(value['content_id']), str(value['language']).strip().casefold())

@@ -20,8 +20,9 @@ HTML was 288586 bytes without compression; gzip level 5 reduces it to ~58835.
   Preserve the current qdisc. Persist the included sysctl file only after
   measured readback; revert to the backed-up congestion-control value on failure.
 - YouTube materials fail in drama metadata enrichment with MySQL error 3024
-  (the existing 8-second read-only statement bound). Diagnose/optimize this
-  separately; do not raise the timeout, change SQL Gate capacity, or bypass the
+  (the existing 8-second read-only statement bound). The indexed read spans ~22000 episode rows for ~80 drama IDs. Read
+  at most 20 IDs per statement, deduplicate encoded metadata across batches,
+  and retain the global 1000-distinct-record bound; do not raise the timeout, change SQL Gate capacity, or bypass the
   gate for production reads. Keep exact ID/language/ambiguity and write gates.
 
 ## Deployment and rollback
