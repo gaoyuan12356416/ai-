@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 SCHEMA_VERSION = 1
 SITE_ID = "2116"
+ATTRIBUTION_METHOD = "campaign-id-publish-ledger-v2"
 BUSINESS_TIMEZONE = "Asia/Shanghai"
 SHANGHAI = ZoneInfo(BUSINESS_TIMEZONE)
 DEFAULT_CACHE_ROOT = Path("/mnt/data-disk/x-account-operating-stats")
@@ -81,14 +82,17 @@ def _money_text(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), "f")
 
 
-def campaign_from_long_url(long_url: object) -> str:
-    """Return the one exact frozen ``c`` value, otherwise an empty string."""
+def campaign_id_from_long_url(long_url: object) -> str:
+    """Return the one exact frozen ``af_c_id`` value, otherwise empty."""
 
     try:
         parsed = urlsplit(str(long_url or ""))
     except ValueError:
         return ""
-    values = [value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "c"]
+    values = [
+        value for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key == "af_c_id"
+    ]
     if len(values) != 1:
         return ""
     return values[0]
@@ -108,7 +112,12 @@ def _open_ledger(path: os.PathLike[str] | str) -> sqlite3.Connection:
 def read_ledger_metrics(
     db_path: os.PathLike[str] | str, yesterday: date
 ) -> tuple[dict[int, dict[str, int]], dict[str, int], dict[str, int]]:
-    """Read actor counts and the exact campaign-to-target-account mapping."""
+    """Read confirmed actor counts and frozen campaign-ID account ownership.
+
+    Revenue ownership comes from the uniquely linked queue/log, independently
+    of whether the X write was confirmed. An unknown publication stays unknown;
+    attributing a bill never changes publication counters or publisher state.
+    """
 
     metrics: dict[int, dict[str, int]] = defaultdict(
         lambda: {
@@ -129,7 +138,8 @@ def read_ledger_metrics(
     with contextlib.closing(_open_ledger(db_path)) as conn:
         rows = conn.execute(
             """
-            SELECT q.account_id,q.delivery_mode,l.status,l.x_post_id,
+            SELECT q.id AS queue_id,q.account_id,q.delivery_mode,
+                   l.account_id AS log_account_id,l.status,l.x_post_id,
                    l.published_at,l.long_url
             FROM x_post_queue q
             JOIN x_post_publish_log l ON l.queue_id=q.id
@@ -141,13 +151,17 @@ def read_ledger_metrics(
                 str(row["status"] or "") == "published"
                 and bool(str(row["x_post_id"] or ""))
             )
-            if confirmed:
-                campaign = campaign_from_long_url(row["long_url"])
-                if campaign:
-                    campaign_accounts[campaign].add(account_id)
-                else:
-                    campaign_evidence["missing"] += 1
+            campaign_id = campaign_id_from_long_url(row["long_url"])
+            if not campaign_id:
+                campaign_evidence["missing"] += 1
+            elif (
+                campaign_id != str(row["queue_id"])
+                or int(row["log_account_id"]) != account_id
+            ):
+                campaign_evidence["ledger_conflicts"] += 1
             else:
+                campaign_accounts[campaign_id].add(account_id)
+            if not confirmed:
                 campaign_evidence["unconfirmed"] += 1
             if (
                 str(row["delivery_mode"] or "direct") == "direct"
@@ -207,19 +221,19 @@ def read_ledger_metrics(
 
 
 def revenue_query(yesterday: date) -> str:
-    """Return the fixed-site, Beijing-session aggregate query."""
+    """Aggregate bills once per exact campaign ID before joining ownership."""
 
     day = yesterday.isoformat()
-    campaign_binary = "CONVERT(COALESCE(campaign,'') USING binary)"
+    campaign_binary = "CONVERT(COALESCE(campaign_id,'') USING binary)"
     return f"""SET SESSION time_zone = '+08:00';
-SELECT REPLACE(TO_BASE64({campaign_binary}),CHAR(10),'') AS campaign_b64,
+SELECT REPLACE(TO_BASE64({campaign_binary}),CHAR(10),'') AS campaign_id_b64,
        CAST(COALESCE(SUM(event_revenue_usd),0) AS CHAR),
        CAST(COALESCE(SUM(CASE WHEN DATE(FROM_UNIXTIME(event_time))='{day}'
             THEN event_revenue_usd ELSE 0 END),0) AS CHAR)
 FROM ads_drama_bills FORCE INDEX(idx_site_event_time)
 WHERE site_id='2116'
-GROUP BY campaign_b64
-ORDER BY campaign_b64;
+GROUP BY campaign_id_b64
+ORDER BY campaign_id_b64;
 """
 
 
@@ -366,6 +380,7 @@ def build_snapshot(
         },
         "attribution": {
             **campaign_evidence,
+            "method": ATTRIBUTION_METHOD,
             "allocated_revenue_campaigns": allocated_campaigns,
             "unallocated_revenue_campaigns": unallocated_campaigns,
         },

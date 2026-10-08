@@ -15,7 +15,7 @@ from features.x_account_stats.service import (
     StatsRefreshError,
     assert_approved_mysql_entry,
     build_snapshot,
-    campaign_from_long_url,
+    campaign_id_from_long_url,
     merge_account_stats,
     read_ledger_metrics,
     revenue_query,
@@ -44,6 +44,7 @@ class XAccountOperatingStatsTests(unittest.TestCase):
                 );
                 CREATE TABLE x_post_publish_log(
                     id INTEGER PRIMARY KEY, queue_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
                     status TEXT NOT NULL, x_post_id TEXT NOT NULL,
                     published_at TEXT NOT NULL, long_url TEXT NOT NULL
                 );
@@ -69,15 +70,15 @@ class XAccountOperatingStatsTests(unittest.TestCase):
             ]
             conn.executemany("INSERT INTO x_post_queue VALUES(?,?,?,?)", queues)
             logs = [
-                (1, 1, "published", "p1", "2026-08-16T16:00:00Z", "https://w/?c=camp%2Bexact"),
-                (2, 2, "published", "p2", "2026-08-17T15:59:59Z", "https://w/?c=only-ten"),
-                (3, 3, "published", "p3", "2026-08-17T16:00:00Z", "https://w/?c=next-day"),
-                (4, 4, "published", "source", "2026-08-17T15:00:00Z", "https://w/?c=relay-target"),
-                (5, 5, "failed", "", "", "https://w/?c=camp%2Bexact"),
-                (6, 7, "published", "p7", "2026-08-17T16:00:00Z", "https://w/?c=conflicting"),
-                (7, 8, "published", "p8", "2026-08-17T16:00:00Z", "https://w/?c=conflicting"),
+                (1, 1, 10, "published", "p1", "2026-08-16T16:00:00Z", "https://w/?c=camp%2Bexact&af_c_id=1"),
+                (2, 2, 10, "published", "p2", "2026-08-17T15:59:59Z", "https://w/?c=only-ten&af_c_id=2"),
+                (3, 3, 10, "published", "p3", "2026-08-17T16:00:00Z", "https://w/?c=next-day&af_c_id=3"),
+                (4, 4, 20, "published", "source", "2026-08-17T15:00:00Z", "https://w/?c=relay-target&af_c_id=4"),
+                (5, 5, 30, "failed", "", "", "https://w/?c=camp%2Bexact&af_c_id=5"),
+                (6, 7, 10, "published", "p7", "2026-08-17T16:00:00Z", "https://w/?c=shared-name&af_c_id=7"),
+                (7, 8, 30, "published", "p8", "2026-08-17T16:00:00Z", "https://w/?c=shared-name&af_c_id=8"),
             ]
-            conn.executemany("INSERT INTO x_post_publish_log VALUES(?,?,?,?,?,?)", logs)
+            conn.executemany("INSERT INTO x_post_publish_log VALUES(?,?,?,?,?,?,?)", logs)
             conn.execute(
                 "INSERT INTO x_post_repost_ledger VALUES(1,4,99,20,'reposted','source','2026-08-16T15:59:59Z','2026-08-17T15:59:59Z')"
             )
@@ -100,22 +101,27 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertEqual(metrics[20]["reposts_total"], 1)
         self.assertEqual(metrics[20]["reposts_yesterday"], 1)
         self.assertNotIn(20, {key for key, item in metrics.items() if item["published_posts_total"]})
-        self.assertEqual(campaigns["camp+exact"], 10)  # failed q5 log is ignored
-        self.assertEqual(campaigns["relay-target"], 20)
-        self.assertEqual(evidence["conflicts"], 1)
+        self.assertEqual(campaigns["1"], 10)
+        self.assertEqual(campaigns["4"], 20)
+        self.assertEqual(campaigns["5"], 30)  # ownership is independent of publish status
+        self.assertEqual(campaigns["7"], 10)
+        self.assertEqual(campaigns["8"], 30)  # same campaign name, different IDs
+        self.assertEqual(evidence["conflicts"], 0)
         self.assertEqual(evidence["unconfirmed"], 1)
         self.assertEqual(evidence["ledger_conflicts"], 1)
         self.assertNotIn(77, metrics)
         self.assertNotIn(88, metrics)
 
-    def test_campaign_value_is_exact_and_duplicate_c_is_rejected(self):
-        self.assertEqual(campaign_from_long_url("https://w/?x=1&c=A%2BB"), "A+B")
-        self.assertEqual(campaign_from_long_url("https://w/?c=a&c=b"), "")
-        self.assertEqual(campaign_from_long_url("https://w/?af_c_id=3"), "")
+    def test_campaign_id_is_exact_and_duplicates_or_missing_id_are_rejected(self):
+        self.assertEqual(campaign_id_from_long_url("https://w/?c=changed&af_c_id=3"), "3")
+        self.assertEqual(campaign_id_from_long_url("https://w/?af_c_id=a&af_c_id=b"), "")
+        self.assertEqual(campaign_id_from_long_url("https://w/?c=3"), "")
+        self.assertEqual(campaign_id_from_long_url("https://w/?af_c_id="), "")
+        self.assertEqual(campaign_id_from_long_url("https://w/?af_c_id=A%2BB"), "A+B")
 
     def test_revenue_query_uses_exact_site_and_db_beijing_date_definition(self):
         query = revenue_query(date(2026, 8, 17))
-        binary_campaign = "CONVERT(COALESCE(campaign,'') USING binary)"
+        binary_campaign = "CONVERT(COALESCE(campaign_id,'') USING binary)"
         self.assertIn("SET SESSION time_zone = '+08:00'", query)
         self.assertIn("DATE(FROM_UNIXTIME(event_time))='2026-08-17'", query)
         self.assertIn("WHERE site_id='2116'", query)
@@ -124,15 +130,56 @@ class XAccountOperatingStatsTests(unittest.TestCase):
         self.assertIn("REPLACE(TO_BASE64", query)
         self.assertEqual(query.count(binary_campaign), 1)
         self.assertIn(f"TO_BASE64({binary_campaign})", query)
-        self.assertIn("AS campaign_b64", query)
-        self.assertIn("GROUP BY campaign_b64", query)
-        self.assertIn("ORDER BY campaign_b64", query)
+        self.assertIn("AS campaign_id_b64", query)
+        self.assertIn("GROUP BY campaign_id_b64", query)
+        self.assertIn("ORDER BY campaign_id_b64", query)
         # MySQL 5.7 ONLY_FULL_GROUP_BY accepts grouping by the complete projection alias.
         self.assertNotIn(f"GROUP BY {binary_campaign}", query)
         self.assertNotIn("GROUP BY campaign\n", query)
         self.assertNotIn("ORDER BY campaign;", query)
         self.assertNotRegex(query, r"\bc\b")
         self.assertNotIn("LIKE", query.upper())
+
+    def test_campaign_id_join_recovers_names_without_claiming_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "ledger.sqlite3"
+            self.make_ledger(db_path)
+            before = db_path.read_bytes()
+            metrics, campaigns, evidence = read_ledger_metrics(db_path, date(2026, 8, 17))
+            self.assertEqual(before, db_path.read_bytes())
+        snapshot = build_snapshot(
+            ledger_metrics=metrics, campaign_accounts=campaigns,
+            campaign_evidence=evidence,
+            revenue_rows=[
+                ("1", Decimal("67.01"), Decimal("0")),
+                ("5", Decimal("4.97"), Decimal("0")),
+                ("", Decimal("699.72"), Decimal("0")),
+                ("nonexistent", Decimal("2"), Decimal("0")),
+            ],
+            now=datetime(2026, 8, 18, 2, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot["accounts"]["10"]["revenue_total_usd"], "67.010000")
+        self.assertEqual(snapshot["accounts"]["30"]["revenue_total_usd"], "4.970000")
+        self.assertEqual(snapshot["accounts"]["30"]["published_posts_total"], 1)
+        self.assertEqual(snapshot["unallocated_revenue"]["total_usd"], "701.720000")
+        self.assertEqual(snapshot["attribution"]["method"], "campaign-id-publish-ledger-v2")
+
+    def test_inconsistent_frozen_id_or_log_owner_is_unallocated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "ledger.sqlite3"
+            self.make_ledger(db_path)
+            with contextlib.closing(sqlite3.connect(db_path)) as conn:
+                conn.execute("UPDATE x_post_publish_log SET long_url='https://w/?af_c_id=2' WHERE queue_id=1")
+                conn.execute("UPDATE x_post_publish_log SET account_id=90 WHERE queue_id=3")
+                conn.execute("UPDATE x_post_publish_log SET long_url='https://w/?c=4' WHERE queue_id=4")
+                conn.commit()
+            _, campaigns, evidence = read_ledger_metrics(db_path, date(2026, 8, 17))
+        self.assertNotIn("1", campaigns)
+        self.assertNotIn("3", campaigns)
+        self.assertNotIn("4", campaigns)
+        self.assertEqual(campaigns["2"], 10)
+        self.assertEqual(evidence["missing"], 1)
+        self.assertEqual(evidence["ledger_conflicts"], 3)
 
     @mock.patch("features.x_account_stats.service.subprocess.run")
     def test_mysql_uses_host_gate_and_password_only_in_child_environment(self, run):
