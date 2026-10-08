@@ -843,6 +843,7 @@ class FBAutoPostStore:
         return {"ok": True, "task_id": task_id, "status": "planned", "deferred": True, "next_prepare_at_utc": next_at}
 
     def claim_next(self, worker_id: str, lease_seconds: int = 1200, *, max_late_seconds: int | None = None) -> Optional[Dict[str, Any]]:
+        from .manual_batch import BatchError, task_policy
         now_dt, now = self.now_fn(), utc_iso(self.now_fn())
         lease = utc_iso(now_dt + timedelta(seconds=lease_seconds))
         cutoff = self._late_cutoff(max_late_seconds)
@@ -863,11 +864,19 @@ class FBAutoPostStore:
                 self._refresh_run(conn, run_id, now)
             # Future planning uses reservations; recheck actual publication
             # timestamps at execution in case yesterday's task published late.
-            due = conn.execute("""SELECT x.id,x.run_id,x.page_id,x.content_id,v.config_json
+            due = conn.execute("""SELECT x.*,v.config_json
                 FROM fb_auto_task x JOIN fb_auto_template_version v
                 ON v.template_id=x.template_id AND v.version=x.template_version
                 WHERE x.status='ready' AND x.planned_publish_at_utc<=? ORDER BY x.id LIMIT 1000""", (now,)).fetchall()
             for candidate in due:
+                try:
+                    policy = task_policy(conn, candidate)
+                except (BatchError, ValueError, KeyError, TypeError, IndexError):
+                    conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_manual_batch_invalid',error_code='fb_manual_batch_invalid',completed_at_utc=? WHERE id=? AND status='ready'", (now, candidate['id']))
+                    self._refresh_run(conn, int(candidate['run_id']), now)
+                    continue
+                if policy and policy['waive_drama_cooldown']:
+                    continue
                 hours = int(_loads(candidate['config_json'], {}).get('drama_cooldown_hours', 0))
                 if not hours:
                     continue
@@ -878,7 +887,19 @@ class FBAutoPostStore:
                 if recent:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_drama_cooldown_at_publish',error_code='fb_auto_drama_cooldown_at_publish',completed_at_utc=? WHERE id=? AND status='ready'", (now,candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
-            row = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1", (now,)).fetchone()
+            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now,)).fetchall()
+            row = None
+            for candidate in rows:
+                try:
+                    policy = task_policy(conn, candidate)
+                except (BatchError, ValueError, KeyError, TypeError, IndexError):
+                    conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_manual_batch_invalid',error_code='fb_manual_batch_invalid',completed_at_utc=? WHERE id=? AND status='ready'", (now, candidate['id']))
+                    self._refresh_run(conn, int(candidate['run_id']), now)
+                    continue
+                if policy and policy['waiting_for_previous']:
+                    continue
+                row = candidate
+                break
             if row is None:
                 conn.commit(); return None
             updated = conn.execute("UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND prepared_media_url<>source_media_url AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND t.status='enabled' AND t.current_version=fb_auto_task.template_version) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status IN ('running','submitted','unknown'))", (worker_id, lease, now, int(row["id"]), now)).rowcount
