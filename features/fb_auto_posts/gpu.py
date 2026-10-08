@@ -81,8 +81,14 @@ class PrepareExecutor:
         if task is None:
             return {"ok": True, "status": "no_planned", "claimed": False}
         try:
-            prepared = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"], source_url=task["source_media_url"], video_template=task["video_template"])
+            from .manual_batch import BatchError, prepare_source_url, task_policy
+            with self.store.connect() as conn:
+                policy = task_policy(conn, task)
+            source_url = prepare_source_url(task["source_media_url"]) if policy else task["source_media_url"]
+            prepared = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"], source_url=source_url, video_template=task["video_template"])
             return self.store.complete_prepare(int(task["id"]), prepared)
+        except BatchError as exc:
+            return self.store.fail_prepare(int(task["id"]), exc.code, str(exc))
         except GPUPrepareError as exc:
             permanent = {
                 "fb_auto_gpu_request_invalid", "fb_auto_prepared_identity_mismatch",
