@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, deduplicated TT correction of an already sent daily report."""
+"""Explicit, deduplicated channel correction of an already sent daily report."""
 from __future__ import annotations
 
 import argparse
@@ -17,10 +17,11 @@ from features.post_daily_report.common import Window, read_db
 from features.post_daily_report.delivery import DeliveryStore, DefiniteFailure, DeliveryUnknown, send_card
 from features.post_daily_report.report import build_card, build_compact_card, preview_html, total, validate_channel
 from features.post_daily_report.tt import collect as collect_tt
+from features.post_daily_report.x import collect as collect_x
 from scripts.post_daily_report import CHAT_ID, DEFAULT_PATHS, atomic_write, ensure_storage
 
 
-def corrected_report(state, chat_id, paths, window, revision):
+def corrected_report(state, chat_id, paths, window, revision, channel="TT"):
     with read_db(state / "delivery.sqlite3") as db:
         original = db.execute("SELECT status,message_id FROM delivery WHERE report_date=? AND chat_id=?",
                               (window.date, chat_id)).fetchone()
@@ -36,16 +37,16 @@ def corrected_report(state, chat_id, paths, window, revision):
         raise RuntimeError("original_window_mismatch")
     if [c.get("channel") for c in report.get("channels", [])] != ["TT", "FB", "X"]:
         raise RuntimeError("original_channel_layout_mismatch")
-    replacement = collect_tt(paths, window)
+    replacement = (collect_tt if channel == "TT" else collect_x)(paths, window)
     validate_channel(replacement)
-    if replacement.get("channel") != "TT" or replacement.get("error") or not replacement.get("rows"):
-        raise RuntimeError("tt_correction_unavailable")
+    if replacement.get("channel") != channel or replacement.get("error") or not replacement.get("rows"):
+        raise RuntimeError(channel.lower() + "_correction_unavailable")
     if any(r.get("expected") is None or not r.get("data_available", True) for r in replacement["rows"]):
-        raise RuntimeError("tt_correction_incomplete")
+        raise RuntimeError(channel.lower() + "_correction_incomplete")
     result = copy.deepcopy(report)
-    result["channels"][0] = replacement
+    result["channels"][["TT", "FB", "X"].index(channel)] = replacement
     result["correction"] = {
-        "channel": "TT", "revision": revision,
+        "channel": channel, "revision": revision,
         "original_message_id": original["message_id"],
         "original_report_sha256": hashlib.sha256(raw).hexdigest(),
         "original_generated_at_utc": report.get("generated_at_utc"),
@@ -56,10 +57,11 @@ def corrected_report(state, chat_id, paths, window, revision):
 
 def correction_card(report, compact=False):
     card = (build_compact_card if compact else build_card)(report)
-    card["header"]["title"]["content"] += "（TT 修正版）"
+    channel = report["correction"]["channel"]
+    card["header"]["title"]["content"] += "（%s 修正版）" % channel
     card["elements"].insert(1, {"tag": "div", "text": {"tag": "lark_md", "content":
-        "**更正说明：TT 统计已修复，请以本条 TT 数据为准。**\n"
-        "统计日和次日 10:00 截止口径保持不变；FB、X 数据沿用原日报。"}})
+        "**更正说明：%s 统计已修复，请以本条 %s 数据为准。**\n"
+        "统计日和次日 10:00 截止口径保持不变；其他渠道沿用原日报。" % (channel, channel)}})
     return card
 
 
@@ -67,6 +69,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="Original Beijing report date, not the sending date")
     parser.add_argument("--revision", required=True, help="Stable correction ID; repeat calls are deduplicated")
+    parser.add_argument("--channel", choices=("TT", "X"), default="TT")
     parser.add_argument("--state-dir", default="/mnt/data-disk/post-daily-report")
     parser.add_argument("--paths-json", help="Optional publisher paths for offline fixtures")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")
@@ -96,7 +99,7 @@ def main(argv=None):
                 print(json.dumps({"status": "already_running"}))
                 return 0
         formal = state / "corrections" / window.date / args.revision
-        delivery_key = window.date + "/TT-correction/" + args.revision
+        delivery_key = window.date + "/" + args.channel + "-correction/" + args.revision
         if args.send:
             formal.mkdir(parents=True, exist_ok=True)
             store = DeliveryStore(formal / "delivery.sqlite3")
@@ -110,7 +113,7 @@ def main(argv=None):
         paths = dict(DEFAULT_PATHS)
         if args.paths_json:
             paths.update(json.loads(Path(args.paths_json).read_text(encoding="utf-8")))
-        report = corrected_report(state, args.chat_id, paths, window, args.revision)
+        report = corrected_report(state, args.chat_id, paths, window, args.revision, args.channel)
         for compact in (False, True):
             card = correction_card(report, compact)
             card_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
@@ -126,7 +129,7 @@ def main(argv=None):
         atomic_write(folder / "card.json", card_json)
         atomic_write(folder / "preview.html", preview_html(report, card))
         print(json.dumps({"status": "correction_ready", "date": window.date, "revision": args.revision,
-            "tt": total(report["channels"][0]["rows"]), "card_bytes": payload_size,
+            args.channel.lower(): total(report["channels"][["TT", "FB", "X"].index(args.channel)]["rows"]), "card_bytes": payload_size,
             "card_sha256": hashlib.sha256(card_json.encode()).hexdigest(), "path": str(folder)}, ensure_ascii=False))
         if not args.send:
             return 0

@@ -58,6 +58,21 @@ def _md(text):
     return {"tag": "div", "text": {"tag": "lark_md", "content": text}}
 
 
+def _cost_text(channel):
+    cost = channel.get("cost")
+    if not cost:
+        return ""
+    counts = cost.get("counts", {})
+    amount = cost.get("display_usd")
+    title = "统计日 X 发布 API 成本（估算）：**US$%s**" % amount if amount is not None else "统计日 X 发布 API 成本：**未知**（已核实操作估算 US$%s）" % cost.get("known_estimated_usd", "0")
+    text = title + "\n带链接原帖 %s · 无链接原帖 %s · 目标转发 %s。" % tuple(counts.get(k, 0) for k in ("post_with_url", "post_without_url", "repost"))
+    text += "\n按实际发布日计费，包含往期计划当日完成；次日补发计入次日报。"
+    text += "\n" + cost.get("note", "")
+    if cost.get("unpriced_posts") or cost.get("unconfirmed_attempts"):
+        text += "\n另有缺少正文的原帖 %s 条、结果不明请求 %s 条待账单核对。" % (cost.get("unpriced_posts", 0), cost.get("unconfirmed_attempts", 0))
+    return text
+
+
 def _columns(values, header=False):
     return {"tag": "column_set", "flex_mode": "none", "background_style": "grey" if header else "default",
             "columns": [{"tag": "column", "width": "weighted", "weight": 3 if i == 0 else 1,
@@ -92,6 +107,8 @@ def build_card(report):
             if note: elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note[:200]}]})
         if len(rows) > 12: elements.append(_md("另有 %s 个来源，已计入渠道汇总；完整明细保存在日报归档。" % (len(rows) - 12)))
         elements.append(_md("往期计划昨日确认完成：**%s** 条（不计入上表昨日计划）。" % channel.get("prior_completed", 0)))
+        if _cost_text(channel):
+            elements.append(_md(_cost_text(channel)))
         reasons = []
         for row in rows:
             for reason in row.get("reasons", []):
@@ -120,6 +137,8 @@ def build_compact_card(report):
         for row in rows[:10]:
             counts = total([row])
             elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]))))
+        if _cost_text(channel):
+            elements.append(_md(_cost_text(channel)))
         reasons = [r for row in rows for r in row.get("reasons", []) if r.get("count")]
         for r in sorted(reasons, key=lambda r: r["count"], reverse=True)[:2]:
             elements.append(_md("%s 条：%s%s；建议：%s" % (r["count"], r["reason"][:100], "（推测/待核实）" if r.get("confidence") != "confirmed" else "", r.get("suggestion", "核查发布记录")[:120])))

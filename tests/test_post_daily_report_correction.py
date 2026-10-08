@@ -126,7 +126,21 @@ class TTCorrectionTests(unittest.TestCase):
     def test_receipt_must_match_confirmed_original_delivery(self):
         (self.folder / 'receipt.json').write_text('{"message_id":"different"}', encoding='utf-8')
         with self.assertRaisesRegex(RuntimeError, 'original_receipt_mismatch'):
-            self.invoke('--preview')
+                self.invoke('--preview')
+
+    def test_x_correction_preserves_tt_fb_and_has_separate_delivery_key(self):
+        x = {'channel':'X','rows':[{'source':'auto','label':'自动模板','expected':15,'published':4,'late':0,'pending':11}],
+             'cost': {'counts': {'post_with_url':4}, 'display_usd':'0.80','note':'估算'}}
+        with patch.object(correction,'collect_x',return_value=x), patch.object(correction,'send_card',return_value={'code':0,'message_id':'x-corrected'}) as send, redirect_stdout(io.StringIO()):
+            self.assertEqual(correction.main(self.args+['--channel','X','--send']),0)
+            self.assertEqual(correction.main(self.args+['--channel','X','--send']),0)
+        self.assertEqual(send.call_count,1)
+        folder=self.state/'corrections'/self.date/self.revision
+        result=json.loads((folder/'report.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['channels'][:2],self.base['channels'][:2])
+        self.assertEqual(result['channels'][2],x)
+        self.assertIn('X 修正版',send.call_args.args[2]['header']['title']['content'])
+        self.assert_original_unchanged()
 
 
 if __name__ == '__main__':

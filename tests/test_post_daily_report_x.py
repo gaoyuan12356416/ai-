@@ -153,11 +153,46 @@ class XCollectorTests(unittest.TestCase):
         _, rows = self.result()
         self.assertEqual((rows["material_pool"]["expected"], rows["material_pool"]["pending"]), (2, 1))
 
-    def test_random_plan_gap_not_hidden_by_current_audit(self):
+    def test_missing_random_plan_quota_is_proven_by_full_day_audit(self):
         self.db.execute("DELETE FROM x_post_schedule_random_plan WHERE source_type='material'")
         self.insert(self.db, "x_post_schedule_config_audit", source_type="material", config_version=1, snapshot_json=json.dumps({"enabled": 1, "schedule_mode": "random", "account_ids_json": "[1]", "random_daily_count": 3}), created_at="2026-09-01T00:00:00Z")
         _, rows = self.result()
+        self.assertEqual((rows["material_pool"]["expected"], rows["material_pool"]["pending"]), (3, 3))
+        self.assertEqual(rows["material_pool"]["reasons"][0]["code"], "random_plan_not_created")
+
+    def test_random_audit_with_future_effective_date_remains_unknown(self):
+        self.db.execute("DELETE FROM x_post_schedule_random_plan WHERE source_type='material'")
+        config = {"enabled": 1, "schedule_mode": "random", "account_ids_json": "[1]", "random_daily_count": 3, "random_effective_date": "2026-09-08"}
+        self.insert(self.db, "x_post_schedule_config_audit", source_type="material", config_version=1, snapshot_json=json.dumps(config), created_at="2026-09-01T00:00:00Z")
+        _, rows = self.result()
         self.assertIsNone(rows["material_pool"]["expected"])
+
+    def test_random_quota_counts_existing_run_once_and_missing_slots(self):
+        self.db.execute("DELETE FROM x_post_schedule_random_plan WHERE source_type='material'")
+        config = {"enabled": 1, "schedule_mode": "random", "account_ids_json": "[1,2]", "random_daily_count": 3}
+        self.insert(self.db, "x_post_schedule_config_audit", source_type="material", config_version=1, snapshot_json=json.dumps(config), created_at="2026-09-01T00:00:00Z")
+        self.schedule_run(accounts=[1, 2])
+        self.queue(1, 1)
+        self.queue(2, 2)
+        _, rows = self.result()
+        self.assertEqual((rows["material_pool"]["expected"], rows["material_pool"]["published"], rows["material_pool"]["pending"]), (6, 2, 4))
+
+    def test_midday_disable_does_not_invent_random_quota(self):
+        self.db.execute("DELETE FROM x_post_schedule_random_plan WHERE source_type='material'")
+        config = {"enabled": 1, "schedule_mode": "random", "account_ids_json": "[1]", "random_daily_count": 3}
+        self.insert(self.db, "x_post_schedule_config_audit", source_type="material", config_version=1, snapshot_json=json.dumps(config), created_at="2026-09-01T00:00:00Z")
+        self.insert(self.db, "x_post_schedule_config_audit", source_type="material", config_version=2, snapshot_json=json.dumps(dict(config, enabled=0)), created_at="2026-09-07T02:00:00Z")
+        _, rows = self.result()
+        self.assertIsNone(rows["material_pool"]["expected"])
+
+    def test_unreadable_auto_published_is_unknown_in_summary(self):
+        from features.post_daily_report.report import total
+        self.db.commit()
+        self.auto.commit()
+        result = collect(dict(self.paths, x_auto=str(Path(self.tmp.name) / "missing.db")), self.window)
+        row = next(r for r in result["rows"] if r["source"] == "auto_template")
+        self.assertFalse(row["data_available"])
+        self.assertIsNone(total([row])["published"])
 
     def test_bootstrap_audit_does_not_invent_pre_observation_history(self):
         self.db.execute("DELETE FROM x_post_schedule_random_plan WHERE source_type='material'")

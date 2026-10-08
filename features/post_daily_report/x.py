@@ -32,6 +32,7 @@ ERRORS = {
     "unknown_outcome": ("上游发布结果尚未确认", "先只读核对 X 平台与发布台账，避免重复发布"),
     "relay_pending": ("中继原帖已发布，目标账号转发尚未确认", "核对目标 Repost 状态及中继台账"),
     "schedule_not_created": ("计划时点没有对应运行记录", "检查定时器、执行门禁与该时点日志"),
+    "random_plan_not_created": ("随机日计划未生成；应发数量来自已保存的排期配置审计", "检查排期服务与执行门禁；保留原有停用状态，不自动补发"),
     "task_not_created": ("冻结计划中的账号未生成执行任务", "检查任务创建阶段及账号预检日志"),
     "execution_pending": ("任务仍未完成", "检查当前队列、媒体准备与执行服务状态"),
     "publish_failed": ("发布未完成，需核对具体错误", "检查对应批次和发布日志"),
@@ -162,6 +163,7 @@ def _root_ids(db):
 
 def _pool_plans(db, window, runs, row_by_source):
     plans = {}
+    missing_quotas = {}
     available_sources = set()
     for plan in _rows(db, "x_post_schedule_random_plan", ["source_type", "run_date", "account_ids_json", "publish_times_json"]):
         if plan.get("run_date") != window.date:
@@ -192,6 +194,30 @@ def _pool_plans(db, window, runs, row_by_source):
                 scheduled = _slot(window.date, time)
                 if scheduled and began <= scheduled < until:
                     plans[(source, time)] = _accounts(config.get("account_ids_json"))
+        if audit_covers_day and missing_random:
+            # Random slot timestamps can be absent while the complete-day quota
+            # remains provable. Never use today's mutable config as history.
+            prior = [a for a in ordered if parse_time(a["created_at"]) <= window.start]
+            config = json_value(prior[-1].get("snapshot_json"), {}) if prior else {}
+            effective = config.get("random_effective_date", window.date)
+            accounts = _accounts(config.get("account_ids_json"))
+            count = config.get("random_daily_count")
+            stable = all(
+                parse_time(a["created_at"]) >= window.end
+                or (json_value(a.get("snapshot_json"), {}).get("enabled")
+                    and json_value(a.get("snapshot_json"), {}).get("schedule_mode") == "random"
+                    and json_value(a.get("snapshot_json"), {}).get("random_effective_date", "") > window.date)
+                for a in ordered if parse_time(a["created_at"]) > window.start)
+            observed = [r for r in runs.values() if r.get("run_date") == window.date and r.get("source_type") == source]
+            matches = all(r.get("schedule_mode") == "random" and _accounts(r.get("account_ids_json")) == accounts for r in observed)
+            if (config.get("enabled") and config.get("schedule_mode") == "random"
+                    and isinstance(effective, str) and effective <= window.date
+                    and type(count) is int and 1 <= count <= 24 and accounts
+                    and stable and matches and len(observed) <= count):
+                missing_quotas[source] = (count - len(observed)) * len(accounts)
+                available_sources.add(source)
+                row_by_source[source + "_pool"]["warnings"].append(
+                    "随机时点尚未生成；应发按覆盖整日的配置审计计算（%s 个账号 × %s 批），不推测发布时间。" % (len(accounts), count))
         if audit_covers_day and not missing_random:
             available_sources.add(source)
 
@@ -204,7 +230,7 @@ def _pool_plans(db, window, runs, row_by_source):
             row = row_by_source[source + "_pool"]
             row["expected"] = None
             row["warnings"].append("缺少覆盖昨日的冻结排期或配置审计；仅统计已记录任务，原计划总数待核对")
-    return plans
+    return plans, missing_quotas
 
 
 def _collect_primary(db, window, output, row_by_source):
@@ -244,7 +270,13 @@ def _collect_primary(db, window, output, row_by_source):
             output["prior_completed"] += 1
             counted_prior.add(queue["id"])
 
-    plans = _pool_plans(db, window, runs, row_by_source)
+    plans, missing_quotas = _pool_plans(db, window, runs, row_by_source)
+    for source, count in missing_quotas.items():
+        row = row_by_source[source + "_pool"]
+        row["expected"] += count
+        row["pending"] += count
+        _reason(row, "random_plan_not_created", count)
+        output["evidence"].setdefault("unmaterialized_random_targets", {})[source] = count
     by_slot = {(r["source_type"], r.get("publish_time", "")): r for r in runs.values() if r.get("run_date") == window.date}
     for (source, time), accounts in plans.items():
         row = row_by_source[source + "_pool"]
@@ -396,14 +428,18 @@ def collect(paths: dict, window) -> dict:
         output["warnings"].append("X 主发布台账读取失败：" + type(exc).__name__)
         for source in ("material_pool", "drama_pool", "manual_immediate", "manual_scheduled"):
             row_by_source[source]["expected"] = None
+            row_by_source[source]["data_available"] = False
     try:
         with read_db(paths["x_auto"]) as db:
             _collect_auto(db, window, output, row_by_source["auto_template"], queue_outcomes, counted_prior)
     except (OSError, sqlite3.Error, KeyError) as exc:
         row_by_source["auto_template"]["expected"] = None
+        row_by_source["auto_template"]["data_available"] = False
         row_by_source["auto_template"]["warnings"].append("X Auto 台账读取失败：" + type(exc).__name__)
     for row in row_by_source.values():
         row["warnings"] = list(dict.fromkeys(row["warnings"]))
         row["reasons"].sort(key=lambda item: (-item["count"], item["code"]))
     output["rows"] = list(row_by_source.values())
+    from .x_cost import collect_cost
+    output["cost"] = collect_cost(paths, window.start, window.end)
     return output

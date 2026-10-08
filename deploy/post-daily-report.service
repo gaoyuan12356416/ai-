@@ -23,3 +23,5 @@ ReadWritePaths=/mnt/data-disk/post-daily-report
 # mode=ro still needs missing WAL auxiliary files. Keep the main DB read-only.
 ReadWritePaths=-/mnt/data-disk/tt-auto-post-publisher
 ReadOnlyPaths=-/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3
+ReadWritePaths=-/mnt/data-disk/x-auto-post-publisher
+ReadOnlyPaths=-/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3
