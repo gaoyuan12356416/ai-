@@ -28,8 +28,11 @@ picker and fresh submit validation without creating a video, task or comment.
 Deploy the exact GitHub commit with
 `scripts/deploy_youtube_channel_auth_retry.py --check`, then without `--check`.
 The script checks both live file hashes, backs up code and the online SQLite
-database, installs only the two Python files, restarts the API and sends SIGTERM
-only to the auto-worker main PID. The worker finishes existing preparation and
+database, installs only the two Python files, restarts the API and, when the shared
+client changes, sends SIGTERM only to the auto-worker main PID. The worker finishes existing preparation and
 systemd starts a new process; confirm the PID change. Retain all current business
 data. Roll back code with the same release script's `--rollback BACKUP_PATH`;
 later file drift causes refusal. Never restore the SQLite snapshot over live data.
+
+See [deployment-evidence.md](deployment-evidence.md) for the final live readback
+and the exact two-stage procedure to restore the pre-repair code.
