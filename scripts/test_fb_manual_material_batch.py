@@ -169,7 +169,7 @@ class ManualBatchTests(unittest.TestCase):
             material["media_info"] = {"size_bytes": 100, "etag": '"same-object"'}
         self.reserve()
         with self.store.connect() as c:
-            c.execute("UPDATE fb_auto_task SET status='failed',error_code='fb_auto_prepared_response_invalid',completed_at_utc=?", (self.now.isoformat(),))
+            c.execute("UPDATE fb_auto_task SET status='failed',attempt_count=1,error_code='fb_auto_prepared_response_invalid',completed_at_utc=?", (self.now.isoformat(),))
         response = Mock(status_code=200, headers={"Content-Type": "video/mp4", "Content-Length": "100", "ETag": '"same-object"'})
         return recover_unattempted_preparation, response, {"FB_AUTO_POST_DB_PATH": self.store.path}
 
@@ -192,7 +192,7 @@ class ManualBatchTests(unittest.TestCase):
             recover(env, "test-batch", str(Path(self.tmp.name) / "blocked.json"))
         with self.store.connect() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM fb_auto_task WHERE status='failed'").fetchone()[0], 107)
-            c.execute("UPDATE fb_auto_task SET unknown_outcome=0,attempt_count=1 WHERE id=(SELECT MAX(id) FROM fb_auto_task)")
+            c.execute("UPDATE fb_auto_task SET unknown_outcome=0,attempt_count=2 WHERE id=(SELECT MAX(id) FROM fb_auto_task)")
         with patch("requests.head", return_value=response), self.assertRaises(BatchError):
             recover(env, "test-batch", str(Path(self.tmp.name) / "blocked-attempt.json"))
 

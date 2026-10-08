@@ -139,7 +139,7 @@ def status(env, operation_id):
         tasks = [dict(r) for r in conn.execute("SELECT id,page_id,material_id,content_id,status,graph_post_id,error_code,error_message,unknown_outcome,started_at_utc,completed_at_utc,gpu_job_id,source_media_url,prepared_media_url,prepared_sha256,prepared_size_bytes,prepared_duration_seconds,short_url,long_url,message_text,selection_json FROM fb_auto_task WHERE run_id=? ORDER BY id", (run["id"],))]
         for row in tasks:
             row["sequence"] = json.loads(row.pop("selection_json"))["sequence"]
-        attempted = [dict(r) for r in conn.execute("SELECT x.id,x.started_at_utc FROM fb_auto_task x WHERE run_id=? AND EXISTS(SELECT 1 FROM fb_auto_publish_attempt a WHERE a.task_id=x.id) ORDER BY started_at_utc,x.id", (run["id"],))]
+        attempted = [dict(r) for r in conn.execute("SELECT x.id,MIN(a.created_at_utc) submitted_at_utc,MIN(a.id) attempt_id FROM fb_auto_task x JOIN fb_auto_publish_attempt a ON a.task_id=x.id WHERE x.run_id=? GROUP BY x.id ORDER BY submitted_at_utc,attempt_id", (run["id"],))]
     positions = {x["id"]: x["sequence"] for x in tasks}
     actual = [positions[x["id"]] for x in attempted]
     return {"run_id": run["id"], "operation_id": operation_id, "frozen_sha256": digest(manifest), "counts": dict(Counter(x["status"] for x in tasks)), "total": len(tasks), "unique_pages": len({x["page_id"] for x in tasks}), "request_sequence": actual, "request_order_valid": actual == sorted(actual), "skipped_pages": manifest["skipped_pages"], "unmatched_material_ids": manifest["unmatched_material_ids"], "tasks": tasks}
@@ -212,7 +212,8 @@ def recover_unattempted_preparation(env, operation_id, output):
         for task in candidates:
             row = dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (task["id"],)).fetchone())
             if (row["status"] != "failed" or row["error_code"] != "fb_auto_prepared_response_invalid"
-                    or row["attempt_count"] != 0 or row["unknown_outcome"] or row["graph_post_id"]
+                    or row["attempt_count"] > 1 or row["prepared_at_utc"] or row["prepared_media_url"]
+                    or row["unknown_outcome"] or row["graph_post_id"]
                     or conn.execute("SELECT 1 FROM fb_auto_publish_attempt WHERE task_id=?", (row["id"],)).fetchone()
                     or conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE task_id=?", (row["id"],)).fetchone()):
                 raise BatchError("Recovery target has changed or has a publication attempt")
