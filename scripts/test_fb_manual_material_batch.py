@@ -123,6 +123,18 @@ class ManualBatchTests(unittest.TestCase):
         with self.store.connect() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM fb_auto_task WHERE status='skipped' AND error_code='fb_manual_batch_invalid'").fetchone()[0], 107)
 
+    def test_manual_batch_rechecks_same_material_and_unknown_before_submission(self):
+        self.reserve()
+        self.ready()
+        with self.store.connect() as c:
+            first, second, third = [dict(r) for r in c.execute("SELECT * FROM fb_auto_task ORDER BY id LIMIT 3")]
+            c.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,created_at_utc,completed_at_utc) VALUES(0,1,1,?,'62','published',?,?,?)", (first['page_id'],first['material_id'],self.now.isoformat(),self.now.isoformat()))
+            c.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,unknown_outcome,created_at_utc) VALUES(0,1,1,?,'62','failed',1,?)", (second['page_id'],self.now.isoformat()))
+        self.assertEqual(self.store.claim_next("worker")['id'],third['id'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT error_code FROM fb_auto_task WHERE id=?", (first['id'],)).fetchone()[0], 'fb_auto_material_cooldown_at_publish')
+            self.assertEqual(c.execute("SELECT error_code FROM fb_auto_task WHERE id=?", (second['id'],)).fetchone()[0], 'fb_auto_page_unknown_at_publish')
+
     def test_ordinary_tasks_keep_cooldown_and_do_not_get_manual_policy(self):
         self.reserve()
         self.ready()

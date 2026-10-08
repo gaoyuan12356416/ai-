@@ -875,8 +875,21 @@ class FBAutoPostStore:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_manual_batch_invalid',error_code='fb_manual_batch_invalid',completed_at_utc=? WHERE id=? AND status='ready'", (now, candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
                     continue
-                if policy and policy['waive_drama_cooldown']:
-                    continue
+                if policy:
+                    cooldown_days = int(_loads(candidate['config_json'], {}).get('cooldown_days', 14))
+                    conflict = conn.execute("""SELECT 1 FROM fb_auto_task WHERE page_id=? AND material_id=? AND id<>?
+                        AND (status IN ('planned','preparing','ready','running','submitted','unknown') OR
+                        (status IN ('published','failed_without_retry') AND COALESCE(NULLIF(completed_at_utc,''),created_at_utc)>?)) LIMIT 1""",
+                        (candidate['page_id'], candidate['material_id'], candidate['id'], utc_iso(now_dt-timedelta(days=cooldown_days)))).fetchone()
+                    unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
+                        (candidate['page_id'], candidate['id'])).fetchone()
+                    if conflict or unknown:
+                        reason = 'fb_auto_page_unknown_at_publish' if unknown else 'fb_auto_material_cooldown_at_publish'
+                        conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason=?,error_code=?,completed_at_utc=? WHERE id=? AND status='ready'", (reason, reason, now, candidate['id']))
+                        self._refresh_run(conn, int(candidate['run_id']), now)
+                        continue
+                    if policy['waive_drama_cooldown']:
+                        continue
                 hours = int(_loads(candidate['config_json'], {}).get('drama_cooldown_hours', 0))
                 if not hours:
                     continue
