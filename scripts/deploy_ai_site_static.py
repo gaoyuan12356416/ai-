@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from urllib.request import Request, urlopen
 
 
@@ -49,12 +50,17 @@ def main():
         subprocess.run(["nginx", "-t"], check=True)
         subprocess.run(["systemctl", "reload", "nginx"], check=True)
         expected_html = hashlib.sha256(Path("/usr/share/nginx/html/index.html").read_bytes()).hexdigest()
-        request = Request("http://127.0.0.1/", headers={"Host": "ai.yingliangads.com", "Accept-Encoding": "gzip"})
-        with urlopen(request, timeout=5) as response:
-            assert response.status == 200
-            assert response.headers["Content-Encoding"] == "gzip"
-            data = response.read()
-            assert hashlib.sha256(gzip.decompress(data)).hexdigest() == expected_html
+        for attempt in range(10):
+            request = Request("http://127.0.0.1/", headers={"Host": "ai.yingliangads.com", "Accept-Encoding": "gzip"})
+            with urlopen(request, timeout=5) as response:
+                encoding = response.headers.get("Content-Encoding")
+                data = response.read()
+                if response.status == 200 and encoding == "gzip":
+                    assert hashlib.sha256(gzip.decompress(data)).hexdigest() == expected_html
+                    break
+            time.sleep(.5)
+        else:
+            raise RuntimeError("new Nginx workers did not serve compressed HTML")
         with urlopen(Request("http://127.0.0.1/quick-nav.js", headers={"Host": "ai.yingliangads.com"}), timeout=5) as response:
             assert response.status == 200
             assert response.headers["Cache-Control"] == "public, max-age=300, must-revalidate"
