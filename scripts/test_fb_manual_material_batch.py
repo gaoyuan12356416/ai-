@@ -81,6 +81,22 @@ class ManualBatchTests(unittest.TestCase):
         self.store.complete_submitted_with_attempt(first, 1, credential_id="c", fb_user_id="u", graph_post_id="123456", trace_id="", definite_attempts=0)
         self.assertEqual(self.store.claim_next("worker-two")["id"], second)
 
+    def test_report_uses_graph_attempt_time_and_requires_matching_ledger(self):
+        from scripts.fb_auto_post_manual_material_batch import status
+        self.reserve()
+        self.ready()
+        with self.store.connect() as c:
+            first, second = [r[0] for r in c.execute("SELECT id FROM fb_auto_task ORDER BY id LIMIT 2")]
+            c.execute("UPDATE fb_auto_task SET started_at_utc='2026-10-08T12:00:00+00:00' WHERE id=?", (first,))
+            c.execute("UPDATE fb_auto_task SET started_at_utc='2026-10-08T10:00:00+00:00' WHERE id=?", (second,))
+            c.execute("UPDATE fb_auto_task SET status='published',graph_post_id='123' WHERE id=?", (first,))
+            for tid, hour in [(first, '10:00'), (second, '11:00')]:
+                c.execute("INSERT INTO fb_auto_publish_attempt(task_id,sequence,result_kind,created_at_utc) VALUES(?,1,'accepted',?)", (tid,'2026-10-08T'+hour+':00+00:00'))
+        report = status({'FB_AUTO_POST_DB_PATH':self.store.path}, 'test-batch')
+        self.assertEqual(report['request_sequence'], [1,2])
+        self.assertTrue(report['request_order_valid'])
+        self.assertFalse(report['tasks'][0]['ledger_confirmed_published'])
+
     def test_unknown_and_missing_authorization_do_not_consume_rotation(self):
         blocked = self.pages[0]
         self.pages.insert(1, PageTarget("62", ("62",), "999", "248", "UTC", "en", 0, "No token"))
