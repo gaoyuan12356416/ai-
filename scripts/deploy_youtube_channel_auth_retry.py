@@ -15,8 +15,8 @@ BASE = Path('/mnt/data-disk/deploy/youtube-auto-publish')
 API = 'drama-material-api.service'
 WORKER = 'youtube-auto-publish-worker.service'
 EXPECTED = {
-    'features/drama_synthesis/youtube.py': '49ea8347ccbd866e7670eb1b762c9fe6ecb5c08ca9052792a4f995c6f88032cf',
-    'features/youtube_auto_publish/channels.py': '69a4484d0f9c278a87058014ac720303fe6773ad4843498f62869b38ce3b659e',
+    'features/drama_synthesis/youtube.py': '61b5a2d976f8df7e88498310becd83c83d4c590b155e046454eef9abc3f8f279',
+    'features/youtube_auto_publish/channels.py': 'f243c2cfe2debe95d06f1d80423a4c1465a68e2ffe410e8b83cc510a0fd48109',
 }
 
 
@@ -74,7 +74,9 @@ def rollback(backup):
     finally:
         run('systemctl', 'start', API)
     healthy()
-    print(json.dumps({'rollback': str(backup), 'worker_old_pid': roll_worker(), 'database': 'retained'}))
+    shared = manifest['files']['features/drama_synthesis/youtube.py']
+    worker = roll_worker() if shared['old'] != shared['new'] else 'retained'
+    print(json.dumps({'rollback': str(backup), 'worker_old_pid': worker, 'database': 'retained'}))
 
 
 def main():
@@ -135,8 +137,10 @@ def main():
     finally:
         run('systemctl', 'start', API)
     healthy()
+    shared = plans['features/drama_synthesis/youtube.py']
+    worker = roll_worker() if shared['old'] != shared['new'] else 'retained'
     print(json.dumps({'deployed': commit, 'backup': str(backup), 'api': 'active',
-        'worker_old_pid': roll_worker(), 'database': 'retained'}))
+        'worker_old_pid': worker, 'database': 'retained'}))
 
 
 if __name__ == '__main__':

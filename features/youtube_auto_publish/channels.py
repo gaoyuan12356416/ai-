@@ -44,20 +44,25 @@ class ChannelProbe:
         session = self.session_factory()
         session.trust_env = False
         try:
-            response = session.post(TOKEN_URL, data=dict(client_id=credential.client_id,
-                client_secret=credential.client_secret, refresh_token=credential.refresh_token,
-                grant_type='refresh_token'), timeout=(3, 8), allow_redirects=False)
-            payload = response.json()
-            if response.status_code != 200 or not payload.get('access_token'):
-                if payload.get('error') in ('invalid_grant', 'invalid_client', 'unauthorized_client'):
-                    return verdict('blocked', '频道授权已失效，请重新授权')
-                return verdict('unknown', '授权校验暂不可用，请稍后重新检查')
-            scopes = normalize_channel_scopes(payload) if payload.get('scope') else credential.scopes
-            capabilities = scope_capabilities(scopes)
-            if not REVIEWED_SCOPES.intersection(scopes) or not capabilities['identity_eligible']:
-                return verdict('blocked', '当前 Token 的发布权限不足，请重新授权')
-            response = read_authorized_channels(session, payload['access_token'],
-                part='id,snippet,status', timeout=(3,8))
+            for refresh_attempt in range(2):
+                response = session.post(TOKEN_URL, data=dict(client_id=credential.client_id,
+                    client_secret=credential.client_secret, refresh_token=credential.refresh_token,
+                    grant_type='refresh_token'), timeout=(3, 8), allow_redirects=False)
+                payload = response.json()
+                if response.status_code != 200 or not payload.get('access_token'):
+                    if payload.get('error') in ('invalid_grant', 'invalid_client', 'unauthorized_client'):
+                        return verdict('blocked', '频道授权已失效，请重新授权')
+                    return verdict('unknown', '授权校验暂不可用，请稍后重新检查')
+                scopes = normalize_channel_scopes(payload) if payload.get('scope') else credential.scopes
+                capabilities = scope_capabilities(scopes)
+                if not REVIEWED_SCOPES.intersection(scopes) or not capabilities['identity_eligible']:
+                    return verdict('blocked', '当前 Token 的发布权限不足，请重新授权')
+                response = read_authorized_channels(session, payload['access_token'],
+                    part='id,snippet,status', timeout=(3,8))
+                # If a refreshed access token remains rejected, replace it once.
+                # This never repeats a publish request or bypasses live scopes.
+                if not channel_read_auth_error(response):
+                    break
             data = response.json()
             if response.status_code != 200:
                 if channel_read_auth_error(response):

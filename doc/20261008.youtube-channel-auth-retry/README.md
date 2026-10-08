@@ -8,7 +8,9 @@ channel for the 300-second picker snapshot and advised reauthorization.
 
 Channel selection and publisher identity checks now retry only this exact
 read-only error, using the same token, for at most four GETs with 1/2/4-second
-backoff. Successful responses must still match exactly one configured channel;
+backoff. Selection replaces a still-rejected access token once and repeats the
+same bounded checks, for at most two refreshes/eight GETs. Successful responses
+must still match exactly one configured channel;
 selection still requires full scopes, long-video qualification, and existing
 thumbnail-failure checks. Exhausted retries remain ineligible/unknown with a
 temporary-check message. Invalid refresh grants remain blocked. Quota/service

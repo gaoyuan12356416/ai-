@@ -52,14 +52,35 @@ class ChannelAuthRetryTests(unittest.TestCase):
         session.close.assert_called_once()
 
     def test_exhausted_401_is_unknown_and_never_eligible(self):
-        session = self.session([error() for _ in range(4)])
+        session = self.session([error() for _ in range(8)])
         result, sleep = self.probe(session)
         self.assertEqual(result['auth_status'], 'unknown')
         self.assertFalse(result['eligible'])
         self.assertEqual(result['auth_error_code'], 'authError')
         self.assertNotIn('重新鉴权', result['reason'])
-        self.assertEqual(session.get.call_count, 4)
-        self.assertEqual(sleep.call_args_list, [call(1), call(2), call(4)])
+        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual(session.get.call_count, 8)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2), call(4)] * 2)
+
+    def test_replaces_rejected_access_token_once_and_recovers(self):
+        session = self.session([error() for _ in range(4)] + [allowed()])
+        session.post.side_effect = [response(200, {'access_token': 'SECRET_FIRST'}),
+                                   response(200, {'access_token': 'SECRET_SECOND'})]
+        result, _ = self.probe(session)
+        self.assertTrue(result['eligible'])
+        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual(session.get.call_count, 5)
+        self.assertEqual(session.get.call_args.kwargs['headers']['Authorization'], 'Bearer SECRET_SECOND')
+
+    def test_replacement_token_scope_loss_or_revocation_remains_blocked(self):
+        for replacement in (response(200, {'access_token': 'SECRET_SECOND', 'scope': 'youtube.readonly'}),
+                            response(400, {'error': 'invalid_grant'})):
+            session = self.session([error() for _ in range(4)])
+            session.post.side_effect = [response(200, {'access_token': 'SECRET_FIRST'}), replacement]
+            result, _ = self.probe(session)
+            self.assertFalse(result['eligible'])
+            self.assertEqual(result['auth_status'], 'blocked')
+            self.assertEqual(session.get.call_count, 4)
 
     def test_recovery_still_checks_identity_and_long_video_eligibility(self):
         for success in (allowed(channel='different'), allowed(long_status='eligible')):
