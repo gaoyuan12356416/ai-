@@ -48,5 +48,47 @@ and gracefully drains the worker. Retain the current database, generated
 assets, review decisions, schedules, notification outbox, and publish ledger;
 never restore the database backup over current operational facts.
 
-Production acceptance evidence is appended after deployment and the five
-requested covers have passed real artifact/readback checks.
+## Production acceptance, 2026-10-09 11:21 Beijing time
+
+Runtime commit: `f7e7e8f7e5cc173cc30aca085bf387da9c3f1fad`, pushed to
+`codex/youtube-cover-cancel-20261009` and fetched on the CPU server before
+deployment. Linux ran 119 relevant tests: 118 passed; one historical image
+fixture was unavailable and skipped. Local syntax and diff checks passed.
+
+The existing worker finished at 11:15:38; systemd restarted it at 11:15:48.
+New PID `66663` is active/running. Both installed file hashes match the GitHub
+release. Main API, main job worker, and the unified writer remain active.
+
+All five requested tasks have a current V1 cover. Authenticated task-owner GETs
+for `/api/youtube-auto-publish/tasks/<id>` and
+`/api/youtube-auto-publish/covers/<asset-id>` returned HTTP 200. All five JPEGs
+fully decoded at **1664 x 936**, and returned bytes matched their stored SHA256.
+Every generation audit matches its frozen reference SHA and its own isolated
+native image artifact; all five source-image SHA256 values are distinct.
+No task IDs, schedules, review decisions, or publication facts were reset.
+
+The earliest Korean task's cover was generated and approved, but its later
+publication failed while creating a YouTube upload session:
+`youtube_resumable_create_failed`, ledger status `failed`, empty `video_id`,
+`unknown_outcome=0`. The cover remains available. This is a separate publishing
+error; this cover repair does not claim successful video publication.
+
+Private per-task readback evidence is on the CPU data disk at
+`/mnt/data-disk/youtube-auto-publish/operations/cancelled-generator-20261009-110631/acceptance.json`.
+The pre-operation record in the same directory found no process left to kill:
+the cancelled generator exited at its own timeout, and the existing worker
+started the first requested cover at 11:06:31. Recovery did not issue a manual
+retry, generate replacement task IDs, or change the cancelled row.
+
+Backup:
+`/mnt/data-disk/deploy/youtube-auto-publish/backups/cover-cancel-20261009-111416-f7e7e8f7e5cc`.
+Exact code rollback on CPU `43.166.187.96`:
+
+```sh
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/f7e7e8f7e5cc173cc30aca085bf387da9c3f1fad/scripts/deploy_youtube_cover_cancel.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-cancel-20261009-111416-f7e7e8f7e5cc
+```
+
+Wait for the gracefully drained worker to restart, then verify its PID, service
+state and restored file hashes. This restores only the two code files and
+retains all current operational data. Skill context was updated in
+`ai-backend-maintenance/references/youtube-auto-publish.md`.
