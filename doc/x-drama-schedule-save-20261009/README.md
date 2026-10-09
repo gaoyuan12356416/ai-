@@ -44,3 +44,11 @@ Exact rollback command (substitute the recorded release/manifest from deployment
 replays the 17-account/one-random-batch edit in shared in-memory SQLite, verifies
 candidate selection, and compares all historical bindings/account/queue/log
 fingerprints. It neither submits a production save nor calls X.
+
+Linux staging initially exposed an existing static-UI drift:
+`test_x_post_navigation_and_dom_link_allowlists` expects the deferred-material
+counter present in the source branch, but both the previous Sidecar bundle and
+the unchanged public/main material-pool HTML lack it. No production switch or
+timer pause occurred in that attempt. Linux acceptance runs the complete store,
+OAuth/account and scheduler suites plus the changed API mapping and existing
+rate-limit mapping tests. The unrelated material-pool UI is preserved.

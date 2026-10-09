@@ -100,7 +100,10 @@ def main():
         target.write_bytes(payload)
         ast.parse(payload.decode("utf-8"), filename=name)
     run("python3", "-m", "unittest", "scripts.test_x_post_multi_schedule_store",
-        "scripts.test_x_accounts", "scripts.test_x_accounts_app_contract", "scripts.test_x_post_schedule_runner", "-q", cwd=release)
+        "scripts.test_x_accounts", "scripts.test_x_post_schedule_runner",
+        "scripts.test_x_accounts_app_contract.XAccountsAppContractTest.test_drama_owner_and_slot_conflicts_survive_client_and_api_mapping",
+        "scripts.test_x_accounts_app_contract.XAccountsAppContractTest.test_rate_limit_error_survives_main_backend_mapping",
+        "-q", cwd=release)
     backup = DATA / "maintenance" / ("20261009-drama-save-" + args.commit[:8])
     backup.mkdir(mode=0o700)
     for name in EXPECTED:
