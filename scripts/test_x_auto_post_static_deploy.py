@@ -50,10 +50,11 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
         for page_name, script_name in page_scripts.items():
             with self.subTest(page=page_name):
                 source = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
-                script_version = (
-                    ASSET_VERSION if page_name == "x-auto-publish-runs.html"
-                    else "20261009accountlanguage1"
-                )
+                script_version = {
+                    "x-auto-publish-runs.html": ASSET_VERSION,
+                    "x-auto-publish-template.html": "20261009accountlanguage1",
+                    "x-auto-publish-templates.html": "20261009listfix1",
+                }[page_name]
                 self.assertIn(
                     f'href="/x-auto-publish.css?v={ASSET_VERSION}"', source
                 )
