@@ -133,6 +133,7 @@ import hmac
 
 
 import logging
+import math
 
 
 
@@ -327,6 +328,7 @@ import sqlite3
 
 
 
+import signal
 import subprocess
 
 
@@ -764,7 +766,43 @@ from features.tt_drama_resources import (
     W2AHTMLClient,
     W2AResourceService,
 )
+from features.retired_modules import filter_navigation, retired_path, RETIRED_MESSAGE
 from features.material_status_broadcast import service as material_status_service
+from features.material_replication_broadcast import delivery as material_replication_delivery
+from features.material_replication_broadcast import service as material_replication_service
+from features.drama_synthesis.core import (
+    DramaSynthesisError,
+    DramaSynthesisStore,
+    ImmutableFilesystemPublisher,
+    freeze_random_recipe,
+)
+from features.drama_synthesis.gpu import catalog_from_assets, render_random_output
+from features.drama_synthesis.catalog import catalog_from_manifest
+from features.drama_synthesis import gpu_cache as drama_gpu_cache
+from features.drama_synthesis import async_runtime as drama_async_runtime
+from features.drama_synthesis import cpu_runtime as drama_cpu_runtime
+from features.drama_synthesis import remote_client as drama_remote_client
+from features.drama_synthesis.local_checkpoint import (
+    atomic_write_record, checkpoint_error, durable_ensure_directory,
+    file_fingerprint, load_completed, read_record, save_completed,
+)
+from features.drama_synthesis.app_support import ObservationStop as DramaObservationStop
+from features.drama_synthesis.app_support import remote_display as drama_remote_display
+from features.drama_synthesis.media_pipeline import (
+    CONCAT_STREAM_PROBE_ARGS,
+    NORMALIZATION_PROFILE,
+    concat_signature as drama_concat_signature,
+    concat_signatures_are_compatible,
+    download_and_prepare_segments,
+    freeze_concat_normalization_plan,
+    freeze_episode_download_route,
+    prepare_normalized_concat_segment,
+    probe_media_source_with_anchor,
+    validate_concat_normalization_plan,
+    validate_normalized_concat_signatures,
+    verify_media_source_anchor,
+)
+from features.drama_synthesis.youtube import YouTubeCredentialRepository, YouTubeHTTPClient
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -1393,6 +1431,28 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 )
+
+DRAMA_SYNTHESIS_STORE = DramaSynthesisStore(JOB_DB_PATH)
+DRAMA_SHORT_LINK_ROOT = os.environ.get("DRAMA_SHORT_LINK_ROOT", "").strip()
+DRAMA_SHORT_LINK_OWNER = os.environ.get("DRAMA_SHORT_LINK_OWNER", "").strip()
+if bool(DRAMA_SHORT_LINK_ROOT) != bool(DRAMA_SHORT_LINK_OWNER):
+    raise RuntimeError("DRAMA_SHORT_LINK_ROOT and DRAMA_SHORT_LINK_OWNER must be configured together")
+DRAMA_SHORT_LINK_PUBLISHER = (
+    ImmutableFilesystemPublisher(DRAMA_SHORT_LINK_ROOT, owner_user=DRAMA_SHORT_LINK_OWNER)
+    if DRAMA_SHORT_LINK_ROOT
+    else None
+)
+DRAMA_RANDOM_OVERLAY_ROOT = os.environ.get("DRAMA_RANDOM_OVERLAY_ROOT", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_FILE = os.environ.get("DRAMA_RANDOM_OVERLAY_MANIFEST_FILE", "").strip()
+DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256 = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256", ""
+).strip().lower()
+DRAMA_RANDOM_OVERLAY_FFMPEG = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFMPEG", "/usr/bin/ffmpeg"
+).strip()
+DRAMA_RANDOM_OVERLAY_FFPROBE = os.environ.get(
+    "DRAMA_RANDOM_OVERLAY_FFPROBE", "/usr/bin/ffprobe"
+).strip()
 
 NAVIGATION_CONFIG_PATH = os.environ.get(
 
@@ -2539,6 +2599,7 @@ DEMUCS_TIMEOUT = int(os.environ.get("DEMUCS_TIMEOUT", "3600"))
 GPU_VIDEO_WORKER_URL = os.environ.get("GPU_VIDEO_WORKER_URL", "").strip().rstrip("/")
 GPU_VIDEO_WORKER_TOKEN = os.environ.get("GPU_VIDEO_WORKER_TOKEN", "").strip()
 GPU_VIDEO_WORKER_TIMEOUT = int(os.environ.get("GPU_VIDEO_WORKER_TIMEOUT", "14400"))
+DRAMA_GPU_ASYNC_ENABLED = os.environ.get("DRAMA_GPU_ASYNC_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 
 
 
@@ -3610,9 +3671,12 @@ MODULE_PERMISSIONS = {
 
     "ad_control_center": "AI自动规则调控（旧版）",
     "ad_control_v3": "AI自动调控 V3",
+    "fb_ad_asset_delete": "Meta 剧集广告删除",
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
     "tt_posts": "TikTok 社媒发布",
+    "fb_page_posts": "Facebook Page 自动发布",
+    "youtube_auto_publish": "YouTube 自动发布",
 
 
 
@@ -3666,9 +3730,12 @@ DEFAULT_USER_PERMISSIONS = {
     "ad_material_tasks": False,
     "ad_control_center": False,
     "ad_control_v3": False,
+    "fb_ad_asset_delete": False,
     "voiceover_drama_tasks": False,
     "x_accounts": False,
     "tt_posts": False,
+    "fb_page_posts": False,
+    "youtube_auto_publish": False,
     "settings": False,
 }
 
@@ -9693,8 +9760,7 @@ def probe_media_stream_info(path):
         proc = subprocess.run(
             [
                 ffprobe_path(), "-v", "error",
-                "-show_entries",
-                "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,duration:format=duration",
+                *CONCAT_STREAM_PROBE_ARGS,
                 "-of", "json",
                 path,
             ],
@@ -13382,7 +13448,7 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "concat_video": bool(outputs.get("concat_video", True)),
+        "concat_video": bool(outputs.get("concat_video", False)),
 
 
 
@@ -13414,7 +13480,7 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "no_bgm_video": bool(outputs.get("no_bgm_video", True)),
+        "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
 
 
 
@@ -13446,7 +13512,9 @@ def normalize_outputs(raw_outputs):
 
 
 
-        "cover_16x9": bool(outputs.get("cover_16x9", True)),
+        "cover_16x9": bool(outputs.get("cover_16x9", False)),
+
+        "random_template_video": bool(outputs.get("random_template_video", outputs.get("random_template", False))),
 
 
 
@@ -13585,6 +13653,10 @@ def selected_job_outputs_ready(job):
         return False
     if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
         return False
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job.get("job_id", ""))
+        if not recipe or not str(recipe.get("output_url") or "").strip():
+            return False
     return True
 
 
@@ -13809,7 +13881,7 @@ def normalize_advanced_options(raw_options):
 
 
 
-        "cover_template": str(options.get("cover_template", "default") or "default"),
+        "cover_template": "default",
 
 
 
@@ -13841,7 +13913,7 @@ def normalize_advanced_options(raw_options):
 
 
 
-        "naming_rule": str(options.get("naming_rule", "default") or "default"),
+        "naming_rule": "default",
 
 
 
@@ -13874,6 +13946,7 @@ def normalize_advanced_options(raw_options):
 
 
         "output_resolution": str(options.get("output_resolution", "1280x720") or "1280x720"),
+        "random_template": options.get("random_template") if isinstance(options.get("random_template"), dict) else None,
 
 
 
@@ -14484,6 +14557,173 @@ def run_mysql(query):
 
 
 
+
+
+def drama_random_template_catalog():
+    if DRAMA_RANDOM_OVERLAY_MANIFEST_FILE:
+        return catalog_from_manifest(
+            DRAMA_RANDOM_OVERLAY_MANIFEST_FILE,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    # This branch is the media-only worker's local asset diagnostic. CPU page
+    # and job queries must use their own pinned metadata file, even if the GPU
+    # is unavailable; never proxy a business catalog query to that worker.
+    if not GPU_VIDEO_WORKER_URL and DRAMA_RANDOM_OVERLAY_ROOT and DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+        return catalog_from_assets(
+            DRAMA_RANDOM_OVERLAY_ROOT,
+            DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+        )
+    raise DramaSynthesisError(
+        "drama_template_catalog_unavailable",
+        "CPU随机模板目录未配置或校验失败",
+        503,
+    )
+
+
+def drama_youtube_repository():
+    try:
+        timeout = int(os.environ.get("DRAMA_YOUTUBE_HTTP_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120
+    client = YouTubeHTTPClient(timeout=timeout)
+
+    def identity_probe(credential):
+        try:
+            token = client.refresh_access_token(credential)
+            client.verify_channel_identity(token, credential.channel_id)
+            return True
+        except Exception:
+            return False
+
+    return YouTubeCredentialRepository(run_mysql, schema=DB_NAME, identity_probe=identity_probe)
+
+
+def decorate_drama_synthesis_job(job):
+    if not job:
+        return job
+    item = dict(job)
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(item.get("job_id", ""))
+    item["random_template_recipe"] = None
+    item["output_random_template_url"] = ""
+    if recipe:
+        frozen = dict(recipe.get("recipe") or {})
+        # The browser needs the frozen layer names and version, not server paths.
+        item["random_template_recipe"] = frozen
+        item["output_random_template_url"] = str(recipe.get("output_url") or "")
+    item["short_links"] = DRAMA_SYNTHESIS_STORE.short_links_for_job(item.get("job_id", ""))
+    youtube_rows = DRAMA_SYNTHESIS_STORE.youtube_tasks_for_job(
+        item.get("job_id", ""), limit=20
+    )
+    safe_fields = (
+        "id", "channel_id", "source_kind", "title", "status", "video_state",
+        "comment_status", "sync_status", "video_id", "comment_id", "unknown_outcome",
+        "error_code", "error_message", "created_at_utc", "updated_at_utc",
+        "video_published_at_utc", "comment_published_at_utc",
+    )
+    item["youtube_publish_tasks"] = [
+        {key: row.get(key) for key in safe_fields} for row in youtube_rows
+    ]
+    result_preview = dict(item.get("result_preview") or {})
+    result_preview["random_template"] = item["output_random_template_url"]
+    item["result_preview"] = result_preview
+    runtime = globals().get("drama_cpu_runtime")
+    snapshot = runtime.get_remote_status(JOB_DB_PATH, item.get("job_id", "")) if runtime else None
+    if snapshot:
+        item["remote_runtime"] = snapshot
+        item["remote_progress"] = drama_remote_display(snapshot)
+        if item.get("status") == "failed":
+            view = item["remote_progress"]
+            view["stage_label"] = "制作失败" if snapshot.get("status") == "failed" else "执行状态待核查"
+            view["stage_percent"] = None
+            view["detail"] = item.get("error_message") or view["stage_label"]
+            item["status_label"] = view["stage_label"]
+        elif item.get("status") != "done":
+            item["status_label"] = item["remote_progress"]["stage_label"]
+        item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
+    return item
+
+
+def drama_synthesis_error_payload(exc):
+    payload = {"code": exc.code, "error": str(exc), "message": str(exc)}
+    payload.update(exc.details)
+    return payload
+
+
+def require_completed_drama_job(job_id):
+    job = fetch_job_row(job_id)
+    if not job:
+        raise DramaSynthesisError("drama_job_not_found", "任务不存在", 404)
+    if job.get("status") != "done" or not selected_job_outputs_ready(job):
+        raise DramaSynthesisError("drama_job_not_completed", "任务尚未完成", 409)
+    return job
+
+
+def drama_youtube_source(job, source_kind):
+    source_kind = str(source_kind or "").strip()
+    random_template_url = str(job.get("output_random_template_url") or "")
+    if source_kind == "random_template" and not random_template_url:
+        frozen = DRAMA_SYNTHESIS_STORE.recipe(str(job.get("job_id") or ""))
+        if frozen and str(frozen.get("completed_at_utc") or ""):
+            random_template_url = str(frozen.get("output_url") or "")
+    sources = {
+        "concat_video": str(job.get("output_video_url") or ""),
+        "no_bgm_video": str(job.get("output_video_no_bgm_url") or ""),
+        "random_template": random_template_url,
+    }
+    source_url = sources.get(source_kind, "")
+    if not source_url:
+        raise DramaSynthesisError("youtube_source_unavailable", "所选视频产物不可用", 409)
+    return source_kind, source_url
+
+
+def enqueue_drama_youtube_publish(job_id, payload):
+    if str(os.environ.get("YOUTUBE_LIVE_ENABLED", "0")).strip() != "1":
+        raise DramaSynthesisError("youtube_publish_disabled", "YouTube真实发布尚未启用", 503)
+    job = require_completed_drama_job(job_id)
+    source_kind, source_url = drama_youtube_source(job, payload.get("material_kind"))
+    repository = drama_youtube_repository()
+    credential = repository.credential(
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=str(payload.get("channel_local_id") or ""),
+        account_id=str(payload.get("youtube_account_id") or ""),
+        expected_channel_id=str(payload.get("channel_id") or ""),
+    )
+    requested_app_id = str(payload.get("app_id") or "")
+    if requested_app_id != str(job.get("app_id") or ""):
+        raise DramaSynthesisError("youtube_app_mismatch", "YouTube产品与任务不一致", 409)
+    description_template = str(payload.get("description_template") or "").strip()
+    description_rendered = description_template
+    if "{{url}}" in description_template:
+        link = DRAMA_SYNTHESIS_STORE.ensure_short_link(
+            job_id, source_kind, str(job.get("content_id") or ""), DRAMA_SHORT_LINK_PUBLISHER
+        )
+        description_rendered = description_template.replace("{{url}}", str(link.get("short_url") or ""))
+    row = DRAMA_SYNTHESIS_STORE.enqueue_youtube(
+        operation_id=str(payload.get("operation_id") or ""),
+        job_id=job_id,
+        content_id=str(job.get("content_id") or ""),
+        app_id=str(job.get("app_id") or ""),
+        channel_local_id=credential.channel_local_id,
+        channel_id=credential.channel_id,
+        youtube_account_id=credential.account_id,
+        source_kind=source_kind,
+        source_url=source_url,
+        title=payload.get("title"),
+        description_template=description_template,
+        description_rendered=description_rendered,
+        comment_text=payload.get("comment_text"),
+        duplicate_confirmed=bool(payload.get("duplicate_confirmed", False)),
+        scopes=credential.scopes,
+        operator_user_id=str(payload.get("_operator_user_id") or ""),
+        operator_name=str(payload.get("_operator_name") or ""),
+    )
+    safe_fields = (
+        "id", "job_id", "channel_id", "source_kind", "title", "status",
+        "video_state", "comment_status", "sync_status", "video_id", "comment_id",
+        "unknown_outcome", "error_code", "error_message", "created_at_utc",
+        "updated_at_utc",
+    )
+    return {key: row.get(key) for key in safe_fields}
 
 
 def get_job_db_connection():
@@ -21912,6 +22152,10 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
     job_id = str(job.get("job_id") or "").strip()
     if not job_id:
         return False
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job_id):
+        # Async jobs may only finish from a verified GPU result and atomic commit.
+        return False
     outputs = normalize_outputs(job.get("outputs", {}))
     candidates = {}
     if outputs["cover_16x9"]:
@@ -21926,11 +22170,17 @@ def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False)
         candidates["output_video_no_bgm_url"] = str(
             job.get("output_video_no_bgm_url") or ""
         ).strip() or build_drama_public_url(job_id, "material_no_bgm.mp4")
+    if outputs["random_template_video"]:
+        recipe = DRAMA_SYNTHESIS_STORE.recipe(job_id)
+        if not recipe or not str(recipe.get("completed_at_utc") or ""):
+            return False
+        candidates["output_random_template_url"] = str(recipe.get("output_url") or "")
 
     min_bytes = {
         "cover_16x9_url": 1024,
         "output_video_url": 1024 * 1024,
         "output_video_no_bgm_url": 1024 * 1024,
+        "output_random_template_url": 1024 * 1024,
     }
     for key, url in candidates.items():
         if not public_artifact_ready(url, min_bytes.get(key, 1)):
@@ -22341,7 +22591,7 @@ def guess_content_type(path):
 
 
 
-def get_cos_client(timeout=None):
+def get_cos_client(timeout=None, *, retry=None):
 
     if not cos_enabled():
 
@@ -22356,17 +22606,20 @@ def get_cos_client(timeout=None):
         KeepAlive=False,
     )
 
-    return CosS3Client(config)
+    if retry is None:
+        return CosS3Client(config)
+    return CosS3Client(config, retry=retry)
 
 
 
 
 
-def upload_file_to_cos(path):
+def upload_file_to_cos(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not cos_enabled():
 
-        return build_public_url(path)
+        url = build_public_url(path)
+        return (url, None) if return_receipt else url
 
     if not file_ready(path):
 
@@ -22375,12 +22628,63 @@ def upload_file_to_cos(path):
     object_key = build_cos_object_key(path)
     object_url = build_cos_url(object_key)
     expected_size = os.path.getsize(path)
+    runtime = globals().get("drama_async_runtime")
+    media_context = runtime.capture_context() if runtime else None
+    # Legacy synchronous GPU calls have no AsyncRuntime context. Recognize only
+    # the three fixed renderer artifact paths so their internal publish calls
+    # still enter the same durable multipart checkpoint as the final receipt
+    # read. Ordinary publish callers keep the previous upload contract.
+    inferred_job_id = None
+    try:
+        relative = os.path.relpath(os.path.realpath(path), os.path.realpath(PUBLIC_ROOT))
+        parts = relative.split(os.sep)
+        if (len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", parts[0])
+                and parts[1] in set(drama_gpu_cache.ARTIFACT_FILENAMES.values())):
+            inferred_job_id = parts[0]
+    except (OSError, ValueError):
+        inferred_job_id = None
+    requested_job_id = str(checkpoint_job_id or "").strip() or None
+    context_job_id = str(media_context.job_id) if media_context else None
+    identities = {value for value in (requested_job_id, context_job_id, inferred_job_id) if value is not None}
+    if (len(identities) > 1 or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value)
+                                   for value in identities)):
+        raise DramaSynthesisError("drama_upload_checkpoint_conflict", "上传记录与当前成片或目标不一致，已停止上传", 409)
+    upload_job_id = next(iter(identities), None)
+    def media_upload_progress(consumed, total):
+        if media_context:
+            with runtime.use_context(media_context):
+                runtime.emit_progress("uploading", uploaded_bytes=consumed, total_bytes=total)
+    if media_context:
+        media_upload_progress(0, expected_size)
+    if media_context or return_receipt or requested_job_id or inferred_job_id:
+        if not upload_job_id:
+            raise DramaSynthesisError("drama_upload_configuration_invalid", "上传参数无效", 400)
+        from features.drama_synthesis.cos_upload import resume_upload
+
+        # Keep multipart identity outside the disposable job working directory.
+        # Only the drama execution context uses this path; other upload callers
+        # retain their existing contract and concurrency settings.
+        checkpoint_path = os.path.join(
+            WORK_ROOT, ".runtime", "uploads", upload_job_id,
+            hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
+        )
+        receipt = resume_upload(
+            # The SDK otherwise retries POST internally, outside the durable
+            # create/complete fences. Retry only via the verified checkpoint.
+            get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
+            bucket=COS_BUCKET, key=object_key, path=path,
+            checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
+            content_type=guess_content_type(path), acl="public-read",
+        )
+        return (object_url, receipt) if return_receipt else object_url
+
     try:
         response = requests.head(object_url, timeout=(5, 15))
         if response.status_code == 200:
             remote_size = int(response.headers.get("Content-Length") or "-1")
             if remote_size == expected_size:
                 logging.info("reuse existing COS object: %s", object_url)
+                media_upload_progress(expected_size, expected_size)
                 return object_url
     except Exception as exc:
         logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
@@ -22395,6 +22699,7 @@ def upload_file_to_cos(path):
             PartSize=max(1, COS_MULTIPART_PART_SIZE_MB),
             MAXThread=max(1, COS_MULTIPART_THREADS),
             EnableMD5=False,
+            progress_callback=media_upload_progress if media_context else None,
             ACL="public-read",
             ContentType=guess_content_type(path),
         )
@@ -22419,13 +22724,14 @@ def upload_file_to_cos(path):
 
             )
 
+    media_upload_progress(expected_size, expected_size)
     return object_url
 
 
 
 
 
-def publish_asset(path):
+def publish_asset(path, *, return_receipt=False, checkpoint_job_id=None):
 
     if not file_ready(path):
 
@@ -22433,9 +22739,12 @@ def publish_asset(path):
 
     if cos_enabled():
 
-        return upload_file_to_cos(path)
+        return upload_file_to_cos(
+            path, return_receipt=return_receipt, checkpoint_job_id=checkpoint_job_id,
+        )
 
-    return build_public_url(path)
+    url = build_public_url(path)
+    return (url, None) if return_receipt else url
 
 
 def playable_preview_root():
@@ -25519,389 +25828,25 @@ def row_to_job(row):
 def set_job_progress(job, status=None, progress=None, detail=None, persist=True):
     if job.get("_gpu_worker"):
         persist = False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if status is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["status"] = status
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if progress is None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        progress = job.get("progress", progress_for_status(job.get("status", "queued")))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    job["progress"] = clamp_progress(progress)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if detail is not None:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = str(detail or "").strip()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    elif "progress_detail" not in job:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["progress_detail"] = ""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if persist:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        upsert_job_record(job)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    lock = job.setdefault("_state_lock", threading.RLock())
+    with lock:
+        if status is not None:
+            job["status"] = status
+        if progress is None:
+            progress = job.get("progress", progress_for_status(job.get("status", "queued")))
+        job["progress"] = clamp_progress(progress)
+        if detail is not None:
+            job["progress_detail"] = str(detail or "").strip()
+        elif "progress_detail" not in job:
+            job["progress_detail"] = ""
+        snapshot = job.get("_remote_snapshot")
+        if snapshot and job.get("status") != "done":
+            view = drama_remote_display(snapshot)
+            job["status"] = view["status"]
+            job["progress"] = clamp_progress(view["stage_percent"] or 0)
+            job["progress_detail"] = view["detail"]
+        if persist:
+            upsert_job_record(job)
     return job
 
 
@@ -26393,6 +26338,12 @@ def upsert_job_record(job):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(
+                    conn, job["job_id"], job["_fenced_lease"],
+                    allow_done=(status_text == "done"),
+                )
             conn.execute(
 
 
@@ -28801,7 +28752,7 @@ def fetch_job_row(job_id):
 
 
 
-    return enrich_material_job_timing(row_to_job(row)) if row else None
+    return decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) if row else None
 
 
 
@@ -31569,7 +31520,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-        "items": [enrich_material_job_timing(row_to_job(row)) for row in rows],
+        "items": [decorate_drama_synthesis_job(enrich_material_job_timing(row_to_job(row))) for row in rows],
 
 
 
@@ -34578,7 +34529,7 @@ def list_ad_control_products(query="", limit=200):
     return {"items": items}
 
 
-def ad_control_run_mysql(query, timeout_seconds=None):
+def ad_control_run_mysql(query, timeout_seconds=None, via_stdin=False):
     timeout_seconds = max(3, int(timeout_seconds or AD_CONTROL_ACCOUNT_LIST_TIMEOUT_SECONDS))
     mysql_env = os.environ.copy()
     if MYSQL_PASSWORD:
@@ -34587,7 +34538,8 @@ def ad_control_run_mysql(query, timeout_seconds=None):
     mysql_env["MYSQL_QUERY_TIMEOUT_KILL_AFTER"] = "3"
     mysql_env["MYSQL_MAX_EXECUTION_TIME_MS"] = str(timeout_seconds * 1000)
     proc = subprocess.run(
-        MYSQL_BASE_CMD + [query],
+        MYSQL_BASE_CMD[:-1] if via_stdin else MYSQL_BASE_CMD + [query],
+        input=(query + ";\n") if via_stdin else None,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -34894,6 +34846,8 @@ def ad_control_graph_set_status(token, object_id, status):
         raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
     return payload
 
+
+# Meta deletion V2 owns its own durable data-disk ledger. Legacy tasks are read-only.
 
 def ad_control_meta_fields(level):
     if level == "campaign":
@@ -40937,6 +40891,7 @@ def generate_ad_material_demand(task_id, reason=""):
 
 
 def run_ad_material_demand_async(task_id, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_demand, args=(task_id, reason), name="ad-demand-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41090,6 +41045,7 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
 
 
 def run_ad_material_generation_async(task_id, indexes=None, reason=""):
+    raise RuntimeError("module_retired: ad_material")
     thread = threading.Thread(target=generate_ad_material_assets, args=(task_id, indexes, reason), name="ad-assets-%s" % task_id[:8])
     thread.daemon = True
     thread.start()
@@ -41228,6 +41184,8 @@ def recover_ad_material_generation_output(task, index, min_output_at=""):
 
 
 def recover_inflight_ad_material_tasks():
+    # Retain historical tasks without restarting discontinued generation work.
+    return {"status": "retired", "recovered": 0}
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -41500,6 +41458,64 @@ from features.x_auto_posts.client import (
     parse_admin_query as x_auto_posts_query_params,
     request_admin as x_auto_post_service_request,
 )
+from features.fb_auto_posts.client import (
+    FB_AUTO_ADMIN_PREFIX,
+    FBAutoPostAdminClientError,
+    error_payload as fb_auto_posts_error_payload,
+    parse_admin_query as fb_auto_posts_query_params,
+    request_admin as fb_auto_post_service_request,
+)
+
+
+_YOUTUBE_AUTO_SERVICE = None
+_YOUTUBE_AUTO_SERVICE_LOCK = threading.Lock()
+
+
+def get_youtube_auto_service():
+    """Do not initialize storage/adapters when legacy workers import app."""
+    global _YOUTUBE_AUTO_SERVICE
+    if _YOUTUBE_AUTO_SERVICE is None:
+        with _YOUTUBE_AUTO_SERVICE_LOCK:
+            if _YOUTUBE_AUTO_SERVICE is None:
+                import sys
+                from features.youtube_auto_publish.runtime import build_service
+
+                _YOUTUBE_AUTO_SERVICE = build_service(sys.modules[__name__])
+    return _YOUTUBE_AUTO_SERVICE
+
+
+def fb_auto_post_actor_scope(session):
+    """Map a Cookie session to the durable Page-pool owner scope."""
+    session = session or {}
+    is_admin = session.get("role") == "admin"
+    email = str(session.get("email") or "").strip()
+    owner_user_id = ""
+    if email:
+        database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+        try:
+            rows = run_mysql(
+                "SELECT DISTINCT CAST(sub_user_id AS CHAR) "
+                "FROM `%s`.admin_user_group WHERE email='%s' "
+                "AND status=0 AND sub_user_id IS NOT NULL LIMIT 2"
+                % (database.replace("`", "``"), mysql_escape_literal(email))
+            )
+            mapped = [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+            if len(set(mapped)) == 1:
+                owner_user_id = mapped[0]
+        except Exception:
+            logging.exception("FB auto publish owner mapping lookup failed")
+    if not is_admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner_user_id):
+        raise FBAutoPostAdminClientError(
+            "fb_auto_owner_mapping_missing",
+            "当前账号未唯一映射到Page池负责人",
+            403,
+        )
+    return {
+        "user_id": str(session.get("user_id") or "")[:128],
+        "name": str(session.get("name") or "")[:200],
+        "is_admin": is_admin,
+        "owner_user_id": owner_user_id,
+    }
 
 
 class TTPostAdminClientError(RuntimeError):
@@ -42074,6 +42090,7 @@ from features.x_accounts.client import (
     start_x_authorization,
     verify_x_account,
 )
+from features.x_account_stats.service import merge_account_stats
 from features.x_posts.drama_selector import (
     DramaSelectionError as XPostDramaSelectionError,
     audit_drama as audit_x_post_drama,
@@ -42091,6 +42108,20 @@ try:
 except (TypeError, ValueError):
     X_POST_AUTOMATION_INTERNAL_TIMEOUT = 30
 X_POST_AUTOMATION_INTERNAL_TIMEOUT = max(1, min(X_POST_AUTOMATION_INTERNAL_TIMEOUT, 120))
+
+X_ACCOUNT_STATS_CACHE_PATH = os.environ.get(
+    "X_ACCOUNT_STATS_CACHE_PATH",
+    "/mnt/data-disk/x-account-operating-stats/current.json",
+)
+try:
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = int(
+        os.environ.get("X_ACCOUNT_STATS_MAX_AGE_SECONDS", "54000") or "54000"
+    )
+except (TypeError, ValueError):
+    X_ACCOUNT_STATS_MAX_AGE_SECONDS = 54000
+X_ACCOUNT_STATS_MAX_AGE_SECONDS = max(
+    60, min(X_ACCOUNT_STATS_MAX_AGE_SECONDS, 7 * 24 * 60 * 60)
+)
 
 try:
     configure_x_accounts_client(
@@ -47427,10 +47458,14 @@ class MaterialStatusDeliveryError(RuntimeError):
         message,
         retryable=False,
         refresh_token=False,
+        uncertain=False,
     ):
         self.code = str(code or "delivery_failed")
         self.retryable = bool(retryable)
         self.refresh_token = bool(refresh_token)
+        # Observational metadata for the new batch path; legacy retry/fallback
+        # decisions continue to use their original fields unchanged.
+        self.uncertain = bool(uncertain)
         super().__init__(
             material_status_service.redact_sensitive_text(message, limit=500)
         )
@@ -47810,12 +47845,14 @@ def material_status_feishu_response(
             "%s_invalid_response" % operation,
             "Feishu %s returned invalid JSON" % operation,
             retryable=response.status_code >= 500,
+            uncertain=(operation == "message_send"),
         ) from None
     if not isinstance(data, dict) or "code" not in data:
         raise MaterialStatusDeliveryError(
             "%s_invalid_response" % operation,
             "Feishu %s response is missing a result code" % operation,
             retryable=True,
+            uncertain=(operation == "message_send"),
         )
     feishu_code = data.get("code")
     retryable_codes = {
@@ -47853,6 +47890,7 @@ def material_status_feishu_response(
             ),
             retryable=retryable,
             refresh_token=refresh_token,
+            uncertain=(operation == "message_send" and response.status_code >= 500),
         )
     return data
 
@@ -47942,6 +47980,7 @@ def send_material_status_feishu_text(
             retryable=False,
         )
     data = None
+    send_outcome_uncertain = False
     for auth_attempt in range(2):
         try:
             tenant_access_token = get_feishu_tenant_access_token()
@@ -47966,12 +48005,14 @@ def send_material_status_feishu_text(
                 "feishu_send_unavailable",
                 "Feishu send unavailable: %s" % exc.__class__.__name__,
                 retryable=True,
+                uncertain=True,
             ) from None
         except Exception as exc:
             raise MaterialStatusDeliveryError(
                 "feishu_send_unavailable",
                 "Feishu send unavailable: %s" % exc.__class__.__name__,
                 retryable=True,
+                uncertain=True,
             ) from None
         try:
             data = material_status_feishu_response(
@@ -47981,6 +48022,10 @@ def send_material_status_feishu_text(
             )
             break
         except MaterialStatusDeliveryError as exc:
+            # Keep any earlier send uncertainty across the internal token retry.
+            # A later explicit rejection cannot prove the first send failed.
+            send_outcome_uncertain = send_outcome_uncertain or exc.uncertain
+            exc.uncertain = send_outcome_uncertain
             if exc.refresh_token and auth_attempt == 0:
                 continue
             raise
@@ -47994,6 +48039,7 @@ def send_material_status_feishu_text(
             "message_send_invalid_response",
             "Feishu message_send response is missing message_id",
             retryable=True,
+            uncertain=True,
         )
     return {
         "message_id": message_id,
@@ -48344,6 +48390,57 @@ def material_status_worker_ready():
     except Exception:
         logging.exception("material status broadcast worker is unavailable")
         return False
+
+
+MATERIAL_REPLICATION_WEBHOOK_TOKENS = tuple(
+    item.strip()
+    for item in os.environ.get("MATERIAL_REPLICATION_WEBHOOK_TOKENS", "").split(",")
+    if item.strip()
+)
+MATERIAL_REPLICATION_RUNTIME = None
+MATERIAL_REPLICATION_RUNTIME_LOCK = threading.Lock()
+
+
+def material_replication_record_audit(row):
+    append_audit_log(
+        None,
+        "material_replication_" + row["status"],
+        "material_replication_broadcast",
+        material_replication_service.format_batch_id(row["id"]),
+        {
+            "status": row["status"],
+            "delivery_kind": row.get("delivery_kind", ""),
+            "attempt_count": row["attempt_count"],
+            "failure_code": row.get("last_error_code", ""),
+        },
+    )
+
+
+def get_material_replication_runtime():
+    global MATERIAL_REPLICATION_RUNTIME
+    with MATERIAL_REPLICATION_RUNTIME_LOCK:
+        if MATERIAL_REPLICATION_RUNTIME is None:
+            MATERIAL_REPLICATION_RUNTIME = material_replication_delivery.ReplicationRuntime(
+                JOB_DB_PATH,
+                MATERIAL_REPLICATION_WEBHOOK_TOKENS,
+                MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
+                resolve_material_status_optimizer,
+                lookup_material_status_feishu_open_id,
+                send_material_status_feishu_text,
+                dependencies_ready=lambda: bool(
+                    FEISHU_APP_ID and FEISHU_APP_SECRET
+                    and ADMIN_MAPPING_MYSQL_HOST and ADMIN_MAPPING_MYSQL_USER
+                    and (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME)
+                ),
+                audit=material_replication_record_audit,
+            )
+        return MATERIAL_REPLICATION_RUNTIME
+
+
+def handle_material_replication_webhook_request(handler):
+    material_replication_delivery.handle_request(
+        handler, get_material_replication_runtime(), json_response,
+    )
 
 
 def handle_material_status_webhook_request(handler):
@@ -48748,6 +48845,9 @@ def mark_job_notification(job, notified_at="", error=""):
 
 
 
+            if job.get("_fenced_lease"):
+                conn.execute("BEGIN IMMEDIATE")
+                drama_cpu_runtime.guard_current_lease(conn, job["job_id"], job["_fenced_lease"], allow_done=True)
             conn.execute(
 
 
@@ -56630,7 +56730,7 @@ def delete_session(session_token):
 
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        return json.load(handle)
+        return filter_navigation(json.load(handle))
 
 
 def navigation_item_access(session, item_key, config):
@@ -56714,7 +56814,7 @@ def validate_navigation_config(config):
 
 
 def save_navigation_config(config):
-    config = validate_navigation_config(config)
+    config = filter_navigation(validate_navigation_config(config))
     directory = os.path.dirname(NAVIGATION_CONFIG_PATH)
     os.makedirs(directory, exist_ok=True)
     temp_path = NAVIGATION_CONFIG_PATH + ".tmp"
@@ -66634,419 +66734,40 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
 
 
 def run_cmd(cmd, timeout=None):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     logging.info("running: %s", " ".join(cmd))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    proc = subprocess.run(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        cmd,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stdout=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        stderr=subprocess.PIPE,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        universal_newlines=True,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        timeout=timeout,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    runtime = globals().get("drama_async_runtime")
+    context = runtime.capture_context() if runtime else None
+    if not context:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=timeout)
+    else:
+        # Process tracking is scoped to drama synthesis; other callers are unchanged.
+        limit = timeout if timeout is not None else int(os.environ.get("DRAMA_GPU_SUBPROCESS_TIMEOUT", "43200"))
+        child = None
+        try:
+            with runtime.process_launch():
+                child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         universal_newlines=True, start_new_session=True)
+                runtime.record_process(child.pid)
+            out, err = child.communicate(timeout=limit)
+        except BaseException:
+            if child is not None:
+                if child.poll() is None:
+                    try:
+                        if os.name == "posix":
+                            os.killpg(child.pid, signal.SIGKILL)
+                        else:
+                            child.kill()
+                    except ProcessLookupError:
+                        pass
+                child.wait()
+            raise
+        finally:
+            if child is not None and child.poll() is not None:
+                runtime.clear_process(child.pid)
+        proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     if proc.returncode != 0:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        raise RuntimeError(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            "command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        raise RuntimeError("command failed (%s): %s" % (proc.returncode, proc.stderr.strip() or proc.stdout.strip()))
     return proc
 
 
@@ -68655,24 +68376,57 @@ def normalize_episode(source_path, output_path):
     ])
 
 
-def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="48000"):
+def normalize_concat_segment(source_path, output_path, plan):
+    plan = validate_concat_normalization_plan(plan)
+    target, source, audio = plan["target"], plan["source"], plan["audio"]
+    target_width, target_height = target["width"], target["height"]
+    sar_numerator, sar_denominator = source["sar_numerator"], source["sar_denominator"]
+    scale_factor = "min(%d/(iw*%d/%d),%d/ih)" % (
+        target_width, sar_numerator, sar_denominator, target_height,
+    )
+    deinterlace_filter = (
+        "bwdif=mode=send_frame:parity=%s:deint=all," % source["deinterlace_parity"]
+        if source["scan_mode"] == "interlaced" else ""
+    )
+    video_filter = deinterlace_filter + (
+        "fps=25,"
+        "scale=w='max(2,trunc(%s*(iw*%d/%d)/2)*2)':"
+        "h='max(2,trunc(%s*ih/2)*2)':eval=init,"
+        "setsar=1,"
+        "colorspace=ispace=%s:itrc=%s:iprimaries=%s:irange=%s:"
+        "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+        "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black"
+    ) % (
+        scale_factor, sar_numerator, sar_denominator, scale_factor,
+        source["color_space"], source["color_transfer"], source["color_primaries"], source["color_range"],
+        target_width, target_height,
+    )
     ensure_dir(os.path.dirname(output_path))
     tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
     if os.path.exists(tmp_output_path):
         os.remove(tmp_output_path)
     try:
-        run_cmd([
-            FFMPEG, "-y", "-i", source_path,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-vf", "fps=%s,format=yuv420p,setsar=1" % fps,
-            "-r", str(fps),
+        command = [FFMPEG, "-y", "-i", source_path]
+        if audio["mode"] == "silence":
+            command.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+        command.extend([
+            "-map", "0:v:0", "-map", "1:a:0" if audio["mode"] == "silence" else "0:a:0",
+            "-vf", video_filter,
+            "-r", "25",
             *video_encode_args(),
-            "-c:a", "aac", "-b:a", "128k", "-ar", str(audio_rate), "-ac", "2",
-            "-af", "aresample=async=1:first_pts=0",
+            "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+            "-video_track_timescale", "12800",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+            "-color_primaries", "bt709", "-chroma_sample_location", "left",
+            "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp", "-b:a", "128k",
+            "-ar", str(audio["sample_rate"]), "-ac", str(audio["channels"]), "-tag:a", "mp4a",
+            "-af", ("aresample=async=1:first_pts=0,apad"
+                    if audio["mode"] == "resample" else "aresample=async=1:first_pts=0"),
             "-movflags", "+faststart",
             "-shortest",
             tmp_output_path,
         ])
+        run_cmd(command)
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("normalized concat segment is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -68684,42 +68438,42 @@ def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="480
 
 
 def concat_segments_need_normalization(segment_paths):
-    signatures = []
-    for path in segment_paths:
-        data = probe_media_stream_info(path)
-        streams = data.get("streams") or []
-        video = next((item for item in streams if item.get("codec_type") == "video"), None)
-        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-        if not video or not audio:
-            return True
-        signatures.append((
-            video.get("codec_name") or "",
-            int(video.get("width") or 0),
-            int(video.get("height") or 0),
-            video.get("avg_frame_rate") or video.get("r_frame_rate") or "",
-            video.get("time_base") or "",
-            audio.get("codec_name") or "",
-            audio.get("sample_rate") or "",
-            int(audio.get("channels") or 0),
-            audio.get("time_base") or "",
-        ))
-    return len(set(signatures)) > 1
+    if len(segment_paths) <= 1:
+        return False
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    signatures = [drama_concat_signature(info) for info, _ in snapshots]
+    for path, (info, anchor) in zip(segment_paths, snapshots):
+        verify_media_source_anchor(path, info, anchor)
+    return not concat_signatures_are_compatible(signatures)
 
 
 def prepare_concat_segments(segment_paths, output_dir):
-    if len(segment_paths) <= 1 or not concat_segments_need_normalization(segment_paths):
+    if len(segment_paths) <= 1:
+        return segment_paths
+    snapshots = [probe_media_source_with_anchor(path, probe_media_stream_info) for path in segment_paths]
+    source_infos = [info for info, _ in snapshots]
+    source_anchors = [anchor for _, anchor in snapshots]
+    if concat_signatures_are_compatible(drama_concat_signature(info) for info in source_infos):
+        for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+            verify_media_source_anchor(path, info, anchor)
         return segment_paths
     ensure_dir(output_dir)
     normalized_paths = []
-    for index, source_path in enumerate(segment_paths):
+    normalized_signatures = []
+    for index, (source_path, source_info) in enumerate(zip(segment_paths, source_infos)):
         normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
-        if (
-            not file_ready(normalized_path)
-            or not valid_video_file(normalized_path)
-            or not valid_av_duration_alignment(normalized_path)
-        ):
-            normalize_concat_segment(source_path, normalized_path)
+        normalized_path, signature, _ = prepare_normalized_concat_segment(
+            source_path, normalized_path, source_info=source_info, source_anchor=source_anchors[index],
+            reference_info=source_infos[0], reference_source=segment_paths[0],
+            reference_anchor=source_anchors[0], segment_index=index,
+            normalize=normalize_concat_segment, probe=probe_media_stream_info,
+            normalization_profile=NORMALIZATION_PROFILE,
+        )
         normalized_paths.append(normalized_path)
+        normalized_signatures.append(signature)
+    validate_normalized_concat_signatures(normalized_signatures)
+    for path, info, anchor in zip(segment_paths, source_infos, source_anchors):
+        verify_media_source_anchor(path, info, anchor)
     return normalized_paths
 
 
@@ -68806,16 +68560,111 @@ def probe_intro_reference_timing(reference_path):
     return timing
 
 
+def validate_intro_cover_color_contract(cover_path):
+    """Parse JPEG APP markers and accept only the fixed JFIF/sRGB contract."""
+    saw_jfif = False
+    saw_scan = False
+    header_bytes = 2
+    try:
+        if os.path.islink(cover_path) or not os.path.isfile(cover_path):
+            raise RuntimeError("intro cover color contract unsupported")
+        with open(cover_path, "rb") as handle:
+            if handle.read(2) != b"\xff\xd8":
+                raise RuntimeError("intro cover color contract unsupported")
+            for _ in range(1024):
+                prefix = handle.read(1)
+                if prefix != b"\xff":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker = handle.read(1)
+                while marker == b"\xff":
+                    marker = handle.read(1)
+                if len(marker) != 1 or marker == b"\x00":
+                    raise RuntimeError("intro cover color contract unsupported")
+                marker_value = marker[0]
+                header_bytes += 2
+                if marker_value == 0xD9:
+                    break
+                if marker_value in {0x01, *range(0xD0, 0xD8)}:
+                    continue
+                length_bytes = handle.read(2)
+                if len(length_bytes) != 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                segment_length = int.from_bytes(length_bytes, "big")
+                if segment_length < 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                payload = handle.read(segment_length - 2)
+                if len(payload) != segment_length - 2:
+                    raise RuntimeError("intro cover color contract unsupported")
+                header_bytes += segment_length
+                if header_bytes > 4 * 1024 * 1024:
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xE0 and payload.startswith(b"JFIF\x00") and len(payload) >= 14:
+                    saw_jfif = True
+                elif marker_value == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                elif marker_value == 0xEE and payload.startswith(b"Adobe"):
+                    raise RuntimeError("intro cover color contract unsupported")
+                if marker_value == 0xDA:
+                    saw_scan = True
+                    break
+            else:
+                raise RuntimeError("intro cover color contract unsupported")
+    except OSError:
+        raise RuntimeError("intro cover color contract unsupported") from None
+    if not saw_jfif or not saw_scan:
+        raise RuntimeError("intro cover color contract unsupported")
+    return {
+        "range": "pc", "matrix": "bt470", "transfer": "iec61966-2-1",
+        "primaries": "bt709",
+    }
+
+
+def freeze_intro_cover_source(cover_path, private_directory):
+    """Copy a stable cover into a private random file and bind its exact bytes."""
+    from features.drama_synthesis.intro_cover import canonicalize_frozen_cover, cover_error
+    before = file_fingerprint(cover_path)
+    fd, frozen_path = tempfile.mkstemp(prefix=".intro-cover-", suffix=".jpg", dir=private_directory)
+    opened_fd = fd
+    try:
+        with open(cover_path, "rb") as source, os.fdopen(fd, "wb") as target:
+            opened_fd = -1
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        after = file_fingerprint(cover_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
+        if before != after or before != frozen_fingerprint:
+            raise cover_error("drama_intro_cover_source_changed")
+        canonicalize_frozen_cover(frozen_path)
+        frozen_fingerprint = file_fingerprint(frozen_path)
+        color = validate_intro_cover_color_contract(frozen_path)
+        return frozen_path, frozen_fingerprint, color
+    except BaseException:
+        if opened_fd >= 0:
+            os.close(opened_fd)
+        if os.path.exists(frozen_path):
+            os.remove(frozen_path)
+        raise
+
+
 def render_intro(cover_path, output_path, reference_path=None):
-    timing = probe_intro_reference_timing(reference_path)
-    intro_fps = timing["fps"]
-    intro_audio_rate = timing["audio_rate"]
-    if reference_path:
-        logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
     ensure_dir(os.path.dirname(output_path))
-    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
-    if os.path.exists(tmp_output_path):
-        os.remove(tmp_output_path)
+    frozen_cover_path, frozen_cover_fingerprint, cover_color = freeze_intro_cover_source(
+        cover_path, os.path.dirname(output_path),
+    )
+    try:
+        timing = probe_intro_reference_timing(reference_path)
+        intro_fps = timing["fps"]
+        intro_audio_rate = timing["audio_rate"]
+        if reference_path:
+            logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
+        tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+    except BaseException:
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
+        raise
 
 
 
@@ -68847,7 +68696,8 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    run_cmd([
+    try:
+        run_cmd([
 
 
 
@@ -68879,7 +68729,7 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        FFMPEG, "-y", "-loop", "1", "-i", cover_path,
+        FFMPEG, "-y", "-loop", "1", "-i", frozen_cover_path,
 
 
 
@@ -68975,7 +68825,16 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        "-vf", (
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2:"
+            "in_range=%s:out_range=tv:in_color_matrix=%s:out_color_matrix=bt709,"
+            "colorspace=ispace=bt709:itrc=%s:iprimaries=%s:irange=tv:"
+            "space=bt709:trc=bt709:primaries=bt709:range=tv:format=yuv420p:fast=0,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        ) % (
+            cover_color["range"], cover_color["matrix"], cover_color["transfer"],
+            cover_color["primaries"],
+        ),
 
 
 
@@ -69039,7 +68898,13 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", tmp_output_path,
+        "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-video_track_timescale", "12800",
+        "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+        "-color_primaries", "bt709", "-chroma_sample_location", "left",
+        "-movflags", "+faststart", "-c:a", "aac", "-profile:a", "aac_low", "-sample_fmt", "fltp",
+        "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-tag:a", "mp4a",
+        "-shortest", tmp_output_path,
 
 
 
@@ -69071,8 +68936,9 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-    ])
-    try:
+        ])
+        if file_fingerprint(frozen_cover_path) != frozen_cover_fingerprint:
+            raise RuntimeError("intro cover changed during render")
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("intro output is not a valid video: %s" % tmp_output_path)
         if not valid_av_duration_alignment(tmp_output_path):
@@ -69081,6 +68947,8 @@ def render_intro(cover_path, output_path, reference_path=None):
     finally:
         if os.path.exists(tmp_output_path):
             os.remove(tmp_output_path)
+        if os.path.exists(frozen_cover_path):
+            os.remove(frozen_cover_path)
 
 
 
@@ -69174,6 +69042,71 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
+
+
+def strict_drama_job_directory(root, job_id):
+    """Resolve one internal job directory without creating outside a real root."""
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
+    root = os.path.abspath(os.fspath(root))
+    try:
+        if (not os.path.lexists(root) or os.path.islink(root)
+                or not os.path.isdir(root) or os.path.realpath(root) != root):
+            raise checkpoint_error()
+        target = os.path.abspath(os.path.join(root, job_id))
+        if os.path.commonpath((root, target)) != root:
+            raise checkpoint_error()
+        if (os.path.lexists(target)
+                and (os.path.islink(target) or os.path.realpath(target) != target)):
+            raise checkpoint_error()
+        return target
+    except DramaSynthesisError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise checkpoint_error() from None
+
+
+def validate_intro_for_reference(intro_path, reference_path):
+    """Bind an existing intro's exact bytes to the current normalization contract."""
+    if (not os.path.lexists(intro_path) or os.path.islink(intro_path)
+            or not file_ready(intro_path)):
+        raise checkpoint_error()
+    reference_info, reference_anchor = probe_media_source_with_anchor(
+        reference_path, probe_media_stream_info,
+    )
+    try:
+        freeze_concat_normalization_plan(reference_info, reference_info, 0)
+    finally:
+        verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    try:
+        intro_info, intro_anchor = probe_media_source_with_anchor(
+            intro_path, probe_media_stream_info,
+        )
+        try:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+            duration = float((intro_info.get("format") or {}).get("duration") or 0)
+            streams = intro_info.get("streams") or []
+            videos = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "video"]
+            audios = [float(item.get("duration") or 0) for item in streams
+                      if str(item.get("codec_type") or "") == "audio"]
+            values = [duration, *videos, *audios]
+            if (not videos or not audios
+                    or any(not math.isfinite(value) or value <= 0 for value in values)
+                    or abs(duration - float(INTRO_SECONDS)) > 0.25
+                    or abs(videos[0] - audios[0]) > 1.0):
+                raise checkpoint_error()
+            freeze_concat_normalization_plan(reference_info, intro_info, -1)
+        finally:
+            verify_media_source_anchor(intro_path, intro_info, intro_anchor)
+    except DramaSynthesisError as exc:
+        if exc.code in {"drama_media_checkpoint_unverified", "drama_media_checkpoint_conflict"}:
+            raise
+        raise checkpoint_error() from None
+    except (AttributeError, TypeError, ValueError):
+        raise checkpoint_error() from None
+    verify_media_source_anchor(reference_path, reference_info, reference_anchor)
+    return intro_anchor
 
 
 def concat_segments(segment_paths, output_path):
@@ -73193,7 +73126,7 @@ def concat_wav_files(input_paths, output_path):
 
 
 
-def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path):
+def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output_path, *, publish_result=True):
 
 
 
@@ -76297,7 +76230,8 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                shutil.copy2(output_video_path, public_output_path)
+                if publish_result:
+                    shutil.copy2(output_video_path, public_output_path)
 
 
 
@@ -76329,7 +76263,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                job["output_video_no_bgm_url"] = publish_asset(public_output_path)
+                    job["output_video_no_bgm_url"] = publish_asset(public_output_path)
 
 
 
@@ -76359,7 +76293,7 @@ def run_no_bgm_pipeline(job, source_video_path, output_video_path, public_output
 
 
 
-                update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
+                    update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
 
 
 
@@ -78971,25 +78905,76 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         return None
     if not GPU_VIDEO_WORKER_TOKEN:
         raise ValueError("GPU_VIDEO_WORKER_TOKEN is required when GPU_VIDEO_WORKER_URL is set")
-    payload = {
-        "job_id": job["job_id"],
-        "content_id": job.get("content_id", ""),
-        "episode_start": job.get("episode_start", 0),
-        "episode_end": job.get("episode_end", 0),
-        "outputs": {
-            "concat_video": bool(outputs.get("concat_video", True)),
-            "no_bgm_video": bool(outputs.get("no_bgm_video", True)),
-        },
-        "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
-        "await_cover_16x9": bool(await_cover_16x9),
-        "episodes": [
-            {
-                "episode_number": int(item["episode_number"]),
-                "episode_url": item["episode_url"],
-            }
-            for item in requested
-        ],
-    }
+    async_enabled = globals().get("DRAMA_GPU_ASYNC_ENABLED", False)
+    payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]) if async_enabled else None
+    if payload is None:
+        payload = {
+            "job_id": job["job_id"],
+            "content_id": job.get("content_id", ""),
+            "episode_start": job.get("episode_start", 0),
+            "episode_end": job.get("episode_end", 0),
+            "outputs": {
+                "concat_video": bool(outputs.get("concat_video", False)),
+                "no_bgm_video": bool(outputs.get("no_bgm_video", False)),
+                "random_template_video": bool(outputs.get("random_template_video", False)),
+            },
+            "cover_16x9_url": str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or ""),
+            "await_cover_16x9": bool(await_cover_16x9),
+            "episodes": [
+                {
+                    "episode_number": int(item["episode_number"]),
+                    "episode_url": item["episode_url"],
+                }
+                for item in requested
+            ],
+        }
+        if async_enabled:
+            for episode in payload["episodes"]:
+                episode["download_route"] = freeze_episode_download_route(episode["episode_url"])
+        if outputs.get("random_template_video"):
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            if not stored_recipe:
+                raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+            payload["random_template_recipe"] = stored_recipe["recipe"]
+    if async_enabled:
+        payload = drama_cpu_runtime.remember_remote_submission(
+            JOB_DB_PATH, job["job_id"], payload, job.get("_fenced_lease"))
+        previous = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job["job_id"]) or {}
+        expected = drama_cpu_runtime.get_remote_resume_intent(JOB_DB_PATH, job["job_id"])
+        lock = job.setdefault("_state_lock", threading.RLock())
+        cover_acknowledged = False
+        def on_status(snapshot):
+            nonlocal cover_acknowledged
+            stop = job.get("_remote_stop_event")
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            if (not cover_acknowledged and payload.get("await_cover_16x9")
+                    and snapshot.get("status") in {"queued", "running"}
+                    and snapshot.get("connection_state") == "connected"):
+                cover_url = str(job.get("_gpu_cover_16x9_url") or job.get("cover_16x9_url") or "")
+                if cover_url:
+                    try:
+                        submit_gpu_video_cover(job, cover_url)
+                    except requests.RequestException:
+                        # A lost cover callback is retried on the next GET, never
+                        # interpreted as failed media or a new render submission.
+                        snapshot = dict(snapshot, connection_state="reconnecting", error_code="cover_connection_unavailable")
+                    else:
+                        cover_acknowledged = True
+            if stop is not None and stop.is_set():
+                raise drama_remote_client.RemotePollingInterrupted()
+            with lock:
+                drama_cpu_runtime.record_remote_status(
+                    JOB_DB_PATH, job["job_id"], snapshot, job.get("_fenced_lease"))
+                job["_remote_snapshot"] = snapshot
+                if snapshot.get("status") != "completed":
+                    set_job_progress(job)
+        return drama_remote_client.wait_for_gpu_job(
+            GPU_VIDEO_WORKER_URL, GPU_VIDEO_WORKER_TOKEN, payload,
+            on_status=on_status, stop_event=job.get("_remote_stop_event"),
+            previous_status=previous, known_remote=bool(previous.get("generation")),
+            explicit_resume=(expected is not None), expected_generation=expected,
+        )
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer %s" % GPU_VIDEO_WORKER_TOKEN,
@@ -79025,13 +79010,21 @@ def submit_gpu_video_cover(job, cover_16x9_url):
         GPU_VIDEO_WORKER_URL + "/api/gpu-video/cover",
         data=json.dumps(payload).encode("utf-8"),
         headers=headers,
-        timeout=60,
+        timeout=(3, 15) if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else 60,
+        allow_redirects=False,
     )
-    response.raise_for_status()
-    result = response.json()
-    if result.get("error"):
-        raise RuntimeError(result.get("error"))
-    return result
+    try:
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and response.status_code in {400, 401, 403, 409}:
+            raise drama_remote_client.RemoteRecoveryRequired()
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or result.get("error"):
+            if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+                raise drama_remote_client.RemoteRecoveryRequired()
+            raise RuntimeError("GPU cover callback failed")
+        return result
+    finally:
+        response.close()
 
 
 def gpu_cover_url_marker_path(workdir):
@@ -79041,10 +79034,33 @@ def gpu_cover_url_marker_path(workdir):
 def write_gpu_cover_url(workdir, cover_16x9_url):
     ensure_dir(workdir)
     marker_path = gpu_cover_url_marker_path(workdir)
-    tmp_path = marker_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        fp.write(str(cover_16x9_url or "").strip())
-    os.replace(tmp_path, marker_path)
+    value = str(cover_16x9_url or "").strip()
+    # Publish a complete first binding atomically. A delayed callback must not
+    # replace the cover already consumed by this job's frozen intro.
+    fd, tmp_path = tempfile.mkstemp(prefix=".cover-binding-", dir=workdir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(value)
+            fp.flush()
+            os.fsync(fp.fileno())
+        try:
+            os.link(tmp_path, marker_path)
+        except FileExistsError:
+            if os.path.islink(marker_path):
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+            with open(marker_path, "r", encoding="utf-8") as fp:
+                previous = fp.read(32768).strip()
+            if previous != value:
+                raise DramaSynthesisError("gpu_job_input_conflict", "封面与已有制作记录不一致", 409)
+        if os.name == "posix":
+            directory = os.open(workdir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def wait_for_gpu_cover_url(workdir, timeout_seconds):
@@ -79065,64 +79081,321 @@ def gpu_video_result_path(job_id):
     return os.path.join(GPU_VIDEO_RESULT_ROOT, safe_job_id + ".json")
 
 
+def gpu_video_local_artifact_identity(input_fingerprint, output_kind, source_paths, processing_profile):
+    """Freeze the sources and processing contract for one completed local output."""
+    try:
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                or output_kind not in {"concat", "no_bgm"}
+                or not isinstance(source_paths, (list, tuple)) or not source_paths
+                or not isinstance(processing_profile, dict)):
+            raise checkpoint_error()
+        # Round-trip through strict JSON so mutable/non-portable profile values
+        # cannot enter a durable identity record.
+        profile = json.loads(json.dumps(
+            processing_profile, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ))
+        sources = []
+        for index, path in enumerate(source_paths):
+            fingerprint = file_fingerprint(path)
+            sources.append({
+                "index": index,
+                "name": os.path.basename(os.fspath(path)),
+                "sha256": fingerprint["sha256"],
+                "size_bytes": fingerprint["size_bytes"],
+            })
+        return {
+            "version": 1,
+            "input_fingerprint": str(input_fingerprint),
+            "output_kind": output_kind,
+            "sources": sources,
+            "processing_profile": profile,
+        }
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def gpu_video_local_checkpoint_path(artifact_path):
+    return os.fspath(artifact_path) + ".completed.json"
+
+
+def load_gpu_video_local_artifact(artifact_path, identity, *, related_paths=()):
+    """Load an identity-bound final artifact; never adopt an untracked file."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        completed = load_completed(checkpoint_path, artifact_path, identity)
+        if completed is None:
+            if any(os.path.lexists(os.fspath(path)) for path in (artifact_path, *tuple(related_paths))):
+                raise checkpoint_error()
+            return None
+        if (set(completed) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(completed.get("sha256") or ""))
+                or type(completed.get("size_bytes")) is not int
+                or completed["size_bytes"] <= 0):
+            raise checkpoint_error()
+        return completed
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def save_gpu_video_local_artifact(artifact_path, identity):
+    """Persist and read back the completed artifact before any upload starts."""
+    checkpoint_path = gpu_video_local_checkpoint_path(artifact_path)
+    try:
+        fingerprint = file_fingerprint(artifact_path)
+        result = {
+            "sha256": fingerprint["sha256"],
+            "size_bytes": fingerprint["size_bytes"],
+        }
+        save_completed(
+            checkpoint_path, artifact_path, identity, result,
+            fingerprint=fingerprint,
+        )
+        if load_completed(checkpoint_path, artifact_path, identity) != result:
+            raise checkpoint_error()
+        return result
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+
+
+def restore_gpu_video_public_artifact(source_path, target_path, *, expected_fingerprint):
+    """Restore a missing public copy from a verified workspace artifact."""
+    temporary = None
+    try:
+        source_path, target_path = os.fspath(source_path), os.fspath(target_path)
+        expected = dict(expected_fingerprint or {})
+        if (set(expected) != {"sha256", "size_bytes"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(expected.get("sha256") or ""))
+                or type(expected.get("size_bytes")) is not int
+                or expected["size_bytes"] <= 0):
+            raise checkpoint_error()
+        source = file_fingerprint(source_path)
+        if source != expected:
+            raise checkpoint_error()
+        parent = os.path.dirname(target_path)
+        if os.path.lexists(target_path):
+            if file_fingerprint(target_path) != source:
+                raise checkpoint_error(conflict=True)
+            with open(target_path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            if os.name == "posix":
+                directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            if file_fingerprint(target_path) != expected:
+                raise checkpoint_error()
+            return target_path
+        durable_ensure_directory(parent)
+        fd, temporary = tempfile.mkstemp(
+            prefix="." + os.path.basename(target_path) + ".restore.", dir=parent,
+        )
+        os.close(fd)
+        shutil.copy2(source_path, temporary)
+        # Windows rejects fsync on a read-only handle.  Reopen the completed
+        # temporary copy read/write so the same durability fence works on both
+        # worker platforms before the atomic replace.
+        with open(temporary, "r+b") as handle:
+            os.fsync(handle.fileno())
+        if file_fingerprint(temporary) != source:
+            raise checkpoint_error()
+        os.replace(temporary, target_path)
+        temporary = None
+        if os.name == "posix":
+            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        if file_fingerprint(target_path) != source:
+            raise checkpoint_error()
+        return target_path
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise checkpoint_error() from None
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def gpu_video_no_bgm_profile():
+    """Version the configured Demucs/remux plan used by local checkpoints."""
+    return {
+        "version": 1,
+        "pipeline": "drama-demucs-v1",
+        "remux_profile": "copy-video-vocals-aac-v1",
+        "device": str(DEMUCS_DEVICE or ""),
+        "profiles": demucs_profiles(),
+        "chunk_seconds": [
+            max(int(DEMUCS_CHUNK_SECONDS), 30),
+            max(min(int(DEMUCS_CHUNK_SECONDS), 60), 24),
+            max(int(DEMUCS_FALLBACK_CHUNK_SECONDS), 20),
+            24,
+        ],
+    }
+
+
 def gpu_video_result_satisfies_outputs(result, outputs):
     if not result:
         return False
-    if bool(outputs.get("concat_video", True)):
+    if drama_gpu_cache.versioned(result):
+        client = get_cos_client(
+            timeout=max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT), retry=0,
+        )
+        return drama_gpu_cache.verify_artifacts(
+            result, outputs, client=client, bucket=COS_BUCKET,
+            url_for_key=build_cos_url,
+        )
+    if bool(outputs.get("concat_video", False)):
         url = str(result.get("output_video_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
             return False
-    if bool(outputs.get("no_bgm_video", True)):
+    if bool(outputs.get("no_bgm_video", False)):
         url = str(result.get("output_video_no_bgm_url") or "").strip()
         if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+    if bool(outputs.get("random_template_video", False)):
+        url = str(result.get("output_random_template_url") or "").strip()
+        if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_output_sha256") or "")):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("random_template_recipe_sha256") or "")):
             return False
     return True
 
 
-def read_gpu_video_result(job_id, outputs):
+def read_gpu_video_result(job_id, outputs, *, input_fingerprint=None):
     result_path = gpu_video_result_path(job_id)
     if os.path.isfile(result_path):
         try:
             with open(result_path, "r", encoding="utf-8") as fp:
                 result = json.load(fp)
+            if not isinstance(result, dict) or str(result.get("job_id") or "") != str(job_id):
+                raise drama_gpu_cache.cache_error()
+            if drama_async_runtime.capture_context() is not None and not drama_gpu_cache.versioned(result):
+                raise drama_gpu_cache.cache_error()
+            if drama_gpu_cache.versioned(result):
+                expected = str(result.get("input_fingerprint") or "")
+                if (not re.fullmatch(r"[0-9a-f]{64}", str(input_fingerprint or ""))
+                        or not secrets.compare_digest(expected, str(input_fingerprint))):
+                    raise drama_gpu_cache.cache_error()
             if gpu_video_result_satisfies_outputs(result, outputs):
+                if drama_gpu_cache.versioned(result):
+                    return drama_gpu_cache.public_result(result)
                 return result
+        except DramaSynthesisError:
+            raise
         except Exception as exc:
             logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
+            raise drama_gpu_cache.cache_error() from None
 
-    result = {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
-    if bool(outputs.get("concat_video", True)):
+    # A new AsyncRuntime execution must never adopt an object solely from a
+    # predictable public filename. Only an already persisted legacy manifest
+    # may use the compatibility path above; new work proceeds through its
+    # upload checkpoint and creates a verified v3 manifest.
+    if drama_async_runtime.capture_context() is not None:
+        return None
+
+    result = {
+        "job_id": job_id,
+        "output_video_url": "",
+        "output_video_no_bgm_url": "",
+        "output_random_template_url": "",
+    }
+    if bool(outputs.get("concat_video", False)):
         result["output_video_url"] = build_drama_public_url(job_id, "material.mp4")
-    if bool(outputs.get("no_bgm_video", True)):
+    if bool(outputs.get("no_bgm_video", False)):
         result["output_video_no_bgm_url"] = build_drama_public_url(job_id, "material_no_bgm.mp4")
+    # Random-template results are never inferred from a public filename: the
+    # immutable output and recipe hashes in the manifest are part of identity.
     if gpu_video_result_satisfies_outputs(result, outputs):
         write_gpu_video_result(job_id, result)
         return result
     return None
 
 
-def write_gpu_video_result(job_id, result):
-    ensure_dir(GPU_VIDEO_RESULT_ROOT)
+def write_gpu_video_result(job_id, result, *, artifact_paths=None, artifact_receipts=None):
     result_path = gpu_video_result_path(job_id)
-    tmp_path = result_path + ".tmp"
-    payload = dict(result or {})
-    payload["job_id"] = str(job_id or payload.get("job_id") or "")
-    payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(tmp_path, "w", encoding="utf-8") as fp:
-        json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp_path, result_path)
+    # The completed manifest is the durable recovery boundary.  The shared
+    # writer fsyncs the file, atomically replaces it and then fsyncs its parent
+    # directory on POSIX.  Read it back before the caller may delete the local
+    # media, so any persistence or serialization failure keeps the artifacts.
+    try:
+        durable_ensure_directory(GPU_VIDEO_RESULT_ROOT)
+        payload = dict(result or {})
+        payload["job_id"] = str(job_id or payload.get("job_id") or "")
+        payload["updated_at"] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+        if artifact_paths is not None:
+            payload.update(drama_gpu_cache.artifact_metadata(payload, artifact_paths, artifact_receipts))
+        elif artifact_receipts is not None:
+            raise drama_gpu_cache.cache_error()
+        atomic_write_record(result_path, payload)
+        if read_record(result_path) != payload:
+            raise drama_gpu_cache.cache_error()
+    except Exception:
+        # A completed render whose manifest is not durably provable must remain
+        # recoverable and keep its local artifacts; never surface a generic
+        # render failure that could encourage a fresh render.
+        raise drama_gpu_cache.cache_error() from None
+
+
+def verify_gpu_artifact_uploads(job_id, result, artifact_paths):
+    """Re-read every selected upload through its durable checkpoint.
+
+    The second resumable call performs an authenticated SDK HEAD and validates
+    the checkpoint binding. It cannot create a replacement object because a
+    missing or conflicting checkpoint fails closed.
+    """
+    if not cos_enabled():
+        return None
+    selected = {field for field in drama_gpu_cache.ARTIFACT_FILENAMES if result.get(field)}
+    if not selected or set(artifact_paths) != selected:
+        raise drama_gpu_cache.cache_error()
+    receipts = {}
+    for field in sorted(selected):
+        try:
+            url, receipt = publish_asset(
+                artifact_paths[field], return_receipt=True, checkpoint_job_id=job_id,
+            )
+        except DramaSynthesisError:
+            raise
+        except Exception:
+            raise drama_gpu_cache.cache_error() from None
+        if url != result[field] or not isinstance(receipt, dict):
+            raise drama_gpu_cache.cache_error()
+        receipts[field] = receipt
+    # Recompute each local SHA here, before the manifest writer is allowed to
+    # persist or cleanup. The writer repeats the same validation as its own
+    # durable boundary.
+    drama_gpu_cache.artifact_metadata(result, artifact_paths, receipts)
+    return receipts
 
 
 def handle_gpu_video_cover(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
+    job_id = payload.get("job_id")
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     if not cover_16x9_url:
         raise ValueError("missing cover_16x9_url")
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
+    durable_ensure_directory(workdir)
     write_gpu_cover_url(workdir, cover_16x9_url)
     return {"job_id": job_id, "ok": True}
 
@@ -79142,28 +79415,98 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
             logging.warning("skip GPU cleanup unexpected %s basename: %s", label, target_dir)
             return
         if os.path.isdir(target_real):
-            shutil.rmtree(target_real, ignore_errors=True)
-            logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
+            try:
+                shutil.rmtree(target_real)
+            except OSError as exc:
+                logging.warning("GPU %s cleanup retained after verified result: %s (%s)", label, target_real, exc)
+                return
+            if os.path.exists(target_real):
+                logging.warning("GPU %s cleanup path still exists after verified result: %s", label, target_real)
+            else:
+                logging.info("cleaned GPU %s dir after COS upload: %s", label, target_real)
 
     remove_job_dir(WORK_ROOT, workdir, "work")
     remove_job_dir(PUBLIC_ROOT, public_dir, "public")
 
 
+def cached_gpu_video_result(payload, *, allow_legacy=True):
+    job_id = str((payload or {}).get("job_id") or "")
+    path = gpu_video_result_path(job_id)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+        if not isinstance(result, dict) or str(result.get("job_id") or "") != job_id:
+            raise drama_gpu_cache.cache_error()
+        if not allow_legacy and not drama_gpu_cache.versioned(result):
+            raise drama_gpu_cache.cache_error()
+        expected_fingerprint = result.get("input_fingerprint")
+        actual_fingerprint = drama_async_runtime.render_fingerprint(payload)
+        if drama_gpu_cache.versioned(result):
+            if (not re.fullmatch(r"[0-9a-f]{64}", str(expected_fingerprint or ""))
+                    or not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint)):
+                raise drama_gpu_cache.cache_error()
+        elif expected_fingerprint and not secrets.compare_digest(str(expected_fingerprint), actual_fingerprint):
+            raise drama_gpu_cache.cache_error()
+        if not gpu_video_result_satisfies_outputs(result, payload.get("outputs") or {}):
+            raise drama_gpu_cache.cache_error()
+        public = drama_gpu_cache.public_result(result) if drama_gpu_cache.versioned(result) else result
+        if (payload.get("outputs") or {}).get("random_template_video"):
+            drama_gpu_cache.verify_cached_recipe(public, payload.get("random_template_recipe"))
+        return public
+    except DramaSynthesisError:
+        raise
+    except Exception:
+        raise drama_gpu_cache.cache_error() from None
+
+
+def strict_cached_gpu_video_result(payload):
+    return cached_gpu_video_result(payload, allow_legacy=False)
+
+
+def gpu_video_resume_ready(payload):
+    # The runtime additionally proves the prior process generation has stopped.
+    if strict_cached_gpu_video_result(payload):
+        return True
+    job_id = str((payload or {}).get("job_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
+        return False
+    workdir = os.path.join(WORK_ROOT, job_id)
+    return (os.path.isdir(workdir) and not os.path.islink(workdir)
+            and os.path.dirname(os.path.realpath(workdir)) == os.path.realpath(WORK_ROOT))
+
+
 def handle_gpu_video_render(payload):
-    job_id = str((payload or {}).get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
-    lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
-    with lock:
-        return _handle_gpu_video_render_unlocked(payload)
+    job_id = (payload or {}).get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
+    # The dedicated worker owns this lock for its full lifetime.  A legacy
+    # monolith route may render only while that worker is absent, which avoids
+    # cross-process duplicate jobs and preserves the global heavy concurrency
+    # of one.  Calls made by AsyncRuntime already run beneath the same owner and
+    # per-job file locks, so they must not reacquire it.
+    compatibility_owner = None
+    if drama_async_runtime.capture_context() is None:
+        runtime_root = durable_ensure_directory(os.path.join(WORK_ROOT, ".runtime"))
+        compatibility_owner = drama_async_runtime._FileLock(runtime_root / "owner.lock")
+        if not compatibility_owner.acquire():
+            raise drama_async_runtime.runtime_error("gpu_runtime_unavailable")
+    try:
+        lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
+        with lock:
+            return _handle_gpu_video_render_unlocked(payload)
+    finally:
+        if compatibility_owner is not None:
+            compatibility_owner.release()
 
 
 def _handle_gpu_video_render_unlocked(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
-    job_id = str(payload.get("job_id", "") or "").strip()
-    if not job_id:
-        raise ValueError("missing job_id")
+    job_id = payload.get("job_id")
+    if not drama_async_runtime.valid_job_id(job_id):
+        raise ValueError("invalid job_id")
     episodes = payload.get("episodes") or []
     if not episodes:
         raise ValueError("missing episodes")
@@ -79171,26 +79514,42 @@ def _handle_gpu_video_render_unlocked(payload):
     cover_16x9_url = str(payload.get("cover_16x9_url") or payload.get("cover_url") or "").strip()
     await_cover_16x9 = bool(payload.get("await_cover_16x9") or payload.get("wait_for_cover"))
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
-    render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True))
-    render_no_bgm = bool(outputs.get("no_bgm_video", True))
-    publish_concat = bool(outputs.get("concat_video", True))
+    render_random = bool(outputs.get("random_template_video", False))
+    random_recipe = payload.get("random_template_recipe") if render_random else None
+    if render_random and not isinstance(random_recipe, dict):
+        raise DramaSynthesisError("drama_recipe_missing", "随机模板配方不存在", 409)
+    random_source_kind = str((random_recipe or {}).get("source") or "")
+    if render_random and random_source_kind not in {"concat_video", "no_bgm_video"}:
+        raise DramaSynthesisError("drama_random_template_source_invalid", "随机模板源视频无效", 409)
+    render_concat = bool(outputs.get("concat_video", False) or outputs.get("no_bgm_video", False) or render_random)
+    publish_no_bgm = bool(outputs.get("no_bgm_video", False))
+    render_no_bgm = bool(publish_no_bgm or (render_random and random_source_kind == "no_bgm_video"))
+    publish_concat = bool(outputs.get("concat_video", False))
     if not render_concat:
-        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+        return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": "", "output_random_template_url": ""}
 
-    existing_result = read_gpu_video_result(job_id, outputs)
+    input_fingerprint = drama_async_runtime.render_fingerprint(payload)
+    existing_result = read_gpu_video_result(
+        job_id, outputs, input_fingerprint=input_fingerprint,
+    )
     if existing_result:
+        if render_random:
+            drama_gpu_cache.verify_cached_recipe(existing_result, random_recipe)
         logging.info("reuse GPU video result for job=%s", job_id)
         return existing_result
 
-    workdir = os.path.join(WORK_ROOT, job_id)
+    workdir = strict_drama_job_directory(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
     segment_dir = os.path.join(workdir, "segments")
     concat_segment_dir = os.path.join(workdir, "concat_segments")
-    public_dir = os.path.join(PUBLIC_ROOT, job_id)
-    ensure_dir(download_dir)
-    ensure_dir(segment_dir)
-    ensure_dir(concat_segment_dir)
-    ensure_dir(public_dir)
+    public_dir = strict_drama_job_directory(PUBLIC_ROOT, job_id)
+    # The completed artifact/checkpoint pair lives directly in workdir.  Make
+    # the first directory entry durable before a render can create either file.
+    durable_ensure_directory(workdir)
+    durable_ensure_directory(public_dir, mode=0o755)
+    durable_ensure_directory(download_dir)
+    durable_ensure_directory(segment_dir)
+    durable_ensure_directory(concat_segment_dir)
 
     job = {
         "_gpu_worker": True,
@@ -79203,6 +79562,7 @@ def _handle_gpu_video_render_unlocked(payload):
         "progress_detail": "",
         "output_video_url": "",
         "output_video_no_bgm_url": "",
+        "output_random_template_url": "",
     }
     segment_paths = []
     total_steps = (
@@ -79211,6 +79571,7 @@ def _handle_gpu_video_render_unlocked(payload):
         + 1
         + (1 if render_no_bgm else 0)
         + (1 if publish_concat else 0)
+        + (1 if render_random else 0)
     )
     completed_steps = 0
 
@@ -79228,51 +79589,31 @@ def _handle_gpu_video_render_unlocked(payload):
             "episode_url": episode_url,
             "source_path": os.path.join(download_dir, "%03d.mp4" % episode_number),
             "normalized_path": os.path.join(segment_dir, "%03d.mp4" % episode_number),
+            **({"download_route": item["download_route"]} if "download_route" in item else {}),
         })
 
-    max_download_workers = max(1, min(4, len(episode_work_items)))
-    download_futures = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_download_workers) as download_executor:
-        for item in episode_work_items:
-            if file_ready(item["source_path"]):
-                continue
-            download_futures[item["episode_number"]] = download_executor.submit(
-                download_file,
-                item["episode_url"],
-                item["source_path"],
-            )
-        if download_futures:
-            logging.info(
-                "GPU prefetch queued %d episode downloads with %d workers for job=%s",
-                len(download_futures),
-                max_download_workers,
-                job_id,
-            )
-
-        for item in episode_work_items:
-            future = download_futures.get(item["episode_number"])
-            if future is not None:
-                future.result()
-            segment_paths.append(item["source_path"])
-            completed_steps += 1
-            update_render_stage(job, completed_steps, total_steps, "GPU episode %d downloaded" % item["episode_number"])
-
-    if cover_16x9_url or await_cover_16x9:
-        if not cover_16x9_url:
-            cover_16x9_url = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
+    def intro_factory(first_source_path):
+        selected_cover = cover_16x9_url
+        if not selected_cover:
+            drama_async_runtime.emit_progress("waiting_cover")
+            selected_cover = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
-        remove_invalid_video_file(intro_path, "GPU intro")
-        if not file_ready(cover_path):
-            download_file(cover_16x9_url, cover_path)
-        if not file_ready(intro_path):
-            reference_path = episode_work_items[0]["source_path"] if episode_work_items else None
-            render_intro(cover_path, intro_path, reference_path=reference_path)
-        segment_paths.insert(0, intro_path)
-        completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
+        if os.path.lexists(intro_path):
+            validate_intro_for_reference(intro_path, first_source_path)
+        else:
+            if not file_ready(cover_path):
+                download_file(selected_cover, cover_path)
+            render_intro(cover_path, intro_path, reference_path=first_source_path)
+            validate_intro_for_reference(intro_path, first_source_path)
+        return intro_path
 
-    segment_paths = prepare_concat_segments(segment_paths, concat_segment_dir)
+    segment_paths = download_and_prepare_segments(
+        episode_work_items, output_dir=concat_segment_dir,
+        probe=probe_media_stream_info, normalize=normalize_concat_segment,
+        intro_factory=intro_factory if (cover_16x9_url or await_cover_16x9) else None,
+    )
+    drama_async_runtime.emit_progress("concatenating")
 
     output_name = "%s_%s_eps_%s_%s.mp4" % (
         job["content_id"] or "material",
@@ -79282,46 +79623,129 @@ def _handle_gpu_video_render_unlocked(payload):
     )
     output_path = os.path.join(workdir, output_name)
     public_video_path = os.path.join(public_dir, "material.mp4")
-    remove_invalid_video_file(output_path, "GPU concat workspace")
-    remove_invalid_video_file(public_video_path, "GPU concat public")
-    if not file_ready(output_path):
+    concat_profile = {
+        "version": 1,
+        "pipeline": "drama-concat-copy-v1",
+        "normalization_profile": NORMALIZATION_PROFILE,
+    }
+    concat_identity = gpu_video_local_artifact_identity(
+        input_fingerprint, "concat", segment_paths, concat_profile,
+    )
+    concat_completed = load_gpu_video_local_artifact(
+        output_path, concat_identity,
+        related_paths=(public_video_path,),
+    )
+    if concat_completed is None:
         concat_segments(segment_paths, output_path)
+        if not valid_video_file(output_path):
+            raise checkpoint_error()
+        if gpu_video_local_artifact_identity(
+                input_fingerprint, "concat", segment_paths, concat_profile,
+        ) != concat_identity:
+            raise checkpoint_error(conflict=True)
+        concat_completed = save_gpu_video_local_artifact(output_path, concat_identity)
     if not valid_video_file(output_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % output_path)
-    if publish_concat and not file_ready(public_video_path):
-        shutil.copy2(output_path, public_video_path)
-    if publish_concat and not valid_video_file(public_video_path):
-        raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
-    update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
+        raise checkpoint_error()
 
     if render_no_bgm:
+        drama_async_runtime.emit_progress("removing_bgm")
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
-        remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
-        remove_invalid_video_file(public_no_bgm_path, "GPU no-BGM public")
-        if file_ready(public_no_bgm_path):
+        no_bgm_profile = gpu_video_no_bgm_profile()
+        no_bgm_identity = gpu_video_local_artifact_identity(
+            input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+        )
+        no_bgm_completed = load_gpu_video_local_artifact(
+            no_bgm_output_path, no_bgm_identity,
+            related_paths=(public_no_bgm_path,),
+        )
+        if no_bgm_completed is None:
+            run_no_bgm_pipeline(
+                job, output_path, no_bgm_output_path, public_no_bgm_path,
+                publish_result=False,
+            )
+            if (not valid_video_file(no_bgm_output_path)
+                    or not valid_av_duration_alignment(no_bgm_output_path)):
+                raise checkpoint_error()
+            if gpu_video_local_artifact_identity(
+                    input_fingerprint, "no_bgm", [output_path], no_bgm_profile,
+            ) != no_bgm_identity:
+                raise checkpoint_error(conflict=True)
+            no_bgm_completed = save_gpu_video_local_artifact(
+                no_bgm_output_path, no_bgm_identity,
+            )
+        if (not valid_video_file(no_bgm_output_path)
+                or not valid_av_duration_alignment(no_bgm_output_path)):
+            raise checkpoint_error()
+        if publish_no_bgm:
+            restore_gpu_video_public_artifact(
+                no_bgm_output_path, public_no_bgm_path,
+                expected_fingerprint=no_bgm_completed,
+            )
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
-        else:
-            run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
+            update_no_bgm_stage(job, 98, "去 BGM 成片已上传")
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU no-BGM video uploaded")
 
     if publish_concat:
+        restore_gpu_video_public_artifact(
+            output_path, public_video_path,
+            expected_fingerprint=concat_completed,
+        )
         job["output_video_url"] = publish_asset(public_video_path)
         completed_steps += 1
-        update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
+
+    random_result = None
+    if render_random:
+        drama_async_runtime.emit_progress("rendering")
+        if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+            raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+        public_random_path = os.path.join(public_dir, "material_random_template.mp4")
+        random_result = render_random_output(
+            source=no_bgm_output_path if random_source_kind == "no_bgm_video" else output_path,
+            output=public_random_path,
+            recipe=random_recipe,
+            asset_root=DRAMA_RANDOM_OVERLAY_ROOT,
+            manifest_sha256=DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256,
+            ffmpeg=DRAMA_RANDOM_OVERLAY_FFMPEG,
+            ffprobe=DRAMA_RANDOM_OVERLAY_FFPROBE,
+        )
+        job["output_random_template_url"] = publish_asset(public_random_path)
+        completed_steps += 1
 
     result = {
         "job_id": job_id,
         "output_video_url": job.get("output_video_url", ""),
-        "output_video_no_bgm_url": job.get("output_video_no_bgm_url", ""),
+        "output_video_no_bgm_url": job.get("output_video_no_bgm_url", "") if publish_no_bgm else "",
+        "output_random_template_url": job.get("output_random_template_url", ""),
     }
     if publish_concat and not result["output_video_url"]:
         raise RuntimeError("GPU concat video upload did not return a URL")
-    if render_no_bgm and not result["output_video_no_bgm_url"]:
+    if publish_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
-    write_gpu_video_result(job_id, result)
-    cleanup_gpu_video_job_files(job_id, workdir, public_dir)
+    if render_random:
+        if not result["output_random_template_url"] or not random_result:
+            raise RuntimeError("GPU random-template video upload did not return a URL")
+        result.update({
+            "random_template_output_sha256": random_result["output_sha256"],
+            "random_template_output_profile": random_result["profile"],
+            "random_template_recipe_sha256": random_result["recipe_sha256"],
+        })
+    artifact_paths = {
+        field: os.path.join(public_dir, filename)
+        for field, filename in drama_gpu_cache.ARTIFACT_FILENAMES.items()
+        if result.get(field)
+    }
+    result["input_fingerprint"] = input_fingerprint
+    artifact_receipts = verify_gpu_artifact_uploads(job_id, result, artifact_paths)
+    if artifact_receipts is None:
+        # Local serving has no authenticated remote identity. Preserve the old
+        # unversioned manifest and the media files; never fabricate v3.
+        write_gpu_video_result(job_id, result)
+    else:
+        write_gpu_video_result(
+            job_id, result, artifact_paths=artifact_paths, artifact_receipts=artifact_receipts,
+        )
+        cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
 
 
@@ -79915,6 +80339,16 @@ def submit_job(payload, actor_session=None):
 
 
     validation = validate_content_request(app_id, content_id, episode_start, episode_end)
+    job_id = uuid.uuid4().hex
+    if outputs["random_template_video"]:
+        recipe = freeze_random_recipe(
+            job_id=job_id,
+            content_id=content_id,
+            request=advanced.get("random_template"),
+            catalog=drama_random_template_catalog(),
+        )
+        # Freeze before the legacy row becomes visible to the external worker.
+        DRAMA_SYNTHESIS_STORE.freeze_recipe(job_id, recipe)
 
 
 
@@ -79978,7 +80412,7 @@ def submit_job(payload, actor_session=None):
 
 
 
-        "job_id": uuid.uuid4().hex,
+        "job_id": job_id,
 
 
 
@@ -81276,7 +81710,49 @@ def submit_job(payload, actor_session=None):
 
 
 
+def complete_async_gpu_job(job, gpu_result):
+    result = dict(gpu_result or {})
+    outputs = normalize_outputs(job.get("outputs", {}))
+    if outputs.get("cover_16x9"):
+        result["cover_16x9_url"] = str(job.get("cover_16x9_url") or "")
+    recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"]) if outputs.get("random_template_video") else None
+    expected = str((recipe or {}).get("recipe_sha256") or "")
+    if outputs.get("random_template_video") and not expected:
+        raise DramaSynthesisError("drama_recipe_missing", "冻结配方不存在，已停止回填", 409)
+    with job.setdefault("_state_lock", threading.RLock()):
+        completed = drama_cpu_runtime.atomic_complete_job(
+            JOB_DB_PATH, job["job_id"], result, job.get("_fenced_lease"),
+            expected_recipe_sha256=expected,
+        )
+        job.update(completed)
+    try:
+        notify_job_creator_on_completion(job)
+    except Exception:
+        logging.exception("completion notification failed after atomic media completion: job=%s", job.get("job_id"))
+
+
 def process_job(job):
+    if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+        return _process_job_observed(job)
+    parent_stop = job.get("_remote_stop_event")
+    observer_stop = DramaObservationStop(parent_stop)
+    job["_remote_stop_event"] = observer_stop
+    try:
+        return _process_job_observed(job)
+    finally:
+        # Stop and join this attempt's observer before a retry reuses the lease.
+        # This never cancels the durable GPU execution.
+        observer_stop.set()
+        executor = job.pop("_gpu_observer_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if parent_stop is None:
+            job.pop("_remote_stop_event", None)
+        else:
+            job["_remote_stop_event"] = parent_stop
+
+
+def _process_job_observed(job):
 
 
 
@@ -81308,6 +81784,13 @@ def process_job(job):
 
 
 
+    job.setdefault("_state_lock", threading.RLock())
+    if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) and gpu_video_worker_enabled():
+        saved_payload = drama_cpu_runtime.get_remote_payload(JOB_DB_PATH, job["job_id"])
+        if saved_payload and (not saved_payload.get("await_cover_16x9") or job.get("cover_16x9_url")):
+            result = call_gpu_video_worker(job, [], normalize_outputs(job.get("outputs", {})))
+            complete_async_gpu_job(job, result)
+            return
     clear_job_deleted_marker(job["job_id"])
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
@@ -82014,7 +82497,13 @@ def process_job(job):
 
 
 
-    need_video_pipeline = outputs["concat_video"] or outputs["no_bgm_video"]
+    need_video_pipeline = (
+        outputs["concat_video"]
+        or outputs["no_bgm_video"]
+        or outputs["random_template_video"]
+    )
+    if outputs["random_template_video"] and not gpu_video_worker_enabled():
+        raise DramaSynthesisError("drama_random_gpu_unavailable", "香港GPU随机模板服务暂不可用", 503)
 
 
 
@@ -83782,6 +84271,8 @@ def process_job(job):
         set_job_progress(job, status="rendering", progress=20, detail="GPU 服已开始处理素材，等待封面后合并")
         ensure_job_not_deleted(job["job_id"])
         gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            job["_gpu_observer_executor"] = gpu_executor
         gpu_future = gpu_executor.submit(call_gpu_video_worker, job, requested, outputs, need_cover)
 
 
@@ -84358,7 +84849,8 @@ def process_job(job):
         job["_gpu_cover_16x9_url"] = job.get("cover_16x9_url") or publish_asset(public_cover_path)
         if outputs["cover_16x9"] and not job.get("cover_16x9_url"):
             job["cover_16x9_url"] = job["_gpu_cover_16x9_url"]
-        submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
+        if not globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            submit_gpu_video_cover(job, job["_gpu_cover_16x9_url"])
 
     if need_video_pipeline and gpu_video_worker_enabled():
         set_job_progress(job, status="rendering", progress=46, detail="已提交 GPU 服制作合集视频")
@@ -84366,13 +84858,30 @@ def process_job(job):
         if gpu_future is None:
             gpu_result = call_gpu_video_worker(job, requested, outputs)
         else:
-            gpu_result = gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
+            gpu_result = gpu_future.result() if globals().get("DRAMA_GPU_ASYNC_ENABLED", False) else gpu_future.result(timeout=GPU_VIDEO_WORKER_TIMEOUT + 120)
             gpu_executor.shutdown(wait=False)
             gpu_executor = None
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            complete_async_gpu_job(job, gpu_result)
+            return
         if outputs["concat_video"]:
             job["output_video_url"] = gpu_result.get("output_video_url", "")
         if outputs["no_bgm_video"]:
             job["output_video_no_bgm_url"] = gpu_result.get("output_video_no_bgm_url", "")
+        if outputs["random_template_video"]:
+            stored_recipe = DRAMA_SYNTHESIS_STORE.recipe(job["job_id"])
+            expected_recipe_sha = str((stored_recipe or {}).get("recipe_sha256") or "")
+            actual_recipe_sha = str(gpu_result.get("random_template_recipe_sha256") or "")
+            if not expected_recipe_sha or not secrets.compare_digest(expected_recipe_sha, actual_recipe_sha):
+                raise DramaSynthesisError("drama_recipe_result_mismatch", "GPU随机模板结果与冻结配方不一致", 502)
+            job["output_random_template_url"] = str(gpu_result.get("output_random_template_url") or "")
+            DRAMA_SYNTHESIS_STORE.complete_recipe(
+                job["job_id"],
+                output_url=job["output_random_template_url"],
+                output_sha256=str(gpu_result.get("random_template_output_sha256") or ""),
+                output_profile=str(gpu_result.get("random_template_output_profile") or ""),
+                recipe_sha256=actual_recipe_sha,
+            )
         if outputs["cover_16x9"] and not job.get("cover_16x9_url") and os.path.isfile(public_cover_path):
             job["cover_16x9_url"] = publish_asset(public_cover_path)
         set_job_progress(job, status="rendering", progress=98, detail="GPU 服视频制作完成")
@@ -90251,7 +90760,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notified_at"] = ""
+    # Notification and media retries are independent.
 
 
 
@@ -90283,7 +90792,7 @@ def resume_job_from_checkpoint(job):
 
 
 
-    job["completion_notification_error"] = ""
+    # Preserve the last delivery outcome while reconnecting.
 
 
 
@@ -90312,6 +90821,17 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    runtime = globals().get("drama_cpu_runtime")
+    if runtime and runtime.get_remote_payload(JOB_DB_PATH, job["job_id"]):
+        # Claim immediately; the worker reconnects to the frozen remote execution.
+        job["status"] = "queued"
+        job["progress_detail"] = "等待恢复原制作任务的跟踪"
+        upsert_job_record(job)
+        run_job_async(job)
+        return
+    # Preserve the legacy retry notification contract outside async runtime.
+    job["completion_notified_at"] = ""
+    job["completion_notification_error"] = ""
     if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
         return
     if selected_job_outputs_ready(job):
@@ -90966,6 +91486,10 @@ def retry_job(job_id):
 
         if job.get("status") != "failed":
             raise ValueError("任务正在处理中，无需重复提交")
+        if globals().get("DRAMA_GPU_ASYNC_ENABLED", False):
+            remote = drama_cpu_runtime.get_remote_status(JOB_DB_PATH, job_id) or {}
+            if remote.get("status") in {"failed", "recovery_required"} and remote.get("generation"):
+                drama_cpu_runtime.request_remote_resume(JOB_DB_PATH, job_id, int(remote["generation"]))
         resume_job_from_checkpoint(job)
     finally:
         lock.release()
@@ -93657,6 +94181,170 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _youtube_auto_actor(self, navigation_key="youtubeAutoPublish"):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "youtube_auto_publish"):
+            json_response(self, 403, {"error": "permission_denied", "module": "youtube_auto_publish"}, no_store=True)
+            return None
+        try:
+            navigation = load_navigation_config()
+            keys = (navigation_key,) if isinstance(navigation_key, str) else navigation_key
+            accesses = [navigation_item_access(session, key, navigation) for key in keys]
+            access = next((item for item in accesses if item.get("allowed")), accesses[0])
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": navigation_key}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
+    def _youtube_auto_json(self, max_bytes):
+        """Bound body reads before parsing; reject ambiguous HTTP framing."""
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+            self.close_connection = True
+            json_response(self, 411, {"error": "valid_content_length_required"}, no_store=True)
+            return None
+        # Bound digit length before int() as well as the eventual body allocation.
+        if len(lengths[0]) > 9 or int(lengths[0]) > max_bytes:
+            self.close_connection = True
+            json_response(self, 413, {"error": "request_too_large"}, no_store=True)
+            return None
+        if int(lengths[0]) < 2:
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        source = str(self.headers.get("Origin") or self.headers.get("Referer") or "").strip()
+        try:
+            valid_source = urlparse(source).scheme.lower() in ("https", "http")
+        except ValueError:
+            valid_source = False
+        if not valid_source or str(self.headers.get("Sec-Fetch-Site", "")).lower() == "cross-site":
+            self.close_connection = True
+            json_response(self, 403, {"error": "same_origin_required"}, no_store=True)
+            return None
+        if not self._require_same_origin_json():
+            self.close_connection = True
+            return None
+        length = int(lengths[0])
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("short request")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("object required")
+        except (ValueError, UnicodeError):
+            self.close_connection = True
+            json_response(self, 400, {"error": "invalid_json"}, no_store=True)
+            return None
+        # Ownership and privilege come exclusively from the loaded session.
+        for key in ("actor", "creator", "tenant_key", "user_id", "open_id", "role", "is_admin"):
+            payload.pop(key, None)
+        return payload
+
+    def _dispatch_youtube_auto_publish(self, parsed):
+        prefix = "/api/youtube-auto-publish"
+        path = parsed.path[len(prefix):]
+        channel_template = re.fullmatch(r"/channels/([1-9][0-9]{0,18})/template", path)
+        # Reads from the publishing form keep its existing navigation authorization.
+        nav_key = "youtubeAutoPublish"
+        if path == "/channel-list" or (channel_template and self.command == "POST"):
+            nav_key = "youtubeChannelList"
+        elif channel_template:
+            nav_key = ("youtubeAutoPublish", "youtubeChannelList")
+        actor = self._youtube_auto_actor(nav_key)
+        if actor is None:
+            self.close_connection = True
+            return
+        if path == "/short-links" or path.startswith("/short-links/"):
+            from features.youtube_auto_publish.manual_link_routes import dispatch
+            return dispatch(self, parsed, actor, globals())
+        if "/x-share" in path:
+            from features.youtube_auto_publish.x_share import dispatch
+            if dispatch(self, parsed, actor, globals()):
+                return
+        task = re.fullmatch(r"/tasks/([0-9a-f]{32})(?:/(review|retry|schedule))?", path)
+        cover = re.fullmatch(r"/covers/([0-9a-f]{32})(/thumbnail)?", path)
+        get_route = path in ("/bootstrap", "/channels", "/channel-list", "/materials", "/tasks", "/settings") or channel_template or (task and not task.group(2)) or cover
+        post_route = path in ("/tasks", "/covers", "/covers/upload", "/settings", "/channels/verify-thumbnail") or channel_template or (task and task.group(2))
+        if not ((self.command == "GET" and get_route) or (self.command == "POST" and post_route)):
+            self.close_connection = True
+            json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
+        payload = None
+        if self.command == "POST":
+            payload = self._youtube_auto_json(3 * 1024 * 1024 if path in ("/covers", "/covers/upload") else 32 * 1024)
+            if payload is None:
+                return
+        from features.youtube_auto_publish.templates import WorkflowError
+        try:
+            service = get_youtube_auto_service()
+            if self.command == "GET":
+                query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=8)
+                if path == "/bootstrap":
+                    result = service.bootstrap(actor, include_channels=query.get("include_channels", ["1"])[0] != "0")
+                elif path == "/channels":
+                    result = service.channel_options(actor, refresh=query.get("refresh", ["0"])[0] == "1")
+                elif path == "/channel-list":
+                    result = service.channel_list(actor, refresh=query.get("refresh", ["0"])[0] == "1")
+                elif channel_template:
+                    result = service.get_channel_template(actor, channel_template.group(1))
+                elif path == "/materials":
+                    result = service.list_materials(actor, search=query.get("search", [""])[0][:200], refresh=query.get("refresh", ["0"])[0] == "1", uploader_id=query.get("uploader_id", [""])[0])
+                elif path == "/tasks":
+                    result = service.list_tasks(actor, search=query.get("search", [""])[0][:200], status=query.get("status", ["all"])[0][:64], compact=query.get("compact", ["0"])[0] == "1", since=query.get("since", [""])[0][:64])
+                elif path == "/settings":
+                    result = service.settings(actor)
+                elif task:
+                    result = service.get_task(actor, task.group(1))
+                else:
+                    asset = service.asset(actor, cover.group(1))
+                    from features.youtube_auto_publish.covers import cover_response
+                    status, headers, data = cover_response(asset, thumbnail=bool(cover.group(2)), if_none_match=self.headers.get("If-None-Match", ""))
+                    self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    if data:
+                        self.wfile.write(data)
+                    return
+            elif channel_template:
+                result = service.save_channel_template(actor, channel_template.group(1), payload)
+            elif path == "/tasks":
+                result = service.create_task(actor, payload)
+            elif path == "/channels/verify-thumbnail":
+                result = service.verify_channel_thumbnail(actor, payload)
+            elif path in ("/covers", "/covers/upload"):
+                result = service.upload_cover(actor, payload)
+            elif path == "/settings":
+                result = service.save_settings(actor, payload)
+            elif task.group(2) == "review":
+                result = service.review(actor, task.group(1), payload)
+            elif task.group(2) == "schedule":
+                result = service.schedule(actor, task.group(1), payload)
+            else:
+                result = service.retry(actor, task.group(1))
+            json_response(self, 200, result, no_store=True)
+        except (WorkflowError, DramaSynthesisError) as exc:
+            json_response(self, exc.status, {"error": exc.code, "message": str(exc)}, no_store=True)
+        except ValueError:
+            json_response(self, 400, {"error": "invalid_request", "message": "请求参数无效"}, no_store=True)
+        except Exception:
+            # Runtime/adapter errors may contain credentials or private filesystem paths.
+            json_response(self, 503, {"error": "youtube_auto_unavailable", "message": "YouTube 自动发布暂不可用，请稍后重试"}, no_store=True)
+
     def _dispatch_ad_control_v3(self, parsed):
         """Lazily dispatch the isolated V3 surface after its prefix matched."""
         try:
@@ -94278,6 +94966,62 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        if parsed.path in {
+            "/fb-post-ad-delete.html",
+            "/fb-post-ad-delete.css",
+            "/fb-post-ad-delete.js",
+        }:
+            static_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "static",
+                parsed.path.lstrip("/"),
+            )
+            try:
+                with open(static_path, "rb") as handle:
+                    data = handle.read()
+                self.send_response(200)
+                self.send_header("Content-Type", guess_content_type(static_path))
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:
+                json_response(self, 404, {"error": "not_found"}, no_store=True)
+            return
+
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.youtube_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
+
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
+
+        if parsed.path == "/api/gpu-video/random-overlay/catalog":
+            auth = self.headers.get("Authorization", "")
+            token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+            if not GPU_VIDEO_WORKER_TOKEN or not secrets.compare_digest(token, GPU_VIDEO_WORKER_TOKEN):
+                json_response(self, 403, {"error": "forbidden"})
+                return
+            try:
+                if not DRAMA_RANDOM_OVERLAY_ROOT or not DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256:
+                    raise DramaSynthesisError("drama_random_assets_unavailable", "GPU随机模板素材未配置", 503)
+                json_response(
+                    self,
+                    200,
+                    {"item": catalog_from_assets(DRAMA_RANDOM_OVERLAY_ROOT, DRAMA_RANDOM_OVERLAY_MANIFEST_SHA256)},
+                )
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("GPU random-template catalog failed")
+                json_response(self, 503, {"code": "drama_random_assets_unavailable", "error": "GPU随机模板素材不可用"})
+            return
 
         if parsed.path == "/api/public/tt-code/resolve":
             self._dispatch_tt_code_resolver(parsed)
@@ -94291,34 +95035,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             self._dispatch_ad_control_v3(parsed)
             return
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        if parsed.path == "/api/fb-post-ad-delete" or parsed.path.startswith("/api/fb-post-ad-delete/"):
+            from features.fb_ad_asset_delete.bridge import dispatch
+            dispatch(self, parsed, globals())
+            return
 
 
         if parsed.path == "/api/auth/status":
@@ -94393,6 +95113,39 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/ui/topbar":
             json_response(self, 200, self._auth_payload())
+            return
+
+        if (
+            parsed.path in {
+                FB_AUTO_ADMIN_PREFIX + "/groups",
+                FB_AUTO_ADMIN_PREFIX + "/templates",
+                FB_AUTO_ADMIN_PREFIX + "/runs",
+            }
+            or re.fullmatch(
+                re.escape(FB_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "fbAutoPublishRuns"
+                if parsed.path.startswith(FB_AUTO_ADMIN_PREFIX + "/runs")
+                else "fbAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = fb_auto_posts_query_params(parsed.path, parsed.query)
+                result = fb_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                    actor=fb_auto_post_actor_scope(self._session()),
+                )
+                json_response(self, 200, result, no_store=True)
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
         if (
@@ -94572,7 +95325,17 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 session = self._session() or {}
-                json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="all"), no_store=True)
+                accounts = query_x_authorized_accounts(x_accounts_actor(session), scope="all")
+                json_response(
+                    self,
+                    200,
+                    merge_account_stats(
+                        accounts,
+                        X_ACCOUNT_STATS_CACHE_PATH,
+                        max_age_seconds=X_ACCOUNT_STATS_MAX_AGE_SECONDS,
+                    ),
+                    no_store=True,
+                )
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)
@@ -96422,6 +97185,49 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if parsed.path == "/api/drama-material/random-template-catalog":
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                catalog = drama_random_template_catalog()
+                json_response(self, 200, {"item": catalog})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama random-template catalog failed")
+                json_response(self, 503, {"code": "drama_template_catalog_unavailable", "error": "随机模板目录暂不可用"})
+            return
+
+        youtube_publish_match = re.fullmatch(r"/api/drama-material/youtube-publishes/([1-9][0-9]{0,18})", parsed.path)
+        if youtube_publish_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            row = DRAMA_SYNTHESIS_STORE.youtube_task(int(youtube_publish_match.group(1)))
+            if not row:
+                json_response(self, 404, {"code": "youtube_publish_not_found", "error": "YouTube发布任务不存在"})
+                return
+            safe = ("id","job_id","app_id","channel_id","source_kind","source_url","title","description_template","description_rendered","status","video_state","comment_status","sync_status","video_id","comment_id","unknown_outcome","error_code","error_message","created_at_utc","updated_at_utc","video_published_at_utc","comment_published_at_utc")
+            json_response(self, 200, {"item": {key: row.get(key) for key in safe}})
+            return
+        youtube_channels_match = re.fullmatch(
+            r"/api/drama-material/youtube/channels",
+            parsed.path,
+        )
+        if youtube_channels_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                query = parse_qs(parsed.query)
+                app_id = str((query.get("app_id") or [""])[0])
+                items = drama_youtube_repository().list_for_app(app_id)
+                json_response(self, 200, {"items": items})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama YouTube channel listing failed")
+                json_response(self, 503, {"code": "youtube_channels_unavailable", "error": "YouTube频道列表暂不可用"})
+            return
+
         if parsed.path == "/api/drama-material/products":
 
 
@@ -97877,6 +98683,107 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.youtube_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
+
+        if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
+            self._dispatch_youtube_auto_publish(parsed)
+            return
+
+        fb_auto_template_match = re.fullmatch(
+            re.escape(FB_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:enable|disable|run-now))?)?",
+            parsed.path,
+        )
+        if fb_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "fbAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "enable": "enable_fb_auto_publish_template",
+                "disable": "disable_fb_auto_publish_template",
+                "run-now": "run_fb_auto_publish_template",
+                "templates": "create_fb_auto_publish_template",
+            }.get(action_suffix, "update_fb_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise FBAutoPostAdminClientError(
+                        "invalid_request", "请求体必须是对象", 400
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = fb_auto_post_actor_scope(session)
+                result = fb_auto_post_service_request(
+                    "POST", parsed.path, payload=outbound_payload
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                append_audit_log(
+                    session,
+                    action,
+                    "fb_auto_publish_template",
+                    target_id,
+                    {
+                        "template_id": target_id,
+                        "run_id": str(result.get("run_id") or ""),
+                        "due_slot_id": str(result.get("due_slot_id") or ""),
+                        "operation_id": str(result.get("operation_id") or "")[:100],
+                        "expected_version": str(
+                            request_payload.get("expected_version") or ""
+                        ),
+                    },
+                )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except FBAutoPostAdminClientError as exc:
+                status, payload = fb_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "fb_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception("FB auto publish audit write failed")
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("FB auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
 
         x_auto_account_verify_match = re.fullmatch(
             re.escape(X_AUTO_ADMIN_PREFIX)
@@ -99252,6 +100159,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             self._dispatch_ad_control_v3(parsed)
             return
 
+        if parsed.path == material_replication_delivery.ENDPOINT:
+            handle_material_replication_webhook_request(self)
+            return
+
         if (
             parsed.path
             == "/api/integrations/v1/material-task-status-events"
@@ -99833,6 +100744,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/fb-post-ad-delete" or parsed.path.startswith("/api/fb-post-ad-delete/"):
+            from features.fb_ad_asset_delete.bridge import dispatch
+            dispatch(self, parsed, globals())
+            return
+
         if parsed.path == "/api/ad-control/rules":
             if not self._require_module("ad_control_center"):
                 return
@@ -100280,6 +101196,55 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        retry_comment_match = re.fullmatch(r"/api/drama-material/youtube-publishes/([1-9][0-9]{0,18})/retry-comment", parsed.path)
+        if retry_comment_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            try:
+                row = DRAMA_SYNTHESIS_STORE.retry_youtube_comment(int(retry_comment_match.group(1)))
+                append_audit_log(self._session(), "retry_drama_youtube_comment", "youtube_publish", str(row["id"]), {"status": row["comment_status"]})
+                json_response(self, 202, {"id": row["id"], "status": row["status"], "comment_status": row["comment_status"]})
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            return
+        drama_action_match = re.fullmatch(
+            r"/api/drama-material/jobs/([0-9a-f]{32})/(short-links|youtube-publishes)",
+            parsed.path,
+        )
+        if drama_action_match:
+            if not self._require_module("drama_synthesis"):
+                return
+            job_id, drama_action = drama_action_match.groups()
+            try:
+                if drama_action == "short-links":
+                    job = require_completed_drama_job(job_id)
+                    request_payload = self._read_json()
+                    material_kind, _source_url = drama_youtube_source(job, request_payload.get("material_kind"))
+                    payload = DRAMA_SYNTHESIS_STORE.ensure_short_link(job_id, material_kind, str(job.get("content_id") or ""), DRAMA_SHORT_LINK_PUBLISHER)
+                    audit_action = "create_drama_short_link"
+                    response_payload = {
+                        key: payload.get(key)
+                        for key in ("id", "short_url", "long_url", "publish_state", "published_at_utc", "reused")
+                    }
+                else:
+                    request_payload = self._read_json()
+                    actor = self._session() or {}
+                    request_payload["_operator_user_id"] = actor.get("user_id", "")
+                    request_payload["_operator_name"] = actor.get("name", "")
+                    response_payload = enqueue_drama_youtube_publish(job_id, request_payload)
+                    audit_action = "enqueue_drama_youtube_publish"
+                append_audit_log(
+                    self._session(), audit_action, "job", job_id,
+                    {"status": response_payload.get("status") or response_payload.get("publish_state", "")},
+                )
+                json_response(self, 202 if drama_action == "youtube-publishes" else 200, response_payload)
+            except DramaSynthesisError as exc:
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
+            except Exception:
+                logging.exception("drama synthesis action failed: %s", drama_action)
+                json_response(self, 500, {"code": "internal_error", "error": "操作失败"})
+            return
+
         if parsed.path == "/api/drama-material/jobs":
 
             if not self._require_module("drama_synthesis"):
@@ -100293,6 +101258,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 append_audit_log(self._session(), "create_job", "job", payload.get("job_id", ""), payload)
 
                 json_response(self, 202, payload)
+
+            except DramaSynthesisError as exc:
+
+                json_response(self, exc.status, drama_synthesis_error_payload(exc))
 
             except Exception as exc:
 
@@ -100328,6 +101297,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
         x_post_schedule_paths = {
             "/api/admin/x-posts/material-pool/schedule",
             "/api/admin/x-posts/drama-pool/schedule",
@@ -100373,6 +101345,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if retired_path(parsed.path):
+            json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
 
         x_pool_delete_match = re.fullmatch(
             r"/api/admin/x-posts/material-pool/([0-9]+)",
@@ -101052,9 +102027,8 @@ def main():
 
     ensure_dir(SCREENSHOT_PUBLIC_ROOT)
 
-    ensure_dir(AD_MATERIAL_WORK_ROOT)
+    # Ad-material work directories are retired; keep archived files in place.
 
-    ensure_dir(AD_MATERIAL_PUBLIC_ROOT)
 
 
 
@@ -101085,12 +102059,12 @@ def main():
 
 
     ensure_job_table()
+    DRAMA_SYNTHESIS_STORE.ensure_storage()
 
     ensure_screenshot_job_table()
 
-    ensure_ad_material_tables()
+    # Historical ad-material and ad-control tables remain available for audit.
 
-    ensure_ad_control_tables()
 
 
 
@@ -101205,6 +102179,16 @@ def main():
         )
     except Exception:
         logging.exception("material status broadcast worker startup failed")
+
+    try:
+        replication_runtime = get_material_replication_runtime()
+        replication_runtime.start()
+        logging.info(
+            "material replication batch worker configured=%s",
+            replication_runtime.configured(),
+        )
+    except Exception:
+        logging.exception("material replication batch worker startup failed")
 
 
 

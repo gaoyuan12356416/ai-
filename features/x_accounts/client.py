@@ -9,6 +9,12 @@ import urllib.request
 
 
 SAFE_ERROR_CODES = {
+    "youtube_share_forbidden",
+    "youtube_share_not_found",
+    "youtube_share_idempotency_conflict",
+    "youtube_share_source_stale",
+    "youtube_share_text_too_long",
+    "youtube_share_storage_unavailable",
     "invalid_random_daily_count",
     "invalid_schedule_mode",
     "invalid_post_template",
@@ -75,6 +81,7 @@ SAFE_ERROR_CODES = {
     "x_posts_unavailable",
     "x_publish_unknown",
     "x_token_missing",
+    "x_token_invalid",
     "x_token_revoked",
     "x_upstream_error",
 }
@@ -187,6 +194,19 @@ def query_x_accounts(actor, scope="mine"):
         "/internal/accounts/query",
         method="POST",
         payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+    )
+
+
+def youtube_share_request(action, actor, scope="mine", **payload):
+    if action not in {"query", "create", "run"}:
+        raise XAccountsClientError("invalid_request", "分享操作无效", 400)
+    body = dict(payload)
+    body["actor"] = normalize_actor(actor)
+    body["scope"] = normalize_scope(scope)
+    return _request(
+        "/internal/youtube-shares/" + action,
+        method="POST",
+        payload=body,
     )
 
 
