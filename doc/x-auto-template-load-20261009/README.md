@@ -23,3 +23,19 @@ git diff --check
 文件覆盖前校验原文件 SHA256 和 current 路径，避免覆盖并发部署。上线后验证三套资源一致、公网响应与缓存版本、真实列表 DTO 渲染及服务/定时器状态。回滚仅恢复这两个静态资源与原 current 指针，不恢复数据库或 Token。
 
 具体提交、备份和回滚命令见本文件的上线验收记录。
+
+## 2026-10-09 上线验收
+
+- GitHub 分支 `codex/x-auto-template-load-20261009`，服务器从 GitHub 读取精确代码提交 `23a9b466d781a592ed2e3da402ee2f97ac3c3a71`。
+- 主机 `43.166.187.96`；新版本目录 `/mnt/data-disk/x-post-automation/releases/23a9b466d781a592ed2e3da402ee2f97ac3c3a71-template-list-static`，由 `/opt/x-post-automation/current` 指向。
+- 备份 `/mnt/data-disk/ai-ui/backups/20261009-x-auto-template-list-23a9b466`，保存主 API `/root/drama_material_service/static` 和 Nginx `/usr/share/nginx/html` 原 JS/HTML、SHA256 清单、原版本路径及回滚程序。
+- Linux 19 项现有检查通过。主 API/Nginx/发布目录资源一致；公网 JS/HTML 均 HTTP 200 且与精确 GitHub 提交逐字节一致。HTML `Cache-Control: no-store, max-age=0`，JS 缓存版本为 `20261009listfix1`。
+- 部署前后服务 PID、启停/启用状态及发布定时器状态一致，无重启；X Auto 全部表及 X 队列/发布/转发账本行数和指纹一致。
+- 上线前已用真实接口 DTO 验证 3 条完整列表、刷新、查询、重置，未产生写请求。上线后重新获取 Nginx 实际资源和真实 DTO，再执行同样的脚本渲染验证。
+- 维护技能补充了列表嵌套配置作用域及非空真实 DTO 验收要求；账户语言、模板版本、任务与发布规则没有变化。
+
+回滚命令（只恢复两份原静态文件和原版本指针，保留数据库、Token 和定时器）：
+
+```bash
+python3 /mnt/data-disk/ai-ui/backups/20261009-x-auto-template-list-23a9b466/rollback.py
+```
