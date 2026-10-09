@@ -136,6 +136,24 @@ class AutoPostStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(task.body_sha256), 64)
 
+    def test_account_routing_requires_snapshot_and_rejects_language_override(self):
+        template = self.store.create_template(
+            name="Account languages", config={
+                "account_ids": ["640"], "language_source": "account",
+                "body_template": "{{drama_name}} {{desc}}",
+            }, confirmation={"accepted": True},
+        )
+        run = self.create_run(template, "account-language-run")
+        with self.assertRaises(XAutoPostStoreError) as missing:
+            self.store.create_task(run_id=run.id, account_id="640", language="en")
+        self.assertEqual(missing.exception.code, "x_auto_account_language_invalid")
+        snapshot = {"language_source": "account", "drama_language": "jp"}
+        with self.assertRaises(XAutoPostStoreError) as mismatch:
+            self.store.create_task(run_id=run.id, account_id="640", language="en", account_snapshot=snapshot)
+        self.assertEqual(mismatch.exception.code, "x_auto_task_language_conflict")
+        task = self.store.create_task(run_id=run.id, account_id="640", language="JP", account_snapshot=snapshot)
+        self.assertEqual(task.language, "ja")
+
     def test_execution_bridge_ids_are_unique_and_immutable(self):
         first = self.create_task(
             self.create_run(self.create_template("First bridge"), "bridge:first"),

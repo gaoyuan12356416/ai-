@@ -22,6 +22,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
+from features.x_accounts.language import canonical_drama_language
+
 
 UTC = timezone.utc
 MAX_JSON_BYTES = 256 * 1024
@@ -443,13 +445,17 @@ def _template_config_json(value: Any) -> Tuple[str, str]:
             "x_auto_invalid_json", "template config must be an object", 400
         )
     normalized = dict(value)
-    language = str(normalized.get("language") or "").strip().lower()
-    if not _LANGUAGE_RE.fullmatch(language):
-        raise XAutoPostStoreError(
-            "x_auto_language_required",
-            "template language is required",
-            400,
-        )
+    if normalized.get("language_source") == "account":
+        normalized.pop("language", None)
+    else:
+        language = str(normalized.get("language") or "").strip().lower()
+        if normalized.get("language_source") is not None or not _LANGUAGE_RE.fullmatch(language):
+            raise XAutoPostStoreError(
+                "x_auto_language_required",
+                "template requires account language routing or a legacy language",
+                400,
+            )
+        normalized["language"] = language
     platform = normalized.get("platform", 0)
     if isinstance(platform, bool) or platform not in (0, "0"):
         raise XAutoPostStoreError(
@@ -462,7 +468,6 @@ def _template_config_json(value: Any) -> Tuple[str, str]:
             "template body_template is required",
             400,
         )
-    normalized["language"] = language
     normalized["platform"] = 0
     normalized["body_template"] = body_template
     return _canonical_json(normalized, "template config")
@@ -1806,18 +1811,52 @@ class XAutoPostStore:
                     404,
                 )
             frozen_config = _json_object(version_row["config_json"])
-            frozen_language = _bounded_text(
-                frozen_config.get("language"), "template language", 32
-            ).lower()
+            snapshot = dict(account_snapshot or {})
+            account_language_routing = (
+                frozen_config.get("language_source") == "account"
+                or snapshot.get("language_source") == "account"
+            )
+            if account_language_routing:
+                if snapshot.get("language_source") != "account":
+                    raise XAutoPostStoreError(
+                        "x_auto_account_language_invalid",
+                        "an account language-source snapshot is required",
+                        409,
+                    )
+                if snapshot.get("account_snapshot_failed") is True:
+                    frozen_language = ""
+                else:
+                    try:
+                        if not str(snapshot.get("drama_language") or "").strip():
+                            raise ValueError("account language snapshot is missing")
+                        frozen_language = canonical_drama_language(
+                            snapshot["drama_language"]
+                        )
+                    except ValueError:
+                        raise XAutoPostStoreError(
+                            "x_auto_account_language_invalid",
+                            "a valid account drama-language snapshot is required",
+                            409,
+                        ) from None
+            else:
+                frozen_language = _bounded_text(
+                    frozen_config.get("language"), "template language", 32
+                ).lower()
             frozen_body = _bounded_text(
                 frozen_config.get("body_template"),
                 "body template",
                 MAX_BODY_TEMPLATE_CHARS,
             )
-            if language not in (None, "") and str(language).strip().lower() != frozen_language:
+            requested_language = str(language or "").strip().lower()
+            if account_language_routing and requested_language:
+                try:
+                    requested_language = canonical_drama_language(requested_language)
+                except ValueError:
+                    requested_language = "invalid"
+            if language not in (None, "") and requested_language != frozen_language:
                 raise XAutoPostStoreError(
                     "x_auto_task_language_conflict",
-                    "task language must match the frozen template version",
+                    "task language must match its frozen language source",
                     409,
                 )
             if body_template not in (None, "") and str(body_template).strip() != frozen_body:

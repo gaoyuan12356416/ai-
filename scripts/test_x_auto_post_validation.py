@@ -55,9 +55,10 @@ def valid_payload(**overrides):
 
 
 class XAutoPostValidationTests(unittest.TestCase):
-    def test_valid_payload_freezes_required_language_and_body(self):
+    def test_valid_payload_freezes_account_language_source_and_body(self):
         normalized = normalize_template_payload(valid_payload())
-        self.assertEqual(normalized["language"], "en")
+        self.assertEqual(normalized["language_source"], "account")
+        self.assertNotIn("language", normalized)
         self.assertEqual(normalized["platform"], 0)
         self.assertEqual(
             normalized["body_template"],
@@ -66,12 +67,18 @@ class XAutoPostValidationTests(unittest.TestCase):
         self.assertEqual(normalized["material_rule"]["duration_max_seconds"], 600)
         self.assertEqual(len(config_hash(normalized)), 64)
 
-    def test_language_is_required_and_canonical(self):
+    def test_legacy_language_input_is_ignored_and_not_required(self):
         for language in (None, "", "zh_CN", "../../en"):
             with self.subTest(language=language):
                 payload = valid_payload(language=language)
-                with self.assertRaises(ValidationError):
-                    normalize_template_payload(payload)
+                normalized = normalize_template_payload(payload)
+                self.assertEqual(normalized["language_source"], "account")
+                self.assertNotIn("language", normalized)
+        payload = valid_payload()
+        payload.pop("language")
+        self.assertEqual(normalize_template_payload(payload)["language_source"], "account")
+        with self.assertRaises(ValidationError):
+            normalize_template_payload(valid_payload(language_source="template"))
 
     def test_platform_is_fixed_to_zero(self):
         with self.assertRaises(ValidationError):

@@ -83,7 +83,7 @@ class XAutoPublishUiTest(unittest.TestCase):
                     f"/x-auto-publish.css?v={ASSET_VERSION}", parser.stylesheets
                 )
                 self.assertIn("/ui-topbar.js", parser.scripts)
-                self.assertIn("/quick-nav.js", parser.scripts)
+                self.assertTrue(any(path.split("?", 1)[0] == "/quick-nav.js" for path in parser.scripts))
                 self.assertIn(
                     f"/x-auto-publish-common.js?v={ASSET_VERSION}", parser.scripts
                 )
@@ -171,10 +171,9 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn("item.last_run_status", source)
         self.assertIn("item.last_run_at", source)
 
-    def test_editor_has_required_language_x_body_and_two_filter_layers(self):
+    def test_editor_reads_account_languages_and_keeps_two_filter_layers(self):
         ids = parse_page(PAGES["template"]).ids
         required = {
-            "templateLanguage",
             "bodyTemplate",
             "accountList",
             "metricWindowDays",
@@ -200,11 +199,12 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertFalse(required - ids, required - ids)
         page = PAGES["template"]
         script = SCRIPTS["template"]
-        self.assertIn('class="required" for="templateLanguage"', page)
+        self.assertNotIn("templateLanguage", ids)
+        self.assertIn("读取 X 账户设置", page)
+        self.assertNotIn("accountLanguageMatches", script)
         self.assertIn('class="required" for="bodyTemplate"', page)
         self.assertLess(page.index("先筛选剧"), page.index("再筛选素材"))
         for field in (
-            "language",
             "body_template",
             "account_ids",
             "metric_window_days",
@@ -368,9 +368,10 @@ class XAutoPublishUiTest(unittest.TestCase):
         source = SCRIPTS["template"]
         self.assertIn('method: "POST"', source)
         self.assertIn("payload.expected_version = state.version", source)
-        self.assertIn('ui.readItem(response, ["template", "item"])', source)
+        self.assertIn('location.href = "/x-auto-publish-templates.html"', source)
         self.assertIn('ui.readItems(payload, ["accounts", "items"])', source)
-        self.assertIn("language,", source)
+        self.assertNotIn("templateLanguage", source)
+        self.assertNotIn("language,", source)
         self.assertIn("body_template: bodyTemplate", source)
         self.assertIn("platform: integerValue", source)
 

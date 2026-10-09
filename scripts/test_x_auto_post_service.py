@@ -134,7 +134,8 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(accounts["total"], 2)
         created = service.create_template(self.actor(valid_payload()))["template"]
         self.assertFalse(created["enabled"])
-        self.assertEqual(created["config"]["language"], "en")
+        self.assertEqual(created["config"]["language_source"], "account")
+        self.assertNotIn("language", created["config"])
         self.assertNotIn("access_token", repr(accounts).lower())
 
     def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
@@ -159,6 +160,100 @@ class XAutoPostServiceTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_template_accepts_mixed_account_languages_without_language_input(self):
+        self.bridge.accounts_by_id["101"]["drama_language"] = "EN"
+        self.bridge.accounts_by_id["102"]["drama_language"] = "JP"
+        payload = valid_payload()
+        payload.pop("language")
+        created = self.service().create_template(self.actor(payload))["template"]
+        self.assertEqual(created["config"]["language_source"], "account")
+        self.assertNotIn("language", created["config"])
+        self.assertEqual(self.bridge.verify_calls, [])
+
+    def test_preview_uses_each_current_account_language_without_reservations(self):
+        service = self.service()
+        created = service.create_template(self.actor(valid_payload()))["template"]
+        self.bridge.accounts_by_id["101"]["drama_language"] = "pt_BR"
+        self.bridge.accounts_by_id["102"]["drama_language"] = "JP"
+        requests = []
+
+        class Selection:
+            def as_dict(self):
+                return {"drama": {}, "material": {}}
+
+        class Selector:
+            def select_and_reserve(self, request):
+                requests.append((request.account_id, request.language))
+                return Selection()
+
+        service._preview_selector = lambda: Selector()
+        result = service.preview(created["id"], {"expected_version": 1})
+        self.assertEqual(requests, [("101", "pt-br"), ("102", "ja")])
+        self.assertEqual([item["language"] for item in result["items"]], ["pt-br", "ja"])
+        self.assertFalse(result["reserved"])
+        self.assertEqual(self.bridge.verify_calls, [])
+        self.assertEqual(self.store.list_runs(), [])
+        self.assertEqual(self.store.list_tasks(), [])
+
+    def test_new_tasks_freeze_account_languages_and_idempotent_reentry_preserves_them(self):
+        service = self.service(AutoLiveGates(True, True, True))
+        self.bridge.accounts_by_id["101"]["drama_language"] = "en"
+        self.bridge.accounts_by_id["102"]["drama_language"] = "jp"
+        created = service.create_template(self.actor(valid_payload()))["template"]
+        payload = {"expected_version": 1, "confirmed": True, "idempotency_key": "language-run-0001"}
+        first = service.run_now(created["id"], payload)
+        tasks = self.store.list_tasks(run_id=first["run_id"])
+        self.assertEqual([(t.account_id, t.language) for t in tasks], [("101", "en"), ("102", "ja")])
+        self.assertTrue(all(t.account_snapshot["language_source"] == "account" for t in tasks))
+        frozen = [t.as_dict() for t in tasks]
+        self.bridge.accounts_by_id["101"]["drama_language"] = "fr"
+        self.bridge.accounts_by_id["102"]["drama_language"] = "en"
+        second = service.run_now(created["id"], payload)
+        self.assertTrue(second["idempotent"])
+        self.assertEqual([t.as_dict() for t in self.store.list_tasks(run_id=first["run_id"])], frozen)
+        next_run = service.run_now(created["id"], {**payload, "idempotency_key": "language-run-0002"})
+        self.assertEqual([t.language for t in self.store.list_tasks(run_id=next_run["run_id"])], ["fr", "en"])
+
+    def test_legacy_template_new_tasks_use_accounts_and_keep_historical_tasks(self):
+        config = valid_payload(language="jp")
+        name = config.pop("name")
+        template = self.store.create_template(name=name, config=config, confirmation={"accepted": True})
+        old_run = self.store.create_run(
+            run_key="legacy-language-run", template_id=template.id, template_version=1,
+            trigger_type="manual", scheduled_at_utc=self.clock(),
+            shanghai_date="2026-08-11", publish_time="18:00", blacklist_snapshot={},
+        )
+        old_task = self.store.create_task(run_id=old_run.id, account_id="101", account_snapshot_version=1)
+        self.assertEqual(old_task.language, "jp")
+        self.bridge.accounts_by_id["101"]["drama_language"] = "pt_BR"
+        self.bridge.accounts_by_id["102"]["drama_language"] = "ja"
+        run, created = self.service()._create_run(
+            template, trigger_type="manual", scheduled_at=self.clock(),
+            publish_time="18:00", run_key="new-account-language-run",
+        )
+        self.assertTrue(created)
+        self.assertEqual([t.language for t in self.store.list_tasks(run_id=run.id)], ["pt-br", "ja"])
+        self.assertEqual(self.store.get_task(old_task.id).as_dict(), old_task.as_dict())
+        self.assertEqual(self.store.get_template(template.id).config, config)
+
+    def test_unavailable_account_records_failed_task_without_inventing_language(self):
+        service = self.service(AutoLiveGates(True, True, True))
+        created = service.create_template(self.actor(valid_payload()))["template"]
+        verify = self.bridge.verify_account
+        def unavailable(account_id, **kwargs):
+            if str(account_id) == "102":
+                raise AutoPostServiceError("x_auto_account_missing", "missing", 404)
+            return verify(account_id, **kwargs)
+        self.bridge.verify_account = unavailable
+        result = service.run_now(created["id"], {
+            "expected_version": 1, "confirmed": True, "idempotency_key": "missing-language-account",
+        })
+        tasks = self.store.list_tasks(run_id=result["run_id"])
+        self.assertEqual([(t.account_id, t.language, t.status) for t in tasks], [
+            ("101", "en", "pending"), ("102", "", "failed"),
+        ])
+        self.assertEqual(tasks[1].error_code, "x_auto_account_missing")
 
     def test_preview_applies_current_standard_account_duration_cap(self):
         service = self.service()

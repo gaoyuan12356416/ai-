@@ -64,14 +64,6 @@
     return canonicalLanguage(item && item.drama_language || "en");
   }
 
-  function selectedTemplateLanguage() {
-    return canonicalLanguage(ui.byId("templateLanguage").value || "en");
-  }
-
-  function accountLanguageMatches(item) {
-    return accountLanguage(item) === selectedTemplateLanguage();
-  }
-
   function accountMembershipLabel(item) {
     return ({
       basic: "X Basic",
@@ -148,19 +140,16 @@
       if (!id) return;
       const label = ui.element("label", { className: "account-option" });
       const eligible = accountEligible(item);
-      const languageMatches = accountLanguageMatches(item);
       const checkbox = ui.element("input", {
         type: "checkbox",
         attributes: { "aria-label": `选择 ${accountName(item)}` },
         dataset: {
           accountId: id,
           accountEligible: eligible ? "1" : "0",
-          accountLanguageMatches: languageMatches ? "1" : "0",
         },
       });
       checkbox.checked = state.selectedAccountIds.has(id);
       checkbox.disabled = !eligible && !checkbox.checked;
-      if (!checkbox.disabled) checkbox.disabled = !languageMatches && !checkbox.checked;
       const details = ui.element("div");
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
@@ -171,8 +160,8 @@
       }));
       meta.appendChild(ui.element("span", { className: "secondary", text: accountMembershipLabel(item) }));
       meta.appendChild(ui.element("span", {
-        className: `language-chip${languageMatches ? "" : " badge warning"}`,
-        text: `剧语言 ${accountLanguage(item)}${languageMatches ? "" : " · 与模板不一致"}`,
+        className: "language-chip",
+        text: `剧语言 ${accountLanguage(item)}`,
       }));
       label.append(checkbox, details, meta);
       list.appendChild(label);
@@ -276,7 +265,6 @@
     const configValue = (key, fallback) => state.template[key] !== undefined ? state.template[key] : config[key] !== undefined ? config[key] : fallback;
     state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
     setValue("templateName", state.template.name);
-    setValue("templateLanguage", configValue("language", ""));
     setValue("platform", configValue("platform", 0), "0");
     setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
     setValue("bodyTemplate", configValue("body_template", ""));
@@ -339,7 +327,11 @@
     const count = state.selectedAccountIds.size;
     ui.setText(ui.byId("selectedAccountCount"), `已选 ${count} 个`, "");
     ui.setText(ui.byId("summaryVersion"), state.version ? `v${state.version}` : "新模板", "");
-    ui.setText(ui.byId("summaryLanguage"), ui.byId("templateLanguage").value.trim() || "未设置", "");
+    const languages = Array.from(new Set(state.accounts
+      .filter(item => state.selectedAccountIds.has(accountId(item)))
+      .map(accountLanguage))).sort();
+    ui.setText(ui.byId("summaryLanguage"), languages.length
+      ? `账户设置：${languages.join("、")}` : "读取 X 账户设置", "");
     ui.setText(ui.byId("summaryAccounts"), `${count} 个`, "");
     ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
     ui.setText(ui.byId("summaryDramaSort"), sortSummary("drama"), "");
@@ -381,16 +373,8 @@
   function buildPayload() {
     const name = ui.byId("templateName").value.trim();
     if (!name) throw new Error("请填写模板名称。");
-    const language = ui.byId("templateLanguage").value.trim().toLowerCase();
-    if (!language) throw new Error("请填写模板剧语言。");
-    if (language.length < 2 || language.length > 32 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(language)) throw new Error("模板剧语言必须为 2–32 位语言代码，例如 en 或 en-us。");
     if (!state.selectedAccountIds.size) throw new Error("请至少选择一个 X 账号。");
     if (state.selectedAccountIds.size > 100) throw new Error("一个模板最多选择 100 个 X 账号。");
-    const mismatchedAccounts = state.accounts.filter(item =>
-      state.selectedAccountIds.has(accountId(item))
-        && accountLanguage(item) !== canonicalLanguage(language)
-    );
-    if (mismatchedAccounts.length) throw new Error(`所选 X 账号剧语言必须与模板 ${canonicalLanguage(language)} 一致。`);
     const bodyTemplate = ui.byId("bodyTemplate").value.replace(/\r\n?/g, "\n").trim();
     if (!bodyTemplate) throw new Error("请填写 X Post 正文模板。");
     if (bodyTemplate.length > 2000) throw new Error("X Post 正文模板不能超过 2000 个字符。");
@@ -437,7 +421,6 @@
 
     const payload = {
       name,
-      language,
       account_ids: Array.from(state.selectedAccountIds),
       body_template: bodyTemplate,
       metric_window_days: metricWindowDays,
@@ -555,14 +538,12 @@
     ui.byId("formStatus").className = "status-line";
     try {
       const path = templateId ? `${ui.API_BASE}/templates/${templateId}` : `${ui.API_BASE}/templates`;
-      const response = await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
-      const saved = ui.readItem(response, ["template", "item"]);
-      const savedId = ui.positiveId(saved.id || saved.template_id || response.template_id || templateId);
+      await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
       state.dirty = false;
       ui.setText(ui.byId("formStatus"), "模板已保存。", "");
       ui.byId("formStatus").className = "status-line success";
       ui.showToast("模板已保存；新模板默认保持关闭。", false);
-      location.href = savedId ? `/x-auto-publish-template.html?id=${encodeURIComponent(savedId)}` : "/x-auto-publish-templates.html";
+      location.href = "/x-auto-publish-templates.html";
     } catch (error) {
       ui.setText(ui.byId("formStatus"), error.message || "模板保存失败。", "");
       ui.byId("formStatus").className = "status-line error";
@@ -602,7 +583,6 @@
       if (event.key === "Escape") setResourceTypeMenuOpen(false);
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
-    ui.byId("templateLanguage").addEventListener("input", renderAccounts);
     ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -614,7 +594,7 @@
     });
     ui.byId("selectVisibleAccounts").addEventListener("click", () => {
       ui.byId("accountList").querySelectorAll("input[data-account-id]").forEach(checkbox => {
-        if (checkbox.dataset.accountEligible !== "1" || checkbox.dataset.accountLanguageMatches !== "1") return;
+        if (checkbox.dataset.accountEligible !== "1") return;
         checkbox.checked = true;
         state.selectedAccountIds.add(checkbox.dataset.accountId);
       });

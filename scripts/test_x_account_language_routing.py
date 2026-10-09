@@ -200,16 +200,13 @@ class XAccountLanguageRoutingTests(unittest.TestCase):
                 "x_account_drama_language_conflict",
             )
 
-    def test_x_auto_accepts_jp_alias_and_rejects_other_language(self):
-        XAutoPostService._assert_account_language(
-            {"drama_language": "ja"}, "jp"
-        )
+    def test_x_auto_uses_canonical_account_language_and_rejects_invalid_setting(self):
+        self.assertEqual(XAutoPostService._account_language({"drama_language": "jp"}), "ja")
+        self.assertEqual(XAutoPostService._account_language({"drama_language": "en"}), "en")
         with self.assertRaises(AutoPostServiceError) as raised:
-            XAutoPostService._assert_account_language(
-                {"drama_language": "en"}, "ja"
-            )
+            XAutoPostService._account_language({"drama_language": "../../en"})
         self.assertEqual(
-            raised.exception.code, "x_auto_account_language_mismatch"
+            raised.exception.code, "x_auto_account_language_invalid"
         )
 
     def test_migration_requires_backup_and_updates_only_explicit_accounts(self):

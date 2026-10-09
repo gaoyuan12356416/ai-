@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from features.x_posts.selector import connect_read_only
-from features.x_accounts.language import same_drama_language
+from features.x_accounts.language import canonical_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from .core import AuditActor, XAutoPostStore
@@ -312,6 +312,7 @@ class XAutoPostService:
             "version": snapshot.version,
             "current_version": snapshot.version,
             "config": config,
+            "language_source": "account",
             "account_count": len(config.get("account_ids") or []),
             "schedule_summary": schedule_summary,
             "confirmed": bool(snapshot.confirmed),
@@ -416,20 +417,16 @@ class XAutoPostService:
                     "selected X account is not currently publishable",
                     409,
                 )
-            self._assert_account_language(account, config.get("language"))
+            self._account_language(account)
 
     @staticmethod
-    def _assert_account_language(
-        account: Mapping[str, Any], template_language: Any
-    ) -> None:
-        if not same_drama_language(
-            account.get("drama_language"), template_language
-        ):
+    def _account_language(account: Mapping[str, Any]) -> str:
+        try:
+            return canonical_drama_language(account.get("drama_language"))
+        except ValueError:
             raise AutoPostServiceError(
-                "x_auto_account_language_mismatch",
-                "selected X account drama language does not match the template language",
-                409,
-            )
+                "x_auto_account_language_invalid", "X账户的剧语言设置无效", 409
+            ) from None
 
     @staticmethod
     def _confirmation(actor: AuditActor, now: datetime) -> Dict[str, Any]:
@@ -560,9 +557,7 @@ class XAutoPostService:
                         "selected X account is not currently publishable",
                         409,
                     )
-                self._assert_account_language(
-                    account, template.config.get("language")
-                )
+                language = self._account_language(account)
                 selection = self._preview_selector().select_and_reserve(
                     SelectionRequest(
                         run_id=index,
@@ -570,7 +565,7 @@ class XAutoPostService:
                         template_id=template.id,
                         template_version=template.version,
                         account_id=account_id,
-                        language=str(template.config.get("language") or ""),
+                        language=language,
                         rules=selector_rules(template.config, account=account),
                         now=self._now(),
                     )
@@ -589,6 +584,7 @@ class XAutoPostService:
                     {
                         "account_id": account_id,
                         "ok": True,
+                        "language": language,
                         "selection": _public_selection(selection.as_dict()),
                     }
                 )
@@ -622,27 +618,29 @@ class XAutoPostService:
                         "selected X account is not currently publishable",
                         409,
                     )
-                self._assert_account_language(
-                    account, config.get("language")
-                )
+                language = self._account_language(account)
+                account["drama_language"] = language
+                account["language_source"] = "account"
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
                     account_username=str(account.get("username") or ""),
                     account_display_name=str(account.get("display_name") or ""),
-                    language=config.get("language"),
+                    language=language,
                     body_template=config.get("body_template"),
                     account_snapshot=dict(account),
-                    account_snapshot_version=1,
+                    account_snapshot_version=2,
                 )
             except Exception as exc:
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
-                    language=config.get("language"),
+                    language=None,
                     body_template=config.get("body_template"),
-                    account_snapshot={},
-                    account_snapshot_version=0,
+                    account_snapshot={
+                        "language_source": "account", "account_snapshot_failed": True
+                    },
+                    account_snapshot_version=2,
                 )
                 task = self.store.transition_task(
                     task.id,

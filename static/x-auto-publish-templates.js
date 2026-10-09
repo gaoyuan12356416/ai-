@@ -171,11 +171,9 @@
       statusCell.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
       row.appendChild(statusCell);
 
-      const config = ui.objectValue(item.config);
       const accountsCell = ui.element("td");
       accountsCell.appendChild(ui.element("strong", { text: `${accountCount(item)} 个账号` }));
-      const languageSummary = item.language || config.language;
-      if (languageSummary) accountsCell.appendChild(ui.element("div", { className: "secondary", text: languageSummary }));
+      accountsCell.appendChild(ui.element("div", { className: "secondary", text: "剧语言读取账户设置" }));
       row.appendChild(accountsCell);
 
       ui.appendTextCell(row, scheduleSummary(item));
