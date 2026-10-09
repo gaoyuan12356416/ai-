@@ -33,3 +33,20 @@ python3 <上线版本>/scripts/install_x_auto_account_language.py --rollback <�
 ```
 
 回滚保留现有数据库和 Token；不恢复旧数据库覆盖后续账本。
+
+## 2026-10-09 上线验收
+
+- 代码分支：`codex/x-auto-account-language-20261009`，GitHub 已推送并由服务器读取精确代码提交 `c243817b1fd77e0de42f340f2fa6ebb1dddb5c56`。
+- 服务器：`43.166.187.96`；上线目录 `/mnt/data-disk/x-post-automation/releases/c243817b1fd77e0de42f340f2fa6ebb1dddb5c56-auto-account-language`，由 `/opt/x-post-automation/current` 指向。
+- 维护备份：`/mnt/data-disk/x-post-automation/maintenance/20261009-auto-account-language-c243817b`，含两套 SQLite 在线备份、主 API/Nginx 原静态文件与指纹清单。原版本为 `/mnt/data-disk/x-post-automation/releases/02ab0404adbdd1c974ee0f5547bb19ac95869a80-drama-save`。
+- Linux 回归 176 项全部通过；本地回归 175 项通过、1 项 Windows 环境条件跳过。Python 编译、Node 语法检查、`git diff --check` 通过。
+- Playwright 创建/历史模板编辑验证：英文和日文账户同时选中，停用账户禁选；请求没有 `language`；成功返回列表；409 保留编辑页、输入、选择和 `expected_version`。
+- 独立 Auto 服务健康。四个公网文件 HTTP 200 且与 GitHub 代码提交逐字节一致；匿名创建模板返回 `401 auth_required`。
+- 线上模板均返回 `language_source=account`，旧版本配置的语言原值保留。只读预览按日文账户设置的 `ja` 成功选择；英文账户按 `en` 筛选，返回现有规则下 `x_auto_no_eligible_material`。两次预览均 `reserved=false`，没有新建任务或发布。
+- 维护锁期间所有 Auto 状态、X 发布账本和 Token 哈希/权限一致；Auto 定时器恢复原状态，已停用的其他 X 发布定时器保持停用。后续预览核对中发现一个模板范围外账户在维护结束后完成 OAuth 重新授权，未回滚其凭证；模板、任务、素材预留、发布账本的指纹仍一致。
+
+本次确切代码回滚命令（自动等待 Auto 请求结束并保持原定时器状态）：
+
+```bash
+python3 /mnt/data-disk/x-post-automation/releases/c243817b1fd77e0de42f340f2fa6ebb1dddb5c56-auto-account-language/scripts/install_x_auto_account_language.py --rollback /mnt/data-disk/x-post-automation/maintenance/20261009-auto-account-language-c243817b
+```
