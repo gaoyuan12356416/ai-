@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 import requests
-from .worker_runtime import run_generator
+from .worker_runtime import GeneratorCancelled, generation_cancel_check, run_generator
 from .cover_provenance import isolated_home, remove_private_auth, verify_generated_origin
 from .service import YouTubeWorkflow
 from .images import normalize_generated_cover
@@ -86,7 +86,7 @@ def readonly_runner(app):
     return query
 
 
-def generate_cover_factory(root):
+def generate_cover_factory(root, *, db_path=None):
     root=Path(root).resolve()
     def generate_attempt(task,version,timeout):
         # Both first generation and every revision use the same immutable drama
@@ -148,7 +148,8 @@ def generate_cover_factory(root):
         started_at=time.time()
         try:
             try:
-                p=run_generator(cmd,input=prompt,env=env,timeout=timeout)
+                cancelled=generation_cancel_check(db_path,task_id,version['number']) if db_path is not None else None
+                p=run_generator(cmd,input=prompt,env=env,timeout=timeout,should_cancel=cancelled)
             except subprocess.TimeoutExpired as timeout_error:
                 if not output.is_file() or output.is_symlink():raise
                 # Recover only a fully validated image after the process group
@@ -187,6 +188,8 @@ def generate_cover_factory(root):
             fd=os.open(work/'generation-output.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
             with os.fdopen(fd,'w',encoding='utf-8') as output_audit_file:json.dump(output_audit,output_audit_file,indent=2)
             return normalized
+        except GeneratorCancelled:
+            raise WorkflowError('cover_generation_cancelled','封面任务已取消或版本已变化，本次生图已停止',409) from None
         except subprocess.TimeoutExpired:
             raise WorkflowError('cover_generation_timeout','AI 封面生成超过 20 分钟，已结束本次尝试；请重试或手动上传封面',503) from None
         except WorkflowError:raise
@@ -268,6 +271,6 @@ def build_service(app):
         return value['short_url']
     links=AttributionLinks(app.JOB_DB_PATH,app.DRAMA_SYNTHESIS_STORE,app.DRAMA_SHORT_LINK_PUBLISHER,attribution_user_resolver(app))
     return YouTubeWorkflow(app.JOB_DB_PATH,root/'assets',source,channels,short_link,app.DRAMA_SYNTHESIS_STORE,attribution_links=links,
-                           generate=generate_cover_factory(root),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,player_cards=player_cards,
+                           generate=generate_cover_factory(root,db_path=app.JOB_DB_PATH),fetch_reference_cover=fetch_reference_cover_factory(),channel_directory=directory,player_cards=player_cards,
                            notify=notify_factory(app),failure_status=lambda body,ledger:failure_notification_status(root/'failure-notifications.sqlite3',body,ledger),public_base=app.PUBLIC_BASE_URL.split('/drama-materials')[0],
                            enabled=os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1')

@@ -18,6 +18,7 @@ from PIL import Image
 from scripts.youtube_cover_test_support import completed_generation
 from features.youtube_auto_publish import reference
 from features.youtube_auto_publish.runtime import generate_cover_factory
+from features.youtube_auto_publish.worker_runtime import GeneratorCancelled
 from features.youtube_auto_publish.templates import WorkflowError
 
 
@@ -219,6 +220,15 @@ class GeneratorReferenceCase(unittest.TestCase):
     def generate(self, task=None, number=1):
         with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=self.fake_run):
             return generate_cover_factory(self.root)(task or self.task, {'number':number})
+
+    def test_cancelled_generation_is_not_retried_and_removes_private_auth(self):
+        with patch('features.youtube_auto_publish.runtime.run_generator', side_effect=GeneratorCancelled()) as runner:
+            with self.assertRaises(WorkflowError) as caught:
+                generate_cover_factory(self.root, db_path=self.root/'tasks.sqlite3')(self.task, {'number':1})
+        self.assertEqual(caught.exception.code, 'cover_generation_cancelled')
+        runner.assert_called_once()
+        self.assertTrue(callable(runner.call_args.kwargs['should_cancel']))
+        self.assertFalse(list((self.root/'generation').glob('*/*/codex-home/auth.json')))
 
     def test_reference_is_real_attachment_and_imagegen_local_reference_is_required(self):
         output = self.generate()
