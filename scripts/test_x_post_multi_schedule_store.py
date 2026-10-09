@@ -3724,6 +3724,118 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(pools["DONE"]["assigned_account_id"], 2)
         self.assertEqual(pools["NEXT"]["assigned_account_id"], 2)
 
+    def _unavailable_drama_owner_fixture(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        first = self.add_drama(content_id="UNAVAILABLE_OWNER", free_episode_count=2)
+        second = self.add_drama(content_id="HEALTHY_OWNER", free_episode_count=2)
+        plan = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "09:00", 2,
+            [self.drama_candidate(first, 2, 1), self.drama_candidate(second, 3, 1)],
+        )
+        for index, queue in enumerate(plan["queues"]):
+            self.publish_queue(queue, index + 1, "owner-repair-%s" % index)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "CREATE TABLE x_authorized_account("
+                "id INTEGER PRIMARY KEY,username TEXT,status TEXT,publish_approved INTEGER)"
+            )
+            conn.executemany(
+                "INSERT INTO x_authorized_account VALUES(?,?,?,?)",
+                [(2, "unavailable", "error", 1), (3, "healthy", "active", 1), (4, "other", "active", 1)],
+            )
+            conn.commit()
+        return plan
+
+    def _owner_repair_save(self, accounts, eligible):
+        return self.store.save_schedule_config(
+            "drama",
+            {"enabled": True, "timezone": "Asia/Shanghai", "account_ids": accounts,
+             "publish_times": ["10:00"], "version": 2},
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=eligible,
+            now=datetime(2026, 7, 27, 8, 0, tzinfo=service.BEIJING_TZ),
+        )
+
+    def _owner_repair_ledger(self):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            return {
+                table: conn.execute("SELECT * FROM " + table + " ORDER BY id").fetchall()
+                for table in ("x_post_drama_pool", "x_post_queue", "x_post_publish_log")
+            }
+
+    def test_unavailable_owner_can_leave_schedule_without_reassigning_or_replaying(self):
+        self._unavailable_drama_owner_fixture()
+        before = self._owner_repair_ledger()
+        saved = self._owner_repair_save([3], [3, 4])
+        self.assertEqual(saved["account_ids"], [3])
+        self.assertEqual(saved["version"], 3)
+        candidates = self.store.available_drama_pool_items(account_ids=[3])
+        self.assertEqual([(r["content_id"], r["candidate_account_id"]) for r in candidates], [("HEALTHY_OWNER", 3)])
+        self.assertEqual(self._owner_repair_ledger(), before)
+
+    def test_removable_owner_states_require_explicit_persisted_failure(self):
+        self._unavailable_drama_owner_fixture()
+        for status, approval in [("error", 1), ("revoked", 1), ("disabled", 1),
+                                 ("disconnected", 1), ("revoke_pending", 1),
+                                 ("token_missing", 1), ("scope_missing", 1), ("active", 0)]:
+            with self.subTest(status=status, approval=approval):
+                with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                    conn.execute("UPDATE x_authorized_account SET status=?,publish_approved=? WHERE id=2", (status, approval))
+                    conn.execute("UPDATE x_post_schedule_config SET version=2 WHERE source_type='drama'")
+                    conn.commit()
+                self.assertEqual(self._owner_repair_save([3], [3, 4])["account_ids"], [3])
+
+    def test_unavailable_owner_does_not_hide_an_omitted_healthy_owner(self):
+        self._unavailable_drama_owner_fixture()
+        for action in [lambda: self._owner_repair_save([4], [3, 4]),
+                       lambda: self.store.available_drama_pool_items(account_ids=[4])]:
+            with self.assertRaises(service.XPostError) as rejected:
+                action()
+            self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+            self.assertIn("3", str(rejected.exception))
+        self.assertEqual(self.store.get_schedule_config("drama")["version"], 2)
+
+    def test_unknown_write_on_unavailable_owner_keeps_owner_protection(self):
+        plan = self._unavailable_drama_owner_fixture()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_post_publish_log SET unknown_outcome=1 WHERE queue_id=?", (plan["queues"][0]["id"],))
+            conn.commit()
+        before = self._owner_repair_ledger()
+        for action in [lambda: self._owner_repair_save([3], [3]),
+                       lambda: self.store.available_drama_pool_items(account_ids=[3])]:
+            with self.assertRaises(service.XPostError) as rejected:
+                action()
+            self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+        self.assertEqual(self._owner_repair_ledger(), before)
+
+    def test_missing_or_unproven_owner_status_keeps_owner_protection(self):
+        self._unavailable_drama_owner_fixture()
+        for status in ["active", "unrecognized"]:
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                conn.execute("UPDATE x_authorized_account SET status=? WHERE id=2", (status,))
+                conn.commit()
+            with self.assertRaises(service.XPostError) as rejected:
+                self._owner_repair_save([3], [3])
+            self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("DELETE FROM x_authorized_account WHERE id=2")
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self._owner_repair_save([3], [3])
+        self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+
+    def test_restored_owner_requires_readding_to_schedule_without_reassignment(self):
+        self._unavailable_drama_owner_fixture()
+        self._owner_repair_save([3], [3])
+        before = self._owner_repair_ledger()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_authorized_account SET status='active' WHERE id=2")
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.available_drama_pool_items(account_ids=[3])
+        self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+        self.assertEqual(self._owner_repair_ledger(), before)
+
     def test_enabled_schedule_cannot_remove_unfinished_drama_owner(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)

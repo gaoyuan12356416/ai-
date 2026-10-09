@@ -42137,6 +42137,8 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "x_post_drama_owner_not_configured": (409, "未完结短剧的正常绑定账号必须保留在排期中"),
+    "x_post_schedule_slot_in_progress": (409, "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置"),
     "invalid_random_daily_count": (400, "每日随机发布次数无效"),
     "invalid_schedule_mode": (400, "自动发布模式无效"),
     "invalid_post_template": (400, "X Post描述模板无效"),
@@ -42198,6 +42200,8 @@ X_ACCOUNTS_ERROR_META = {
 def x_accounts_error_payload(exc):
     code = str(getattr(exc, "code", "x_accounts_unavailable") or "x_accounts_unavailable")
     status, message = X_ACCOUNTS_ERROR_META.get(code, X_ACCOUNTS_ERROR_META["x_accounts_unavailable"])
+    if code == "x_post_drama_owner_not_configured":
+        message = str(exc) or message
     return status, {"error": code if code in X_ACCOUNTS_ERROR_META else "x_accounts_unavailable", "message": message}
 
 

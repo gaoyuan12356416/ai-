@@ -5385,6 +5385,23 @@ class XPostStore:
                     account_ids.append(account_id)
         return account_ids
 
+    @staticmethod
+    def _required_drama_owner(conn, rows):
+        """Keep unavailable owners bound without blocking other accounts."""
+        owner_ids = list(dict.fromkeys(int(row["assigned_account_id"]) for row in rows))
+        blockers = read_account_publish_blockers(conn, owner_ids)
+        # Only an explicit persisted authorization/approval failure permits an
+        # owner to leave the schedule. Unknown writes, ledger holds and missing
+        # account evidence retain the unfinished-owner protection.
+        return next(
+            (
+                row for row in rows
+                if blockers.get(int(row["assigned_account_id"]), {}).get("code")
+                != "x_account_not_publishable"
+            ),
+            None,
+        )
+
     def save_schedule_config(
         self,
         source_type,
@@ -5578,16 +5595,17 @@ class XPostStore:
                     placeholders = ",".join(
                         "?" for _item in account_ids
                     )
-                    missing_owner = conn.execute(
+                    missing_owners = conn.execute(
                         "SELECT content_id,assigned_account_id "
                         "FROM x_post_drama_pool "
                         "WHERE status IN ('pending','active','needs_review') "
                         "AND assigned_account_id>0 "
                         "AND next_sub_number<=free_episode_count "
                         "AND assigned_account_id NOT IN (%s) "
-                        "ORDER BY created_at,id LIMIT 1" % placeholders,
+                        "ORDER BY created_at,id" % placeholders,
                         tuple(account_ids),
-                    ).fetchone()
+                    ).fetchall()
+                    missing_owner = self._required_drama_owner(conn, missing_owners)
                     if missing_owner:
                         conn.rollback()
                         raise XPostError(
@@ -7702,7 +7720,7 @@ class XPostStore:
             return []
         placeholders = ",".join("?" for _item in account_ids)
         configured_placeholders = ",".join("?" for _item in configured_account_ids)
-        foreign_owner = conn.execute(
+        foreign_owners = conn.execute(
             "SELECT content_id,assigned_account_id "
             "FROM x_post_drama_pool "
             "WHERE status IN ('pending','active') "
@@ -7710,9 +7728,10 @@ class XPostStore:
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id>0 "
             "AND assigned_account_id NOT IN (%s) "
-            "ORDER BY created_at,id LIMIT 1" % configured_placeholders,
+            "ORDER BY created_at,id" % configured_placeholders,
             tuple(configured_account_ids),
-        ).fetchone()
+        ).fetchall()
+        foreign_owner = XPostStore._required_drama_owner(conn, foreign_owners)
         if foreign_owner:
             raise XPostError(
                 "x_post_drama_owner_not_configured",

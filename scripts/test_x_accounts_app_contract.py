@@ -266,6 +266,31 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertEqual(status, 429)
         self.assertEqual(payload["error"], "x_post_rate_limited")
 
+    def test_drama_owner_and_slot_conflicts_survive_client_and_api_mapping(self):
+        from features.x_accounts.client import XAccountsClientError
+
+        tree = ast.parse(APP_SOURCE)
+        nodes = [node for node in tree.body if (
+            isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "X_ACCOUNTS_ERROR_META"
+                for target in node.targets
+            )
+        ) or (isinstance(node, ast.FunctionDef) and node.name == "x_accounts_error_payload")]
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(APP_PATH), "exec"), namespace)
+        for code, message in [
+            ("x_post_drama_owner_not_configured", "短剧D1尚未发完，必须保留绑定账号2"),
+            ("x_post_schedule_slot_in_progress", "当前发布时间点正在冻结或执行"),
+        ]:
+            with self.subTest(code=code):
+                error = XAccountsClientError(code, message, 409)
+                status, payload = namespace["x_accounts_error_payload"](error)
+                self.assertEqual(status, 409)
+                self.assertEqual(payload["error"], code)
+                self.assertNotIn("暂不可用", payload["message"])
+                if code == "x_post_drama_owner_not_configured":
+                    self.assertEqual(payload["message"], message)
+
     def test_owner_and_admin_list_routes_use_distinct_scopes(self):
         owner = source_between(
             'if parsed.path == "/api/x-accounts":',

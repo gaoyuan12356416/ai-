@@ -58,6 +58,8 @@ SAFE_ERROR_CODES = {
     "x_post_schedule_run_exists",
     "x_post_schedule_run_not_found",
     "x_post_schedule_version_conflict",
+    "x_post_schedule_slot_in_progress",
+    "x_post_drama_owner_not_configured",
     "x_post_drama_already_used",
     "x_post_drama_account_language_mismatch",
     "x_post_drama_episode_already_used",
