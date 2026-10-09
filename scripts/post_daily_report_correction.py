@@ -18,6 +18,7 @@ from features.post_daily_report.delivery import DeliveryStore, DefiniteFailure, 
 from features.post_daily_report.report import build_card, build_compact_card, preview_html, total, validate_channel
 from features.post_daily_report.tt import collect as collect_tt
 from features.post_daily_report.x import collect as collect_x
+from features.post_daily_report.fb import collect as collect_fb
 from scripts.post_daily_report import CHAT_ID, DEFAULT_PATHS, atomic_write, ensure_storage
 
 
@@ -37,7 +38,8 @@ def corrected_report(state, chat_id, paths, window, revision, channel="TT"):
         raise RuntimeError("original_window_mismatch")
     if [c.get("channel") for c in report.get("channels", [])] != ["TT", "FB", "X"]:
         raise RuntimeError("original_channel_layout_mismatch")
-    replacement = (collect_tt if channel == "TT" else collect_x)(paths, window)
+    collectors = {"TT": collect_tt, "FB": collect_fb, "X": collect_x}
+    replacement = collectors[channel](paths, window)
     validate_channel(replacement)
     if replacement.get("channel") != channel or replacement.get("error") or not replacement.get("rows"):
         raise RuntimeError(channel.lower() + "_correction_unavailable")
@@ -56,8 +58,13 @@ def corrected_report(state, chat_id, paths, window, revision, channel="TT"):
 
 
 def correction_card(report, compact=False):
-    card = (build_compact_card if compact else build_card)(report)
     channel = report["correction"]["channel"]
+    visible = copy.deepcopy(report)
+    if channel == "FB":
+        visible["channels"] = [c for c in visible["channels"] if c["channel"] == "FB"]
+    card = (build_compact_card if compact else build_card)(visible)
+    if channel == "FB":
+        card["header"]["title"]["content"] = "%s｜FB Post 发布日报" % report["date"]
     card["header"]["title"]["content"] += "（%s 修正版）" % channel
     card["elements"].insert(1, {"tag": "div", "text": {"tag": "lark_md", "content":
         "**更正说明：%s 统计已修复，请以本条 %s 数据为准。**\n"
@@ -69,7 +76,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="Original Beijing report date, not the sending date")
     parser.add_argument("--revision", required=True, help="Stable correction ID; repeat calls are deduplicated")
-    parser.add_argument("--channel", choices=("TT", "X"), default="TT")
+    parser.add_argument("--channel", choices=("TT", "FB", "X"), default="TT")
     parser.add_argument("--state-dir", default="/mnt/data-disk/post-daily-report")
     parser.add_argument("--paths-json", help="Optional publisher paths for offline fixtures")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")

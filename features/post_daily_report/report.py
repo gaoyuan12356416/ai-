@@ -28,7 +28,7 @@ def collect_report(paths, window):
 
 def validate_channel(channel):
     for row in channel.get("rows", []):
-        for field in ("published", "late", "pending", "unknown", "failed"):
+        for field in ("published", "late", "pending", "unknown", "failed", "blocked", "policy_skipped", "frequency_excluded"):
             value = row.get(field, 0)
             if not isinstance(value, int) or value < 0:
                 raise ValueError("invalid report counter")
@@ -37,6 +37,9 @@ def validate_channel(channel):
             raise ValueError("invalid expected counter")
         if expected is not None and row.get("published", 0) + row.get("late", 0) > expected:
             raise ValueError("completion exceeds planned targets")
+        if channel.get("accounting") == "actual-fb-v2" and expected is not None:
+            if sum(row.get(k, 0) for k in ("published", "late", "pending", "unknown", "failed", "blocked", "policy_skipped")) != expected:
+                raise ValueError("FB outcome counters do not reconcile with actual targets")
 
 
 def total(rows):
@@ -80,6 +83,36 @@ def _columns(values, header=False):
                         for i, v in enumerate(values)]}
 
 
+def _fb_elements(channel, compact=False):
+    rows = channel["rows"]
+    sums = total(rows)
+    states = {key: sum(r.get(key, 0) for r in rows) for key in
+              ("failed", "pending", "blocked", "unknown", "policy_skipped", "frequency_excluded")}
+    success = None if sums["published"] is None else sums["published"] + sums["late"]
+    elements = [_md("**FB｜实际应发 %s · 确认成功 %s · 明确失败 %s**\n"
+                    "受阻/待处理 %s · 结果待确认 %s · 策略跳过 %s。" %
+                    (_n(sums["expected"]), _n(success), states["failed"], states["blocked"] + states["pending"],
+                     states["unknown"], states["policy_skipped"]))]
+    if not compact:
+        elements.append(_columns(["发布来源", "实际应发", "成功", "失败", "受阻/待处理", "待确认"], True))
+    for row in rows[:12]:
+        confirmed = row.get("published", 0) + row.get("late", 0)
+        values = [row.get("label", row["source"]), _n(row.get("expected")), confirmed,
+                  row.get("failed", 0), row.get("blocked", 0) + row.get("pending", 0), row.get("unknown", 0)]
+        if compact:
+            elements.append(_md("%s：实际应发 %s｜成功 %s｜失败 %s｜受阻/待处理 %s｜待确认 %s。" % tuple(values)))
+        else:
+            elements.append(_columns(values))
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
+            "当日确认成功 %s，次日补发 %s；策略跳过 %s。" %
+            (row.get("published", 0), row.get("late", 0), row.get("policy_skipped", 0))}]})
+    elements.append(_md("**统计口径**\n实际应发按冻结的 Page 频次及所选时隙计算；已排除频次外 %s 个位置。\n"
+                        "成功为当日确认成功 %s + 次日 10:00 前补发 %s；结果待确认不计成功或失败。\n"
+                        "策略跳过包含于实际应发，单列且不计失败；受阻/待处理不等同于平台发布失败。" %
+                        (states["frequency_excluded"], _n(sums["published"]), _n(sums["late"]))))
+    return elements
+
+
 def build_card(report):
     incomplete = any(c.get("error") or any(r.get("expected") is None for r in c.get("rows", [])) for c in report["channels"])
     elements = [_md("**统计日：%s（北京时间）**\n昨日 00:00–24:00；补发截至次日 10:00。\n范围：AI 后台全部自动、手动 Post。" % report["date"])]
@@ -92,10 +125,14 @@ def build_card(report):
             elements.append(_md("**%s｜数据不完整**\n%s" % (channel["channel"], "；".join(channel["warnings"]))))
             continue
         sums = total(rows)
-        elements.append(_md("**%s｜应发 %s · 昨日已发 %s · 补发 %s · 未完成 %s**" %
+        actual_fb = channel.get("accounting") == "actual-fb-v2"
+        if actual_fb:
+            elements.extend(_fb_elements(channel))
+        else:
+            elements.append(_md("**%s｜应发 %s · 昨日已发 %s · 补发 %s · 未完成 %s**" %
                             (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]))))
-        elements.append(_columns(["发布来源", "应发", "已发", "补发", "未完成"], True))
-        for row in rows[:12]:
+            elements.append(_columns(["发布来源", "应发", "已发", "补发", "未完成"], True))
+        for row in ([] if actual_fb else rows[:12]):
             counts = total([row])
             elements.append(_columns([row.get("label", row["source"]), _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]), _n(counts["missing"])]))
             forms = row.get("form_counts") or {}
@@ -115,7 +152,12 @@ def build_card(report):
                 if not reason.get("count"): continue
                 qualifier = "（推测）" if reason.get("confidence") == "inferred" else "（待核实）" if reason.get("confidence") == "unknown" else ""
                 reasons.append("• **%s：%s 条** %s%s\n  建议：%s" % (row.get("label", row["source"])[:60], reason["count"], reason["reason"][:150], qualifier, reason.get("suggestion", "核对任务记录。")[:150]))
-        if reasons: elements.append(_md("**缺口原因与建议**\n" + "\n".join(reasons[:8]) + ("\n另有 %s 项原因，完整明细见日报归档。" % (len(reasons) - 8) if len(reasons) > 8 else "")))
+        if reasons: elements.append(_md(("**失败、受阻与待确认原因**\n" if actual_fb else "**缺口原因与建议**\n") + "\n".join(reasons[:8]) + ("\n另有 %s 项原因，完整明细见日报归档。" % (len(reasons) - 8) if len(reasons) > 8 else "")))
+        if actual_fb:
+            policies = ["• %s：%s 条 %s" % (row.get("label", row["source"]), reason["count"], reason["reason"])
+                        for row in rows for reason in row.get("policy_reasons", [])]
+            if policies:
+                elements.append(_md("**正常策略跳过（不计失败）**\n" + "\n".join(policies)))
         warnings = list(dict.fromkeys(channel.get("warnings", []) + [w for r in rows for w in r.get("warnings", [])]))
         if warnings: elements.append(_md("**口径说明**\n" + "\n".join("• " + w[:220] for w in warnings[:4]) + ("\n另有 %s 条说明，完整内容保存在日报归档。" % (len(warnings) - 4) if len(warnings) > 4 else "")))
     elements.append({"tag": "hr"})
@@ -133,8 +175,13 @@ def build_compact_card(report):
             continue
         rows = channel.get("rows", [])
         sums = total(rows)
-        elements.append(_md("**%s** 应发 %s｜已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
-        for row in rows[:10]:
+        actual_fb = channel.get("accounting") == "actual-fb-v2"
+        if actual_fb:
+            elements.extend(_fb_elements(channel, compact=True))
+            elements.append(_md("往期计划当日确认完成 %s 条，单列不计入上述计划。" % channel.get("prior_completed", 0)))
+        else:
+            elements.append(_md("**%s** 应发 %s｜已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
+        for row in ([] if actual_fb else rows[:10]):
             counts = total([row])
             elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]))))
         if _cost_text(channel):
@@ -155,6 +202,6 @@ def preview_html(report, card):
         elif element["tag"] == "div": lines.append("<p>" + render_text(element["text"]["content"]) + "</p>")
         elif element["tag"] == "column_set":
             values = [col["elements"][0]["text"]["content"] for col in element["columns"]]
-            lines.append('<div class="row">' + "".join("<span>" + html.escape(v) + "</span>" for v in values) + "</div>")
+            lines.append('<div class="row" style="grid-template-columns:3fr repeat(%s,1fr)">' % (len(values)-1) + "".join("<span>" + html.escape(v) + "</span>" for v in values) + "</div>")
         elif element["tag"] == "note": lines.append("<small>" + html.escape(element["elements"][0]["content"]) + "</small>")
     return '<!doctype html><html lang="zh"><meta charset="utf-8"><title>Post 发布日报预览</title><style>body{font:15px/1.65 system-ui;background:#f3f5f8;color:#182534;margin:30px auto;max-width:900px;padding:25px;background:white}h1{font-size:23px}.row{display:grid;grid-template-columns:3fr repeat(4,1fr);gap:12px;border-bottom:1px solid #eee;padding:8px}small{display:block;color:#687586}hr{border:0;border-top:1px solid #ccc;margin:24px 0}</style><h1>' + html.escape(card["header"]["title"]["content"]) + '</h1>' + "\n".join(lines) + '</html>'

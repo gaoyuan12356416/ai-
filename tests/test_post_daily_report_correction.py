@@ -142,6 +142,25 @@ class TTCorrectionTests(unittest.TestCase):
         self.assertIn('X 修正版',send.call_args.args[2]['header']['title']['content'])
         self.assert_original_unchanged()
 
+    def test_fb_correction_only_broadcasts_fb_preserves_other_channels_and_sends_once(self):
+        fb={'channel':'FB','accounting':'actual-fb-v2','rows':[{'source':'auto','label':'自动模板',
+            'expected':10,'published':5,'late':1,'failed':2,'blocked':1,'unknown':1,'policy_skipped':0,'frequency_excluded':5}]}
+        with patch.object(correction,'collect_fb',return_value=fb), patch.object(correction,'send_card',return_value={'code':0,'message_id':'fb-corrected'}) as send, redirect_stdout(io.StringIO()):
+            self.assertEqual(correction.main(self.args+['--channel','FB','--preview']),0)
+            self.assertEqual(correction.main(self.args+['--channel','FB','--send']),0)
+            self.assertEqual(correction.main(self.args+['--channel','FB','--send']),0)
+        self.assertEqual(send.call_count,1)
+        result=json.loads((self.state/'corrections'/self.date/self.revision/'report.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['channels'][0],self.base['channels'][0])
+        self.assertEqual(result['channels'][2],self.base['channels'][2])
+        self.assertEqual(result['channels'][1],fb)
+        content=json.dumps(send.call_args.args[2],ensure_ascii=False)
+        self.assertIn('FB 修正版',content)
+        self.assertIn('确认成功 6',content)
+        self.assertNotIn('frozen-x',content)
+        self.assertNotIn('TT / FB / X',content)
+        self.assert_original_unchanged()
+
 
 if __name__ == '__main__':
     unittest.main()
