@@ -16,7 +16,7 @@ Meta structures are resolved through `ads_facebook_auto_created_data`; TikTok st
 
 Each tab shows its own running/success/failed pipeline counts. Failed copies remain in the pipeline totals but cannot have post-copy effect rows because they have no successful `new_id`.
 
-Data is refreshed in a background thread every 15 minutes, so a page request never owns the database refresh. The last successful compact v2 payload is held in memory and atomically persisted at `/mnt/data-disk/campaign-copy-performance/cache/report.json`; a service restart can therefore serve the last cache immediately while a fresh query runs. Failed refreshes retry after two minutes and keep the most recent valid cache for up to 24 hours.
+Data is refreshed in a background thread every 15 minutes, so a page request never owns the database refresh. The last successful compact v2 payload is held in memory and atomically persisted at `/mnt/data-disk/campaign-copy-performance/cache/report.json`; a service restart can therefore serve the last cache immediately while a fresh query runs. Failed refreshes retry after two minutes and retain the last verified cache, including across restarts. The page explicitly labels a stale snapshot; missing days must not be interpreted as zero activity.
 
 The API pre-compresses the payload once, supports `ETag`/`304`, and permits private browser reuse for one minute. Its v2 wire format keeps the original Campaign arrays backward-compatible and adds compact Ad Set/Ad arrays plus per-level pipeline counts. The frontend starts fetching from `<head>`, shows an explicit cache-loading state, inflates the compact row format, and debounces text/number filters. Its statistics-date presets remain `全部`, `当天`, `昨天`, `近三天`, and `近七天`, based on the MySQL server date in timezone `+08:00`.
 
@@ -47,3 +47,36 @@ systemctl daemon-reload
 systemctl restart campaign-copy-performance.service
 nginx -t && systemctl reload nginx
 ```
+
+## Refresh repair (2026-10-10)
+
+The old full-history loop issued tens of thousands of small insight reads as the
+report grew to about 250,000 Campaigns and 916,000 mapped Ads. Its last successful
+refresh took 24,607 seconds; subsequent OperationalErrors left the October 8
+snapshot visible. The source already contained October 9 and October 10 rows.
+
+The refresh now reads all copy/mapping metadata, re-queries the latest seven days
+(or every missing date after an outage), and revisits one older date each cycle.
+The historical cursor advances only after a successful atomic publish. Newly
+observed successful copies with old creation dates expand the backfill window.
+Every refreshed date replaces old rows for that date, even when the new result is
+empty. Other historical dates retain their previous values until their rotation;
+no source database writes or changed revenue definitions are involved.
+
+Insight batches contain 20,000 unique Ad IDs, mapping batches 3,000 IDs. The
+production reader holds one FIFO SQL gate permit, checks read-only port/state,
+uses a 15-second statement limit and 840-second overall database budget, and
+closes its connection on gate loss. No refresh publishes partial results. Cold
+builds or very long outages may exceed this budget and require a separately
+supervised rebuild; existing historical cache must be preserved.
+
+The date presets use the HTTP server clock in Beijing time even for a stale
+snapshot. Editing either end of a reversed date range adjusts the other end.
+Snapshots older than 30 minutes (or marked stale by the API) show an explicit
+warning. Runtime logs include safe database error codes and per-date progress.
+
+Use `python3 service.py --warm-cache` with a separate cache path to prepare a
+candidate before switching a release. Copy the existing cache as its seed. The
+same command can verify the next incremental refresh without taking down the
+serving process. Deploy only this standalone report; no ad execution services,
+cron entries, main backend, or Nginx changes are required.

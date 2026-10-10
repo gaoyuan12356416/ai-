@@ -147,7 +147,10 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const ratio = value => value == null || !Number.isFinite(Number(value)) ? '—' : num(value).toFixed(3);
   const percent = value => value == null || !Number.isFinite(Number(value)) ? '—' : (num(value) * 100).toFixed(1) + '%';
   const roasClass = value => value == null ? '' : num(value) >= .5 ? 'good' : num(value) >= .35 ? 'mid' : 'bad';
-  const currentDate = meta.today || '';
+  const serverNow = new Date(response.headers.get('Date') || Date.now());
+  const currentDate = new Date(serverNow.getTime()+8*3600000).toISOString().slice(0,10);
+  const sourceAge = Math.max(0,(serverNow-new Date((meta.generated_at||'').replace(' ','T')+'+08:00'))/1000);
+  const staleReport = sourceAge>1800 || response.headers.get('X-Report-Cache')==='stale';
   const levelInfo = {
     '0':{name:'Campaign',newLabel:'新 Campaign',originLabel:'源 Campaign'},
     '1':{name:'Ad Set',newLabel:'新 Ad Set',originLabel:'源 Ad Set'},
@@ -321,14 +324,25 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
     const generated=meta.generated_at||'',copyStart=allCopyStart||'无成功样本',copyEnd=allCopyEnd||'无成功样本',statStart=allStatStart||'无效果数据',statEnd=allStatEnd||'无效果数据';
     get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
-    get('scopeHint').textContent='每15分钟后台自动刷新｜'+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('scopeHint').textContent=(staleReport?'数据尚未更新，当前展示上次成功快照；缺少日期不代表零消耗｜':'每15分钟后台自动刷新｜')+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('scopeHint').style.color=staleReport?'#b45309':'';
     get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
 
   function init(){
-    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>requestAnimationFrame(render))});
+    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>{normalizeDateRange(id);requestAnimationFrame(render)})});
     get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>applyLevel(button.dataset.level)));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel('0');
     get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
+  }
+  function normalizeDateRange(changed){
+    for(const prefix of ['copy','stat']){
+      const start=get(prefix+'StartDate'),end=get(prefix+'EndDate');
+      if(start.value&&end.value&&start.value>end.value){
+        if(changed===prefix+'StartDate')end.value=start.value;
+        else if(changed===prefix+'EndDate')start.value=end.value;
+      }
+    }
+    if(changed==='statStartDate'||changed==='statEndDate')get('presets').querySelectorAll('button').forEach(button=>button.classList.remove('active'));
   }
   init();
 })().catch(error=>{

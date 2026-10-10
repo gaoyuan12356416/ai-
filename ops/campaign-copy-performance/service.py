@@ -7,10 +7,13 @@ import gzip
 import hashlib
 import json
 import os
+import select
+import socket
 import sys
 import threading
 import time
 from decimal import Decimal
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,7 +39,9 @@ CACHE_PATH_TEXT = os.environ.get("CAMPAIGN_COPY_REPORT_CACHE_PATH", "").strip()
 CACHE_PATH = Path(CACHE_PATH_TEXT) if CACHE_PATH_TEXT else None
 SUPPORTED_PLATFORMS = (0, 3)
 PLATFORM_LABELS = {0: "Meta", 3: "TikTok"}
-INSIGHT_CHUNK_SIZES = {0: 500, 3: 2000}
+INSIGHT_CHUNK_SIZES = {0: 20000, 3: 20000}
+REFRESH_LOOKBACK_DAYS = 7
+REFRESH_BUDGET_SECONDS = 840
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -210,263 +215,385 @@ def mysql_connection():
     )
 
 
-def query_raw() -> dict:
-    conn = mysql_connection()
-    payload: dict[str, object] = {}
+@contextmanager
+def report_connection():
+    """One automation connection under the host FIFO gate, closed on lease loss."""
+    sys.path.insert(0, "/opt/sql-connection-gate")
+    from sql_connection_gate import acquire_permit, DEFAULT_POOL, DEFAULT_SOCKET_PATH
+
+    permit, response = acquire_permit(DEFAULT_SOCKET_PATH, DEFAULT_POOL, "campaign-copy-report", 300)
+    if response.get("status") != "granted":
+        if permit is not None:
+            permit.close()
+        raise RuntimeError("report SQL gate unavailable")
+    conn = None
+    done = threading.Event()
+    lost = threading.Event()
+    deadline = time.monotonic() + REFRESH_BUDGET_SECONDS
+
+    def watch():
+        while not done.wait(0.2):
+            if time.monotonic() >= deadline or select.select([permit], [], [], 0)[0]:
+                lost.set()
+                if conn is not None and conn._sock is not None:
+                    try:
+                        conn._sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                return
+
+    watcher = None
     try:
+        conn = mysql_connection()
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT @@read_only AS is_read_only, NOW() AS server_time, "
-                "@@session.time_zone AS session_time_zone"
-            )
-            safety = cur.fetchone()
-            if int((safety or {}).get("is_read_only") or 0) != 1:
-                raise RuntimeError("refusing report build: MySQL endpoint is not read-only")
-            payload["safety"] = safety
+            cur.execute("SET SESSION max_execution_time=15000")
+            cur.execute("SET SESSION time_zone='+08:00'")
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        yield conn
+        if lost.is_set():
+            raise RuntimeError("report SQL lease or refresh deadline lost")
+    finally:
+        done.set()
+        if watcher is not None:
+            watcher.join(timeout=1)
+        if conn is not None:
+            conn.close()
+        permit.close()
 
-            cur.execute(
-                """
-                SELECT level, status, COUNT(*) AS n
-                FROM ads_business.ads_campaign_rule_logs
-                WHERE platform IN (0,3) AND level IN (0,1,2) AND data_source=1
-                GROUP BY level, status
-                ORDER BY level, status
-                """
-            )
-            payload["copy_status_counts"] = cur.fetchall()
 
-            cur.execute(
-                """
-                SELECT l.id, l.platform, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
-                       l.user_id, l.app_id, l.content_id, l.created_at,
-                       r.name AS rule_name, a.name AS app_name,
-                       aug.name AS user_name
-                FROM ads_business.ads_campaign_rule_logs l
-                LEFT JOIN ads_business.ads_campaign_auto_rules r ON r.id=l.queue_id
-                LEFT JOIN kunlunads_dev.ads_apps_setting a ON a.id=l.app_id
-                LEFT JOIN (
-                    SELECT sub_user_id,
-                           COALESCE(
-                               MAX(CASE WHEN status=0 THEN NULLIF(TRIM(name), '') END),
-                               MAX(NULLIF(TRIM(name), ''))
-                           ) AS name
-                    FROM kunlunads_dev.admin_user_group
-                    GROUP BY sub_user_id
-                ) aug ON aug.sub_user_id=l.user_id
-                WHERE l.platform IN (0,3) AND l.level IN (0,1,2)
-                  AND l.data_source=1 AND l.status=1
-                ORDER BY l.created_at, l.id
-                """
-            )
-            successful_logs = [
-                row
-                for row in cur.fetchall()
-                if str(row.get("new_id") or "").isdigit() and int(row["new_id"]) > 0
-            ]
-            logs = [row for row in successful_logs if int(row.get("level") or 0) == 0]
-            extra_logs = [row for row in successful_logs if int(row.get("level") or 0) in (1, 2)]
-            payload["logs"] = logs
-            payload["extra_logs"] = extra_logs
+def refresh_dates(previous: dict | None, logs: list[dict], max_dt: dt.date) -> tuple[list[dt.date], str]:
+    dates = [parse_datetime(row.get("created_at")) for row in logs]
+    earliest = min((value.date() for value in dates if value), default=max_dt)
+    if not previous:
+        start = earliest
+        historical = None
+    else:
+        meta = previous.get("m", {})
+        through = dt.date.fromisoformat(meta.get("refreshed_through") or meta["stat_end"])
+        if max_dt < through:
+            raise RuntimeError("insight date regressed; preserving previous report")
+        start = max(earliest, min(max_dt - dt.timedelta(days=REFRESH_LOOKBACK_DAYS - 1), through + dt.timedelta(days=1)))
+        known = set()
+        for fields_key, rows_key, level in (("cf", "c", 0), ("xf", "x", None)):
+            fields = previous.get(fields_key, [])
+            for values in previous.get(rows_key, []):
+                row = dict(zip(fields, values))
+                known.add((platform_id(row), level if level is not None else int(row["level"]), str(row.get("entity_id") if level is None else row["campaign_id"])))
+        # Late-arriving successful logs must get their entire post-copy history.
+        for row in logs:
+            key = (platform_id(row), int(row.get("level") or 0), str(row["new_id"]))
+            copied = parse_datetime(row.get("created_at"))
+            if key not in known and copied:
+                start = min(start, copied.date())
+        historical = dt.date.fromisoformat(meta.get("history_next_date") or earliest.isoformat())
+        if historical < earliest or historical >= start:
+            historical = earliest
+    selected = []
+    current = start
+    while current <= max_dt:
+        selected.append(current)
+        current += dt.timedelta(days=1)
+    if historical is not None and historical < start:
+        selected.append(historical)
+        next_history = historical + dt.timedelta(days=1)
+    else:
+        next_history = earliest
+    # Fetch newest dates first; only publish after every selected date succeeds.
+    return sorted(set(selected), reverse=True), next_history.isoformat()
 
-            mapping: list[dict] = []
-            meta_campaign_ids = sorted(
-                {str(row["new_id"]) for row in logs if platform_id(row) == 0}
-            )
-            found_meta_campaigns: set[str] = set()
-            for source_table in (
-                "kunlunads_dev.ads_facebook_auto_created_data",
-                "ads_ai.ads_facebook_auto_created_data",
-            ):
-                remaining = sorted(set(meta_campaign_ids) - found_meta_campaigns)
-                for part in chunks(remaining, 300):
-                    placeholders = ",".join(["%s"] * len(part))
-                    cur.execute(
-                        f"""
-                        SELECT 0 AS platform, campaign_id, ad_id, campaign_name, product,
-                               ad_account_id, status, country, language, budget
-                        FROM {source_table} FORCE INDEX (campaign_id)
-                        WHERE campaign_id IN ({placeholders})
-                        """,
-                        part,
-                    )
-                    for source_row in cur.fetchall():
-                        mapping.append(source_row)
-                        found_meta_campaigns.add(str(source_row["campaign_id"]))
 
-            tiktok_campaign_ids = sorted(
-                {str(row["new_id"]) for row in logs if platform_id(row) == 3}
-            )
-            for part in chunks(tiktok_campaign_ids, 300):
+def merge_history(payload: dict, previous: dict | None, dates: list[str], next_history: str) -> dict:
+    refreshed = set(dates)
+    if previous:
+        valid_campaigns = {(platform_id(row), row["campaign_id"]) for row in payload["campaigns"]}
+        valid_entities = {row["entity_key"] for row in payload["extra_entities"]}
+        for fields_key, rows_key, target in (("df", "d", "daily"), ("xdf", "xd", "extra_daily")):
+            fields = previous.get(fields_key, [])
+            date_index = fields.index("dt")
+            for values in previous.get(rows_key, []):
+                if values[date_index] in refreshed:
+                    continue
+                row = dict(zip(fields, values))
+                valid = (platform_id(row), row["campaign_id"]) in valid_campaigns if target == "daily" else row["entity_key"] in valid_entities
+                if valid:
+                    payload[target].append(row)
+    stat_dates = [row["dt"] for row in payload["daily"] + payload["extra_daily"]]
+    payload["meta"].update(stat_start=min(stat_dates, default=""), stat_end=max(stat_dates, default=""),
+                           refreshed_through=max(dates, default=""), history_next_date=next_history,
+                           refreshed_dates=sorted(dates), refresh_lookback_days=REFRESH_LOOKBACK_DAYS)
+    return payload
+
+
+def query_raw(previous: dict | None = None) -> dict:
+    with report_connection() as conn:
+        return query_raw_connection(conn, previous)
+
+
+def query_raw_connection(conn, previous: dict | None = None) -> dict:
+    payload: dict[str, object] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT @@read_only AS is_read_only, NOW() AS server_time, "
+            "@@session.time_zone AS session_time_zone"
+        )
+        safety = cur.fetchone()
+        if int((safety or {}).get("is_read_only") or 0) != 1:
+            raise RuntimeError("refusing report build: MySQL endpoint is not read-only")
+        payload["safety"] = safety
+
+        cur.execute(
+            """
+            SELECT level, status, COUNT(*) AS n
+            FROM ads_business.ads_campaign_rule_logs
+            WHERE platform IN (0,3) AND level IN (0,1,2) AND data_source=1
+            GROUP BY level, status
+            ORDER BY level, status
+            """
+        )
+        payload["copy_status_counts"] = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT l.id, l.platform, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
+                   l.user_id, l.app_id, l.content_id, l.created_at,
+                   r.name AS rule_name, a.name AS app_name,
+                   aug.name AS user_name
+            FROM ads_business.ads_campaign_rule_logs l
+            LEFT JOIN ads_business.ads_campaign_auto_rules r ON r.id=l.queue_id
+            LEFT JOIN kunlunads_dev.ads_apps_setting a ON a.id=l.app_id
+            LEFT JOIN (
+                SELECT sub_user_id,
+                       COALESCE(
+                           MAX(CASE WHEN status=0 THEN NULLIF(TRIM(name), '') END),
+                           MAX(NULLIF(TRIM(name), ''))
+                       ) AS name
+                FROM kunlunads_dev.admin_user_group
+                GROUP BY sub_user_id
+            ) aug ON aug.sub_user_id=l.user_id
+            WHERE l.platform IN (0,3) AND l.level IN (0,1,2)
+              AND l.data_source=1 AND l.status=1
+            ORDER BY l.created_at, l.id
+            """
+        )
+        successful_logs = [
+            row
+            for row in cur.fetchall()
+            if str(row.get("new_id") or "").isdigit() and int(row["new_id"]) > 0
+        ]
+        logs = [row for row in successful_logs if int(row.get("level") or 0) == 0]
+        extra_logs = [row for row in successful_logs if int(row.get("level") or 0) in (1, 2)]
+        payload["logs"] = logs
+        payload["extra_logs"] = extra_logs
+
+        mapping: list[dict] = []
+        meta_campaign_ids = sorted(
+            {str(row["new_id"]) for row in logs if platform_id(row) == 0}
+        )
+        found_meta_campaigns: set[str] = set()
+        for source_table in (
+            "kunlunads_dev.ads_facebook_auto_created_data",
+            "ads_ai.ads_facebook_auto_created_data",
+        ):
+            remaining = sorted(set(meta_campaign_ids) - found_meta_campaigns)
+            for part in chunks(remaining, 3000):
                 placeholders = ",".join(["%s"] * len(part))
                 cur.execute(
                     f"""
-                    SELECT 3 AS platform, campaign_id, ad_id, campaign_name,
-                           '' AS product, ad_account_id, status, country, language, budget
-                    FROM kunlunads_dev.ads_tiktok_auto_created_data FORCE INDEX (campaign_id)
+                    SELECT 0 AS platform, campaign_id, ad_id, campaign_name, product,
+                           ad_account_id, status, country, language, budget
+                    FROM {source_table} FORCE INDEX (campaign_id)
                     WHERE campaign_id IN ({placeholders})
                     """,
                     part,
                 )
-                mapping.extend(cur.fetchall())
-            payload["mapping"] = mapping
+                for source_row in cur.fetchall():
+                    mapping.append(source_row)
+                    found_meta_campaigns.add(str(source_row["campaign_id"]))
 
-            extra_mapping: list[dict] = []
-            for platform in SUPPORTED_PLATFORMS:
-                for level, id_field in ((1, "adset_id"), (2, "ad_id")):
-                    entity_ids = sorted(
-                        {
-                            str(row["new_id"])
-                            for row in extra_logs
-                            if platform_id(row) == platform
-                            and int(row.get("level") or 0) == level
-                        }
-                    )
-                    found: set[str] = set()
-                    if platform == 0:
-                        source_specs = (
-                            ("kunlunads_dev.ads_facebook_auto_created_data", "product", ""),
-                            ("ads_ai.ads_facebook_auto_created_data", "product", ""),
-                        )
-                    else:
-                        source_specs = (
-                            (
-                                "kunlunads_dev.ads_tiktok_auto_created_data",
-                                "'' AS product",
-                                f" FORCE INDEX ({id_field})",
-                            ),
-                        )
-                    for source_table, product_sql, index_hint in source_specs:
-                        remaining = sorted(set(entity_ids) - found)
-                        for part in chunks(remaining, 300):
-                            placeholders = ",".join(["%s"] * len(part))
-                            cur.execute(
-                                f"""
-                                SELECT {platform} AS platform, campaign_id, adset_id, ad_id,
-                                       campaign_name, adset_name, ad_name, {product_sql},
-                                       ad_account_id, status, country, language, budget
-                                FROM {source_table}{index_hint}
-                                WHERE {id_field} IN ({placeholders})
-                                """,
-                                part,
-                            )
-                            for source_row in cur.fetchall():
-                                entity_id = str(source_row.get(id_field) or "")
-                                if not entity_id:
-                                    continue
-                                source_row["level"] = level
-                                source_row["entity_id"] = entity_id
-                                extra_mapping.append(source_row)
-                                found.add(entity_id)
-            payload["extra_mapping"] = extra_mapping
-
+        tiktok_campaign_ids = sorted(
+            {str(row["new_id"]) for row in logs if platform_id(row) == 3}
+        )
+        for part in chunks(tiktok_campaign_ids, 3000):
+            placeholders = ",".join(["%s"] * len(part))
             cur.execute(
-                "SELECT dt FROM kunlunads_dev.ads_custom_source_insight "
-                "FORCE INDEX (index_dad) WHERE platform IN (0,3) "
-                "ORDER BY dt DESC LIMIT 1"
+                f"""
+                SELECT 3 AS platform, campaign_id, ad_id, campaign_name,
+                       '' AS product, ad_account_id, status, country, language, budget
+                FROM kunlunads_dev.ads_tiktok_auto_created_data FORCE INDEX (campaign_id)
+                WHERE campaign_id IN ({placeholders})
+                """,
+                part,
             )
-            latest = cur.fetchone()
-            max_dt = latest["dt"] if latest else None
-            payload["insight_max_dt"] = max_dt
+            mapping.extend(cur.fetchall())
+        payload["mapping"] = mapping
 
-            daily: list[dict] = []
-            for platform in SUPPORTED_PLATFORMS:
-                ad_ids = sorted(
+        extra_mapping: list[dict] = []
+        for platform in SUPPORTED_PLATFORMS:
+            for level, id_field in ((1, "adset_id"), (2, "ad_id")):
+                entity_ids = sorted(
                     {
-                        str(row["ad_id"])
-                        for row in mapping
+                        str(row["new_id"])
+                        for row in extra_logs
                         if platform_id(row) == platform
-                        and str(row.get("ad_id") or "").isdigit()
-                        and int(row["ad_id"]) > 0
+                        and int(row.get("level") or 0) == level
                     }
                 )
-                log_dates = [
-                    parse_datetime(row.get("created_at"))
-                    for row in logs
-                    if platform_id(row) == platform
-                ]
-                min_dt = min((value.date() for value in log_dates if value), default=max_dt)
-                current = min_dt
-                while current and max_dt and current <= max_dt:
-                    for part in chunks(ad_ids, INSIGHT_CHUNK_SIZES[platform]):
+                found: set[str] = set()
+                if platform == 0:
+                    source_specs = (
+                        ("kunlunads_dev.ads_facebook_auto_created_data", "product", ""),
+                        ("ads_ai.ads_facebook_auto_created_data", "product", ""),
+                    )
+                else:
+                    source_specs = (
+                        (
+                            "kunlunads_dev.ads_tiktok_auto_created_data",
+                            "'' AS product",
+                            f" FORCE INDEX ({id_field})",
+                        ),
+                    )
+                for source_table, product_sql, index_hint in source_specs:
+                    remaining = sorted(set(entity_ids) - found)
+                    for part in chunks(remaining, 3000):
                         placeholders = ",".join(["%s"] * len(part))
                         cur.execute(
                             f"""
-                            SELECT {platform} AS platform, campaign_id,
-                                   SUM(impressions) AS impressions,
-                                   SUM(clicks) AS clicks,
-                                   SUM(installs) AS installs,
-                                   SUM(spend) AS spend,
-                                   SUM(purchase) AS purchase,
-                                   SUM(revenue) AS revenue,
-                                   SUM(af_installs) AS af_installs,
-                                   SUM(af_revenue0) AS af_revenue0,
-                                   SUM(af_revenue) AS af_revenue,
-                                   SUM(ad_impression_revenue) AS iaa_revenue,
-                                   COUNT(*) AS source_rows
-                            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
-                            WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
-                            GROUP BY campaign_id
+                            SELECT {platform} AS platform, campaign_id, adset_id, ad_id,
+                                   campaign_name, adset_name, ad_name, {product_sql},
+                                   ad_account_id, status, country, language, budget
+                            FROM {source_table}{index_hint}
+                            WHERE {id_field} IN ({placeholders})
                             """,
-                            [current, platform] + part,
+                            part,
                         )
-                        for row in cur.fetchall():
-                            row["dt"] = current
-                            daily.append(row)
-                    current += dt.timedelta(days=1)
-            payload["daily"] = daily
+                        for source_row in cur.fetchall():
+                            entity_id = str(source_row.get(id_field) or "")
+                            if not entity_id:
+                                continue
+                            source_row["level"] = level
+                            source_row["entity_id"] = entity_id
+                            extra_mapping.append(source_row)
+                            found.add(entity_id)
+        payload["extra_mapping"] = extra_mapping
 
-            extra_daily: list[dict] = []
-            for platform in SUPPORTED_PLATFORMS:
-                extra_ad_ids = sorted(
-                    {
-                        str(row["ad_id"])
-                        for row in extra_mapping
-                        if platform_id(row) == platform
-                        and str(row.get("ad_id") or "").isdigit()
-                        and int(row["ad_id"]) > 0
-                    }
-                )
-                extra_log_dates = [
-                    parse_datetime(row.get("created_at"))
-                    for row in extra_logs
+        cur.execute(
+            "SELECT dt FROM kunlunads_dev.ads_custom_source_insight "
+            "FORCE INDEX (index_dad) WHERE platform IN (0,3) "
+            "ORDER BY dt DESC LIMIT 1"
+        )
+        latest = cur.fetchone()
+        max_dt = latest["dt"] if latest else None
+        payload["insight_max_dt"] = max_dt
+        if not isinstance(max_dt, dt.date):
+            raise RuntimeError("insight date unavailable")
+        selected_dates, next_history = refresh_dates(previous, successful_logs, max_dt)
+        payload["refresh_dates"] = [value.isoformat() for value in selected_dates]
+        payload["history_next_date"] = next_history
+        print(json.dumps({"event": "campaign_copy_report_query_plan", "dates": payload["refresh_dates"],
+                          "campaigns": len(logs), "mapping_rows": len(mapping)}), flush=True)
+
+        daily: list[dict] = []
+        for platform in SUPPORTED_PLATFORMS:
+            ad_ids = sorted(
+                {
+                    str(row["ad_id"])
+                    for row in mapping
                     if platform_id(row) == platform
-                ]
-                extra_min_dt = min(
-                    (value.date() for value in extra_log_dates if value),
-                    default=max_dt,
-                )
-                current = extra_min_dt
-                while current and max_dt and current <= max_dt:
-                    for part in chunks(extra_ad_ids, INSIGHT_CHUNK_SIZES[platform]):
-                        placeholders = ",".join(["%s"] * len(part))
-                        cur.execute(
-                            f"""
-                            SELECT {platform} AS platform, ad_id,
-                                   SUM(impressions) AS impressions,
-                                   SUM(clicks) AS clicks,
-                                   SUM(installs) AS installs,
-                                   SUM(spend) AS spend,
-                                   SUM(purchase) AS purchase,
-                                   SUM(revenue) AS revenue,
-                                   SUM(af_installs) AS af_installs,
-                                   SUM(af_revenue0) AS af_revenue0,
-                                   SUM(af_revenue) AS af_revenue,
-                                   SUM(ad_impression_revenue) AS iaa_revenue,
-                                   COUNT(*) AS source_rows
-                            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
-                            WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
-                            GROUP BY ad_id
-                            """,
-                            [current, platform] + part,
-                        )
-                        for row in cur.fetchall():
-                            row["dt"] = current
-                            extra_daily.append(row)
-                    current += dt.timedelta(days=1)
-            payload["extra_daily"] = extra_daily
-            return payload
-    finally:
-        conn.close()
+                    and str(row.get("ad_id") or "").isdigit()
+                    and int(row["ad_id"]) > 0
+                }
+            )
+            log_dates = [
+                parse_datetime(row.get("created_at"))
+                for row in logs
+                if platform_id(row) == platform
+            ]
+            min_dt = min((value.date() for value in log_dates if value), default=max_dt)
+            for current in selected_dates:
+                if current < min_dt:
+                    continue
+                for part in chunks(ad_ids, INSIGHT_CHUNK_SIZES[platform]):
+                    placeholders = ",".join(["%s"] * len(part))
+                    cur.execute(
+                        f"""
+                        SELECT {platform} AS platform, campaign_id,
+                               SUM(impressions) AS impressions,
+                               SUM(clicks) AS clicks,
+                               SUM(installs) AS installs,
+                               SUM(spend) AS spend,
+                               SUM(purchase) AS purchase,
+                               SUM(revenue) AS revenue,
+                               SUM(af_installs) AS af_installs,
+                               SUM(af_revenue0) AS af_revenue0,
+                               SUM(af_revenue) AS af_revenue,
+                               SUM(ad_impression_revenue) AS iaa_revenue,
+                               COUNT(*) AS source_rows
+                        FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
+                        WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
+                        GROUP BY campaign_id
+                        """,
+                        [current, platform] + part,
+                    )
+                    for row in cur.fetchall():
+                        row["dt"] = current
+                        daily.append(row)
+                print(json.dumps({"event": "campaign_copy_report_day", "platform": platform,
+                                  "date": current.isoformat()}), flush=True)
+        payload["daily"] = daily
+
+        extra_daily: list[dict] = []
+        for platform in SUPPORTED_PLATFORMS:
+            extra_ad_ids = sorted(
+                {
+                    str(row["ad_id"])
+                    for row in extra_mapping
+                    if platform_id(row) == platform
+                    and str(row.get("ad_id") or "").isdigit()
+                    and int(row["ad_id"]) > 0
+                }
+            )
+            extra_log_dates = [
+                parse_datetime(row.get("created_at"))
+                for row in extra_logs
+                if platform_id(row) == platform
+            ]
+            extra_min_dt = min(
+                (value.date() for value in extra_log_dates if value),
+                default=max_dt,
+            )
+            for current in selected_dates:
+                if current < extra_min_dt:
+                    continue
+                for part in chunks(extra_ad_ids, INSIGHT_CHUNK_SIZES[platform]):
+                    placeholders = ",".join(["%s"] * len(part))
+                    cur.execute(
+                        f"""
+                        SELECT {platform} AS platform, ad_id,
+                               SUM(impressions) AS impressions,
+                               SUM(clicks) AS clicks,
+                               SUM(installs) AS installs,
+                               SUM(spend) AS spend,
+                               SUM(purchase) AS purchase,
+                               SUM(revenue) AS revenue,
+                               SUM(af_installs) AS af_installs,
+                               SUM(af_revenue0) AS af_revenue0,
+                               SUM(af_revenue) AS af_revenue,
+                               SUM(ad_impression_revenue) AS iaa_revenue,
+                               COUNT(*) AS source_rows
+                        FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
+                        WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
+                        GROUP BY ad_id
+                        """,
+                        [current, platform] + part,
+                    )
+                    for row in cur.fetchall():
+                        row["dt"] = current
+                        extra_daily.append(row)
+                print(json.dumps({"event": "campaign_copy_report_day", "platform": platform,
+                                  "date": current.isoformat()}), flush=True)
+        payload["extra_daily"] = extra_daily
+        return payload
 
 
 def build_payload(raw: dict) -> dict:
@@ -859,10 +986,10 @@ class ReportCache:
         age = max(0, time.time() - self.cache_path.stat().st_mtime)
         if age > STALE_IF_ERROR_SECONDS:
             print(
-                json.dumps({"event": "campaign_copy_report_disk_cache_ignored", "age_seconds": int(age)}),
+                json.dumps({"event": "campaign_copy_report_disk_cache_stale", "age_seconds": int(age)}),
                 flush=True,
             )
-            return False
+            # Keep verified historical rows as an incremental seed; HTTP marks them stale.
         try:
             original = self.cache_path.read_bytes()
             body = validate_or_convert_cache_body(original)
@@ -900,7 +1027,11 @@ class ReportCache:
             self.refresh_in_progress = True
             self.last_error = ""
         try:
-            payload = build_payload(query_raw())
+            prior_body = self.snapshot()["body"]
+            previous = json.loads(prior_body) if prior_body else None
+            raw = query_raw(previous)
+            payload = merge_history(build_payload(raw), previous, raw["refresh_dates"], raw["history_next_date"])
+            del raw, previous, prior_body
             body = serialize_wire_payload(payload)
             self._persist(body)
             self._install_body(body)
@@ -934,6 +1065,8 @@ class ReportCache:
                     {
                         "event": "campaign_copy_report_refresh_failed",
                         "error_type": type(exc).__name__,
+                        "error_code": exc.args[0] if exc.args and isinstance(exc.args[0], int) else None,
+                        "seconds": round(time.monotonic() - started, 3),
                         "cache_age_seconds": snapshot["age"] if snapshot["body"] is not None else -1,
                     }
                 ),
@@ -1217,6 +1350,9 @@ def self_test() -> int:
 def main() -> int:
     if "--self-test" in sys.argv:
         return self_test()
+    if "--warm-cache" in sys.argv:
+        CACHE.load_disk()
+        return 0 if CACHE.refresh() else 1
     if not INDEX_PATH.is_file():
         raise RuntimeError(f"missing frontend: {INDEX_PATH}")
     CACHE.start()

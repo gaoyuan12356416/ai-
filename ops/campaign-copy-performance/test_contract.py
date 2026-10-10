@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import datetime as dt
+import time
 import os
 import tempfile
 import threading
@@ -14,6 +16,60 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ContractTest(unittest.TestCase):
+    def previous(self):
+        return {"v": 2, "m": {"read_only_verified": True, "stat_end": "2026-10-08"},
+                "cf": ["platform", "campaign_id"], "c": [[0, "100"]],
+                "xf": ["platform", "level", "entity_id"], "x": [[3, 2, "200"]],
+                "df": ["platform", "campaign_id", "dt", "spend"],
+                "d": [[0, "100", "2026-07-17", 3], [0, "100", "2026-08-01", 5], [0, "100", "2026-10-08", 7]],
+                "xdf": ["entity_key", "dt", "spend"], "xd": [["3:2:200", "2026-08-01", 4]]}
+
+    def test_incremental_replaces_dates_without_double_counting(self):
+        previous = self.previous()
+        payload = {"meta": {}, "campaigns": [{"platform": 0, "campaign_id": "100"}],
+                   "extra_entities": [{"entity_key": "3:2:200"}], "extra_daily": [],
+                   "daily": [{"platform": 0, "campaign_id": "100", "dt": "2026-10-08", "spend": 11}]}
+        merged = service.merge_history(payload, previous, ["2026-07-17", "2026-10-08"], "2026-07-18")
+        self.assertEqual(sum(row["spend"] for row in merged["daily"]), 16)
+        self.assertEqual(merged["meta"]["stat_start"], "2026-08-01")
+        self.assertEqual(merged["extra_daily"][0]["spend"], 4)
+        # An empty successful re-query replaces old rows too (including deleted corrections).
+        self.assertNotIn("2026-07-17", [row["dt"] for row in merged["daily"]])
+
+    def test_refresh_window_covers_outage_and_rotates_history(self):
+        previous = self.previous()
+        logs = [{"platform": 0, "level": 0, "new_id": "100", "created_at": "2026-07-17 10:00:00"}]
+        dates, cursor = service.refresh_dates(previous, logs, dt.date(2026, 10, 10))
+        self.assertEqual(len(dates), 8)
+        self.assertIn(dt.date(2026, 10, 9), dates)
+        self.assertIn(dt.date(2026, 10, 10), dates)
+        self.assertEqual(cursor, "2026-07-18")
+        previous["m"]["stat_end"] = "2026-09-20"
+        dates, _ = service.refresh_dates(previous, logs, dt.date(2026, 10, 10))
+        self.assertIn(dt.date(2026, 9, 21), dates)
+        logs.append({"platform": 3, "level": 0, "new_id": "100", "created_at": "2026-08-10"})
+        dates, _ = service.refresh_dates(previous, logs, dt.date(2026, 10, 10))
+        self.assertIn(dt.date(2026, 8, 10), dates)
+
+    def test_failed_refresh_keeps_last_good_cache(self):
+        cache = service.ReportCache(None)
+        body = json.dumps(self.previous()).encode()
+        cache._install_body(body)
+        with mock.patch.object(service, "query_raw", side_effect=service.pymysql.err.OperationalError(3024, "timeout")):
+            self.assertFalse(cache.refresh())
+        self.assertEqual(cache.snapshot()["body"], body)
+        self.assertFalse(cache.snapshot()["refresh_in_progress"])
+
+    def test_stale_disk_cache_remains_available_as_historical_seed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"report.json"
+            path.write_text(json.dumps(self.previous()))
+            past = time.time()-3*86400
+            os.utime(path, (past, past))
+            cache = service.ReportCache(path)
+            self.assertTrue(cache.load_disk())
+            self.assertGreater(cache.snapshot()["age"], 2*86400)
+
     def test_frontend_contract(self):
         source = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn("fetch('./api/data'", source)
