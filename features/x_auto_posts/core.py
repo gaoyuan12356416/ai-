@@ -3851,8 +3851,19 @@ class XAutoPostStore:
         clean_product = None if product is None else _bounded_text(product, "product", 128)
         items: List[Dict[str, Any]] = []
         with self._reader() as conn:
-            date_placeholders = ",".join("?" for _ in normalized_dates)
-            sql = """
+            # Production SQLite permits only 999 bound variables. Bound both
+            # dimensions and read one snapshot so a cache refresh cannot mix
+            # generations between batches.
+            conn.execute("BEGIN")
+            content_batches = (
+                [None] if clean_content_ids is None else
+                [clean_content_ids[offset : offset + 500]
+                 for offset in range(0, len(clean_content_ids), 500)]
+            )
+            for date_offset in range(0, len(normalized_dates), 400):
+                date_batch = normalized_dates[date_offset : date_offset + 400]
+                date_placeholders = ",".join("?" for _ in date_batch)
+                base_sql = """
                 SELECT
                     p.metric_date,p.platform,p.product,
                     d.content_id,d.material_id,d.spend,d.af_revenue0
@@ -3862,27 +3873,29 @@ class XAutoPostStore:
                 WHERE p.platform=? AND p.metric_date IN (%s)
                   AND g.status='ready'
             """ % date_placeholders
-            params: List[Any] = [normalized_platform, *normalized_dates]
-            if clean_product is not None:
-                sql += " AND p.product=?"
-                params.append(clean_product)
-            if clean_content_ids is not None:
-                content_placeholders = ",".join("?" for _ in clean_content_ids)
-                sql += " AND d.content_id IN (%s)" % content_placeholders
-                params.extend(clean_content_ids)
-            sql += " ORDER BY p.metric_date,d.content_id,d.material_id"
-            for row in conn.execute(sql, tuple(params)):
-                items.append(
-                    {
-                        "metric_date": str(row["metric_date"]),
-                        "platform": int(row["platform"]),
-                        "product": str(row["product"]),
-                        "content_id": str(row["content_id"]),
-                        "material_id": str(row["material_id"]),
-                        "spend": str(row["spend"] or "0"),
-                        "af_revenue0": str(row["af_revenue0"] or "0"),
-                    }
-                )
+                for content_batch in content_batches:
+                    sql = base_sql
+                    params: List[Any] = [normalized_platform, *date_batch]
+                    if clean_product is not None:
+                        sql += " AND p.product=?"
+                        params.append(clean_product)
+                    if content_batch is not None:
+                        content_placeholders = ",".join("?" for _ in content_batch)
+                        sql += " AND d.content_id IN (%s)" % content_placeholders
+                        params.extend(content_batch)
+                    for row in conn.execute(sql, tuple(params)):
+                        items.append(
+                            {
+                                "metric_date": str(row["metric_date"]),
+                                "platform": int(row["platform"]),
+                                "product": str(row["product"]),
+                                "content_id": str(row["content_id"]),
+                                "material_id": str(row["material_id"]),
+                                "spend": str(row["spend"] or "0"),
+                                "af_revenue0": str(row["af_revenue0"] or "0"),
+                            }
+                        )
+        items.sort(key=lambda row: (row["metric_date"], row["content_id"], row["material_id"]))
         return iter(items)
 
 
