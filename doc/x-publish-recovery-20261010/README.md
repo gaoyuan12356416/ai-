@@ -33,3 +33,66 @@ under the user's publishing-repair authorization, following health and ledger
 checks. Preserve configured accounts, frequency, frozen plans, historical failed
 attempts, ambiguous outcomes and the existing 90-second schedule grace period.
 Never invoke a historical catch-up or a synthetic Post to test this repair.
+
+## Production acceptance, 2026-10-10 Beijing time
+
+- Code commit: `5def5268635a6dbfd8148f86dd7ae9c47542323a`, pushed to
+  `codex/x-publish-recovery-20261010` before deployment.
+- CPU host: `43.166.187.96`; active link: `/opt/x-post-automation/current`.
+- New release:
+  `/mnt/data-disk/x-post-automation/releases/5def5268635a6dbfd8148f86dd7ae9c47542323a-metric-query`.
+- Previous release:
+  `/mnt/data-disk/x-post-automation/releases/23a9b466d781a592ed2e3da402ee2f97ac3c3a71-template-list-static`.
+- Online database backups, immutable publication fingerprints, token hashes and
+  operation manifest:
+  `/mnt/data-disk/x-post-automation/maintenance/20261010-metric-query-5def5268`.
+- Local Auto suite: 155 checks, one environment-dependent skip. Focused CPU
+  suite: 63 passed. Python syntax and Git whitespace checks passed.
+- The same live read that failed before the change now returns all 28,130
+  active metric rows for 2,737 dramas. Query-only access was used.
+- X Auto sidecar restart succeeded; local Auto, X OAuth and public OAuth health
+  endpoints all returned HTTP 200. Code switching preserved publication/token
+  fingerprints. Main API and X OAuth sidecar were not restarted.
+- By 11:20, two natural Auto tasks had new confirmed Post IDs, each with one
+  attempt and no unknown outcome. A subsequent audit found no new transient
+  failure events after the repair. Older error text can remain on queued or
+  selecting tasks until they advance; do not equate that with a new failure.
+- Existing schedule, schedule-claim and manual timers were separately restored
+  to active/enabled under the user's repair request. Their prior state and unit
+  files are in `pool-timer-restoration/` inside the backup directory. The claim
+  service succeeded and the next-day random plans were generated. Publish
+  workers use their existing shared lock while Auto drains its pending work.
+- Existing pool configuration remains 18 configured accounts and one daily
+  batch per pool. The next material slot is 2026-10-10 16:20; the next future
+  drama slot is 2026-10-11 01:04. The elapsed 08:25 drama slot was not redrawn.
+
+Yesterday's quota shortfall was distinct from today's SQL error: on October 9
+the two stopped pool timers had not created the daily plans (122 target posts),
+while Auto published 12 and had three no-candidate results under its configured
+ROAS/media/history gates. The pool triggers were stopped during the October 1
+credit-exhaustion incident and had not been restored. Current confirmed Auto
+Posts demonstrate the shared API can publish again; this is not a balance audit.
+
+Remaining scope is explicit: 15 bound dramas retain known failed episodes from
+the old billing incident. Historical retry is awaiting the user's scope choice;
+their queue/log/pool facts remain unchanged. One unknown-result account remains
+fenced, and another configured account was freshly confirmed suspended by X.
+These are account-local holds, not a reason to stop healthy accounts. Do not
+describe the entire drama pool as fully restored while these holds remain.
+
+The local `ai-backend-maintenance` skill context was updated with the reusable
+query-limit, snapshot and timer-restoration guidance.
+
+Code-only rollback, after the installer safely drains workers:
+
+```bash
+python3 /mnt/data-disk/x-post-automation/install-metric-query-5def526.py --rollback /mnt/data-disk/x-post-automation/maintenance/20261010-metric-query-5def5268
+```
+
+This preserves current publisher databases, tokens and pool timer states. To
+separately undo this task's restoration of the pool triggers, stop only these
+timers (do not interrupt an in-flight sidecar request):
+
+```bash
+systemctl stop x-post-schedule.timer x-post-schedule-claim.timer x-post-manual.timer
+```
