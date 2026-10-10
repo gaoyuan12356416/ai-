@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
+import subprocess
 import time
 from functools import cmp_to_key
 from dataclasses import dataclass, field
@@ -122,6 +124,24 @@ def _description(value: Any) -> str:
     if any(ord(char) < 32 for char in text):
         return ""
     return text[:4096].rstrip()
+
+
+def _probe_exact_material_duration(source_url: str) -> Decimal:
+    """Bounded read-only metadata probe; the caller first validates the owned COS URL."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-rw_timeout", "10000000", "-show_entries", "format=duration",
+             "-of", "json", source_url], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RepositoryError("fb_auto_material_probe_failed", "素材库缺少视频时长，媒体时长探测失败或超时，请稍后重试", 503) from None
+    if result.returncode != 0 or len(result.stdout) > 8192:
+        raise RepositoryError("fb_auto_material_probe_failed", "素材库缺少视频时长，未能读取实际媒体时长", 409)
+    try:
+        return Decimal(str(json.loads(result.stdout)["format"]["duration"]))
+    except (ValueError, TypeError, KeyError, InvalidOperation):
+        raise RepositoryError("fb_auto_material_probe_failed", "实际媒体未返回有效视频时长", 409) from None
 
 
 class ReadOnlyMySQL:
@@ -305,18 +325,107 @@ class PagePoolRepository:
 class MaterialRepository:
     """Select video candidates using the current X-auto source semantics."""
 
-    def __init__(self, mysql: ReadOnlyMySQL, metric_store: Any | None = None, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC), rng: random.Random | None = None, monotonic_fn: Callable[[], float] = time.monotonic, catalog_deadline_seconds: int = 600, catalog_max_pages: int = 100, metric_prefilter_min_content_ids: int = 100, metric_prefilter_batch_size: int = 200, candidate_limit: int = 5000):
+    def __init__(self, mysql: ReadOnlyMySQL, metric_store: Any | None = None, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC), rng: random.Random | None = None, monotonic_fn: Callable[[], float] = time.monotonic, catalog_deadline_seconds: int = 600, catalog_max_pages: int = 100, metric_prefilter_min_content_ids: int = 100, metric_prefilter_batch_size: int = 200, candidate_limit: int = 5000, duration_probe: Callable[[str], Any] | None = None):
         self.mysql, self.metric_store, self.now_fn, self.rng = mysql, metric_store, now_fn, rng or random.SystemRandom()
         self.monotonic_fn, self.catalog_deadline_seconds, self.catalog_max_pages = monotonic_fn, max(60, int(catalog_deadline_seconds)), max(1, int(catalog_max_pages))
         self.metric_prefilter_min_content_ids = max(1, int(metric_prefilter_min_content_ids))
         self.metric_prefilter_batch_size = max(1, min(int(metric_prefilter_batch_size), 500))
         self.candidate_limit = max(1, min(int(candidate_limit), 5000))
+        self.duration_probe = duration_probe or _probe_exact_material_duration
 
     @staticmethod
     def _in_range(value: Decimal | None, low: Any, high: Any) -> bool:
         if value is None:
             return low is None and high is None
         return (low is None or value >= Decimal(str(low))) and (high is None or value <= Decimal(str(high)))
+
+    def exact_material(self, config: Mapping[str, Any], material_id: str) -> MaterialCandidate:
+        """Resolve one trusted source ID without automatic ranking or Page language filters."""
+        from .languages import page_language
+        from .manual_batch import BatchError, prepare_source_url
+
+        if not re.fullmatch(r"[1-9][0-9]{0,30}", str(material_id)):
+            raise RepositoryError("invalid_request", "素材ID必须为正整数", 400)
+        rows = self.mysql.select(f"""
+            SELECT CAST(s.id AS CHAR) material_id,s.data_source,s.product,s.type,s.is_delete,
+                   TRIM(s.data_source_id) content_id,s.url media_url,
+                   LOWER(TRIM(s.language)) language,COALESCE(s.name,'') material_name,
+                   COALESCE(s.tag_name,'') material_tag,s.video_duration
+              FROM `{self.mysql.schema}`.ads_custom_source s WHERE s.id=%s
+        """, (str(material_id),))
+        if not rows:
+            raise RepositoryError("fb_auto_material_not_found", "指定素材ID不存在", 404)
+        if len(rows) != 1 or str(rows[0].get("material_id")) != str(material_id):
+            raise RepositoryError("fb_auto_source_data_invalid", "指定素材ID返回了不唯一的数据")
+        row = rows[0]
+        if (str(row.get("type")) != "2" or str(row.get("data_source")) != str(config["material_data_source"])
+                or str(row.get("is_delete")) != "0"
+                or str(row.get("product") or "").casefold() != str(config["product"]).casefold()):
+            raise RepositoryError("fb_auto_material_invalid", "指定素材须为当前产品下未删除的视频素材", 409)
+        content_id = str(row.get("content_id") or "").strip()
+        language = page_language(row.get("language"))
+        try:
+            duration = Decimal(str(row.get("video_duration") or 0))
+        except (InvalidOperation, TypeError, ValueError):
+            duration = Decimal(0)
+        if not duration.is_finite():
+            duration = Decimal(0)
+        if not content_id or not language:
+            raise RepositoryError("fb_auto_material_invalid", "指定素材缺少短剧或语言信息", 409)
+        if duration > 3600:
+            raise RepositoryError("fb_auto_material_duration_invalid", "指定视频时长超过当前1小时制作上限", 409)
+        try:
+            source_url = prepare_source_url(row.get("media_url"))
+        except (BatchError, ValueError):
+            raise RepositoryError("fb_auto_material_url_invalid", "指定素材必须为素材库COS中的有效MP4地址", 409) from None
+        dramas = self.mysql.select(f"""
+            SELECT d.id,COALESCE(d.name,'') drama_name,LOWER(TRIM(d.language)) language,
+                   CAST(d.resource_type_v2 AS CHAR) resource_type_v2,
+                   CAST(d.series_code AS CHAR) series_code
+              FROM `{self.mysql.schema}`.ads_drama_info d
+             WHERE d.app_id=%s AND d.content_id=%s AND d.release_status=1
+               AND d.deploy_time>0 AND d.deploy_time<=%s ORDER BY d.id DESC
+        """, (str(config["app_id"]), content_id, int(self.now_fn().timestamp())))
+        detail = next((item for item in dramas if page_language(item.get("language")) == language), None)
+        if detail is None:
+            raise RepositoryError("fb_auto_material_drama_unavailable", "指定素材未匹配到已上架且已到投放时间的短剧", 409)
+        blocked = self.mysql.select(f"""
+            SELECT b.id FROM `{self.mysql.blacklist_schema}`.ads_facebook_post_blacklist b
+             WHERE b.is_delete=0 AND ((b.type=1 AND b.content_id=%s) OR
+               (b.type=0 AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info d
+                  WHERE d.app_id=%s AND d.content_id=%s AND d.series_code=b.content_id))) LIMIT 1
+        """, (content_id, str(config["app_id"]), content_id))
+        if blocked:
+            raise RepositoryError("fb_auto_material_blacklisted", "指定素材对应短剧在Facebook发布黑名单中，未创建运行", 409)
+        if duration <= 0:
+            try:
+                duration = Decimal(str(self.duration_probe(source_url)))
+            except RepositoryError:
+                raise
+            except (OSError, subprocess.TimeoutExpired):
+                raise RepositoryError("fb_auto_material_probe_failed", "素材库缺少视频时长，媒体时长探测失败或超时，请稍后重试", 503) from None
+            except (InvalidOperation, TypeError, ValueError):
+                raise RepositoryError("fb_auto_material_probe_failed", "实际媒体未返回有效视频时长", 409) from None
+            if not duration.is_finite() or not 0 < duration <= 3600:
+                raise RepositoryError("fb_auto_material_duration_invalid", "实际媒体时长无效或超过当前1小时制作上限", 409)
+        description = ""
+        if "{{desc}}" in str(config.get("message_template") or ""):
+            descriptions = self.mysql.select(f"""
+                SELECT MAX(TRIM(r.`desc`)) drama_description,
+                       COUNT(DISTINCT BINARY TRIM(r.`desc`)) description_count
+                  FROM `{self.mysql.schema}`.ads_drama_resource r
+                 WHERE r.app_id=%s AND r.content_id=%s AND r.type=2
+                   AND LOWER(TRIM(r.language))=%s AND TRIM(COALESCE(r.`desc`,''))<>''
+            """, (str(config["app_id"]), content_id, str(row["language"])))
+            if len(descriptions) == 1 and int(descriptions[0].get("description_count") or 0) == 1:
+                description = _description(descriptions[0].get("drama_description"))
+            if not description:
+                raise RepositoryError("fb_auto_material_description_invalid", "模板使用短剧简介，但指定素材没有唯一有效的同语言简介", 409)
+        return MaterialCandidate(str(material_id), content_id, source_url,
+                                 str(row.get("material_name") or ""), str(detail.get("drama_name") or ""),
+                                 language, duration, Decimal(0), None, Decimal(0), None,
+                                 str(detail.get("resource_type_v2") or ""), description,
+                                 str(row.get("material_tag") or "FBmanual"))
 
     def candidate_snapshot(self, config: Mapping[str, Any]) -> CandidateSnapshot:
         # Trusted planner-only bound: retain enough ranked rows for every known

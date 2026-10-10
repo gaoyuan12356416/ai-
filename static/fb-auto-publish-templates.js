@@ -8,6 +8,9 @@
     limit: 50,
     offset: 0,
     busyIds: new Set(),
+    material: null,
+    materialBusy: false,
+    draftNamespace: "",
   };
 
   function isEnabled(item) {
@@ -87,6 +90,7 @@
         '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
         '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
+        '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', runDisabled, runTitle, ">爆款素材发布</button>",
         "</div></td>",
         "</tr>",
       ].join("");
@@ -124,6 +128,140 @@
     return state.templates.find(item => ui.positiveId(item.id || item.template_id) === id) || null;
   }
 
+  const skipReasons = {
+    fb_auto_page_frequency_limit: "Page 已暂停",
+    fb_page_missing_eligible_token: "缺少有效发布授权",
+    fb_auto_page_unknown_block: "历史发布结果待核验",
+    fb_auto_material_active: "该素材已有待执行或执行中的任务",
+    fb_auto_material_cooldown: "近 14 天已使用该素材",
+    fb_auto_page_task_conflict: "该 Page 同一时点已有发布任务",
+    page_paused: "Page 已暂停", paused_page: "Page 已暂停", page_daily_limit_zero: "Page 已暂停",
+    missing_eligible_token: "缺少有效发布授权", page_unknown: "历史发布结果待核验",
+    same_material_cooldown: "近 14 天已使用或正在使用该素材",
+    same_material_reserved: "该素材已有待发布任务", material_reserved: "该素材已有待发布任务",
+  };
+  // A proxy can return 400 after the sidecar committed (for example if audit
+  // logging fails). Only explicit pre-reservation business codes release a draft.
+  const materialRejections = new Set([
+    "fb_auto_version_conflict", "fb_auto_template_disabled", "fb_auto_video_template_required",
+    "fb_auto_live_gate_closed", "fb_auto_prebuild_gate_closed", "fb_auto_page_pool_empty",
+    "fb_auto_page_scope_invalid", "fb_auto_legacy_queue_conflict", "fb_auto_page_template_conflict",
+    "fb_auto_capacity_snapshot_changed", "fb_auto_capacity_exceeded", "fb_auto_material_identity_invalid",
+    "fb_auto_material_not_found", "fb_auto_source_data_invalid", "fb_auto_material_invalid",
+    "fb_auto_material_url_invalid", "fb_auto_material_drama_unavailable", "fb_auto_material_blacklisted",
+    "fb_auto_material_description_invalid", "fb_auto_material_duration_invalid", "fb_auto_material_probe_failed",
+  ]);
+
+  function materialStorageKey(id) {
+    return "fb-hit-material:" + state.draftNamespace + ":" + id;
+  }
+
+  function materialStatus(message, isError = false) {
+    ui.byId("materialStatus").textContent = message;
+    ui.byId("materialStatus").className = "status-line" + (isError ? " error" : "");
+  }
+
+  function renderMaterialResult(result) {
+    const queued = Number(result.queued || 0);
+    const skipped = Number(result.skipped || 0);
+    materialStatus("运行 #" + result.run_id + " 已创建：" + queued + " 个 Page 已加入发布队列，" + skipped + " 个跳过。" + (queued ? "发布进度请查看记录。" : "本轮没有可发布的 Page。"));
+    ui.byId("materialResult").classList.remove("hidden");
+    ui.byId("materialRunLink").href = "/fb-auto-publish-runs.html?run_id=" + ui.positiveId(result.run_id);
+    const rows = Array.isArray(result.skipped_pages) ? result.skipped_pages : [];
+    ui.byId("materialSkipped").classList.toggle("hidden", !rows.length);
+    ui.byId("materialSkippedSummary").textContent = "查看 " + rows.length + " 个 Page 的跳过原因";
+    ui.byId("materialSkippedRows").innerHTML = rows.map(row => "<tr><td>" + ui.escapeHtml(row.page_id) + "</td><td>" + ui.escapeHtml(row.message || skipReasons[row.reason] || row.reason || "暂不可发布") + "</td></tr>").join("");
+    ui.byId("materialSubmit").classList.add("hidden");
+    ui.byId("materialNew").classList.remove("hidden");
+    ui.byId("materialClose").textContent = "关闭";
+    ui.byId("hitMaterialId").readOnly = true;
+  }
+
+  function openMaterialDialog(item, fresh = false) {
+    const id = ui.positiveId(item.id || item.template_id);
+    let saved = null;
+    try {
+      saved = fresh ? null : JSON.parse(window.sessionStorage.getItem(materialStorageKey(id)) || "null");
+      if (fresh) window.sessionStorage.removeItem(materialStorageKey(id));
+    } catch (_error) { /* Submission will require durable browser storage. */ }
+    state.material = {id, item, draft: saved && saved.draft || null, result: saved && saved.result || null};
+    ui.byId("materialTemplateName").textContent = item.name || item.config?.name || "模板 " + id;
+    ui.byId("hitMaterialId").value = state.material.draft?.material_id || "";
+    ui.byId("hitMaterialId").readOnly = Boolean(state.material.draft);
+    ui.byId("materialResult").classList.add("hidden");
+    ui.byId("materialNew").classList.add("hidden");
+    ui.byId("materialSubmit").classList.remove("hidden");
+    ui.byId("materialSubmit").disabled = false;
+    ui.byId("materialSubmit").textContent = state.material.draft ? "重试确认" : "确认发布";
+    ui.byId("materialClose").textContent = "取消";
+    materialStatus(state.material.draft ? "上次提交尚未确认结果，请重试确认同一轮任务。" : "确认后将开始制作并排队发布。", Boolean(state.material.draft));
+    if (state.material.result) renderMaterialResult(state.material.result);
+    if (!ui.byId("materialDialog").open) ui.byId("materialDialog").showModal();
+    ui.byId("hitMaterialId").focus();
+  }
+
+  async function submitMaterial(event) {
+    event.preventDefault();
+    const current = state.material;
+    if (!current || state.materialBusy || current.result) return;
+    const materialId = ui.byId("hitMaterialId").value.trim();
+    if (!/^[1-9][0-9]{0,19}$/.test(materialId)) {
+      materialStatus("请输入一个有效的数字素材 ID。", true);
+      return;
+    }
+    if (!current.draft) current.draft = {expected_version: ui.templateVersion(current.item), material_id: materialId, operation_id: ui.operationId()};
+    try {
+      window.sessionStorage.setItem(materialStorageKey(current.id), JSON.stringify({draft: current.draft}));
+    } catch (_error) {
+      current.draft = null;
+      materialStatus("浏览器无法保存本次提交，请允许本站存储后重试。尚未发送发布请求。", true);
+      return;
+    }
+    state.materialBusy = true;
+    state.busyIds.add(current.id);
+    ui.byId("materialSubmit").disabled = true;
+    ui.byId("materialClose").disabled = true;
+    ui.byId("hitMaterialId").readOnly = true;
+    materialStatus("正在核对素材和 Page，并创建本轮任务…");
+    renderTemplates();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 125000);
+    try {
+      const response = await fetch(ui.API_BASE + "/templates/" + current.id + "/run-now", {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify(current.draft), signal: controller.signal,
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        const error = new Error(result.message || "发布请求未完成");
+        error.rejected = materialRejections.has(result.code || result.error);
+        throw error;
+      }
+      if (result.ok !== true || !ui.positiveId(result.run_id)) throw new Error("未取得有效的运行记录");
+      current.result = result;
+      try { window.sessionStorage.setItem(materialStorageKey(current.id), JSON.stringify({draft: current.draft, result})); } catch (_error) { /* The original request remains replayable. */ }
+      renderMaterialResult(result);
+    } catch (error) {
+      if (error.rejected) {
+        current.draft = null;
+        try { window.sessionStorage.removeItem(materialStorageKey(current.id)); } catch (_error) { /* Keep the visible error. */ }
+        ui.byId("hitMaterialId").readOnly = false;
+        ui.byId("materialSubmit").textContent = "确认发布";
+        materialStatus(error.message, true);
+      } else {
+        ui.byId("materialSubmit").textContent = "重试确认";
+        materialStatus("尚未确认提交结果。点击“重试确认”查询或继续同一轮任务，不会重复创建。", true);
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      state.materialBusy = false;
+      state.busyIds.delete(current.id);
+      ui.byId("materialSubmit").disabled = false;
+      ui.byId("materialClose").disabled = false;
+      renderTemplates();
+    }
+  }
+
   async function handleAction(event) {
     const button = event.target.closest("button[data-action][data-template-id]");
     if (!button || !ui.byId("templateRows").contains(button)) return;
@@ -132,8 +270,12 @@
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
     const enabled = isEnabled(item);
-    if (action === "run" && !enabled) {
+    if (["run", "material"].includes(action) && !enabled) {
       ui.showToast("模板已停用，请先启用后再手动执行。", true);
+      return;
+    }
+    if (action === "material") {
+      openMaterialDialog(item);
       return;
     }
     const accepted = action === "run"
@@ -173,6 +315,16 @@
   }
 
   function bindEvents() {
+    ui.byId("materialForm").addEventListener("submit", event => void submitMaterial(event));
+    ui.byId("materialClose").addEventListener("click", () => {
+      if (!state.materialBusy) ui.byId("materialDialog").close();
+    });
+    ui.byId("materialDialog").addEventListener("cancel", event => {
+      if (state.materialBusy) event.preventDefault();
+    });
+    ui.byId("materialNew").addEventListener("click", () => {
+      if (state.material && !state.materialBusy) openMaterialDialog(findTemplate(state.material.id) || state.material.item, true);
+    });
     ui.byId("templateFilters").addEventListener("submit", event => {
       event.preventDefault();
       state.offset = 0;
@@ -197,7 +349,9 @@
   }
 
   void ui.boot({
-    onReady: async () => {
+    onReady: async auth => {
+      const user = auth && auth.user || {};
+      state.draftNamespace = String(user.tenant_key || "") + ":" + String(user.user_id || user.open_id || user.id || "current");
       bindEvents();
       await Promise.all([loadGroups(), loadTemplates()]);
     },

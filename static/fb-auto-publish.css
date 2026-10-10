@@ -292,6 +292,14 @@ dialog {
 }
 
 dialog::backdrop { background: rgb(16 24 40 / 45%); }
+#materialDialog { width: min(580px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.material-body { display: grid; gap: 14px; }
+.material-body #materialTemplateName { color: #172033; font-weight: 600; }
+.material-body .status-line.error { color: #b42318; }
+.material-body .status-line.success { color: #067647; }
+.material-body details { margin-top: 14px; }
+.material-body summary { cursor: pointer; color: #475467; }
+.material-skips { max-height: 230px; overflow: auto; margin-top: 8px; }
 .dialog-head, .dialog-body, .dialog-foot { padding: 16px 18px; }
 .dialog-head { border-bottom: 1px solid #eaecf0; }
 .dialog-body p { margin: 0; color: #475467; line-height: 1.6; }

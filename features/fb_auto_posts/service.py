@@ -253,6 +253,9 @@ class Handler(BaseHTTPRequestHandler):
                 summary = self.runtime.validate_activation(template) if action == "enable" else {}
                 fingerprint = summary.pop("_enabled_fingerprint", None)
                 result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], expected_enabled_fingerprint=fingerprint, preserve_unsubmitted_before_utc=payload.get("preserve_unsubmitted_before_utc")), "page_summary": summary}
+            elif action == "run-now" and "material_id" in payload:
+                from .hit_material import publish_material
+                result = publish_material(self.runtime, template_id, actor, payload)
             else:
                 if set(payload) != {"expected_version","operation_id"}: raise ServiceError("invalid_request", "手动执行请求字段无效", 400)
                 if not self.runtime.executor.live_enabled: raise ServiceError("fb_auto_live_gate_closed", "FB自动发布总开关关闭，未创建运行或调用GPU/Meta", 409)

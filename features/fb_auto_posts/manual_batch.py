@@ -177,7 +177,10 @@ def task_policy(conn, task):
     config = json.loads(run["config_json"])
     marker = config.get("operator_material_batch")
     if marker is None:
-        return None
+        from .hit_material import task_policy as hit_material_policy
+        return hit_material_policy(run, task, config)
+    if "hit_material_publish" in config:
+        raise BatchError("Conflicting immutable manual policies")
     manifest = marker.get("manifest", {}) if isinstance(marker, dict) else {}
     entries = manifest.get("entries", [])
     if (run["trigger_type"] != "manual" or manifest.get("kind") != KIND or digest(manifest) != marker.get("sha256")

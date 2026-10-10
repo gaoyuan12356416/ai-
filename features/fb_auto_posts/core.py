@@ -904,12 +904,19 @@ class FBAutoPostStore:
                     continue
                 if policy:
                     cooldown_days = int(_loads(candidate['config_json'], {}).get('cooldown_days', 14))
-                    conflict = conn.execute("""SELECT 1 FROM fb_auto_task WHERE page_id=? AND material_id=? AND id<>?
+                    # UI exact-material runs preserve the configured creation-time
+                    # cooldown; the older operator CLI retains its existing policy.
+                    history_check = (("created_at_utc>=?" if cooldown_days > 0 else "0 AND created_at_utc>=?") if policy.get('material_cooldown_basis') == 'created_at'
+                                     else "COALESCE(NULLIF(completed_at_utc,''),created_at_utc)>?")
+                    conflict = conn.execute(f"""SELECT 1 FROM fb_auto_task WHERE page_id=? AND material_id=? AND id<>?
                         AND (status IN ('planned','preparing','ready','running','submitted','unknown') OR
-                        (status IN ('published','failed_without_retry') AND COALESCE(NULLIF(completed_at_utc,''),created_at_utc)>?)) LIMIT 1""",
+                        (status IN ('published','failed_without_retry') AND {history_check})) LIMIT 1""",
                         (candidate['page_id'], candidate['material_id'], candidate['id'], utc_iso(now_dt-timedelta(days=cooldown_days)))).fetchone()
                     unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
                         (candidate['page_id'], candidate['id'])).fetchone()
+                    if not unknown and policy.get('material_cooldown_basis') == 'created_at':
+                        unknown = conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE page_id=? AND task_id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
+                            (candidate['page_id'], candidate['id'])).fetchone()
                     if conflict or unknown:
                         reason = 'fb_auto_page_unknown_at_publish' if unknown else 'fb_auto_material_cooldown_at_publish'
                         conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason=?,error_code=?,completed_at_utc=? WHERE id=? AND status='ready'", (reason, reason, now, candidate['id']))
@@ -1090,6 +1097,8 @@ class FBAutoPostStore:
             item["group_ids"] = _loads(item.pop("group_ids_json"), [])
             result["page_snapshots"].append(item)
         result["attempts"] = [dict(row) for row in attempts]
+        result["skipped_pages"] = [{"page_id": task["page_id"], "reason": task["skip_reason"] or task["error_code"]}
+                                   for task in result["tasks"] if task["status"] == "skipped"]
         return {"ok": True, "run": result}
 
     @staticmethod

@@ -60,7 +60,7 @@ class ContractTests(unittest.TestCase):
         list_page=(ROOT/"static"/"fb-auto-publish-templates.html").read_text(encoding="utf-8")
         form_page=(ROOT/"static"/"fb-auto-publish-template.html").read_text(encoding="utf-8")
         nginx=(ROOT/"deploy"/"nginx-fb-auto-publish.conf").read_text(encoding="utf-8")
-        for page,nav_version in ((list_page,"20260820-list-only-v2"),(form_page,"20260915retired")):
+        for page,nav_version in ((list_page,"20260915retired"),(form_page,"20260915retired")):
             self.assertIn('/quick-nav.js?v='+nav_version,page)
             self.assertIn('v=20260820-list-only-v2',page)
         for path in (
@@ -85,7 +85,7 @@ class ContractTests(unittest.TestCase):
         html=(ROOT/"static"/"fb-auto-publish-templates.html").read_text(encoding="utf-8")
         self.assertIn('state.busyIds.has(id) || !enabled ? " disabled" : ""',page)
         self.assertIn("模板已停用，请先启用后再手动执行",page)
-        self.assertIn('/fb-auto-publish-templates.js?v=20260821-prebuild-v1',html)
+        self.assertIn('/fb-auto-publish-templates.js?v=hit-material-20261010-v1',html)
 
     def test_description_url_helper_and_fb_short_link_nginx_contract(self):
         form=(ROOT/"static"/"fb-auto-publish-template.html").read_text(encoding="utf-8")
