@@ -1083,8 +1083,9 @@ class ReportCache:
     def _scheduler_loop(self) -> None:
         delay = 0
         while not self.stop_event.wait(delay):
+            started = time.monotonic()
             ok = self.refresh(wait_for_lock=True)
-            delay = CACHE_TTL_SECONDS if ok else CACHE_REFRESH_RETRY_SECONDS
+            delay = max(1, CACHE_TTL_SECONDS - (time.monotonic() - started)) if ok else CACHE_REFRESH_RETRY_SECONDS
 
     def start(self) -> None:
         self.load_disk()

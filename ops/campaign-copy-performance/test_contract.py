@@ -5,6 +5,8 @@ import time
 import os
 import tempfile
 import threading
+import socket
+import types
 import unittest
 from urllib import error, request
 from unittest import mock
@@ -16,6 +18,33 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ContractTest(unittest.TestCase):
+    def test_sql_gate_loss_closes_the_connection_and_fails_refresh(self):
+        permit, peer = socket.socketpair()
+        gate = types.SimpleNamespace(DEFAULT_POOL="test", DEFAULT_SOCKET_PATH="test",
+                                     acquire_permit=lambda *args: (permit, {"status": "granted"}))
+        conn = mock.MagicMock()
+        stopped = threading.Event()
+        conn._sock.shutdown.side_effect = lambda *args: stopped.set()
+        try:
+            with mock.patch.dict(service.sys.modules, {"sql_connection_gate": gate}), mock.patch.object(service, "mysql_connection", return_value=conn):
+                with self.assertRaisesRegex(RuntimeError, "lease"):
+                    with service.report_connection():
+                        peer.close()
+                        self.assertTrue(stopped.wait(2))
+            conn.close.assert_called_once()
+        finally:
+            peer.close()
+            permit.close()
+
+    def test_sql_gate_denial_never_opens_database_connection(self):
+        gate = types.SimpleNamespace(DEFAULT_POOL="test", DEFAULT_SOCKET_PATH="test",
+                                     acquire_permit=lambda *args: (None, {"status": "error"}))
+        with mock.patch.dict(service.sys.modules, {"sql_connection_gate": gate}), mock.patch.object(service, "mysql_connection") as connect:
+            with self.assertRaisesRegex(RuntimeError, "gate unavailable"):
+                with service.report_connection():
+                    self.fail("denied permit yielded a database connection")
+            connect.assert_not_called()
+
     def previous(self):
         return {"v": 2, "m": {"read_only_verified": True, "stat_end": "2026-10-08"},
                 "cf": ["platform", "campaign_id"], "c": [[0, "100"]],
