@@ -8,6 +8,7 @@
     template: null,
     busy: false,
     pageLimits: [],
+    fixedStaggerMinutes: 0,
   };
 
   function range(prefix) {
@@ -43,7 +44,7 @@
       drama_launch_window_days: Number(ui.byId("launchDays").value),
       cooldown_days: Number(ui.byId("cooldown").value),
       drama_cooldown_hours: Number(ui.byId("dramaCooldown").value),
-      stagger_minutes: Number(ui.byId("staggerMinutes").value),
+      stagger_minutes: schedule.mode === "fixed" ? Number(ui.byId("staggerMinutes").value) : 0,
       ...(ui.byId("pageLimitsEnabled").checked ? {
         page_daily_limits: state.pageLimits.map(row => ({...row})),
         default_daily_count: Number(ui.byId("defaultDailyCount").value),
@@ -192,6 +193,15 @@
     const fixed = ui.byId("scheduleMode").value === "fixed";
     ui.byId("fixedField").classList.toggle("hidden", !fixed);
     ui.byId("randomField").classList.toggle("hidden", fixed);
+    const stagger = ui.byId("staggerMinutes");
+    if (!fixed && !stagger.disabled) {
+      state.fixedStaggerMinutes = Number(stagger.value || 0);
+      stagger.value = 0;
+    } else if (fixed && stagger.disabled) {
+      stagger.value = state.fixedStaggerMinutes;
+    }
+    stagger.disabled = !fixed;
+    ui.byId("staggerField").classList.toggle("hidden", !fixed);
     estimate();
   }
 

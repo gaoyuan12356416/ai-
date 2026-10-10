@@ -1,0 +1,12 @@
+[Unit]
+Description=Bounded 2026-10-10 FB frequency cutover retries
+
+[Timer]
+OnCalendar=2026-10-10 22:30,35,40,45,50,55:00 Asia/Shanghai
+OnCalendar=2026-10-10 23:00,05,10,15,20,25,30,35,40,45:00 Asia/Shanghai
+AccuracySec=1s
+Persistent=false
+Unit=fb-frequency-random-20261010.service
+
+[Install]
+WantedBy=timers.target

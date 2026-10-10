@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply reviewed FB Page random two-post schedule after today's queue drains
+After=fb-auto-post-service.service
+Requires=fb-auto-post-service.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/mnt/data-disk/fb-auto-post-deploy/frequency-random-20261010/code
+Environment=PYTHONPATH=/opt/fb-auto-post/current
+ExecStart=/usr/bin/python3 scripts/fb_auto_post_frequency_cutover.py --apply
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+

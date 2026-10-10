@@ -245,11 +245,14 @@ class Handler(BaseHTTPRequestHandler):
             if not action:
                 version = payload.pop("expected_version", None); source = self.runtime.resolve_source(payload, actor); result = {"ok": True, "template": self.runtime.store.update_template(template_id, payload, actor, version, source)}
             elif action in {"enable", "disable"}:
-                if set(payload) != {"expected_version"}: raise ServiceError("invalid_request", "请求字段无效", 400)
+                allowed = {"expected_version", "preserve_unsubmitted_before_utc"} if action == "disable" else {"expected_version"}
+                if "expected_version" not in payload or set(payload) - allowed: raise ServiceError("invalid_request", "请求字段无效", 400)
+                if "preserve_unsubmitted_before_utc" in payload and not isinstance(payload["preserve_unsubmitted_before_utc"], str):
+                    raise ServiceError("invalid_request", "保护未提交任务的截止时间必须为含时区的ISO时间", 400)
                 template = self.runtime.store.get_template(template_id, actor)
                 summary = self.runtime.validate_activation(template) if action == "enable" else {}
                 fingerprint = summary.pop("_enabled_fingerprint", None)
-                result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], expected_enabled_fingerprint=fingerprint), "page_summary": summary}
+                result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], expected_enabled_fingerprint=fingerprint, preserve_unsubmitted_before_utc=payload.get("preserve_unsubmitted_before_utc")), "page_summary": summary}
             else:
                 if set(payload) != {"expected_version","operation_id"}: raise ServiceError("invalid_request", "手动执行请求字段无效", 400)
                 if not self.runtime.executor.live_enabled: raise ServiceError("fb_auto_live_gate_closed", "FB自动发布总开关关闭，未创建运行或调用GPU/Meta", 409)

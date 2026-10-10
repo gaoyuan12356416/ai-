@@ -146,18 +146,18 @@
               <select id="scheduleMode"><option value="fixed">固定时间</option><option value="random">每日随机</option></select>
             </div>
             <div class="field" id="fixedField">
-              <label for="fixedTimes">固定时间（逗号分隔）</label>
+              <label for="fixedTimes">固定候选时段（北京时间，逗号分隔）</label>
               <input id="fixedTimes" value="10:30" />
             </div>
             <div class="field hidden" id="randomField">
-              <label>随机次数 / 窗口</label>
+              <label>每日随机候选次数 / 窗口（北京时间）</label>
               <div class="random-grid">
                 <input id="randomCount" type="number" value="1" min="1" max="24" aria-label="每日随机次数" />
                 <input id="randomStart" type="time" value="08:00" aria-label="随机开始时间" />
                 <input id="randomEnd" type="time" value="23:00" aria-label="随机结束时间" />
               </div>
             </div>
-            <div class="field">
+            <div class="field" id="staggerField">
               <label for="staggerMinutes">固定时段内 Page 错峰（分钟）</label>
               <input id="staggerMinutes" type="number" min="0" max="59" value="0" />
               <span class="helper">每个 Page 在时段起点后分散发布；0 表示不额外错峰。</span>
@@ -169,7 +169,7 @@
                   <label>未列出 Page 每日次数 <input id="defaultDailyCount" type="number" min="0" max="24" value="0" /></label>
                   <label>查找 Page <input id="pageLimitSearch" type="search" placeholder="名称、ID 或分档" /></label>
                 </div>
-                <p class="helper">次数为每日上限，自动分散到已配置时段；0 表示暂停。候选、授权或冷却不满足时，实际数量会减少。</p>
+                <p class="helper">次数为每个 Page 的每日上限，不超过候选时段数；固定或随机模式均生效，0 表示暂停。候选、授权或冷却不满足时，实际数量会减少。</p>
                 <div style="max-height:360px;overflow:auto;border:1px solid var(--border,#dce3ed);border-radius:10px">
                   <table style="width:100%"><thead><tr><th>分档</th><th>Page</th><th>每日次数</th></tr></thead><tbody id="pageLimitsBody"></tbody></table>
                 </div>
@@ -208,6 +208,6 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-template.js?v=page-performance-20260922-v1"></script>
+  <script src="/fb-auto-publish-template.js?v=page-frequency-20261010-v1"></script>
 </body>
 </html>

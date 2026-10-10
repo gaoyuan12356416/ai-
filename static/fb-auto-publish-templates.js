@@ -14,18 +14,32 @@
     return String(item && item.status || "").toLowerCase() === "enabled";
   }
 
-  function scheduleText(config) {
+  function scheduleSummary(config) {
     const schedule = config && config.schedule || {};
-    if (Array.isArray(config.page_daily_limits)) {
-      const maximum = schedule.mode === "fixed" ? (schedule.times || []).length : Number(schedule.daily_count || 0);
-      const total = config.page_daily_limits.reduce((sum,row) => sum + Math.min(maximum, Number(row.daily_count || 0)), 0);
-      return "已分档 Page 上限 " + total + " 条/日 · 同剧冷却 " + Number(config.drama_cooldown_hours || 0) + "h · " + (schedule.times || []).join(", ") + (config.stagger_minutes ? "（各时段后错峰 " + config.stagger_minutes + " 分钟）" : "");
+    if (!["fixed", "random"].includes(schedule.mode)) return {frequency: "未设置", details: ""};
+    const maximum = schedule.mode === "fixed" ? (schedule.times || []).length : Number(schedule.daily_count || 0);
+    const custom = Array.isArray(config.page_daily_limits) || config.default_daily_count !== undefined;
+    const rows = custom ? (config.page_daily_limits || []) : [];
+    const counts = rows.map(row => Math.min(maximum, Number(row.daily_count || 0)));
+    const fallback = Math.min(maximum, Number(config.default_daily_count ?? maximum));
+    const activeCounts = [...new Set([...counts, fallback].filter(count => count > 0))].sort((a, b) => a - b);
+    const frequency = activeCounts.length === 0
+      ? "所有 Page 每天上限 0 次（暂停）"
+      : activeCounts.length === 1
+        ? "每个启用 Page 每天上限 " + activeCounts[0] + " 次"
+        : "启用 Page 每天上限 " + activeCounts[0] + "–" + activeCounts[activeCounts.length - 1] + " 次（按 Page 配置）";
+    const timing = schedule.mode === "fixed"
+      ? "固定 " + maximum + " 个候选时段：" + (schedule.times || []).join(", ") + (config.stagger_minutes ? "（各时段后错峰 " + config.stagger_minutes + " 分钟）" : "")
+      : "每日随机 " + maximum + " 个候选时刻：" + String(schedule.start || "—") + "–" + String(schedule.end || "—");
+    const details = [timing + "（北京时间）"];
+    if (custom) {
+      details.push("已配置 " + counts.filter(count => count > 0).length + " 个 Page 安排发布、" + counts.filter(count => count === 0).length + " 个暂停");
+      details.push("已配置 Page 合计上限 " + counts.reduce((sum, count) => sum + count, 0) + " 条/日");
+      details.push(fallback ? "未列 Page 每天上限 " + fallback + " 次" : "未列 Page 暂停");
     }
-    if (schedule.mode === "fixed") return (schedule.times || []).join(", ") || "未设置";
-    if (schedule.mode === "random") {
-      return "随机 " + Number(schedule.daily_count || 0) + " 次 / " + String(schedule.start || "—") + "-" + String(schedule.end || "—");
-    }
-    return "未设置";
+    if (config.drama_cooldown_hours) details.push("同剧冷却 " + Number(config.drama_cooldown_hours) + "h");
+    details.push("实际数量受授权、候选与冷却限制");
+    return {frequency, details: details.join(" · ")};
   }
 
   async function loadGroups() {
@@ -54,6 +68,7 @@
     }
     body.innerHTML = state.templates.map(item => {
       const config = item.config || {};
+      const schedule = scheduleSummary(config);
       const id = ui.positiveId(item.id || item.template_id);
       const version = ui.templateVersion(item);
       const enabled = isEnabled(item);
@@ -67,7 +82,7 @@
         config.video_template === "random_overlay" ? "随机排重模板" : "视频模板缺失", "</small></td>",
         "<td>", ui.escapeHtml(config.product || "—"), " / ", poolIds || "未选择 Page 池", "</td>",
         '<td><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", "</span></td>",
-        "<td>", ui.escapeHtml(scheduleText(config)), "</td>",
+        "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
         '<td><div class="table-actions">',
         '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",

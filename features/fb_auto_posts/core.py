@@ -304,13 +304,40 @@ class FBAutoPostStore:
             conn.commit()
             return self._template_dto(self._template_row(conn, template_id, actor))
 
-    def set_template_status(self, template_id: int, enabled: bool, actor: ActorScope, version: Any, *, expected_enabled_fingerprint: Sequence[tuple[int,int]] | None = None) -> Dict[str, Any]:
+    def set_template_status(self, template_id: int, enabled: bool, actor: ActorScope, version: Any, *, expected_enabled_fingerprint: Sequence[tuple[int,int]] | None = None, preserve_unsubmitted_before_utc: str | None = None) -> Dict[str, Any]:
         expected, now = expected_version(version), utc_iso(self.now_fn())
+        preserve_cutoff = None
+        if preserve_unsubmitted_before_utc is not None:
+            try:
+                if enabled or not isinstance(preserve_unsubmitted_before_utc, str):
+                    raise ValueError
+                cutoff = datetime.fromisoformat(preserve_unsubmitted_before_utc.replace("Z", "+00:00"))
+                if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+                    raise ValueError
+                preserve_cutoff = cutoff.astimezone(UTC).isoformat()
+            except (TypeError, ValueError, OverflowError):
+                raise StoreError("invalid_request", "保护未提交任务的截止时间必须为含时区的ISO时间，且仅支持停用操作", 400) from None
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._template_row(conn, template_id, actor)
             if int(row["current_version"]) != expected:
                 raise StoreError("fb_auto_template_version_conflict", "模板版本冲突", 409)
+            if preserve_cutoff is not None:
+                # Keep the preservation check and disable under the same write lock:
+                # a concurrent manual enqueue/worker claim must see the disabled state.
+                task_conflict = conn.execute(
+                    "SELECT 1 FROM fb_auto_task x LEFT JOIN fb_auto_run r ON r.id=x.run_id WHERE x.template_id=? AND ("
+                    "x.status IN ('preparing','running') OR (x.status IN ('queued','planned','ready') AND ("
+                    "r.trigger_type='manual' OR julianday(x.planned_publish_at_utc) IS NULL OR julianday(x.planned_publish_at_utc)<julianday(?)))) LIMIT 1",
+                    (template_id, preserve_cutoff),
+                ).fetchone()
+                due_conflict = conn.execute(
+                    "SELECT 1 FROM fb_auto_due_slot WHERE template_id=? AND (status='preparing' OR (status='pending' AND ("
+                    "trigger_type='manual' OR julianday(planned_publish_at_utc) IS NULL OR julianday(planned_publish_at_utc)<julianday(?)))) LIMIT 1",
+                    (template_id, preserve_cutoff),
+                ).fetchone()
+                if task_conflict or due_conflict:
+                    raise StoreError("fb_auto_disable_unsubmitted_conflict", "模板存在执行中、手动或保护截止时间之前的未提交任务，本次未停用或修改任务，请等待完成后重试", 409)
             if not enabled and conn.execute("SELECT 1 FROM fb_auto_task WHERE template_id=? AND status='running' LIMIT 1", (template_id,)).fetchone():
                 raise StoreError("fb_auto_template_running_change_denied", "模板存在正在向Meta提交的任务，请等待发布结果落账后再停用", 409)
             if enabled and expected_enabled_fingerprint is not None:
