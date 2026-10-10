@@ -22,6 +22,14 @@ renewed credit depletion stop remaining retries. An explicit account suspension
 or lost long-video membership leaves that row unchanged and does not hold usable
 accounts. A frozen route is never replaced to work around expired membership.
 
+Renew the original schedule execution lease in the rearm transaction. Otherwise
+the minute claim poller treats a historical running batch's old lease as stale
+and applies pool review holds while an authorized publish is still active.
+Proven credit-failure holds with an exact `x_post_schedule_stale_claim` run are
+reconciled through a separate immutable audit before account verification. Their
+original failure remains recorded, and actual unknown publication fences remain
+authoritative. This recovery does not stop or modify any normal timer.
+
 The live sidecar, its media fingerprint/duration and entitlement checks, token
 rotation ownership, attribution wrapper and durable X receipt path are reused.
 No source database writes, new queue, service restart, schedule edit or token-file

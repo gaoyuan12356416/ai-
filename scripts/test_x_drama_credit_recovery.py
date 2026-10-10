@@ -9,7 +9,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.recover_x_drama_credit_failures import (
-    AUDIT, ERROR, RecoveryConflict, arm, snapshot, validate, verify_route,
+    AUDIT, STALE_AUDIT, ERROR, RecoveryConflict, arm, snapshot, validate, verify_route,
+    release_stale_reviews,
 )
 
 
@@ -43,6 +44,8 @@ def fixture(relay=False):
 def database(item):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE x_post_schedule_run (id INTEGER PRIMARY KEY, error_code TEXT, lease_heartbeat_at TEXT)")
+    conn.execute("INSERT INTO x_post_schedule_run VALUES (8,'','old')")
     tables = {"queue": "x_post_queue", "log": "x_post_publish_log", "pool": "x_post_drama_pool",
               "relay": "x_post_repost_ledger", "route": "x_post_drama_delivery_route"}
     for key, table in tables.items():
@@ -73,6 +76,7 @@ class CreditRecoveryTests(unittest.TestCase):
                 self.assertEqual(after["log"]["status"], "reserved")
                 self.assertEqual(after["pool"], original["pool"])
                 self.assertEqual(after["route"], original["route"])
+                self.assertNotEqual(conn.execute("SELECT lease_heartbeat_at FROM x_post_schedule_run").fetchone()[0], "old")
                 for key in ("queue", "log", "relay"):
                     if after[key]:
                         for name, value in original[key].items():
@@ -147,6 +151,29 @@ class CreditRecoveryTests(unittest.TestCase):
         with self.assertRaises(RecoveryConflict):
             verify_route(Client(), item)
         self.assertEqual(item, fixture(True))
+
+    def test_stale_hold_reconciliation_preserves_failure_and_renews_lease(self):
+        item = fixture()
+        item["pool"].update(status="needs_review", last_checked_at="old", updated_at="old")
+        conn = database(item)
+        conn.execute("UPDATE x_post_schedule_run SET error_code='x_post_schedule_stale_claim'")
+        conn.commit()
+        restored = release_stale_reviews(conn, [item], 8, actor="operator", commit="b" * 40,
+                                         manifest_sha="c" * 64, fence=lambda *args: None)
+        self.assertEqual(restored[0]["pool"]["status"], "active")
+        self.assertEqual(restored[0]["pool"]["last_error_message"], ERROR)
+        self.assertEqual(restored[0]["log"], item["log"])
+        self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {STALE_AUDIT}").fetchone()[0], 1)
+        self.apply(conn, restored[0])
+
+    def test_review_hold_without_stale_evidence_cannot_be_cleared(self):
+        item = fixture()
+        item["pool"]["status"] = "needs_review"
+        conn = database(item)
+        with self.assertRaises(RecoveryConflict):
+            release_stale_reviews(conn, [item], 8, actor="operator", commit="b" * 40,
+                                  manifest_sha="c" * 64, fence=lambda *args: None)
+        self.assertEqual(snapshot(conn, 1), item)
 
 
 if __name__ == "__main__":

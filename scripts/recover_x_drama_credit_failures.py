@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 REASON = "operator_exact_drama_upload_credit_retry_v1"
 ERROR = "X媒体完成上传失败(HTTP 402): credits depleted"
 AUDIT = "x_post_drama_upload_credit_recovery_audit"
+STALE_AUDIT = "x_post_drama_credit_stale_hold_recovery_audit"
 
 
 class RecoveryConflict(RuntimeError):
@@ -69,7 +70,7 @@ def validate(item, run_id):
         l["error_code"] == "x_upstream_error", l["error_message"] == ERROR,
         not any(l[k] for k in ("x_media_id", "x_post_id", "x_post_url", "published_at")),
         all(l[k] for k in ("long_url", "short_url", "post_text", "started_at")),
-        p["status"] == "active", p["id"] == q["drama_pool_item_id"],
+        p["status"] in ("active", "needs_review"), p["id"] == q["drama_pool_item_id"],
         p["content_id"] == q["content_id"], p["assigned_account_id"] == q["account_id"],
         p["replay_generation"] == q["drama_replay_generation"],
         p["next_sub_number"] == q["episode_number"],
@@ -120,6 +121,8 @@ def arm(conn, expected, run_id, *, actor, commit, manifest_sha, sync_run):
     try:
         current = snapshot(conn, queue_id)
         validate(current, run_id)
+        if current["pool"]["status"] != "active":
+            raise RecoveryConflict("Review hold must be reconciled before arming")
         if current != expected:
             raise RecoveryConflict("Frozen state changed since the approved manifest")
         create_audit(conn)
@@ -139,11 +142,60 @@ def arm(conn, expected, run_id, *, actor, commit, manifest_sha, sync_run):
         if current["relay"]:
             conn.execute("UPDATE x_post_repost_ledger SET status='reserved',updated_at=? WHERE queue_id=?",
                          (timestamp, queue_id))
+        # The normal claim poller must not expire this historical batch while
+        # its operator-authorized retry is executing (lease lasts two hours).
+        changed = conn.execute(
+            "UPDATE x_post_schedule_run SET lease_heartbeat_at=? WHERE id=?",
+            (timestamp, run_id),
+        )
+        if changed.rowcount != 1:
+            raise RecoveryConflict("Original schedule run is missing")
         sync_run(conn, queue_id, timestamp)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
+
+
+def release_stale_reviews(conn, items, run_id, *, actor, commit, manifest_sha, fence):
+    """Reconcile only proven credit-failure holds applied by stale-run cleanup."""
+    if not any(item["pool"]["status"] == "needs_review" for item in items):
+        return items
+    timestamp = utcnow()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        run = one(conn, "x_post_schedule_run", "id", run_id)
+        if not run or run["error_code"] != "x_post_schedule_stale_claim":
+            raise RecoveryConflict("Review hold lacks stale-claim evidence")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS {STALE_AUDIT} (
+            queue_id INTEGER PRIMARY KEY, schedule_run_id INTEGER NOT NULL,
+            actor TEXT NOT NULL, deployed_commit TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL, before_json TEXT NOT NULL,
+            created_at TEXT NOT NULL)""")
+        for operation in ("UPDATE", "DELETE"):
+            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS trg_{STALE_AUDIT}_{operation.lower()}
+                BEFORE {operation} ON {STALE_AUDIT} BEGIN
+                SELECT RAISE(ABORT, 'stale credit hold audit immutable'); END""")
+        for item in items:
+            if item["pool"]["status"] != "needs_review":
+                continue
+            current = snapshot(conn, item["queue"]["id"])
+            validate(current, run_id)
+            if current != item:
+                raise RecoveryConflict("Stale-hold evidence changed")
+            fence(conn, current["queue"])
+            conn.execute(f"INSERT INTO {STALE_AUDIT} VALUES (?,?,?,?,?,?,?)", (
+                current["queue"]["id"], run_id, actor, commit, manifest_sha,
+                canonical({"item": current, "run": run}), timestamp,
+            ))
+            conn.execute("UPDATE x_post_drama_pool SET status='active',last_checked_at=?,updated_at=? WHERE id=?",
+                         (timestamp, timestamp, current["pool"]["id"]))
+        conn.execute("UPDATE x_post_schedule_run SET lease_heartbeat_at=? WHERE id=?", (timestamp, run_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return [snapshot(conn, item["queue"]["id"]) for item in items]
 
 
 def verify_route(sidecar, item):
@@ -249,6 +301,9 @@ def main():
                     raise RecoveryConflict("Backup integrity check failed")
             os.chmod(backup, 0o600)
             emit(progress, {"event": "backup_complete", "queue_count": len(items)})
+            items = release_stale_reviews(conn, items, run_id, actor=args.actor,
+                                         commit=args.commit, manifest_sha=args.expected_manifest_sha256,
+                                         fence=XPostStore._assert_account_publish_fence)
             for item in items:
                 q = item["queue"]
                 entry = {"queue_id": q["id"], "account": q["account_username"],
