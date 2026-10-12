@@ -15,6 +15,15 @@ loopback health URLs are `http://127.0.0.1:8810/health` and
 `http://127.0.0.1:18833/health`; the public OAuth prefix is not the loopback
 health route.
 
+The Hong Kong GPU repair worker has its own
+`X_POST_MEDIA_REPAIR_ALLOWED_HOSTS` in
+`/data/x-post-media-repair/config/worker.env`. Back up and update that exact
+host list too, then restart only `x-post-media-repair.service` after its
+requests have drained. H.264/AAC media can still need normalization; a codec
+probe alone does not validate the complete preflight. GPU loopback health is
+`http://127.0.0.1:8820/health`. Confirm the CPU repair tunnel reaches this
+worker and include its configuration in rollback.
+
 The operator recovery script is deliberately restricted to the two known
 preflight failures. It requires unchanged failed tasks, zero publish attempts,
 zero unknown outcomes, empty canonical queues, and failed-preflight execution
@@ -28,8 +37,7 @@ online SQLite backup copies, verify idempotency and unknown-outcome rejection,
 then apply as `x-post-daily` with the existing service environment. This script
 reads canonical execution facts through the existing Sidecar query route;
 it does not grant the Auto service filesystem access to the private X account
-database. This script
-only creates pending tasks; its success does not prove publication. Acceptance
+database. It only creates pending tasks; its success does not prove publication. Acceptance
 requires both child tasks and their canonical queue/logs to be published with
 matching X post IDs and `unknown_outcome=0`.
 
