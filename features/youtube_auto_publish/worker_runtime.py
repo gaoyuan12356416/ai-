@@ -1,8 +1,10 @@
 """Bounded preparation lane and generator subprocess lifecycle."""
+import logging
 import os
 import signal
 import sqlite3
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -70,20 +72,45 @@ def _stop_generator(process, descendants):
 
 
 class PreparationLane:
-    def __init__(self):
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='youtube-preparation')
-        self.pending = None
+    """Continuously refill bounded preparation slots independently of uploads.
 
-    def tick(self, workflow, worker_id):
-        result = None
-        if self.pending is not None and self.pending.done():
-            completed, self.pending = self.pending, None
-            result = completed.result()
-        if self.pending is None:
-            self.pending = self.pool.submit(workflow.run_once, worker_id)
-        return result
+    The workflow's SQLite transaction and lease remain the sole claim authority.
+    Do not put unclaimed tasks into an executor queue or retry a failed task here.
+    """
+
+    def __init__(self, workers=2, *, enabled=lambda: True, idle_seconds=1):
+        if str(workers) not in ('1', '2', '3', '4'):
+            raise ValueError('YOUTUBE_AUTO_PREPARATION_WORKERS must be between 1 and 4')
+        self.workers = int(workers)
+        self.enabled = enabled
+        self.idle_seconds = idle_seconds
+        self.stopping = threading.Event()
+        self.pool = ThreadPoolExecutor(max_workers=self.workers,
+                                       thread_name_prefix='youtube-preparation')
+        self.futures = []
+
+    def start(self, workflow, worker_id):
+        if self.futures or self.stopping.is_set():
+            return
+        self.futures = [self.pool.submit(self._run, workflow, '%s:prepare:%d' % (worker_id, slot))
+                        for slot in range(self.workers)]
+
+    def _run(self, workflow, worker_id):
+        while not self.stopping.is_set():
+            try:
+                if self.enabled() and not self.stopping.is_set():
+                    result = workflow.run_once(worker_id)
+                    if result and result.get('claimed'):
+                        logging.info('YouTube preparation task=%s processed', result.get('task_id', ''))
+                        continue
+            except Exception:
+                # Keep other slots and publishing alive; no content, SQL or
+                # credentials from an exception may enter worker logs.
+                logging.error('YouTube preparation iteration failed; inspect persisted task status')
+            self.stopping.wait(self.idle_seconds)
 
     def close(self):
+        self.stopping.set()
         self.pool.shutdown(wait=True)
 
 

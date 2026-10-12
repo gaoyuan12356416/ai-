@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One preparation/notification or reviewed publish claim per iteration."""
+"""Independent bounded preparation slots and serialized reviewed publication."""
 import logging
 import os
 import signal
@@ -46,24 +46,27 @@ def main():
     app.DRAMA_SYNTHESIS_STORE.ensure_storage()
     workflow=build_service(app);engine=build_engine();failures=build_failure_notifications(app)
     worker_id='youtube-auto:%s:%s' % (socket.gethostname(),os.getpid())
-    preparation=PreparationLane()
-    while not STOP:
-        if os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1' and os.environ.get('YOUTUBE_LIVE_ENABLED','0')=='1':
-            try:
-                # Give existing approved uploads a turn even when generation keeps arriving.
-                published=engine.run_once(worker_id)
+    enabled=lambda: not STOP and os.environ.get('YOUTUBE_AUTO_ENABLED','0')=='1' and os.environ.get('YOUTUBE_LIVE_ENABLED','0')=='1'
+    preparation=PreparationLane(os.environ.get('YOUTUBE_AUTO_PREPARATION_WORKERS','2'),enabled=enabled)
+    preparation.start(workflow,worker_id)
+    logging.info('YouTube preparation slots=%s started',preparation.workers)
+    try:
+        while not STOP:
+            if enabled():
+                try:
+                    published=engine.run_once(worker_id)
+                    if published and published.get('claimed'):
+                        logging.info('YouTube auto task=%s processed',published.get('task_id',''))
+                except Exception:
+                    # Never log SQL, tokens, uploaded content or model output.
+                    logging.error('YouTube auto worker iteration failed; inspect persisted task status')
                 notify_failures(failures)
-                prepared=preparation.tick(workflow,worker_id)
-                for result in (published,prepared):
-                    if result and result.get('claimed'):logging.info('YouTube auto task=%s processed',result.get('task_id',''))
-            except Exception:
-                # Never log SQL, tokens, uploaded content or model output.
-                logging.error('YouTube auto worker iteration failed; inspect persisted task status')
-            notify_failures(failures)
-        for _ in range(5):
-            if STOP:break
-            time.sleep(1)
-    preparation.close()
+            for _ in range(5):
+                if STOP:break
+                time.sleep(1)
+    finally:
+        # Stop new claims, then drain already claimed generation/enqueue work.
+        preparation.close()
     return 0
 
 if __name__=='__main__':raise SystemExit(main())

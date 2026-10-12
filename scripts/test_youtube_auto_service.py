@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -28,6 +29,7 @@ from features.youtube_auto_publish.service import YouTubeWorkflow
 from features.youtube_auto_publish.source import MaterialSource, validate_sql
 from features.youtube_auto_publish.templates import WorkflowError, long_url, render
 from features.youtube_auto_publish.runtime import generate_cover_factory, notify_factory, readonly_runner
+from features.youtube_auto_publish.worker_runtime import PreparationLane
 
 
 def png(width=1280, height=720):
@@ -315,6 +317,45 @@ class WorkflowCase(unittest.TestCase):
             ids=list(pool.map(lambda _:create(),range(2)))
         self.assertEqual(len(set(ids)),1)
         self.assertEqual(self.service.list_tasks(self.actor)['total'],1)
+
+    def test_parallel_preparation_claims_each_task_once_and_preserves_review_gate(self):
+        tasks = [self.create() for _ in range(3)]
+        entered, release = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        calls = []
+        pixels = png()
+        def generate(task, version):
+            with lock:
+                calls.append(task['id'])
+                if len(calls) == 2:entered.set()
+            release.wait(5)
+            return pixels
+        self.service.generate = generate
+        lane = PreparationLane(2, idle_seconds=.01)
+        try:
+            lane.start(self.service, 'test')
+            self.assertTrue(entered.wait(2))
+            with self.service.db() as c:
+                states = [row['state'] for row in c.execute('SELECT state FROM youtube_auto_preparation')]
+            self.assertEqual(states.count('generating'), 2)
+            self.assertEqual(states.count('queued_generation'), 1)
+            release.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with self.service.db() as c:
+                    sent = c.execute("SELECT COUNT(*) FROM youtube_auto_notification WHERE state='sent'").fetchone()[0]
+                if sent == 3:break
+                time.sleep(.01)
+            self.assertEqual(sent, 3)
+        finally:
+            release.set()
+            lane.close()
+        self.assertCountEqual(calls, [task['id'] for task in tasks])
+        results = [self.service.get_task(self.actor, task['id'])['task'] for task in tasks]
+        self.assertTrue(all(task['status'] == 'review' for task in results))
+        self.assertTrue(all(task['versions'][-1]['asset_id'] for task in results))
+        self.assertEqual(self.notify.call_count, 3)
+        self.assertEqual(self.store.enqueues, [], 'generation must never approve or publish')
 
     def test_owner_and_tenant_isolation_with_tenant_admin(self):
         value=self.create()

@@ -69,27 +69,90 @@ class WorkerRuntimeCase(unittest.TestCase):
                 self.assertTrue(generation_cancel_check(db, task, version)())
             self.assertEqual(db.read_bytes(), before)
 
-    def test_generation_does_not_block_publishing_or_duplicate_preparation(self):
-        entered, release = threading.Event(), threading.Event()
-        calls = []
+    def test_slow_cover_does_not_block_other_covers_or_require_publish_ticks(self):
+        entered, release, remaining_done = (threading.Event() for _ in range(3))
+        lock = threading.Lock()
+        pending, calls, active = list(range(4)), [], set()
+        peak = []
         def generate(worker):
+            with lock:
+                if not pending:return {'claimed': False}
+                task = pending.pop(0)
+                calls.append(task)
+                active.add(task)
+                peak.append(len(active))
+            if task == 0:
+                entered.set()
+                release.wait(5)
+            elif task == 3:
+                remaining_done.set()
+            with lock:active.remove(task)
+            return {'claimed': True, 'task_id': str(task)}
+        lane = PreparationLane(2, idle_seconds=.01)
+        try:
+            workflow = SimpleNamespace(run_once=generate)
+            lane.start(workflow, 'test')
+            lane.start(workflow, 'test')  # Starting again must not add slots.
+            self.assertTrue(entered.wait(1))
+            # Simulate a blocked publisher: no main-loop calls refill the pool.
+            self.assertTrue(remaining_done.wait(1))
+            self.assertEqual(calls, [0, 1, 2, 3])
+            self.assertEqual(max(peak), 2)
+            self.assertIn(0, active)
+        finally:
+            release.set()
+            lane.close()
+
+    def test_transient_dispatch_error_does_not_stop_lane_or_leak_exception(self):
+        recovered = threading.Event()
+        calls = []
+        def prepare(worker):
+            calls.append(worker)
+            if len(calls) == 1:raise RuntimeError('secret-exception-content')
+            recovered.set()
+            return {'claimed': False}
+        lane = PreparationLane(1, idle_seconds=.01)
+        with self.assertLogs(level='ERROR') as logs:
+            try:
+                lane.start(SimpleNamespace(run_once=prepare), 'test')
+                self.assertTrue(recovered.wait(1))
+            finally:lane.close()
+        self.assertNotIn('secret-exception-content', '\n'.join(logs.output))
+
+    def test_disabled_gate_and_graceful_drain_stop_new_claims(self):
+        enabled, entered, release = (threading.Event() for _ in range(3))
+        calls = []
+        def prepare(worker):
             calls.append(worker)
             entered.set()
             release.wait(5)
             return {'claimed': True}
-        lane = PreparationLane()
+        lane = PreparationLane(1, enabled=enabled.is_set, idle_seconds=.01)
+        closer = None
         try:
-            workflow = SimpleNamespace(run_once=generate)
-            lane.tick(workflow, 'test')
+            lane.start(SimpleNamespace(run_once=prepare), 'test')
+            self.assertFalse(entered.wait(.05))
+            enabled.set()
             self.assertTrue(entered.wait(1))
-            published = []
-            for _ in range(20):
-                published.append('publish tick')
-                self.assertIsNone(lane.tick(workflow, 'test'))
-            self.assertEqual(len(published), 20)
-            self.assertEqual(calls, ['test'])
+            closer = threading.Thread(target=lane.close)
+            closer.start()
+            self.assertTrue(lane.stopping.wait(1))
+            self.assertTrue(closer.is_alive(), 'close must wait for active work')
+            release.set()
+            closer.join(1)
+            self.assertFalse(closer.is_alive())
+            self.assertEqual(len(calls), 1)
         finally:
             release.set()
+            if closer:closer.join(2)
+            lane.close()
+
+    def test_preparation_worker_limit_is_bounded(self):
+        for value in (0, 5, -1, '', '2.0', True, 'unlimited'):
+            with self.assertRaises(ValueError):PreparationLane(value)
+        for value in (1, '2', 4):
+            lane = PreparationLane(value)
+            self.assertEqual(lane.workers, int(value))
             lane.close()
 
     @unittest.skipUnless(os.name == 'posix', 'Linux process groups')
