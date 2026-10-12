@@ -26,6 +26,9 @@ with the existing X Auto runner and retain its shared publication lock.
 Run the default read-only check first. Rehearse `--apply --rehearsal` against
 online SQLite backup copies, verify idempotency and unknown-outcome rejection,
 then apply as `x-post-daily` with the existing service environment. This script
+reads canonical execution facts through the existing Sidecar query route;
+it does not grant the Auto service filesystem access to the private X account
+database. This script
 only creates pending tasks; its success does not prove publication. Acceptance
 requires both child tasks and their canonical queue/logs to be published with
 matching X post IDs and `unknown_outcome=0`.

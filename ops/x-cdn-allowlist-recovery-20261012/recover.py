@@ -29,8 +29,9 @@ def reader(path):
     return conn
 
 
-def inspect(auto_db, post_db, source_run, source_ids, operation):
-    with contextlib.closing(reader(auto_db)) as auto, contextlib.closing(reader(post_db)) as post:
+def inspect(auto_db, post_db, source_run, source_ids, operation, canonical=None):
+    post_reader = contextlib.nullcontext(None) if canonical else contextlib.closing(reader(post_db))
+    with contextlib.closing(reader(auto_db)) as auto, post_reader as post:
         placeholders = ",".join("?" for _ in source_ids)
         tasks = [dict(r) for r in auto.execute("SELECT * FROM x_auto_task WHERE id IN (" + placeholders + ") ORDER BY id", source_ids)]
         assert len(tasks) == len(source_ids), "source tasks missing"
@@ -44,13 +45,17 @@ def inspect(auto_db, post_db, source_run, source_ids, operation):
             assert task["language"] and task["publish_attempt_count"] == 0
             assert not any(task[k] for k in ("publish_id", "publish_url", "unknown_outcome", "execution_queue_id", "execution_log_id", "claim_token", "lease_expires_at_utc"))
             assert task["execution_run_id"]
-            run = dict(post.execute("SELECT * FROM x_post_manual_run WHERE id=?", (task["execution_run_id"],)).fetchone())
+            run = canonical(task["execution_run_id"]) if canonical else dict(post.execute("SELECT * FROM x_post_manual_run WHERE id=?", (task["execution_run_id"],)).fetchone())
             assert run["status"] == "failed_preflight" and run["error_code"] == "media_host_not_allowed"
             assert run["external_task_key"] == "x-auto-task-%s" % ident
             assert run["trigger_source"] == "auto_template"
-            assert json.loads(run["account_ids_json"]) == [int(task["account_id"])]
+            actual_accounts = run["account_ids"] if canonical else json.loads(run["account_ids_json"])
+            assert actual_accounts == [int(task["account_id"])]
             assert not any(run[k] for k in ("queued_count", "published_count", "unknown_count"))
-            assert post.execute("SELECT count(*) FROM x_post_queue WHERE manual_run_id=?", (run["id"],)).fetchone()[0] == 0
+            if canonical:
+                assert run["queues"] == []
+            else:
+                assert post.execute("SELECT count(*) FROM x_post_queue WHERE manual_run_id=?", (run["id"],)).fetchone()[0] == 0
             assert auto.execute("SELECT count(*) FROM x_auto_material_ledger WHERE task_id=?", (ident,)).fetchone()[0] == 0
         original_rows = [list(r) for r in auto.execute("SELECT * FROM x_auto_task WHERE run_id=? ORDER BY id", (source_run,))]
         original_hash = hashlib.sha256(json.dumps(original_rows, ensure_ascii=True).encode()).hexdigest()
@@ -80,7 +85,13 @@ def main():
     elif args.apply:
         import pwd
         assert os.geteuid() == pwd.getpwnam("x-post-daily").pw_uid, "use publisher service identity"
-    tasks, parent, original_hash, existing = inspect(args.auto_db, args.post_db, args.source_run, source_ids, operation)
+    sys.path.insert(0, str(Path(args.runtime).resolve()))
+    bridge = None
+    if args.apply and not args.rehearsal:
+        from features.x_auto_posts.x_sidecar import XPostAutoBridgeClient
+        bridge = XPostAutoBridgeClient("http://127.0.0.1:8810", os.environ["X_POST_AUTO_INTERNAL_TOKEN"])
+    canonical = None if bridge is None else bridge.query_run
+    tasks, parent, original_hash, existing = inspect(args.auto_db, args.post_db, args.source_run, source_ids, operation, canonical)
     account_ids = {task["account_id"] for task in tasks}
     if existing is not None:
         with contextlib.closing(reader(args.auto_db)) as conn:
@@ -92,7 +103,6 @@ def main():
     if not args.apply:
         print(json.dumps({"ok": True, "dry_run": True, "source_run_id": args.source_run, "source_task_ids": source_ids, "accounts": sorted(account_ids), "source_task_sha256": original_hash}))
         return
-    sys.path.insert(0, str(Path(args.runtime).resolve()))
     from features.x_auto_posts.core import XAutoPostStore, AuditActor
     from features.x_accounts.language import canonical_drama_language
     accounts = {}
@@ -100,8 +110,6 @@ def main():
         for task in tasks:
             accounts[task["account_id"]] = json.loads(task["account_snapshot_json"])
     else:
-        from features.x_auto_posts.x_sidecar import XPostAutoBridgeClient
-        bridge = XPostAutoBridgeClient("http://127.0.0.1:8810", os.environ["X_POST_AUTO_INTERNAL_TOKEN"])
         for task in tasks:
             account = bridge.verify_account(int(task["account_id"]), only_refresh_required=False, preserve_transient_status=True, require_publish_approved=True)
             assert str(account["id"]) == task["account_id"]
@@ -120,7 +128,7 @@ def main():
         result.append({"source_task_id": task["id"], "task_id": child.id, "account_id": child.account_id, "status": child.status})
     with store._transaction() as conn:
         store._event(conn, run_id=run.id, event_type="operator_failed_preflight_recovery", created_at=store._now_iso(), details={"operation": operation, "source_run_id": args.source_run, "source_task_ids": list(source_ids), "source_task_sha256": original_hash, "reason": "User authorized socialkit-cdn.yingliang.tech allowlist and republish", "children": result})
-    assert inspect(args.auto_db, args.post_db, args.source_run, source_ids, operation)[2] == original_hash, "source publication facts changed"
+    assert inspect(args.auto_db, args.post_db, args.source_run, source_ids, operation, canonical)[2] == original_hash, "source publication facts changed"
     print(json.dumps({"ok": True, "rehearsal": args.rehearsal, "run_id": run.id, "tasks": result, "source_tasks_preserved": True}))
 
 
