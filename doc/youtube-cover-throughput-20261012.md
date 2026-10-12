@@ -53,6 +53,57 @@ only the two previous source files, then drains the worker. Keep the current
 database, generated covers, approvals, schedules and publication ledger.
 Never restore the database backup over live publication state.
 
-Production release identifiers and acceptance results will be recorded after
-deployment. Per-task/operator details belong only in the private data-disk
-operations evidence.
+## Production release, 2026-10-12 Beijing time
+
+Runtime commit: `b8c8e3c93b899ca9e743d49d44dd36b17f05ccd7`, pushed to
+`codex/youtube-cover-throughput-20261012` and fetched/checked out on CPU before
+deployment. Linux regression: **115 tests, 114 passed, one unavailable historical
+image fixture skipped**. Both installed source hashes match the release.
+
+Code was installed at 18:45:09; the old worker drained its current task, and the
+replacement started at 18:46:58 with PID `3432663` and `slots=2`. Two separate
+live Codex process trees and two persisted `generating` tasks were verified.
+The main API retained PID `3258648`; the unified writer retained PID `2937249`.
+Both remain active. The public page returns 200 and anonymous task access 401.
+
+The live service includes newer channel-template methods absent from this
+branch's base. A source comparison confirmed that its preparation/claim path is
+unchanged; the service module was intentionally not deployed.
+
+Backup:
+`/mnt/data-disk/deploy/youtube-auto-publish/backups/cover-throughput-20261012-184509-b8c8e3c93b89`.
+
+Exact rollback command on CPU:
+
+```sh
+python3 /mnt/data-disk/deploy/youtube-auto-publish/releases/b8c8e3c93b899ca9e743d49d44dd36b17f05ccd7/scripts/deploy_youtube_cover_throughput.py --rollback /mnt/data-disk/deploy/youtube-auto-publish/backups/cover-throughput-20261012-184509-b8c8e3c93b89
+```
+
+Wait for the worker's replacement PID and verify hashes/health. This restores
+only dispatch source code, preserving current database and images. Private
+per-task evidence is under
+`/mnt/data-disk/youtube-auto-publish/operations/cover-throughput-20261012/`.
+The maintenance skill's YouTube context now documents independent dispatch,
+bounded concurrency and graceful migration.
+
+## Final acceptance, 2026-10-12 18:57:51 Beijing time
+
+All five tasks in the operator screenshot now have a current V1 AI cover.
+Public HTTPS task-owner GETs for all five task details and all five cover assets
+returned **200**. Every JPEG fully decoded at **1664 × 936**, and its response
+bytes and stored file matched the database asset SHA256.
+
+For each cover, verification matched the frozen reference SHA, the original
+native image in that attempt's isolated Codex home and its recorded generation
+thread. Re-running the same normalization/JPEG conversion reproduced each
+stored asset SHA exactly. The five native image hashes are distinct.
+
+The global preparation query returned no queued, generating, review or
+enqueue-pending tasks at that cutoff. All five had advanced through the existing
+review/publishing flow; the task DTOs showed four published and one still
+uploading. This verifies cover recovery, without claiming that the final video
+upload had completed. The repair performed no manual retry, task reset, cover
+approval or direct platform write.
+
+Final private evidence:
+`/mnt/data-disk/youtube-auto-publish/operations/cover-throughput-20261012/acceptance-185755.json`.
