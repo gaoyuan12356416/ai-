@@ -145,6 +145,80 @@ class PoolConnection:
 
 
 class ManualPoolSelectorTests(unittest.TestCase):
+    def test_pool_uses_drama_language_when_material_language_is_missing_or_wrong(self):
+        for source_language in (None, "", "en", "not a language"):
+            with self.subTest(source_language=source_language):
+                connection = PoolConnection([10])
+                connection.materials["10"]["material_language"] = source_language
+                connection.drama_rows["10"] = [drama_row(10, language="ja")]
+                connection.deploy_rows["10"] = [deploy_row(10, language="ja")]
+                selected, rejected = select_pool_candidates(
+                    connection, [pool_item(1, 10, "2026-10-12T00:00:00Z")],
+                    "2026-10-11", limit=1,
+                )
+                self.assertEqual(rejected, [])
+                self.assertEqual(selected[0]["material_language"], "ja")
+                drama_sql, params = next(
+                    (sql, params) for sql, params in connection.calls
+                    if "ads_drama_resource" in sql
+                )
+                self.assertEqual(params, ("C10",))
+                self.assertNotIn("TRIM(r.language)", drama_sql)
+
+    def test_manual_material_also_routes_from_drama_language(self):
+        connection = PoolConnection([10])
+        connection.drama_rows["10"] = [drama_row(10, language="pt-BR")]
+        connection.deploy_rows["10"] = [deploy_row(10, language="pt_br")]
+        selected, rejected = select_manual_candidates(connection, [10], "2026-10-11")
+        self.assertEqual(rejected, [])
+        self.assertEqual(selected[0]["material_language"], "pt-br")
+
+    def test_drama_language_missing_invalid_or_ambiguous_never_uses_material_fallback(self):
+        cases = [
+            ([drama_row(10, language="")], "drama_language_missing"),
+            ([drama_row(10, language=None)], "drama_language_missing"),
+            ([drama_row(10, language="bad language")], "drama_language_invalid"),
+            ([drama_row(10, language="en"), drama_row(10, language="ja")],
+             "drama_language_ambiguous"),
+        ]
+        for rows, code in cases:
+            with self.subTest(code=code, rows=rows):
+                connection = PoolConnection([10])
+                connection.drama_rows["10"] = rows
+                selected, rejected = select_manual_candidates(connection, [10], "2026-10-11")
+                self.assertEqual(selected, [])
+                self.assertEqual(rejected[0]["error_code"], code)
+                self.assertFalse(any("ads_drama_info" in sql for sql, _ in connection.calls))
+
+    def test_drama_language_aliases_share_identity_and_latest_delivery_boundary(self):
+        connection = PoolConnection([10])
+        connection.drama_rows["10"] = [drama_row(10, language="jp"), drama_row(10, language="ja")]
+        connection.deploy_rows["10"] = [
+            deploy_row(10, language="jp"),
+            deploy_row(10, language="ja", deploy_time=4102444800),
+        ]
+        selected, rejected = select_manual_candidates(connection, [10], "2026-10-11")
+        self.assertEqual(selected, [])
+        self.assertEqual(rejected[0]["error_code"], "drama_not_yet_deliverable")
+        connection.deploy_rows["10"][1]["deploy_time"] = 0
+        selected, rejected = select_manual_candidates(connection, [10], "2026-10-11")
+        self.assertEqual(rejected, [])
+        self.assertEqual(selected[0]["material_language"], "ja")
+
+    def test_automatic_template_retains_its_existing_material_language_contract(self):
+        connection = PoolConnection([10])
+        connection.materials["10"]["material_language"] = ""
+        selected, rejected = select_auto_template_candidates(connection, [10], "2026-10-11")
+        self.assertEqual(selected, [])
+        self.assertEqual(rejected[0]["error_code"], "material_metadata_invalid")
+
+    def test_other_material_metadata_is_still_required(self):
+        connection = PoolConnection([10])
+        connection.materials["10"]["content_id"] = ""
+        selected, rejected = select_manual_candidates(connection, [10], "2026-10-11")
+        self.assertEqual(selected, [])
+        self.assertEqual(rejected[0]["error_code"], "material_metadata_invalid")
+
     def test_direct_manual_selection_preserves_exact_request_order_without_pool_rows(self):
         connection = PoolConnection([10, 20, 30])
         selected, rejections = select_manual_candidates(
@@ -326,7 +400,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
             for sql, params in connection.calls
             if "ads_drama_resource" in sql
         ]
-        self.assertEqual(drama_calls[0][1], ("C30", "en"))
+        self.assertEqual(drama_calls[0][1], ("C30",))
         deploy_calls = [
             (sql, params)
             for sql, params in connection.calls

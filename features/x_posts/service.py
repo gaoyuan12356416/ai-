@@ -456,6 +456,12 @@ REVALIDATABLE_MATERIAL_VALIDATION_CODES = frozenset(
         # material with the current selector; this never treats ambiguity as
         # valid or clears the stored error before successful full preflight.
         "drama_mapping_ambiguous",
+        # Pool/operator-manual routing now resolves language from the drama.
+        # A fresh source/media check must still pass before clearing history.
+        "material_metadata_invalid",
+        "drama_language_missing",
+        "drama_language_invalid",
+        "drama_language_ambiguous",
         # Product restrictions were removed for operator-selected materials.
         # Revisit historical failures through full source/media preflight.
         "material_product_mismatch",

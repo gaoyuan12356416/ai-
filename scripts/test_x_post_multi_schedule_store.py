@@ -2146,6 +2146,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_material_fifo_capacity_proof_preserves_available_historical_codes(self):
         historical_codes = (
+            "material_metadata_invalid",
+            "drama_language_missing",
+            "drama_language_invalid",
+            "drama_language_ambiguous",
             "material_duration_missing",
             "material_product_mismatch",
             "material_deleted_image_unsupported",
