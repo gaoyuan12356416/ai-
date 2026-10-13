@@ -28,7 +28,7 @@ def collect_report(paths, window):
 
 def validate_channel(channel):
     for row in channel.get("rows", []):
-        for field in ("published", "late", "pending", "unknown", "failed", "blocked", "policy_skipped", "frequency_excluded"):
+        for field in ("published", "late", "pending", "unknown", "failed", "blocked", "policy_skipped", "frequency_excluded", "superseded_slots"):
             value = row.get(field, 0)
             if not isinstance(value, int) or value < 0:
                 raise ValueError("invalid report counter")
@@ -87,7 +87,7 @@ def _fb_elements(channel, compact=False):
     rows = channel["rows"]
     sums = total(rows)
     states = {key: sum(r.get(key, 0) for r in rows) for key in
-              ("failed", "pending", "blocked", "unknown", "policy_skipped", "frequency_excluded")}
+              ("failed", "pending", "blocked", "unknown", "policy_skipped", "frequency_excluded", "superseded_slots")}
     success = None if sums["published"] is None else sums["published"] + sums["late"]
     elements = [_md("**FB｜实际应发 %s · 确认成功 %s · 明确失败 %s**\n"
                     "受阻/待处理 %s · 结果待确认 %s · 策略跳过 %s。" %
@@ -106,10 +106,10 @@ def _fb_elements(channel, compact=False):
         elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
             "当日确认成功 %s，次日补发 %s；策略跳过 %s。" %
             (row.get("published", 0), row.get("late", 0), row.get("policy_skipped", 0))}]})
-    elements.append(_md("**统计口径**\n实际应发按冻结的 Page 频次及所选时隙计算；已排除频次外 %s 个位置。\n"
+    elements.append(_md("**统计口径**\n实际应发按冻结的 Page 频次及所选时隙计算；已排除频次外 %s 个位置、执行前已失效的旧计划 %s 个时隙。\n"
                         "成功为当日确认成功 %s + 次日 10:00 前补发 %s；结果待确认不计成功或失败。\n"
                         "策略跳过包含于实际应发，单列且不计失败；受阻/待处理不等同于平台发布失败。" %
-                        (states["frequency_excluded"], _n(sums["published"]), _n(sums["late"]))))
+                        (states["frequency_excluded"], states["superseded_slots"], _n(sums["published"]), _n(sums["late"]))))
     return elements
 
 

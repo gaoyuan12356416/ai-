@@ -257,6 +257,138 @@ class FBReportTests(unittest.TestCase):
         self.assertEqual(row['blocked'],2)
         self.assertEqual({r['code'] for r in row['reasons']},{'fb_report_late_unknown_block','fb_report_prepare_retries_expired'})
 
+    def superseded_fixture(self):
+        self.frequency_schema()
+        self.db.executescript("""
+          ALTER TABLE fb_auto_template_version ADD COLUMN created_at_utc TEXT;
+          ALTER TABLE fb_auto_due_slot ADD COLUMN template_version INTEGER;
+          ALTER TABLE fb_auto_due_slot ADD COLUMN updated_at_utc TEXT;
+          CREATE TABLE fb_auto_publish_attempt(task_id INTEGER,error_code TEXT);
+          CREATE TABLE fb_auto_schedule_plan(template_id INTEGER,template_version INTEGER,
+            local_date TEXT,times_json TEXT);
+        """)
+        config = {'schedule': {'mode': 'fixed', 'times': ['09:00']}, 'default_daily_count': 1}
+        for version, created in [(1, '2026-09-01T00:00:00Z'), (2, '2026-09-06T12:00:00Z')]:
+            self.db.execute('INSERT INTO fb_auto_template_version VALUES(1,?,?,?)',
+                            (version, json.dumps(config), created))
+        for run_id, version in [(1, 1), (2, 2)]:
+            self.run_row(run_id=run_id, pages=2)
+            self.db.execute('UPDATE fb_auto_run SET template_version=?,config_json=?,slot_key=? WHERE id=?',
+                            (version, json.dumps(config), f'auto:v{version}:2026-09-07:09:00', run_id))
+            for offset, page in enumerate(('p1', 'p2')):
+                task_id = (run_id - 1) * 2 + offset + 1
+                self.db.execute('INSERT INTO fb_auto_run_page VALUES(?,?)', (run_id, page))
+                if run_id == 2 and page == 'p1':
+                    self.task(task_id=task_id, run_id=run_id, page_id=page)
+                else:
+                    self.task(task_id=task_id, run_id=run_id, page_id=page, status='skipped',
+                              ledger_status=None, completed='2026-09-06T12:00:00Z')
+                    reason = 'fb_auto_template_version_changed' if page == 'p1' else 'fb_auto_page_unknown_block'
+                    self.db.execute("UPDATE fb_auto_task SET graph_post_id='',skip_reason=? WHERE id=?", (reason, task_id))
+
+    def test_superseded_run_removes_its_cancelled_and_preexisting_blocked_targets(self):
+        from features.post_daily_report.report import validate_channel, build_card, build_compact_card
+        self.superseded_fixture()
+        result = self.result()
+        row = result['rows'][0]
+        self.assertEqual((row['expected'], row['published'], row['blocked'], row['superseded_slots']), (2, 1, 1, 1))
+        self.assertEqual(row['reasons'][0]['count'], 1)
+        self.assertEqual(result['excluded_plans'][0]['id'], 1)
+        self.assertNotIn('fb_auto_run:1', result['evidence'])
+        validate_channel(result)
+        for builder in (build_card, build_compact_card):
+            card = json.dumps(builder({'date': self.window.date, 'channels': [result]}), ensure_ascii=False)
+            self.assertIn('实际应发 2', card)
+            self.assertIn('执行前已失效的旧计划 1 个时隙', card)
+        before = self.path.read_bytes()
+        self.result()
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_no_run_cancelled_old_slot_without_snapshot_does_not_make_expected_unknown(self):
+        self.superseded_fixture()
+        self.db.execute("INSERT INTO fb_auto_due_slot VALUES(9,1,'old-orphan','auto','2026-09-07T02:00:00Z',NULL,'missed','fb_auto_due_slot_template_changed',1,'2026-09-06T12:00:00Z')")
+        row = self.row()
+        self.assertEqual((row['expected'], row['superseded_slots']), (2, 2))
+        self.assertFalse(row['warnings'])
+        self.db.execute("UPDATE fb_auto_due_slot SET updated_at_utc=NULL")
+        self.assertIsNone(self.row()['expected'])
+
+    def test_old_failed_slot_without_cancellation_evidence_stays_visible(self):
+        self.superseded_fixture()
+        self.db.execute("INSERT INTO fb_auto_due_slot VALUES(9,1,'old-orphan','auto','2026-09-07T02:00:00Z',NULL,'missed','fb_auto_due_slot_too_late',1,'2026-09-06T12:00:00Z')")
+        self.assertIsNone(self.row()['expected'])
+
+    def test_missing_version_time_retains_old_targets(self):
+        self.superseded_fixture()
+        self.db.execute('UPDATE fb_auto_template_version SET created_at_utc=NULL WHERE version=2')
+        row = self.row()
+        self.assertEqual((row['expected'], row['blocked'], row['superseded_slots']), (4, 3, 0))
+
+    def test_missing_attempt_history_cannot_prove_old_run_unattempted(self):
+        self.superseded_fixture()
+        self.db.execute('DROP TABLE fb_auto_publish_attempt')
+        self.assertEqual(self.row()['expected'], 4)
+
+    def test_version_change_after_due_does_not_erase_missed_work(self):
+        self.superseded_fixture()
+        self.db.execute("UPDATE fb_auto_template_version SET created_at_utc='2026-09-07T02:00:00Z' WHERE version=2")
+        self.assertEqual(self.row()['expected'], 4)
+
+    def test_cancellation_after_due_remains_in_expected(self):
+        self.superseded_fixture()
+        self.db.execute("UPDATE fb_auto_task SET completed_at_utc='2026-09-07T02:00:00Z' WHERE id=1")
+        self.assertEqual(self.row()['expected'], 4)
+
+    def test_actual_outcomes_on_old_version_are_never_discarded(self):
+        self.superseded_fixture()
+        for status in ('published', 'failed', 'unknown', 'submitted', 'ready'):
+            with self.subTest(status=status):
+                self.db.execute('UPDATE fb_auto_task SET status=? WHERE id=1', (status,))
+                row = self.row()
+                self.assertEqual((row['expected'], row['superseded_slots']), (4, 0))
+        self.db.execute("UPDATE fb_auto_task SET status='skipped',graph_post_id='remote-evidence' WHERE id=1")
+        self.assertEqual(self.row()['expected'], 4)
+        self.db.execute("UPDATE fb_auto_task SET graph_post_id='',unknown_outcome=1 WHERE id=1")
+        self.assertEqual(self.row()['expected'], 4)
+
+    def test_old_skipped_task_with_ledger_or_attempt_cannot_be_erased(self):
+        self.superseded_fixture()
+        self.db.execute("INSERT INTO fb_auto_publish_ledger VALUES(1,'p1','failed','',0)")
+        self.assertEqual(self.row()['expected'], 4)
+        self.db.execute('DELETE FROM fb_auto_publish_ledger WHERE task_id=1')
+        self.db.execute("INSERT INTO fb_auto_publish_attempt VALUES(1,'fb_graph_190')")
+        self.assertEqual(self.row()['expected'], 4)
+
+    def test_incomplete_old_task_scope_is_not_assumed_cancelled(self):
+        self.superseded_fixture()
+        self.db.execute('DELETE FROM fb_auto_task WHERE id=1')
+        row = self.row()
+        self.assertEqual((row['expected'], row['unknown'], row['superseded_slots']), (4, 1, 0))
+
+    def test_manual_old_run_and_due_are_preserved(self):
+        self.superseded_fixture()
+        self.db.execute("UPDATE fb_auto_run SET trigger_type='manual' WHERE id=1")
+        manual = self.row('manual_template')
+        self.assertEqual((manual['expected'], manual['blocked']), (2, 2))
+        self.db.execute("INSERT INTO fb_auto_due_slot VALUES(9,1,'manual-orphan','manual','2026-09-07T02:00:00Z',NULL,'missed','fb_auto_due_slot_template_changed',1,'2026-09-06T12:00:00Z')")
+        self.assertIsNone(self.row('manual_template')['expected'])
+
+    def test_superseded_random_plan_without_due_is_excluded(self):
+        self.superseded_fixture()
+        self.db.execute("INSERT INTO fb_auto_schedule_plan VALUES(1,1,'2026-09-07','[\"11:00\"]')")
+        row = self.row()
+        self.assertEqual((row['expected'], row['superseded_slots']), (2, 2))
+        self.db.execute('UPDATE fb_auto_schedule_plan SET template_version=2')
+        self.assertIsNone(self.row()['expected'])
+
+    def test_new_random_slot_not_masked_by_same_time_old_version(self):
+        self.superseded_fixture()
+        self.db.execute('DELETE FROM fb_auto_run WHERE id=2')
+        self.db.execute('DELETE FROM fb_auto_task WHERE run_id=2')
+        self.db.execute('DELETE FROM fb_auto_run_page WHERE run_id=2')
+        self.db.execute("INSERT INTO fb_auto_schedule_plan VALUES(1,2,'2026-09-07','[\"09:00\"]')")
+        self.assertIsNone(self.row()['expected'])
+
 
 class FBTargetAuditTests(unittest.TestCase):
     def test_hook_freezes_first_target_set_and_known_empty(self):

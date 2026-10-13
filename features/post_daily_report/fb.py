@@ -3,7 +3,7 @@
 Legacy MySQL publishers are deliberately outside this adapter's scope.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
 import hashlib
 
 from .common import BEIJING, in_window, json_value, parse_time, read_db
@@ -65,6 +65,7 @@ def _new_row(source):
             "form": "Page 视频（随机排重）", "expected": 0, "published": 0, "late": 0,
             "pending": 0, "unknown": 0, "failed": 0, "blocked": 0,
             "policy_skipped": 0, "frequency_excluded": 0, "raw_targets": 0,
+            "superseded_slots": 0,
             "reasons": [], "policy_reasons": [], "warnings": []}
 
 
@@ -138,12 +139,42 @@ def _confirmed(task, ledger):
                 and str(task.get("page_id")) == str(ledger.get("page_id")))
 
 
+def _superseded_at(item, planned, version_times, cutoff):
+    """Prove withdrawal from historical version creation, never current settings."""
+    if item.get("trigger_type", "auto") != "auto" or planned is None:
+        return None
+    key = (item.get("template_id"), item.get("template_version"))
+    created = version_times.get(key)
+    if created is None or type(key[1]) is not int:
+        return None
+    changes = [stamp for (template_id, version), stamp in version_times.items()
+               if template_id == key[0] and type(version) is int and version > key[1]
+               and stamp is not None and created <= stamp < min(planned, cutoff)]
+    return min(changes) if changes else None
+
+
+def _unattempted_run(run, tasks, ledgers, attempted, planned, cutoff):
+    """Do not discard incomplete scope, actual attempts, receipts or ambiguity."""
+    total_pages = int(run.get("total_pages") or 0)
+    if (attempted is None or len(tasks) != total_pages
+            or len({t.get("page_id") for t in tasks}) != total_pages):
+        return False
+    for task in tasks:
+        completed = parse_time(task.get("completed_at_utc"))
+        if (task.get("status") != "skipped" or task.get("graph_post_id")
+                or task.get("unknown_outcome") or task["id"] in ledgers
+                or task["id"] in attempted or completed is None
+                or completed >= min(planned, cutoff)):
+            return False
+    return True
+
+
 def collect(paths, window):
     """Count planned Page posts, requiring task AND ledger success evidence."""
     groups = {key: _new_row(key) for key in ("auto_template", "manual_template")}
     reasons = {key: Counter() for key in groups}
     policy_reasons = {key: Counter() for key in groups}
-    warnings, evidence, prior = [], [], 0
+    warnings, evidence, excluded_plans, prior = [], [], [], 0
     seen_success = set()
     with read_db(paths["fb"]) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -160,15 +191,32 @@ def collect(paths, window):
         schedule_plans = (_rows(conn, "fb_auto_schedule_plan")
                           if "fb_auto_schedule_plan" in tables else [])
         run_pages = _rows(conn, "fb_auto_run_page") if "fb_auto_run_page" in tables else []
-        versions = {(v["template_id"], v["version"]): v["config_json"]
-                    for v in _rows(conn, "fb_auto_template_version")} if "fb_auto_template_version" in tables else {}
+        version_rows = (_rows(conn, "fb_auto_template_version")
+                        if "fb_auto_template_version" in tables else [])
+        versions = {(v["template_id"], v["version"]): v["config_json"] for v in version_rows}
+        version_times = {(v["template_id"], v["version"]): parse_time(v.get("created_at_utc"))
+                         for v in version_rows}
+        attempted = ({r[0] for r in conn.execute("SELECT DISTINCT task_id FROM fb_auto_publish_attempt")}
+                     if "fb_auto_publish_attempt" in tables else None)
         fetch_failures = ({r[0] for r in conn.execute(
             "SELECT DISTINCT task_id FROM fb_auto_publish_attempt WHERE error_code='fb_graph_389'")}
             if "fb_auto_publish_attempt" in tables else set())
 
+    def exclude(kind, item, planned, changed):
+        groups["auto_template"]["superseded_slots"] += 1
+        excluded_plans.append({"kind": kind, "id": item.get("id"),
+                               "template_id": item.get("template_id"),
+                               "template_version": item.get("template_version"),
+                               "planned_publish_at_utc": planned.isoformat(),
+                               "superseded_at_utc": changed.isoformat()})
+
+    tasks_by_run = defaultdict(list)
+    for task in tasks:
+        tasks_by_run[task.get("run_id")].append(task)
+
     # A frozen random schedule can exist even when the scheduler failed to create
     # its due rows. Preserve that evidence rather than reporting an empty day.
-    observed_slots = {(r.get("template_id"), parse_time(r.get("planned_publish_at_utc")))
+    observed_slots = {(r.get("template_id"), r.get("template_version"), parse_time(r.get("planned_publish_at_utc")))
                       for r in list(runs.values()) + due_slots}
     for plan in schedule_plans:
         if plan.get("local_date") != window.date:
@@ -178,10 +226,14 @@ def collect(paths, window):
             if instant is None:
                 groups["auto_template"]["expected"] = None
                 groups["auto_template"]["warnings"].append("已保存的 FB 随机计划包含无法解析的时刻")
-            elif (plan.get("template_id"), instant) not in observed_slots:
-                groups["auto_template"]["expected"] = None
-                groups["auto_template"]["warnings"].append(
-                    f"模板 {plan['template_id']} 已冻结的 {slot_time} 计划缺少时隙及运行记录，预期条数未知")
+            elif (plan.get("template_id"), plan.get("template_version"), instant) not in observed_slots:
+                changed = _superseded_at(plan, instant, version_times, window.cutoff)
+                if changed is not None:
+                    exclude("schedule", plan, instant, changed)
+                else:
+                    groups["auto_template"]["expected"] = None
+                    groups["auto_template"]["warnings"].append(
+                        f"模板 {plan['template_id']} 已冻结的 {slot_time} 计划缺少时隙及运行记录，预期条数未知")
 
     page_scope = {}
     for item in run_pages or tasks:
@@ -201,6 +253,11 @@ def collect(paths, window):
                 groups[key]["warnings"].append(f"运行 {run_id} 缺少计划时间，昨日归属与预期未确认")
             continue
         if in_window(planned, window.start, window.end):
+            changed = _superseded_at(run, planned, version_times, window.cutoff)
+            if changed is not None and _unattempted_run(
+                    run, tasks_by_run[run_id], ledgers, attempted, planned, window.cutoff):
+                exclude("run", run, planned, changed)
+                continue
             cohort_runs[run_id] = run
             key = _source(run.get("trigger_type"))
             row = groups[key]
@@ -223,6 +280,14 @@ def collect(paths, window):
         if not in_window(due.get("planned_publish_at_utc"), window.start, window.end):
             continue
         if due.get("run_id") in runs or (due.get("template_id"), due.get("slot_key")) in run_slots:
+            continue
+        planned = parse_time(due.get("planned_publish_at_utc"))
+        changed = _superseded_at(due, planned, version_times, window.cutoff)
+        updated = parse_time(due.get("updated_at_utc"))
+        if (changed is not None and due.get("status") == "missed"
+                and due.get("error_code") == "fb_auto_due_slot_template_changed"
+                and updated is not None and changed <= updated < min(planned, window.cutoff)):
+            exclude("due_slot", due, planned, changed)
             continue
         key = _source(due.get("trigger_type"))
         row = groups[key]
@@ -347,5 +412,6 @@ def collect(paths, window):
             row["policy_reasons"].append({"code": code, "reason": reason, "count": count,
                                            "suggestion": suggestion, "confidence": "confirmed"})
         row["warnings"] = list(dict.fromkeys(row["warnings"]))
-    return {"channel": "FB", "accounting": "actual-fb-v2", "rows": list(groups.values()), "prior_completed": prior,
-            "warnings": warnings, "evidence": evidence}
+    return {"channel": "FB", "accounting": "actual-fb-v2", "accounting_revision": "superseded-auto-v1",
+            "rows": list(groups.values()), "prior_completed": prior,
+            "warnings": warnings, "evidence": evidence, "excluded_plans": excluded_plans}
