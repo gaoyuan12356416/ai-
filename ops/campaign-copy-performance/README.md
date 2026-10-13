@@ -157,9 +157,11 @@ signature controls descriptive-field reuse only: every metric query uses exact
 freshly read Ad IDs, never a cached membership set or digest. A failed refresh
 does not advance metadata ages, rotation, financial dates, or history cursors.
 The v2 cache adds optional metadata fields to `cf/c`; the old frontend and old
-service can still read it. The first migration reuses verified TikTok descriptors
-when Ad counts match; Meta source-product fallbacks are refreshed once because
-the legacy cache stored only the resolved App label.
+service can still read it. The first migration reuses verified descriptors when
+Ad counts match. A missing Meta source-product fallback is fetched immediately
+only when the current log lacks an App name; otherwise it stays explicitly
+unknown until that Campaign's normal metadata rotation. This avoids treating an
+old resolved App label as the raw product or forcing a full migration lookup.
 
 Copy pipeline counts and successful logs now come from one log query, removing
 the second full log scan and SQL filesort. All statements in one refresh use a

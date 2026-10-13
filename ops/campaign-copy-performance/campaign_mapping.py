@@ -79,6 +79,8 @@ def query_campaign_mapping(cur, logs, previous, now):
                 row["product"] = row["metadata_product"]
             elif int(row.get("platform") or 0) == 3:
                 row["product"] = ""
+            else:
+                row["product"] = None  # Unknown legacy fallback, not the App label.
             prior[(int(row.get("platform") or 0), str(row["campaign_id"]))] = row
     now = timestamp(now)
     if now is None:
@@ -87,8 +89,12 @@ def query_campaign_mapping(cur, logs, previous, now):
     seed_time = timestamp(previous_meta.get("generated_at"))
     bucket = int(previous_meta.get("mapping_metadata_next_bucket", 0)) % METADATA_BUCKETS
     ids_by_platform = collections.defaultdict(set)
+    needs_product = set()
     for row in logs:
-        ids_by_platform[int(row.get("platform") or 0)].add(str(row["new_id"]))
+        key = (int(row.get("platform") or 0), str(row["new_id"]))
+        ids_by_platform[key[0]].add(key[1])
+        if not str(row.get("app_name") or "").strip():
+            needs_product.add(key)
 
     mapping = []
     grouped = collections.defaultdict(list)
@@ -132,6 +138,7 @@ def query_campaign_mapping(cur, logs, previous, now):
             )
             due = (not same or checked is None or checked > now or now - checked >= METADATA_MAX_AGE
                    or metadata_bucket(platform, cid) == bucket
+                   or (key in needs_product and (old or {}).get("product") is None)
                    or any(field not in (old or {}) for field in METADATA_FIELDS))
             metadata[key] = {"metadata_signature": signature,
                              "metadata_checked_at": str(now if due else checked)}
@@ -141,6 +148,9 @@ def query_campaign_mapping(cur, logs, previous, now):
                 metadata[key].update({field: old[field] for field in METADATA_FIELDS})
                 stats["reused_campaigns"] += 1
 
+        print(json.dumps({"event": "campaign_copy_report_mapping_plan", "platform": platform,
+                          "source": table, "membership_campaigns": len(remaining),
+                          "detail_campaigns": len(refresh_ids)}), flush=True)
         for part in chunks(refresh_ids, DETAIL_BATCH):
             placeholders = ",".join(["%s"] * len(part))
             # status, budget and ad_account_id were fetched but never consumed.

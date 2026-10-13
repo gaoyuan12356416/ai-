@@ -127,6 +127,19 @@ class MappingTest(unittest.TestCase):
         prior["c"][0][prior["cf"].index("platform")] = 0
         self.assertEqual(self.query({FB: [source_row()]}, [{"platform": 0, "new_id": "100"}], prior)[3]["detail_queries"], 1)
 
+    def test_meta_migration_only_fetches_raw_product_when_log_app_name_is_missing(self):
+        logs = [{"platform": 0, "new_id": "100", "app_name": "App label"}]
+        tables = {FB: [source_row()]}
+        prior = self.prior(tables, logs)
+        prior["c"][0][prior["cf"].index("metadata_product")] = None
+        _, metadata, _, stats, _ = self.query(tables, logs, prior)
+        self.assertEqual(stats["detail_queries"], 0)
+        self.assertIsNone(metadata[(0, "100")]["product"])
+        logs[0]["app_name"] = ""
+        _, metadata, _, stats, _ = self.query(tables, logs, prior)
+        self.assertEqual(stats["detail_queries"], 1)
+        self.assertEqual(metadata[(0, "100")]["product"], "Source product")
+
     def test_inconsistent_source_fails_instead_of_installing_partial_metadata(self):
         cur = SourceCursor({TT: [source_row()]})
         execute = cur.execute
