@@ -156,8 +156,10 @@ rows, or fallback-source changes) are detected with a compact signature. The
 signature controls descriptive-field reuse only: every metric query uses exact
 freshly read Ad IDs, never a cached membership set or digest. A failed refresh
 does not advance metadata ages, rotation, financial dates, or history cursors.
-The v2 cache adds optional metadata fields to `cf/c`; the old frontend and old
-service can still read it. The first migration reuses verified descriptors when
+The durable v2 cache adds optional metadata fields to `cf/c`; the old service can
+still read it. These fields and the metadata cursor are stripped from the public
+API, avoiding extra browser transfer and keeping the original frontend contract.
+The ETag hashes the public body, not the private seed file. The first migration reuses verified descriptors when
 Ad counts match. A missing Meta source-product fallback is fetched immediately
 only when the current log lacks an App name; otherwise it stays explicitly
 unknown until that Campaign's normal metadata rotation. This avoids treating an

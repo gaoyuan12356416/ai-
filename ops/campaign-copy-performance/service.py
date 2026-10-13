@@ -881,15 +881,22 @@ def json_default(value: object):
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
-def encode_wire_payload(payload: dict) -> dict:
+PRIVATE_CAMPAIGN_FIELDS = {"metadata_signature", "metadata_checked_at", "metadata_product"}
+
+
+def encode_wire_payload(payload: dict, *, include_metadata: bool = True) -> dict:
     """Remove repeated JSON object keys while keeping the frontend contract explicit."""
+    campaign_fields = [field for field in CAMPAIGN_FIELDS if include_metadata or field not in PRIVATE_CAMPAIGN_FIELDS]
+    meta = dict(payload["meta"])
+    if not include_metadata:
+        meta.pop("mapping_metadata_next_bucket", None)
     return {
         "v": 2,
-        "m": payload["meta"],
+        "m": meta,
         "p": payload["copy_pipeline"],
         "lp": payload.get("copy_pipelines", {"0": payload["copy_pipeline"]}),
-        "cf": list(CAMPAIGN_FIELDS),
-        "c": [[row.get(field) for field in CAMPAIGN_FIELDS] for row in payload["campaigns"]],
+        "cf": campaign_fields,
+        "c": [[row.get(field) for field in campaign_fields] for row in payload["campaigns"]],
         "df": list(DAILY_FIELDS),
         "d": [[row.get(field) for field in DAILY_FIELDS] for row in payload["daily"]],
         "xf": list(EXTRA_ENTITY_FIELDS),
@@ -905,13 +912,26 @@ def encode_wire_payload(payload: dict) -> dict:
     }
 
 
-def serialize_wire_payload(payload: dict) -> bytes:
+def serialize_wire_payload(payload: dict, *, include_metadata: bool = True) -> bytes:
     return json.dumps(
-        encode_wire_payload(payload),
+        encode_wire_payload(payload, include_metadata=include_metadata),
         ensure_ascii=False,
         separators=(",", ":"),
         default=json_default,
     ).encode("utf-8")
+
+
+def public_cache_body(body: bytes) -> bytes:
+    """Strip private reuse metadata when loading the durable seed at startup."""
+    data = json.loads(body)
+    fields = data.get("cf", [])
+    if not PRIVATE_CAMPAIGN_FIELDS.intersection(fields):
+        return body
+    keep = [i for i, field in enumerate(fields) if field not in PRIVATE_CAMPAIGN_FIELDS]
+    data["cf"] = [fields[i] for i in keep]
+    data["c"] = [[row[i] for i in keep] for row in data["c"]]
+    data.get("m", {}).pop("mapping_metadata_next_bucket", None)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def validate_or_convert_cache_body(body: bytes) -> bytes:
@@ -946,6 +966,7 @@ class ReportCache:
         self.ready_event = threading.Event()
         self.stop_event = threading.Event()
         self.body: bytes | None = None
+        self.seed_body: bytes | None = None
         self.gzip_body: bytes | None = None
         self.loaded_at = 0.0
         self.etag = ""
@@ -959,6 +980,7 @@ class ReportCache:
             age = int(time.monotonic() - self.loaded_at) if self.body is not None else None
             return {
                 "body": self.body,
+                "seed_body": self.seed_body,
                 "gzip_body": self.gzip_body,
                 "etag": self.etag,
                 "age": age,
@@ -967,13 +989,15 @@ class ReportCache:
                 "last_error": self.last_error,
             }
 
-    def _install_body(self, body: bytes, age_seconds: float = 0) -> None:
-        compressed = gzip.compress(body, compresslevel=6, mtime=0)
+    def _install_body(self, body: bytes, age_seconds: float = 0, *, public_body: bytes | None = None) -> None:
+        public_body = public_cache_body(body) if public_body is None else public_body
+        compressed = gzip.compress(public_body, compresslevel=6, mtime=0)
         with self.state_lock:
-            self.body = body
+            self.seed_body = body
+            self.body = public_body
             self.gzip_body = compressed
             self.loaded_at = time.monotonic() - max(0, age_seconds)
-            self.etag = 'W/"' + hashlib.sha256(body).hexdigest() + '"'
+            self.etag = 'W/"' + hashlib.sha256(public_body).hexdigest() + '"'
         self.ready_event.set()
 
     def _persist(self, body: bytes) -> None:
@@ -1035,14 +1059,15 @@ class ReportCache:
             self.refresh_in_progress = True
             self.last_error = ""
         try:
-            prior_body = self.snapshot()["body"]
+            prior_body = self.snapshot()["seed_body"]
             previous = json.loads(prior_body) if prior_body else None
             raw = query_raw(previous)
             payload = merge_history(build_payload(raw), previous, raw["refresh_dates"], raw["history_next_date"])
             del raw, previous, prior_body
             body = serialize_wire_payload(payload)
+            public_body = serialize_wire_payload(payload, include_metadata=False)
             self._persist(body)
-            self._install_body(body)
+            self._install_body(body, public_body=public_body)
             duration = time.monotonic() - started
             with self.state_lock:
                 self.last_refresh_duration = duration
@@ -1051,7 +1076,8 @@ class ReportCache:
                         {
                             "event": "campaign_copy_report_refresh",
                             "seconds": round(duration, 3),
-                            "bytes": len(body),
+                            "bytes": len(public_body),
+                            "disk_cache_bytes": len(body),
                             "gzip_bytes": len(self.gzip_body or b""),
                             "campaigns": len(payload["campaigns"]),
                             "extra_entities": len(payload.get("extra_entities", [])),

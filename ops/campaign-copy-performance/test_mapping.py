@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import unittest
+import json
 from unittest import mock
 
 import campaign_mapping as mapping
@@ -173,6 +174,23 @@ class MappingTest(unittest.TestCase):
 
 
 class RefreshSchedulingTest(unittest.TestCase):
+    def test_private_metadata_is_retained_for_refresh_but_never_sent_to_browser(self):
+        seed = {"v": 2, "m": {"read_only_verified": True, "mapping_metadata_next_bucket": 5},
+                "cf": ["campaign_id", "metadata_signature", "metadata_checked_at", "metadata_product"],
+                "c": [["100", "private-digest", str(NOW), "raw-product"]],
+                "df": ["spend"], "d": [[12.5]]}
+        body = json.dumps(seed).encode()
+        cache = service.ReportCache(None)
+        cache._install_body(body)
+        snapshot = cache.snapshot()
+        self.assertEqual(snapshot["seed_body"], body)
+        public = json.loads(snapshot["body"])
+        self.assertEqual(public["cf"], ["campaign_id"])
+        self.assertEqual(public["c"], [["100"]])
+        self.assertEqual(public["d"], [[12.5]])
+        self.assertNotIn("mapping_metadata_next_bucket", public["m"])
+        self.assertEqual(service.gzip.decompress(snapshot["gzip_body"]), snapshot["body"])
+
     def test_page_reads_never_start_sql_even_for_stale_or_failed_cache(self):
         cache = service.ReportCache(None)
         cache._install_body(b"{}", age_seconds=9000)
