@@ -194,3 +194,34 @@ ln -s /opt/campaign-copy-performance/releases/4727724c3cdafff5b5bbd2c727284f1ed9
 mv -Tf /opt/campaign-copy-performance/current.rollback /opt/campaign-copy-performance/current
 systemctl restart campaign-copy-performance.service
 ```
+
+### Production verification (2026-10-13, Beijing time)
+
+- Code `5ab4071e8c82940b7a1e1b87f01e1022d7fb3d97` deployed to
+  `43.166.187.96:/opt/campaign-copy-performance/current`. Only this report service
+  restarted at 17:49. Backup:
+  `/mnt/data-disk/campaign-copy-performance/optimization-20261013/backup/pre-switch-20261013-174923`.
+- 29 tests passed locally and on the CPU server. The supplied 848-ID sample
+  returned identical 10,182 Campaign/Ad pairs: original query 8.0217s; covering
+  query 0.7303s. This is not an 11x speedup of the complete refresh.
+- Two real-data warm runs took 464.617s and 437.479s. The final run covered
+  282,344 Campaigns and 1,016,160 current mapping rows while retrieving only
+  10,305 detailed rows for 2,925 Campaigns. Mapping SQL: 59 covering reads plus
+  13 detail reads (72 total), versus 97 detail reads at the same population.
+- Final phases: copy-log paging 17 statements / 23.039s; mapping 72 / 57.645s;
+  other mappings 4 / 3.335s; insights 416 / 311.200s. Insight reads remain the
+  principal full-refresh cost, with the 15-minute cadence unchanged.
+- 579,331 Campaign-day and 15,484 Ad Set/Ad-day rows outside the refreshed dates
+  were retained exactly. Duplicate entity/date keys: zero.
+- Six Meta/TikTok samples (48 Ads) in one database snapshot matched original and
+  optimized membership and all 11 metrics/counts. A separate later live read
+  differed by 0.37 spend; source `updated_at` was after the candidate snapshot.
+  This was recorded as ingestion drift, not a zero-delta cache check.
+- The validated 17:39:11 candidate replaced the older 17:28:20 live cache. Public
+  HTML/API returned 200; conditional requests returned 304. The response contained
+  282,344 Campaigns, 5,517 extra entities and 693,264 daily rows through 2026-10-13.
+  Public bytes: 213,486,208; gzip: 26,432,372. Private metadata was absent.
+  Public-body SHA-256 and ETag matched the reconstructed candidate:
+  `a5137810e469aa0c69519143b33a796964f8d20f436ab07d9dbd67b7dccfa0ea`.
+- Evidence remains under the optimization directory. Rollback uses the commands
+  above to restore code `4727724`, preserving the latest v2 cache.
