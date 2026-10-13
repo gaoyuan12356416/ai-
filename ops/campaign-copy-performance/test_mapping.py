@@ -211,7 +211,7 @@ class RefreshSchedulingTest(unittest.TestCase):
         rows[-1]["new_id"] = "invalid"
         cursor = mock.MagicMock()
         cursor.execute.return_value = 1
-        cursor.fetchone.side_effect = [{"is_read_only": 1, "server_time": NOW}, {"dt": NOW.date()}]
+        cursor.fetchone.side_effect = [{"is_read_only": 1, "server_time": NOW}, {"max_id": 4}, None, {"dt": NOW.date()}]
         cursor.fetchall.return_value = rows
         conn = mock.MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -220,8 +220,33 @@ class RefreshSchedulingTest(unittest.TestCase):
         self.assertEqual(raw["copy_status_counts"], [{"level": 0, "status": 0, "n": 1},
                          {"level": 0, "status": 1, "n": 2}, {"level": 0, "status": 2, "n": 1}])
         self.assertEqual([r["new_id"] for r in mapped.call_args.args[1]], ["2"])
-        log_queries = [call.args[0] for call in cursor.execute.call_args_list if "ads_campaign_rule_logs" in call.args[0]]
+        log_queries = [call.args[0] for call in cursor.execute.call_args_list if "SELECT l.id" in call.args[0]]
         self.assertEqual(len(log_queries), 1)
+        self.assertIn("l.id > %s AND l.id <= %s", log_queries[0])
+
+    def test_log_paging_covers_sparse_ids_and_old_status_corrections_once(self):
+        ids = [1, 4, 99, 100, 201]
+        cur = mock.MagicMock()
+        result = {}
+        ranges = []
+        def execute(sql, args=None):
+            if "MAX(id)" in sql:
+                result["one"] = {"max_id": 201}
+            elif "SELECT id FROM" in sql:
+                remaining = [value for value in ids if args[0] < value <= args[1]]
+                result["one"] = {"id": remaining[1]} if len(remaining) >= 2 else None
+            else:
+                ranges.append(tuple(args))
+                result["all"] = [{"id": value, "status": 2 if value == 1 else 1}
+                                 for value in ids if args[0] < value <= args[1]]
+        cur.execute.side_effect = execute
+        cur.fetchone.side_effect = lambda: result["one"]
+        cur.fetchall.side_effect = lambda: result["all"]
+        with mock.patch.object(service, "COPY_LOG_PAGE_ROWS", 2):
+            rows = service.read_copy_logs(cur)
+        self.assertEqual([row["id"] for row in rows], ids)
+        self.assertEqual(rows[0]["status"], 2)
+        self.assertEqual(ranges, [(0, 4), (4, 100), (100, 201)])
 
 
 if __name__ == "__main__":

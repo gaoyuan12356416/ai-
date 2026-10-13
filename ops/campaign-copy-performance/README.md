@@ -165,8 +165,12 @@ only when the current log lacks an App name; otherwise it stays explicitly
 unknown until that Campaign's normal metadata rotation. This avoids treating an
 old resolved App label as the raw product or forcing a full migration lookup.
 
-Copy pipeline counts and successful logs now come from one log query, removing
-the second full log scan and SQL filesort. All statements in one refresh use a
+Copy pipeline counts and successful logs now come from one logical log scan,
+removing the second full scan and SQL filesort. The scan is split into primary-key
+pages of at most 500,000 source rows to stay below the statement timeout. An
+index-only seek finds each page boundary, including across sparse/deleted IDs;
+old status corrections remain visible because the full source population is
+still covered. All statements in one refresh use a
 read-only, repeatable-read consistent snapshot under the existing FIFO gate.
 Phase timings/query counts and mapping reuse counts are logged without SQL text,
 IDs, or credentials. The existing statement/overall budgets and atomic publish

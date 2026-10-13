@@ -44,6 +44,7 @@ PLATFORM_LABELS = {0: "Meta", 3: "TikTok"}
 INSIGHT_CHUNK_SIZES = {0: 20000, 3: 20000}
 REFRESH_LOOKBACK_DAYS = 7
 REFRESH_BUDGET_SECONDS = 840
+COPY_LOG_PAGE_ROWS = 500000
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -370,6 +371,52 @@ class MeasuredCursor:
         return getattr(self.cursor, name)
 
 
+
+def read_copy_logs(cur):
+    """One logical full scan in bounded primary-key pages, including corrections.
+
+    The seek query walks only the primary index and returns one upper boundary.
+    Sparse/deleted IDs do not cause empty numeric-range loops. All pages share
+    the refresh's consistent snapshot, so no rows are skipped or counted twice.
+    """
+    cur.execute("SELECT MAX(id) AS max_id FROM ads_business.ads_campaign_rule_logs")
+    maximum = int((cur.fetchone() or {}).get("max_id") or 0)
+    rows = []
+    after = 0
+    while after < maximum:
+        cur.execute(
+            "SELECT id FROM ads_business.ads_campaign_rule_logs FORCE INDEX (PRIMARY) "
+            f"WHERE id > %s AND id <= %s ORDER BY id LIMIT {COPY_LOG_PAGE_ROWS - 1},1",
+            (after, maximum),
+        )
+        boundary = cur.fetchone()
+        through = int(boundary["id"]) if boundary else maximum
+        cur.execute("""
+            SELECT l.id, l.platform, l.level, l.status, l.account_id, l.origin_id, l.new_id, l.queue_id,
+                   l.user_id, l.app_id, l.content_id, l.created_at,
+                   r.name AS rule_name, a.name AS app_name,
+                   aug.name AS user_name
+            FROM ads_business.ads_campaign_rule_logs l FORCE INDEX (PRIMARY)
+            LEFT JOIN ads_business.ads_campaign_auto_rules r ON r.id=l.queue_id
+            LEFT JOIN kunlunads_dev.ads_apps_setting a ON a.id=l.app_id
+            LEFT JOIN (
+                SELECT sub_user_id,
+                       COALESCE(
+                           MAX(CASE WHEN status=0 THEN NULLIF(TRIM(name), '') END),
+                           MAX(NULLIF(TRIM(name), ''))
+                       ) AS name
+                FROM kunlunads_dev.admin_user_group
+                GROUP BY sub_user_id
+            ) aug ON aug.sub_user_id=l.user_id
+            WHERE l.id > %s AND l.id <= %s
+              AND l.platform IN (0,3) AND l.level IN (0,1,2)
+              AND l.data_source=1
+            """, (after, through))
+        rows.extend(cur.fetchall())
+        after = through
+    return rows
+
+
 def query_raw_connection(conn, previous: dict | None = None) -> dict:
     payload: dict[str, object] = {}
     with conn.cursor() as source_cursor:
@@ -384,29 +431,7 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
         payload["safety"] = safety
 
         cur.phase = "copy_logs"
-        cur.execute(
-            """
-            SELECT l.id, l.platform, l.level, l.status, l.account_id, l.origin_id, l.new_id, l.queue_id,
-                   l.user_id, l.app_id, l.content_id, l.created_at,
-                   r.name AS rule_name, a.name AS app_name,
-                   aug.name AS user_name
-            FROM ads_business.ads_campaign_rule_logs l
-            LEFT JOIN ads_business.ads_campaign_auto_rules r ON r.id=l.queue_id
-            LEFT JOIN kunlunads_dev.ads_apps_setting a ON a.id=l.app_id
-            LEFT JOIN (
-                SELECT sub_user_id,
-                       COALESCE(
-                           MAX(CASE WHEN status=0 THEN NULLIF(TRIM(name), '') END),
-                           MAX(NULLIF(TRIM(name), ''))
-                       ) AS name
-                FROM kunlunads_dev.admin_user_group
-                GROUP BY sub_user_id
-            ) aug ON aug.sub_user_id=l.user_id
-            WHERE l.platform IN (0,3) AND l.level IN (0,1,2)
-              AND l.data_source=1
-            """
-        )
-        all_logs = cur.fetchall()
+        all_logs = read_copy_logs(cur)
         counts = collections.Counter((int(row["level"]), int(row["status"])) for row in all_logs)
         payload["copy_status_counts"] = [
             {"level": level, "status": status, "n": count}
