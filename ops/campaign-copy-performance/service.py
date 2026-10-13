@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 import pymysql
 
+from campaign_mapping import query_campaign_mapping
+
 
 ROOT = Path(__file__).resolve().parent
 INDEX_PATH = ROOT / "index.html"
@@ -77,6 +79,9 @@ CAMPAIGN_FIELDS = (
     "age_hours",
     "countries",
     "languages",
+    "metadata_signature",
+    "metadata_checked_at",
+    "metadata_product",
 )
 DAILY_FIELDS = (
     "platform",
@@ -248,6 +253,9 @@ def report_connection():
         with conn.cursor() as cur:
             cur.execute("SET SESSION max_execution_time=15000")
             cur.execute("SET SESSION time_zone='+08:00'")
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("SET SESSION TRANSACTION READ ONLY")
+            cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
         yield conn
@@ -328,11 +336,44 @@ def merge_history(payload: dict, previous: dict | None, dates: list[str], next_h
 def query_raw(previous: dict | None = None) -> dict:
     with report_connection() as conn:
         return query_raw_connection(conn, previous)
+def refresh_delay(ok: bool, elapsed: float, failures: int) -> float:
+    if ok:
+        return max(1, CACHE_TTL_SECONDS - elapsed)
+    return min(CACHE_TTL_SECONDS, CACHE_REFRESH_RETRY_SECONDS * (2 ** min(max(0, failures - 1), 10)))
+
+
+class MeasuredCursor:
+    """Log phase/query counts and durations without logging SQL or credentials."""
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.phase = "safety"
+        self.stats = {}
+
+    def execute(self, sql, args=None):
+        started = time.monotonic()
+        stat = self.stats.setdefault(self.phase, {"queries": 0, "seconds": 0, "rows": 0})
+        stat["queries"] += 1
+        try:
+            count = self.cursor.execute(sql, args)
+            stat["rows"] += max(0, count or 0)
+            return count
+        except Exception as exc:
+            print(json.dumps({"event": "campaign_copy_report_query_failed", "phase": self.phase,
+                              "error_type": type(exc).__name__,
+                              "error_code": exc.args[0] if exc.args and isinstance(exc.args[0], int) else None}),
+                  flush=True)
+            raise
+        finally:
+            stat["seconds"] = round(stat["seconds"] + time.monotonic() - started, 3)
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
 
 
 def query_raw_connection(conn, previous: dict | None = None) -> dict:
     payload: dict[str, object] = {}
-    with conn.cursor() as cur:
+    with conn.cursor() as source_cursor:
+        cur = MeasuredCursor(source_cursor)
         cur.execute(
             "SELECT @@read_only AS is_read_only, NOW() AS server_time, "
             "@@session.time_zone AS session_time_zone"
@@ -342,20 +383,10 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
             raise RuntimeError("refusing report build: MySQL endpoint is not read-only")
         payload["safety"] = safety
 
+        cur.phase = "copy_logs"
         cur.execute(
             """
-            SELECT level, status, COUNT(*) AS n
-            FROM ads_business.ads_campaign_rule_logs
-            WHERE platform IN (0,3) AND level IN (0,1,2) AND data_source=1
-            GROUP BY level, status
-            ORDER BY level, status
-            """
-        )
-        payload["copy_status_counts"] = cur.fetchall()
-
-        cur.execute(
-            """
-            SELECT l.id, l.platform, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
+            SELECT l.id, l.platform, l.level, l.status, l.account_id, l.origin_id, l.new_id, l.queue_id,
                    l.user_id, l.app_id, l.content_id, l.created_at,
                    r.name AS rule_name, a.name AS app_name,
                    aug.name AS user_name
@@ -372,62 +403,31 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
                 GROUP BY sub_user_id
             ) aug ON aug.sub_user_id=l.user_id
             WHERE l.platform IN (0,3) AND l.level IN (0,1,2)
-              AND l.data_source=1 AND l.status=1
-            ORDER BY l.created_at, l.id
+              AND l.data_source=1
             """
         )
-        successful_logs = [
-            row
-            for row in cur.fetchall()
-            if str(row.get("new_id") or "").isdigit() and int(row["new_id"]) > 0
+        all_logs = cur.fetchall()
+        counts = collections.Counter((int(row["level"]), int(row["status"])) for row in all_logs)
+        payload["copy_status_counts"] = [
+            {"level": level, "status": status, "n": count}
+            for (level, status), count in sorted(counts.items())
         ]
+        successful_logs = [row for row in all_logs if int(row["status"]) == 1
+                           and str(row.get("new_id") or "").isdigit() and int(row["new_id"]) > 0]
+        del all_logs
         logs = [row for row in successful_logs if int(row.get("level") or 0) == 0]
         extra_logs = [row for row in successful_logs if int(row.get("level") or 0) in (1, 2)]
         payload["logs"] = logs
         payload["extra_logs"] = extra_logs
 
-        mapping: list[dict] = []
-        meta_campaign_ids = sorted(
-            {str(row["new_id"]) for row in logs if platform_id(row) == 0}
+        cur.phase = "campaign_mapping"
+        mapping, metadata, next_bucket, mapping_stats = query_campaign_mapping(
+            cur, logs, previous, safety["server_time"]
         )
-        found_meta_campaigns: set[str] = set()
-        for source_table in (
-            "kunlunads_dev.ads_facebook_auto_created_data",
-            "ads_ai.ads_facebook_auto_created_data",
-        ):
-            remaining = sorted(set(meta_campaign_ids) - found_meta_campaigns)
-            for part in chunks(remaining, 3000):
-                placeholders = ",".join(["%s"] * len(part))
-                cur.execute(
-                    f"""
-                    SELECT 0 AS platform, campaign_id, ad_id, campaign_name, product,
-                           ad_account_id, status, country, language, budget
-                    FROM {source_table} FORCE INDEX (campaign_id)
-                    WHERE campaign_id IN ({placeholders})
-                    """,
-                    part,
-                )
-                for source_row in cur.fetchall():
-                    mapping.append(source_row)
-                    found_meta_campaigns.add(str(source_row["campaign_id"]))
+        payload.update(mapping=mapping, campaign_metadata=metadata,
+                       mapping_metadata_next_bucket=next_bucket, mapping_stats=mapping_stats)
 
-        tiktok_campaign_ids = sorted(
-            {str(row["new_id"]) for row in logs if platform_id(row) == 3}
-        )
-        for part in chunks(tiktok_campaign_ids, 3000):
-            placeholders = ",".join(["%s"] * len(part))
-            cur.execute(
-                f"""
-                SELECT 3 AS platform, campaign_id, ad_id, campaign_name,
-                       '' AS product, ad_account_id, status, country, language, budget
-                FROM kunlunads_dev.ads_tiktok_auto_created_data FORCE INDEX (campaign_id)
-                WHERE campaign_id IN ({placeholders})
-                """,
-                part,
-            )
-            mapping.extend(cur.fetchall())
-        payload["mapping"] = mapping
-
+        cur.phase = "extra_mapping"
         extra_mapping: list[dict] = []
         for platform in SUPPORTED_PLATFORMS:
             for level, id_field in ((1, "adset_id"), (2, "ad_id")):
@@ -493,6 +493,7 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
         print(json.dumps({"event": "campaign_copy_report_query_plan", "dates": payload["refresh_dates"],
                           "campaigns": len(logs), "mapping_rows": len(mapping)}), flush=True)
 
+        cur.phase = "insights"
         daily: list[dict] = []
         for platform in SUPPORTED_PLATFORMS:
             ad_ids = sorted(
@@ -593,6 +594,8 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
                 print(json.dumps({"event": "campaign_copy_report_day", "platform": platform,
                                   "date": current.isoformat()}), flush=True)
         payload["extra_daily"] = extra_daily
+        payload["query_stats"] = cur.stats
+        print(json.dumps({"event": "campaign_copy_report_query_stats", "phases": cur.stats}), flush=True)
         return payload
 
 
@@ -634,6 +637,7 @@ def build_payload(raw: dict) -> dict:
     for (platform, campaign_id), logs in logs_by_campaign.items():
         log = sorted(logs, key=lambda row: (str(row.get("created_at")), int(row.get("id") or 0)))[0]
         mapping = mapping_by_campaign.get((platform, campaign_id), [])
+        metadata = raw.get("campaign_metadata", {}).get((platform, campaign_id))
         copy_at = parse_datetime(log.get("created_at"))
         copy_date = copy_at.date().isoformat() if copy_at else ""
         copy_date_by_campaign[(platform, campaign_id)] = copy_date
@@ -648,7 +652,7 @@ def build_payload(raw: dict) -> dict:
         user_name = str(log.get("user_name") or "").strip()
         user_label = f"{user_name}（ID {user_id}）" if user_name else f"未配置姓名（ID {user_id}）"
         product = str(log.get("app_name") or "").strip() or dominant(
-            [row.get("product") for row in mapping],
+            [metadata["product"]] if metadata is not None else [row.get("product") for row in mapping],
             f"App #{log.get('app_id')}",
         )
         campaigns.append(
@@ -656,7 +660,7 @@ def build_payload(raw: dict) -> dict:
                 "platform": platform,
                 "platform_label": platform_label(platform),
                 "campaign_id": campaign_id,
-                "campaign_name": dominant([row.get("campaign_name") for row in mapping]),
+                "campaign_name": metadata["campaign_name"] if metadata is not None else dominant([row.get("campaign_name") for row in mapping]),
                 "origin_campaign_id": str(log.get("origin_id") or ""),
                 "account_id": str(log.get("account_id") or ""),
                 "content_id": str(log.get("content_id") or ""),
@@ -674,8 +678,11 @@ def build_payload(raw: dict) -> dict:
                 "age_hours": round(max(0.0, (report_time - copy_at).total_seconds() / 3600), 2)
                 if copy_at
                 else None,
-                "countries": joined_distinct([row.get("country") for row in mapping]),
-                "languages": joined_distinct([row.get("language") for row in mapping]),
+                "countries": metadata["countries"] if metadata is not None else joined_distinct([row.get("country") for row in mapping]),
+                "languages": metadata["languages"] if metadata is not None else joined_distinct([row.get("language") for row in mapping]),
+                "metadata_signature": (metadata or {}).get("metadata_signature"),
+                "metadata_checked_at": (metadata or {}).get("metadata_checked_at"),
+                "metadata_product": (metadata or {}).get("product"),
             }
         )
 
@@ -850,6 +857,7 @@ def build_payload(raw: dict) -> dict:
             "insight_max_dt": str(raw.get("insight_max_dt") or ""),
             "source": "ads_business.ads_campaign_rule_logs + kunlunads_dev.admin_user_group + kunlunads_dev.ads_custom_source_insight",
             "platform_scope": "0=Meta, 3=TikTok",
+            "mapping_metadata_next_bucket": raw.get("mapping_metadata_next_bucket", 0),
             "read_only_verified": True,
             "copy_start": min(copy_times, default=""),
             "copy_end": max(copy_times, default=""),
@@ -1082,10 +1090,12 @@ class ReportCache:
 
     def _scheduler_loop(self) -> None:
         delay = 0
+        failures = 0
         while not self.stop_event.wait(delay):
             started = time.monotonic()
             ok = self.refresh(wait_for_lock=True)
-            delay = max(1, CACHE_TTL_SECONDS - (time.monotonic() - started)) if ok else CACHE_REFRESH_RETRY_SECONDS
+            failures = 0 if ok else failures + 1
+            delay = refresh_delay(ok, time.monotonic() - started, failures)
 
     def start(self) -> None:
         self.load_disk()
@@ -1101,25 +1111,15 @@ class ReportCache:
         if self.scheduler_thread is not None:
             self.scheduler_thread.join(timeout=1)
 
-    def trigger_refresh(self) -> None:
-        threading.Thread(
-            target=lambda: self.refresh(wait_for_lock=False),
-            name="campaign-copy-report-refresh-trigger",
-            daemon=True,
-        ).start()
-
     def get(self) -> tuple[bytes, bytes, str, str, int]:
         snapshot = self.snapshot()
         if snapshot["body"] is not None:
-            if snapshot["age"] >= CACHE_TTL_SECONDS:
-                self.trigger_refresh()
             state = "stale" if snapshot["age"] >= CACHE_TTL_SECONDS else "hit"
             return snapshot["body"], snapshot["gzip_body"], snapshot["etag"], state, snapshot["age"]
         self.ready_event.clear()
         snapshot = self.snapshot()
         if snapshot["body"] is not None:
             return snapshot["body"], snapshot["gzip_body"], snapshot["etag"], "hit", snapshot["age"]
-        self.trigger_refresh()
         self.ready_event.wait(timeout=180)
         snapshot = self.snapshot()
         if snapshot["body"] is None:

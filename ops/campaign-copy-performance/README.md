@@ -16,7 +16,7 @@ Meta structures are resolved through `ads_facebook_auto_created_data`; TikTok st
 
 Each tab shows its own running/success/failed pipeline counts. Failed copies remain in the pipeline totals but cannot have post-copy effect rows because they have no successful `new_id`.
 
-Data is refreshed in a background thread every 15 minutes, so a page request never owns the database refresh. The last successful compact v2 payload is held in memory and atomically persisted at `/mnt/data-disk/campaign-copy-performance/cache/report.json`; a service restart can therefore serve the last cache immediately while a fresh query runs. Failed refreshes retry after two minutes and retain the last verified cache, including across restarts. The page explicitly labels a stale snapshot; missing days must not be interpreted as zero activity.
+Data is refreshed by one background scheduler every 15 minutes. GET/HEAD requests only read the cache and never trigger SQL, including when the snapshot is stale. The last successful compact v2 payload is held in memory and atomically persisted at `/mnt/data-disk/campaign-copy-performance/cache/report.json`; a service restart can therefore serve the last cache immediately while a fresh query runs. Consecutive failures retry after 2, 4, 8, then at most 15 minutes and retain the last verified cache. Success restores the 15-minute start-to-start cadence. The page explicitly labels a stale snapshot; missing days must not be interpreted as zero activity.
 
 The API pre-compresses the payload once, supports `ETag`/`304`, and permits private browser reuse for one minute. Its v2 wire format keeps the original Campaign arrays backward-compatible and adds compact Ad Set/Ad arrays plus per-level pipeline counts. The frontend starts fetching from `<head>`, shows an explicit cache-loading state, inflates the compact row format, and debounces text/number filters. Its statistics-date presets remain `全部`, `当天`, `昨天`, `近三天`, and `近七天`, based on the MySQL server date in timezone `+08:00`.
 
@@ -26,6 +26,7 @@ The API pre-compresses the payload once, supports `ETag`/`304`, and permits priv
 python3 -m py_compile service.py
 python3 service.py --self-test
 python3 test_contract.py
+python3 test_mapping.py
 node --check < extracted-inline-script.js
 ```
 
@@ -133,3 +134,55 @@ console errors. The Windows verification network was unusually slow and reset a
 large download, so that local failure is not counted as a successful public UI
 check. Full report transport remains about 23.5 MB compressed; cold loads depend
 on the client connection speed.
+
+## Query optimization (2026-10-13)
+
+The previous refresh repeatedly fetched all Campaign descriptions (about 1.01M
+mapping rows for 282K Campaigns). `campaign_mapping.py` now reads **exact current
+Campaign/Ad membership** through covering indexes, in batches of 5,000: TikTok
+`campaign_id_2 (campaign_id, adset_id, ad_id)` and Meta `campaign_id` with the same
+columns. Meta fallback remains per Campaign: use `ads_ai` only when `kunlunads_dev`
+has no rows. No database DDL or source writes are required.
+
+Only new Campaigns, changed membership, and a rotating 1/96 of existing Campaigns
+fetch descriptions, with at most 250 IDs per detailed query. Campaign names,
+countries, languages, and the source product fallback have a maximum successful
+refresh age of 24 hours. Copy-log App names and financial metrics still refresh
+every cycle. `status`, `budget`, and `ad_account_id` were not used by this report
+and are no longer fetched for Campaign mappings. Ad Set/Ad queries are unchanged.
+
+Membership changes (including equal-count Ad replacement, deletion, duplicate
+rows, or fallback-source changes) are detected with a compact signature. The
+signature controls descriptive-field reuse only: every metric query uses exact
+freshly read Ad IDs, never a cached membership set or digest. A failed refresh
+does not advance metadata ages, rotation, financial dates, or history cursors.
+The v2 cache adds optional metadata fields to `cf/c`; the old frontend and old
+service can still read it. The first migration reuses verified TikTok descriptors
+when Ad counts match; Meta source-product fallbacks are refreshed once because
+the legacy cache stored only the resolved App label.
+
+Copy pipeline counts and successful logs now come from one log query, removing
+the second full log scan and SQL filesort. All statements in one refresh use a
+read-only, repeatable-read consistent snapshot under the existing FIFO gate.
+Phase timings/query counts and mapping reuse counts are logged without SQL text,
+IDs, or credentials. The existing statement/overall budgets and atomic publish
+remain in force.
+
+Validation: seed a separate candidate cache from the currently published cache,
+run `service.py --warm-cache` under the gate, then run:
+
+```bash
+python3 validate_cache.py /path/to/seed.json /path/to/candidate.json
+python3 -m unittest discover -p 'test_*.py'
+```
+
+Validate a second warm refresh to measure normal reuse after migration. Verify
+real source samples and public HTTP/ETag after switching only this standalone
+service. A warm operation never writes to the live cache path. Roll back to
+release `4727724c3cdafff5b5bbd2c727284f1ed953eca6`, preserving the latest v2 cache:
+
+```bash
+ln -s /opt/campaign-copy-performance/releases/4727724c3cdafff5b5bbd2c727284f1ed953eca6/ops/campaign-copy-performance /opt/campaign-copy-performance/current.rollback
+mv -Tf /opt/campaign-copy-performance/current.rollback /opt/campaign-copy-performance/current
+systemctl restart campaign-copy-performance.service
+```
