@@ -10,3 +10,14 @@
 - 截图和临时操作脚本保存在忽略的 `output/` 目录，不进入发布目录。
 
 COS 发布后追加公网校验结果。
+
+## COS 公网发布
+
+- 预览地址：https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261013/facebook-publishing-preview-20261013_183108/index.html
+- 原型资源版本：`56d057f`，已推送 `codex/fb-publishing-preview-20261013`。
+- 11 个发布文件均完成 HTTP 200、字节数与 SHA-256 一致性回读；HTML HEAD 为 `200` / `text/html` / `17216` 字节。
+- HTML SHA-256：`409da8b105463bfbeefd40d20891c344042ae78fbb286c9edcb2e13ba2c2abf5`。
+- 公网浏览器：390px 手机布局无溢出，6 个素材图片正确加载，素材弹窗可操作，模拟发布产生 2 个主页任务并演示完成；控制台 0 错误 / 0 警告，0 个非静态网络请求。
+- 公网验证完成后重置浏览器演示数据。真实后台与 Facebook 均无请求或发布动作。
+- 回退边界：仅静态原型。保留此 COS 版本；可从 `56d057f` 重新生成发布目录，不涉及生产服务、数据库或发布账本回滚。
+- 技能上下文：未变，本次不涉及后端规则。
