@@ -48,3 +48,18 @@ FB 日报使用 `actual-fb-v2`。只读取发布库，不创建计划、补发�
 验收日期为 2026-10-11 和 2026-10-12，二者均应为应发 288、成功 244、受阻 44、明确失败 0。
 10 月 12 日应排除 5 个旧时隙；10 月 11 日应排除 10 个旧运行和 5 个无运行旧时隙。
 已发送日报不会自动覆盖或重发；历史更正发送仍须单独授权并使用更正投递账本。
+
+部署验收：2026-10-13 北京时间 10:29，CPU `43.166.187.96` 的
+`/opt/post-daily-report/current` 已切换至 GitHub 提交
+`449dcda4d200f56819f03fbd5786980b5a6db42e`。本地和 CPU 各 80 项测试通过；
+10 月 8–12 日同快照新旧收集器对比保留全部已发布、失败、待确认和处理中事实。
+10 月 11/12 日的期望值均通过。正式服务同等 ProtectSystem=strict 权限下，
+三渠道无发送预览全部读取成功；原日报及 delivery.sqlite3 哈希不变。
+
+日报为 oneshot，无需重启发布器；仅切换日报 current 并保留 timer 激活状态。
+验收时下一次运行是北京时间 2026-10-14 10:00。未发送更正或重发历史消息。
+
+- 验证目录：`/mnt/data-disk/post-daily-report/diagnostics/fb-superseded-20261013-449dcda-after`
+- 完整预览：`/mnt/data-disk/post-daily-report/diagnostics/fb-superseded-20261013-449dcda-full/previews/2026-10-12`
+- 备份目录：`/mnt/data-disk/post-daily-report/backups/20261013T022929Z-fb-superseded`
+- 回滚命令：`bash /mnt/data-disk/post-daily-report/backups/20261013T022929Z-fb-superseded/rollback.sh`
