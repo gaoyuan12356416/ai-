@@ -3970,7 +3970,8 @@ def available_post_material_pool_request(payload):
     try:
         return {
             "items": XPostStore(POST_DB_PATH).available_pool_items(
-                payload.get("limit", 50)
+                payload.get("limit", 50),
+                schedule_identity=payload.get("schedule_identity"),
             )
         }
     except XPostError as exc:
@@ -4298,6 +4299,7 @@ def _safe_schedule_plan_query_result(result):
         "started_at",
         "finished_at",
         "plan_attempted_at",
+        "material_pool_snapshot_max_id",
         "created_at",
         "updated_at",
     )

@@ -1708,8 +1708,14 @@ def _material_candidates(
     stable_shuffler=_stable_shuffled,
     heartbeat=None,
 ):
+    pool_options = {}
+    if assignment_identity is not None:
+        pool_options["schedule_identity"] = {
+            key: assignment_identity[key]
+            for key in ("source_type", "run_date", "publish_time", "version", "account_ids")
+        }
     pool_items = sidecar.available_pool_items(
-        config.material_pool_path, config.scan_limit
+        config.material_pool_path, config.scan_limit, **pool_options
     )
     if not pool_items:
         raise ScheduleRunError(

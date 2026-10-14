@@ -838,14 +838,17 @@ class SidecarClient:
             )
         return occupied
 
-    def available_pool_items(self, path, limit):
+    def available_pool_items(self, path, limit, *, schedule_identity=None):
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
             raise DailyRunError("pool candidate limit is invalid") from None
         if limit <= 0 or limit > 1000:
             raise DailyRunError("pool candidate limit is out of range")
-        result = self.post(path, {"limit": limit})
+        payload = {"limit": limit}
+        if schedule_identity is not None:
+            payload["schedule_identity"] = schedule_identity
+        result = self.post(path, payload)
         items = result.get("items") if isinstance(result, dict) else None
         if not isinstance(items, list) or len(items) > limit:
             raise SidecarError(
