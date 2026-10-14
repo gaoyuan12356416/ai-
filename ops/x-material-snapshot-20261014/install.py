@@ -21,7 +21,9 @@ helpers.RESCUE = "x-material-snapshot-restore-20261014"
 BASE = helpers.BASE
 CURRENT = helpers.CURRENT
 MAIN = helpers.MAIN
-SERVICES = ["x-post-automation.service", "drama-material-api.service"]
+# X Auto has Requires=x-post-automation.service: stopping the X Sidecar also
+# stops Auto, so restore it explicitly before accepting health or resuming timers.
+SERVICES = ["x-post-automation.service", "x-auto-post-service.service", "drama-material-api.service"]
 EXPECTED = {
     "features/x_posts/service.py": "c41468438003a3d07875cb01949aec2ddd5577bda28fcaee74794960901c3ac9",
     "features/x_accounts/oauth_service.py": "9fcf9ebe889a37073137cd8ee12e9a0a942a16fa494a3b8a467ed48260faaa49",
@@ -39,11 +41,12 @@ TESTS = [
 COLUMN = "material_pool_snapshot_max_id"
 
 
-def fingerprints(db):
+def fingerprints(db, *, auto=False):
     result = {}
     with helpers.ro(db) as conn:
+        table_scope = "name IN ('x_auto_run','x_auto_task')" if auto else "name LIKE 'x_post_%'"
         for (table,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'x_post_%' ORDER BY name"
+            "SELECT name FROM sqlite_master WHERE type='table' AND " + table_scope + " ORDER BY name"
         ):
             columns = [r[1] for r in conn.execute('PRAGMA table_info("' + table + '")')
                        if r[1] != COLUMN]
@@ -121,6 +124,7 @@ def install(commit, backup):
                            cwd=stage, capture_output=True, text=True, timeout=240)
     (backup / "staged-tests.txt").write_text(tests.stdout + tests.stderr)
     assert tests.returncode == 0, "staged Linux tests failed; production untouched"
+    helpers.ready()
     manifest = {
         "commit": commit, "previous_release": str(old_release), "release": str(stage),
         "timers": {unit: helpers.state(unit) for unit in helpers.TIMERS},
@@ -141,7 +145,7 @@ def install(commit, backup):
             for port in (8810, 18833):
                 active = helpers.run(["ss", "-Htn", "state", "established", "sport = :%d" % port]).stdout.strip()
                 assert not active, "active sidecar request; no code switched"
-            for unit, old in manifest["services"].items():
+            for unit, old in reversed(list(manifest["services"].items())):
                 if old == "active":
                     helpers.run(["systemctl", "stop", unit], timeout=90)
             for label, db in helpers.DBS.items():
@@ -155,8 +159,10 @@ def install(commit, backup):
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(MAIN / name, saved)
             before = fingerprints(helpers.DBS["post"])
+            auto_before = fingerprints(helpers.DBS["auto"], auto=True)
             tokens = helpers.token_inventory()
             helpers.save(backup / "ledger-before.json", before)
+            helpers.save(backup / "auto-ledger-before.json", auto_before)
             helpers.save(backup / "tokens-before.json", tokens)
             # Rehearse the exact additive migration and verify all historic values.
             rehearsal = backup / "migration-rehearsal.sqlite3"
@@ -175,6 +181,7 @@ def install(commit, backup):
             health = helpers.ready()
             after = fingerprints(helpers.DBS["post"])
             assert before == after, "publisher facts changed during maintenance"
+            assert auto_before == fingerprints(helpers.DBS["auto"], auto=True), "Auto publication facts changed"
             assert tokens == helpers.token_inventory(), "token files changed during maintenance"
             with helpers.ro(helpers.DBS["post"]) as conn:
                 assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -186,6 +193,7 @@ def install(commit, backup):
                 "commit": commit, "release": str(stage), "backup": str(backup),
                 "health": health, "hashes": hashes, "ledger_unchanged": True,
                 "token_inventory_unchanged": True, "migration_rehearsed": True,
+                "auto_ledger_unchanged": True,
                 "quick_check": "ok", "posts_created_by_deployment": 0,
             })
             helpers.progress(backup, "verified")

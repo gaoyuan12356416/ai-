@@ -42,17 +42,19 @@ Run `python3 SOURCE/ops/x-material-snapshot-20261014/install.py --commit COMMIT
 
 The installer checks the mounted data disk and exact live file hashes, stages
 only four changed files onto the verified composite, and runs the Linux suite.
-It then drains existing timers/workers, holds the publishing lock, stops only
-the X Sidecar and main API, and backs up both databases, token files and changed
+It then drains existing timers/workers, holds the publishing lock, stops
+the X Sidecar, its dependent X Auto Sidecar and main API, and backs up both databases, token files and changed
 main code. It rehearses the migration on a copy before applying it as the X
 service user. Health, exact hashes, complete X Post table fingerprints, token
 hashes/modes and SQLite quick_check must pass before restoring timer states.
-The X Auto service is not restarted. A rescue timer and finally block restore
+The X Auto unit has `Requires=x-post-automation.service`, so it must be explicitly
+restored before health acceptance. Its run/task fingerprints must also match.
+A rescue timer and finally block restore
 previously active services/timers after a failure.
 
 For rollback run `python3 SOURCE/ops/x-material-snapshot-20261014/install.py
 --rollback BACKUP`. This drains current workers, switches to the saved release,
-restores the main service file and restarts the two affected services. It
+restores the main service file and restarts the three dependent services. It
 preserves current timer choices. Never restore databases, tokens or publishing
 history; the nullable additive column may remain after a code rollback. Drain
 an already preparing snapshot-bound batch before reverting to older code.
