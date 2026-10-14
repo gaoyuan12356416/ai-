@@ -1646,6 +1646,117 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
+    def snapshot_identity(self):
+        return {
+            "source_type": "material", "run_date": "2026-07-27",
+            "publish_time": "09:00", "version": 2, "account_ids": [2],
+        }
+
+    def add_snapshot_materials(self, material_ids):
+        return self.store.add_pool_materials(
+            material_ids, actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[{"material_id": value, "error_code": ""}
+                               for value in material_ids],
+        )["items"]
+
+    def test_material_snapshot_survives_150_new_rows_and_store_restart(self):
+        self.save_schedule("material", [2], ["09:00", "10:00"])
+        old = self.add_snapshot_materials(["201"])[0]
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        identity = self.snapshot_identity()
+        before = self.store.query_schedule_plan("material", "2026-07-27", "09:00")
+        snapshot = self.store.available_pool_items(1000, schedule_identity=identity)
+        for start in range(1000, 1150, 50):
+            self.add_snapshot_materials([str(value) for value in range(start, start + 50)])
+        self.store = service.XPostStore(self.db_path)
+        self.assertEqual(snapshot, self.store.available_pool_items(1000, schedule_identity=identity))
+        self.assertEqual(len(self.store.available_pool_items(1000)), 151)
+        run = self.store.query_schedule_plan("material", "2026-07-27", "09:00")["run"]
+        self.assertEqual(run["material_pool_snapshot_max_id"], old["id"])
+        self.assertEqual(run["updated_at"], before["run"]["updated_at"])
+        self.store.heartbeat_schedule_run("material", "2026-07-27", "09:00", 2, [2], plan_attempt=True)
+        plan = self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                                               [self.material_candidate(old, 2)])
+        self.assertEqual([q["material_id"] for q in plan["queues"]], ["201"])
+        self.assertEqual(len(self.store.available_pool_items(1000)), 150)
+        self.claim_schedule_slot("2026-07-27", "10:00")
+        next_identity = dict(identity, publish_time="10:00")
+        next_snapshot = self.store.available_pool_items(1000, schedule_identity=next_identity)
+        self.assertEqual(len(next_snapshot), 150)
+        self.assertEqual(next_snapshot[0]["material_id"], "1149")
+
+    def test_material_snapshot_rejects_skipping_a_row_inside_boundary(self):
+        self.save_schedule("material", [2], ["09:00"])
+        old, _new = self.add_snapshot_materials(["201", "202"])
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        self.store.available_pool_items(1000, schedule_identity=self.snapshot_identity())
+        self.add_snapshot_materials(["203"])
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                                            [self.material_candidate(old, 2)])
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+
+    def test_material_snapshot_rejects_candidates_outside_boundary(self):
+        self.save_schedule("material", [2], ["09:00"])
+        self.add_snapshot_materials(["201"])
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        self.store.available_pool_items(1000, schedule_identity=self.snapshot_identity())
+        new = self.add_snapshot_materials(["202"])[0]
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                                            [self.material_candidate(new, 2)])
+        self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+        self.assertEqual(self.store.query_schedule_plan("material", "2026-07-27", "09:00")["queues"], [])
+
+    def test_material_snapshot_empty_boundary_is_not_unbounded(self):
+        self.save_schedule("material", [2], ["09:00"])
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        self.assertEqual(self.store.available_pool_items(1, schedule_identity=self.snapshot_identity()), [])
+        new = self.add_snapshot_materials(["201"])[0]
+        self.assertEqual(self.store.available_pool_items(1, schedule_identity=self.snapshot_identity()), [])
+        self.assertEqual(self.store.query_schedule_plan("material", "2026-07-27", "09:00")["run"]["material_pool_snapshot_max_id"], 0)
+        with self.assertRaises(service.XPostError):
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                                            [self.material_candidate(new, 2)])
+
+    def test_material_snapshot_rechecks_current_occupancy(self):
+        self.save_schedule("material", [2], ["09:00", "10:00"])
+        old = self.add_snapshot_materials(["201"])[0]
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        self.store.available_pool_items(1000, schedule_identity=self.snapshot_identity())
+        self.store.create_schedule_plan("material", "2026-07-27", "10:00", 2,
+                                        [self.material_candidate(old, 2)])
+        with self.assertRaises(service.XPostError):
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                                            [self.material_candidate(old, 2)])
+        self.assertEqual(self.store.query_schedule_plan("material", "2026-07-27", "09:00")["queues"], [])
+
+    def test_material_snapshot_identity_and_attempt_fences(self):
+        self.save_schedule("material", [2], ["09:00"])
+        self.add_snapshot_materials(["201"])
+        identity = self.snapshot_identity()
+        with self.assertRaises(service.XPostError):
+            self.store.available_pool_items(schedule_identity=identity)
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        for invalid in [dict(identity, version=3), dict(identity, account_ids=[3]),
+                        dict(identity, source_type="drama"), [], {}]:
+            with self.subTest(invalid=invalid), self.assertRaises(service.XPostError):
+                self.store.available_pool_items(schedule_identity=invalid)
+        run = self.store.query_schedule_plan("material", "2026-07-27", "09:00")["run"]
+        self.assertIsNone(run["material_pool_snapshot_max_id"])
+        self.store.heartbeat_schedule_run("material", "2026-07-27", "09:00", 2, [2], plan_attempt=True)
+        with self.assertRaises(service.XPostError):
+            self.store.available_pool_items(schedule_identity=identity)
+
+    def test_material_snapshot_filters_before_page_limit(self):
+        self.save_schedule("material", [2], ["09:00"])
+        self.add_snapshot_materials(["201", "202"])
+        self.claim_schedule_slot("2026-07-27", "09:00")
+        initial = self.store.available_pool_items(1, schedule_identity=self.snapshot_identity())
+        self.add_snapshot_materials(["203", "204"])
+        self.assertEqual(self.store.available_pool_items(1, schedule_identity=self.snapshot_identity()), initial)
+        self.assertEqual(len(self.store.available_pool_items(2, schedule_identity=self.snapshot_identity())), 2)
+
     def test_material_schedule_atomically_clears_selected_revalidatable_error(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(

@@ -1861,6 +1861,8 @@ def ensure_storage(db_path):
                     finished_at TEXT NOT NULL DEFAULT '',
                     lease_heartbeat_at TEXT NOT NULL DEFAULT '',
                     plan_attempted_at TEXT NOT NULL DEFAULT '',
+                    material_pool_snapshot_max_id INTEGER
+                        CHECK(material_pool_snapshot_max_id >= 0),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(source_type,run_date,publish_time)
@@ -2608,6 +2610,12 @@ def ensure_storage(db_path):
                 conn.execute(
                     "ALTER TABLE x_post_schedule_run "
                     "ADD COLUMN plan_attempted_at TEXT NOT NULL DEFAULT ''"
+                )
+            if "material_pool_snapshot_max_id" not in schedule_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_run "
+                    "ADD COLUMN material_pool_snapshot_max_id INTEGER "
+                    "CHECK(material_pool_snapshot_max_id >= 0)"
                 )
 
             material_pool_columns = {
@@ -7029,18 +7037,70 @@ class XPostStore:
             ),
         }
 
-    def available_pool_items(self, limit=50):
+    def available_pool_items(self, limit=50, *, schedule_identity=None):
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
             raise XPostError("invalid_request", "limit无效", 400) from None
         if limit <= 0 or limit > 1000:
             raise XPostError("invalid_request", "limit必须在1到1000之间", 400)
+        identity = None
+        if schedule_identity is not None:
+            if (
+                not isinstance(schedule_identity, dict)
+                or schedule_identity.get("source_type") != "material"
+            ):
+                raise XPostError("invalid_request", "素材快照批次身份无效", 400)
+            identity = {
+                "run_date": _date_value(schedule_identity.get("run_date"), "run_date"),
+                "publish_time": _schedule_publish_time(schedule_identity.get("publish_time")),
+                "version": _positive_int(schedule_identity.get("version"), "version"),
+                "account_ids": _schedule_account_ids(schedule_identity.get("account_ids")),
+            }
         with contextlib.closing(_connect(self.db_path)) as conn:
+            snapshot_max_id = None
+            if identity is not None:
+                # Freeze once, before source/media preflight. Pool additions remain
+                # available to later batches; they cannot invalidate this batch.
+                # The boundary belongs to the stored run, never to a plan payload.
+                conn.execute("BEGIN IMMEDIATE")
+                run = conn.execute(
+                    "SELECT * FROM x_post_schedule_run WHERE source_type='material' "
+                    "AND run_date=? AND publish_time=?",
+                    (identity["run_date"], identity["publish_time"]),
+                ).fetchone()
+                if (
+                    not run
+                    or run["status"] != "claimed"
+                    or run["plan_attempted_at"]
+                    or int(run["config_version"]) != identity["version"]
+                    or _schedule_account_ids(_json_array(run["account_ids_json"], "account_ids"))
+                    != identity["account_ids"]
+                    or conn.execute(
+                        "SELECT 1 FROM x_post_queue WHERE schedule_run_id=? LIMIT 1",
+                        (run["id"],),
+                    ).fetchone()
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_lease_conflict",
+                        "素材快照必须属于尚未提交计划的当前冻结批次", 409,
+                    )
+                snapshot_max_id = run["material_pool_snapshot_max_id"]
+                if snapshot_max_id is None:
+                    snapshot_max_id = int(conn.execute(
+                        "SELECT COALESCE(MAX(id),0) FROM x_post_material_pool"
+                    ).fetchone()[0])
+                    conn.execute(
+                        "UPDATE x_post_schedule_run SET material_pool_snapshot_max_id=? "
+                        "WHERE id=? AND material_pool_snapshot_max_id IS NULL",
+                        (snapshot_max_id, run["id"]),
+                    )
             rows = conn.execute(
                 "SELECT p.id,p.material_key,p.material_id,p.created_at "
                 "FROM x_post_material_pool p "
                 "WHERE p.status='unpublished' "
+                "AND (? IS NULL OR p.id<=?) "
                 "AND (p.last_error_code='' OR p.last_error_code IN %s "
                 "OR p.last_error_code IN %s) "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
@@ -7053,8 +7113,10 @@ class XPostStore:
                     _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                     _REVALIDATABLE_MATERIAL_VALIDATION_SQL,
                 ),
-                (limit,),
+                (snapshot_max_id, snapshot_max_id, limit),
             ).fetchall()
+            if identity is not None:
+                conn.commit()
         return [_row_dict(row) for row in rows]
 
     def record_pool_checks(self, checks):
@@ -10247,6 +10309,7 @@ class XPostStore:
             "started_at",
             "finished_at",
             "plan_attempted_at",
+            "material_pool_snapshot_max_id",
             "created_at",
             "updated_at",
         )
@@ -12848,9 +12911,14 @@ class XPostStore:
                 )
 
             if source_type == "material":
+                snapshot_max_id = (
+                    existing["material_pool_snapshot_max_id"]
+                    if existing is not None else None
+                )
                 expected_pools = conn.execute(
                     "SELECT p.* FROM x_post_material_pool p "
                     "WHERE p.status='unpublished' "
+                    "AND (? IS NULL OR p.id<=?) "
                     "AND (p.last_error_code='' OR p.last_error_code IN %s "
                     "OR p.last_error_code IN %s) "
                     "AND NOT EXISTS("
@@ -12863,6 +12931,7 @@ class XPostStore:
                         _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                         _REVALIDATABLE_MATERIAL_VALIDATION_SQL,
                     ),
+                    (snapshot_max_id, snapshot_max_id),
                 ).fetchall()
                 if not _material_fifo_selection_matches(
                     expected_pools,

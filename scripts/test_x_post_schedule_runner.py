@@ -660,8 +660,9 @@ class ScheduleRunnerTests(unittest.TestCase):
                 super().__init__([due_item(accounts=[11])])
                 self.checks = []
 
-            def available_pool_items(self, path, limit):
+            def available_pool_items(self, path, limit, *, schedule_identity=None):
                 self.request = (path, limit)
+                self.snapshot_identity = schedule_identity
                 return list(pool_items)
 
             def record_pool_checks(self, path, checks):
@@ -751,6 +752,11 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(sidecar.request[1], self.config.scan_limit)
+        expected_identity = due_item(accounts=[11])
+        self.assertEqual(sidecar.snapshot_identity, {
+            key: expected_identity[key]
+            for key in ("source_type", "run_date", "publish_time", "version", "account_ids")
+        })
         self.assertEqual(
             [len(batch) for batch in selector_batches],
             [50, 1],
@@ -798,7 +804,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 super().__init__([due_item(accounts=[11])])
                 self.pool_requests = []
 
-            def available_pool_items(self, path, limit):
+            def available_pool_items(self, path, limit, *, schedule_identity=None):
                 self.pool_requests.append((path, limit))
                 return [dict(pool_item)]
 
@@ -883,7 +889,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 self.closed = True
 
         class Sidecar(FakeSidecar):
-            def available_pool_items(self, _path, _limit):
+            def available_pool_items(self, _path, _limit, *, schedule_identity=None):
                 return [
                     {
                         "id": 9,
@@ -932,7 +938,7 @@ class ScheduleRunnerTests(unittest.TestCase):
 
     def test_source_connection_failure_uses_safe_terminal_error(self):
         class Sidecar(FakeSidecar):
-            def available_pool_items(self, _path, _limit):
+            def available_pool_items(self, _path, _limit, *, schedule_identity=None):
                 return [
                     {
                         "id": 9,
