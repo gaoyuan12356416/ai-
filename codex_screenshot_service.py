@@ -61,7 +61,7 @@ SYNC_ISOLATED_AUTH = os.environ.get("CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH", "1").
     "yes",
     "on",
 )
-CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-6.1-sol").strip() or "gpt-6.1-sol"
 CODEX_REASONING = os.environ.get("CODEX_SCREENSHOT_CODEX_REASONING", "medium").strip() or "medium"
 ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE", "0.08"))
 SOURCE_CONSISTENCY_STRICT = os.environ.get("CODEX_SCREENSHOT_SOURCE_CONSISTENCY_STRICT", "0").strip().lower() in (
@@ -114,6 +114,33 @@ def json_response(handler, status_code, payload):
     handler.wfile.write(body)
 
 
+class CodexConfigurationError(RuntimeError):
+    """A request configuration that cannot be repaired by per-size retries."""
+
+
+def command_failure_detail(stdout, stderr):
+    # CLI stderr starts with startup notices and echoes the full prompt. The
+    # provider's actionable error is at the end; never send the prompt as the
+    # first line of a user-facing failure notification.
+    lines = ((stderr or "") + "\n" + (stdout or "")).splitlines()
+    for line in reversed(lines):
+        if not line.strip().startswith("ERROR:"):
+            continue
+        detail = line.strip()[len("ERROR:"):].strip()
+        try:
+            payload = json.loads(detail)
+            error = payload.get("error", payload)
+            if isinstance(error, dict) and error.get("message"):
+                return str(error["message"])[:1000]
+        except (ValueError, TypeError, AttributeError):
+            pass
+        if detail:
+            return detail[:1000]
+    meaningful = [line.strip() for line in lines if line.strip()
+                  and not line.startswith("Reading additional input from stdin")]
+    return meaningful[-1][:1000] if meaningful else "Codex exited without an error detail"
+
+
 def run_cmd(cmd, timeout=None, env=None):
     logging.info("running: %s", " ".join(cmd))
     proc = subprocess.run(
@@ -126,9 +153,13 @@ def run_cmd(cmd, timeout=None, env=None):
         env=env,
     )
     if proc.returncode != 0:
-        error = RuntimeError(
+        detail = command_failure_detail(proc.stdout, proc.stderr)
+        error_class = (CodexConfigurationError
+                       if "not supported when using Codex" in detail
+                       else RuntimeError)
+        error = error_class(
             "command failed (%s): %s"
-            % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
+            % (proc.returncode, detail)
         )
         error.proc = proc
         raise error
@@ -339,10 +370,10 @@ def prepare_isolated_codex_home(workdir, project_dir, home_id=""):
     for dirname in ("generated_images", "sessions", "log", "tmp", "shell_snapshots"):
         ensure_dir(os.path.join(codex_home, dirname))
 
-    # Keep this path as a plain file so Codex cannot auto-install bundled
-    # system skills such as imagegen into the subprocess context.
-    with open(os.path.join(codex_home, "skills"), "w", encoding="utf-8") as fh:
-        fh.write("system skills disabled for screenshot generation\n")
+    # Current Codex requires a real skills directory during startup. Do not
+    # copy personal skills into this isolated home; the task prompt retains
+    # the direct built-in image generation requirement.
+    ensure_dir(os.path.join(codex_home, "skills"))
 
     for filename in (
         "auth.json",
@@ -1186,6 +1217,8 @@ def generate_screenshots(payload):
             if proc is not None:
                 merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
             logging.exception("batch generation failed for %s", job_id)
+            if isinstance(exc, CodexConfigurationError):
+                raise
 
         batch_result_data = {"items": []}
         batch_result_source = result_json_path if os.path.isfile(result_json_path) else manifest_json_path
@@ -1321,6 +1354,8 @@ class CodexScreenshotHandler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "ok",
+                "codex_model": CODEX_MODEL,
+                "codex_reasoning": CODEX_REASONING,
                 "max_concurrency": MAX_CONCURRENCY,
                 "item_parallelism": ITEM_PARALLELISM,
                 "ai_attempts": AI_ATTEMPTS,
