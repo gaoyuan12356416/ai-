@@ -572,9 +572,15 @@
       const channel = state.channels.items.find(c => String(c.id) === selection.channelId);
       if (!value || typeof value.version !== 'number' || typeof value.channel_id !== 'string' || value.channel_id !== channel?.channel_id ||
           ['title','description','comment'].some(f => typeof value[f + '_template'] !== 'string')) throw new Error('频道模板响应不完整，请重试。');
+      if (value.cover_requirements_template !== undefined && typeof value.cover_requirements_template !== 'string') throw new Error('频道模板响应不完整，请重试。');
       for (const field of ['title','description','comment']) {
         const text = value[field + '_template'];
         if (text.trim()) { current[field] = text; selection.fields.push(field); delete current.errors[field]; }
+      }
+      if (value.cover_requirements_template?.trim()) {
+        current.requirements = value.cover_requirements_template;
+        selection.fields.push('cover_requirements');
+        delete current.errors.requirements;
       }
       selection.status = 'ready';
     } catch (error) {
@@ -586,8 +592,8 @@
     const t = draft.channelTemplate;
     if (!draft.channelId) return '';
     if (t.status === 'loading') return '<div class="note-box note-blue" role="status">正在读取频道模板…</div>';
-    if (t.status === 'error') return `<div class="note-box note-error" role="alert"><span>${esc(t.error)} 当前文案已保留。</span><button type="button" class="btn btn-secondary btn-sm" data-action="retry-channel-template">重试读取模板</button></div>`;
-    return `<div class="note-box note-blue" role="status">${t.fields.length ? '已套用频道模板：' + t.fields.map(f => ({title:'标题',description:'描述',comment:'首评'}[f])).join('、') + '。可继续修改本次文案。' : '该频道未配置模板，保留当前文案。'}</div>`;
+    if (t.status === 'error') return `<div class="note-box note-error" role="alert"><span>${esc(t.error)} 当前内容已保留。</span><button type="button" class="btn btn-secondary btn-sm" data-action="retry-channel-template">重试读取模板</button></div>`;
+    return `<div class="note-box note-blue" role="status">${t.fields.length ? '已套用频道模板：' + t.fields.map(f => ({title:'标题',description:'描述',comment:'首评',cover_requirements:'封面要求'}[f])).join('、') + '。可继续修改本次内容。' : '该频道未配置模板，保留当前内容。'}</div>`;
   }
   function publishView(v) {
     const m = draft.material, channels = state.channels.items;
@@ -654,7 +660,7 @@
     document.body.style.overflow = 'hidden';
     if (!changed && !focus) return;
     if (busy) root.querySelectorAll('button,input,textarea,select').forEach(el => { el.disabled = true; });
-    if (draft?.channelTemplate?.status === 'loading' && top()?.type === 'publish') root.lastElementChild.querySelectorAll('#draft-title,#draft-description,#draft-comment,.copy-field-title button,.copy-field-description button,.copy-field-comment button').forEach(el => { el.disabled = true; });
+    if (draft?.channelTemplate?.status === 'loading' && top()?.type === 'publish') root.lastElementChild.querySelectorAll('#draft-title,#draft-description,#draft-comment,#draft-requirements,.copy-field-title button,.copy-field-description button,.copy-field-comment button').forEach(el => { el.disabled = true; });
     if (draft?.channelId && draft.channelTemplate?.status !== 'ready' && !draft.pendingPayload && top()?.type === 'publish') root.lastElementChild.querySelector('[data-action="submit-publish"]')?.setAttribute('disabled','');
     if (draft?.pendingPayload && top()?.type === 'publish') root.lastElementChild.querySelectorAll('input,textarea,select,button:not([data-action="submit-publish"]):not([data-action="close-modal"])').forEach(el => { el.disabled = true; });
     const retained = active?.isConnected && root.lastElementChild.contains(active) ? active : activeId ? root.lastElementChild.querySelector('#' + CSS.escape(activeId)) : null;

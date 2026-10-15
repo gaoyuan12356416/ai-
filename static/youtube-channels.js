@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = selector => document.querySelector(selector), BASE = '/api/youtube-auto-publish';
-  const fields = ['title','description','comment'], names = {title:'标题',description:'描述',comment:'首评'};
+  const fields = ['title','description','comment','cover_requirements'], names = {title:'标题',description:'描述',comment:'首评',cover_requirements:'封面要求'};
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const time = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai',hour12:false}) + ' 北京时间' : '—';
   let auth, rows = [], editor = null, serial = 0, timer, polls = 0;
@@ -56,9 +56,9 @@
     try {
       const result = await api('/channels/' + encodeURIComponent(current.channel.id) + '/template');
       if (editor !== current || current.request !== request) return;
-      if (!result.template || result.template.channel_id !== current.channel.channel_id || fields.some(f => typeof result.template[f + '_template'] !== 'string')) throw new Error('频道身份或模板已变化，请关闭后刷新列表');
+      if (!result.template || result.template.channel_id !== current.channel.channel_id || fields.some(f => typeof result.template[f + '_template'] !== 'string' && !(f === 'cover_requirements' && result.template[f + '_template'] === undefined))) throw new Error('频道身份或模板已变化，请关闭后刷新列表');
       current.template = result.template;
-      fields.forEach(f => { $('#template-' + f).value = current.template[f + '_template']; });
+      fields.forEach(f => { $('#template-' + f).value = current.template[f + '_template'] || ''; });
       $('#template-fields').disabled = false; $('#save-template').disabled = false;
       editorMessage(''); $('#template-title').focus();
     } catch (error) { if (editor === current) { editorMessage(error.message,true); $('#reload-template').hidden = false; } }
