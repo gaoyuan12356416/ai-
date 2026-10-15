@@ -5,7 +5,6 @@ import json
 import logging
 import mimetypes
 import os
-import signal
 import shutil
 import shlex
 import subprocess
@@ -64,7 +63,6 @@ SYNC_ISOLATED_AUTH = os.environ.get("CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH", "1").
 )
 CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
 CODEX_REASONING = os.environ.get("CODEX_SCREENSHOT_CODEX_REASONING", "medium").strip() or "medium"
-NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS = positive_int_env("CODEX_SCREENSHOT_NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS", 1)
 ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE", "0.08"))
 SOURCE_CONSISTENCY_STRICT = os.environ.get("CODEX_SCREENSHOT_SOURCE_CONSISTENCY_STRICT", "0").strip().lower() in (
     "1",
@@ -118,26 +116,15 @@ def json_response(handler, status_code, payload):
 
 def run_cmd(cmd, timeout=None, env=None):
     logging.info("running: %s", " ".join(cmd))
-    popen_kwargs = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "universal_newlines": True,
-        "env": env,
-    }
-    if os.name != "nt":
-        popen_kwargs["start_new_session"] = True
-    proc_obj = subprocess.Popen(cmd, **popen_kwargs)
-    try:
-        stdout, stderr = proc_obj.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        terminate_process_tree(proc_obj)
-        stdout, stderr = proc_obj.communicate()
-        proc = subprocess.CompletedProcess(cmd, proc_obj.returncode, stdout, stderr)
-        error = TimeoutError("command timed out after %ss: %s" % (timeout, stderr.strip() or stdout.strip()))
-        error.proc = proc
-        raise error
-    proc = subprocess.CompletedProcess(cmd, proc_obj.returncode, stdout, stderr)
+    proc = subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        timeout=timeout,
+        env=env,
+    )
     if proc.returncode != 0:
         error = RuntimeError(
             "command failed (%s): %s"
@@ -146,27 +133,6 @@ def run_cmd(cmd, timeout=None, env=None):
         error.proc = proc
         raise error
     return proc
-
-
-def terminate_process_tree(proc):
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        if os.name != "nt":
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            if os.name != "nt":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                proc.kill()
-            proc.wait(timeout=5)
-    except Exception:
-        logging.exception("failed to terminate timed out Codex process tree: pid=%s", getattr(proc, "pid", ""))
 
 
 TOKEN_USAGE_FIELDS = (
@@ -729,40 +695,6 @@ def summarize_missing_raw_path_reason(result_data):
     return "; ".join(unique)[:500]
 
 
-NO_OUTPUT_ERROR_MARKERS = (
-    "ai image generation produced no output",
-    "image generation produced no output",
-    "raw_generated_path",
-    "no generated image",
-    "no image was generated",
-    "no image path",
-    "no output path",
-    "no raw generated path",
-    "missing result json",
-    "built-in ai image generation failed",
-    "built-in image generation failed",
-    "image generation tool failed",
-    "image generation tool returned usererror",
-)
-
-
-def is_generation_no_output_error(exc):
-    text = str(exc or "").lower()
-    return any(marker in text for marker in NO_OUTPUT_ERROR_MARKERS)
-
-
-def remove_path_quietly(path):
-    try:
-        if not path or not os.path.exists(path):
-            return
-        if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            os.remove(path)
-    except OSError:
-        logging.warning("failed to remove path during retry cleanup: %s", path)
-
-
 def validate_raw_generated_image(item, result_data, codex_home=None):
     key = str(item.get("key", "")).strip()
     raw_path = resolve_raw_generated_path(result_data, codex_home)
@@ -1102,72 +1034,29 @@ def generate_one_item(job_id, drama_name, staged_source_path, source_url, workdi
 
     result_json_path = os.path.join(workdir, "%s_result.json" % key)
     ws = job_workspace(job_id, key)
-    validation_result_path = os.path.join(workdir, "%s_source_consistency.json" % key)
-    token_usage = {}
-    last_error = None
-    attempts = 1 + max(0, int(NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS or 0))
-    result_data = None
-
-    for attempt in range(1, attempts + 1):
-        reset_dir(ws)
-        remove_path_quietly(result_json_path)
-        remove_path_quietly(validation_result_path)
-        remove_path_quietly(workspace_output_path)
-        remove_path_quietly(public_output_path)
-        codex_env = build_codex_env(workdir, ws, key)
-        codex_home = (codex_env or {}).get("CODEX_HOME")
-        cmd = build_codex_exec_cmd(
-            ws,
-            staged_source_path,
-            result_json_path,
-            build_codex_instruction(drama_name, item),
-        )
-        try:
-            proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
-            merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
-            if not os.path.isfile(result_json_path):
-                raise RuntimeError(
-                    "ai image generation produced no output for %s: missing result JSON and raw_generated_path"
-                    % key
-                )
-            with open(result_json_path, "r", encoding="utf-8") as fh:
-                attempt_result = json.loads(extract_json_text(fh.read()))
-            attempt_result = validate_and_normalize_generated_output(
-                item,
-                attempt_result,
-                workspace_output_path,
-                codex_home,
-                staged_source_path,
-                ws,
-                codex_env,
-                validation_result_path,
-            )
-            result_data = attempt_result
-            break
-        except Exception as exc:
-            last_error = exc
-            proc = getattr(exc, "proc", None)
-            if proc is not None:
-                merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
-            if not is_generation_no_output_error(exc) or attempt >= attempts:
-                break
-            logging.warning(
-                "raw_generated_path missing; cleaning context and retrying: job=%s key=%s attempt=%s/%s error=%s",
-                job_id,
-                key,
-                attempt,
-                attempts - 1,
-                str(exc).strip() or exc.__class__.__name__,
-            )
-
-    if result_data is None:
-        if last_error and is_generation_no_output_error(last_error) and NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS:
-            raise RuntimeError(
-                "%s; cleaned context and retried %s time(s) but raw_generated_path was still missing"
-                % (str(last_error).strip() or last_error.__class__.__name__, NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS)
-            )
-        raise last_error or RuntimeError("ai image generation produced no output for %s" % key)
-
+    reset_dir(ws)
+    codex_env = build_codex_env(workdir, ws, key)
+    codex_home = (codex_env or {}).get("CODEX_HOME")
+    cmd = build_codex_exec_cmd(
+        ws,
+        staged_source_path,
+        result_json_path,
+        build_codex_instruction(drama_name, item),
+    )
+    proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
+    token_usage = getattr(proc, "codex_token_usage", {})
+    with open(result_json_path, "r", encoding="utf-8") as fh:
+        result_data = json.loads(extract_json_text(fh.read()))
+    result_data = validate_and_normalize_generated_output(
+        item,
+        result_data,
+        workspace_output_path,
+        codex_home,
+        staged_source_path,
+        ws,
+        codex_env,
+        os.path.join(workdir, "%s_source_consistency.json" % key),
+    )
     merge_token_usage(token_usage, result_data.pop("_validation_token_usage", {}))
     shutil.copy2(workspace_output_path, public_output_path)
     cache_id = store_to_cache(source_url, drama_name, item)
@@ -1181,7 +1070,6 @@ def generate_one_item(job_id, drama_name, staged_source_path, source_url, workdi
             "generator": "codex-ai-image",
             "cache": "miss",
             "cache_key": cache_id,
-            "context_retry_count": max(0, attempts - 1) if last_error else 0,
         }
     )
     with open(result_json_path, "w", encoding="utf-8") as fh:
