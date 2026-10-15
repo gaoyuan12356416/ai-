@@ -3,21 +3,28 @@ from datetime import datetime, timezone
 
 from .templates import WorkflowError, render
 
-FIELDS = ('title_template', 'description_template', 'comment_template')
+COPY_FIELDS = ('title_template', 'description_template', 'comment_template')
+COVER_FIELD = 'cover_requirements_template'
+FIELDS = COPY_FIELDS + (COVER_FIELD,)
 
 
 class ChannelTemplateStore:
     def __init__(self, db):
         self.db = db
-        with db() as c:
+        # Serialize the additive migration across API/worker startup.
+        with db(True) as c:
             c.execute('''CREATE TABLE IF NOT EXISTS youtube_channel_template(
                 tenant TEXT NOT NULL, channel_id TEXT NOT NULL,
                 title_template TEXT NOT NULL DEFAULT '',
                 description_template TEXT NOT NULL DEFAULT '',
                 comment_template TEXT NOT NULL DEFAULT '',
+                cover_requirements_template TEXT NOT NULL DEFAULT '',
                 version INTEGER NOT NULL, updated_by TEXT NOT NULL,
                 updated_by_name TEXT NOT NULL, updated_at TEXT NOT NULL,
                 PRIMARY KEY(tenant,channel_id))''')
+            columns = {row['name'] for row in c.execute('PRAGMA table_info(youtube_channel_template)')}
+            if COVER_FIELD not in columns:
+                c.execute("ALTER TABLE youtube_channel_template ADD COLUMN cover_requirements_template TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def empty(channel_id):
@@ -51,7 +58,7 @@ class ChannelTemplateStore:
         if type(version) is not int or version < 0:
             raise WorkflowError('version_required', '请重新加载模板后保存')
         values = {}
-        for field in FIELDS:
+        for field in COPY_FIELDS:
             text = payload.get(field)
             if not isinstance(text, str):
                 raise WorkflowError('invalid_template', '请提交完整的三个模板文本字段')
@@ -59,19 +66,30 @@ class ChannelTemplateStore:
             if len(text.encode('utf-8')) > 16000:
                 raise WorkflowError('template_too_long', '文案模板过长')
             values[field] = render(text, {}, field[:-9], allow_unresolved=True) if text.strip() else ''
+        if COVER_FIELD in payload:
+            text = payload[COVER_FIELD]
+            if not isinstance(text, str):
+                raise WorkflowError('invalid_template', '封面要求必须为文本')
+            values[COVER_FIELD] = text.strip()
+            if len(values[COVER_FIELD]) > 2000:
+                raise WorkflowError('template_too_long', '封面要求不能超过 2000 字')
         tenant = actor['tenant_key']
         stamp = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
         with self.db(True) as c:
-            row = c.execute('SELECT version FROM youtube_channel_template WHERE tenant=? AND channel_id=?',
+            row = c.execute('SELECT version,cover_requirements_template FROM youtube_channel_template WHERE tenant=? AND channel_id=?',
                             (tenant, channel_id)).fetchone()
             if (row['version'] if row else 0) != version:
                 raise WorkflowError('template_conflict', '模板已被其他人修改，当前输入已保留，请重新加载后核对', 409)
+            # Older cached editors submit only copy fields; omission must not clear a cover default.
+            if COVER_FIELD not in values:
+                values[COVER_FIELD] = row[COVER_FIELD] if row else ''
             c.execute('''INSERT INTO youtube_channel_template
-                (tenant,channel_id,title_template,description_template,comment_template,
-                 version,updated_by,updated_by_name,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+                (tenant,channel_id,title_template,description_template,comment_template,cover_requirements_template,
+                 version,updated_by,updated_by_name,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(tenant,channel_id) DO UPDATE SET
                 title_template=excluded.title_template,description_template=excluded.description_template,
-                comment_template=excluded.comment_template,version=excluded.version,
+                comment_template=excluded.comment_template,cover_requirements_template=excluded.cover_requirements_template,
+                version=excluded.version,
                 updated_by=excluded.updated_by,updated_by_name=excluded.updated_by_name,updated_at=excluded.updated_at''',
                 (tenant, channel_id, *(values[f] for f in FIELDS), version + 1,
                  actor['user_id'], actor.get('name', ''), stamp))

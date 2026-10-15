@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import test_youtube_auto_service as fixture
 from test_youtube_channel_cache import CRED
 from features.youtube_auto_publish.channels import ChannelDirectory
+from features.youtube_auto_publish.channel_templates import ChannelTemplateStore
 from features.youtube_auto_publish.templates import WorkflowError
 
 
@@ -91,6 +92,68 @@ class Templates(unittest.TestCase):
         self.assertEqual(again['title'],'Manual Test Drama')
         self.assertEqual(again['description'],'Manual description')
         self.assertEqual(again['comment'],'')
+
+    def test_cover_defaults_shared_isolated_clear_and_literal(self):
+        self.assertEqual(self.get()['cover_requirements_template'], '')
+        value = self.save(cover_requirements_template='  16:9 横版\n保留 {name} 和 {anything} 原文  ')
+        self.assertEqual(value['cover_requirements_template'], '16:9 横版\n保留 {name} 和 {anything} 原文')
+        self.assertEqual(self.get(self.other)['cover_requirements_template'], value['cover_requirements_template'])
+        self.assertEqual(self.get(self.foreign)['cover_requirements_template'], '')
+        self.assertEqual(self.service.channel_list(self.actor)['channels'][0]['template']['configured_fields'], ['cover_requirements'])
+        self.save(version=1, cover_requirements_template=' \n\t')
+        self.assertEqual(self.get()['cover_requirements_template'], '')
+
+    def test_cover_limit_and_invalid_types(self):
+        self.save(cover_requirements_template='封'*2000)
+        for text in ('封'*2001, None, 123, [], {}):
+            with self.subTest(text=str(text)[:30]), self.assertRaises(WorkflowError):
+                self.save(version=1, cover_requirements_template=text)
+        self.assertEqual(self.get()['version'], 1)
+        self.assertEqual(len(self.get()['cover_requirements_template']), 2000)
+
+    def test_legacy_client_omission_retains_saved_cover(self):
+        self.save(cover_requirements_template='Saved cover')
+        result = self.save(version=1, title_template='Legacy title')
+        self.assertEqual(result['cover_requirements_template'], 'Saved cover')
+        self.assertEqual(self.get()['cover_requirements_template'], 'Saved cover')
+        with self.assertRaises(WorkflowError):
+            self.save(version=1, cover_requirements_template='Stale cover')
+        self.assertEqual(self.get()['cover_requirements_template'], 'Saved cover')
+
+    def test_legacy_schema_migration_is_repeatable_and_preserves_rows(self):
+        with self.service.db(True) as c:
+            c.execute('DROP TABLE youtube_channel_template')
+            c.execute('''CREATE TABLE youtube_channel_template(
+                tenant TEXT NOT NULL, channel_id TEXT NOT NULL,
+                title_template TEXT NOT NULL DEFAULT '', description_template TEXT NOT NULL DEFAULT '',
+                comment_template TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL,
+                updated_by TEXT NOT NULL,updated_by_name TEXT NOT NULL,updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant,channel_id))''')
+            c.execute('INSERT INTO youtube_channel_template VALUES(?,?,?,?,?,?,?,?,?)',
+                      (self.actor['tenant_key'], self.channel['channel_id'], 'Old title', 'Old description',
+                       'Old comment', 7, 'editor', 'Editor', '2026-10-14T00:00:00Z'))
+            before = tuple(c.execute('SELECT * FROM youtube_channel_template').fetchone())
+        def migrate(_):
+            ChannelTemplateStore(self.service.db)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(migrate, range(3)))
+        ChannelTemplateStore(self.service.db)
+        with self.service.db() as c:
+            after = tuple(c.execute('SELECT * FROM youtube_channel_template').fetchone())
+        self.assertEqual(after[:-1], before)
+        self.assertEqual(after[-1], '')
+        self.assertEqual(self.get()['version'], 7)
+
+    def test_cover_submission_frozen_for_retry_and_generation(self):
+        self.save(cover_requirements_template='Default cover')
+        request = self.payload(requirements='Final edited cover')
+        first = self.service.create_task(self.actor, request)['task']
+        self.save(version=1, cover_requirements_template='Later default')
+        repeated = self.service.create_task(self.actor, copy.deepcopy(request))['task']
+        self.assertEqual(first['id'], repeated['id'])
+        self.assertEqual(repeated['requirements'], 'Final edited cover')
+        self.service.run_once()
+        self.assertEqual(self.generate.call_args.args[0]['requirements'], 'Final edited cover')
 
 
 if __name__=='__main__':unittest.main()
