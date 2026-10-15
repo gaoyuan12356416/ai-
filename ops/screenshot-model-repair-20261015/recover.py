@@ -55,15 +55,18 @@ def retry(selected):
         print('ACCEPTED', job_id, 'missing_sizes', payload['retry_count'], flush=True)
 
 
-def verify(selected):
+def verify(selected, available=False):
     from PIL import Image, ImageFile
     ImageFile.LOAD_TRUNCATED_IMAGES = False
     verification = STATE / 'verified-outputs'; verification.mkdir(exist_ok=True)
     for row in selected:
-        assert row['status'] == 'done', row['job_id'] + ' is not done'
+        if not available:
+            assert row['status'] == 'done', row['job_id'] + ' is not done'
         checks = []
         for field, dimensions in zip(FIELDS, SIZES):
             url = row[field]
+            if available and not url:
+                continue
             assert url.startswith('https://'), 'missing public HTTPS output'
             with urllib.request.urlopen(url, timeout=45) as response:
                 raw = response.read()
@@ -72,17 +75,18 @@ def verify(selected):
                 image.load(); assert image.size == dimensions, str(image.size)
             checks.append({'field': field, 'url': url, 'size': dimensions,
                            'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
-        (verification / (row['job_id'] + '.json')).write_text(json.dumps(checks, indent=2), encoding='utf-8')
-        print('VERIFIED', row['job_id'], len(checks), flush=True)
+        if checks:
+            (verification / (row['job_id'] + '.json')).write_text(json.dumps(checks, indent=2), encoding='utf-8')
+            print('VERIFIED', row['job_id'], len(checks), flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('action', choices=['retry', 'status', 'verify'])
-    parser.add_argument('--only'); args = parser.parse_args()
+    parser.add_argument('--only'); parser.add_argument('--available', action='store_true'); args = parser.parse_args()
     selected = [r for r in rows() if not args.only or r['job_id'] == args.only]
     assert selected, 'empty selection'
     if args.action == 'retry': retry(selected)
-    elif args.action == 'verify': verify(selected)
+    elif args.action == 'verify': verify(selected, args.available)
     else:
         print(json.dumps({'counts': dict(Counter(r['status'] for r in selected)), 'jobs': [
             {'job_id': r['job_id'], 'status': r['status'], 'progress': r['progress'],

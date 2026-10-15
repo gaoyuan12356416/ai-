@@ -31,3 +31,37 @@ UTC, then use the existing retry API; never directly reset database rows.
 
 Official configuration: https://learn.chatgpt.com/docs/config-file/config-reference
 Model migration: https://developers.openai.com/api/docs/guides/latest-model
+
+## Deployed configuration and rollback
+
+CPU host: `43.166.187.96`. Code release: `0ba7eefa1033adc20e3130b07693713facff445a`.
+All four screenshot workers returned `gpt-6.1-sol` / `low` after the scoped
+restart; the main API retained PID `1171997`. Runtime source is
+`/mnt/data-disk/codex-workers/us-migrated/releases/0ba7eefa1033adc20e3130b07693713facff445a/runtime/codex_screenshot_service.py`;
+the maintainable main-runtime copy is `/root/drama_material_service/codex_screenshot_service.py`.
+Unit overrides are named `95-screenshot-model-repair.conf`.
+
+Backup and frozen recovery state:
+`/mnt/data-disk/codex/tasks/screenshot-model-repair-20261015/before-deploy`.
+The 2026-10-15 Beijing natural day corresponds to database UTC
+`[2026-10-14 16:00:00, 2026-10-15 16:00:00)`. Both created-day and
+finished-day checks found the same 26 failed jobs; all 26 had unsupported-model
+errors, no successful sizes, and received one HTTP 202 retry receipt.
+Receipts and original errors remain in the private task directory, outside Git.
+
+To inspect without changing jobs:
+
+```sh
+python3 /mnt/data-disk/codex/workspaces/screenshot-model-repair-20261015/ops/screenshot-model-repair-20261015/recover.py status
+```
+
+Rollback after draining screenshot work:
+
+```sh
+python3 /mnt/data-disk/codex/workspaces/screenshot-model-repair-20261015/ops/screenshot-model-repair-20261015/rollback.py
+```
+
+Rollback restores source and removes only this rollout's four dedicated
+unit overrides, then restarts those four workers. It never restores the old
+SQLite snapshot or removes new images. The former model is rejected upstream,
+so rollback is an emergency code/configuration restore, not a working model fix.
