@@ -65,3 +65,32 @@ Rollback restores source and removes only this rollout's four dedicated
 unit overrides, then restarts those four workers. It never restores the old
 SQLite snapshot or removes new images. The former model is rejected upstream,
 so rollback is an emergency code/configuration restore, not a working model fix.
+
+## Verification and background handoff
+
+The operator requested that Codex stop continuous monitoring and leave the
+batch to the existing backend workers. No new monitor or automation was created.
+At the last checked snapshot, all 26 original failures had received one accepted
+retry: 4 jobs were done, 21 remained failed due to upstream content rejection,
+and 1 was still processing. These are handoff counts, not final batch counts.
+
+Seventeen retained public images passed HTTP GET, strict decoding, exact output
+dimensions and SHA256 recording. A Windows-side public GET independently matched
+the server hash. One complete three-ratio set and one partial portrait were
+visually inspected against their original covers. The original screenshot job
+remained blocked by image-generation content moderation in this retry.
+
+Five targeted regression tests passed both locally and on CPU, as did compilation
+and diff checks. Four previously successful jobs retained their images and
+completion timestamps; SQLite quick_check returned ok. The main API PID stayed
+unchanged. Skill context now requires background handoff for long generation
+batches unless the operator explicitly requests continued monitoring.
+
+The remaining job continues in the backend independently of the chat. Inspect
+later through the existing task UI or existing notification mechanism; do not
+replay the frozen receipt set or create chat polling automations implicitly.
+The private operation directory retains frozen failures, all 26 accepted retry
+receipts, the last status snapshot, and image verification receipts.
+The compatible backup entry is
+`/root/drama_material_service/backups/screenshot-model-repair-20261015`, pointing
+to the data-disk backup above.
