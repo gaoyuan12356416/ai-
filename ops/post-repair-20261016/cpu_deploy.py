@@ -58,20 +58,24 @@ def stage(plan):
     verify_baseline(plan)
     for name, meta in plan['components'].items():
         cache = meta['cache']
-        subprocess.run(['git', '-C', cache, 'fetch', 'origin', meta['branch']], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(['git', '-C', cache, 'fetch', 'git@github.com:gaoyuan12356416/ai-.git', meta['branch']], check=True, stdout=subprocess.DEVNULL)
         assert run(['git', '-C', cache, 'rev-parse', meta['commit'] + '^{commit}']) == meta['commit']
         target = ROOT / 'releases' / (name + '-' + meta['commit'])
-        assert not target.exists(), str(target)
-        shutil.copytree(Path(meta['root']).resolve(), target, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        existed = target.exists()
+        if not existed:
+            shutil.copytree(Path(meta['root']).resolve(), target, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
         for file in meta['files']:
             contents = subprocess.check_output(['git', '-C', cache, 'show', meta['commit'] + ':' + file])
             destination = target / file
+            if existed:
+                assert destination.read_bytes() == contents, ('partial stage changed', destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(contents)
         meta['candidate'] = str(target)
         code = [str(target / file) for file in meta['files'] if file.endswith('.py')]
         subprocess.run([sys.executable, '-m', 'py_compile', *code], check=True)
         subprocess.run([sys.executable, '-m', 'unittest', *meta['tests'], '-q'], cwd=target, check=True, timeout=120)
+        save(target / '.post-repair-validation.json', {'commit': meta['commit'], 'tests': meta['tests']})
     save(ROOT / 'stage.json', plan)
     print(json.dumps({'status': 'staged_and_tested', 'candidates': {k: v['candidate'] for k, v in plan['components'].items()}}))
 
