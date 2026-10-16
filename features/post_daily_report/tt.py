@@ -87,7 +87,8 @@ def _error_reason(row, task, *, confidence="confirmed"):
     combined = (code + " " + message).lower()
     if code in {"source_url_not_allowed", "fb_auto_source_url_not_allowed"}:
         _reason(row, "source_url_not_allowed", "源视频域名未通过制作服务校验，尚未提交平台发布", "核对受信来源域名及下载入口；历史失败不自动重试", confidence)
-    elif code in {"tt_publish_outcome_unknown", "tt_auto_reconcile_publish_id_missing"} or task.get("unknown_outcome"):
+    elif (code in {"tt_publish_outcome_unknown", "tt_auto_reconcile_publish_id_missing"}
+          or task.get("unknown_outcome") or task.get("status") in {"unknown", "reconciling"}):
         text = "同账号前序发布结果待确认，阻塞后续计划" if confidence == "inferred" else "发布结果待确认，尚不能认定成功或失败"
         _reason(row, "historical_outcome_hold" if confidence == "inferred" else "outcome_unconfirmed", text, "先核对现有发布结果；不重新初始化历史发布", confidence)
     elif "spam_risk_user_banned_from_posting" in combined:

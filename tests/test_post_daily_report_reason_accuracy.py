@@ -11,6 +11,7 @@ class ReasonAccuracyTests(unittest.TestCase):
             ({"status": "failed", "error_code": "source_url_not_allowed"}, "source_url_not_allowed"),
             ({"status": "ready"}, "prepared_waiting_publish"),
             ({"status": "retry_wait", "error_code": "tt_publish_outcome_unknown"}, "historical_outcome_hold"),
+            ({"status": "reconciling", "error_code": "tt_account_source_unavailable"}, "historical_outcome_hold"),
         ]:
             row = tt._row("a", "a", "a")
             tt._error_reason(row, task, confidence="inferred" if expected == "historical_outcome_hold" else "confirmed")
