@@ -1,0 +1,130 @@
+{
+  "audit_date": "2026-10-16",
+  "proof": "All 20 immutable request sources mismatch the running GPU allowlist; deployed pure validator reproduces invalid_request/source URL host invalid before job creation. Match task ID, run ID, job ID, original code, and full source URL SHA256.",
+  "gpu_process_started": "Tue 2026-09-29 10:41:45 CST",
+  "allowed_source_hosts_at_failure": [
+    "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
+  ],
+  "tasks": {
+    "23267": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-e447e5715879a3948c8951e5a37d5cab076a3d76c04c3f08",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "0e4c9f61de2030772f839c0a708252f9385fa65b8c0108ed393f592807608daf"
+    },
+    "23286": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-a782a7ec3d62d874fa125c3c69047e158ad823efb7e5ef95",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "0e4c9f61de2030772f839c0a708252f9385fa65b8c0108ed393f592807608daf"
+    },
+    "23328": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-a741c238b0b957cfca102fd822679d168b4a22be3fa713c3",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "f41f994876bce55912d87ddde52813c6c671c18ca869eb22376e4c2fafaca147"
+    },
+    "23346": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-c8fd85f1355200e2c04a184f849941a01790ad3de8a69071",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "38af42b8d3153f8c8d224d375399e7e48343b81e0716b49484ea6e3c75ac387f"
+    },
+    "23353": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-74875a01c63cbdaa75b679431070e9e4bd3ca6479e94051c",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "687f432d88a462a84591bec13989f49748cc244518e11336c73cb9f9632620aa"
+    },
+    "23387": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-9e679aeed5e0c97625b6530b1e123ef107fd3bc3537f39ed",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "687f432d88a462a84591bec13989f49748cc244518e11336c73cb9f9632620aa"
+    },
+    "23388": {
+      "run_id": 272,
+      "gpu_job_id": "fb-page-cdafe2699171a6f439bca8b062e0ed27034c9ffee4b1b416",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "ce8075ac31bdf387301b69c5ef65f4a21802eea123ee449f71fe8728f763e8fa"
+    },
+    "23404": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-201f109d1b13fca44a7ebe1d04117bfebfafb8ed2841dc0e",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "38af42b8d3153f8c8d224d375399e7e48343b81e0716b49484ea6e3c75ac387f"
+    },
+    "23414": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-aade493f3651d7635de21624467dea3840789a35541357c9",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "38af42b8d3153f8c8d224d375399e7e48343b81e0716b49484ea6e3c75ac387f"
+    },
+    "23417": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-d3906030d190f8bb4ce2ab62be2129940ccc26328a1699b1",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "38af42b8d3153f8c8d224d375399e7e48343b81e0716b49484ea6e3c75ac387f"
+    },
+    "23418": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-1a8c6e5af69fc031241d300651ea0ed290a15b02b7faf311",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "881abf53ce6baed74d0285cf92a27cbebf4f9e71d6229aceac39ff04b9f27c67"
+    },
+    "23469": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-200497a5ab3fee38fc76ee8ca21d572265c537ac2e1d18f0",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "ce8075ac31bdf387301b69c5ef65f4a21802eea123ee449f71fe8728f763e8fa"
+    },
+    "23471": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-780ac048b5aee6585e0c02558b10f673770f366970eb575a",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "904f81e24165c854d81cb69023cbafab0a1bcc6de2de06dd35ea7cbffd456b54"
+    },
+    "23476": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-497d0d1986266227addd54948904ecc5361c35479d37e0a3",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "e441910a5344f27d58a72674d7d60f2563521cb20479cd4bfa76218d2d9c62ea"
+    },
+    "23478": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-2e96bc96d32bf9c11b89061313ef72f9c4859758153d2f46",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "bf13063883156df0a801613a24f8f2f2745b083bb237a2b926545def69a856d7"
+    },
+    "23483": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-8d2b8452df8f2981dbfc0e4863bf50bb4a1f8e8eb1630641",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "38af42b8d3153f8c8d224d375399e7e48343b81e0716b49484ea6e3c75ac387f"
+    },
+    "23484": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-52bd3b1e940dfa533c5e6209f13edf012f490a466722e770",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "7796927a015d5f9bc4dac6a77e8acbf7d671c3854455a3e02c68b1cd266772a2"
+    },
+    "23499": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-caaaa9ca5ebb842433c8ef014fa80ac8c2c252edd0c348c2",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "7796927a015d5f9bc4dac6a77e8acbf7d671c3854455a3e02c68b1cd266772a2"
+    },
+    "23506": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-0b6909d25556e6caec212fd2efbe9356fee3277e69ca7ade",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "904f81e24165c854d81cb69023cbafab0a1bcc6de2de06dd35ea7cbffd456b54"
+    },
+    "23518": {
+      "run_id": 273,
+      "gpu_job_id": "fb-page-ff17fb4ac89b6478dfa54935884dc15ce701dc4a04733766",
+      "original_error_code": "invalid_request",
+      "source_url_sha256": "ce8075ac31bdf387301b69c5ef65f4a21802eea123ee449f71fe8728f763e8fa"
+    }
+  }
+}

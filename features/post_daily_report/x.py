@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -18,7 +19,8 @@ LABELS = {
 ERRORS = {
     "x_post_pool_fifo_conflict": ("素材池最新可用记录与冻结计划冲突", "核查候选快照、素材占用与顺序校验；确认原因后再决定补发"),
     "x_auto_no_eligible_material": ("模板未找到符合条件的可用素材", "检查同语言素材、上线时间、历史占用及模板筛选阈值"),
-    "x_post_schedule_partial_capacity": ("该时点部分配置账号未匹配到可用内容", "补充对应语言的可用素材或短剧，并核查账号与内容绑定"),
+    "x_post_schedule_partial_capacity": ("配置账号未形成发布队列，具体预检限制需核实", "核对当时的账号授权、历史任务占用、语言匹配和内容容量；未入队不代表平台发布失败"),
+    "x_historical_outcome_hold": ("历史发布结果待确认，阻止该账号建立新队列", "先核对已有发布账本，不重新发布历史任务"),
     "x_post_schedule_material_preflight_shortage": ("可通过预检的素材不足", "检查候选素材、下载和媒体校验记录"),
     "x_post_schedule_drama_shortage": ("可用于配置账号的短剧不足", "补充同语言可用短剧并检查未完成短剧绑定"),
     "x_post_premium_relay_unavailable": ("缺少同语言可用 Premium 中继账号", "检查同语言 Premium 账号资格和授权"),
@@ -66,7 +68,7 @@ def _slot(day, time):
 def _row(source):
     return {"source": source, "label": LABELS[source], "form": "直接发布／目标转发" if source.endswith("_pool") else "直接发布",
             "expected": 0, "published": 0, "late": 0, "pending": 0, "unknown": 0, "failed": 0,
-            "reasons": [], "warnings": [], "form_counts": {}}
+            "reasons": [], "warnings": [], "form_counts": {}, "unqueued": 0}
 
 
 def _reason(row, code, count=1, confidence="confirmed"):
@@ -128,16 +130,29 @@ def _best(outcomes):
     return "pending", None, "直接发布", "execution_pending"
 
 
-def _missing(row, run, count):
+def _missing(row, run, count, account=None, logs_by_id=None):
     if count <= 0:
         return
     code = run.get("error_code") or ""
+    row["unqueued"] += count
+    message = str(run.get("error_message") or "")
+    if account is not None and f"账号{account}授权或发布开关不可用" in message:
+        row["failed"] += count
+        _reason(row, "x_account_not_publishable", count)
+        return
+    if account is not None:
+        for log_id in re.findall(r"日志(\d+)", message):
+            log = (logs_by_id or {}).get(int(log_id), {})
+            if str(log.get("account_id")) == str(account) and log.get("unknown_outcome"):
+                row["failed"] += count
+                _reason(row, "x_historical_outcome_hold", count)
+                return
     if run.get("status") in {"failed_preflight", "failed", "stopped", "completed_with_errors"}:
         row["failed"] += count
         _reason(row, code or "publish_failed", count)
     elif run.get("status") == "completed":
         row["failed"] += count
-        _reason(row, "x_post_schedule_partial_capacity", count)
+        _reason(row, "x_post_schedule_partial_capacity", count, confidence="unknown")
     else:
         row["pending"] += count
         _reason(row, "task_not_created" if run else "schedule_not_created", count)
@@ -237,10 +252,11 @@ def _collect_primary(db, window, output, row_by_source):
     if not list(db.execute('PRAGMA table_info(x_post_queue)')):
         raise sqlite3.OperationalError("missing X target ledger")
     root = _root_ids(db)
-    all_runs = {r["id"]: r for r in _rows(db, "x_post_schedule_run", ["id", "source_type", "run_date", "publish_time", "account_ids_json", "status", "error_code", "schedule_mode"])}
+    all_runs = {r["id"]: r for r in _rows(db, "x_post_schedule_run", ["id", "source_type", "run_date", "publish_time", "account_ids_json", "status", "error_code", "error_message", "schedule_mode"])}
     runs = {key: r for key, r in all_runs.items() if root(key) == key}
     manuals = {r["id"]: r for r in _rows(db, "x_post_manual_run", ["id", "trigger_source", "run_date", "created_at", "publish_mode", "scheduled_at", "account_ids_json", "expected_count", "status", "error_code"])}
-    logs = {r["queue_id"]: r for r in _rows(db, "x_post_publish_log", ["id", "queue_id", "status", "x_post_id", "published_at", "unknown_outcome", "error_code"])}
+    logs = {r["queue_id"]: r for r in _rows(db, "x_post_publish_log", ["id", "queue_id", "account_id", "status", "x_post_id", "published_at", "unknown_outcome", "error_code"])}
+    logs_by_id = {r["id"]: r for r in logs.values()}
     relays = {r["queue_id"]: r for r in _rows(db, "x_post_repost_ledger", ["queue_id", "status", "source_post_id", "reposted_at", "unknown_outcome", "error_code"])}
     queues = _rows(db, "x_post_queue", ["id", "account_id", "run_date", "source_type", "status", "delivery_mode", "schedule_run_id", "manual_run_id", "run_id", "catchup_run_id"])
     by_schedule, by_manual, by_daily, by_catchup = (defaultdict(list) for _ in range(4))
@@ -290,7 +306,7 @@ def _collect_primary(db, window, output, row_by_source):
             if by_account.get(account):
                 _record(row, _best(by_account[account]), window)
             else:
-                _missing(row, run, 1)
+                _missing(row, run, 1, account=account, logs_by_id=logs_by_id)
         extra = set(by_account) - set(accounts)
         if extra:
             row["warnings"].append("存在冻结计划以外的目标账号，请核对补偿批次")

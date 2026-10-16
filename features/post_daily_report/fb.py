@@ -5,11 +5,15 @@ Legacy MySQL publishers are deliberately outside this adapter's scope.
 
 from collections import Counter, defaultdict
 import hashlib
+import json
+from pathlib import Path
 
 from .common import BEIJING, in_window, json_value, parse_time, read_db
 
 
 _REASONS = {
+    "fb_auto_source_url_not_allowed": ("源视频域名未通过制作服务校验，尚未提交 Meta 发布", "核对受信来源域名及下载入口；历史失败不自动重试"),
+    "fb_report_prepare_request_invalid": ("视频制作请求校验失败，旧记录未保留具体参数原因", "核对制作服务原始错误及请求；不能据此认定 Meta 拒绝发布"),
     "fb_page_missing_eligible_token": ("Page 授权不可用", "补充或更新该 Page 的发布授权"),
     "fb_auto_no_eligible_video": ("没有满足筛选和冷却规则的视频", "检查素材储备、筛选条件及冷却周期"),
     "fb_auto_previous_run_backlog": ("上一时隙仍有任务积压", "检查视频制作、上传和发布耗时"),
@@ -51,6 +55,25 @@ _REASONS = {
     "fb_report_late_unknown_block": ("视频已制作，但被同 Page 结果不明任务阻塞至超时", "先核实阻塞任务的发布结果，再恢复后续正常计划"),
     "fb_report_prepare_retries_expired": ("视频制作反复延后重试，超过发布宽限", "保留底层制作错误，定位失败并限制重复重试"),
 }
+
+
+def _verified_preparation_code(task, evidence):
+    """Match immutable evidence; a hostname alone cannot explain old 400s."""
+    item = evidence.get(str(task.get("id")), {})
+    source_sha = hashlib.sha256(str(task.get("source_media_url") or "").encode()).hexdigest()
+    if (item and task.get("run_id") == item.get("run_id")
+            and task.get("gpu_job_id") == item.get("gpu_job_id")
+            and task.get("error_code") == item.get("original_error_code")
+            and source_sha == item.get("source_url_sha256")):
+        return "fb_auto_source_url_not_allowed"
+    return ""
+
+
+def _verified_errors():
+    try:
+        return json.loads(Path(__file__).with_name("verified_preparation_errors.json").read_text(encoding="utf-8"))["tasks"]
+    except (OSError, ValueError, KeyError):
+        return {}
 
 _POLICY_SKIPS = {"fb_auto_page_frequency_limit", "fb_auto_drama_cooldown_at_publish",
                  "fb_auto_material_cooldown_at_publish"}
@@ -176,6 +199,7 @@ def collect(paths, window):
     policy_reasons = {key: Counter() for key in groups}
     warnings, evidence, excluded_plans, prior = [], [], [], 0
     seen_success = set()
+    verified_errors = _verified_errors()
     with read_db(paths["fb"]) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         required = {"fb_auto_run", "fb_auto_task", "fb_auto_publish_ledger", "fb_auto_due_slot"}
@@ -387,6 +411,9 @@ def collect(paths, window):
                         code = "fb_report_prepare_retries_expired"
             else:
                 row["failed"] += 1
+                code = _verified_preparation_code(task, verified_errors) or code
+                if code == "invalid_request" and task.get("error_message") == "GPU视频制作失败" and not task.get("prepared_at_utc"):
+                    code = "fb_report_prepare_request_invalid"
                 if task["id"] in fetch_failures and code in {"fb_graph_389", "fb_graph_190", "fb_graph_10", "fb_graph_102", "fb_graph_200"}:
                     code = "fb_graph_389"
         reasons[key][code] += 1

@@ -44,8 +44,8 @@ class ReportTests(unittest.TestCase):
             self.assertIsNone(sums[key])
         report = {"date": "2026-09-17", "channels": [{"channel": "TT", "rows": rows}]}
         full = json.dumps(build_card(report), ensure_ascii=False)
-        self.assertIn('昨日已发 未知', full)
-        self.assertNotIn('昨日已发 0', full)
+        self.assertIn('当日计划已发 未知', full)
+        self.assertNotIn('当日计划已发 0', full)
         compact = json.dumps(build_compact_card(report), ensure_ascii=False)
         self.assertIn('已发 未知', compact)
         self.assertIn('未知 / 未知 / 未知', compact)

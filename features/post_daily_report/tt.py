@@ -85,7 +85,12 @@ def _error_reason(row, task, *, confidence="confirmed"):
     code = str(task.get("error_code") or "")
     message = str(task.get("error_message") or "").lower()
     combined = (code + " " + message).lower()
-    if "spam_risk_user_banned_from_posting" in combined:
+    if code in {"source_url_not_allowed", "fb_auto_source_url_not_allowed"}:
+        _reason(row, "source_url_not_allowed", "源视频域名未通过制作服务校验，尚未提交平台发布", "核对受信来源域名及下载入口；历史失败不自动重试", confidence)
+    elif code in {"tt_publish_outcome_unknown", "tt_auto_reconcile_publish_id_missing"} or task.get("unknown_outcome"):
+        text = "同账号前序发布结果待确认，阻塞后续计划" if confidence == "inferred" else "发布结果待确认，尚不能认定成功或失败"
+        _reason(row, "historical_outcome_hold" if confidence == "inferred" else "outcome_unconfirmed", text, "先核对现有发布结果；不重新初始化历史发布", confidence)
+    elif "spam_risk_user_banned_from_posting" in combined:
         reason = "同账号前序任务遇到发布限制，可能阻塞后续任务" if confidence == "inferred" else "TikTok 明确限制该账号发布"
         _reason(row, "account_posting_banned", reason, "核查账号发布禁令并申诉；评估暂停该账号无效重试", confidence)
     elif any(word in combined for word in ("token", "unauthorized", "credential", "authorization")):
@@ -94,8 +99,10 @@ def _error_reason(row, task, *, confidence="confirmed"):
         _reason(row, "material_unavailable", "未找到符合账号语言或筛选条件的可用素材", "补充对应语言素材，核对素材筛选条件与去重范围", confidence)
     elif any(word in combined for word in ("rate_limit", "too_many", "429")):
         _reason(row, "platform_rate_limit", "平台限流导致发布延后", "检查限流持续时间并调整该账号发布间隔", confidence)
+    elif code == "tt_account_source_unavailable":
+        _reason(row, "account_source_unavailable", "账号状态只读查询暂不可用", "检查账号数据查询服务；保留原发布证据", confidence)
     elif any(word in combined for word in ("gpu", "media", "prepare", "download", "ffmpeg")):
-        _reason(row, "media_preparation", "视频准备、下载或校验未完成", "检查对应制作任务与源视频可用性，修复后由现有流程恢复", confidence)
+        _reason(row, "media_preparation", "视频准备、下载或校验未完成", "检查制作任务及源视频；历史失败不自动重试", confidence)
     elif task.get("status") in {"canceled", "skipped"}:
         _reason(row, "canceled_or_skipped", "计划已取消或跳过", "核对操作记录与当前发布安排", confidence)
     elif task.get("status") == "missed":
@@ -105,6 +112,8 @@ def _error_reason(row, task, *, confidence="confirmed"):
     elif code:
         # Do not copy upstream messages, URLs, or arbitrary codes into the group.
         _reason(row, "publish_error", "发布流程记录了错误，需查看对应任务", "根据任务证据定位失败阶段并处理", confidence)
+    elif task.get("status") == "ready":
+        _reason(row, "prepared_waiting_publish", "视频已制作完成，等待发布执行", "检查发布执行通道及同账号前序任务；不自动补发历史计划", confidence)
     else:
         _reason(row, "pending_without_error", "任务尚未完成，未记录明确错误", "检查该账号前序任务、制作进度与调度日志", "unknown")
 
@@ -284,6 +293,16 @@ def _auto(conn, window, output):
         groups[source]["expected"] = None
     prior = _rows(conn, "tt_auto_task", " WHERE status='published' AND publish_id<>'' AND julianday(scheduled_at_utc)<julianday(?) AND julianday(published_at_utc)>=julianday(?) AND julianday(published_at_utc)<julianday(?)", (window.start.isoformat(), window.start.isoformat(), window.end.isoformat()))
     output["prior_completed"] += len(prior)
+    event_columns = {r[1] for r in conn.execute("PRAGMA table_info(tt_auto_event)")}
+    if {"task_id", "event_type", "created_at"}.issubset(event_columns):
+        crowded = conn.execute(
+            "SELECT task_id,COUNT(*) FROM tt_auto_event WHERE event_type='task_claimed_reconcile' "
+            "AND julianday(created_at)>=julianday(?) AND julianday(created_at)<julianday(?) "
+            "GROUP BY task_id HAVING COUNT(*)>=1000 ORDER BY COUNT(*) DESC LIMIT 3",
+            (window.start.isoformat(), window.cutoff.isoformat()),
+        ).fetchall()
+        for task_id, count in crowded:
+            output["warnings"].append(f"统计日至补发截止，旧任务 {task_id} 被领取核对 {count} 次，核对频率异常；需检查退避及执行器积压。")
     output["rows"].extend(groups.values())
     output["evidence"].append({"source": "tt_auto", "tables": "tt_auto_template_version,tt_auto_random_plan,tt_auto_run,tt_auto_task,tt_auto_event", "date": window.date, "run_count": len(runs), "task_count": len(tasks)})
 

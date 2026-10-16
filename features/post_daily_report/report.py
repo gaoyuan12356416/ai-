@@ -129,9 +129,9 @@ def build_card(report):
         if actual_fb:
             elements.extend(_fb_elements(channel))
         else:
-            elements.append(_md("**%s｜应发 %s · 昨日已发 %s · 补发 %s · 未完成 %s**" %
+            elements.append(_md("**%s｜应发 %s · 当日计划已发 %s · 补发 %s · 未完成 %s**" %
                             (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]))))
-            elements.append(_columns(["发布来源", "应发", "已发", "补发", "未完成"], True))
+            elements.append(_columns(["发布来源", "应发", "当日已发", "补发", "未完成"], True))
         for row in ([] if actual_fb else rows[:12]):
             counts = total([row])
             elements.append(_columns([row.get("label", row["source"]), _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]), _n(counts["missing"])]))
@@ -139,7 +139,10 @@ def build_card(report):
             form_text = "、".join("%s %s" % (k, v) for k, v in forms.items()) if forms else row.get("form", "")
             states = []
             for key, label in (("pending", "待处理"), ("unknown", "结果待确认"), ("failed", "失败/受阻")):
-                if row.get(key): states.append("%s %s" % (label, row[key]))
+                if row.get(key):
+                    if key == "failed" and row.get("unqueued") == row[key]:
+                        label = "未入队"
+                    states.append("%s %s" % (label, row[key]))
             note = "；".join(x for x in [form_text, "、".join(states)] if x)
             if note: elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note[:200]}]})
         if len(rows) > 12: elements.append(_md("另有 %s 个来源，已计入渠道汇总；完整明细保存在日报归档。" % (len(rows) - 12)))
@@ -180,7 +183,7 @@ def build_compact_card(report):
             elements.extend(_fb_elements(channel, compact=True))
             elements.append(_md("往期计划当日确认完成 %s 条，单列不计入上述计划。" % channel.get("prior_completed", 0)))
         else:
-            elements.append(_md("**%s** 应发 %s｜已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
+            elements.append(_md("**%s** 应发 %s｜当日计划已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
         for row in ([] if actual_fb else rows[:10]):
             counts = total([row])
             elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]))))
