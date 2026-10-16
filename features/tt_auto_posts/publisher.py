@@ -1160,6 +1160,7 @@ class AutoPostExecutor:
                 "claim_worker": "",
                 "claim_token": "",
                 "lease_expires_at_utc": "",
+                "next_attempt_at_utc": self._now() + timedelta(minutes=5),
             },
             event_type="task_reconcile_pending",
         )

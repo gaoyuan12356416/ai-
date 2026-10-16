@@ -101,6 +101,59 @@ class AutoPostStoreTests(unittest.TestCase):
             },
         )
 
+    def test_history_floor_holds_old_unattempted_work_but_allows_new_day(self):
+        template = self.create_template()
+        old = self.create_task(self.create_run(template, "history-old"))
+        self.store.reserve_material(task_id=old.id, material_id="old-reserved", content_id="old-drama")
+        self.store.transition_task(old.id, "ready", expected_statuses={"reserved"})
+        floor = datetime(2026, 8, 6, tzinfo=UTC)
+        fresh_run = self.store.create_run(
+            run_key="history-fresh", template_id=template.id, template_version=template.version,
+            trigger_type="auto", scheduled_at_utc=floor, shanghai_date="2026-08-06", publish_time="08:00",
+            blacklist_snapshot={"sha256": "a" * 64}, actor=self.actor,
+        )
+        fresh = self.create_task(fresh_run)
+        self.clock.value = floor
+        guarded = TTPostAutoStore(self.db_path, now_fn=self.clock, execution_not_before_utc=floor)
+        claim = guarded.claim_next_executable_task(worker_id="fresh", lease_seconds=60)
+        self.assertEqual(claim.task.id, fresh.id)
+        self.assertEqual(claim.claim_phase, "selection")
+        self.assertEqual(guarded.get_task(old.id).status, "ready")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT publish_attempt_count FROM tt_auto_task WHERE id=?", (old.id,)).fetchone()[0], 0)
+
+    def test_history_floor_preserves_ambiguous_account_fence_and_reconcile(self):
+        template = self.create_template()
+        old = self.create_task(self.create_run(template, "unknown-old"))
+        self.store.reserve_material(task_id=old.id, material_id="unknown-reserved", content_id="old-drama")
+        self.store.transition_task(old.id, "reconciling", expected_statuses={"reserved"}, updates={"publish_id": "remote-id", "claim_phase": "reconcile"})
+        floor = datetime(2026, 8, 6, tzinfo=UTC)
+        fresh_run = self.store.create_run(
+            run_key="unknown-fresh", template_id=template.id, template_version=template.version,
+            trigger_type="auto", scheduled_at_utc=floor, shanghai_date="2026-08-06", publish_time="08:00",
+            blacklist_snapshot={"sha256": "a" * 64}, actor=self.actor,
+        )
+        self.create_task(fresh_run)
+        self.clock.value = floor
+        guarded = TTPostAutoStore(self.db_path, now_fn=self.clock, execution_not_before_utc=floor)
+        self.assertIsNone(guarded.claim_next_executable_task(worker_id="no-new-publish", lease_seconds=60, allowed_phases=["selection", "prepare", "publish"]))
+        claim = guarded.claim_next_executable_task(worker_id="read-existing-result", lease_seconds=60, allowed_phases=["reconcile"])
+        self.assertEqual(claim.task.id, old.id)
+        self.assertEqual(claim.claim_phase, "reconcile")
+
+    def test_reconcile_backoff_does_not_starve_ready_other_account(self):
+        template = self.create_template()
+        run = self.create_run(template, "fair-claims")
+        old = self.create_task(run, "640")
+        ready = self.create_task(run, "641")
+        for task, suffix in [(old, "old"), (ready, "ready")]:
+            self.store.reserve_material(task_id=task.id, material_id=suffix, content_id=suffix)
+        self.store.transition_task(old.id, "reconciling", expected_statuses={"reserved"}, updates={"publish_id": "remote-id", "claim_phase": "reconcile", "next_attempt_at_utc": self.clock() + timedelta(minutes=5)})
+        self.store.transition_task(ready.id, "ready", expected_statuses={"reserved"})
+        claim = self.store.claim_next_executable_task(worker_id="publish-ready", lease_seconds=60)
+        self.assertEqual(claim.task.id, ready.id)
+        self.assertIsNone(self.store.claim_next_executable_task(worker_id="not-due", lease_seconds=60, allowed_phases=["reconcile"]))
+
     def test_schema_initialization_is_idempotent(self):
         ensure_storage(self.db_path)
         ensure_storage(self.db_path)

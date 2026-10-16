@@ -130,6 +130,21 @@ class TTAutoPostRunnerTests(unittest.TestCase):
         with self.assertRaises(RunnerError):
             invalid.validate()
 
+    def test_always_claimed_reconcile_does_not_keep_oneshot_alive(self):
+        class AlwaysReconcile(FakeSidecarClient):
+            publish_calls = 0
+
+            def post(self, path, payload, timeout):
+                if str(payload.get("worker_id", "")).endswith("-publish"):
+                    type(self).publish_calls += 1
+                    return {"ok": True, "claimed": True, "task": {"status": "reconciling"}}
+                return super().post(path, payload, timeout)
+
+        with mock.patch("scripts.tt_auto_post_runner.SidecarClient", AlwaysReconcile):
+            result = run_once(self.config)
+        self.assertTrue(result["ok"])
+        self.assertEqual(AlwaysReconcile.publish_calls, 8)
+
     def test_documented_placeholder_bearer_is_rejected(self):
         invalid = RunnerConfig(
             **{

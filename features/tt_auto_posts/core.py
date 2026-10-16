@@ -913,12 +913,17 @@ class TTAutoPostStore:
         db_path: Any,
         *,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+        execution_not_before_utc: Any = "",
     ):
         path = Path(str(db_path)).expanduser()
         if not path.is_absolute():
             raise TTAutoPostStoreError("tt_auto_db_path_invalid", "database path must be absolute", 500)
         self.db_path = str(path)
         self._now_fn = now_fn
+        self.execution_not_before_utc = (
+            _utc_datetime(execution_not_before_utc).isoformat(timespec="seconds")
+            if execution_not_before_utc else ""
+        )
         ensure_storage(path)
 
     def _now(self) -> datetime:
@@ -2065,7 +2070,7 @@ class TTAutoPostStore:
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_auto_task
-                WHERE
+                WHERE (
                     (status='pending' AND scheduled_at_utc<=?)
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
@@ -2086,11 +2091,17 @@ class TTAutoPostStore:
                     OR (
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
+                        AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                     )
+                ) AND (
+                    scheduled_at_utc>=?
+                    OR status IN ('publishing','reconciling','unknown')
+                    OR (status='retry_wait' AND claim_phase='reconcile')
+                )
                 ORDER BY
                     CASE
-                        WHEN status IN ('publishing','reconciling','unknown') THEN 0
-                        WHEN status='ready' THEN 1
+                        WHEN status='ready' THEN 0
+                        WHEN status IN ('publishing','reconciling','unknown') THEN 1
                         WHEN status IN ('reserved','preparing','retry_wait') THEN 2
                         ELSE 3
                     END,
@@ -2100,17 +2111,7 @@ class TTAutoPostStore:
                     id ASC
                 LIMIT 500
                 """,
-                (
-                    prepare_cutoff,
-                    current,
-                    current,
-                    current,
-                    current,
-                    current,
-                    current,
-                    current,
-                    current,
-                ),
+                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc),
             ).fetchall()
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
@@ -2144,7 +2145,8 @@ class TTAutoPostStore:
                     continue
                 others = conn.execute(
                     """
-                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
+                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc,
+                           publish_id,unknown_outcome,publish_attempt_count,claim_phase
                     FROM tt_auto_task
                     WHERE account_id=? AND id<>? AND status IN (%s)
                     ORDER BY scheduled_at_utc,id
@@ -2155,6 +2157,17 @@ class TTAutoPostStore:
                         *sorted(ACTIVE_ACCOUNT_TASK_STATUSES),
                     ),
                 ).fetchall()
+                # An unattempted archived task cannot silently resume or occupy
+                # a fresh day's account. Ambiguous writes and live leases remain
+                # account fences until their existing result is reconciled.
+                others = [other for other in others if (
+                    str(other["scheduled_at_utc"]) >= self.execution_not_before_utc
+                    or other["publish_id"] or other["unknown_outcome"]
+                    or other["publish_attempt_count"]
+                    or other["status"] in {"publishing", "reconciling", "unknown"}
+                    or other["claim_phase"] == "reconcile"
+                    or (other["claim_token"] and str(other["lease_expires_at_utc"]) > current)
+                )]
                 if candidate_status == "pending" and others:
                     continue
                 if candidate_status in ACTIVE_ACCOUNT_TASK_STATUSES and others:

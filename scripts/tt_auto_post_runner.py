@@ -323,7 +323,10 @@ def execute_pending(config: RunnerConfig) -> list[list[Dict[str, Any]]]:
         ]
         publish_results: list[Dict[str, Any]] = []
         publish_client = SidecarClient(config)
-        while True:
+        # A perpetually pending remote publish must not keep a oneshot alive
+        # after its finite preparation workers have completed.
+        publish_attempt_limit = max(8, config.worker_count * config.max_tasks_per_worker * 2)
+        for _ in range(publish_attempt_limit):
             try:
                 result = publish_client.post(
                     "/internal/tt-auto-post/execute-next",

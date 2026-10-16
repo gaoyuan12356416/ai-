@@ -1248,7 +1248,10 @@ def build_service_from_env(
         source_connection,
         schema=material_schema,
     )
-    store = TTPostAutoStore(db_path)
+    store = TTPostAutoStore(
+        db_path,
+        execution_not_before_utc=source.get("TT_AUTO_POST_EXECUTION_NOT_BEFORE_UTC", ""),
+    )
     legacy = LegacyTTPostReader(legacy_path)
     legacy.validate_schema()
     resolver = DramawaveMaterialResolver(

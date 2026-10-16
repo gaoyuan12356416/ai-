@@ -857,6 +857,23 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         self.assertEqual(len(gpu.reconcile_calls), 1)
         self.assertEqual(third["material_id"], task.material_id)
 
+    def test_remote_processing_waits_five_minutes_and_never_republishes(self):
+        task = self.reserved_task(suffix="processing-backoff")
+        pending = {"publish_id": "pub-processing", "state": "processing"}
+        gpu = FakeGPU(publish_results=[pending], reconcile_result=pending)
+        executor = self.executor(gpu)
+        executor.execute_next("prepare")
+        executor.execute_next("publish")
+        first = executor.execute_next("reconcile")["task"]
+        self.assertEqual(first["status"], "reconciling")
+        self.assertEqual(self.store.get_task(task.id).publish_id, "pub-processing")
+        for _ in range(10):
+            self.assertFalse(executor.execute_next("reconcile-too-soon")["claimed"])
+        self.clock.value += timedelta(minutes=5)
+        self.assertTrue(executor.execute_next("reconcile-due")["claimed"])
+        self.assertEqual(len(gpu.publish_calls), 1)
+        self.assertEqual(len(gpu.reconcile_calls), 2)
+
     def test_reconcile_4xx_remains_nonterminal_until_remote_result_is_known(self):
         task = self.reserved_task(suffix="reconcile-4xx")
         unknown = GPUClientError(
