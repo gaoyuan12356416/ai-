@@ -113,7 +113,8 @@ def _error_reason(row, task, *, confidence="confirmed"):
         # Do not copy upstream messages, URLs, or arbitrary codes into the group.
         _reason(row, "publish_error", "发布流程记录了错误，需查看对应任务", "根据任务证据定位失败阶段并处理", confidence)
     elif task.get("status") == "ready":
-        _reason(row, "prepared_waiting_publish", "视频已制作完成，等待发布执行", "检查发布执行通道及同账号前序任务；不自动补发历史计划", confidence)
+        text = "同账号前序视频已就绪，是否仍阻塞需核实执行策略" if confidence == "inferred" else "视频已制作完成，等待发布执行"
+        _reason(row, "prepared_waiting_publish", text, "检查发布执行通道及历史任务门禁；不自动补发历史计划", confidence)
     else:
         _reason(row, "pending_without_error", "任务尚未完成，未记录明确错误", "检查该账号前序任务、制作进度与调度日志", "unknown")
 
