@@ -50,6 +50,11 @@ class GPUPrepareClient:
             try: decoded = json.loads(raw.decode()) if raw else {}
             except (UnicodeError, ValueError): raise GPUPrepareError("fb_auto_prepared_response_invalid", "GPU响应格式无效") from None
             if not 200 <= int(response.status) < 300:
+                code = str(decoded.get("code") or "fb_auto_gpu_prepare_failed")[:96]
+                if code == "invalid_request" and decoded.get("message") == "source URL host invalid":
+                    raise GPUPrepareError("fb_auto_source_url_not_allowed", "源视频域名不在制作服务白名单", int(response.status))
+                if code == "invalid_request":
+                    raise GPUPrepareError(code, "视频制作请求参数未通过校验", int(response.status))
                 raise GPUPrepareError(str(decoded.get("code") or "fb_auto_gpu_prepare_failed")[:96], "GPU视频制作失败", int(response.status))
         except GPUPrepareError:
             raise
