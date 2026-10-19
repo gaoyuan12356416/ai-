@@ -1,0 +1,231 @@
+{
+  "prototype_commit": "5e8a427095e69b504f1f3e54aa8c7d9d5a7b0ba1",
+  "branch": "codex/fb-batch-publishing-preview-20261019",
+  "rollback_commit": "8e7818c",
+  "url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-batch-publishing-preview-20261019_163205/index.html",
+  "uploaded_files": 16,
+  "verification": {
+    "head": {
+      "status": 200,
+      "content_type": "text/html",
+      "content_length": "26980"
+    },
+    "files": [
+      {
+        "path": "assets/app.js",
+        "status": 200,
+        "content_type": "application/javascript",
+        "bytes": 56741,
+        "sha256": "b0238bac7442c101850a72ed84cb2ef5cabb4eee4f55be2549ff12a162da7809"
+      },
+      {
+        "path": "assets/batch.css",
+        "status": 200,
+        "content_type": "text/css",
+        "bytes": 4840,
+        "sha256": "577c9f9d60ffbe8fdd8d0bc31c076ec4c6d63f9220a75965fff5b5d11991ab0a"
+      },
+      {
+        "path": "assets/links.js",
+        "status": 200,
+        "content_type": "application/javascript",
+        "bytes": 2786,
+        "sha256": "e592c2fc6db0e4612d8e2dd0f5927b16e253f9d00ec65895e788f9071619f25a"
+      },
+      {
+        "path": "assets/nav-config.js",
+        "status": 200,
+        "content_type": "application/javascript",
+        "bytes": 822,
+        "sha256": "09ca8935481fa3c4ddfec97eb2b0c272580fadfec0744d2d2ac4226f8a86081e"
+      },
+      {
+        "path": "assets/page-management.css",
+        "status": 200,
+        "content_type": "text/css",
+        "bytes": 6030,
+        "sha256": "e61a6fb37fc33934b3d13b6baddd2a22b645cdbdd8d55fb0ae4976c1236c094c"
+      },
+      {
+        "path": "assets/poster-city.svg",
+        "status": 200,
+        "content_type": "image/svg+xml",
+        "bytes": 2920,
+        "sha256": "e9b74bd55c78b7a385bec3f237cd569d5d35402b2c5e041bd9bd8a81c757f53a"
+      },
+      {
+        "path": "assets/poster-gold.svg",
+        "status": 200,
+        "content_type": "image/svg+xml",
+        "bytes": 1872,
+        "sha256": "1a59abc5720aa3e290adf0c41eaf9959c0fa62deafa8dfb801efc520e29b8c6d"
+      },
+      {
+        "path": "assets/poster-local.svg",
+        "status": 200,
+        "content_type": "image/svg+xml",
+        "bytes": 593,
+        "sha256": "670eefba82b9c000e8f32521249326f28d7033556791b1c7dda19f28134ad5c8"
+      },
+      {
+        "path": "assets/poster-rain.svg",
+        "status": 200,
+        "content_type": "image/svg+xml",
+        "bytes": 2266,
+        "sha256": "4acad19d9f44ada19f0dbc61a51dc1ce8199efcb7acf9ccfc552c79d04528831"
+      },
+      {
+        "path": "assets/quick-nav.js",
+        "status": 200,
+        "content_type": "application/javascript",
+        "bytes": 30803,
+        "sha256": "b491579cbc4dbbd942fa788b236c7912bbca6befdab8c2c2f384755988f6ba30"
+      },
+      {
+        "path": "assets/standard-ui.css",
+        "status": 200,
+        "content_type": "text/css",
+        "bytes": 15130,
+        "sha256": "7bb4ac65470971f1171382b17f5b83fc81c9864dfcee11de5b765e656b686f0e"
+      },
+      {
+        "path": "assets/style.css",
+        "status": 200,
+        "content_type": "text/css",
+        "bytes": 31172,
+        "sha256": "9eb74cd1df16e11b32643bf44172f245269f77b094c91cbf25a54acc2f1728af"
+      },
+      {
+        "path": "assets/ui-topbar.css",
+        "status": 200,
+        "content_type": "text/css",
+        "bytes": 1667,
+        "sha256": "04f670c81e3c83ed06ee640f29173af756ea51ddd40705177a4fac7f229ef107"
+      },
+      {
+        "path": "assets/ui-topbar.js",
+        "status": 200,
+        "content_type": "application/javascript",
+        "bytes": 2872,
+        "sha256": "e3aaa16aecd485da2cf1a2263d667d0c8103c9aaaa6bb5152728e64639867d9a"
+      },
+      {
+        "path": "index.html",
+        "status": 200,
+        "content_type": "text/html",
+        "bytes": 26980,
+        "sha256": "f09ea85c9b9a4b58a4e30d9109fd8adad16842fba8c9cc900c682a24a65e0348"
+      },
+      {
+        "path": "pages.html",
+        "status": 200,
+        "content_type": "text/html",
+        "bytes": 27007,
+        "sha256": "8b2a3f10a342273ee80b37b05f06685bd6ef44ba80f4a526293231252b4b6f6e"
+      }
+    ]
+  },
+  "browser": {
+    "passed": 95,
+    "checks": [
+      "batch starts with no silently selected material",
+      "empty material selection blocks submit",
+      "material picker uses real multi-select checkboxes",
+      "filtered select all preserves prior selections",
+      "mixed-language selection survives search and language changes",
+      "all three selected materials appear in compose",
+      "cancel material picker preserves prior committed selection",
+      "missing configured Pages blocks batch",
+      "Page management starts empty",
+      "Page configuration still requires drama language",
+      "Page configuration still requires caption",
+      "invalid Page macro blocked",
+      "configured Pages cannot be duplicated",
+      "Chinese and English Page configurations saved independently",
+      "target Pages remain unselected by default",
+      "expired authorization disabled in batch targets",
+      "undefined video templates remain disabled",
+      "select all includes three eligible mixed-language Pages",
+      "selecting target Pages alone does not silently create pairs",
+      "two Chinese videos by two Chinese Pages plus one English video produces five pairs",
+      "cross-language pairs are disabled",
+      "Page task totals reflect actual assignments",
+      "operators can reduce automatic assignment to three explicit pairs",
+      "unmatched-only filter exposes missing material",
+      "unmatched material blocks entire batch instead of silently skipping",
+      "assigned material leaves unmatched-only view immediately",
+      "Page assignment filter shows its two materials",
+      "assignment language filter works",
+      "same Page different material has separate draft",
+      "same material different Page has separate draft",
+      "preview selector edits the corresponding pair",
+      "pair draft does not mutate Page template",
+      "repeated language matching never duplicates pairs",
+      "rematching preserves independent draft edits",
+      "all pairs validated, invalid nonactive pair receives focus",
+      "UTF-8 expanded caption length blocks batch",
+      "invalid Page interval blocked",
+      "past batch schedule blocked",
+      "new unmatched language does not change previous five pairs",
+      "unmatched Spanish material blocks submit",
+      "explicit removal resolves unmatched material",
+      "local video without drama metadata is visibly unmatched",
+      "material ordering controls Page publication order",
+      "batch selections and assignments restore after reload",
+      "pair-specific copy survives refresh",
+      "old single-material draft remains untouched",
+      "confirmation groups five material tasks under three Pages",
+      "every material-Page pair gets a distinct short link",
+      "failed storage creates no partial batch",
+      "five independent scheduled task snapshots committed",
+      "2310 plus eight fields for DEMO-26002::demo-page-01",
+      "attribution identities align for DEMO-26002::demo-page-01",
+      "frozen campaign and short caption align for DEMO-26002::demo-page-01",
+      "2310 plus eight fields for DEMO-26002::demo-page-02",
+      "attribution identities align for DEMO-26002::demo-page-02",
+      "frozen campaign and short caption align for DEMO-26002::demo-page-02",
+      "2310 plus eight fields for DEMO-26001::demo-page-01",
+      "attribution identities align for DEMO-26001::demo-page-01",
+      "frozen campaign and short caption align for DEMO-26001::demo-page-01",
+      "2310 plus eight fields for DEMO-26001::demo-page-02",
+      "attribution identities align for DEMO-26001::demo-page-02",
+      "frozen campaign and short caption align for DEMO-26001::demo-page-02",
+      "2310 plus eight fields for DEMO-26003::demo-page-03",
+      "attribution identities align for DEMO-26003::demo-page-03",
+      "frozen campaign and short caption align for DEMO-26003::demo-page-03",
+      "five task IDs and mock ledger IDs are unique",
+      "Page order and ten-minute interval frozen for demo-page-01",
+      "Page order and ten-minute interval frozen for demo-page-02",
+      "Page template edits do not rewrite history",
+      "template edits preserve current pair draft",
+      "explicit template reapply changes only active pair",
+      "another pair under same Page remains unchanged",
+      "deleting Page removes its pair assignments",
+      "deleting Page preserves historical tasks and links",
+      "recreated Page does not inherit deleted pair drafts",
+      "batch compose no horizontal overflow 1440",
+      "multi-picker fits viewport 1440",
+      "history repeat requires explicit acknowledgement 1440",
+      "batch confirm fits viewport 1440",
+      "batch compose no horizontal overflow 820",
+      "multi-picker fits viewport 820",
+      "history repeat requires explicit acknowledgement 820",
+      "batch confirm fits viewport 820",
+      "mobile navigation fully closed after responsive transition",
+      "batch compose no horizontal overflow 390",
+      "multi-picker fits viewport 390",
+      "history repeat requires explicit acknowledgement 390",
+      "batch confirm fits viewport 390",
+      "repeat creates exactly five new tasks with unique links",
+      "new publication leaves the earlier batch frozen",
+      "cancel acts on one pair only",
+      "simulated short URLs never rendered as clickable production links",
+      "mixed historical and current batch records survive refresh",
+      "no browser runtime errors",
+      "network only contains same-origin static files and local video blobs"
+    ],
+    "requests": 55,
+    "unexpectedRequests": [],
+    "errors": []
+  }
+}
