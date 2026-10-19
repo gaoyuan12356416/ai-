@@ -29,4 +29,8 @@ Nginx 的 HTTP 级 map 仅把符合 `^xtest_20261019_[A-Za-z0-9_-]{43}$` 的回�
 
 服务器检查新服务 health、管理员门禁、普通/测试 callback 去向、独立数据库 `quick_check` 和发布表数；核对原主服务及 X 服务 PID 未变、原 health 正常。
 
+2026-10-19 部署已验证：运行版本 `ab03134578a546b56b2c9ba6430d8a36ff9686a7`，新服务 PID 3572324，公开 test health 与原 X health 均为 200；匿名测试首页走原 Feishu 登录。以 HEAD 请求验证普通 state 仍走原服务、测试 state 进入新服务，无 OAuth 状态消费或账号写入。原主后台 PID 2640208、原 X 服务 PID 1171982 及两个原调度 timer 状态保持不变；独立库初始账号 0、发布表 0、`quick_check=ok`。默认 Chrome 已显示管理员测试页并进入 X 官方授权页面，实际授权结果仍待用户完成。
+
+部署前配置与状态记录：`/mnt/data-disk/x-new-app-sandbox-20261019/backups/pre-deploy/`。Nginx 原文件 SHA256 `4a161d89e5478f50a070c1142e6f5ac5d26016c678d6847bfb75a189f9e9845e`，部署后 `cf8c96708e3754d0be23fa2d1ca3ae94faf5493e436ebc67b02039e500d3f1b8`。
+
 回退：恢复部署前 `/etc/nginx/default.d/x-oauth.conf`，移走新 map/location 配置，`nginx -t && systemctl reload nginx`，停止 `x-new-app-test.service`。保留测试数据和日志供核对，不删除或回退生产账本。
