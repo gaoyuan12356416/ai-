@@ -1,0 +1,34 @@
+[Unit]
+Description=Publish the prior-day Dramawave AI image material analysis
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/ai-image-daily/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/python3 -B /opt/ai-image-daily/current/ops/ai-image-daily/deploy.py --check-disk
+ExecStart=/usr/bin/python3 -B /opt/ai-image-daily/current/ops/ai-image-daily/report.py --state /mnt/data-disk/ai-image-daily --env-file /root/drama_material_service/.env
+TimeoutStartSec=1800
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/ai-image-daily
+# Read-only WAL readers may need reader sidecars; keep both DB files protected.
+ReadWritePaths=/root/drama_material_service/data
+ReadWritePaths=/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data
+ReadOnlyPaths=/root/drama_material_service/data/drama_material_jobs.sqlite3
+ReadOnlyPaths=/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data/drama_material_jobs.sqlite3
+ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
+ReadOnlyPaths=/mnt/data-disk/youtube-cover-material-sync/sync.sqlite3
+# The gated mysql client shares the host FIFO socket and session lock directory.
+ReadWritePaths=/run/sql-connection-gate
+ReadWritePaths=/var/lib/sql-connection-gate/session-locks
+MemoryMax=768M
+CPUQuota=50%
+
