@@ -80,3 +80,16 @@ python3 -B <本次release>/ops/ai-image-daily/report.py \
 本地部署器 Python 语法检查与 5 项防护检查通过；在 CPU 的数据盘临时目录执行 `systemd-analyze verify` 返回 0，无警告。三个 `systemd-analyze calendar` 均通过，下一触发为北京时间 2026-10-20 09:00、09:10、09:30；临时校验文件已清理，没有安装或启动服务。
 
 实际 commit、服务器安装回滚点、首轮报告数据日期、COS 校验及 timer 状态由上线执行者在真实验证后补充，不能将本文命令模板视作已部署证据。
+
+## 实际上线（2026-10-19）
+
+- 已部署SHA：9fa54e4bae35aaac1d0b23cb55cb7dee6e601285。
+- CPU43.166.187.96，current=/opt/ai-image-daily/current，release=/mnt/data-disk/deploy/ai-image-daily/releases/9fa54e4bae35aaac1d0b23cb55cb7dee6e601285。
+- 安装备份：/mnt/data-disk/deploy/ai-image-daily/backups/20261019T092938.862777Z。此前首个版本仅preflight失败，未读数、未发布；BUG-002修复后首轮成功。
+- COS首版发布备份：/mnt/data-disk/ai-image-daily/backups/20261019T172939310979（首次没有旧页面，保留当前已发布页，不执行无意义恢复）。
+- 31项Linux测试、88项实际汇总检查、三素材独立SQL读回、COS正文SHA、公网手机/桌面及重复运行通过。
+- timer已启用，下一次北京时间2026-10-20 09:00；09:10和09:30失败重试/成功跳过。
+- 停用只执行 `systemctl disable --now ai-image-daily.timer` 和 `systemctl stop ai-image-daily.service`；保留已发布页面、所有历史和原业务服务。
+- 代码/unit回滚命令：`python3 -B /mnt/data-disk/deploy/ai-image-daily/releases/9fa54e4bae35aaac1d0b23cb55cb7dee6e601285/ops/ai-image-daily/deploy.py --rollback /mnt/data-disk/deploy/ai-image-daily/backups/20261019T092938.862777Z`。该备份此前指向首次preflight失败版本，不应恢复后自动启用；首次上线撤回优先使用上述停用流程。
+
+固定入口：https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/dramawave-ai-image-daily/index.html
