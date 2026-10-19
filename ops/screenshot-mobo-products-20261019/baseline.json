@@ -1,7 +1,7 @@
 {
   "functions": {
-    "app_package_for_app_id": "a2c1b6325698ab3a2ee0f31226917c1127e416144093ca278d0f81361335c9d0",
-    "validate_screenshot_request": "fe3c2d5507a25f433b326d763ab2ec20fe044577b162215e7c1e32affb37fede"
+    "app_package_for_app_id": "c1b73606b9b83095d3d28b2293fc848f16eaaaf39e900557c3c6a0a064f4e52e",
+    "validate_screenshot_request": "8ef3acb5d50e4281bb1d6778d2523a92a4c55c4d5f687912c302081afd5997cd"
   },
   "files": {
     "scripts/auto_submit_cover_synthesis.py": "428740f3abfc080af90bea8726b3ae0a67c7183ad109ec5b961daae43ac6aab1",

@@ -37,7 +37,15 @@ def function_nodes(source):
 
 
 def ast_sha(node):
-    return sha(ast.dump(node, include_attributes=False).encode())
+    # ast.dump changed empty-field rendering in Python 3.13, and 3.12 added
+    # FunctionDef.type_params. Keep source guards stable across Windows/Linux.
+    def canonical(value):
+        if isinstance(value, ast.AST):
+            return [type(value).__name__, {k: canonical(v) for k, v in ast.iter_fields(value) if k != 'type_params'}]
+        if isinstance(value, list):
+            return [canonical(v) for v in value]
+        return value
+    return sha(json.dumps(canonical(node), sort_keys=True, separators=(',', ':')).encode())
 
 
 def compose_app(live_source, repo_source, expected):
