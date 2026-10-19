@@ -65,3 +65,20 @@ systemctl stop x-api-credit-monitor.service
 Keep the monitor's state/receipts. No production rollback is necessary because
 the production App/code/configuration is not replaced. Do not restore the
 deleted Codex heartbeat or install a second scheduler.
+
+## Acceptance, 2026-10-19 11:55 Beijing
+
+- Deployed GitHub code `7fe96d877f6494dcfa80e1e23f19d839dcbea56a` to the CPU
+  release path above. Sixteen tests passed on Windows and CPU.
+- `systemd-analyze verify` passed; the actual sandboxed systemd service returned
+  `Result=success`, `ExecMainStatus=0`. Timer enabled/active, next scheduled run
+  was 2026-10-19 12:00:16 Beijing.
+- Real production lookup returned USD 85.09, through source service PID 1171982,
+  with a current user token; no token refresh was required in this validation.
+- Corrected production setup notification was sent once. Feishu GET message
+  readback returned code 0, matching message ID and 85.09 content. Receipt is in
+  private state, and a subsequent unit run sent no additional message.
+- Existing main/X/test service PID/state and publishing-timer snapshots matched
+  before/after exactly. No production App/config replacement or service restart.
+- Codex heartbeat deletion confirmed by tool and missing local automation file.
+  Skill reference updated to retire the erroneous test-App/heartbeat workflow.
