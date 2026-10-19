@@ -29,3 +29,13 @@
 ## 技能与回滚
 
 已备份并更新本地 ai-backend-maintenance 共享上下文，记录独立阈值、无分集封面、只读去重和分阶段上线规则；未提交该技能仓库其他既有未提交修改。回滚命令和私有证据位置见 deploy.md。
+
+## 2026-10-19 接口放开后的续验
+
+17:16（北京）用户确认接口已调整并授权复用图片验收。新备份before-resume-20261019-171633保存SQLite、部署状态和原定时wrapper/crontab。两条原任务仅调用一次恢复API：preserved_count=3、retry_count=0、force_remake=false，回调均HTTP200/code=0；六图SHA与原冻结值完全一致，没有重新生成。
+
+接收记录为7680927–7680932，正确归属moboreels/MoboShort，但data_source=102的data_source_id为外部material_id、type=2，需由上游异步转正式素材。17:21回读正式素材仍0条，接收remark为空；比其晚接收的DramaWave已转正式。已向用户提供接收ID排查异步worker，期间不重发、不activate。
+
+只读验收/恢复工具已补接收标识查询，Windows/Linux测试25/25通过（2ea5a8e）。最终仍只计data_source=6/type=1正式图片。
+
+昨天2026-10-18的三产品只读预检：DramaWave25候选、24已存在、1可新增；Moboreels0、MoboShort0。阈值分别为>=1000且ROAS>=45%、>3000且不限ROAS、>3000且不限ROAS。服务器Asia/Shanghai，crond active，原10:00/22:00计划未改。
