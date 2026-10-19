@@ -88,7 +88,7 @@ def deploy(host):
     if host == 'gpu':
         assert digest(old / 'features/x_posts/media_repair.py') == MANIFEST['gpu_before'], 'GPU source drift'
         files = MANIFEST['gpu']
-        units = ['x-post-media-repair.service']
+        units = ['x-post-media-repair.service', 'x-post-media-repair-tunnel.service']
         dropin = Path('/etc/systemd/system/x-post-media-repair.service.d/60-x-random-template.conf')
     else:
         for name in MANIFEST['cpu_existing']:
