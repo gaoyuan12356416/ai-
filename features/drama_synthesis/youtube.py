@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,41 @@ COMMENTS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,32}")
+
+
+def channel_read_auth_error(response) -> bool:
+    """Recognize only the observed Google 401 authError, without exposing text."""
+    if response.status_code != 401:
+        return False
+    try:
+        payload = response.json()
+        errors = payload.get("error", {}).get("errors", [])
+        return isinstance(errors, list) and bool(errors) and all(
+            isinstance(error, Mapping) and error.get("reason") == "authError"
+            and error.get("domain") == "global" for error in errors
+        )
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def read_authorized_channels(session, token: str, *, part: str, timeout):
+    """Bounded retries of this read only, using the same freshly refreshed token.
+
+    A token refresh can succeed while channels.list intermittently rejects that
+    token. Never extend this policy to upload, visibility or comment writes.
+    """
+    for delay in (0, 1, 2, 4):
+        if delay:
+            time.sleep(delay)
+        response = session.get(
+            CHANNELS_URL + "?" + urlencode({"part": part, "mine": "true"}),
+            headers={"Authorization": "Bearer " + token},
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        if not channel_read_auth_error(response):
+            break
+    return response
 
 
 def _json_object_from_hex(value: Any) -> Dict[str, Any]:
@@ -252,12 +288,7 @@ class YouTubeHTTPClient:
         session = self.session_factory()
         session.trust_env = False
         try:
-            response = session.get(
-                CHANNELS_URL + "?" + urlencode({"part": "id", "mine": "true"}),
-                headers={"Authorization": "Bearer " + token},
-                timeout=self.timeout,
-                allow_redirects=False,
-            )
+            response = read_authorized_channels(session, token, part="id", timeout=self.timeout)
         except requests.RequestException:
             raise YouTubeHTTPError(
                 "youtube_channel_identity_unavailable",
@@ -266,6 +297,13 @@ class YouTubeHTTPClient:
             ) from None
         finally:
             session.close()
+        if channel_read_auth_error(response):
+            raise YouTubeHTTPError(
+                "youtube_channel_identity_unavailable",
+                "YouTube频道接口暂未接受刷新后的凭证，请稍后重试",
+                status=401,
+                retryable=True,
+            )
         if response.status_code >= 500:
             raise YouTubeHTTPError(
                 "youtube_channel_identity_unavailable",
