@@ -3,7 +3,7 @@
 - Channel list: Edit template includes an optional channel language selector. The list and new-publication picker show the Chinese language label. Reopening the picker reads the latest saved value while OAuth checks retain their existing server cache.
 - Language is tenant/channel metadata in the additive `youtube_channel_template.language` column. Old clients omitting it preserve the value; explicit empty clears it. Existing version CAS, ownership and permission checks remain. This is descriptive metadata, not a publication eligibility rule. No historical tasks are rewritten.
 - Reports grouped by drama add English drama name immediately after the original drama column, including CSV. English titles are current metadata from `kunlunads_dev.ads_drama_info`, exact content ID to unique series code to unique `en` title, always `app_id=1479`. Ambiguous/missing/unavailable values are labelled, never guessed or translated.
-- Title enrichment runs after existing attribution, permission filtering and aggregation. It cannot change financial totals, grouping or ownership. Read-only SQL on 63350 uses the existing FIFO gate, 20-ID batches, 8-second statement limit and bounded cache. No query when drama is not grouped.
+- Title enrichment runs after existing attribution, permission filtering and aggregation. It cannot change financial totals, grouping or ownership. Read-only SQL on 63350 uses the existing FIFO gate, 100-ID batches on the verified content/series indexes, 8-second statement limit and bounded cache. Only the current page is enriched for report requests; CSV enriches all filtered rows. No query when drama is not grouped.
 
 ## Validation and release
 

@@ -53,6 +53,17 @@ class DisplayMetadataTests(unittest.TestCase):
         titles.enrich(value, query)
         query.assert_not_called()
 
+    def test_page_lookup_is_bounded_and_export_covers_all_rows(self):
+        rows = [dict(drama='d' + str(i)) for i in range(150)]
+        value = dict(group_by=['drama'], rows=rows[:20], all_rows=rows, warnings=[])
+        query = Mock(return_value=[])
+        titles.enrich(value, query)
+        self.assertEqual(query.call_count, 1)
+        self.assertNotIn('drama_english_status', rows[20])
+        titles.enrich(value, query, export=True)
+        self.assertTrue(all(r['drama_english_status'] == 'missing' for r in rows))
+        self.assertEqual(query.call_count, 3)
+
     def test_title_csv_formula_escaped(self):
         value = report.summarize([catalog_row()], [metric()], OWNER, params(group_by='drama'), '')
         value['all_rows'][0]['drama_english_name'] = '=HYPERLINK("x")'

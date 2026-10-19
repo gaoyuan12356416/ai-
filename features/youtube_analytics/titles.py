@@ -3,7 +3,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 
-BATCH_SIZE = 20
+BATCH_SIZE = 100
 _cache = OrderedDict()
 _lock = threading.Lock()
 
@@ -56,10 +56,11 @@ def resolve(content_ids, query):
     return result
 
 
-def enrich(report, query):
+def enrich(report, query, *, export=False):
     if 'drama' not in report['group_by']:
         return
-    ids = sorted({row['drama'] for row in report['all_rows']})
+    rows = report['all_rows'] if export else report['rows']
+    ids = sorted({row['drama'] for row in rows})
     values = {}
     if _lock.acquire(timeout=1):
         try:
@@ -79,9 +80,9 @@ def enrich(report, query):
                 _cache.popitem(last=False)
         finally:
             _lock.release()
-    for row in report['all_rows']:
+    for row in rows:
         row.update(values.get(row['drama'], {'drama_english_name': '', 'drama_english_status': 'unavailable'}))
-    if any(row['drama_english_status'] == 'unavailable' for row in report['all_rows']):
+    if any(row['drama_english_status'] == 'unavailable' for row in rows):
         report['warnings'].append('英文剧名暂时读取失败，效果数据仍按原归因统计。')
 
 

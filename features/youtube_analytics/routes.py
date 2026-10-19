@@ -99,7 +99,7 @@ def dispatch(handler, parsed, app):
         catalog=read_catalog(app['JOB_DB_PATH'])
         metrics,fetched=source(app,params['start'],params['end'])
         report=summarize(catalog,metrics,actor,params,fetched)
-        enrich(report, lambda sql: query_rows(app, sql))
+        enrich(report, lambda sql: query_rows(app, sql), export=parsed.path.endswith('/export.csv'))
         if parsed.path.endswith('/export.csv'):
             data=csv_export(report)
             handler.send_response(200)
