@@ -133,27 +133,28 @@ class RandomTemplateTests(unittest.TestCase):
         client.prepare.assert_not_called()
 
     def test_fixed_and_random_schedule_freeze_flag(self):
-        for mode in ("fixed", "random"):
-            with self.subTest(mode=mode):
-                db=self.root/(mode+".sqlite3");store=service.XPostStore(db)
+        for source,mode in ((source,mode) for source in ("material","drama") for mode in ("fixed","random")):
+            with self.subTest(source=source,mode=mode):
+                db=self.root/(source+mode+".sqlite3");store=service.XPostStore(db)
                 now=datetime(2026,10,19,8,tzinfo=service.BEIJING_TZ)
-                cfg=store.save_schedule_config("material", {"enabled":True,"account_ids":[2],"publish_times":["09:00"] if mode=="fixed" else [],
+                cfg=store.save_schedule_config(source, {"enabled":True,"account_ids":[2],"publish_times":["09:00"] if mode=="fixed" else [],
                     "schedule_mode":mode,"random_daily_count":1 if mode=="random" else 0,"version":1,"random_template_enabled":True}, eligible_account_ids=[2],now=now)
+                self.assertFalse(store.get_schedule_config("drama" if source=="material" else "material")["random_template_enabled"])
                 date="2026-10-19" if mode=="fixed" else "2026-10-20"
                 if mode=="random":
                     store.ensure_random_schedule_plans([date])
                     with contextlib.closing(sqlite3.connect(db)) as c:
-                        row=c.execute("SELECT random_template_enabled,publish_times_json FROM x_post_schedule_random_plan WHERE source_type='material' AND run_date=?",(date,)).fetchone()
+                        row=c.execute("SELECT random_template_enabled,publish_times_json FROM x_post_schedule_random_plan WHERE source_type=? AND run_date=?",(source,date)).fetchone()
                     self.assertEqual(row[0],1);time=json.loads(row[1])[0]
                 else:time="09:00"
                 store.due_schedule_slots(datetime.fromisoformat(date+"T"+time+":00+08:00"))
-                run=store.query_schedule_plan("material",date,time)["run"]
+                run=store.query_schedule_plan(source,date,time)["run"]
                 self.assertIs(run["random_template_enabled"],True)
                 # Later config edits cannot alter the claimed snapshot.
-                cfg=store.save_schedule_config("material", {"enabled":True,"account_ids":[2],"publish_times":["09:00"] if mode=="fixed" else [],
+                cfg=store.save_schedule_config(source, {"enabled":True,"account_ids":[2],"publish_times":["09:00"] if mode=="fixed" else [],
                     "schedule_mode":mode,"random_daily_count":1 if mode=="random" else 0,"version":cfg["version"],"random_template_enabled":False}, eligible_account_ids=[2],now=now)
                 self.assertFalse(cfg["random_template_enabled"])
-                self.assertTrue(store.query_schedule_plan("material",date,time)["run"]["random_template_enabled"])
+                self.assertTrue(store.query_schedule_plan(source,date,time)["run"]["random_template_enabled"])
 
 
     def test_random_video_upload_and_post_are_simulated_once(self):
