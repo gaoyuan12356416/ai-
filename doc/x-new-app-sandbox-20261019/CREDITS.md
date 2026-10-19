@@ -46,3 +46,20 @@ To stop, pause the named chat heartbeat `X 新 App 余额低于 5 美元提醒` 
 Codex automation tool. Keep `state.json` and its receipts; deleting them could
 resend the same low-balance notification. No production rollback or restart is
 required. Code releases are immutable under the existing sandbox release root.
+
+## Deployment acceptance, 2026-10-19 11:48 Beijing
+
+- GitHub code commit `479bb46240121133c6599a094779d0d671823680` was fetched and
+  checked out on CPU under the sandbox `releases/` directory before execution.
+- All eight tests passed both locally and on CPU. Actual balance read HTTP 200:
+  USD 9.97 total, USD 5.00 prepaid, USD 4.97 free.
+- Hourly thread heartbeat `x-app-5` is active. Pause it with the Codex automation
+  tool to stop checks. It requires the Codex execution host to be available.
+- Setup notification returned a Feishu message ID; GET message readback returned
+  code 0, one matching message, and matching 9.97 balance content. Receipt stays
+  in private `state.json`. The subsequent `--notify` check returned healthy and
+  sent no new message.
+- New OAuth test service stayed active at PID 3572324; no restart/reload or
+  production App replacement. Pre-deploy baseline is saved in
+  `backups/credit-monitor-20261019/before.json`. No prior monitor existed.
+- Maintenance skill reference updated; no memory files were modified.
