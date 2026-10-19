@@ -67,7 +67,7 @@ def chain(source_url, destination, premium=False):
     store.create_manual_plan(run['id'],[item])
     with contextlib.closing(sqlite3.connect(db)) as conn:qid=conn.execute('SELECT id FROM x_post_queue').fetchone()[0]
     queue=store.get_queue(qid);log=store.reserve_log(qid)
-    account={'id':2,'username':queue['account_username'],'long_video_publish_eligible':premium,'protected':False}
+    account={'id':2,'username':queue['account_username'],'long_video_publish_eligible':premium,'subscription_type':'premium' if premium else 'none','protected':False}
     kwargs=dict(queue=queue,log=log,account=account,db_path=db,public_root=destination/'public',allowed_media_hosts=hosts,timeout=120)
     print(json.dumps({'stage':'render_requested','duration':probe['duration'],'queue_id':qid}),flush=True)
     with prepare_random_template(**kwargs) as prepared:

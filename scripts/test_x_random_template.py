@@ -184,9 +184,12 @@ class RandomTemplateTests(unittest.TestCase):
 
     def test_auto_600_second_limit_and_relay_source_identity(self):
         queue=self.manual_queue(duration=601)
-        premium={"id":2,"long_video_publish_eligible":True,"protected":False}
-        with self.assertRaises(service.XPostError):
+        premium={"id":2,"subscription_type":"premium","long_video_publish_eligible":True,"protected":False}
+        with self.assertRaises(service.XPostError) as error:
             with self.prepare(queue,account=premium,auto_template=True):pass
+        self.assertEqual(error.exception.code,"x_auto_duration_out_of_range")
+        with self.prepare(queue,account=premium) as prepared:
+            self.assertIsInstance(prepared,rt.PreparedRandomTemplateMedia)
         relay={**queue,"delivery_mode":service.PREMIUM_RELAY_REPOST_MODE,"relay_account_id":12}
         client=self.client()
         with self.assertRaises(service.XPostError):
