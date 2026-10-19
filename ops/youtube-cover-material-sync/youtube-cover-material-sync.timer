@@ -1,0 +1,11 @@
+[Unit]
+Description=Discover published YouTube covers and reconcile material receipts
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=15s
+AccuracySec=5s
+Unit=youtube-cover-material-sync.service
+
+[Install]
+WantedBy=timers.target

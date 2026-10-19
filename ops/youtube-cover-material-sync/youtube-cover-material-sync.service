@@ -1,0 +1,27 @@
+[Unit]
+Description=Sync approved YouTube covers to the AI material library
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/youtube-cover-material-sync/current
+EnvironmentFile=/root/drama_material_service/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=YOUTUBE_COVER_SYNC_ROOT=/mnt/data-disk/youtube-cover-material-sync
+Environment=DRAMA_JOB_DB_PATH=/root/drama_material_service/data/drama_material_jobs.sqlite3
+ExecStart=/usr/bin/python3 /opt/youtube-cover-material-sync/current/ops/youtube-cover-material-sync/sync.py run --max-new 50
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
+# SQL gate runtime paths are shared by all approved automated MySQL readers.
+ReadWritePaths=/var/lib/sql-connection-gate/session-locks
+MemoryMax=384M
+CPUQuota=50%
+
