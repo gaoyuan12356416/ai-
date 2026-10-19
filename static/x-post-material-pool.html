@@ -1175,7 +1175,7 @@
         const unknown = Number(run.unknown_count || 0);
         setText(
           byId("manualRunCounts"),
-          `目标 ${expected} 个 · 已成功 ${published} 个 · 已失败 ${failed} 个 · 待核对 ${unknown} 个`,
+          `目标 ${expected} 个 · 已成功 ${published} 个 · 已失败 ${failed} 个 · 待核对 ${unknown} 个 · 随机模板：${run.random_template_enabled === true ? "开启" : "关闭"}（仅对视频生效）`,
           ""
         );
         const errorNode = byId("manualRunError");

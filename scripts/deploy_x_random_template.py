@@ -53,6 +53,22 @@ def counts(db):
                 for table in ('x_post_queue', 'x_post_publish_log', 'x_post_schedule_run', 'x_post_manual_run')}
 
 
+
+def original_rows(db, columns=None):
+    tables=('x_post_queue','x_post_publish_log','x_post_schedule_config','x_post_schedule_run','x_post_manual_run','x_post_schedule_random_plan')
+    signatures={}
+    with contextlib.closing(sqlite3.connect('file:' + str(db) + '?mode=ro', uri=True)) as conn:
+        if columns is None:
+            columns={t:[r[1] for r in conn.execute('PRAGMA table_info('+t+')')] for t in tables}
+        for table,names in columns.items():
+            sha=hashlib.sha256()
+            for row in conn.execute('SELECT '+','.join(names)+' FROM '+table+' ORDER BY rowid'):
+                sha.update(json.dumps(row,ensure_ascii=True,separators=(',',':')).encode())
+                sha.update(b'\n')
+            signatures[table]=sha.hexdigest()
+    return columns,signatures
+
+
 def snapshot(target):
     with contextlib.closing(sqlite3.connect('file:' + str(DB) + '?mode=ro', uri=True)) as source:
         with contextlib.closing(sqlite3.connect(target)) as dest:
@@ -127,13 +143,15 @@ def deploy(host):
         sys.path.insert(0, str(release))
         from features.x_posts.service import ensure_storage
         before = counts(backup / 'rehearsal.sqlite3')
+        old_columns,old_rows=original_rows(backup / 'rehearsal.sqlite3')
         ensure_storage(backup / 'rehearsal.sqlite3'); ensure_storage(backup / 'rehearsal.sqlite3')
         assert counts(backup / 'rehearsal.sqlite3') == before
+        assert original_rows(backup / 'rehearsal.sqlite3',old_columns)[1]==old_rows, 'historical row content changed'
         with contextlib.closing(sqlite3.connect(backup / 'rehearsal.sqlite3')) as conn:
             assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             for table in ('x_post_queue','x_post_schedule_config','x_post_schedule_run','x_post_manual_run','x_post_schedule_random_plan'):
                 assert conn.execute('SELECT count(*) FROM ' + table + ' WHERE random_template_enabled<>0').fetchone()[0] == 0
-        state['migration_rehearsal'] = {'integrity': 'ok', 'counts_unchanged': before, 'all_flags_false': True}
+        state['migration_rehearsal'] = {'integrity': 'ok', 'counts_unchanged': before, 'all_flags_false': True, 'original_row_hashes': old_rows}
         for timer, was_active in state['timers'].items():
             if was_active: subprocess.check_call(['systemctl', 'stop', timer])
     receipt(backup, state)
@@ -152,7 +170,9 @@ def deploy(host):
         subprocess.check_call(['systemctl', 'stop', *units])
         if host == 'cpu':
             snapshot(backup / 'cutover.sqlite3')
+            live_columns,live_rows=original_rows(DB)
             ensure_storage(DB)
+            assert original_rows(DB,live_columns)[1]==live_rows, 'live historical rows changed'
             assert counts(DB) == state['before_counts'], 'ledger count changed during migration'
             for name in MANIFEST['main']:
                 copy(SOURCE / name, Path('/root/drama_material_service') / name)
