@@ -9,6 +9,11 @@
 <h1>X 新 App 隔离测试</h1>
 <p class="muted">使用与现有 AI 后台一致的 OAuth 2.0 登录代码。这里保存的配置和账号仅属于本次测试。</p>
 <div id="notice" class="notice">正在读取测试环境状态…</div>
+<section class="card" id="extensionSetup"><h2>默认浏览器：启用一次测试回调转接</h2>
+<p>在当前 Chrome 地址栏打开 <code>chrome://extensions/</code>，开启右上角“开发者模式”，点击“加载已解压的扩展程序”，选择下面这个目录：</p>
+<p><code>D:\codex\worktrees\x-new-app-sandbox-20261019\browser-extension</code></p>
+<p class="muted">扩展名称为“X 新 App 本机测试回调”。加载后刷新本页。它只转接这次授权标识对应的回调，不访问 X 登录页面；测试结束后可移除。</p>
+<p id="extensionState" class="muted">正在检测回调转接扩展…</p></section>
 <section class="card"><h2>1. 配置新 App</h2>
 <p>在 <a href="https://developer.x.com/" target="_blank" rel="noreferrer">X 开发者后台</a> 进入新 App → Settings → User authentication settings，启用 Read and write，类型选 Web App, Automated App or Bot。</p>
 <p>Callback URL 必须完整填写：<code>https://ai.yingliangads.com/x-oauth/callback</code></p>
@@ -18,7 +23,7 @@
 <section class="card"><h2>2. 登录一个测试账号</h2>
 <p>点击后进入 X 官方授权页面，确认当前登录的是你准备测试的账号，再点击授权。成功后会自动返回这里。</p>
 <button id="login" disabled>前往 X 登录并授权</button><button class="secondary" id="refresh">刷新页面状态</button>
-<p class="muted">仅在专用测试浏览器中完成授权。它会在本机接住这次回调，交给隔离环境，线上服务不会收到测试授权。</p></section>
+<p class="muted">可直接使用你的默认 Chrome 和其中的 X 登录状态。正式回调地址保持不变，测试回调由本机扩展转接，线上服务不会收到这次测试授权。</p></section>
 <section class="card"><h2>3. 验证新 App 与账号</h2>
 <p>应用检查会读取一次 XDevelopers 公开账号；账号验证会读取刚登录账号的身份与会员状态。API 读取可能计入新 App 用量。</p>
 <button class="secondary" id="probe">检查应用 Bearer Token</button><button id="verify" disabled>验证已登录账号</button>
@@ -27,12 +32,50 @@
 <script>
 const csrf='__CSRF__';
 const $=id=>document.getElementById(id);
+let latestStatus=null;
+let extensionReady=false;
+const bridgePending=new Map();
+window.addEventListener('message',event=>{
+  if(event.source!==window||event.origin!==location.origin||event.data?.source!=='x-sandbox-extension')return;
+  const pending=bridgePending.get(event.data.id);
+  if(pending){bridgePending.delete(event.data.id);clearTimeout(pending.timer);pending.resolve(event.data.result);}
+});
+function bridgeCall(kind,payload={}){
+  return new Promise(resolve=>{
+    const id=crypto.randomUUID();
+    const timer=setTimeout(()=>{bridgePending.delete(id);resolve({ok:false});},kind==='REGISTER'?8000:1500);
+    bridgePending.set(id,{resolve,timer});
+    window.postMessage({source:'x-sandbox-page',id,kind,payload},location.origin);
+  });
+}
 function notice(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');}
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Sandbox-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const p=await r.json();if(!r.ok)throw new Error(p.message||p.error||'请求失败');return p;}
-async function load(){const p=await api('/api/status');$('configState').textContent=(p.configured?'OAuth 2.0 配置已保存。':'等待 OAuth 2.0 Client ID / Secret。')+' Consumer Key / Secret / Bearer Token：'+(p.consumer_key_stored&&p.consumer_secret_stored&&p.bearer_token_stored?'已保存在测试目录':'待配置');$('login').disabled=!p.configured||p.accounts.length>0||!p.callback_guard_active;$('verify').disabled=p.accounts.length!==1;$('probe').disabled=!p.bearer_token_stored;const a=p.accounts[0];$('account').textContent=a?'当前测试账号：@'+a.username+'（'+a.display_name+'）':'';$('details').textContent=JSON.stringify({应用检查:p.app_probe,测试账号:p.accounts,请求权限:p.scopes,专用浏览器回调保护:p.callback_guard_active?'已启用':'未启用',发布入口:p.publishing_enabled?'启用':'关闭'},null,2);if(!p.callback_guard_active)notice('请使用已打开的专用测试浏览器完成登录；普通浏览器中的登录按钮已关闭。',true);else if(a)notice('已登录 @'+a.username+'。点击“验证已登录账号”完成身份与 API 检查。');else if(p.configured)notice('配置就绪，可以登录一个测试账号。');else notice('隔离环境已启动。请先填写新 App 的 OAuth 2.0 Client ID 和 Client Secret。');return p;}
-async function run(button,fn){button.disabled=true;try{await fn();}catch(e){notice(e.message,true);}finally{button.disabled=false;}}
+async function api(path,body,extraHeaders={}){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Sandbox-CSRF':csrf,...extraHeaders}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const p=await r.json();if(!r.ok)throw new Error(p.message||p.error||'请求失败');return p;}
+function updateLogin(){const p=latestStatus;$('login').disabled=!p||!p.configured||p.accounts.length>0||(!p.callback_guard_active&&!extensionReady);}
+async function load(){
+  const p=await api('/api/status');latestStatus=p;
+  extensionReady=Boolean((await bridgeCall('PING')).ok);
+  $('extensionSetup').hidden=Boolean(p.callback_guard_active);
+  $('extensionState').textContent=extensionReady?'回调转接扩展已就绪，可以在默认浏览器登录。':'尚未检测到扩展，请加载后刷新本页。';
+  $('configState').textContent=(p.configured?'OAuth 2.0 配置已保存，无需再次填写。':'等待 OAuth 2.0 Client ID / Secret。')+' Consumer Key / Secret / Bearer Token：'+(p.consumer_key_stored&&p.consumer_secret_stored&&p.bearer_token_stored?'已保存在测试目录':'待配置');
+  $('verify').disabled=p.accounts.length!==1;$('probe').disabled=!p.bearer_token_stored;updateLogin();
+  const a=p.accounts[0];$('account').textContent=a?'当前测试账号：@'+a.username+'（'+a.display_name+'）':'';
+  $('details').textContent=JSON.stringify({应用检查:p.app_probe,测试账号:p.accounts,请求权限:p.scopes,回调保护:(p.callback_guard_active||extensionReady)?'已启用':'等待扩展',发布入口:p.publishing_enabled?'启用':'关闭'},null,2);
+  if(a)notice('已登录 @'+a.username+'。点击“验证已登录账号”完成身份与 API 检查。');
+  else if(!p.callback_guard_active&&!extensionReady)notice('App 配置已保留。请先加载上方的回调转接扩展，然后刷新本页。');
+  else if(p.configured)notice('配置就绪，可以使用当前浏览器登录一个测试账号。');
+  else notice('隔离环境已启动。请先填写新 App 的 OAuth 2.0 Client ID 和 Client Secret。');
+  return p;
+}
+async function run(button,fn){button.disabled=true;try{await fn();}catch(e){notice(e.message,true);}finally{button.disabled=false;updateLogin();}}
 $('config').onsubmit=e=>{e.preventDefault();run($('save'),async()=>{const f=new FormData(e.target);await api('/api/config',{client_id:f.get('client_id'),client_secret:f.get('client_secret')});e.target.reset();await load();notice('配置已保存在本机。现在可以登录测试账号。');});};
-$('login').onclick=()=>run($('login'),async()=>{notice('正在创建一次性授权链接…');const p=await api('/api/authorize',{});location.assign(p.authorization_url);});
+$('login').onclick=()=>run($('login'),async()=>{
+  notice('正在准备一次性授权与本机回调…');
+  const useExtension=!latestStatus?.callback_guard_active;
+  if(useExtension&&!(await bridgeCall('PING')).ok)throw new Error('回调扩展尚未就绪，请加载后刷新本页。');
+  const p=await api('/api/authorize',{},useExtension?{'X-Sandbox-Transport':'extension'}:{});
+  if(useExtension&&!(await bridgeCall('REGISTER',p)).ok)throw new Error('回调转接规则未能登记，尚未跳转到 X。请刷新测试页后重试。');
+  location.assign(p.authorization_url);
+});
 $('refresh').onclick=()=>run($('refresh'),load);
 $('probe').onclick=()=>run($('probe'),async()=>{notice('正在执行一次应用只读检查…');const p=await api('/api/app-probe',{});await load();notice(p.ok?'应用 Bearer Token 检查通过。':'应用检查未通过：HTTP '+p.http_status+' / '+p.upstream_title,!p.ok);});
 $('verify').onclick=()=>run($('verify'),async()=>{notice('正在验证测试账号…');await api('/api/verify',{});await load();notice('测试账号身份与 API 检查通过。');});

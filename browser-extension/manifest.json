@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "X 新 App 本机测试回调",
+  "version": "1.0.0",
+  "description": "仅转接本机测试生成的一次性 X 授权回调，保留正式回调地址，不修改线上服务。",
+  "minimum_chrome_version": "102",
+  "permissions": ["declarativeNetRequestWithHostAccess", "alarms"],
+  "host_permissions": ["https://ai.yingliangads.com/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["http://127.0.0.1/*"],
+    "js": ["content.js"],
+    "run_at": "document_start",
+    "all_frames": false
+  }]
+}

@@ -234,7 +234,8 @@ def make_handler():
                     self.send_json(200, {"ok": True})
                 elif path == "/api/authorize":
                     with CONFIG_LOCK:
-                        if not self.guarded_browser():
+                        extension_transport = self.headers.get("X-Sandbox-Transport") == "extension"
+                        if not self.guarded_browser() and not extension_transport:
                             raise oauth.ServiceError("dedicated_test_browser_required", "请在专用测试浏览器中登录", 403)
                         if accounts():
                             raise oauth.ServiceError("one_account_only", "已登录一个测试账号，请先完成该账号验证", 409)
@@ -245,7 +246,12 @@ def make_handler():
                             conn.commit()
                         finally:
                             conn.close()
-                        self.send_json(200, oauth.create_authorization(ACTOR))
+                        result = oauth.create_authorization(ACTOR)
+                        if extension_transport:
+                            # Browser-only bridge credential, released behind Cookie/Origin/CSRF.
+                            # The extension installs an exact-state loopback header rule before navigation.
+                            result["callback_guard"] = BROWSER_GUARD
+                        self.send_json(200, result)
                 elif path == "/api/verify":
                     with CONFIG_LOCK:
                         items = accounts()

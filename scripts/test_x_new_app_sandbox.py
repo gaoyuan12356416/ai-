@@ -44,11 +44,13 @@ class SandboxTests(unittest.TestCase):
         sandbox.CONFIG.clear()
         sandbox.oauth.CLIENT_ID = sandbox.oauth.CLIENT_SECRET = ""
 
-    def request(self, path, body=None, *, host="127.0.0.1:18880", session=True, origin=sandbox.BASE, csrf=True, guard=True):
+    def request(self, path, body=None, *, host="127.0.0.1:18880", session=True, origin=sandbox.BASE, csrf=True, guard=True, extension=False):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
         headers = {"Host": host}
         if guard:
             headers["X-Sandbox-Callback-Guard"] = sandbox.BROWSER_GUARD
+        if extension:
+            headers["X-Sandbox-Transport"] = "extension"
         if session:
             headers["Cookie"] = "x_sandbox=" + sandbox.SESSION
         if body is not None:
@@ -130,6 +132,17 @@ class SandboxTests(unittest.TestCase):
         self.configure()
         self.assertEqual(self.request("/api/authorize", {}, guard=False)[0], 403)
         self.assertEqual(self.request("/x-oauth/callback?code=fake&state=invalid", guard=False)[0], 403)
+
+    def test_default_browser_extension_gets_bridge_guard_only_after_csrf(self):
+        self.configure()
+        self.assertEqual(self.request("/api/authorize", {}, guard=False, extension=True, csrf=False)[0], 403)
+        code, _, body = self.request("/api/authorize", {}, guard=False, extension=True)
+        self.assertEqual(code, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["callback_guard"], sandbox.BROWSER_GUARD)
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(payload["authorization_url"]).query)
+        self.assertEqual(params["redirect_uri"], [sandbox.CALLBACK_BASE + "/callback"])
+        self.assertNotIn("callback_guard", sandbox.status())
 
     def test_invalid_callback_is_redirected_without_creating_an_account(self):
         code, headers, raw = self.request("/x-oauth/callback?code=fake&state=invalid")
