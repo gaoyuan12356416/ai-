@@ -92,12 +92,13 @@ def valid_probe_payload(width=720, height=1280, fps="30000/1001", duration="45.2
     }
 
 
-def deferred_drama_queue(store, account_id=2, username="ShortsDramhx", relay=False):
+def deferred_drama_queue(store, account_id=2, username="ShortsDramhx", relay=False, random_template_enabled=False):
     """Build a real frozen deferred episode; shared with Sidecar integration tests."""
     config = store.save_schedule_config(
         "drama",
         {
             "enabled": True, "timezone": "Asia/Shanghai", "account_ids": [account_id],
+            "random_template_enabled": random_template_enabled,
             "publish_times": ["09:00"], "version": 1,
         },
         actor={"user_id": "admin-1", "name": "Admin"},

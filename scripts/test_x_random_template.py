@@ -174,6 +174,28 @@ class RandomTemplateTests(unittest.TestCase):
         self.assertEqual(len([r for r in http.requests if r["url"].endswith("/tweets")]),1)
         self.assertTrue(any(self.output in (r["body"] or b"") for r in http.requests if isinstance(r["body"],bytes)))
 
+
+    def test_enabled_drama_relay_renders_source_once_then_only_reposts(self):
+        from scripts.test_x_posts import deferred_drama_queue,ScriptedHttpClient,response
+        queue=deferred_drama_queue(self.store,relay=True,random_template_enabled=True)
+        client=self.client()
+        account={"id":queue["relay_account_id"],"username":queue["relay_account_username"],"subscription_type":"premium"}
+        http=ScriptedHttpClient([response(200,{"data":{"id":"m1"}}),response(200,{"data":{"expires_at":1}}),
+            response(200,{"data":{"id":"m1"}}),response(201,{"data":{"id":"190002"}}),
+            response(200,{"data":{"retweeted":True,"rest_id":"190003"}})])
+        with self.prepare(queue,client,account=account) as prepared,mock.patch.object(service,"probe_media",return_value={"duration":141.,"width":720,"height":1280}):
+            result=service.publish_canary(db_path=self.db,queue_id=queue["id"],account=account,access_token="source-fixture",
+                public_root=self.root/"public",short_base_url="https://gy.g2flow.com/s2l",allowed_media_hosts=["media.example.test"],
+                prepared_media=prepared,http_client=http,sleeper=lambda s:None)
+        self.assertEqual(result["status"],"source_published")
+        relay=self.store.mark_reposting(queue["id"])
+        result=service.XApiClient(http_client=http).repost("target-fixture","1234",relay["source_post_id"])
+        self.store.mark_reposted(queue["id"],result["repost_id"])
+        self.assertEqual(client.prepare.call_count,1)
+        self.assertEqual(len(http.requests),5)
+        self.assertTrue(http.requests[-1]["url"].endswith("/retweets"))
+        self.assertEqual(self.store.get_log(self.store.reserve_log(queue["id"])["id"])["status"],"published")
+
     def test_gpu_timeout_never_reaches_upload(self):
         queue=self.manual_queue()
         client=SimpleNamespace(prepare=mock.Mock(side_effect=TimeoutError("GPU timeout")))
