@@ -182,6 +182,11 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sync.Catalog(dict(env, ADMIN_MAPPING_MYSQL_PORT="63353"))
 
+    def test_sql_parameters_have_explicit_collation_and_no_raw_input(self):
+        value = "quote'中文"
+        self.assertIn("COLLATE utf8mb4_bin", sync.literal(value))
+        self.assertNotIn(value, sync.literal(value))
+
     def test_post_acceptance_is_not_final_confirmation(self):
         self.store.add([source()])
         self.tick()

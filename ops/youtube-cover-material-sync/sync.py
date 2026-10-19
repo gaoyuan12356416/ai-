@@ -199,7 +199,7 @@ class Store:
 
 
 def literal(value):
-    return "CONVERT(0x" + str(value).encode("utf-8").hex() + " USING utf8mb4)" if str(value) else "''"
+    return "CONVERT(0x" + str(value).encode("utf-8").hex() + " USING utf8mb4) COLLATE utf8mb4_bin" if str(value) else "_utf8mb4'' COLLATE utf8mb4_bin"
 
 
 class Catalog:
