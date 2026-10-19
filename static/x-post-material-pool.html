@@ -476,6 +476,11 @@
               </div>
             </div>
           </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input id="scheduleRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+            <span class="helper">仅对视频生效；关闭时保持原有发布处理。保存后按新排程生效。</span>
+            <span id="randomTemplateSummary" class="helper">已保存：随机模板关闭</span>
+          </div>
           <div class="schedule-footer">
             <div>
               <label class="switch-row"><input id="scheduleEnabled" type="checkbox" />启用素材池自动发布</label>
@@ -602,6 +607,10 @@
               <span>定时发布</span>
             </label>
           </div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label style="display:flex;align-items:center;gap:8px"><input id="manualRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+          <span class="helper">仅对视频生效；只影响本次批次，每个新批次默认关闭。</span>
         </div>
         <div id="manualScheduleField" class="field manual-schedule-field hidden" style="margin-top: 12px">
           <label for="manualScheduledAt">定时发布时间（北京时间）</label>
@@ -882,12 +891,13 @@
         if (!suffix) suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
         return `x-post-manual-ui-${suffix}`;
       }
-      function stableManualIdempotencyKey(materialIds, accountIds, publishMode, scheduledAt) {
+      function stableManualIdempotencyKey(materialIds, accountIds, publishMode, scheduledAt, randomTemplateEnabled) {
         const fingerprint = JSON.stringify({
           material_ids: materialIds,
           account_ids: accountIds,
           publish_mode: publishMode,
           scheduled_at: scheduledAt,
+          random_template_enabled: randomTemplateEnabled,
         });
         try {
           const stored = JSON.parse(sessionRead(MANUAL_DRAFT_STORAGE_KEY) || "{}");
@@ -957,6 +967,7 @@
         }).format(date);
       }
       function renderManualTiming() {
+        byId("manualRandomTemplate").disabled = state.manual.submitting;
         const scheduled = state.manual.publishMode === "scheduled";
         byId("manualScheduleField").classList.toggle("hidden", !scheduled);
         byId("manualScheduledAt").disabled = state.manual.submitting || !scheduled;
@@ -1314,6 +1325,7 @@
           })
         );
         state.manual.publishMode = "immediate";
+        byId("manualRandomTemplate").checked = false;
         state.manual.submitting = false;
         state.manual.runId = 0;
         state.manual.run = null;
@@ -1377,6 +1389,7 @@
           showToast(timing.message || "定时发布时间无效。", true);
           return;
         }
+        const randomTemplateEnabled = byId("manualRandomTemplate").checked;
         state.manual.submitting = true;
         renderManualTiming();
         renderManualAccountOptions();
@@ -1386,7 +1399,8 @@
           materialIds,
           accountIds,
           state.manual.publishMode,
-          timing.scheduledAt
+          timing.scheduledAt,
+          randomTemplateEnabled
         );
         try {
           const result = await api("/api/admin/x-posts/material-pool/manual-publish", {
@@ -1397,6 +1411,7 @@
               idempotency_key: idempotencyKey,
               publish_mode: state.manual.publishMode,
               scheduled_at: timing.scheduledAt,
+              random_template_enabled: randomTemplateEnabled,
             }),
           });
           const run = scheduleItem(result);
@@ -1408,6 +1423,7 @@
             || JSON.stringify(returnedAccounts) !== JSON.stringify(accountIds.map(Number))
             || String(run.publish_mode || "immediate") !== state.manual.publishMode
             || String(run.scheduled_at || "") !== timing.normalized
+            || (run.random_template_enabled === true) !== randomTemplateEnabled
           ) {
             throw new Error("后台返回的手动发布任务与本次选择不一致，请勿重复更换参数，直接重试");
           }
@@ -1593,6 +1609,8 @@
         state.schedule.nextDueAt = String(item.next_due_at || "");
         byId("scheduleEnabled").checked = state.schedule.enabled;
         byId("materialPostTemplate").value = state.schedule.bodyTemplate;
+        byId("scheduleRandomTemplate").checked = item.random_template_enabled === true;
+        setText(byId("randomTemplateSummary"), `已保存：随机模板${item.random_template_enabled === true ? "开启" : "关闭"}`);
         renderAccountOptions();
         renderPublishTimes();
         renderScheduleMode();
@@ -1699,6 +1717,7 @@
               schedule_mode: scheduleMode,
               random_daily_count: scheduleMode === "random" ? randomDailyCount : 0,
               body_template: bodyTemplate,
+              random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
             }),
           });

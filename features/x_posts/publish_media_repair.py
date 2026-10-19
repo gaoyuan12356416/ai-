@@ -463,7 +463,7 @@ def prepare_deferred_drama_media(
                         repaired, repaired_media, repaired_probe,
                         max_duration_seconds=duration_limit,
                     )
-                    media = repaired_media
+                    media = {**repaired_media, "source_url": repaired["output_url"]}
                 except service.XPostError:
                     raise
                 except Exception as exc:
@@ -906,7 +906,7 @@ def prepare_duration_pending_drama_media(
                             max_duration_seconds=duration_limit,
                         )
                     )
-                    media = repaired_media
+                    media = {**repaired_media, "source_url": repaired["output_url"]}
                     repair_applied = True
                 except service.XPostError:
                     raise

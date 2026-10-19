@@ -343,3 +343,33 @@ X 上传/Post/Repost 的可见错误。它从生产基线
 
 该清单不回显 Token、请求头、完整上游响应或堆栈；未知内部码在运营页面统一显示
 “发布前检查失败，请联系技术人员”，结构化码仅保留在后台审计中。
+
+
+## X 随机模板与现行语言门禁（2026-10-19）
+
+随机模板错误均在调用 X 上传前阻断，不允许降级发送原片。保留队列、发布日志、GPU 配方及回执；已有发布尝试或未知结果必须先核查账本。
+
+- `drama_language_ambiguous`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `drama_language_invalid`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `drama_language_missing`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `x_account_suspended`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `x_auto_duration_out_of_range`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `x_post_drama_progress_sync_conflict`：保留原任务，核对账号状态、短剧语言或剧集进度；不得自动重发。
+- `x_random_catalog_mismatch`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_configuration_missing`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_disk_reserve`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_duration_changed`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_duration_invalid`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_fingerprint_mismatch`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_identity_changed`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_job_conflict`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_manifest_invalid`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_output_invalid`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_output_missing`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_preparation_failed`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_preparation_required`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_receipt_invalid`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_request_invalid`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_service_unavailable`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_source_changed`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。
+- `x_random_source_not_allowed`：核查随机制作配置、冻结配方、源文件和成片 SHA256，修复后由人工确认后续处置。

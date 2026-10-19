@@ -325,6 +325,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     optional = {
         "language",  # Accepted for older editors; account settings are authoritative.
         "language_source",
+        "random_template_enabled",
         "metric_window_days",
         "drama_launch_window_days",
         "cooldown_days",
@@ -333,6 +334,8 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     _keys(value, required=required, optional=optional, label="模板")
     if value.get("language_source", "account") != "account":
         raise ValidationError("invalid_request", "剧语言必须读取X账户设置")
+    if type(value.get("random_template_enabled", False)) is not bool:
+        raise ValidationError("invalid_request", "random_template_enabled必须是布尔值")
     accounts = value.get("account_ids")
     if not isinstance(accounts, list) or not 1 <= len(accounts) <= 100:
         raise ValidationError("invalid_request", "至少选择一个且最多100个账号")
@@ -353,6 +356,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "name": _text(value.get("name"), "模板名称", minimum=1, maximum=120),
         "account_ids": account_ids,
         "language_source": "account",
+        "random_template_enabled": value.get("random_template_enabled", False),
         "body_template": _body_template(value.get("body_template")),
         "metric_window_days": _integer(
             value.get("metric_window_days", 7), "指标统计窗口", 1, 30

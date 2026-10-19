@@ -521,7 +521,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
         class FakeStore:
             called = None
 
-            def create_auto_template_run(self, *args):
+            def create_auto_template_run(self, *args, random_template_enabled=False):
                 self.called = args
                 return {
                     "id": 17,

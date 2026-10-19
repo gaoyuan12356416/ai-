@@ -1029,7 +1029,7 @@ class XAccountsAppContractTest(unittest.TestCase):
             X_POST_POOL_SOURCE,
         )
         self.assertIn('<option value="deferred">待可投放</option>', X_POST_POOL_SOURCE)
-        self.assertIn('countFor({ availability: "deferred" })', X_POST_POOL_SOURCE)
+        self.assertIn('deferredCount: "deferred"', X_POST_POOL_SOURCE)
         self.assertIn("下一次自然排期自动复检", X_POST_POOL_SOURCE)
         self.assertIn("result.deferred_count", X_POST_POOL_SOURCE)
         self.assertIn('setText(cell, "无法预览")', X_POST_POOL_SOURCE)

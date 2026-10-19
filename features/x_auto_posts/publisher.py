@@ -405,7 +405,7 @@ class AutoPostExecutor:
             )
         return normalized
 
-    def _create_run(self, task: TaskRecord, body_template: str) -> Dict[str, Any]:
+    def _create_run(self, task: TaskRecord, body_template: str, random_template_enabled: bool = False) -> Dict[str, Any]:
         payload = {
             "external_task_key": f"x-auto-task-{task.id}",
             "template_ref": f"x-auto-template-{task.template_id}",
@@ -413,6 +413,7 @@ class AutoPostExecutor:
             "account_id": int(task.account_id),
             "material_id": str(task.material_id),
             "body_template": body_template,
+            "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
         try:
@@ -507,8 +508,10 @@ class AutoPostExecutor:
                 task, self.bridge.query_run(task.execution_run_id)
             )
             if task.execution_run_id
-            else self._create_run(task, body_template)
+            else self._create_run(task, body_template, template.config.get("random_template_enabled", False))
         )
+        if bool(run.get("random_template_enabled", False)) != bool(template.config.get("random_template_enabled", False)):
+            raise AutoPostExecutionError("x_auto_execution_identity_mismatch", "random template mode differs from frozen task", 409)
         run_id = int(run["id"])
         if str(run.get("status") or "") == "failed_preflight":
             raise AutoPostExecutionError(

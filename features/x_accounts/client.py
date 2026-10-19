@@ -368,6 +368,7 @@ def create_x_post_manual_run(
     navigation_item="",
     publish_mode="immediate",
     scheduled_at="",
+    random_template_enabled=False,
 ):
     if not isinstance(material_ids, (list, tuple)) or not isinstance(
         account_ids, (list, tuple)
@@ -385,6 +386,7 @@ def create_x_post_manual_run(
         "idempotency_key": str(idempotency_key or ""),
         "publish_mode": str(publish_mode or "immediate"),
         "scheduled_at": str(scheduled_at or ""),
+        "random_template_enabled": random_template_enabled,
     }
     if navigation_item:
         payload["navigation_item"] = str(navigation_item)

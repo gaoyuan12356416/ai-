@@ -269,6 +269,7 @@ QUEUE_LEDGER_FIELDS = (
     "run_date",
     "source_type",
     "body_template",
+    "random_template_enabled",
     "account_drama_language",
     "account_drama_language_frozen",
     "delivery_mode",
@@ -1483,7 +1484,7 @@ SCHEDULE_CONFIG_AUDIT_DDL = (
     "'timezone',NEW.timezone,'account_ids_json',NEW.account_ids_json,"
     "'publish_times_json',NEW.publish_times_json,'schedule_mode',NEW.schedule_mode,"
     "'random_daily_count',NEW.random_daily_count,"
-    "'random_effective_date',NEW.random_effective_date,'version',NEW.version),"
+    "'random_effective_date',NEW.random_effective_date,'random_template_enabled',NEW.random_template_enabled,'version',NEW.version),"
     "strftime('%Y-%m-%dT%H:%M:%SZ','now')); END",
     "CREATE TRIGGER IF NOT EXISTS trg_x_post_schedule_config_audit_update "
     "AFTER UPDATE ON x_post_schedule_config BEGIN "
@@ -1494,7 +1495,7 @@ SCHEDULE_CONFIG_AUDIT_DDL = (
     "'timezone',NEW.timezone,'account_ids_json',NEW.account_ids_json,"
     "'publish_times_json',NEW.publish_times_json,'schedule_mode',NEW.schedule_mode,"
     "'random_daily_count',NEW.random_daily_count,"
-    "'random_effective_date',NEW.random_effective_date,'version',NEW.version),"
+    "'random_effective_date',NEW.random_effective_date,'random_template_enabled',NEW.random_template_enabled,'version',NEW.version),"
     "strftime('%Y-%m-%dT%H:%M:%SZ','now')); END",
     "INSERT OR IGNORE INTO x_post_schedule_config_audit "
     "(source_type,config_version,snapshot_json,created_at) "
@@ -2669,6 +2670,8 @@ def ensure_storage(db_path):
                 "AND drama_replay_generation=0"
             )
             migration_timestamp = utc_now()
+            from features.x_posts.random_template_store import migrate
+            migrate(conn)
             for statement in SCHEDULE_CONFIG_AUDIT_DDL:
                 conn.execute(statement)
             conn.execute(
@@ -4527,8 +4530,17 @@ def ensure_storage(db_path):
         pass
 
 
+def _random_template_enabled(value=False):
+    if type(value) is not bool:
+        raise XPostError("invalid_request", "random_template_enabled必须是布尔值", 400)
+    return value
+
+
 def _row_dict(row):
-    return dict(row) if row is not None else None
+    item = dict(row) if row is not None else None
+    if item is not None and "random_template_enabled" in item:
+        item["random_template_enabled"] = bool(item["random_template_enabled"])
+    return item
 
 
 def _overlay_drama_delivery_route(item):
@@ -5238,6 +5250,7 @@ class XPostStore:
             int(config["version"]),
             json.dumps(config["account_ids"], separators=(",", ":")),
             config["body_template"],
+            int(config["random_template_enabled"]),
             json.dumps(publish_times, separators=(",", ":")),
             timestamp,
         )
@@ -5245,8 +5258,8 @@ class XPostStore:
             conn.execute(
                 "INSERT INTO x_post_schedule_random_plan("
                 "source_type,run_date,config_version,account_ids_json,"
-                "body_template,publish_times_json,created_at"
-                ") VALUES(?,?,?,?,?,?,?)",
+                "body_template,random_template_enabled,publish_times_json,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?)",
                 (
                     config["source_type"],
                     normalized_date,
@@ -5256,7 +5269,7 @@ class XPostStore:
         else:
             conn.execute(
                 "UPDATE x_post_schedule_random_plan SET "
-                "config_version=?,account_ids_json=?,body_template=?,"
+                "config_version=?,account_ids_json=?,body_template=?,random_template_enabled=?,"
                 "publish_times_json=?,created_at=? "
                 "WHERE source_type=? AND run_date=?",
                 (
@@ -5433,6 +5446,7 @@ class XPostStore:
                 "自动发布时区固定为Asia/Shanghai",
                 400,
             )
+        random_template_enabled = _random_template_enabled(payload.get("random_template_enabled", False))
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise XPostError("invalid_request", "enabled必须是布尔值", 400)
@@ -5571,6 +5585,7 @@ class XPostStore:
                 or current_mode != schedule_mode
                 or current_random_count != random_daily_count
                 or current_item["body_template"] != body_template
+                or current_item["random_template_enabled"] != random_template_enabled
             )
             protected_schedule_times = set(
                 current_item["publish_times"]
@@ -5696,7 +5711,7 @@ class XPostStore:
             cursor = conn.execute(
                 "UPDATE x_post_schedule_config SET enabled=?,timezone=?,"
                 "account_ids_json=?,publish_times_json=?,schedule_mode=?,"
-                "random_daily_count=?,random_effective_date=?,body_template=?,"
+                "random_daily_count=?,random_effective_date=?,body_template=?,random_template_enabled=?,"
                 "version=version+1,"
                 "updated_by_user_id=?,updated_by_name=?,updated_at=? "
                 "WHERE source_type=? AND version=?",
@@ -5709,6 +5724,7 @@ class XPostStore:
                     random_daily_count,
                     random_effective_date,
                     body_template,
+                    int(random_template_enabled),
                     updated_by_user_id,
                     updated_by_name,
                     timestamp,
@@ -5863,10 +5879,10 @@ class XPostStore:
                         "INSERT OR IGNORE INTO x_post_schedule_run("
                         "slot_key,source_type,run_date,publish_time,timezone,"
                         "config_version,account_ids_json,schedule_mode,"
-                        "body_template,status,"
+                        "body_template,random_template_enabled,status,"
                         "expected_count,queued_count,created_at,updated_at,"
                         "lease_heartbeat_at"
-                        ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?,?)",
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?,?)",
                         (
                             slot_key,
                             config["source_type"],
@@ -5882,6 +5898,7 @@ class XPostStore:
                             ),
                             schedule_mode,
                             slot_config["body_template"],
+                            int(slot_config["random_template_enabled"]),
                             len(slot_config["account_ids"]),
                             timestamp,
                             timestamp,
@@ -6322,6 +6339,7 @@ class XPostStore:
         if source_type not in SCHEDULE_SOURCE_TYPES:
             raise XPostError("invalid_request", "source_type无效", 400)
         result["source_type"] = source_type
+        result["random_template_enabled"] = _random_template_enabled(payload.get("random_template_enabled", False))
         result["body_template"] = _normalize_post_template(
             payload.get("body_template"),
             source_type,
@@ -9264,7 +9282,9 @@ class XPostStore:
         actor=None,
         publish_mode="immediate",
         scheduled_at="",
+        random_template_enabled=False,
     ):
+        random_template_enabled = _random_template_enabled(random_template_enabled)
         material_ids = _manual_material_ids(material_ids)
         account_ids = _schedule_account_ids(account_ids)
         if len(material_ids) != len(account_ids):
@@ -9325,6 +9345,7 @@ class XPostStore:
                     and str(existing["source_date"]) == source_date
                     and str(existing["account_ids_json"]) == accounts_json
                     and str(existing["material_ids_json"]) == materials_json
+                    and bool(existing["random_template_enabled"]) == random_template_enabled
                     and str(existing["actor_user_id"]) == actor_user_id
                 )
                 if not same:
@@ -9387,9 +9408,9 @@ class XPostStore:
                     "idempotency_key,trigger_source,publish_mode,scheduled_at,"
                     "scheduled_timezone,run_date,source_date,"
                     "account_ids_json,"
-                    "material_ids_json,body_template,actor_user_id,actor_name,"
+                    "material_ids_json,body_template,random_template_enabled,actor_user_id,actor_name,"
                     "status,expected_count,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (
                         idempotency_key,
                         MANUAL_TRIGGER_SOURCE,
@@ -9401,6 +9422,7 @@ class XPostStore:
                         accounts_json,
                         materials_json,
                         body_template,
+                        int(random_template_enabled),
                         actor_user_id,
                         actor_name,
                         len(account_ids),
@@ -9443,7 +9465,9 @@ class XPostStore:
         template_version,
         body_template,
         actor=None,
+        random_template_enabled=False,
     ):
+        random_template_enabled = _random_template_enabled(random_template_enabled)
         material_ids = _manual_material_ids([material_id])
         account_ids = _schedule_account_ids([account_id])
         external_task_key = _auto_provenance_token(
@@ -9512,6 +9536,7 @@ class XPostStore:
                     == body_template
                     and str(existing["body_template_sha256"])
                     == body_template_sha256
+                    and bool(existing["random_template_enabled"]) == random_template_enabled
                     and str(existing["actor_user_id"]) == actor_user_id
                 )
                 if not same:
@@ -9571,9 +9596,9 @@ class XPostStore:
                     "idempotency_key,trigger_source,external_task_key,"
                     "template_ref,template_version,body_template_sha256,"
                     "run_date,source_date,account_ids_json,material_ids_json,"
-                    "body_template,actor_user_id,actor_name,status,"
+                    "body_template,random_template_enabled,actor_user_id,actor_name,status,"
                     "expected_count,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?)",
                     (
                         idempotency_key,
                         AUTO_TEMPLATE_TRIGGER_SOURCE,
@@ -9586,6 +9611,7 @@ class XPostStore:
                         accounts_json,
                         materials_json,
                         body_template,
+                        int(random_template_enabled),
                         actor_user_id,
                         actor_name,
                         timestamp,
@@ -10030,6 +10056,7 @@ class XPostStore:
                 {
                     "source_type": "material",
                     "body_template": frozen["body_template"],
+                    "random_template_enabled": frozen["random_template_enabled"],
                     "manual_run_id": run_id,
                 }
             )
@@ -10298,6 +10325,7 @@ class XPostStore:
             "account_ids_json",
             "schedule_mode",
             "body_template",
+            "random_template_enabled",
             "status",
             "expected_count",
             "queued_count",
@@ -10390,6 +10418,7 @@ class XPostStore:
         if not run:
             return {"found": False, "run": None, "queues": []}
         run_item = {field: run[field] for field in run_fields}
+        run_item["random_template_enabled"] = bool(run_item["random_template_enabled"])
         run_item["account_ids"] = _schedule_account_ids(
             _json_array(
                 run_item.pop("account_ids_json"),
@@ -10714,10 +10743,10 @@ class XPostStore:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
                     "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,status,expected_count,"
+                    "config_version,account_ids_json,random_template_enabled,status,expected_count,"
                     "queued_count,error_code,error_message,started_at,"
                     "finished_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,'failed_preflight',?,0,?,?,?,?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,COALESCE((SELECT json_extract(snapshot_json,'$.random_template_enabled') FROM x_post_schedule_config_audit WHERE source_type=? AND config_version=?),0),'failed_preflight',?,0,?,?,?,?,?,?)",
                     (
                         slot_key,
                         source_type,
@@ -10726,6 +10755,8 @@ class XPostStore:
                         SCHEDULE_TIMEZONE,
                         config_version,
                         json.dumps(account_ids, separators=(",", ":")),
+                        source_type,
+                        config_version,
                         len(account_ids),
                         code,
                         message,
@@ -11729,10 +11760,10 @@ class XPostStore:
                     "INSERT INTO x_post_schedule_run("
                     "slot_key,source_type,run_date,publish_time,timezone,"
                     "config_version,account_ids_json,schedule_mode,"
-                    "body_template,status,expected_count,queued_count,"
+                    "body_template,random_template_enabled,status,expected_count,queued_count,"
                     "published_count,failed_count,unknown_count,"
                     "created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,0,0,0,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,0,0,0,?,?)",
                     (
                         compensation_slot_key,
                         str(run["source_type"]),
@@ -11743,6 +11774,7 @@ class XPostStore:
                         str(run["account_ids_json"]),
                         str(run["schedule_mode"]),
                         str(run["body_template"]),
+                        int(run["random_template_enabled"]),
                         int(run["expected_count"]),
                         timestamp,
                         timestamp,
@@ -12317,10 +12349,10 @@ class XPostStore:
             cursor = conn.execute(
                 "INSERT INTO x_post_schedule_run("
                 "slot_key,source_type,run_date,publish_time,timezone,"
-                "config_version,account_ids_json,schedule_mode,body_template,"
+                "config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,"
                 "status,expected_count,queued_count,published_count,"
                 "failed_count,unknown_count,created_at,updated_at"
-                ") VALUES(?,'drama',?,?,?,?,?,'random',?,'claimed',?,0,0,0,0,?,?)",
+                ") VALUES(?,'drama',?,?,?,?,?,'random',?,?,'claimed',?,0,0,0,0,?,?)",
                 (
                     slot_key,
                     current_date,
@@ -12329,6 +12361,7 @@ class XPostStore:
                     int(config_row["version"]),
                     new_account_json,
                     new_template,
+                    int(plan_row["random_template_enabled"]),
                     len(new_account_ids),
                     timestamp,
                     timestamp,
@@ -12461,6 +12494,7 @@ class XPostStore:
                     "该时间点已存在其他版本的冻结计划",
                     409,
                 )
+            random_template_enabled = bool(frozen_run["random_template_enabled"])
             account_ids = list(frozen_run["account_ids"])
             schedule_mode = _schedule_mode(
                 frozen_run.get("schedule_mode", "fixed")
@@ -12489,6 +12523,7 @@ class XPostStore:
                 )
             account_ids = list(slot["account_ids"])
             body_template = slot["body_template"]
+            random_template_enabled = bool(slot["random_template_enabled"])
             valid_version = (
                 int(slot["config_version"])
                 if schedule_mode == "random"
@@ -12518,6 +12553,7 @@ class XPostStore:
                 raise XPostError("invalid_request", "candidate必须是对象", 400)
             payload["source_type"] = source_type
             payload["body_template"] = body_template
+            payload["random_template_enabled"] = random_template_enabled
             values = self._queue_payload(
                 payload,
                 run_date=run_date,
@@ -13226,9 +13262,9 @@ class XPostStore:
                     "INSERT INTO x_post_schedule_run("
                     "slot_key,source_type,run_date,publish_time,timezone,"
                     "config_version,account_ids_json,schedule_mode,"
-                    "body_template,status,expected_count,"
+                    "body_template,random_template_enabled,status,expected_count,"
                     "queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                     (
                         slot_key,
                         source_type,
@@ -13239,6 +13275,7 @@ class XPostStore:
                         json.dumps(account_ids, separators=(",", ":")),
                         schedule_mode,
                         body_template,
+                        int(random_template_enabled),
                         len(prepared),
                         len(prepared),
                         timestamp,
@@ -19161,6 +19198,8 @@ def publish_canary(
                 long_url,
                 durable_storage=durable_storage,
             )
+        from features.x_posts.random_template import PreparedRandomTemplateMedia
+        random_capability = bool(queue.get("random_template_enabled")) and isinstance(prepared_media, PreparedRandomTemplateMedia)
         if prepared_media is not None:
             from features.x_posts.publish_media_repair import (
                 PreparedDeferredDramaMedia,
@@ -19179,9 +19218,9 @@ def publish_canary(
                     prepared_media, PreparedDurationPendingDramaMedia
                 )
             )
-            if queue.get("source_type") != "drama" or not (
+            if not random_capability and (queue.get("source_type") != "drama" or not (
                 deferred_capability or duration_routed_capability
-            ):
+            )):
                 raise XPostError(
                     "media_preflight_changed", "已准备媒体只能用于原冻结短剧队列", 409,
                 )
@@ -19213,7 +19252,7 @@ def publish_canary(
             )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
         expected_size = int(queue.get("preflight_size", 0) or 0)
-        if not deferred_media_validation and (
+        if not random_capability and not deferred_media_validation and (
             queue.get("run_id")
             or queue.get("catchup_run_id")
             or queue.get("schedule_run_id")
@@ -19245,6 +19284,8 @@ def publish_canary(
             published_duration = 0.0
             media_category = media_probe["media_category"]
         else:
+            if queue.get("random_template_enabled") and not random_capability:
+                raise XPostError("x_random_preparation_required", "随机模板成片尚未通过验证，禁止上传原片", 409)
             premium_video_eligible = _account_has_premium_video_entitlement(
                 account
             )

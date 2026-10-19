@@ -81,6 +81,8 @@
                     <span class="helper">未填写时按最近 7 个完整北京时间自然日。</span>
                   </div>
                   <div class="field span-2">
+                    <label style="display:flex;align-items:center;gap:8px"><input id="randomTemplateEnabled" type="checkbox" style="width:auto" />是否启用随机模板</label>
+                    <span class="helper">仅对视频生效；默认关闭，只影响此模板产生的新任务。</span>
                     <label class="required" for="bodyTemplate">X Post 正文模板</label>
                     <textarea id="bodyTemplate" maxlength="2000" aria-describedby="bodyTemplateHelp">🎬 {{drama_name}}
 {{desc}}
@@ -279,6 +281,6 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/x-auto-publish-common.js?v=20260814language1"></script>
-  <script src="/x-auto-publish-template.js?v=20261009accountlanguage1"></script>
+  <script src="/x-auto-publish-template.js?v=20261019random1"></script>
 </body>
 </html>

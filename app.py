@@ -99700,6 +99700,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 allowed_fields = required_fields | {
                     "publish_mode",
                     "scheduled_at",
+                    "random_template_enabled",
                 }
                 if not required_fields.issubset(payload) or not set(payload).issubset(
                     allowed_fields
@@ -99721,6 +99722,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     navigation_item="xPostMaterialPool",
                     publish_mode=requested_publish_mode,
                     scheduled_at=requested_scheduled_at,
+                    random_template_enabled=payload.get("random_template_enabled", False),
                 )
                 item = result.get("item", {}) if isinstance(result, dict) else {}
                 audit_recorded = True

@@ -47,6 +47,7 @@ class FakeStore:
         actor,
         publish_mode="immediate",
         scheduled_at="",
+        random_template_enabled=False,
     ):
         self.created_manual = {
             "material_ids": list(material_ids),

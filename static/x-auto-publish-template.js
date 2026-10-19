@@ -268,6 +268,7 @@
     setValue("platform", configValue("platform", 0), "0");
     setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
     setValue("bodyTemplate", configValue("body_template", ""));
+    document.getElementById("randomTemplateEnabled").checked = configValue("random_template_enabled", false) === true;
     setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
     setValue("cooldownDays", configValue("cooldown_days", 0), "0");
 
@@ -423,6 +424,7 @@
       name,
       account_ids: Array.from(state.selectedAccountIds),
       body_template: bodyTemplate,
+      random_template_enabled: document.getElementById("randomTemplateEnabled").checked,
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,
       cooldown_days: cooldown,

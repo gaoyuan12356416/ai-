@@ -2907,7 +2907,7 @@ def publish_queue_request(
                         409,
                     )
             else:
-                verify_account(
+                verified_source = verify_account(
                     source_account_id,
                     actor,
                     "all",
@@ -2980,6 +2980,24 @@ def publish_queue_request(
                             "Long-video account is no longer eligible",
                             409,
                         )
+                if queue.get("random_template_enabled"):
+                    from features.x_posts.random_template import prepare_random_template
+                    prepared_media = publish_contexts.enter_context(prepare_random_template(
+                        queue=queue, log=log, account=verified_source, db_path=POST_DB_PATH,
+                        public_root=POST_PUBLIC_ROOT, allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                        prepared_media=prepared_media, max_media_bytes=POST_MAX_MEDIA_BYTES,
+                        timeout=POST_HTTP_TIMEOUT_SECONDS, storage_guard=preflight_post_storage_request,
+                        durable_storage={"mount_root": POST_STORAGE_MOUNT_ROOT, "storage_root": POST_STORAGE_ROOT},
+                        auto_template=expected_manual_trigger_source == "auto_template",
+                    ))
+                    verified_source = verify_account(
+                        source_account_id, actor, "all", preserve_transient_status=True,
+                        require_publish_approved=True,
+                    )
+                    if frozen_drama_language and not same_drama_language(verified_source.get("drama_language"), frozen_drama_language):
+                        raise ServiceError("x_post_account_language_mismatch", "账号语言与冻结队列不一致", 409)
+                    if (relay_delivery or duration > 140.0) and not verified_source.get("long_video_publish_eligible"):
+                        raise ServiceError("x_post_premium_relay_unavailable", "长视频账号资格已变化", 409)
                 account, access_token = publish_contexts.enter_context(
                     publish_credentials(source_account_id, actor, "all")
                 )
@@ -3406,7 +3424,7 @@ def save_post_schedule_request(payload, source_type, navigation_item):
     settings = payload.get("settings")
     if not isinstance(settings, dict):
         settings = {
-            key: payload.get(key)
+            key: payload.get(key, False) if key == "random_template_enabled" else payload.get(key)
             for key in (
                 "enabled",
                 "timezone",
@@ -3414,6 +3432,7 @@ def save_post_schedule_request(payload, source_type, navigation_item):
                 "publish_times",
                 "schedule_mode",
                 "random_daily_count",
+                "random_template_enabled",
                 "body_template",
                 "version",
             )
@@ -3511,6 +3530,7 @@ def _public_manual_run(item):
         "scheduled_timezone",
         "account_ids",
         "material_ids",
+        "random_template_enabled",
         "status",
         "expected_count",
         "queued_count",
@@ -3563,6 +3583,7 @@ def _auto_template_run(item):
         "template_ref",
         "template_version",
         "body_template_sha256",
+        "random_template_enabled",
         "run_date",
         "source_date",
         "account_ids",
@@ -3639,6 +3660,7 @@ def create_post_auto_template_run_request(payload):
             payload.get("template_version"),
             payload.get("body_template"),
             AUTO_TEMPLATE_ACTOR,
+            random_template_enabled=payload.get("random_template_enabled", False),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3861,6 +3883,7 @@ def create_post_manual_run_request(payload):
             actor,
             publish_mode=payload.get("publish_mode", "immediate"),
             scheduled_at=payload.get("scheduled_at", ""),
+            random_template_enabled=payload.get("random_template_enabled", False),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)

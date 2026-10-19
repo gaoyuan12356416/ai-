@@ -385,6 +385,11 @@
               </div>
             </div>
           </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input id="scheduleRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+            <span class="helper">仅对视频生效；关闭时保持原有发布处理。保存后按新排程生效。</span>
+            <span id="randomTemplateSummary" class="helper">已保存：随机模板关闭</span>
+          </div>
           <div class="schedule-footer">
             <div>
               <label class="switch-row"><input id="scheduleEnabled" type="checkbox" />启用短剧池自动发布</label>
@@ -837,6 +842,8 @@ Episode {{episode_number}}
         state.schedule.nextDueAt = String(item.next_due_at || "");
         byId("scheduleEnabled").checked = state.schedule.enabled;
         byId("dramaPostTemplate").value = state.schedule.bodyTemplate;
+        byId("scheduleRandomTemplate").checked = item.random_template_enabled === true;
+        setText(byId("randomTemplateSummary"), `已保存：随机模板${item.random_template_enabled === true ? "开启" : "关闭"}`);
         renderAccountOptions();
         renderPublishTimes();
         renderScheduleMode();
@@ -947,6 +954,7 @@ Episode {{episode_number}}
               schedule_mode: scheduleMode,
               random_daily_count: scheduleMode === "random" ? randomDailyCount : 0,
               body_template: bodyTemplate,
+              random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
             }),
           });

@@ -1487,6 +1487,10 @@ class MediaRepairHTTPServer(ThreadingHTTPServer):
         super().__init__(address, MediaRepairRequestHandler)
         self.processor = processor
         self.token = token
+        self.random_template = None
+        if os.environ.get("X_POST_RANDOM_TEMPLATE_ENABLED", "0") == "1":
+            from .random_template_gpu import RandomTemplateProcessor
+            self.random_template = RandomTemplateProcessor.from_env(processor)
 
 
 class MediaRepairRequestHandler(BaseHTTPRequestHandler):
@@ -1538,6 +1542,8 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
             {
                 "status": "ok",
                 "profile": getattr(self.server.processor.config, "profile", REPAIR_PROFILE),
+                "random_template_enabled": self.server.random_template is not None,
+                "random_template_manifest_sha256": self.server.random_template.assets["manifest_sha256"] if self.server.random_template else "",
             },
         )
 
@@ -1546,7 +1552,8 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
         if not self._allow_client() or not self._authorized():
             self._send_json(403, {"code": "forbidden", "message": "forbidden"})
             return
-        if parsed.path != REPAIR_PATH or parsed.query or parsed.fragment:
+        random_request = parsed.path == "/internal/x-post-random-template" and self.server.random_template is not None
+        if (parsed.path != REPAIR_PATH and not random_request) or parsed.query or parsed.fragment:
             self._send_json(404, {"code": "not_found", "message": "not found"})
             return
         content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
@@ -1582,7 +1589,7 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            result = self.server.processor.repair(payload)
+            result = self.server.random_template.prepare(payload) if random_request else self.server.processor.repair(payload)
         except MediaRepairError as exc:
             self._send_json(
                 exc.status,

@@ -1,0 +1,50 @@
+{
+  "cpu_existing": [
+    "features/x_posts/service.py",
+    "features/x_posts/publish_media_repair.py",
+    "features/x_accounts/client.py",
+    "features/x_accounts/oauth_service.py",
+    "features/x_auto_posts/validation.py",
+    "features/x_auto_posts/publisher.py"
+  ],
+  "cpu_new": [
+    "features/x_posts/random_template.py",
+    "features/x_posts/random_template_store.py"
+  ],
+  "main": [
+    "app.py",
+    "features/x_posts/service.py",
+    "features/x_accounts/client.py",
+    "features/x_posts/random_template.py",
+    "features/x_posts/random_template_store.py"
+  ],
+  "static": [
+    "x-post-material-pool.html",
+    "x-post-drama-pool.html",
+    "x-auto-publish-template.html",
+    "x-auto-publish-template.js",
+    "x-auto-publish-templates.html",
+    "x-auto-publish-templates.js"
+  ],
+  "gpu": [
+    "features/x_posts/media_repair.py",
+    "features/x_posts/random_template_gpu.py",
+    "features/x_posts/random_template_store.py",
+    "features/fb_gpu/random_overlay.py",
+    "features/fb_gpu/prepare_worker.py",
+    "features/fb_gpu/render_process.py",
+    "features/random_gpu/asset_cache.py",
+    "features/random_gpu/compositor.py",
+    "features/random_gpu/random_overlay.cl"
+  ],
+  "before": {
+    "features/x_posts/service.py": "49fb9094cd0c47ca429d984cd1bbec26506b54e5a3fd810cc7ad4e54f66d8597",
+    "features/x_posts/publish_media_repair.py": "3bee5b332b4ec384fdfd7699b17ea1dd13a99fab4514753489abf91fbd5dd708",
+    "features/x_accounts/client.py": "813bccf759c07c0016ddd10dceba45ebf89471a1ba3306c34d768077c877954e",
+    "features/x_accounts/oauth_service.py": "faa18209999f3f3f345db125f71c3c57c821e3c6043251f3cd38dd509dfbaaab",
+    "features/x_auto_posts/validation.py": "a2251d0aa5ae1d58d6bcf5948ebdae8d80ed093ee763b1652360a9918aa0dba6",
+    "features/x_auto_posts/publisher.py": "7ed73a31a392ed8412a97e776369cc38c4168527bfc04fbdf8eb1d025c927468",
+    "app.py": "84e27623cc06313abc36b2395b59889f1c8638ac2f3cea6dbdc7451e3cd13d72"
+  },
+  "gpu_before": "09dfeba82598a3cce0dd483cb5b091434deb9f5f814d37099b118d0666310f3c"
+}

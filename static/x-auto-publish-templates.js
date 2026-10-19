@@ -166,6 +166,7 @@
       primary.appendChild(ui.element("strong", { text: item.name || `模板 ${id}` }));
       primary.appendChild(ui.element("span", { className: "secondary mono", text: `ID ${id || "—"} · v${version}` }));
       nameCell.appendChild(primary);
+      nameCell.appendChild(ui.element("div", { className: "secondary", text: `随机模板：${config.random_template_enabled === true ? "开启" : "关闭"}` }));
       row.appendChild(nameCell);
 
       const statusCell = ui.element("td");
