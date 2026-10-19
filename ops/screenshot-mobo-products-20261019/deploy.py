@@ -44,6 +44,8 @@ def ast_sha(node):
             return [type(value).__name__, {k: canonical(v) for k, v in ast.iter_fields(value) if k != 'type_params'}]
         if isinstance(value, list):
             return [canonical(v) for v in value]
+        if isinstance(value, (bytes, complex)) or value is Ellipsis:
+            return [type(value).__name__, repr(value)]
         return value
     return sha(json.dumps(canonical(node), sort_keys=True, separators=(',', ':')).encode())
 
