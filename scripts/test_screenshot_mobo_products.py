@@ -4,6 +4,7 @@ import argparse
 import ast
 import contextlib
 import datetime as dt
+import hashlib
 import importlib.util
 import io
 import json
@@ -302,6 +303,40 @@ class ProductionOnlyHandler:
         self.assertEqual(self.deploy.ast_sha(node), expected)
         other = ast.parse("def sample():\n    return (b'changed', 2j, ...)\n").body[0]
         self.assertNotEqual(self.deploy.ast_sha(other), expected)
+
+
+class PreservedAcceptanceTests(unittest.TestCase):
+    def test_resume_requires_exact_failed_canary_and_all_original_image_bytes(self):
+        source = (ROOT / 'ops/screenshot-mobo-products-20261019/resume_acceptance.py').read_text(encoding='utf-8')
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'validate_preserved')
+        fields = ('square_1x1_url', 'landscape_1_91x1_url', 'portrait_4x5_url')
+        namespace = {'JOBS': {'synthetic-job': '3360'}, 'acceptance': types.SimpleNamespace(SIZES=dict.fromkeys(fields)),
+                     'json': json, 'Path': Path, 'hashlib': hashlib}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'resume-guard', 'exec'), namespace)
+        check = namespace['validate_preserved']
+        with tempfile.TemporaryDirectory() as directory:
+            job = {'job_id': 'synthetic-job', 'app_id': '3360', 'content_id': '67767322', 'status': 'failed',
+                   'error_message': 'app_package not supported'}
+            assets, images = {}, []
+            for field in fields:
+                path = Path(directory) / field
+                path.write_bytes(field.encode())
+                job[field] = 'https://example.invalid/' + field
+                assets[field.removesuffix('_url')] = {'public_output_path': str(path)}
+                images.append({'job_id': job['job_id'], 'field': field, 'url': job[field],
+                               'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+            job['assets_json'] = json.dumps(assets)
+            check(job, images)
+            for patch in ({'status': 'done'}, {'app_id': '2373'}, {'error_message': 'network timeout'},
+                          {'square_1x1_url': 'changed-url'}):
+                with self.subTest(patch=patch), self.assertRaises(AssertionError):
+                    check({**job, **patch}, images)
+            (Path(directory) / fields[0]).write_bytes(b'changed')
+            with self.assertRaisesRegex(AssertionError, 'do not regenerate'):
+                check(job, images)
+            (Path(directory) / fields[0]).unlink()
+            with self.assertRaisesRegex(AssertionError, 'do not regenerate'):
+                check(job, images)
 
 
 class CandidateTests(unittest.TestCase):

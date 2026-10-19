@@ -24,3 +24,5 @@ CPU 43.166.187.96。执行 ops/screenshot-mobo-products-20261019/deploy.py，默
 真实验收发现 ai-source 不支持两个新增包名，HTTP200/code=-1。repair_callback.py 从 GitHub 精确提交局部替换回调函数，备份 before-receipt-fix，窄重启 API，保持四个 worker PID；仅纠正本次两条已明确拒绝的验收任务，不发送请求，保留六图。同步更新 deployment.json 的代码指纹和版本，使原始完整回滚仍可使用。
 
 未经六图与六条正确产品素材的验收，不得执行 --activate。不能切换到明确排除短剧的通用 /api/material/source，也不能改用 DramaWave 包名。待上游增加两个产品后，只回传已有图片并保留原 material_id，先对账再恢复本次验收。
+
+回执修复已部署并回读确认：9242380bffa2876ff9a95dfcbeab02540e04ec23，app.py SHA256=84e27623cc06313abc36b2395b59889f1c8638ac2f3cea6dbdc7451e3cd13d72。两个canary现为failed/progress96，六图不变，各有纠正审计；多产品入口仍未激活。上游由用户安排开发，交接与后续命令见upstream-handoff.md。
