@@ -24,4 +24,3 @@ ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
 ReadWritePaths=/var/lib/sql-connection-gate/session-locks
 MemoryMax=384M
 CPUQuota=50%
-
