@@ -339,6 +339,8 @@ class Publisher:
         if response.status_code == 404:
             self.cos.put_object(Bucket=self.env["COS_BUCKET"], Body=raw, Key=key, ContentType="image/jpeg", EnableMD5=True)
             response = self.session.head(request["url"], timeout=(5, 20), allow_redirects=False)
+        if response.status_code in (404, 408, 429) or response.status_code >= 500:
+            raise RuntimeError("public_object_temporarily_unavailable")
         if (response.status_code != 200 or int(response.headers.get("Content-Length", "-1")) != len(raw)
                 or response.headers.get("ETag", "").strip('"') != hashlib.md5(raw).hexdigest()):
             raise ValueError("public_object_readback_mismatch")

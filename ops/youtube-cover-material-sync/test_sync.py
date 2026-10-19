@@ -168,6 +168,16 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(self.publisher.uploads)
         self.assertFalse(self.publisher.posts)
 
+    def test_preupload_transient_error_retries_only_before_material_post(self):
+        self.store.add([source()])
+        with patch.object(self.publisher, "upload", side_effect=RuntimeError("temporary")):
+            self.tick()
+        self.assertEqual((self.row()["state"], self.row()["attempts"]), ("pending", 0))
+        self.assertFalse(self.publisher.posts)
+        self.store.change(self.row()["key"], "pending", next_check=0)
+        self.tick()
+        self.assertEqual(len(self.publisher.posts), 1)
+
     def test_mysql_wrapper_and_read_only_port(self):
         env = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT="63350",
                    ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-secret")
@@ -198,6 +208,62 @@ class SyncTests(unittest.TestCase):
         self.make_existing({"data_source_id": "other"})
         self.tick()
         self.assertEqual(self.row()["state"], "blocked")
+
+
+class SourceSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        from PIL import Image
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.assets = self.root / "assets"
+        self.assets.mkdir()
+        self.path = self.assets / "cover.jpg"
+        Image.new("RGB", (160, 90), "red").save(self.path)
+        self.digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        self.db = self.root / "source.sqlite3"
+        self.connection = sqlite3.connect(self.db)
+        self.connection.executescript('''
+          CREATE TABLE drama_youtube_publish (preparation_id,workflow,video_state,unknown_outcome,
+            public_status,thumbnail_status,processing_status,video_id,approved_cover_path,approved_cover_sha256);
+          CREATE TABLE youtube_auto_asset (id,tenant,owner,path,sha256,created_at);
+          CREATE TABLE drama_admin_user (tenant_key,user_id,name,email);
+          CREATE TABLE youtube_auto_preparation (id,tenant,owner,body,created_at);
+        ''')
+        self.connection.execute("INSERT INTO drama_admin_user VALUES('t','u','User','person@example.com')")
+        self.connection.execute("INSERT INTO youtube_auto_asset VALUES('a','t','u',?,?,'2026-10-19T00:00:00Z')", (str(self.path), self.digest))
+        body = dict(versions=[dict(approved=True,asset_id="a",number=1,source="ai")],
+                    material=dict(app_id="1479", content_id="c", macro_name="Drama", language="en"))
+        for task, state, unknown in (("published", "published", 0), ("scheduled", "submitted", 0), ("unknown", "published", 1)):
+            self.connection.execute("INSERT INTO youtube_auto_preparation VALUES(?,'t','u',?,'2026-10-19')", (task, json.dumps(body)))
+            self.connection.execute("INSERT INTO drama_youtube_publish VALUES(?,'reviewed_thumbnail',?,?,'succeeded','succeeded','succeeded','12345678901',?,?)", (task,state,unknown,str(self.path),self.digest))
+        self.connection.commit()
+
+    def tearDown(self):
+        self.connection.close()
+        self.temp.cleanup()
+
+    def test_explicit_backfill_includes_approved_unknown_and_scheduled_but_live_does_not(self):
+        all_items, errors = sync.candidates(self.db, self.assets, "approved")
+        self.assertEqual(len(all_items), 3)
+        self.assertFalse(errors)
+        live, errors = sync.candidates(self.db, self.assets, "published")
+        self.assertEqual([r["task_id"] for r in live], ["published"])
+        self.assertFalse(errors)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM youtube_auto_preparation").fetchone()[0], 3)
+
+    def test_published_asset_must_match_frozen_platform_cover(self):
+        self.connection.execute("UPDATE drama_youtube_publish SET approved_cover_sha256='wrong' WHERE preparation_id='published'")
+        self.connection.commit()
+        live, errors = sync.candidates(self.db, self.assets, "published")
+        self.assertFalse(live)
+        self.assertEqual(errors[0]["reason"], "published_cover_mismatch")
+
+    def test_wrong_owner_asset_is_excluded(self):
+        self.connection.execute("UPDATE youtube_auto_asset SET owner='someone-else'")
+        self.connection.commit()
+        items, errors = sync.candidates(self.db, self.assets, "approved")
+        self.assertFalse(items)
+        self.assertEqual(len(errors), 3)
 
 
 if __name__ == "__main__":
