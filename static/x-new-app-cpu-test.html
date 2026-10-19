@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>X 新 App 测试</title>
+<style>body{font:16px/1.6 system-ui;background:#f1f5f8;color:#193247;max-width:850px;margin:45px auto;padding:0 20px}.card{padding:25px;background:white;border:1px solid #dce5eb;border-radius:14px;margin:20px 0}h1{font-size:27px}button{background:#12618b;color:white;border:0;border-radius:7px;padding:11px 20px;font:inherit;cursor:pointer;margin:10px 8px 0 0}button:disabled{opacity:.5;cursor:default}.secondary{background:#e4edf3;color:#193247}.muted{color:#5a6d7a;font-size:14px}.notice{padding:15px;background:#e4f1fa;border-radius:8px;white-space:pre-wrap}pre{background:#f6f8fa;padding:15px;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}code{overflow-wrap:anywhere}</style></head><body>
+<p class="muted">CPU 独立测试环境 · 已登录 AI 后台管理员 · 发布入口关闭</p>
+<h1>X 新 App 测试</h1><p>使用当前浏览器完成 X 官方授权。测试账号独立保存，不进入线上账号库。</p>
+<div id="notice" class="notice">正在读取测试配置…</div>
+<section class="card"><h2>1. 登录一个测试账号</h2><p id="config">正在检查已保存的 App 配置…</p><p class="muted">Callback URL：<code>https://ai.yingliangads.com/x-oauth/callback</code></p>
+<button id="login" disabled>登录 X 测试账号</button><button id="refresh" class="secondary">刷新状态</button></section>
+<section class="card"><h2>2. 验证账号</h2><p id="account">尚未授权测试账号。</p><button id="verify" disabled>验证账号与权限</button><button id="probe" class="secondary">检查应用只读 API</button><pre id="details"></pre><p class="muted">API 检查可能计入新 App 用量。真实发帖和媒体上传尚未测试，本页不提供发布或定时任务入口。</p></section>
+<script>
+const csrf='__CSRF__';const $=id=>document.getElementById(id);let state;
+function notice(text){$('notice').textContent=text;}
+async function api(path,body){const r=await fetch('/x-app-test/api/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Sandbox-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const p=await r.json();if(!r.ok)throw new Error(p.message||p.error);return p;}
+function buttons(){if(!state)return;$('login').disabled=!state.configured||state.accounts.length>0;$('verify').disabled=state.accounts.length!==1;}
+async function load(){state=await api('status');$('config').textContent=state.configured?'新 App 配置已保存，无需再次填写。':'新 App 配置尚未完整，请联系管理员。';const a=state.accounts[0];$('account').textContent=a?'当前测试账号：@'+a.username+'（'+a.display_name+'）':'尚未授权测试账号。';$('details').textContent=JSON.stringify({测试账号:state.accounts,请求权限:state.scopes,发布入口:'关闭'},null,2);buttons();notice(a?'账号已授权，请点击“验证账号与权限”。':'配置已就绪，点击“登录 X 测试账号”即可开始。');}
+async function run(button,fn){button.disabled=true;try{await fn();}catch(e){notice(e.message);}finally{button.disabled=false;buttons();}}
+$('login').onclick=()=>run($('login'),async()=>{notice('正在创建一次性授权链接…');const p=await api('authorize',{});location.assign(p.authorization_url);});
+$('verify').onclick=()=>run($('verify'),async()=>{notice('正在验证测试账号…');await api('verify',{});await load();notice('测试账号身份与 API 检查通过。');});
+$('probe').onclick=()=>run($('probe'),async()=>{notice('正在执行一次应用只读检查…');const p=await api('app-probe',{});notice(p.ok?'应用只读请求通过（HTTP '+p.http_status+'）。':'应用检查未通过：HTTP '+p.http_status+' / '+p.upstream_title);});
+$('refresh').onclick=()=>run($('refresh'),load);
+load().then(()=>{const q=new URLSearchParams(location.search);if(q.get('oauth')==='error')notice('X 授权未完成：'+q.get('reason'));if(q.has('oauth'))history.replaceState(null,'','/x-app-test/');}).catch(e=>notice(e.message));
+</script></body></html>
