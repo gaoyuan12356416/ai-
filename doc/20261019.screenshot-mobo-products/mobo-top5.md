@@ -13,3 +13,16 @@ Windows离线28项测试通过，覆盖正消耗、低消耗/零ROAS、未舍入
 仅此次规则回滚：从本次精确Git提交执行 `python3 /mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019/acceptance-tools/ops/screenshot-mobo-products-20261019/update_selection.py --rollback`。它持锁并核对文件未漂移后恢复>1000版本的两个文件和对应部署指纹；保留当前任务数据库、图片和入库记录，无服务重启。不使用备份数据库覆盖在线库。
 
 昨日实际执行日期固定为2026-10-18，分别使用--profile moboreels和--profile moboshort。私有mobo-top5-20261018*记录一次性出站意图、每产品输出/退出码及任务库回读；后台继续生成和上传，不重复原六图验收。
+
+## 上线与昨日运行结果
+
+18:07:34北京时间部署758ea90ae6336be14984a67526f67e6d54430f0e，Windows/Linux28项测试通过。CPU43.166.187.96:/root/drama_material_service仅替换两个筛选文件；备份before-mobo-top5-20261019-180733，详细路径、前后SHA保存在top5-deployment.json。API及四个图像worker PID完全未变，cron/crond正常，四产品接口验证通过。
+
+| 产品 | 正消耗且有原封面 | 排除已有任务 | 剩余可选 | 本次提交 | 其余未选 | 提交失败 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Moboreels | 22 | 3 | 19 | 5 | 14 | 0 |
+| MoboShort | 468 | 2 | 466 | 5 | 461 | 0 |
+
+两次执行退出码均0。18:08:43只读回查线上任务库与部署前在线备份，确认10个job_id的产品和剧ID正确，按app_id+content_id分别仅1条、备份库均无该剧任务。同剧跨产品分别创建成功。快照为4条processing_cover和6条queued，生成及上传交既有后台，未将本批误报为已完成。
+
+本次没有重跑DramaWave。正式入库的原两条验收任务和已有失败任务全部跳过，没有重复上传或恢复历史失败。技能上下文同步了最新top5语义、部署回滚和后台交接。
