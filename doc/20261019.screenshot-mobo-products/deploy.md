@@ -18,3 +18,9 @@ CPU 43.166.187.96。执行 ops/screenshot-mobo-products-20261019/deploy.py，默
 - 四个截图 worker PID 未变。多产品定时入口待真实两产品验收通过后执行 --activate。
 - 精确回滚：python3 /mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019/source/ops/screenshot-mobo-products-20261019/deploy.py --rollback。
 - 生产验收、API 回读、试跑和部署清单均存放于上述任务目录，包含私有任务证据，不提交至 GitHub。
+
+## 回执修复与上游门槛
+
+真实验收发现 ai-source 不支持两个新增包名，HTTP200/code=-1。repair_callback.py 从 GitHub 精确提交局部替换回调函数，备份 before-receipt-fix，窄重启 API，保持四个 worker PID；仅纠正本次两条已明确拒绝的验收任务，不发送请求，保留六图。同步更新 deployment.json 的代码指纹和版本，使原始完整回滚仍可使用。
+
+未经六图与六条正确产品素材的验收，不得执行 --activate。不能切换到明确排除短剧的通用 /api/material/source，也不能改用 DramaWave 包名。待上游增加两个产品后，只回传已有图片并保留原 material_id，先对账再恢复本次验收。

@@ -31006,9 +31006,9 @@ def screenshot_asset_name(job, spec):
 
 def post_screenshot_ai_source_callback(job):
     if not AI_SOURCE_CALLBACK_ENABLED:
-        return {"skipped": True, "reason": "disabled"}
+        raise RuntimeError("ai source callback is disabled; generated images have not been imported")
     if not AI_SOURCE_CALLBACK_URL or not AI_SOURCE_CALLBACK_TOKEN:
-        return {"skipped": True, "reason": "not_configured"}
+        raise RuntimeError("ai source callback is not configured; generated images have not been imported")
     creator = get_admin_user_callback_username(job.get("creator_user_id", "")) or str(job.get("creator_name", "") or "").strip()
     created_at = callback_time_text(job.get("updated_at") or job.get("created_at") or "")
     items = []
@@ -31026,8 +31026,8 @@ def post_screenshot_ai_source_callback(job):
             "email": creator,
             "created_at": created_at,
         })
-    if not items:
-        return {"skipped": True, "reason": "no_assets"}
+    if len(items) != len(SCREENSHOT_SPECS):
+        raise RuntimeError("ai source callback requires all three generated images")
     headers = {
         "Authorization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
         "Authrization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
@@ -31039,8 +31039,15 @@ def post_screenshot_ai_source_callback(job):
         json=items[:50],
         timeout=AI_SOURCE_CALLBACK_TIMEOUT,
     )
-    if response.status_code >= 400:
+    if not 200 <= response.status_code < 300:
         raise RuntimeError("ai source callback failed (%s): %s" % (response.status_code, response.text[:500]))
+    try:
+        receipt = json.loads(response.text)
+    except (TypeError, ValueError):
+        raise RuntimeError("ai source callback returned an invalid JSON receipt; reconcile before retry")
+    if not isinstance(receipt, dict) or str(receipt.get("code")) != "0":
+        message = (receipt.get("msg") or receipt.get("message") or receipt.get("error") or "missing success code") if isinstance(receipt, dict) else "invalid receipt object"
+        raise RuntimeError("ai source callback rejected import: %s" % str(message)[:500])
     return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
 
 

@@ -17,7 +17,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 LIVE = Path('/root/drama_material_service')
 STATE = Path('/mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019')
-FUNCTIONS = ('app_package_for_app_id', 'validate_screenshot_request')
+FUNCTIONS = ('app_package_for_app_id', 'validate_screenshot_request', 'post_screenshot_ai_source_callback')
 URL = '/api/drama-screenshot-material/products'
 OLD_URL = '/api/drama-material/products'
 WORKERS = ('codex-screenshot-batch', 'codex-screenshot-batch-burst',

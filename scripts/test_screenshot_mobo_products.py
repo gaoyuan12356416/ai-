@@ -209,7 +209,7 @@ class ProductAndCoverTests(unittest.TestCase):
         self.assertEqual(saved.call_args.args[0]["app_id"], "2373")
 
     def test_callback_routes_three_sizes_and_reuses_material_ids(self):
-        post = mock.Mock(return_value=types.SimpleNamespace(status_code=200, text='{"ok":true}'))
+        post = mock.Mock(return_value=types.SimpleNamespace(status_code=200, text='{"code":0,"data":[]}'))
         specs = [{"key": "square_1x1", "field": "square_1x1_url", "ratio": "1:1"},
                  {"key": "landscape_1_91x1", "field": "landscape_1_91x1_url", "ratio": "1.91:1"},
                  {"key": "portrait_4x5", "field": "portrait_4x5_url", "ratio": "4:5"}]
@@ -219,7 +219,7 @@ class ProductAndCoverTests(unittest.TestCase):
                                   AI_SOURCE_CALLBACK_TOKEN="synthetic-token", AI_SOURCE_CALLBACK_TIMEOUT=3,
                                   get_admin_user_callback_username=lambda value: "synthetic-user",
                                   callback_time_text=lambda value: "2026-10-19 12:00:00", SCREENSHOT_SPECS=specs,
-                                  requests=types.SimpleNamespace(post=post))
+                                  requests=types.SimpleNamespace(post=post), json=json)
         for app_id, package in [("3360", "com.changdu.mobovideo"), ("2373", "com.changdu.moboshort")]:
             job = {"app_id": app_id, "content_id": "synthetic-drama", "job_id": "synthetic-job-" + app_id,
                    **{spec["field"]: "https://example.invalid/" + spec["key"] + ".jpg" for spec in specs}}
@@ -232,6 +232,20 @@ class ProductAndCoverTests(unittest.TestCase):
             self.assertEqual({item["content_id"] for item in first}, {"synthetic-drama"})
             self.assertEqual({item["category"] for item in first}, {"1:1", "1.91:1", "4:5"})
             self.assertEqual([item["material_id"] for item in first], [item["material_id"] for item in second])
+
+        job_before = dict(job)
+        for status, body in [(200, '{"code":-1,"msg":"unsupported product"}'),
+                             (200, '{"data":[]}'), (200, '[]'), (200, 'invalid'),
+                             (200, '{"code":true}'), (403, '{"code":0}'), (302, '{"code":0}')]:
+            post.return_value = types.SimpleNamespace(status_code=status, text=body)
+            with self.subTest(status=status, body=body), self.assertRaises(RuntimeError):
+                namespace["post_screenshot_ai_source_callback"](job)
+            self.assertEqual(job, job_before, 'failed upload must preserve image URLs and material identity')
+        for field in ('AI_SOURCE_CALLBACK_ENABLED', 'AI_SOURCE_CALLBACK_TOKEN'):
+            with mock.patch.dict(namespace, {field: False}), self.assertRaises(RuntimeError):
+                namespace["post_screenshot_ai_source_callback"](job)
+        with self.assertRaisesRegex(RuntimeError, 'all three'):
+            namespace["post_screenshot_ai_source_callback"]({**job, 'square_1x1_url': ''})
 
 
 class DeployCompositionTests(unittest.TestCase):
@@ -247,6 +261,9 @@ class DeployCompositionTests(unittest.TestCase):
     return "legacy"
 
 def validate_screenshot_request(app_id, content_id):
+    return {"legacy": True}
+
+def post_screenshot_ai_source_callback(job):
     return {"legacy": True}
 
 def production_only_function():
