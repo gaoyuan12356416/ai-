@@ -1,0 +1,187 @@
+{
+  "source_commit": "6d945817ac3935324537bbf34bfbbfd2e39100cc",
+  "index_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-management-preview-20261019_153146/index.html",
+  "management_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-management-preview-20261019_153146/pages.html",
+  "head": {
+    "status": 200,
+    "content_type": "text/html",
+    "content_length": "23655"
+  },
+  "files": [
+    {
+      "path": "assets/app.js",
+      "status": 200,
+      "content_type": "application/javascript",
+      "bytes": 45014,
+      "sha256": "682c86564a17da6a99e176a7f6f2430b35c68c78641e775ed418325e3c6eb9ab"
+    },
+    {
+      "path": "assets/links.js",
+      "status": 200,
+      "content_type": "application/javascript",
+      "bytes": 2786,
+      "sha256": "e592c2fc6db0e4612d8e2dd0f5927b16e253f9d00ec65895e788f9071619f25a"
+    },
+    {
+      "path": "assets/nav-config.js",
+      "status": 200,
+      "content_type": "application/javascript",
+      "bytes": 822,
+      "sha256": "09ca8935481fa3c4ddfec97eb2b0c272580fadfec0744d2d2ac4226f8a86081e"
+    },
+    {
+      "path": "assets/page-management.css",
+      "status": 200,
+      "content_type": "text/css",
+      "bytes": 5054,
+      "sha256": "69f2092ab4b1254d6307f171b46853ffc6d8d81ec9ea9d28d5cd2ca8e178dec7"
+    },
+    {
+      "path": "assets/poster-city.svg",
+      "status": 200,
+      "content_type": "image/svg+xml",
+      "bytes": 2920,
+      "sha256": "e9b74bd55c78b7a385bec3f237cd569d5d35402b2c5e041bd9bd8a81c757f53a"
+    },
+    {
+      "path": "assets/poster-gold.svg",
+      "status": 200,
+      "content_type": "image/svg+xml",
+      "bytes": 1872,
+      "sha256": "1a59abc5720aa3e290adf0c41eaf9959c0fa62deafa8dfb801efc520e29b8c6d"
+    },
+    {
+      "path": "assets/poster-local.svg",
+      "status": 200,
+      "content_type": "image/svg+xml",
+      "bytes": 593,
+      "sha256": "670eefba82b9c000e8f32521249326f28d7033556791b1c7dda19f28134ad5c8"
+    },
+    {
+      "path": "assets/poster-rain.svg",
+      "status": 200,
+      "content_type": "image/svg+xml",
+      "bytes": 2266,
+      "sha256": "4acad19d9f44ada19f0dbc61a51dc1ce8199efcb7acf9ccfc552c79d04528831"
+    },
+    {
+      "path": "assets/quick-nav.js",
+      "status": 200,
+      "content_type": "application/javascript",
+      "bytes": 30803,
+      "sha256": "b491579cbc4dbbd942fa788b236c7912bbca6befdab8c2c2f384755988f6ba30"
+    },
+    {
+      "path": "assets/standard-ui.css",
+      "status": 200,
+      "content_type": "text/css",
+      "bytes": 15130,
+      "sha256": "7bb4ac65470971f1171382b17f5b83fc81c9864dfcee11de5b765e656b686f0e"
+    },
+    {
+      "path": "assets/style.css",
+      "status": 200,
+      "content_type": "text/css",
+      "bytes": 31172,
+      "sha256": "9eb74cd1df16e11b32643bf44172f245269f77b094c91cbf25a54acc2f1728af"
+    },
+    {
+      "path": "assets/ui-topbar.css",
+      "status": 200,
+      "content_type": "text/css",
+      "bytes": 1667,
+      "sha256": "04f670c81e3c83ed06ee640f29173af756ea51ddd40705177a4fac7f229ef107"
+    },
+    {
+      "path": "assets/ui-topbar.js",
+      "status": 200,
+      "content_type": "application/javascript",
+      "bytes": 2872,
+      "sha256": "e3aaa16aecd485da2cf1a2263d667d0c8103c9aaaa6bb5152728e64639867d9a"
+    },
+    {
+      "path": "index.html",
+      "status": 200,
+      "content_type": "text/html",
+      "bytes": 23655,
+      "sha256": "a19bde048487cf6ec2a91463fcce93a143a41c059737574ef7e06d84602f6425"
+    },
+    {
+      "path": "pages.html",
+      "status": 200,
+      "content_type": "text/html",
+      "bytes": 23682,
+      "sha256": "b56a1356ff8dd376c5137ab53bef4ab22948f8e97904f0c5cd14bdcdbfa09cff"
+    }
+  ],
+  "browser": {
+    "passed": 62,
+    "checks": [
+      "first visit has empty Page configuration list",
+      "unconfigured Pages absent and select-all disabled",
+      "publish without configured Page blocked",
+      "create requires at least one Page",
+      "create requires nonempty caption",
+      "unknown macro blocks configuration",
+      "unclosed macro blocks configuration",
+      "candidate Page search filters results",
+      "example drama changes macro preview",
+      "batch creation saves one independent config per Page, no material binding",
+      "list has three independent Page rows",
+      "configured Pages cannot be recreated",
+      "single Page edit increments only its version",
+      "configuration survives refresh",
+      "publish lists only configured Pages, default selection empty",
+      "invalid authorization disabled with reason",
+      "select all includes only configured eligible Pages",
+      "Page B uses its own saved template",
+      "Page switching retains independent publication edits",
+      "publication edits do not change saved templates",
+      "macro insertion uses cursor",
+      "invalid publication macro blocks submit",
+      "expanded UTF-8 length limit blocks submit",
+      "explicitly saved per-Page drafts survive refresh",
+      "past schedule blocked",
+      "confirmation displays each Page caption and link",
+      "per-Page short links unique and marked simulated",
+      "simulated short links not clickable",
+      "one frozen task per selected Page",
+      "2310 landing and eight attribution parameters: demo-page-01",
+      "campaign uses frozen record timestamp, Page, language, title and ledger: demo-page-01",
+      "attribution sources match frozen task: demo-page-01",
+      "Page name, short URL substitution and UTF-8 encoding: demo-page-01",
+      "2310 landing and eight attribution parameters: demo-page-02",
+      "campaign uses frozen record timestamp, Page, language, title and ledger: demo-page-02",
+      "attribution sources match frozen task: demo-page-02",
+      "Page name, short URL substitution and UTF-8 encoding: demo-page-02",
+      "Page tasks have unique mock ledger and task identifiers",
+      "template edit preserves current draft with stale-version hint",
+      "template edits never rewrite submitted task snapshots",
+      "explicit reapply gets current Page template",
+      "next publication allocates different simulated short link",
+      "local video without macro source blocks submit",
+      "storage failure preserves unsaved config",
+      "failed storage does not mutate saved config",
+      "history frozen across refresh",
+      "management no horizontal page overflow 1440",
+      "edit dialog fits viewport 1440",
+      "long URL does not overflow dialog 1440",
+      "publish no horizontal page overflow 1440",
+      "management no horizontal page overflow 820",
+      "edit dialog fits viewport 820",
+      "long URL does not overflow dialog 820",
+      "publish no horizontal page overflow 820",
+      "management no horizontal page overflow 390",
+      "edit dialog fits viewport 390",
+      "long URL does not overflow dialog 390",
+      "publish no horizontal page overflow 390",
+      "old-version storage preserved",
+      "network contains only same-origin static GETs or local blob video",
+      "no browser runtime errors",
+      "direct Page management URL opens empty management view"
+    ],
+    "requests": 59,
+    "unexpectedRequests": [],
+    "errors": []
+  }
+}

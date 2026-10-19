@@ -26,4 +26,13 @@
 
 ## 发布与公网验证
 
-待源码提交后填入新 COS 地址、逐文件校验和公网浏览器结果。上传目录仅 `dist/`，保持旧版 COS 地址和源码不变。
+源码提交：`6d945817ac3935324537bbf34bfbbfd2e39100cc`，分支 `codex/fb-page-management-preview-20261019`，已推送 GitHub 后发布。
+
+- [视频发布](https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-management-preview-20261019_153146/index.html)
+- [Page 管理](https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-management-preview-20261019_153146/pages.html)
+- 共上传并逐文件 GET 读回 15 个静态文件，全部 HTTP 200、字节数和 SHA-256 与本地相同；HTML HEAD 返回 200 / `text/html` / 23,655 字节。
+- index.html SHA-256：`a19bde048487cf6ec2a91463fcce93a143a41c059737574ef7e06d84602f6425`。
+- 公网 Playwright 全流程 62 项检查通过，捕获 59 个请求，无非静态网络请求、无浏览器运行错误。覆盖 1440 / 820 / 390 像素宽度。测试完成后仅清除测试浏览器本版数据，直达管理页恢复为空列表。
+- 完整文件校验值与逐项检查名保存在 [public-verification.json](public-verification.json)。测试日志和截图在本地忽略目录 `output/`。
+- 旧目录相对 `921b7c1` 无差异；新 URL 不覆盖旧 URL。回退使用 README 中的旧版链接。
+- 上传目录仅 `dist/`；没有生产代码部署、服务重启、数据库写入、真实短链或平台发布。技能上下文保持不变。
