@@ -982,6 +982,7 @@
     }
 
   </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
 </head>
 
@@ -1239,7 +1240,7 @@
 
 
 
-  <script src="/quick-nav.js"></script>
+  <script src="/quick-nav.js?v=20260915retired"></script>
   <script>
     const state = {
 
@@ -1384,7 +1385,7 @@ const els = {
 
     async function loadAuth() {
 
-      const auth = await api("/api/auth/status");
+      const auth = await api("/api/ui/topbar");
 
       if (!auth.authenticated) {
 
@@ -1413,7 +1414,7 @@ const els = {
 
     async function loadProducts() {
 
-      const data = await api("/api/drama-material/products");
+      const data = await api("/api/drama-screenshot-material/products");
 
       state.products = data.items || [];
 

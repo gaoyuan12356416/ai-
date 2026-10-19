@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "app_package_for_app_id": "a2c1b6325698ab3a2ee0f31226917c1127e416144093ca278d0f81361335c9d0",
+    "validate_screenshot_request": "fe3c2d5507a25f433b326d763ab2ec20fe044577b162215e7c1e32affb37fede"
+  },
+  "files": {
+    "scripts/auto_submit_cover_synthesis.py": "428740f3abfc080af90bea8726b3ae0a67c7183ad109ec5b961daae43ac6aab1",
+    "scripts/run_auto_cover_synthesis.sh": "e5fe32cd7cab4a5a19feda7261d1c757633bbb8f3547d6a7ce156c37fdad04a7"
+  }
+}

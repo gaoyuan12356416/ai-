@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit high-ROAS dramas to the cover/screenshot synthesis backend."""
+"""Submit eligible dramas using separate, explicit per-product cover rules."""
 
 import argparse
 import csv
@@ -14,6 +14,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from features.screenshot_products import AUTO_PROFILES, get_product
 
 
 DEFAULT_ENV_FILE = "/root/drama_material_service/.env"
@@ -77,7 +80,7 @@ def run_mysql(sql, timeout, fieldnames):
     if password:
         env["MYSQL_PWD"] = password
     proc = subprocess.run(
-        mysql_cmd() + [compact_sql(sql)],
+        mysql_cmd() + ["SET SESSION TRANSACTION READ ONLY; SET time_zone = '+08:00'; " + compact_sql(sql)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -104,6 +107,14 @@ def fetch_candidates(args):
         raise ValueError("at least one product is required")
     product_sql = "(" + ",".join(mysql_escape(item) for item in product_values) + ")"
     date_sql = metric_date_expr(args.date)
+    spend_operator = getattr(args, "spend_operator", ">=")
+    if spend_operator not in (">", ">="):
+        raise ValueError("invalid spend operator")
+    # Preserve DramaWave's rounded existing boundary; Mobo is strictly raw SUM > 3000.
+    spend_expression = "SUM(spend)" if spend_operator == ">" else "spend"
+    having_sql = "%s %s %s" % (spend_expression, spend_operator, float(args.min_spend))
+    if args.min_roas is not None:
+        having_sql += " AND af_roas0 >= %s" % float(args.min_roas)
     metric_sql = """
     SELECT
       data_source_id AS content_id,
@@ -121,8 +132,7 @@ def fetch_candidates(args):
       AND platform = {platform}
       AND data_source_id <> ''
     GROUP BY data_source_id
-    HAVING af_roas0 >= {min_roas}
-       AND spend >= {min_spend}
+    HAVING {having_sql}
     ORDER BY spend DESC, data_source_id
     """.format(
         db=mysql_identifier(database),
@@ -131,8 +141,7 @@ def fetch_candidates(args):
         date_sql=date_sql,
         platform=mysql_escape(args.platform),
         target_app_id=mysql_escape(args.target_app_id),
-        min_roas=float(args.min_roas),
-        min_spend=float(args.min_spend),
+        having_sql=having_sql,
     )
     rows = run_mysql(metric_sql, args.mysql_timeout, [
         "content_id",
@@ -149,6 +158,8 @@ def fetch_candidates(args):
     if not content_ids:
         return []
 
+    product = get_product(args.target_app_id)
+    episode_filter = "" if product and product["cover_only"] else "AND sub_number > 0 AND sub_url <> ''"
     resource_sql = """
     SELECT
       content_id,
@@ -158,15 +169,15 @@ def fetch_candidates(args):
     WHERE app_id = {target_app_id}
       AND content_id IN ({content_ids})
       AND type = 2
-      AND sub_number > 0
-      AND sub_url <> ''
-      AND cover <> ''
+      {episode_filter}
+      AND TRIM(COALESCE(cover, '')) <> ''
     GROUP BY content_id
     """.format(
         db=mysql_identifier(database),
         source_table=mysql_identifier(source_table),
         target_app_id=mysql_escape(args.target_app_id),
         content_ids=",".join(mysql_escape(item) for item in content_ids),
+        episode_filter=episode_filter,
     )
     resource_rows = run_mysql(resource_sql, args.mysql_timeout, ["content_id", "drama_name", "episode_count"])
     resource_map = {row["content_id"]: row for row in resource_rows}
@@ -181,19 +192,21 @@ def fetch_candidates(args):
 
 
 def existing_jobs(db_path, app_id, content_ids):
-    if not content_ids or not Path(db_path).exists():
+    if not content_ids:
         return {}
-    placeholders = ",".join(["?"] * len(content_ids))
-    sql = (
-        "SELECT content_id, job_id, status, progress, progress_detail "
-        "FROM drama_screenshot_job WHERE app_id = ? AND content_id IN (%s)"
-    ) % placeholders
-    conn = sqlite3.connect(db_path)
+    if not Path(db_path).is_file():
+        raise RuntimeError("screenshot task database is unavailable; submission stopped")
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
     try:
+        conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(sql, [str(app_id)] + list(content_ids)).fetchall()
-    except sqlite3.Error:
-        return {}
+        rows = []
+        for start in range(0, len(content_ids), 400):
+            batch = list(content_ids[start:start + 400])
+            placeholders = ",".join(["?"] * len(batch))
+            sql = ("SELECT content_id, job_id, status, progress, progress_detail "
+                   "FROM drama_screenshot_job WHERE app_id = ? AND content_id IN (%s)") % placeholders
+            rows.extend(conn.execute(sql, [str(app_id)] + batch).fetchall())
     finally:
         conn.close()
     result = {}
@@ -251,20 +264,13 @@ def build_parser():
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("AUTO_COVER_API_TIMEOUT", "30")))
     parser.add_argument("--mysql-timeout", type=int, default=int(os.environ.get("AUTO_COVER_MYSQL_TIMEOUT", "180")))
     parser.add_argument("--dry-run", action="store_true")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--all-products", action="store_true", help="Run the three fixed automatic product profiles.")
+    selection.add_argument("--profile", choices=[p["name"] for p in AUTO_PROFILES])
     return parser
 
 
-def main(argv=None):
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
-    pre_args, _ = pre_parser.parse_known_args(argv)
-    load_env_file(pre_args.env_file)
-
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.date:
-        dt.datetime.strptime(args.date, "%Y-%m-%d")
-
+def run_product(args):
     started_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     candidates = fetch_candidates(args)
     existing = existing_jobs(args.db_path, args.target_app_id, [row["content_id"] for row in candidates])
@@ -289,7 +295,12 @@ def main(argv=None):
         if args.dry_run:
             submitted.append({**item, "dry_run": True})
             continue
-        status, data = submit_job(args.api_url, token, args.target_app_id, row["content_id"], args.timeout)
+        try:
+            status, data = submit_job(args.api_url, token, args.target_app_id, row["content_id"], args.timeout)
+        except (OSError, TimeoutError, ValueError) as exc:
+            # Never replay an uncertain POST. A later run rechecks the durable task DB.
+            failed.append({**item, "error": type(exc).__name__, "unknown_outcome": True})
+            break
         if 200 <= status < 300:
             submitted.append({**item, "job_id": data.get("job_id", ""), "status": data.get("status", "")})
         else:
@@ -306,6 +317,7 @@ def main(argv=None):
         "target_app_id": args.target_app_id,
         "min_roas": args.min_roas,
         "min_spend": args.min_spend,
+        "spend_operator": getattr(args, "spend_operator", ">="),
         "candidate_count": len(candidates),
         "submitted_count": len(submitted),
         "skipped_existing_count": len(skipped),
@@ -314,8 +326,55 @@ def main(argv=None):
         "skipped_existing": skipped,
         "failed": failed,
     }
+    return summary
+
+
+def profile_args(args, profile):
+    result = argparse.Namespace(**vars(args))
+    result.product = profile["product"]
+    result.target_app_id = profile["app_id"]
+    result.min_spend = profile["min_spend"]
+    result.min_roas = profile["min_roas"]
+    result.spend_operator = profile["spend_operator"]
+    return result
+
+
+def run_selected_products(args):
+    if args.all_products:
+        profiles = AUTO_PROFILES
+    elif args.profile:
+        profiles = [p for p in AUTO_PROFILES if p["name"] == args.profile]
+    else:
+        # Preserve the original one-product CLI and its environment defaults.
+        return [run_product(args)]
+    results = []
+    for profile in profiles:
+        selected = profile_args(args, profile)
+        try:
+            results.append(run_product(selected))
+        except Exception as exc:
+            results.append({"product": selected.product, "target_app_id": selected.target_app_id,
+                            "date": selected.date, "mode": "dry_run" if args.dry_run else "prod",
+                            "min_spend": selected.min_spend, "min_roas": selected.min_roas,
+                            "spend_operator": selected.spend_operator,
+                            "failed_count": 1, "error_type": type(exc).__name__,
+                            "error": "product run failed; no automatic replay"})
+    return results
+
+
+def main(argv=None):
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
+    pre_args, _ = pre_parser.parse_known_args(argv)
+    load_env_file(pre_args.env_file)
+    args = build_parser().parse_args(argv)
+    if not args.date:
+        args.date = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)).isoformat()
+    dt.datetime.strptime(args.date, "%Y-%m-%d")
+    results = run_selected_products(args)
+    summary = {"date": args.date, "timezone": "Asia/Shanghai", "products": results} if args.all_products else results[0]
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-    return 1 if failed else 0
+    return 1 if any(r.get("failed_count", 0) for r in results) else 0
 
 
 if __name__ == "__main__":

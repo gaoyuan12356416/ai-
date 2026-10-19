@@ -30889,12 +30889,8 @@ def finish_screenshot_job_run(job):
 
 
 def app_package_for_app_id(app_id):
-    mapping = {
-        "1479": "com.dramawave.app",
-        "979": "com.freereels.app",
-    }
-    app_id = str(app_id or "").strip()
-    return mapping.get(app_id, app_id)
+    from features.screenshot_products import app_package
+    return app_package(app_id)
 
 
 def mysql_escape_literal(value):
@@ -57747,41 +57743,28 @@ def validate_content_request(app_id, content_id, episode_start, episode_end):
 
 
 def validate_screenshot_request(app_id, content_id):
-
+    from features.screenshot_products import get_product, resolve_cover_resource
+    product = get_product(app_id)
+    if product and product["cover_only"]:
+        return resolve_cover_resource(app_id, content_id, run_mysql, DB_NAME,
+                                      SOURCE_TABLE, normalize_cover_source_url)
     episodes = fetch_drama_episodes(content_id, app_id=app_id)
-
     sample = episodes[0]
-
     cover_source_url = ""
-
     for episode in episodes:
-
         cover_source_url = normalize_cover_source_url(episode.get("cover_url", ""))
-
         if cover_source_url:
-
             break
-
     if not cover_source_url:
-
         raise ValueError("未找到可用封面素材")
-
     return {
-
         "app_id": sample["app_id"],
-
         "total_episodes": len(episodes),
-
         "app": product_name_for_app_id(sample["app_id"], sample["app"]),
-
         "country": sample["country"],
-
         "language": sample["language"],
-
         "drama_name": sample["drama_name"],
-
         "cover_source_url": cover_source_url,
-
     }
 
 
@@ -86650,6 +86633,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if parsed.path == "/api/drama-screenshot-material/products":
+            if not self._require_module("cover_synthesis"):
+                return
+            from features.screenshot_products import list_products as list_screenshot_products
+            json_response(self, 200, {"items": list_screenshot_products()})
+            return
         if parsed.path == "/api/drama-material/products":
 
 
