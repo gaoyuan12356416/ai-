@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>X 新 App 隔离测试</title>
+<style>
+:root{font:16px/1.6 system-ui,sans-serif;color:#193247;background:#f1f5f8}body{max-width:960px;margin:40px auto;padding:0 22px}h1{font-size:28px;margin-bottom:8px}h2{font-size:20px;margin-top:0}.tag{display:inline-block;background:#def3e9;color:#166345;border-radius:20px;padding:4px 13px;font-size:13px}.card{background:white;border:1px solid #dce5eb;border-radius:15px;padding:24px;margin:20px 0}label{display:block;margin-top:12px}input{display:block;box-sizing:border-box;width:100%;padding:11px;border:1px solid #b7c9d4;border-radius:7px;font:inherit}button{font:inherit;border:0;border-radius:7px;padding:10px 18px;margin:12px 8px 0 0;background:#12618b;color:white;cursor:pointer}button:disabled{opacity:.45;cursor:default}.secondary{background:#e7eff4;color:#193247}code{background:#f1f5f8;padding:3px 7px;overflow-wrap:anywhere}p{margin:9px 0}.muted{color:#596d7a;font-size:14px}.notice{padding:13px;border-radius:7px;background:#eaf3fa;white-space:pre-wrap}.error{background:#fff0eb;color:#923a21}pre{background:#f6f8fa;padding:16px;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}a{color:#12618b}.row{display:flex;gap:12px;flex-wrap:wrap}.pill{background:#eef3f6;border-radius:7px;padding:8px 12px}@media(max-width:600px){body{margin:24px auto}.card{padding:18px}h1{font-size:25px}}
+</style></head>
+<body>
+<span class="tag">仅本机 · 独立账号库 · 发布入口关闭</span>
+<h1>X 新 App 隔离测试</h1>
+<p class="muted">使用与现有 AI 后台一致的 OAuth 2.0 登录代码。这里保存的配置和账号仅属于本次测试。</p>
+<div id="notice" class="notice">正在读取测试环境状态…</div>
+<section class="card"><h2>1. 配置新 App</h2>
+<p>在 <a href="https://developer.x.com/" target="_blank" rel="noreferrer">X 开发者后台</a> 进入新 App → Settings → User authentication settings，启用 Read and write，类型选 Web App, Automated App or Bot。</p>
+<p>Callback URL 必须完整填写：<code>https://ai.yingliangads.com/x-oauth/callback</code></p>
+<p class="muted">Website URL 可填 https://ai.yingliangads.com。保存后在 Keys and tokens 的 OAuth 2.0 区域找到下列两项。</p>
+<form id="config" autocomplete="off"><label>OAuth 2.0 Client ID<input name="client_id" required autocomplete="off" spellcheck="false"></label><label>OAuth 2.0 Client Secret<input name="client_secret" type="password" required autocomplete="new-password" spellcheck="false"></label><button id="save">保存到本机测试配置</button></form>
+<p id="configState" class="muted"></p></section>
+<section class="card"><h2>2. 登录一个测试账号</h2>
+<p>点击后进入 X 官方授权页面，确认当前登录的是你准备测试的账号，再点击授权。成功后会自动返回这里。</p>
+<button id="login" disabled>前往 X 登录并授权</button><button class="secondary" id="refresh">刷新页面状态</button>
+<p class="muted">仅在专用测试浏览器中完成授权。它会在本机接住这次回调，交给隔离环境，线上服务不会收到测试授权。</p></section>
+<section class="card"><h2>3. 验证新 App 与账号</h2>
+<p>应用检查会读取一次 XDevelopers 公开账号；账号验证会读取刚登录账号的身份与会员状态。API 读取可能计入新 App 用量。</p>
+<button class="secondary" id="probe">检查应用 Bearer Token</button><button id="verify" disabled>验证已登录账号</button>
+<div id="account"></div><pre id="details">尚未登录测试账号。</pre>
+<p class="muted">本轮先确认登录、身份、所获权限和 API 可用性。真实发帖及视频上传需要下一步指定测试内容；本页不提供发布或定时任务入口。</p></section>
+<script>
+const csrf='__CSRF__';
+const $=id=>document.getElementById(id);
+function notice(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Sandbox-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const p=await r.json();if(!r.ok)throw new Error(p.message||p.error||'请求失败');return p;}
+async function load(){const p=await api('/api/status');$('configState').textContent=(p.configured?'OAuth 2.0 配置已保存。':'等待 OAuth 2.0 Client ID / Secret。')+' Consumer Key / Secret / Bearer Token：'+(p.consumer_key_stored&&p.consumer_secret_stored&&p.bearer_token_stored?'已保存在测试目录':'待配置');$('login').disabled=!p.configured||p.accounts.length>0||!p.callback_guard_active;$('verify').disabled=p.accounts.length!==1;$('probe').disabled=!p.bearer_token_stored;const a=p.accounts[0];$('account').textContent=a?'当前测试账号：@'+a.username+'（'+a.display_name+'）':'';$('details').textContent=JSON.stringify({应用检查:p.app_probe,测试账号:p.accounts,请求权限:p.scopes,专用浏览器回调保护:p.callback_guard_active?'已启用':'未启用',发布入口:p.publishing_enabled?'启用':'关闭'},null,2);if(!p.callback_guard_active)notice('请使用已打开的专用测试浏览器完成登录；普通浏览器中的登录按钮已关闭。',true);else if(a)notice('已登录 @'+a.username+'。点击“验证已登录账号”完成身份与 API 检查。');else if(p.configured)notice('配置就绪，可以登录一个测试账号。');else notice('隔离环境已启动。请先填写新 App 的 OAuth 2.0 Client ID 和 Client Secret。');return p;}
+async function run(button,fn){button.disabled=true;try{await fn();}catch(e){notice(e.message,true);}finally{button.disabled=false;}}
+$('config').onsubmit=e=>{e.preventDefault();run($('save'),async()=>{const f=new FormData(e.target);await api('/api/config',{client_id:f.get('client_id'),client_secret:f.get('client_secret')});e.target.reset();await load();notice('配置已保存在本机。现在可以登录测试账号。');});};
+$('login').onclick=()=>run($('login'),async()=>{notice('正在创建一次性授权链接…');const p=await api('/api/authorize',{});location.assign(p.authorization_url);});
+$('refresh').onclick=()=>run($('refresh'),load);
+$('probe').onclick=()=>run($('probe'),async()=>{notice('正在执行一次应用只读检查…');const p=await api('/api/app-probe',{});await load();notice(p.ok?'应用 Bearer Token 检查通过。':'应用检查未通过：HTTP '+p.http_status+' / '+p.upstream_title,!p.ok);});
+$('verify').onclick=()=>run($('verify'),async()=>{notice('正在验证测试账号…');await api('/api/verify',{});await load();notice('测试账号身份与 API 检查通过。');});
+load().then(()=>{const q=new URLSearchParams(location.search);if(q.get('oauth')==='error')notice('X 授权未完成：'+(q.get('reason')||'unknown'),true);if(q.has('oauth'))history.replaceState(null,'','/');}).catch(e=>notice(e.message,true));
+</script></body></html>
