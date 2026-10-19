@@ -11,14 +11,15 @@ PRODUCTS = (
      "app_package": "com.changdu.moboshort", "cover_only": True},
 )
 
+# Mobo selects up to five new, cover-eligible dramas AFTER all-status deduplication.
 # Keep these separate: the Mobo change must not change DramaWave's thresholds.
 AUTO_PROFILES = (
     {"name": "dramawave", "product": "dramawave", "app_id": "1479",
      "min_spend": 1000.0, "spend_operator": ">=", "min_roas": 45.0},
     {"name": "moboreels", "product": "moboreels", "app_id": "3360",
-     "min_spend": 1000.0, "spend_operator": ">", "min_roas": None},
+     "min_spend": 0.0, "spend_operator": ">", "min_roas": None, "top_n": 5},
     {"name": "moboshort", "product": "MoboShort", "app_id": "2373",
-     "min_spend": 1000.0, "spend_operator": ">", "min_roas": None},
+     "min_spend": 0.0, "spend_operator": ">", "min_roas": None, "top_n": 5},
 )
 
 

@@ -380,14 +380,25 @@ class CandidateTests(unittest.TestCase):
             self.db.resource("1479", content_id, episode_url="video.mp4" if episode else "")
         self.assertEqual([r["content_id"] for r in self.candidates("dramawave")], ["high", "exact"])
 
-    def test_both_new_products_use_strict_unrounded_spend_and_ignore_roas(self):
+    def test_both_mobo_products_rank_positive_unrounded_spend_without_roas_or_amount_floor(self):
         for profile, source, app_id in [("moboreels", "moboreels", "3360"), ("moboshort", "MoboShort", "2373")]:
-            for content_id, spend, roas in [("exact", 1000, 100), ("low", 999.99, 100),
-                                           ("just-above", 1000.001, 0), ("above", 1000.01, 44.99), ("high", 4000, 0)]:
+            for content_id, spend, roas in [("exact", 1000, 0), ("low", 999.99, 0),
+                                           ("z-higher", 0.004, 0), ("a-lower", 0.003, 44.99),
+                                           ("zero", 0, 100), ("negative", -1, 100),
+                                           ("b-tie", 1, 0), ("a-tie", 1, 0)]:
                 self.db.metric(source, content_id, spend, roas)
                 self.db.resource(app_id, content_id)
             with self.subTest(profile=profile):
-                self.assertEqual([r["content_id"] for r in self.candidates(profile)], ["high", "above", "just-above"])
+                self.assertEqual([r["content_id"] for r in self.candidates(profile)],
+                                 ["exact", "low", "a-tie", "b-tie", "z-higher", "a-lower"])
+
+    def test_ranked_profiles_ignore_legacy_limit_before_deduplication(self):
+        for i in range(8):
+            self.db.metric("moboreels", str(i), 100 - i)
+            self.db.resource("3360", str(i))
+        with mock.patch.object(runner, "run_mysql", side_effect=self.db.cli_select):
+            rows = runner.fetch_candidates(arguments("moboreels", limit=2))
+        self.assertEqual([row["content_id"] for row in rows], [str(i) for i in range(8)])
 
     def test_date_platform_aggregation_order_and_local_cover_filter(self):
         for content_id, spend, date, platform in [("aggregate", 1600, "2026-10-18", "0"),
@@ -406,8 +417,9 @@ class CandidateTests(unittest.TestCase):
             original = runner.build_parser().parse_args([])
         for profile in products.AUTO_PROFILES:
             selected = runner.profile_args(original, profile)
-            expected = (1000, 45, ">=") if profile["name"] == "dramawave" else (1000, None, ">")
+            expected = (1000, 45, ">=") if profile["name"] == "dramawave" else (0, None, ">")
             self.assertEqual((selected.min_spend, selected.min_roas, selected.spend_operator), expected)
+            self.assertEqual(selected.top_n, 0 if profile["name"] == "dramawave" else 5)
         self.assertEqual((original.min_spend, original.min_roas), (9999, 90))
 
 
@@ -439,6 +451,33 @@ class LedgerAndDispatchTests(unittest.TestCase):
 
     def test_large_candidate_list_is_chunked_without_losing_existing_rows(self):
         self.assertEqual(set(runner.existing_jobs(str(self.path), "3360", [str(i) for i in range(1000)] + ["failed"])), {"failed"})
+
+    def test_top_five_is_selected_after_all_status_deduplication_per_product(self):
+        ids = ["success", "running", "failed", "shared"] + ["new-" + str(i) for i in range(6)]
+        for profile, expected_skipped, expected in [
+            ("moboreels", 3, ["shared", "new-0", "new-1", "new-2", "new-3"]),
+            ("moboshort", 0, ids[:5]),
+            ("dramawave", 1, [x for x in ids if x != "shared"]),
+        ]:
+            with self.subTest(profile=profile), \
+                 mock.patch.object(runner, "fetch_candidates", return_value=[{"content_id": x} for x in ids]), \
+                 mock.patch.object(runner, "submit_job") as submit:
+                result = runner.run_product(arguments(profile, db_path=str(self.path), dry_run=True))
+            self.assertEqual([r["content_id"] for r in result["submitted"]], expected)
+            self.assertEqual(result["skipped_existing_count"], expected_skipped)
+            self.assertEqual(result["eligible_new_count"], len(ids) - expected_skipped)
+            self.assertEqual(result["selected_count"], len(expected))
+            self.assertEqual(result["deferred_by_top_n_count"], len(ids) - expected_skipped - len(expected))
+            submit.assert_not_called()
+
+    def test_rejected_top_five_does_not_replace_with_sixth_drama(self):
+        with mock.patch.object(runner, "fetch_candidates", return_value=[{"content_id": str(i)} for i in range(7)]), \
+             mock.patch.object(runner, "api_token", return_value="synthetic-token"), \
+             mock.patch.object(runner, "submit_job", return_value=(400, {"error": "synthetic rejection"})) as submit:
+            result = runner.run_product(arguments("moboreels", db_path=str(self.path)))
+        self.assertEqual([call.args[3] for call in submit.call_args_list], [str(i) for i in range(5)])
+        self.assertEqual(result["failed_count"], 5)
+        self.assertEqual(result["deferred_by_top_n_count"], 2)
 
     def test_missing_corrupt_and_wrong_schema_ledger_stop_submission(self):
         paths = [Path(self.temp.name) / "absent.sqlite3", Path(self.temp.name) / "corrupt.sqlite3",

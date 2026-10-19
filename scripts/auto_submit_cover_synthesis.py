@@ -110,7 +110,7 @@ def fetch_candidates(args):
     spend_operator = getattr(args, "spend_operator", ">=")
     if spend_operator not in (">", ">="):
         raise ValueError("invalid spend operator")
-    # Preserve DramaWave's rounded existing boundary; Mobo is strictly raw SUM > 3000.
+    # Preserve DramaWave's existing rounded boundary; Mobo requires positive raw spend.
     spend_expression = "SUM(spend)" if spend_operator == ">" else "spend"
     having_sql = "%s %s %s" % (spend_expression, spend_operator, float(args.min_spend))
     if args.min_roas is not None:
@@ -133,7 +133,7 @@ def fetch_candidates(args):
       AND data_source_id <> ''
     GROUP BY data_source_id
     HAVING {having_sql}
-    ORDER BY spend DESC, data_source_id
+    ORDER BY {spend_order} DESC, data_source_id
     """.format(
         db=mysql_identifier(database),
         insight_table=mysql_identifier(insight_table),
@@ -142,6 +142,7 @@ def fetch_candidates(args):
         platform=mysql_escape(args.platform),
         target_app_id=mysql_escape(args.target_app_id),
         having_sql=having_sql,
+        spend_order="SUM(spend)" if getattr(args, "top_n", 0) else "spend",
     )
     rows = run_mysql(metric_sql, args.mysql_timeout, [
         "content_id",
@@ -186,7 +187,8 @@ def fetch_candidates(args):
         for row in rows
         if row.get("content_id") in resource_map
     ]
-    if args.limit and args.limit > 0:
+    # A ranked profile must see every eligible row before excluding existing jobs.
+    if not getattr(args, "top_n", 0) and args.limit and args.limit > 0:
         return rows[:args.limit]
     return rows
 
@@ -249,7 +251,7 @@ def submit_job(api_url, token, app_id, content_id, timeout):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Auto-submit high-ROAS dramas to cover synthesis.")
+    parser = argparse.ArgumentParser(description="Auto-submit dramas using per-product cover selection rules.")
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
     parser.add_argument("--date", default="", help="Metric date, YYYY-MM-DD. Defaults to CURDATE()-1 in MySQL.")
     parser.add_argument("--product", default=os.environ.get("AUTO_COVER_PRODUCT", "dramawave"))
@@ -275,13 +277,8 @@ def run_product(args):
     candidates = fetch_candidates(args)
     existing = existing_jobs(args.db_path, args.target_app_id, [row["content_id"] for row in candidates])
 
-    submitted = []
     skipped = []
-    failed = []
-    token = api_token()
-    if not args.dry_run and not token:
-        raise RuntimeError("missing AUTO_COVER_API_TOKEN or DRAMA_SCREENSHOT_API_TOKEN")
-
+    eligible = []
     for row in candidates:
         existing_item = existing.get(row["content_id"])
         item = dict(row)
@@ -292,11 +289,23 @@ def run_product(args):
             })
             skipped.append(item)
             continue
+        eligible.append(item)
+
+    top_n = getattr(args, "top_n", 0)
+    selected = eligible[:top_n] if top_n else eligible
+    submitted = []
+    failed = []
+    token = api_token()
+    if not args.dry_run and not token:
+        raise RuntimeError("missing AUTO_COVER_API_TOKEN or DRAMA_SCREENSHOT_API_TOKEN")
+
+    # Freeze the top selection before POSTs: a failure does not pull in rank six.
+    for item in selected:
         if args.dry_run:
             submitted.append({**item, "dry_run": True})
             continue
         try:
-            status, data = submit_job(args.api_url, token, args.target_app_id, row["content_id"], args.timeout)
+            status, data = submit_job(args.api_url, token, args.target_app_id, item["content_id"], args.timeout)
         except (OSError, TimeoutError, ValueError) as exc:
             # Never replay an uncertain POST. A later run rechecks the durable task DB.
             failed.append({**item, "error": type(exc).__name__, "unknown_outcome": True})
@@ -318,7 +327,11 @@ def run_product(args):
         "min_roas": args.min_roas,
         "min_spend": args.min_spend,
         "spend_operator": getattr(args, "spend_operator", ">="),
+        "top_n": top_n,
         "candidate_count": len(candidates),
+        "eligible_new_count": len(eligible),
+        "selected_count": len(selected),
+        "deferred_by_top_n_count": len(eligible) - len(selected),
         "submitted_count": len(submitted),
         "skipped_existing_count": len(skipped),
         "failed_count": len(failed),
@@ -336,6 +349,7 @@ def profile_args(args, profile):
     result.min_spend = profile["min_spend"]
     result.min_roas = profile["min_roas"]
     result.spend_operator = profile["spend_operator"]
+    result.top_n = profile.get("top_n", 0)
     return result
 
 
