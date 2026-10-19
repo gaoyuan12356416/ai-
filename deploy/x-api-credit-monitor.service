@@ -1,0 +1,20 @@
+[Unit]
+Description=Production AI backend X API USD credit balance and Feishu alert
+After=network-online.target x-post-automation.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/mnt/data-disk/x-api-credit-monitor/current
+ExecStart=/usr/bin/python3 /mnt/data-disk/x-api-credit-monitor/current/scripts/x_live_credit_monitor.py --notify
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/data-disk/x-api-credit-monitor/data
+ReadOnlyPaths=/var/lib/x-post-automation
+Environment=PYTHONDONTWRITEBYTECODE=1
+

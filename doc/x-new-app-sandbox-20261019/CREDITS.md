@@ -1,5 +1,10 @@
 # New App USD balance alert
 
+**Superseded on 2026-10-19:** the user clarified that the target is the live AI
+backend App and scheduling must run on CPU. The Codex heartbeat `x-app-5` was
+deleted. This page records the earlier, incorrect test scope only. Current
+implementation: [PRODUCTION-CREDITS.md](PRODUCTION-CREDITS.md).
+
 Scope: only the developer billing account associated with the new test App.
 This is not a balance for each authorized X profile. The existing production
 App and publishers are not modified.

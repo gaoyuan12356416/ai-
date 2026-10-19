@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly production AI backend X credit balance check
+
+[Timer]
+OnCalendar=*-*-* *:00:00
+Persistent=true
+RandomizedDelaySec=30
+AccuracySec=30
+Unit=x-api-credit-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -108,7 +108,7 @@ def message(balance, setup):
             + 'https://console.x.com/\n来源：X GET /2/usage/credits')
 
 
-def update(state, balance, *, notify, setup, persist, sender):
+def update(state, balance, *, notify, setup, persist, sender, message_builder=message):
     """Persist intent before send. An ambiguous send is held for reconciliation."""
     state.update(last_success_at=now(), last_balance=balance, consecutive_failures=0, last_error=None)
     low = Decimal(balance['total_balance']) < THRESHOLD
@@ -131,7 +131,7 @@ def update(state, balance, *, notify, setup, persist, sender):
         record.update(status='sending', attempted_at=now())
         persist(state)
         try:
-            receipt = sender(message(balance, kind == 'setup'), record['uuid'])
+            receipt = sender(message_builder(balance, kind == 'setup'), record['uuid'])
         except Exception:
             record.update(status='unknown', error='notification_outcome_unknown')
             persist(state)
