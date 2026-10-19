@@ -275,6 +275,17 @@ class ProductionOnlyHandler:
         with self.assertRaisesRegex(RuntimeError, "drift"):
             self.deploy.compose_app(live.replace('return "legacy"', 'return "changed-live"'), repo, expected)
 
+    def test_fingerprint_handles_binary_constants_and_optional_python_fields(self):
+        node = ast.parse("def sample():\n    return (b'bytes', 2j, ...)\n").body[0]
+        expected = self.deploy.ast_sha(node)
+        self.assertEqual(len(expected), 64)
+        node.type_params = []
+        self.assertEqual(self.deploy.ast_sha(node), expected)
+        del node.type_params
+        self.assertEqual(self.deploy.ast_sha(node), expected)
+        other = ast.parse("def sample():\n    return (b'changed', 2j, ...)\n").body[0]
+        self.assertNotEqual(self.deploy.ast_sha(other), expected)
+
 
 class CandidateTests(unittest.TestCase):
     def setUp(self):

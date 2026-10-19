@@ -9,3 +9,12 @@ CPU 43.166.187.96。执行 ops/screenshot-mobo-products-20261019/deploy.py，默
 真实验收通过后启用三产品定时入口并运行一次昨天。不得对已接受但响应不确定的请求盲目重发；先回读任务库。
 
 部署分两阶段：--apply 保持旧 wrapper，真实验收通过并写出 acceptance.json 后执行 --activate。回滚会校验文件指纹，遇到发布后的其他改动则拒绝覆盖，需重新审阅局部回滚。
+
+## 已部署代码与证据
+
+- 功能提交 cbb3de7f62fcc7877ace7d98e2b1397337379044；部署修复后实际运行提交 2ea151cd5bf910729eb4dc4a76dbf3ffb7688b27。
+- CPU 拉取源码：/mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019/source。
+- 已完成 --apply，/api/drama-screenshot-material/products 返回四个产品；原视频 products 仍两个；未登录返回401；公网截图页使用新接口。
+- 四个截图 worker PID 未变。多产品定时入口待真实两产品验收通过后执行 --activate。
+- 精确回滚：python3 /mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019/source/ops/screenshot-mobo-products-20261019/deploy.py --rollback。
+- 生产验收、API 回读、试跑和部署清单均存放于上述任务目录，包含私有任务证据，不提交至 GitHub。

@@ -18,6 +18,7 @@ LIVE = Path('/root/drama_material_service')
 STATE = Path('/mnt/data-disk/codex/tasks/screenshot-mobo-products-20261019')
 MANIFEST = STATE / 'canaries.json'
 SIZES = {'square_1x1_url': (1200, 1200), 'landscape_1_91x1_url': (1200, 628), 'portrait_4x5_url': (1200, 1500)}
+RATIOS = {'square_1x1_url': '1:1', 'landscape_1_91x1_url': '1.91:1', 'portrait_4x5_url': '4:5'}
 
 
 def db():
@@ -39,9 +40,9 @@ def token():
     return env.get('AUTO_COVER_API_TOKEN') or env.get('DRAMA_SCREENSHOT_API_TOKEN') or env['AI_COVER_API_TOKEN']
 
 
-def submit():
+def submit(content_id='84322322'):
     assert not MANIFEST.exists(), 'canaries already prepared; inspect and reconcile, never resubmit'
-    items = [{'app_id': app, 'content_id': '84322322', 'kind': kind, 'stage': 'planned'}
+    items = [{'app_id': app, 'content_id': content_id, 'kind': kind, 'stage': 'planned'}
              for app, kind in [('3360', 'single'), ('2373', 'batch')]]
     with closing(db()) as c:
         for item in items:
@@ -87,7 +88,7 @@ def material_rows(content_ids):
                '--connect-timeout=8', '--default-character-set=utf8mb4', '-N', '-B', '-e']
     ids = ','.join(module['mysql_escape'](i) for i in content_ids)
     sql = "SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=20000; SELECT @@read_only; "
-    sql += "SELECT id,product,data_source_id,url,name,type,data_source FROM kunlunads_dev.ads_custom_source WHERE data_source_id IN (%s) AND data_source IN (6,102)" % ids
+    sql += "SELECT id,product,data_source_id,url,name,type,data_source FROM kunlunads_dev.ads_custom_source WHERE data_source_id IN (%s) AND data_source IN (6,102) AND type=1" % ids
     result = subprocess.run(command + [sql], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True, timeout=30)
     if result.returncode:
@@ -141,10 +142,18 @@ def check():
     for job in jobs:
         expected = 'moboreels' if job['app_id'] == '3360' else 'moboshort'
         for field in SIZES:
-            matches = [r for r in rows if r['url'] == job[field] and r['data_source_id'] == job['content_id']]
-            assert len(matches) == 1, 'material URL must have exactly one ingested row'
+            # ai-source ingests bytes under a new COS URL; retain the stable
+            # original asset name and verify the ingested image bytes as well.
+            name = '%s-%s-%s-%s' % (job['content_id'], job['drama_name'], RATIOS[field], job['job_id'][:8])
+            matches = [r for r in rows if r['name'] == name and r['data_source_id'] == job['content_id']]
+            assert len(matches) == 1, 'material asset name must have exactly one ingested row'
             assert matches[0]['product'].lower() == expected, 'uploaded material belongs to wrong product'
             assert matches[0]['type'] == '1', 'uploaded material is not an image'
+            with urllib.request.urlopen(matches[0]['url'], timeout=30) as response:
+                ingested = response.read(30 * 1024 * 1024)
+            image = next(i for i in images if i['job_id'] == job['job_id'] and i['url'] == job[field])
+            assert hashlib.sha256(ingested).hexdigest() == image['sha256'], 'ingested image bytes differ'
+            matches[0]['sha256'] = image['sha256']
             materials.append(matches[0])
     result = {'accepted': True, 'verified_at': dt.datetime.utcnow().isoformat(),
               'jobs': [{'app_id': j['app_id'], 'job_id': j['job_id'], 'content_id': j['content_id'], 'status': j['status']} for j in jobs],
@@ -156,5 +165,8 @@ def check():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('submit', 'check'))
+    parser.add_argument('--content-id', default='84322322')
+    parser.add_argument('--manifest-name', default='canaries.json', choices=('canaries.json', 'canaries-alternate.json'))
     args = parser.parse_args()
-    submit() if args.action == 'submit' else check()
+    MANIFEST = STATE / args.manifest_name
+    submit(args.content_id) if args.action == 'submit' else check()
