@@ -160,7 +160,15 @@ def deploy(host):
     try:
         if host == 'cpu':
             lock = open('/run/x-post-daily/runner.lock', 'r+')
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline=time.monotonic()+60
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic()>=deadline: raise
+                    print('Waiting for the existing X publisher to finish; no interruption.',flush=True)
+                    time.sleep(5)
             # No in-flight publishing or planning oneshot may be interrupted.
             assert not any(active(t.replace('.timer','.service')) for t in TIMERS), 'X oneshot is active; retry after drain'
             state['before_counts'] = counts(DB)
