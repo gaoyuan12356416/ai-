@@ -14,6 +14,7 @@ from pathlib import Path
 from .images import decode_cover
 from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
 from .channel_templates import ChannelTemplateStore
+from .channel_languages import decorate as decorate_channel_languages
 from .scheduling import normalize_publish_at, is_due
 
 MAX_IMAGE = 2 * 1024 * 1024
@@ -188,10 +189,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
     def channel_options(self,actor,*,refresh=False):
         self._actor(actor);_,state=self.source.configuration()
         if self.channel_directory is not None and state['configured']:
-            return self.channel_directory.options(actor,refresh=refresh)
+            result = self.channel_directory.options(actor,refresh=refresh)
+            return dict(result, channels=decorate_channel_languages(result['channels'], self.channel_templates.all(actor['tenant_key'])))
         channels=self.channels(actor) if state['configured'] else []
         safe=[{k:v for k,v in row.items() if k not in ('scopes','youtube_account_id')} for row in channels]
-        return {'channels':safe}
+        return {'channels':decorate_channel_languages(safe, self.channel_templates.all(actor['tenant_key']))}
 
     def channel_list(self, actor, *, refresh=False):
         tenant, _ = self._actor(actor)
@@ -204,7 +206,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             row['channel_url'] = 'https://www.youtube.com/channel/' + real_id if re.fullmatch(r'UC[A-Za-z0-9_-]{22}', real_id) else ''
             row['template'] = self.channel_templates.summary(templates.get(real_id) or self.channel_templates.empty(real_id))
             rows.append(row)
-        return dict(result, channels=rows)
+        return dict(result, channels=decorate_channel_languages(rows, templates))
 
     def _template_channel(self, actor, local_id):
         self._actor(actor)

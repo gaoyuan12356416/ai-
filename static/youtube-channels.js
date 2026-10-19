@@ -28,8 +28,8 @@
     $('#channel-table').innerHTML = visible.length ? visible.map(r => {
       const t = r.template, status = {verified:'鉴权通过',checking:'核验中',blocked:'不可发布',unknown:'待核实'}[r.auth_status] || '待核实';
       const url = /^https:\/\/www\.youtube\.com\/channel\/UC[A-Za-z0-9_-]{22}$/.test(r.channel_url || '') ? r.channel_url : '';
-      return `<tr><td>${url ? `<a class="channel-name" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(r.name || '未命名频道')} ↗</a>` : `<strong>${esc(r.name || '未命名频道')}</strong>`}<span class="channel-meta">${esc(r.channel_id)}</span></td><td><span class="badge badge-${r.eligible ? 'green' : r.auth_status === 'blocked' ? 'red' : 'amber'}">${status}</span><span class="channel-meta">${esc(r.reason)}</span><span class="channel-meta">${esc(time(r.checked_at))}</span></td><td>${r.comment_eligible ? '已授权' : r.auth_status === 'verified' ? '未授权' : '待核实'}</td><td><div class="template-tags">${t.configured_fields.length ? t.configured_fields.map(f => `<span class="badge badge-blue">${esc(names[f])}</span>`).join('') : '<span class="channel-meta">未配置 · 保留原值</span>'}</div></td><td>${esc(t.updated_by_name || t.updated_by || '—')}<span class="channel-meta">${esc(time(t.updated_at))}</span></td><td><button class="btn btn-secondary btn-sm" data-edit="${esc(r.id)}">编辑模板</button></td></tr>`;
-    }).join('') : '<tr><td colspan="6" class="channel-empty">暂无匹配的频道</td></tr>';
+      return `<tr><td>${url ? `<a class="channel-name" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(r.name || '未命名频道')} ↗</a>` : `<strong>${esc(r.name || '未命名频道')}</strong>`}<span class="channel-meta">${esc(r.channel_id)}</span></td><td>${esc(r.language_label || '未设置语种')}</td><td><span class="badge badge-${r.eligible ? 'green' : r.auth_status === 'blocked' ? 'red' : 'amber'}">${status}</span><span class="channel-meta">${esc(r.reason)}</span><span class="channel-meta">${esc(time(r.checked_at))}</span></td><td>${r.comment_eligible ? '已授权' : r.auth_status === 'verified' ? '未授权' : '待核实'}</td><td><div class="template-tags">${t.configured_fields.length ? t.configured_fields.map(f => `<span class="badge badge-blue">${esc(names[f])}</span>`).join('') : '<span class="channel-meta">未配置 · 保留原值</span>'}</div></td><td>${esc(t.updated_by_name || t.updated_by || '—')}<span class="channel-meta">${esc(time(t.updated_at))}</span></td><td><button class="btn btn-secondary btn-sm" data-edit="${esc(r.id)}">编辑模板</button></td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="channel-empty">暂无匹配的频道</td></tr>';
   }
   async function loadChannels(force = false, polling = false) {
     clearTimeout(timer); const current = ++serial;
@@ -58,6 +58,7 @@
       if (editor !== current || current.request !== request) return;
       if (!result.template || result.template.channel_id !== current.channel.channel_id || fields.some(f => typeof result.template[f + '_template'] !== 'string' && !(f === 'cover_requirements' && result.template[f + '_template'] === undefined))) throw new Error('频道身份或模板已变化，请关闭后刷新列表');
       current.template = result.template;
+      $('#template-language').value = current.template.language || '';
       fields.forEach(f => { $('#template-' + f).value = current.template[f + '_template'] || ''; });
       $('#template-fields').disabled = false; $('#save-template').disabled = false;
       editorMessage(''); $('#template-title').focus();
@@ -74,7 +75,7 @@
   async function save(event) {
     event.preventDefault(); const current = editor;
     if (!current || current.loading || current.saving || !current.template) return;
-    const payload = {channel_id:current.template.channel_id,version:current.template.version};
+    const payload = {channel_id:current.template.channel_id,version:current.template.version,language:$('#template-language').value};
     fields.forEach(f => { payload[f + '_template'] = $('#template-' + f).value; });
     current.saving = true; $('#save-template').disabled = true; $('#template-fields').disabled = true; $('#reload-template').disabled = true; $('#close-template').disabled = true;
     editorMessage('正在保存…');

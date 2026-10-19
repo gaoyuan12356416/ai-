@@ -183,11 +183,12 @@
     $('#ranking-chart').innerHTML = rows.map((row,index) => `<div class="ranking-row"><span class="ranking-position">${index+1}</span><div class="ranking-content"><div class="ranking-copy"><span title="${esc(row.label)}">${esc(row.label || '未标记分组')}</span><strong>${format(row[key],key)}</strong></div><div class="ranking-track" aria-hidden="true"><span style="width:${finite(row[key]) ? Math.abs(Number(row[key]))/max*100 : 0}%"></span></div></div></div>`).join('');
   }
   function renderTable() {
-    const groups = report.group_by,columns = [...groups,...Object.keys(metrics)];
+    const groups = report.group_by,displayGroups = groups.flatMap(key => key === 'drama' ? [key,'drama_english_name'] : [key]),columns = [...displayGroups,...Object.keys(metrics)];
     const sort = applied.get('sort'),direction = applied.get('direction');
     $('#table-description').textContent = '分组：' + groups.map(group => dimensions[group]).join(' × ') + ' · 点击列标题排序 · 期内生成链接 ' + format(report.totals.links) + ' 条';
-    $('#report-head').innerHTML = '<tr>' + columns.map(key => `<th scope="col" class="${metrics[key] ? 'number-column' : ''}" aria-sort="${key === sort ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}"><button type="button" data-sort="${key}" class="${key === sort ? 'sorted' : ''}">${dimensions[key] || metrics[key].label}<span aria-hidden="true"> ${key === sort ? direction === 'asc' ? '↑' : '↓' : '↕'}</span></button></th>`).join('') + '</tr>';
-    $('#report-body').innerHTML = report.rows.length ? report.rows.map(row => '<tr>' + groups.map(key => {
+    $('#report-head').innerHTML = '<tr>' + columns.map(key => key === 'drama_english_name' ? '<th scope="col">英文剧名</th>' : `<th scope="col" class="${metrics[key] ? 'number-column' : ''}" aria-sort="${key === sort ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}"><button type="button" data-sort="${key}" class="${key === sort ? 'sorted' : ''}">${dimensions[key] || metrics[key].label}<span aria-hidden="true"> ${key === sort ? direction === 'asc' ? '↑' : '↓' : '↕'}</span></button></th>`).join('') + '</tr>';
+    $('#report-body').innerHTML = report.rows.length ? report.rows.map(row => '<tr>' + displayGroups.map(key => {
+      if (key === 'drama_english_name') return `<td class="dimension-cell"><strong>${esc(row.drama_english_name || ({ambiguous:'英文名待核实',unavailable:'英文名暂不可用'}[row.drama_english_status]) || '暂无英文名')}</strong></td>`;
       const value = row[key],label = row[key + '_label'] || value || '未标记';
       return `<td class="dimension-cell"><strong>${esc(label)}</strong>${['drama','channel'].includes(key) ? `<small>${key === 'drama' ? '剧 ID：' : '频道 ID：'}${esc(value || '—')}</small>` : ''}</td>`;
     }).join('') + Object.keys(metrics).map(key => `<td class="number-column">${format(row[key],key)}</td>`).join('') + '</tr>').join('') : `<tr><td colspan="${columns.length}" class="empty-table">当前条件下没有可归属的数据，请调整日期或筛选条件。</td></tr>`;

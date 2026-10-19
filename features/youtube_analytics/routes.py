@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
 from .report import ReportError, csv_export, options, parameters, read_catalog, summarize
+from .titles import enrich
 
 _cache = OrderedDict()
 _lock = threading.Lock()
@@ -31,13 +32,17 @@ def metric_sql(start, end):
 
 
 def query_metrics(app, start, end):
+    return query_rows(app, metric_sql(start, end), MAX_ROWS)
+
+
+def query_rows(app, statement, max_rows=1001):
     if (str(app['ADMIN_MAPPING_MYSQL_HOST'])!='101.32.56.53' or str(app['ADMIN_MAPPING_MYSQL_PORT'])!='63350'):
         raise ReportError('报表只读数据源配置异常',503)
     env = dict(os.environ)
     env.pop('SQL_GATE_BYPASS',None)
     env.update(MYSQL_PWD=app['ADMIN_MAPPING_MYSQL_PASSWORD'],SQL_GATE_JOB_NAME='youtube-analytics',
                SQL_GATE_WAIT_TIMEOUT_SECONDS='5',SQL_GATE_EXEC_TIMEOUT_SECONDS='12')
-    sql = "SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; START TRANSACTION READ ONLY; SELECT @@read_only; "+metric_sql(start,end)+'; ROLLBACK;'
+    sql = "SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; START TRANSACTION READ ONLY; SELECT @@read_only; "+statement+'; ROLLBACK;'
     try:
         result=subprocess.run(['/usr/bin/mysql','-h','101.32.56.53','-P','63350','-u',str(app['ADMIN_MAPPING_MYSQL_USER']),
             '--connect-timeout=3','--default-character-set=utf8mb4','--skip-reconnect','-N','-B','-r'],
@@ -46,7 +51,7 @@ def query_metrics(app, start, end):
         if result.returncode or not lines or lines.pop(0)!='1':
             raise ValueError('readonly_query_failed')
         rows=[json.loads(bytes.fromhex(line).decode('utf-8')) for line in lines if line.strip()]
-        if len(rows)>MAX_ROWS:
+        if len(rows)>max_rows:
             raise ReportError('数据量超过在线查询上限，请缩小日期范围',400)
         return rows
     except ReportError:
@@ -94,6 +99,7 @@ def dispatch(handler, parsed, app):
         catalog=read_catalog(app['JOB_DB_PATH'])
         metrics,fetched=source(app,params['start'],params['end'])
         report=summarize(catalog,metrics,actor,params,fetched)
+        enrich(report, lambda sql: query_rows(app, sql))
         if parsed.path.endswith('/export.csv'):
             data=csv_export(report)
             handler.send_response(200)

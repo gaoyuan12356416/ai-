@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from .titles import display_title
 
 DIMENSIONS = ('date', 'owner', 'drama', 'channel', 'link_type', 'language')
 FIELDS = ('clicks', 'views', 'installs', 'conversions', 'revenue_cents', 'refund_cents')
@@ -327,6 +328,8 @@ def csv_export(report):
     for d in report['group_by']:
         if d != 'date': fields.append((d,d+' ID'))
         fields.append((d if d=='date' else d+'_label',LABELS[d]))
+        if d == 'drama':
+            fields.append(('drama_english_display','英文剧名'))
     fields += [(m,LABELS[m]) for m in METRICS]
     fields += [('period','统计范围（UTC）'),('data_status','数据完整性'),('conversion_note','转化口径')]
     def safe(value):
@@ -335,7 +338,7 @@ def csv_export(report):
         return '未同步' if value is None else value
     writer.writerow([label for _,label in fields])
     for row in report['all_rows']:
-        row = dict(row,period=report['meta']['start']+' 至 '+report['meta']['end'],
+        row = dict(row,drama_english_display=display_title(row),period=report['meta']['start']+' 至 '+report['meta']['end'],
                    data_status='缺少源数据日期：'+','.join(report['quality']['missing_dates']) if report['quality']['missing_dates'] else '已有源数据',
                    conversion_note='源表充值人数，每日人数累加，未跨日去重')
         writer.writerow([safe(row.get(key)) for key,_ in fields])

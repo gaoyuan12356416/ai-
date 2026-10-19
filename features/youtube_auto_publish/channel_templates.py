@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 
 from .templates import WorkflowError, render
+from .channel_languages import LANGUAGE_NAMES
 
 COPY_FIELDS = ('title_template', 'description_template', 'comment_template')
 COVER_FIELD = 'cover_requirements_template'
@@ -25,10 +26,12 @@ class ChannelTemplateStore:
             columns = {row['name'] for row in c.execute('PRAGMA table_info(youtube_channel_template)')}
             if COVER_FIELD not in columns:
                 c.execute("ALTER TABLE youtube_channel_template ADD COLUMN cover_requirements_template TEXT NOT NULL DEFAULT ''")
+            if 'language' not in columns:
+                c.execute("ALTER TABLE youtube_channel_template ADD COLUMN language TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def empty(channel_id):
-        return dict(channel_id=channel_id, version=0, updated_by='',
+        return dict(channel_id=channel_id, language='', version=0, updated_by='',
                     updated_by_name='', updated_at='', **{f: '' for f in FIELDS})
 
     @staticmethod
@@ -74,24 +77,30 @@ class ChannelTemplateStore:
             if len(values[COVER_FIELD]) > 2000:
                 raise WorkflowError('template_too_long', '封面要求不能超过 2000 字')
         tenant = actor['tenant_key']
+        if 'language' in payload:
+            if not isinstance(payload['language'], str) or payload['language'].strip().lower() not in {'', *LANGUAGE_NAMES}:
+                raise WorkflowError('invalid_language', '请选择有效的频道语种')
+            values['language'] = payload['language'].strip().lower()
         stamp = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
         with self.db(True) as c:
-            row = c.execute('SELECT version,cover_requirements_template FROM youtube_channel_template WHERE tenant=? AND channel_id=?',
+            row = c.execute('SELECT version,cover_requirements_template,language FROM youtube_channel_template WHERE tenant=? AND channel_id=?',
                             (tenant, channel_id)).fetchone()
             if (row['version'] if row else 0) != version:
                 raise WorkflowError('template_conflict', '模板已被其他人修改，当前输入已保留，请重新加载后核对', 409)
             # Older cached editors submit only copy fields; omission must not clear a cover default.
             if COVER_FIELD not in values:
                 values[COVER_FIELD] = row[COVER_FIELD] if row else ''
+            if 'language' not in values:
+                values['language'] = row['language'] if row else ''
             c.execute('''INSERT INTO youtube_channel_template
-                (tenant,channel_id,title_template,description_template,comment_template,cover_requirements_template,
-                 version,updated_by,updated_by_name,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+                (tenant,channel_id,title_template,description_template,comment_template,cover_requirements_template,language,
+                 version,updated_by,updated_by_name,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(tenant,channel_id) DO UPDATE SET
                 title_template=excluded.title_template,description_template=excluded.description_template,
                 comment_template=excluded.comment_template,cover_requirements_template=excluded.cover_requirements_template,
-                version=excluded.version,
+                language=excluded.language,version=excluded.version,
                 updated_by=excluded.updated_by,updated_by_name=excluded.updated_by_name,updated_at=excluded.updated_at''',
-                (tenant, channel_id, *(values[f] for f in FIELDS), version + 1,
+                (tenant, channel_id, *(values[f] for f in FIELDS), values['language'], version + 1,
                  actor['user_id'], actor.get('name', ''), stamp))
         # Return this exact write, even if another publisher saves immediately after it.
         return dict(channel_id=channel_id, **values, version=version + 1,

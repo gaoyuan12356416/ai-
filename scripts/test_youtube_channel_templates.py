@@ -39,6 +39,26 @@ class Templates(unittest.TestCase):
         self.assertEqual(self.get()['version'],2)
         self.assertEqual(self.service.channel_list(self.actor)['channels'][0]['template']['configured_fields'],[])
 
+    def test_language_is_shared_per_tenant_and_visible_in_picker(self):
+        self.save(language='es')
+        self.assertEqual(self.get(self.other)['language'], 'es')
+        self.assertEqual(self.get(self.foreign)['language'], '')
+        for result in (self.service.channel_list(self.actor), self.service.channel_options(self.actor)):
+            self.assertEqual(result['channels'][0]['language_label'], '西班牙语')
+        # An old browser omits the new field: keep the current saved language.
+        self.save(version=1, title_template='Saved elsewhere')
+        self.assertEqual(self.get()['language'], 'es')
+        self.save(version=2, language='')
+        self.assertEqual(self.service.channel_options(self.actor)['channels'][0]['language_label'], '未设置语种')
+
+    def test_language_rejects_invalid_and_retains_version_gate(self):
+        with self.assertRaises(WorkflowError):
+            self.save(language='<script>')
+        self.save(language='en')
+        with self.assertRaises(WorkflowError):
+            self.save(version=0, language='ja')
+        self.assertEqual(self.get()['language'], 'en')
+
     def test_shared_publishers_and_tenant_isolation(self):
         self.save(description_template='Shared')
         self.assertEqual(self.get(self.other)['description_template'],'Shared')
@@ -140,7 +160,7 @@ class Templates(unittest.TestCase):
         ChannelTemplateStore(self.service.db)
         with self.service.db() as c:
             after = tuple(c.execute('SELECT * FROM youtube_channel_template').fetchone())
-        self.assertEqual(after[:-1], before)
+        self.assertEqual(after[:len(before)], before)
         self.assertEqual(after[-1], '')
         self.assertEqual(self.get()['version'], 7)
 
