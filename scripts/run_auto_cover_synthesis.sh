@@ -13,4 +13,8 @@ if ! flock -n 9; then
 fi
 
 cd "$APP_DIR"
+if [ "$#" -eq 0 ]; then
+  set -- --all-products
+fi
+
 exec /usr/bin/python3 "$APP_DIR/scripts/auto_submit_cover_synthesis.py" "$@"
