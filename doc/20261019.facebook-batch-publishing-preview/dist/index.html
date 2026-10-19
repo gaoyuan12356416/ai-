@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Facebook 多主页视频发布交互原型。选择素材、固定去重模板、文案与发布时间。所有操作均为本地演示。">
+  <title>Facebook 发布 · AI自动后台 · 交互预览</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%232764ed'/%3E%3Ctext x='13' y='33' fill='white' font-size='34' font-family='Arial' font-weight='bold'%3Ef%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/ui-topbar.css">
+  <link rel="stylesheet" href="assets/style.css?v=20261019-batch-v5"><link rel="stylesheet" href="assets/standard-ui.css?v=20261019-batch-v5"><link rel="stylesheet" href="assets/page-management.css?v=20261019-batch-v5">
+<link rel="stylesheet" href="assets/batch.css?v=20261019-batch-v5">
+</head>
+<body>
+<svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-7 18-4-7-7-4zM10 14 21 3"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.8 6.2L21 12l-6.2 2.8L12 21l-2.8-6.2L3 12l6.2-2.8z"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20 4c-3-2-6 0-8 2-2-2-5-4-8-2-5 5 1 10 8 16 7-6 13-11 8-16z"/></symbol>
+  <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 11a9 9 0 0 1-9 9H4l-2 2V11a9 9 0 0 1 19 0z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+</defs></svg>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="#compose"><span class="brand-mark">剧</span><span><strong>AI自动后台</strong><small>内容制作与发布管理</small></span></a>
+  <div class="workspace-tag"><span class="workspace-avatar">D</span><div><strong>DramaWave</strong><small>内容运营工作空间</small></div><svg><use href="#i-chevron"/></svg></div>
+  <div class="nav-caption">工作空间</div>
+  <nav id="quickNav" aria-label="后台导航"></nav>
+  <div class="sidebar-footer"><span class="version-dot"></span><div><strong>交互原型 · V0.5</strong><small>2026.10.19 / 需求预览</small></div></div>
+</aside>
+<div class="workspace">
+  <header class="topbar">
+    <div class="breadcrumb"><button class="icon-button mobile-menu" id="menuButton" aria-label="展开导航"><svg><use href="#i-menu"/></svg></button><span>内容发布</span><svg><use href="#i-chevron"/></svg><strong id="breadcrumbTitle">Facebook 发布</strong></div>
+    <div class="toolbar"><span class="environment"><i></i>静态演示</span><div id="userCard" class="user-card"></div><button class="icon-button" id="refreshPage" aria-label="刷新页面" title="刷新页面"><svg><use href="#i-reset"/></svg></button></div>
+  </header>
+  <main class="main-content">
+    <div class="page-heading"><div><h1 id="pageTitle">Facebook 发布</h1><p id="pageDescription">选择素材与发布主页，配置文案和发布时间。</p></div><button class="btn secondary" id="requirementsButton">原型说明</button></div>
+    <div class="demo-banner"><span class="demo-label">预览模式</span><span>体验从素材选择到发布的完整流程；页面内账号、任务与发布结果均为模拟数据。</span><span class="no-cover"><svg><use href="#i-check"/></svg>无需生成或审核封面</span></div>
+    <div class="view-tabs" role="tablist" aria-label="工作台视图"><button id="composeTab" class="view-tab active" role="tab" aria-selected="true" aria-controls="composeView"><svg><use href="#i-plus"/></svg>新建发布</button><button id="recordsTab" class="view-tab" role="tab" aria-selected="false" aria-controls="recordsView"><svg><use href="#i-film"/></svg>发布记录 <span id="recordTabCount">0</span></button><button id="managementTab" class="view-tab" role="tab" aria-selected="false" aria-controls="managementView"><svg><use href="#i-grid"/></svg>Page 管理</button><span class="view-note">Facebook 视频发布工作台</span></div>
+    <section id="composeView" role="tabpanel" aria-labelledby="composeTab">
+      <div class="workflow" aria-label="发布步骤"><span class="current"><b>1</b>选择视频</span><i></i><span><b>2</b>选择主页</span><i></i><span><b>3</b>对应关系</span><i></i><span><b>4</b>逐条文案</span><i></i><span><b>5</b>发布设置</span></div>
+      <div class="composer-grid">
+        <div class="form-column">
+          <section class="panel section-panel" id="materialSection"><div class="section-heading"><div><span class="step-number">01</span><h2>选择视频素材</h2><span class="required">必填</span></div><button class="text-button" id="openMaterials">选择素材（可多选） <svg><use href="#i-chevron"/></svg></button></div><p class="selection-count" id="materialCount"></p><div id="selectedMaterial"></div><p class="field-note">可一次选择多条素材。列表顺序决定同一 Page 的发布顺序，可使用箭头调整。</p></section>
+          <section class="panel section-panel" id="pagesSection"><div class="section-heading"><div><span class="step-number">02</span><h2>发布账号 / 主页</h2><span class="required">必填</span></div><span class="selection-count" id="pageCount">已选 0 个主页</span></div><div class="configured-page-heading"><p class="field-note">仅展示 Page 管理中已配置的主页；仅授权正常且与本批素材语言匹配的 Page 可选。选中后请建立对应关系。</p><button class="text-button" id="managePages">前往 Page 管理</button></div><div class="page-tools"><label class="search-field"><svg><use href="#i-search"/></svg><input id="pageSearch" placeholder="搜索主页名称或账号" aria-label="搜索主页"></label><button class="text-button" id="selectAllPages">全选可用</button></div><div class="page-grid" id="pageGrid"></div><div class="selected-page-summary" id="selectedPagesSummary"></div></section>
+          <section class="panel section-panel" id="pairingSection"><div class="section-heading"><div><span class="step-number">03</span><h2>素材与 Page 对应</h2><span class="required">必填</span></div><button class="btn primary small" id="matchByLanguage">按剧语言匹配</button></div><p class="field-note">仅在已选范围内匹配同语言 Page。每个勾选是一条独立任务；可以手动调整。</p><div class="pair-filter-tools"><select id="pairLanguageFilter" aria-label="按素材剧语言筛选"><option value="all">全部剧语言</option><option>中文</option><option>英语</option><option>西班牙语</option></select><select id="pairPageFilter" aria-label="按对应 Page 筛选"><option value="all">全部 Page</option></select><label><input type="checkbox" id="showUnmatched">只看未分配</label></div><div id="pairSummary" class="pair-summary"></div><div id="pairList"></div><p class="field-note" id="pageTaskTotals"></p></section>
+<section class="panel section-panel" id="templateSection"><div class="section-heading"><div><span class="step-number">04</span><h2>视频去重</h2></div><span class="subtle">当前仅使用原视频</span></div><p class="field-note dedup-explanation">模板 01–03 是尚未定义的占位选项，没有实际视频处理能力，暂不可选。当前“不去重”直接使用原视频。</p><div class="template-grid" id="templateGrid"></div><div class="template-note"><svg><use href="#i-info"/></svg><span id="templateNote"></span></div></section>
+          <section class="panel section-panel" id="captionSection"><div class="section-heading"><div><span class="step-number">05</span><h2>发布文案</h2><span class="required">必填</span></div><button class="text-button" id="restorePageCaption">重新套用此 Page 模板</button></div><div class="caption-page-row"><label for="captionPage">当前编辑配对</label><select id="captionPage"></select></div><label class="sr-only" for="caption">发布文案</label><div class="caption-box"><textarea id="caption" maxlength="16000" rows="5" placeholder="写下你的故事，为这条视频添加发布文案…"></textarea><div class="caption-footer"><span id="captionSource">各 Page 独立文案 · 单次发布可修改</span><span id="captionCount">0 / 5,000</span></div></div><div class="macro-toolbar" data-macro-target="caption"></div><p class="field-note">与 YouTube 一致：{name} 剧名 · {desc} 简介 · {url} 短链。当前修改仅影响此素材与 Page 的配对。</p><p id="captionMacroError" class="error-message" role="alert" hidden></p><button class="text-button" id="sampleCaption">填入示例文案</button></section>
+          <section class="panel section-panel" id="scheduleSection"><div class="section-heading"><div><span class="step-number">06</span><h2>发布时间</h2></div><span class="subtle">北京时间 · UTC+8</span></div><div class="schedule-options"><label class="choice-card"><input type="radio" name="publishMode" value="now" checked><span class="choice-icon"><svg><use href="#i-send"/></svg></span><span><strong>立即发布</strong><small>提交后开始处理与发布</small></span></label><label class="choice-card"><input type="radio" name="publishMode" value="scheduled"><span class="choice-icon"><svg><use href="#i-clock"/></svg></span><span><strong>定时发布</strong><small>选择你希望发布的时间</small></span></label></div><div id="scheduleFields" class="schedule-fields" hidden><label for="scheduleAt">预约时间</label><input id="scheduleAt" type="datetime-local"><button class="btn secondary small" id="tomorrowButton">明天 10:00</button><span>北京时间（Asia/Shanghai）</span></div><div class="interval-setting"><label for="intervalMinutes">同一 Page 的发布间隔</label><input type="number" id="intervalMinutes" min="0" max="1440" step="1" value="0"><span>分钟（0 为同时提交）</span><p>按素材列表顺序排列；预约任务仅展示时间，不会在后台执行。</p></div><p id="formError" class="error-message" role="alert" hidden></p></section>
+          <div class="compose-footer"><div><strong id="publishSummary">0 条素材 → 0 条任务</strong><span id="publishSummaryDetail">原视频 · 立即发布</span></div><div class="footer-buttons"><button class="btn secondary" id="saveDraft">保存草稿</button><button class="btn primary" id="submitPublish"><svg><use href="#i-send"/></svg><span id="submitLabel">模拟发布</span></button></div></div>
+        </div>
+        <aside class="preview-column" aria-label="发布效果预览"><div class="preview-sticky"><div class="preview-heading"><h2>发布效果预览</h2><span class="live-badge"><i></i>实时更新</span></div><label class="sr-only" for="previewPage">切换预览配对</label><select id="previewPage" class="preview-page-select"></select><article class="facebook-card"><div class="post-header"><div id="previewAvatar" class="page-avatar">D</div><div><strong id="previewName"></strong><span>刚刚 · <svg><use href="#i-globe"/></svg></span></div><span class="post-menu" aria-hidden="true">···</span></div><p id="previewCaption" class="post-caption"></p><button id="previewVideoButton" class="post-video" aria-label="预览所选视频"><img id="previewPoster" alt="示例视频画面"><span class="poster-label">素材画面示意</span><span class="play-circle"><svg><use href="#i-play"/></svg></span><span class="video-time" id="previewDuration"></span></button><div class="post-engagement"><span class="engagement-like">f</span><span>期待第一个精彩互动</span></div><div class="post-actions" aria-hidden="true"><span><svg><use href="#i-heart"/></svg>赞</span><span><svg><use href="#i-message"/></svg>评论</span><span><svg><use href="#i-send"/></svg>分享</span></div></article><div class="landing-note"><strong>模拟短链 · 落地页 2310</strong><span>{url} 为短链示例，仅展示文案，不可访问。</span></div><div id="publishLinkDetails"></div><p class="preview-disclaimer">展示布局与文案，实际呈现以 Facebook 为准。</p><div class="summary-card"><h3>本次发布</h3><dl><div><dt>视频素材</dt><dd id="summaryMaterial"></dd></div><div><dt>发布主页</dt><dd id="summaryPages"></dd></div><div><dt>去重方式</dt><dd id="summaryTemplate"></dd></div><div><dt>发布时间</dt><dd id="summaryTime"></dd></div></dl><div class="summary-foot"><svg><use href="#i-check"/></svg>每个素材与 Page 配对创建独立任务</div></div></div></aside>
+      </div>
+    </section>
+    <section id="recordsView" role="tabpanel" aria-labelledby="recordsTab" hidden><div class="records-heading"><div><h2>发布记录</h2><p>按主页查看每条视频的处理进度与发布结果。</p></div><button class="btn primary" id="newPublish"><svg><use href="#i-plus"/></svg>新建发布</button></div><div class="stats-grid" id="statsGrid"></div><div class="panel records-panel"><div class="records-toolbar"><div id="recordFilters" class="record-filters" role="group" aria-label="任务状态筛选"></div><label class="search-field"><svg><use href="#i-search"/></svg><input id="recordSearch" placeholder="搜索视频、主页或任务 ID" aria-label="搜索发布记录"></label></div><div class="table-scroll"><table><thead><tr><th>视频 / 素材</th><th>Facebook 主页</th><th>去重模板</th><th>状态</th><th>发布时间（北京）</th><th>操作</th></tr></thead><tbody id="recordsBody"></tbody></table></div><div class="table-footer"><span>全部为演示记录 · 不会产生真实发布</span><button class="text-button" id="resetDemo">重置演示</button></div></div></section>
+
+    <section id="managementView" role="tabpanel" aria-labelledby="managementTab" hidden>
+  <div class="panel group-list-panel">
+    <div class="group-list-heading"><div><h2>已配置 Page <span class="tag blue" id="managementTotal">0 个已配置 Page</span></h2><p>为主页设置默认文案，保存后才会出现在视频发布中。</p></div><button class="btn primary" id="createPage"><svg><use href="#i-plus"/></svg>创建</button></div>
+    <div class="group-list-tools"><label class="search-field"><svg><use href="#i-search"/></svg><input id="managementSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page"></label><select id="managementFilter" aria-label="授权状态筛选"><option value="all">全部授权状态</option><option value="available">授权正常</option><option value="unavailable">授权异常</option></select></div>
+    <div class="management-empty" id="managementEmpty"><span class="empty-icon"><svg><use href="#i-grid"/></svg></span><h3>暂无 Page 配置</h3><p>点击创建，选择 Page 并设置默认发布文案。<br>可以一次选择多个 Page，保存后各自独立管理。</p><button class="btn primary" id="createFirstPage">创建 Page 配置</button></div>
+    <div id="managementTableWrap" class="table-scroll" hidden><table class="group-table management-table"><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>默认发布文案</th><th>最后修改（北京）</th><th>操作</th></tr></thead><tbody id="managementBody"></tbody></table></div>
+    <div class="table-footer"><span id="managementCount">0 个 Page</span><span>示例 Page 目录 · 配置保存在当前浏览器</span></div>
+  </div>
+  <div class="group-contract"><strong>配置后，即可在视频发布中选择</strong><p>支持 {name} 剧名、{desc} 简介、{url} 短链。每个 Page 使用自己的文案，落地页固定为 2310。</p><p>模板修改不影响已提交任务；当前发布草稿可主动重新套用最新模板。</p></div>
+</section>
+
+    <footer class="page-footer"><span>AI自动后台 / Facebook 发布</span><span>交互原型 V0.5 · 2026.10.19</span></footer>
+  </main>
+</div>
+
+<dialog id="pageDialog" aria-labelledby="pageDialogTitle">
+  <div class="dialog-head"><div><h2 id="pageDialogTitle">创建 Page 配置</h2><p id="pageEditorSubtitle"></p></div><button class="icon-button" id="closePageEditor" aria-label="关闭 Page 配置"><svg><use href="#i-close"/></svg></button></div>
+  <div class="group-editor-content">
+    <div class="page-picker"><div class="picker-title"><strong>选择 Page <span class="required">必填</span></strong><span id="candidateCount" class="subtle">已选 0 个 Page</span></div>
+      <div id="candidateControls" class="candidate-controls"><label class="search-field"><svg><use href="#i-search"/></svg><input id="pagePickerSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索待配置 Page"></label><button class="text-button" id="selectCandidatePages">选择 / 取消当前结果</button></div>
+      <div id="pageCandidates" class="page-candidates"></div><p class="field-note">已配置的 Page 请在列表编辑。授权异常的 Page 可保存文案，暂不能选择发布。</p>
+    </div>
+    <div class="drama-language-setting"><label class="field-label" for="pageDramaLanguage">剧语言 <span class="required">必填</span></label><select id="pageDramaLanguage"></select><p class="field-note">对应素材关联剧集的语言，用于匹配发布素材，不是 Page 名称或文案语言。批量创建的 Page 使用同一选项，保存后可分别修改。</p></div><div class="group-editor-grid"><div class="group-editor-form">
+      <div class="editor-copy-heading"><label class="field-label" for="pageCaption">发布文案 <span class="required">必填</span></label><button class="text-button" id="editorSampleCaption">填入示例文案</button></div>
+      <textarea id="pageCaption" rows="7" maxlength="16000" placeholder="例如：{name}&#10;{desc}&#10;立即观看：{url}"></textarea>
+      <div class="macro-toolbar" data-macro-target="pageCaption"></div><p class="field-note">仅支持 {name}、{desc}、{url}，点击插入光标处。批量创建后，每个 Page 的文案可分别编辑。</p>
+      <p class="field-note" id="pageCaptionCount"></p><p class="error-message" id="pageSaveError" role="alert" hidden></p>
+      <div class="landing-setting"><label for="pageLanding">落地页</label><input id="pageLanding" value="2310 · DramaWave" readonly><code>https://www.dramawavew2a.com/ads/101/2310/view</code></div>
+    </div><div class="group-editor-preview">
+      <label class="field-label" for="editorPreviewMaterial">示例剧目预览 <span class="subtle">仅预览，不绑定素材</span></label><select id="editorPreviewMaterial"></select>
+      <div class="macro-preview"><div class="macro-preview-heading"><strong>替换后文案</strong><span>模拟数据</span></div><p id="editorExpandedPreview"></p></div>
+      <p id="editorPreviewError" class="error-message" hidden></p><p class="field-note" id="editorPreviewPageNote"></p><p class="field-note">短链为不可访问的模拟地址，正式开发时由短链服务生成。</p><div id="editorLinkDetails"></div>
+    </div></div>
+  </div>
+  <div class="dialog-foot"><span id="pageDirtyStatus">尚未修改</span><div><button class="btn secondary" id="cancelPageEdit">取消</button><button class="btn primary" id="savePageConfig">创建配置</button></div></div>
+</dialog>
+
+<dialog id="deletePageDialog" aria-labelledby="deletePageTitle"><div class="dialog-head"><div><h2 id="deletePageTitle">删除 Page 配置</h2><p>确认删除以下配置？</p></div><button class="icon-button" data-close="deletePageDialog" aria-label="关闭删除确认">×</button></div><div class="delete-page-body"><strong id="deletePageName"></strong><code id="deletePageId"></code><p>删除后，此 Page 将从可发布列表移除。历史发布记录保留，之后可以重新创建配置。</p><p class="field-note">仅删除当前浏览器中的配置，不删除 Facebook 主页或帖子，也不取消已提交任务。</p><p class="error-message" id="deletePageError" role="alert" hidden></p></div><div class="dialog-foot"><span></span><div><button class="btn secondary" data-close="deletePageDialog">取消</button><button class="btn danger" id="confirmDeletePage">删除配置</button></div></div></dialog>
+<dialog id="materialDialog" aria-labelledby="materialDialogTitle"><div class="dialog-head"><div><span class="eyebrow">VIDEO LIBRARY</span><h2 id="materialDialogTitle">选择视频素材</h2><p>勾选多条视频，搜索和语言筛选不会清除已选素材。</p></div><button class="icon-button" data-close="materialDialog" aria-label="关闭素材选择"><svg><use href="#i-close"/></svg></button></div><div class="dialog-tools"><label class="search-field"><svg><use href="#i-search"/></svg><input id="materialSearch" placeholder="搜索素材名称或 ID" aria-label="搜索视频素材"></label><label class="sr-only" for="materialLanguage">素材语言</label><select id="materialLanguage"><option value="all">全部语言</option><option value="中文">中文</option><option value="英语">英语</option><option value="西班牙语">西班牙语</option></select><button class="btn secondary" id="uploadLocal"><svg><use href="#i-upload"/></svg>导入本地视频</button><input type="file" id="localVideoInput" accept="video/*" multiple hidden></div><div class="material-bulk-tools"><button class="text-button" id="selectFilteredMaterials">全选 / 取消当前结果</button><button class="text-button" id="clearMaterialSelection">清空全部选择</button></div><div class="material-library" id="materialLibrary"></div><div class="dialog-foot"><span id="materialSelectionNote">已选 0 条素材</span><div><button class="btn secondary" data-close="materialDialog">取消</button><button class="btn primary" id="confirmMaterial">使用所选素材</button></div></div><p class="dialog-bottom-note">本地视频仅在当前浏览器预览，不会上传；刷新后需重新选择。</p></dialog>
+<dialog id="confirmDialog" class="compact-dialog" aria-labelledby="confirmTitle"><div class="dialog-head"><div><span class="eyebrow">READY TO PUBLISH</span><h2 id="confirmTitle">确认模拟发布</h2><p>请检查本次发布配置。</p></div><button class="icon-button" data-close="confirmDialog" aria-label="关闭确认"><svg><use href="#i-close"/></svg></button></div><div id="confirmContent" class="confirm-content"></div><div class="dialog-foot"><button class="btn secondary" data-close="confirmDialog">返回编辑</button><button class="btn primary" id="confirmPublish">确认模拟发布</button></div></dialog>
+<dialog id="detailDialog" class="compact-dialog" aria-labelledby="detailTitle"><div class="dialog-head"><div><span class="eyebrow">TASK DETAILS</span><h2 id="detailTitle">任务详情</h2></div><button class="icon-button" data-close="detailDialog" aria-label="关闭详情"><svg><use href="#i-close"/></svg></button></div><div id="detailContent" class="detail-content"></div><div class="dialog-foot"><span>静态演示 · 无平台请求</span><button class="btn secondary" data-close="detailDialog">关闭</button></div></dialog>
+<dialog id="videoDialog" class="video-dialog" aria-labelledby="videoTitle"><div class="dialog-head"><div><h2 id="videoTitle">素材预览</h2><p id="videoSubtitle"></p></div><button class="icon-button" data-close="videoDialog" aria-label="关闭视频预览"><svg><use href="#i-close"/></svg></button></div><div id="videoContent"></div></dialog>
+<dialog id="infoDialog" class="compact-dialog" aria-labelledby="infoTitle"><div class="dialog-head"><div><span class="eyebrow">ABOUT THIS PROTOTYPE</span><h2 id="infoTitle">先看效果，再确定开发</h2></div><button class="icon-button" data-close="infoDialog" aria-label="关闭原型说明"><svg><use href="#i-close"/></svg></button></div><div class="info-content"><p>本页依据《Facebook 发布功能需求》制作，沿用现有 AI 后台的导航与顶栏组件，演示多主页视频发布流程。</p><h3>本次可以体验</h3><ul><li>素材多选、跨筛选保留选择、本地视频预览</li><li>多素材与 Page 按剧语言匹配、手动调整对应关系</li><li>不去重（其他模板尚未定义，暂不可选）</li><li>批量创建独立 Page 配置、各 Page 文案编辑与宏预览</li><li>2310 落地页与模拟短链、立即 / 定时发布、草稿保存</li><li>逐配对独立文案、任务、短链；Page 内排序与间隔、历史重复提醒</li></ul><h3>需要确认后再开发</h3><p>去重模板的数量、名称和实际处理方式；发布账号与主页的接入方式。当前提供 3 个模板占位示例，不运行视频处理。</p><div class="info-note">本页只保存当前浏览器中的Page 配置、演示草稿与记录，不连接 Facebook，不创建正式任务，也不生成或审核封面。</div></div><div class="dialog-foot"><span>需求预览 · 2026.10.19</span><button class="btn primary" data-close="infoDialog">开始体验</button></div></dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<script src="assets/nav-config.js"></script>
+<script src="assets/quick-nav.js"></script>
+<script src="assets/ui-topbar.js"></script>
+<script src="assets/links.js?v=20261019-batch-v5"></script>
+<script src="assets/app.js?v=20261019-batch-v5"></script>
+</body></html>
