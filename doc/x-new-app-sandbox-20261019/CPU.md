@@ -34,3 +34,19 @@ Nginx 的 HTTP 级 map 仅把符合 `^xtest_20261019_[A-Za-z0-9_-]{43}$` 的回�
 部署前配置与状态记录：`/mnt/data-disk/x-new-app-sandbox-20261019/backups/pre-deploy/`。Nginx 原文件 SHA256 `4a161d89e5478f50a070c1142e6f5ac5d26016c678d6847bfb75a189f9e9845e`，部署后 `cf8c96708e3754d0be23fa2d1ca3ae94faf5493e436ebc67b02039e500d3f1b8`。
 
 回退：恢复部署前 `/etc/nginx/default.d/x-oauth.conf`，移走新 map/location 配置，`nginx -t && systemctl reload nginx`，停止 `x-new-app-test.service`。保留测试数据和日志供核对，不删除或回退生产账本。
+
+## 已授权的单次文字发布验收
+
+用户于 2026-10-19 完成账号授权后，明确要求测试 Post 发布并返回预览。仅测试独立账号 `gaoyuan30105257`（X user ID `1531581362968272897`），未选择任何生产账号或素材。
+
+- 运行源码：`dfcdd5cecd104af14f501ab8847a7bb982b7273d/scripts/x_new_app_cpu_post_smoke.py`。
+- 固定运行标识：`20261019-new-app-text-v1`。发布前备份独立账号库、冻结正文和账号，记录 `post_creating` 后才发请求。任何已有运行均只读回；中断或不明确结果不重发。
+- 正文：`X API 新 App 独立环境发布测试，2026-10-19。` 换行 `这是一条测试 Post。`
+- 发布时间：北京时间 2026-10-19 11:36:16。
+- `POST /2/tweets` HTTP 201；Post ID `2112025009338077294`。
+- 随后 `GET /2/tweets/{id}` HTTP 200，Post ID、作者 ID 和完整正文均一致。最终 `published_verified`、`attempts=1`、`unknown_outcome=false`。
+- 真实预览：<https://x.com/gaoyuan30105257/status/2112025009338077294>。
+- 独立持久回执：`/mnt/data-disk/x-new-app-sandbox-20261019/data/text-post-tests/20261019-new-app-text-v1.json`。账号发布许可已恢复原值 false；未启用自动发布或新的公开发布入口。
+- 原主后台与原 X 服务 PID 仍为 2640208 / 1171982，原 App 未替换。
+
+本轮仅证明新 App 的账号授权、身份读取、权限获取和纯文字发布可用。图片/视频上传、实际刷新令牌、长视频能力及生产切换尚未验收。保留该 Post 供预览，不自动删除或复发。
