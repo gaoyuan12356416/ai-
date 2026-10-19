@@ -382,8 +382,8 @@ class CandidateTests(unittest.TestCase):
 
     def test_both_new_products_use_strict_unrounded_spend_and_ignore_roas(self):
         for profile, source, app_id in [("moboreels", "moboreels", "3360"), ("moboshort", "MoboShort", "2373")]:
-            for content_id, spend, roas in [("exact", 3000, 100), ("low", 2999.99, 100),
-                                           ("just-above", 3000.001, 0), ("above", 3000.01, 44.99), ("high", 4000, 0)]:
+            for content_id, spend, roas in [("exact", 1000, 100), ("low", 999.99, 100),
+                                           ("just-above", 1000.001, 0), ("above", 1000.01, 44.99), ("high", 4000, 0)]:
                 self.db.metric(source, content_id, spend, roas)
                 self.db.resource(app_id, content_id)
             with self.subTest(profile=profile):
@@ -406,7 +406,7 @@ class CandidateTests(unittest.TestCase):
             original = runner.build_parser().parse_args([])
         for profile in products.AUTO_PROFILES:
             selected = runner.profile_args(original, profile)
-            expected = (1000, 45, ">=") if profile["name"] == "dramawave" else (3000, None, ">")
+            expected = (1000, 45, ">=") if profile["name"] == "dramawave" else (1000, None, ">")
             self.assertEqual((selected.min_spend, selected.min_roas, selected.spend_operator), expected)
         self.assertEqual((original.min_spend, original.min_roas), (9999, 90))
 

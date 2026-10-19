@@ -16,9 +16,9 @@ AUTO_PROFILES = (
     {"name": "dramawave", "product": "dramawave", "app_id": "1479",
      "min_spend": 1000.0, "spend_operator": ">=", "min_roas": 45.0},
     {"name": "moboreels", "product": "moboreels", "app_id": "3360",
-     "min_spend": 3000.0, "spend_operator": ">", "min_roas": None},
+     "min_spend": 1000.0, "spend_operator": ">", "min_roas": None},
     {"name": "moboshort", "product": "MoboShort", "app_id": "2373",
-     "min_spend": 3000.0, "spend_operator": ">", "min_roas": None},
+     "min_spend": 1000.0, "spend_operator": ">", "min_roas": None},
 )
 
 
