@@ -155,6 +155,7 @@
     }
 
     state.templates.forEach(item => {
+      const config = ui.objectValue(item && item.config);
       const id = templateId(item);
       const enabled = isEnabled(item);
       const version = templateVersion(item);

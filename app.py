@@ -32050,12 +32050,8 @@ def finish_screenshot_job_run(job):
 
 
 def app_package_for_app_id(app_id):
-    mapping = {
-        "1479": "com.dramawave.app",
-        "979": "com.freereels.app",
-    }
-    app_id = str(app_id or "").strip()
-    return mapping.get(app_id, app_id)
+    from features.screenshot_products import app_package
+    return app_package(app_id)
 
 
 def mysql_escape_literal(value):
@@ -32171,9 +32167,9 @@ def screenshot_asset_name(job, spec):
 
 def post_screenshot_ai_source_callback(job):
     if not AI_SOURCE_CALLBACK_ENABLED:
-        return {"skipped": True, "reason": "disabled"}
+        raise RuntimeError("ai source callback is disabled; generated images have not been imported")
     if not AI_SOURCE_CALLBACK_URL or not AI_SOURCE_CALLBACK_TOKEN:
-        return {"skipped": True, "reason": "not_configured"}
+        raise RuntimeError("ai source callback is not configured; generated images have not been imported")
     creator = get_admin_user_callback_username(job.get("creator_user_id", "")) or str(job.get("creator_name", "") or "").strip()
     created_at = callback_time_text(job.get("updated_at") or job.get("created_at") or "")
     items = []
@@ -32191,8 +32187,8 @@ def post_screenshot_ai_source_callback(job):
             "email": creator,
             "created_at": created_at,
         })
-    if not items:
-        return {"skipped": True, "reason": "no_assets"}
+    if len(items) != len(SCREENSHOT_SPECS):
+        raise RuntimeError("ai source callback requires all three generated images")
     headers = {
         "Authorization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
         "Authrization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
@@ -32204,8 +32200,15 @@ def post_screenshot_ai_source_callback(job):
         json=items[:50],
         timeout=AI_SOURCE_CALLBACK_TIMEOUT,
     )
-    if response.status_code >= 400:
+    if not 200 <= response.status_code < 300:
         raise RuntimeError("ai source callback failed (%s): %s" % (response.status_code, response.text[:500]))
+    try:
+        receipt = json.loads(response.text)
+    except (TypeError, ValueError):
+        raise RuntimeError("ai source callback returned an invalid JSON receipt; reconcile before retry")
+    if not isinstance(receipt, dict) or str(receipt.get("code")) != "0":
+        message = (receipt.get("msg") or receipt.get("message") or receipt.get("error") or "missing success code") if isinstance(receipt, dict) else "invalid receipt object"
+        raise RuntimeError("ai source callback rejected import: %s" % str(message)[:500])
     return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
 
 
@@ -66545,41 +66548,28 @@ def validate_content_request(app_id, content_id, episode_start, episode_end):
 
 
 def validate_screenshot_request(app_id, content_id):
-
+    from features.screenshot_products import get_product, resolve_cover_resource
+    product = get_product(app_id)
+    if product and product["cover_only"]:
+        return resolve_cover_resource(app_id, content_id, run_mysql, DB_NAME,
+                                      SOURCE_TABLE, normalize_cover_source_url)
     episodes = fetch_drama_episodes(content_id, app_id=app_id)
-
     sample = episodes[0]
-
     cover_source_url = ""
-
     for episode in episodes:
-
         cover_source_url = normalize_cover_source_url(episode.get("cover_url", ""))
-
         if cover_source_url:
-
             break
-
     if not cover_source_url:
-
         raise ValueError("未找到可用封面素材")
-
     return {
-
         "app_id": sample["app_id"],
-
         "total_episodes": len(episodes),
-
         "app": product_name_for_app_id(sample["app_id"], sample["app"]),
-
         "country": sample["country"],
-
         "language": sample["language"],
-
         "drama_name": sample["drama_name"],
-
         "cover_source_url": cover_source_url,
-
     }
 
 
@@ -97235,6 +97225,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 503, {"code": "youtube_channels_unavailable", "error": "YouTube频道列表暂不可用"})
             return
 
+        if parsed.path == "/api/drama-screenshot-material/products":
+            if not self._require_module("cover_synthesis"):
+                return
+            from features.screenshot_products import list_products as list_screenshot_products
+            json_response(self, 200, {"items": list_screenshot_products()})
+            return
         if parsed.path == "/api/drama-material/products":
 
 
