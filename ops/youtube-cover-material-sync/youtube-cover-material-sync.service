@@ -20,6 +20,10 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
+# SQLite in WAL mode needs to create reader sidecars even with mode=ro.
+# Keep the source database itself read-only; SQL also enforces query_only.
+ReadWritePaths=/root/drama_material_service/data
+ReadOnlyPaths=/root/drama_material_service/data/drama_material_jobs.sqlite3
 # SQL gate runtime paths are shared by all approved automated MySQL readers.
 ReadWritePaths=/var/lib/sql-connection-gate/session-locks
 MemoryMax=384M
