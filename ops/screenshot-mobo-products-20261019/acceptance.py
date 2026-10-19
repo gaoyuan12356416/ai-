@@ -145,7 +145,8 @@ def check():
             # ai-source ingests bytes under a new COS URL; retain the stable
             # original asset name and verify the ingested image bytes as well.
             name = '%s-%s-%s-%s' % (job['content_id'], job['drama_name'], RATIOS[field], job['job_id'][:8])
-            matches = [r for r in rows if r['name'] == name and r['data_source_id'] == job['content_id']]
+            matches = [r for r in rows if r['name'] == name and r['data_source_id'] == job['content_id']
+                       and r['data_source'] == '6']
             assert len(matches) == 1, 'material asset name must have exactly one ingested row'
             assert matches[0]['product'].lower() == expected, 'uploaded material belongs to wrong product'
             assert matches[0]['type'] == '1', 'uploaded material is not an image'
