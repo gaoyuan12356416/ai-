@@ -13,4 +13,12 @@
 
 ## COS 与公网结果
 
-待源码推送后发布新目录，补记 URL、文件 SHA-256 清单和公网复验结果。仅上传 dist，不改服务器程序或生产状态。
+源码提交 `9f6aa0987a5c13573739c035fd0f050d297dc98e`，分支 `codex/fb-page-language-preview-20261019`，已推送 GitHub 后发布。
+
+- [Page 管理](https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-language-preview-20261019_155212/pages.html) / [视频发布](https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261019/facebook-page-language-preview-20261019_155212/index.html)。
+- 上传并逐文件公网读回 15 个静态文件，全部 HTTP 200、长度与 SHA-256 与本地完全一致。HTML HEAD：200 / text/html / 25,167 字节。
+- index.html SHA-256：`cf0e24145ebbcec8f0cf2ebc9fa41aacce29e9231452f64d6cf1c4a016abb220`。
+- 公网浏览器复验 87 项通过；109 个请求，非静态请求 0、运行错误 0；含 1440 / 820 / 390 像素布局检查。
+- 完整检查名和文件校验值见 [public-verification.json](public-verification.json)。测试完成后清理独立测试浏览器本版夹具数据。
+- 基线 `3fa9012` 的旧源目录无变动；旧 COS 地址保留。只上传 dist，未修改服务器程序、生产发布或短链状态。
+- 多素材对应仍为方案文档，未作为已实现能力发布。技能上下文保持不变。
