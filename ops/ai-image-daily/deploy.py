@@ -32,7 +32,11 @@ def check_disk():
     uuid = output("findmnt", "-n", "-o", "UUID", "--mountpoint", "/mnt/data-disk").decode().strip()
     if uuid != DISK_UUID:
         raise RuntimeError("data_disk_uuid_mismatch")
-    if not os.access("/mnt/data-disk", os.W_OK):
+    # ProtectSystem=strict keeps the mount root read-only in the service while
+    # ReadWritePaths grants the existing report state directory. Only a first
+    # installation without STATE needs write access to the mount root itself.
+    writable_target = STATE if STATE.exists() else Path("/mnt/data-disk")
+    if not os.access(str(writable_target), os.W_OK):
         raise RuntimeError("data_disk_not_writable")
     if shutil.disk_usage("/mnt/data-disk").free < 1024 ** 3:
         raise RuntimeError("data_disk_free_space_below_1_gib")
