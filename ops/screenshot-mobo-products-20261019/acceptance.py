@@ -77,7 +77,12 @@ def submit(content_id='84322322'):
     print(json.dumps([{'app_id': i['app_id'], 'job_id': i['job_id'], 'stage': i['stage']} for i in items]))
 
 
-def material_rows(content_ids):
+def material_ids_for_jobs(jobs):
+    return [str(int(hashlib.sha1((job['job_id'] + ':' + field.removesuffix('_url')).encode()).hexdigest()[:15], 16))
+            for job in jobs for field in SIZES]
+
+
+def material_rows(content_ids, material_ids=()):
     module = runpy.run_path(str(LIVE / 'scripts/auto_submit_cover_synthesis.py'))
     module['load_env_file'](str(LIVE / '.env'))
     env = os.environ.copy()
@@ -88,7 +93,13 @@ def material_rows(content_ids):
                '--connect-timeout=8', '--default-character-set=utf8mb4', '-N', '-B', '-e']
     ids = ','.join(module['mysql_escape'](i) for i in content_ids)
     sql = "SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=20000; SELECT @@read_only; "
-    sql += "SELECT id,product,data_source_id,url,name,type,data_source FROM kunlunads_dev.ads_custom_source WHERE data_source_id IN (%s) AND data_source IN (6,102) AND type=1" % ids
+    sql += "SELECT id,product,data_source_id,url,name,type,data_source FROM kunlunads_dev.ads_custom_source WHERE data_source_id IN (%s) AND data_source=6 AND type=1" % ids
+    if material_ids:
+        # Receiving rows use the external material ID, not the drama ID, and
+        # start with type=2 even for images. Never hide an accepted upload from
+        # retry preflight by filtering those rows as formal image materials.
+        external_ids = ','.join(module['mysql_escape'](i) for i in material_ids)
+        sql += " UNION ALL SELECT id,product,data_source_id,url,name,type,data_source FROM kunlunads_dev.ads_custom_source WHERE data_source_id IN (%s) AND data_source=102" % external_ids
     result = subprocess.run(command + [sql], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True, timeout=30)
     if result.returncode:
@@ -137,7 +148,7 @@ def check():
             target.write_bytes(data)
             images.append({'job_id': job['job_id'], 'app_id': job['app_id'], 'url': url,
                            'size': list(size), 'sha256': hashlib.sha256(data).hexdigest()})
-    rows = material_rows(sorted(set(j['content_id'] for j in jobs)))
+    rows = material_rows(sorted(set(j['content_id'] for j in jobs)), material_ids_for_jobs(jobs))
     materials = []
     for job in jobs:
         expected = 'moboreels' if job['app_id'] == '3360' else 'moboshort'

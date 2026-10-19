@@ -47,7 +47,7 @@ def prepare():
             body = json.loads(receipt['response'])
             assert body['code'] == -1 and 'app_package' in body['msg'], 'known product rejection required'
             jobs.append({'job': job, 'receipt': receipt})
-    rows = acceptance.material_rows(['67767322'])
+    rows = acceptance.material_rows(['67767322'], acceptance.material_ids_for_jobs([item['job'] for item in jobs]))
     names = {f"67767322-{item['job']['drama_name']}-{ratio}-{item['job']['job_id'][:8]}"
              for item in jobs for ratio in acceptance.RATIOS.values()}
     assert not any(row['name'] in names for row in rows), 'existing material requires reconciliation before mutation'

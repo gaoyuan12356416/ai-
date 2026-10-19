@@ -45,7 +45,7 @@ def main():
         jobs = [dict(conn.execute('SELECT * FROM drama_screenshot_job WHERE job_id=?', (jid,)).fetchone()) for jid in JOBS]
     for job in jobs:
         validate_preserved(job, images)
-    rows = acceptance.material_rows(['67767322'])
+    rows = acceptance.material_rows(['67767322'], acceptance.material_ids_for_jobs(jobs))
     names = {f"67767322-{j['drama_name']}-{ratio}-{j['job_id'][:8]}" for j in jobs for ratio in acceptance.RATIOS.values()}
     assert not any(row['name'] in names for row in rows), 'existing receiving or formal material requires reconciliation'
     print('PREFLIGHT: two failed canaries, six intact local images, no existing uploaded materials')

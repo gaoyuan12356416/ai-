@@ -306,6 +306,30 @@ class ProductionOnlyHandler:
 
 
 class PreservedAcceptanceTests(unittest.TestCase):
+    def test_receiving_records_use_external_material_id_without_image_type_filter(self):
+        source = (ROOT / 'ops/screenshot-mobo-products-20261019/acceptance.py').read_text(encoding='utf-8')
+        nodes = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)
+                 and n.name in ('material_ids_for_jobs', 'material_rows')]
+        process = mock.Mock(return_value=types.SimpleNamespace(returncode=0,
+                            stdout='1\n700\tmoboreels\t123\thttps://example.invalid/a.jpg\tasset\t2\t102\n'))
+        namespace = {'SIZES': {'square_1x1_url': (1200, 1200)}, 'hashlib': hashlib,
+                     'runpy': types.SimpleNamespace(run_path=lambda path: {'load_env_file': lambda path: None,
+                                                                         'mysql_escape': lambda value: "'" + value + "'"}),
+                     'LIVE': Path('/synthetic'), 'os': types.SimpleNamespace(environ={'DRAMA_DB_USER': 'synthetic-user'}),
+                     'subprocess': types.SimpleNamespace(run=process, PIPE=-1)}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), 'receiving-readback', 'exec'), namespace)
+        ids = namespace['material_ids_for_jobs']([{'job_id': 'synthetic-job'}])
+        self.assertEqual(ids, [str(int(hashlib.sha1(b'synthetic-job:square_1x1').hexdigest()[:15], 16))])
+        rows = namespace['material_rows'](['67767322'], ids)
+        sql = process.call_args.args[0][-1]
+        formal, receiving = sql.split(' UNION ALL ')
+        self.assertIn("data_source_id IN ('67767322')", formal)
+        self.assertIn('data_source=6 AND type=1', formal)
+        self.assertIn("data_source_id IN ('" + ids[0] + "')", receiving)
+        self.assertIn('data_source=102', receiving)
+        self.assertNotIn('type=1', receiving)
+        self.assertEqual((rows[0]['data_source'], rows[0]['type']), ('102', '2'))
+
     def test_resume_requires_exact_failed_canary_and_all_original_image_bytes(self):
         source = (ROOT / 'ops/screenshot-mobo-products-20261019/resume_acceptance.py').read_text(encoding='utf-8')
         node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'validate_preserved')
