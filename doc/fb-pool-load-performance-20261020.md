@@ -14,10 +14,13 @@
 
 ## 验证和部署
 
-网关 12、池身份 19、池状态机/隔离 44、部署保护 11 项 Python 测试通过。覆盖管理员无映射读取、普通用户仍需映射、禁用模块/导航拒绝、跨租户拒绝、第二次读取立刻看到 Page 范围撤销、GET 不创建池。
+网关 12、池身份 19、池状态机/隔离 44、部署保护 20 项 Python 测试通过。覆盖管理员无映射读取、普通用户仍需映射、禁用模块/导航拒绝、跨租户拒绝、第二次读取立刻看到 Page 范围撤销、GET 不创建池。
 
 浏览器隔离测试：池加载/失败/并发 29、原素材池 47、Page 列表加载 33 项通过，共 109 项；含关闭旧弹窗后不启动旧入池操作恢复、不影响新弹窗的验证。JS 语法及 diff 检查通过。
 
-使用独立分支 `codex/fb-pool-load-performance-20261020`，从 `0770d15` 开始。部署脚本 `scripts/deploy_fb_pool_load_performance.py` 隔离复用已验证部署流程，保持上一轮脚本的 baseline/白名单不变。先提交推送，再核对 GitHub SHA、文件基线、活动租约和池发布时间窗口；备份代码/在线库/服务状态后切换并恢复原服务状态。回滚只恢复本轮代码，保留任务、SQLite 和短链。
+使用独立分支 `codex/fb-pool-load-performance-20261020`，从 `0770d15` 开始。部署脚本 `scripts/deploy_fb_pool_load_performance.py` 保持上一轮脚本的 baseline/白名单不变。先提交推送，再核对 GitHub SHA、文件基线、新模块未完成任务/租约及启用池；备份代码/在线库/服务状态后，仅重启主 API，保持 FB sidecar、worker、池调度 PID 和原定时器状态。回滚只恢复本轮代码，保留任务、SQLite 和短链。
+
+首次以 `896be83` 尝试原排空流程时，旧自动发布 runner 正在处理 8 条任务，120 秒内未排空；脚本未改文件，自动恢复原服务状态，manifest 状态为 `failed_restored`：`/mnt/data-disk/fb-video-publish/backups/page-list-20261020T103234Z-896be839/manifest.json`。随后核实旧自动发布执行直接调用来源、Graph 和 GPU，不导入本次变更的 gateway；仅新手动模块的查询/身份 broker 依赖主 API。因此本轮调整为上述主 API 单独切换，避免中断旧发布任务。主 `app.py` 不替换，前后验证哈希不变。
 
 验收不创建池、不修改计划、不发 Facebook 帖子。上线后实测及回滚清单在下方补充。
+
