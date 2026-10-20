@@ -345,10 +345,17 @@ class Client:
         return "accepted", receipt
 
 
+def valid_api_receipt(row):
+    identifier = row.get("api_id")
+    return isinstance(identifier, int) and not isinstance(identifier, bool) and identifier > 0
+
+
 def reconcile(ledger, catalog, row):
     request = json.loads(row["request_json"])
     matches = catalog.find(request)
     if not matches:
+        if row["state"] == "confirmed" and not valid_api_receipt(row):
+            return ledger.change(row["key"], "unknown", error="valid_api_receipt_missing")
         return row
     if len(matches) != 1:
         return ledger.change(row["key"], "blocked", error="formal_identity_not_unique")
@@ -357,13 +364,17 @@ def reconcile(ledger, catalog, row):
     if errors:
         return ledger.change(row["key"], "blocked", error="formal_mismatch:" + ",".join(errors),
                              final_id=int(final["id"]), final_json=encoded(final))
-    # A valid readback can resolve an uncertain/duplicate response without a new POST.
-    return ledger.change(row["key"], "confirmed", {
+    # Formal existence and the API's data.id are separate evidence; neither replaces the other.
+    receipt_valid = valid_api_receipt(row)
+    return ledger.change(row["key"], "confirmed" if receipt_valid else "unknown", {
                          "resolved_by": "content_sign_readback",
+                         "api_receipt_valid": receipt_valid,
+                         "formal_verified": True,
                          "country_policy": "drama_catalog_override",
                          "requested_country": request["country"],
                          "formal_country": final.get("country")},
-                         final_id=int(final["id"]), final_json=encoded(final), error="")
+                         final_id=int(final["id"]), final_json=encoded(final),
+                         error="" if receipt_valid else "formal_found_receipt_missing")
 
 
 def submit(source, ledger, catalog, client, verify_image=inspect_image):
@@ -382,7 +393,7 @@ def submit(source, ledger, catalog, client, verify_image=inspect_image):
             if country_language(source.get("country"), source.get("language")) != country_language(
                     frozen_source.get("country"), frozen_source.get("language")):
                 raise ValueError("frozen_source_changed")
-        if row["state"] == "confirmed":
+        if row["state"] == "confirmed" and valid_api_receipt(row):
             return row
         row = reconcile(ledger, catalog, row)  # Failed readback must prevent any new write.
         if row["state"] != "prepared":

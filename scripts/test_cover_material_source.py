@@ -359,12 +359,13 @@ class LedgerTests(OfflineTest):
         self.assertEqual(self.client.post.call_count, 1)
 
     def test_confirmed_identity_does_not_silently_adopt_changed_content(self):
-        request = material.make_payload(source(), 248)
-        self.catalog.rows[request["content_sign"]] = [formal(request)]
+        first = self.send()
+        request = json.loads(first["request_json"])
+        self.catalog.rows[first["key"]] = [formal(request)]
         self.assertEqual(self.send()["state"], "confirmed")
         with self.assertRaisesRegex(ValueError, "frozen_source_changed"):
             self.send(source(content_id="other-drama"))
-        self.client.post.assert_not_called()
+        self.assertEqual(self.client.post.call_count, 1)
 
     def test_backfill_metadata_and_equivalent_language_keep_same_attempt(self):
         self.send()
@@ -392,14 +393,19 @@ class LedgerTests(OfflineTest):
         self.assertEqual((result["state"], result["attempts"]), ("unknown", 1))
         self.assertEqual(self.client.post.call_count, 1)
 
-    def test_timeout_then_readback_confirms_without_second_post(self):
+    def test_timeout_then_readback_preserves_formal_evidence_but_requires_receipt(self):
         self.client.post.side_effect = TimeoutError(TOKEN)
         first = self.send()
         self.assertEqual((first["state"], first["attempts"]), ("unknown", 1))
         request = json.loads(first["request_json"])
         self.catalog.rows[first["key"]] = [formal(request)]
         second = self.send()
-        self.assertEqual((second["state"], second["final_id"]), ("confirmed", 901))
+        self.assertEqual((second["state"], second["api_id"], second["final_id"]),
+                         ("unknown", None, 901))
+        self.assertEqual(second["error"], "formal_found_receipt_missing")
+        self.assertEqual(json.loads(second["final_json"]), formal(request))
+        third = self.send()
+        self.assertEqual(third["state"], "unknown")
         self.assertEqual(self.client.post.call_count, 1)
         events = [dict(row) for row in self.ledger.db.execute("SELECT * FROM events")]
         self.assertNotIn(TOKEN, material.encoded([second, events]))
@@ -410,12 +416,73 @@ class LedgerTests(OfflineTest):
         second = self.send()
         self.assertEqual(second["state"], "accepted")
         self.assertEqual(self.client.post.call_count, 1)
+        self.catalog.rows[first["key"]] = [formal(json.loads(first["request_json"]))]
+        third = self.send()
+        self.assertEqual((third["state"], third["api_id"], third["final_id"]), ("confirmed", 42, 901))
+        self.assertEqual(self.send()["state"], "confirmed")
+        self.assertEqual(self.client.post.call_count, 1)
 
-    def test_preexisting_formal_readback_confirms_without_post(self):
+    def test_preexisting_formal_readback_requires_receipt_without_post(self):
         request = material.make_payload(source(), 248)
         self.catalog.rows[request["content_sign"]] = [formal(request)]
         result = self.send()
-        self.assertEqual((result["state"], result["attempts"]), ("confirmed", 0))
+        self.assertEqual((result["state"], result["attempts"], result["api_id"], result["final_id"]),
+                         ("unknown", 0, None, 901))
+        self.assertEqual(result["error"], "formal_found_receipt_missing")
+        self.assertEqual(self.send()["state"], "unknown")
+        self.client.post.assert_not_called()
+        self.inspect.assert_not_called()
+
+    def test_duplicate_or_missing_id_readback_cannot_confirm_or_repeat_post(self):
+        for index, response in enumerate((
+                {"code": -1, "msg": "素材已经存在!"},
+                {"code": 0, "data": {}},
+                {"code": 0, "id": 42})):
+            with self.subTest(response=response):
+                record = source(source_key="missing-receipt:" + str(index))
+                session = FakeSession(FakeResponse(body=response))
+                actual_client = material.Client({"AD_MATERIAL_SOURCE_API_TOKEN": TOKEN}, session)
+                first = material.submit(record, self.ledger, self.catalog, actual_client,
+                                        verify_image=self.inspect)
+                request = json.loads(first["request_json"])
+                self.catalog.rows[first["key"]] = [formal(request)]
+                for _ in range(2):
+                    result = material.submit(record, self.ledger, self.catalog, actual_client,
+                                             verify_image=self.inspect)
+                    self.assertEqual((result["state"], result["api_id"], result["final_id"]),
+                                     ("unknown", None, 901))
+                    self.assertEqual(result["error"], "formal_found_receipt_missing")
+                self.assertEqual(len(session.calls), 1)
+
+    def test_invalid_persisted_receipt_never_satisfies_formal_confirmation(self):
+        for index, identifier in enumerate((None, 0, -1, 1.5, "invalid")):
+            with self.subTest(identifier=identifier):
+                record = source(source_key="invalid-receipt:" + str(index))
+                request = material.make_payload(record, 248)
+                row = self.ledger.prepare(record, request)
+                row = self.ledger.change(row["key"], "accepted", api_id=identifier)
+                self.catalog.rows[row["key"]] = [formal(request)]
+                result = material.reconcile(self.ledger, self.catalog, row)
+                self.assertEqual((result["state"], result["final_id"]), ("unknown", 901))
+                self.assertEqual(result["error"], "formal_found_receipt_missing")
+        self.assertFalse(material.valid_api_receipt({"api_id": True}))
+        self.client.post.assert_not_called()
+
+    def test_prior_confirmed_missing_receipt_is_readback_only_and_never_posts(self):
+        for found in (False, True):
+            with self.subTest(found=found):
+                record = source(source_key="prior-confirmed:" + str(found))
+                request = material.make_payload(record, 248)
+                row = self.ledger.prepare(record, request)
+                self.ledger.change(row["key"], "confirmed", final_id=901, final_json=material.encoded(formal(request)))
+                if found:
+                    self.catalog.rows[row["key"]] = [formal(request)]
+                for _ in range(2):
+                    result = self.send(record)
+                    self.assertEqual((result["state"], result["api_id"], result["final_id"]),
+                                     ("unknown", None, 901))
+                    self.assertEqual(result["error"], "formal_found_receipt_missing" if found
+                                     else "valid_api_receipt_missing")
         self.client.post.assert_not_called()
         self.inspect.assert_not_called()
 
@@ -423,7 +490,8 @@ class LedgerTests(OfflineTest):
         for index, country in enumerate(("", None, "GB")):
             with self.subTest(country=country):
                 record = source(source_key="country-override:" + str(index), country="US")
-                request = material.make_payload(record, 248)
+                first = self.send(record)
+                request = json.loads(first["request_json"])
                 self.catalog.rows[request["content_sign"]] = [formal(request, country=country)]
                 result = self.send(record)
                 self.assertEqual(result["state"], "confirmed")
@@ -435,7 +503,7 @@ class LedgerTests(OfflineTest):
                 self.assertEqual(evidence["country_policy"], "drama_catalog_override")
                 self.assertEqual(evidence["requested_country"], "US")
                 self.assertEqual(evidence["formal_country"], country)
-        self.client.post.assert_not_called()
+        self.assertEqual(self.client.post.call_count, 3)
 
     def test_country_override_with_wrong_language_or_person_stays_blocked(self):
         for field, value in (("language", "ja"), ("user_id", 249), ("initiator", 249)):
@@ -808,7 +876,7 @@ class YoutubeIntegrationTests(OfflineTest):
         self.assertEqual(self.publisher.upload.call_count, 1)
         self.assertEqual(self.row(key)["state"], "custom_pending")
 
-    def test_unknown_resolves_by_readback_and_confirmed_never_repeats(self):
+    def test_timeout_formal_readback_stays_pending_without_receipt_and_never_repeats(self):
         _item, key = self.add_source()
         self.client.post.side_effect = TimeoutError("simulated timeout")
         self.tick()
@@ -816,10 +884,28 @@ class YoutubeIntegrationTests(OfflineTest):
         self.new_catalog.rows[request["content_sign"]] = [formal(request)]
         self.force_due(key)
         self.tick()
-        self.assertEqual((self.row(key)["state"], self.row(key)["final_id"]), ("confirmed", 901))
+        self.assertEqual((self.row(key)["state"], self.row(key)["final_id"]), ("custom_pending", 901))
         uploads = self.publisher.upload.call_count
+        self.force_due(key)
         self.tick()
         self.assertEqual(self.publisher.upload.call_count, uploads)
+        self.assertEqual(self.client.post.call_count, 1)
+        with contextlib.closing(sqlite3.connect(Path(self.env["AI_COVER_SOURCE_ROOT"]) / "upload.sqlite3")) as db:
+            state, api_id, final_id, error = db.execute(
+                "SELECT state, api_id, final_id, error FROM uploads").fetchone()
+        self.assertEqual((state, api_id, final_id, error),
+                         ("unknown", None, 901, "formal_found_receipt_missing"))
+
+    def test_valid_receipt_and_formal_readback_confirm_without_repeating_upload(self):
+        _item, key = self.add_source()
+        self.tick()
+        request = self.client.post.call_args.args[0]
+        self.new_catalog.rows[request["content_sign"]] = [formal(request)]
+        self.force_due(key)
+        self.tick()
+        self.assertEqual((self.row(key)["state"], self.row(key)["final_id"]), ("confirmed", 901))
+        self.tick()
+        self.assertEqual(self.publisher.upload.call_count, 1)
         self.assertEqual(self.client.post.call_count, 1)
 
     def test_legacy_ready_with_attempt_never_crosses_protocol(self):

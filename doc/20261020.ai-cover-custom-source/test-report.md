@@ -4,7 +4,9 @@
 
 入库实现提交为 e3f11ce5708df33d4c68ef2010d81aa51b03e019。备份点为 /mnt/data-disk/ai-cover-material-source/deployments/20261020T033316.881286Z，包含主源库、YT 同步库、共用上传账本在线备份及原配置。apply 成功，主 API PID784884；仅替换上传回调后的 app SHA256 为 cc68f0f4d5f7bf22ba7c6a1fbe50c56f4db360f4ea565b9fc62859055fe4405e，其余 AST 和六个独立制作 worker 保持不变。
 
-入库发布前离线验证共197项：共享客户端58项、历史发现与续对账12项、受控拒绝恢复7项、旧YT回归20项、日报含交互63项、部署23项、有限补传14项。Windows和Linux均验证相关核心测试。真实日报复验另外发现多行 requested_country 展示误用循环变量，后续修正逐行取值并增加回归测试；不影响正式 country、入库结果或迁移计数。
+最终离线验证共202项：共享客户端62项、历史发现与续对账12项、受控拒绝恢复7项、旧YT回归20项、日报含交互64项、部署23项、有限补传14项。Windows和Linux均验证相关核心测试。真实日报复验发现的多行 requested_country 展示误用循环变量已修正逐行取值并增加回归测试；不影响正式 country、入库结果或迁移计数。日报独立修正提交8424ded609372ca12709fca60e5b0a1bd88cf096已从GitHub部署，备份/mnt/data-disk/deploy/ai-image-daily/backups/20261020T034618.851867Z。
+
+最终复查收紧缺回执规则：即使正式素材已读回，缺有效data.id仍为unknown，保留正式证据、禁止重发；先前confirmed且缺回执的submit也不能直接跳过。新增/调整超时真实已存、重复响应、缺id、顶层id、非法持久化id及YouTube pending测试。生产当时已确认58张全部具备有效api_id，不存在需要纠正的误确认记录；守卫更新不改变T和冻结清单。
 
 真实样本：
 
@@ -17,4 +19,4 @@
 
 正式清单 /mnt/data-disk/ai-cover-material-source/frozen-manifest.json 共916张：1479共838、3360共45、2373共33、979共0；截图171、YouTube745。两条旧业务拒绝排除，无身份/时间待确认问题。原三张 pending 已核实旧正式 ID7694349/7694348/7694350并进入正式清单。sources SHA256=1488f3d1a6da2570fab8ffa6b3abc08f3359dabbaa239db71976c670ca17f639；完整文件SHA256=30294559ff54c43a49a2bc2772483f8318f61f0a70160fb811f716f02feb4245。
 
-HOLD、临时 Nginx 拦截及 cron 锁已解除，YouTube timer 恢复。有限补传服务 ai-cover-source-backfill-20261020.service 从原顺序继续，每轮≤50逐张提交，自动跳过6张已确认代表样本；进度在 backfill-progress.json，逐图状态以 upload.sqlite3 为准。日报 timer 待请求国家展示修正并复验后恢复，不重发历史日报。只有916张及全部清单问题均对账完成，才能报告完整补传完成。
+HOLD、临时 Nginx 拦截及 cron 锁已解除，YouTube和日报timer均恢复。有限补传服务 ai-cover-source-backfill-20261020.service 从原顺序继续，每轮≤50逐张提交，自动跳过6张已确认代表样本；进度在 backfill-progress.json，逐图状态以 upload.sqlite3 为准。日报修后真实6样本复验通过：4张Dramawave纳入、2张其他产品按原报表范围排除，8个正式ID合并为4个图片版本，4条迁移不增加首次生成数，逐图请求国家正确，unresolved为空，history.json哈希前后不变；没有重发历史日报。只有916张及全部清单问题均对账完成，才能报告完整补传完成。
