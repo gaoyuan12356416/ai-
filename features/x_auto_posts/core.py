@@ -140,12 +140,14 @@ class XAutoPostStoreError(RuntimeError):
 class AuditActor:
     user_id: str = ""
     name: str = ""
+    tenant_key: str = ""
 
     @classmethod
-    def from_values(cls, user_id: Any = "", name: Any = "") -> "AuditActor":
+    def from_values(cls, user_id: Any = "", name: Any = "", tenant_key: Any = "") -> "AuditActor":
         return cls(
             user_id=_bounded_text(user_id, "actor user id", 128, allow_empty=True),
             name=_bounded_text(name, "actor name", 200, allow_empty=True),
+            tenant_key=_bounded_text(tenant_key, "actor tenant", 255, allow_empty=True),
         )
 
 
@@ -817,6 +819,8 @@ def ensure_storage(db_path: Any) -> None:
                 COMMIT;
                 """
             )
+            if "created_by_tenant_key" not in {r[1] for r in conn.execute("PRAGMA table_info(x_auto_template)")}:
+                conn.execute("ALTER TABLE x_auto_template ADD COLUMN created_by_tenant_key TEXT NOT NULL DEFAULT ''")
             template_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(x_auto_template)")
@@ -1160,22 +1164,23 @@ class XAutoPostStore:
         config_json, config_sha = _template_config_json(config)
         confirmation_json, _ = _canonical_json(confirmation or {}, "template confirmation")
         confirmed = bool(isinstance(confirmation, Mapping) and confirmation.get("accepted") is True)
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO x_auto_template(
                     name,description,enabled,current_version,
-                    created_by_user_id,created_by_name,
+                    created_by_user_id,created_by_name,created_by_tenant_key,
                     updated_by_user_id,updated_by_name,created_at,updated_at
-                ) VALUES(?,?,0,1,?,?,?,?,?,?)
+                ) VALUES(?,?,0,1,?,?,?,?,?,?,?)
                 """,
                 (
                     clean_name,
                     clean_description,
                     actor.user_id,
                     actor.name,
+                    actor.tenant_key,
                     actor.user_id,
                     actor.name,
                     now,
@@ -1262,7 +1267,7 @@ class XAutoPostStore:
         config_json, config_sha = _template_config_json(config)
         confirmation_json, _ = _canonical_json(confirmation or {}, "template confirmation")
         confirmed = bool(isinstance(confirmation, Mapping) and confirmation.get("accepted") is True)
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             current = conn.execute("SELECT * FROM x_auto_template WHERE id=?", (normalized_id,)).fetchone()
@@ -1341,7 +1346,7 @@ class XAutoPostStore:
         if confirmation.get("accepted") is not True:
             raise XAutoPostStoreError("x_auto_confirmation_required", "explicit confirmation is required", 400)
         confirmation_json, _ = _canonical_json(confirmation, "template confirmation")
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             current = conn.execute(
@@ -1385,7 +1390,7 @@ class XAutoPostStore:
         expected = _positive_int(expected_version, "expected version")
         if type(enabled) is not bool:
             raise XAutoPostStoreError("x_auto_enabled_invalid", "enabled must be a boolean", 400)
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             row = self._template_row(conn, normalized_id)
@@ -1535,7 +1540,7 @@ class XAutoPostStore:
         normalized_publish_time = _publish_time(publish_time)
         generation_id = None if metric_generation_id is None else _positive_int(metric_generation_id, "metric generation id")
         blacklist_json, _ = _canonical_json(blacklist_snapshot or {}, "blacklist snapshot")
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             version_row = conn.execute(
@@ -3326,7 +3331,7 @@ class XAutoPostStore:
         normalized_date = _shanghai_date(metric_date)
         clean_product = _bounded_text(product, "product", 128)
         metadata_json, metadata_sha = _canonical_json(metadata or {}, "metric generation metadata")
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             existing = conn.execute(
@@ -3536,7 +3541,7 @@ class XAutoPostStore:
         actor: AuditActor = AuditActor(),
     ) -> MetricGeneration:
         normalized_id = _positive_int(generation_id, "metric generation id")
-        actor = AuditActor.from_values(actor.user_id, actor.name)
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
             generation = conn.execute("SELECT * FROM x_auto_metric_generation WHERE id=?", (normalized_id,)).fetchone()

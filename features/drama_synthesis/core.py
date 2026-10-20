@@ -1,0 +1,1754 @@
+"""Durable contracts for the drama-synthesis upgrade.
+
+The existing ``drama_material_job`` row remains the source of truth for the
+legacy job state machine.  These tables are additive and contain only the new
+immutable recipe, short-link and YouTube ledgers.  Credentials never enter
+SQLite or API DTOs.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import os
+import re
+import sqlite3
+import stat
+import tempfile
+import threading
+import unicodedata
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Union
+from urllib.parse import quote, urlencode, urlsplit
+
+
+RECIPE_VERSION = 1
+RECIPE_PROFILE = "drama-random-overlay-h264-720x1280-v1"
+RECIPE_CATEGORIES = ("border", "opacity_video", "corners", "tint")
+SOURCE_OVERLAY_VERSION = 1
+UPLOAD_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtubepartner",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "youtube.upload",
+        "youtube",
+        "youtubepartner",
+        "youtube.force-ssl",
+    }
+)
+IDENTITY_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtubepartner",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "youtube.readonly",
+        "youtube",
+        "youtubepartner",
+        "youtube.force-ssl",
+    }
+)
+COMMENT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+REVIEWED_WORKFLOW = "reviewed_thumbnail"
+REVIEWED_SCOPES = frozenset({"youtube", "youtube.force-ssl", "youtubepartner",
+    "https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl",
+    "https://www.googleapis.com/auth/youtubepartner"})
+SHORT_BASE_URL = "https://gy.g2flow.com/s2l/youtube"
+W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2284/view"
+JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
+OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+ASSET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+CHANNEL_ID_RE = re.compile(r"UC[A-Za-z0-9_-]{20,30}")
+CANARY_OPERATION_ID = "drama-hk-deploy-unlisted-20260827-shahrul-263"
+CANARY_APP_ID = "1479"
+CANARY_CHANNEL_LOCAL_ID = "263"
+CANARY_CHANNEL_ID = "UCHJ1jFaYuW8g5EM7hM5pPpg"
+CANARY_ACCOUNT_ID = "255"
+CANARY_TITLE = "DramaWave deployment verification - unlisted canary 20260827"
+CANARY_DESCRIPTION = "Internal deployment verification. Test video remains unlisted.\n{{url}}"
+CANARY_COMMENT = "DramaWave deployment verification: one unlisted canary, no public release."
+
+
+def is_youtube_canary(row: Mapping[str, Any]) -> bool:
+    return all(str(row.get(key) or "") == expected for key, expected in (
+        ("operation_id", CANARY_OPERATION_ID), ("privacy_status", "unlisted"),
+        ("app_id", CANARY_APP_ID), ("channel_local_id", CANARY_CHANNEL_LOCAL_ID),
+        ("channel_id", CANARY_CHANNEL_ID), ("youtube_account_id", CANARY_ACCOUNT_ID),
+    ))
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS = 60
+
+
+def normalize_youtube_publish_at(value: Any, *, require_future: bool = False) -> str:
+    """UTC seconds on disk; reject ambiguous wall-clock timestamps."""
+    if value is None or value == "":
+        return ""
+    try:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError()
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError()
+        normalized = parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (ValueError, TypeError, OverflowError):
+        raise DramaSynthesisError("youtube_schedule_invalid", "定时发布时间无效，请选择带时区的日期和时间", 400) from None
+    if require_future and normalized <= utc_now():
+        raise DramaSynthesisError("youtube_schedule_past", "定时发布时间必须晚于当前时间", 400)
+    return normalized
+
+
+def _bounded_decimal(value: Any, *, low: int = 0, high: int = 2_147_483_647) -> int:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        return 0
+    number = int(text)
+    return number if low <= number <= high else 0
+
+
+def _video_sync_payload(row: Mapping[str, Any], video_id: str, published_at_utc: str) -> Dict[str, Any]:
+    payload = {
+        "publish_id": int(row["id"]),
+        "video_id": str(video_id),
+        "app_id": _bounded_decimal(row.get("app_id"), low=1),
+        "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
+        "operator_user_id": str(row.get("operator_user_id") or ""),
+        "job_id": str(row.get("job_id") or ""),
+        "content_id": str(row.get("content_id") or ""),
+        "source_kind": str(row.get("source_kind") or ""),
+        "source_url": str(row.get("source_url") or ""),
+        "title": str(row.get("title") or ""),
+        "description_rendered": str(row.get("description_rendered") or ""),
+        "privacy_status": str(row.get("privacy_status") or ""),
+        "published_at_utc": str(published_at_utc),
+    }
+    if is_youtube_canary(row):
+        payload["canary_operation_id"] = CANARY_OPERATION_ID
+    if row.get("workflow") == REVIEWED_WORKFLOW:
+        payload.update(workflow=REVIEWED_WORKFLOW, source_material_id=row.get("source_material_id", ""),
+                       preparation_id=row.get("preparation_id", ""))
+    return payload
+
+
+def _comment_sync_payload(row: Mapping[str, Any], comment_id: str, published_at_utc: str) -> Dict[str, Any]:
+    payload = {
+        "publish_id": int(row["id"]),
+        "video_id": str(row.get("video_id") or ""),
+        "comment_id": str(comment_id),
+        "channel_local_id": _bounded_decimal(row.get("channel_local_id"), low=1),
+        "operator_user_id": str(row.get("operator_user_id") or ""),
+        "comment_text": str(row.get("comment_text") or ""),
+        "published_at_utc": str(published_at_utc),
+    }
+    if is_youtube_canary(row):
+        payload["canary_operation_id"] = CANARY_OPERATION_ID
+    return payload
+
+
+class DramaSynthesisError(RuntimeError):
+    def __init__(self, code: str, message: str, status: int = 400, **details: Any):
+        self.code = str(code)
+        self.status = int(status)
+        self.details = dict(details)
+        super().__init__(message)
+
+
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def normalize_channel_scopes(value: Any) -> frozenset[str]:
+    """Accept stored OAuth scope metadata without accepting a missing scope."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return frozenset()
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = text.replace(",", " ").split()
+        return normalize_channel_scopes(parsed)
+    if isinstance(value, Mapping):
+        for key in ("scopes", "scope"):
+            if key in value:
+                return normalize_channel_scopes(value.get(key))
+        return frozenset()
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset()
+    normalized = set()
+    for item in value:
+        scope = str(item or "").strip()
+        if not scope:
+            continue
+        normalized.add(scope)
+        if scope.startswith("https://www.googleapis.com/auth/"):
+            normalized.add(scope.rsplit("/", 1)[-1])
+    return frozenset(normalized)
+
+
+def scope_capabilities(scopes: Iterable[str]) -> Dict[str, bool]:
+    normalized = normalize_channel_scopes(list(scopes))
+    upload = bool(normalized & UPLOAD_SCOPES)
+    identity = bool(normalized & IDENTITY_SCOPES)
+    comment = COMMENT_SCOPE in normalized or "youtube.force-ssl" in normalized
+    return {"upload_eligible": upload, "identity_eligible": identity, "comment_eligible": comment}
+
+
+def _catalog_assets(catalog: Mapping[str, Any]) -> Dict[str, tuple[Dict[str, Any], ...]]:
+    if int(catalog.get("version") or 0) != RECIPE_VERSION or str(catalog.get("profile") or "") != RECIPE_PROFILE:
+        raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板目录版本无效", 503)
+    fingerprint = str(catalog.get("manifest_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板目录指纹无效", 503)
+    categories = catalog.get("categories")
+    if not isinstance(categories, Mapping):
+        raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板目录无效", 503)
+    result: Dict[str, tuple[Dict[str, Any], ...]] = {}
+    for category in RECIPE_CATEGORIES:
+        rows = categories.get(category)
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+            raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板层级不完整", 503)
+        normalized = []
+        seen = set()
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板素材无效", 503)
+            name = str(raw.get("name") or "")
+            sha = str(raw.get("sha256") or "").lower()
+            media_type = str(raw.get("media_type") or "")
+            try:
+                size = int(raw.get("size") or 0)
+            except (TypeError, ValueError, OverflowError):
+                size = 0
+            if (
+                not ASSET_NAME_RE.fullmatch(name)
+                or name in seen
+                or not re.fullmatch(r"[0-9a-f]{64}", sha)
+                or media_type not in {"image/png", "video/webm"}
+                or not 0 < size <= 2 * 1024 * 1024 * 1024
+            ):
+                raise DramaSynthesisError("drama_template_catalog_invalid", "随机模板素材元数据无效", 503)
+            normalized.append({"name": name, "sha256": sha, "media_type": media_type, "size": size})
+            seen.add(name)
+        result[category] = tuple(normalized)
+    return result
+
+
+def _stable_int(identity: Mapping[str, Any], label: str, low: int, high: int) -> int:
+    raw = _canonical_json({"identity": identity, "label": label}).encode("utf-8")
+    return low + int.from_bytes(hashlib.sha256(raw).digest()[:8], "big") % (high - low + 1)
+
+
+def validate_source_overlay(recipe: Mapping[str, Any]) -> Optional[Dict[str, int]]:
+    """Validate the optional frozen layer without upgrading legacy recipes."""
+    if "source_overlay" not in recipe:
+        return None
+    overlay = recipe["source_overlay"]
+    if (
+        not isinstance(overlay, Mapping)
+        or set(overlay) != {"version", "opacity_bp", "scale_bp"}
+        or any(type(overlay.get(key)) is not int for key in ("version", "opacity_bp", "scale_bp"))
+        or overlay["version"] != SOURCE_OVERLAY_VERSION
+        or not 200 <= overlay["opacity_bp"] <= 500
+        or not 11000 <= overlay["scale_bp"] <= 15000
+    ):
+        raise DramaSynthesisError("drama_source_overlay_invalid", "原视频叠层配方无效", 409)
+    return dict(overlay)
+
+
+def freeze_random_recipe(
+    *,
+    job_id: str,
+    content_id: str,
+    request: Any,
+    catalog: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Resolve auto/manual input exactly once into an immutable recipe."""
+    if not JOB_ID_RE.fullmatch(str(job_id or "")):
+        raise DramaSynthesisError("invalid_request", "任务ID无效")
+    if not isinstance(request, Mapping):
+        raise DramaSynthesisError("drama_random_template_required", "随机模板配置必填")
+    mode = str(request.get("mode") or "").strip().lower()
+    if mode not in {"auto", "manual"}:
+        raise DramaSynthesisError("drama_random_template_mode_invalid", "随机模板模式无效")
+    source = str(request.get("source") or "").strip()
+    if source not in {"concat_video", "no_bgm_video"}:
+        raise DramaSynthesisError("drama_random_template_source_invalid", "随机模板源视频必填且无效")
+    assets = _catalog_assets(catalog)
+    manifest_sha = str(catalog["manifest_sha256"]).lower()
+    identity = {
+        "job_id": str(job_id),
+        "content_id": str(content_id or ""),
+        "manifest_sha256": manifest_sha,
+        "profile": RECIPE_PROFILE,
+        "version": RECIPE_VERSION,
+        "source": source,
+    }
+    requested_layers = request.get("layers") if isinstance(request.get("layers"), Mapping) else {}
+    if mode == "manual" and set(requested_layers) != set(RECIPE_CATEGORIES):
+        raise DramaSynthesisError("drama_random_template_layers_required", "手动模式必须选择全部模板层级")
+    selected: Dict[str, Dict[str, Any]] = {}
+    for category in RECIPE_CATEGORIES:
+        rows = assets[category]
+        if mode == "auto":
+            row = rows[_stable_int(identity, "asset:" + category, 0, len(rows) - 1)]
+        else:
+            name = str(requested_layers.get(category) or "")
+            matches = [item for item in rows if item["name"] == name]
+            if len(matches) != 1:
+                raise DramaSynthesisError("drama_random_template_layer_invalid", "手动模板层级不存在")
+            row = matches[0]
+        selected[category] = dict(row)
+    recipe = {
+        "version": RECIPE_VERSION,
+        "profile": RECIPE_PROFILE,
+        "mode": mode,
+        "source": source,
+        "asset_set_sha256": manifest_sha,
+        "assets": selected,
+        "rotation_millidegrees": _stable_int(identity, "rotation", -2000, 2000),
+        "scale_bp": _stable_int(identity, "scale", 9800, 10200),
+        "tint_opacity_bp": _stable_int(identity, "tint-opacity", 100, 1000),
+        "source_overlay": {
+            "version": SOURCE_OVERLAY_VERSION,
+            "opacity_bp": _stable_int(identity, "source-overlay-opacity", 200, 500),
+            "scale_bp": _stable_int(identity, "source-overlay-scale", 11000, 15000),
+        },
+    }
+    recipe["recipe_sha256"] = _sha256_text(_canonical_json(recipe))
+    return recipe
+
+
+def build_long_url(job_id: str, content_id: str) -> str:
+    if not JOB_ID_RE.fullmatch(str(job_id or "")):
+        raise DramaSynthesisError("invalid_request", "任务ID无效")
+    normalized_content_id = str(content_id or "").strip()
+    if not normalized_content_id or len(normalized_content_id) > 256:
+        raise DramaSynthesisError("invalid_request", "content_id无效")
+    query = urlencode(
+        (("af_dp", normalized_content_id), ("c", "ai_youtube"), ("af_channel", "ai_youtube"), ("af_c_id", str(job_id))),
+        quote_via=quote,
+        safe="",
+    )
+    target = W2A_BASE_URL + "?" + query
+    parsed = urlsplit(target)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "www.dramawavew2a.com"
+        or parsed.path != "/ads/101/2284/view"
+        or parsed.fragment
+    ):
+        raise DramaSynthesisError("drama_short_link_target_invalid", "短链目标地址无效", 500)
+    return target
+
+
+def render_wrapper_html(job_id: str, content_id: str, *, target: str = "") -> bytes:
+    target = target or build_long_url(job_id, content_id)
+    escaped = html.escape(target, quote=True)
+    document = (
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+        "<meta name=\"referrer\" content=\"no-referrer\">"
+        f"<meta http-equiv=\"refresh\" content=\"0;url={escaped}\">"
+        f"<link rel=\"canonical\" href=\"{escaped}\">"
+        "<title>DramaWave</title>"
+        "<script>(function(){var u=new URL(document.querySelector('link[rel=canonical]').href);"
+        "var p=new URLSearchParams(location.search),f=p.get('fbclid');"
+        "if(f&&f.length<=512){u.searchParams.set('fbclid',f)}location.replace(u.toString())})()</script>"
+        "</head><body></body></html>\n"
+    )
+    return document.encode("utf-8")
+
+
+class ImmutableFilesystemPublisher:
+    """Publish only ``<id>.html`` below an explicitly configured origin root."""
+
+    def __init__(self, root: Union[str, os.PathLike], *, owner_user: str = ""):
+        path = Path(root)
+        if not path.is_absolute():
+            raise ValueError("short-link root must be absolute")
+        self.root = path
+        self.owner_user = str(owner_user or "").strip()
+        self.owner_uid: Optional[int] = None
+        self.owner_gid: Optional[int] = None
+        if self.owner_user:
+            if os.name == "nt":
+                raise ValueError("short-link owner is not supported on Windows")
+            import pwd
+
+            try:
+                owner = pwd.getpwnam(self.owner_user)
+            except KeyError:
+                raise ValueError("short-link owner does not exist") from None
+            self.owner_uid = int(owner.pw_uid)
+            self.owner_gid = int(owner.pw_gid)
+            if self.root.is_symlink() or not self.root.is_dir():
+                raise ValueError("short-link owner root is unavailable")
+            self._validate_owner(self.root)
+
+    def _validate_owner(self, path: Path) -> None:
+        if self.owner_uid is None or self.owner_gid is None:
+            return
+        metadata = path.stat()
+        is_root = path == self.root
+        expected_mode = 0o750 if is_root else 0o640
+        expected_type = stat.S_ISDIR(metadata.st_mode) if is_root else stat.S_ISREG(metadata.st_mode)
+        if (
+            not expected_type
+            or metadata.st_uid != self.owner_uid
+            or metadata.st_gid != self.owner_gid
+            or stat.S_IMODE(metadata.st_mode) != expected_mode
+        ):
+            raise DramaSynthesisError("drama_short_link_owner_invalid", "短链目录或文件所有者无效", 503)
+
+    def publish(self, link_id: int, body: bytes) -> Dict[str, Any]:
+        if not 1 <= int(link_id) <= 9_223_372_036_854_775_807:
+            raise DramaSynthesisError("drama_short_link_id_invalid", "短链ID无效", 500)
+        if self.root.is_symlink():
+            raise DramaSynthesisError("drama_short_link_path_invalid", "短链路径无效", 500)
+        if self.owner_uid is None:
+            self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        elif not self.root.is_dir():
+            raise DramaSynthesisError("drama_short_link_root_missing", "短链目录尚未配置", 503)
+        self._validate_owner(self.root)
+        target = self.root / (str(int(link_id)) + ".html")
+        if target.is_symlink():
+            raise DramaSynthesisError("drama_short_link_path_invalid", "短链路径无效", 500)
+        if target.exists():
+            self._validate_owner(target)
+            existing = target.read_bytes()
+            if existing != body:
+                raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链ID已存在且目标不一致", 409)
+            return {"reused": True, "sha256": hashlib.sha256(body).hexdigest()}
+        temporary: Optional[Path] = None
+        created = False
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(prefix=target.name + ".tmp.", dir=str(self.root))
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                if self.owner_uid is not None and self.owner_gid is not None:
+                    os.fchmod(handle.fileno(), 0o640)
+                    os.fchown(handle.fileno(), self.owner_uid, self.owner_gid)
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, target)
+                created = True
+                self._validate_owner(target)
+            except FileExistsError:
+                self._validate_owner(target)
+                if target.is_symlink() or target.read_bytes() != body:
+                    raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链ID已存在且目标不一致", 409)
+            if created and hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(str(self.root), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        try:
+            persisted = target.read_bytes()
+        except OSError:
+            raise DramaSynthesisError("drama_short_link_write_failed", "短链落盘读回失败", 503) from None
+        if persisted != body:
+            raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链落盘读回不一致", 409)
+        return {"reused": not created, "sha256": hashlib.sha256(body).hexdigest()}
+
+
+def complete_recipe_in_transaction(conn, job_id: str, *, output_url: str, output_sha256: str,
+                                   output_profile: str, recipe_sha256: str) -> Dict[str, Any]:
+    """Validate and consume a GPU result in the caller's existing transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("recipe completion requires an existing write transaction")
+    parsed = urlsplit(str(output_url or ""))
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片地址无效", 502)
+    digest = str(output_sha256 or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise DramaSynthesisError("drama_random_output_invalid", "随机模板成片指纹无效", 502)
+    cursor = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,))
+    raw = cursor.fetchone()
+    row = dict(zip((item[0] for item in cursor.description), raw)) if raw is not None else None
+    if row is None or row["recipe_sha256"] != recipe_sha256 or row["recipe_profile"] != output_profile:
+        raise DramaSynthesisError("drama_random_output_identity_mismatch", "随机模板成片身份不一致", 409)
+    if row["output_url"] and (row["output_url"] != output_url or row["output_sha256"] != digest):
+        raise DramaSynthesisError("drama_random_output_immutable_conflict", "随机模板成片已冻结且不一致", 409)
+    if row["completed_at_utc"] and row["output_url"] == output_url and row["output_sha256"] == digest and row["output_profile"] == output_profile:
+        return row
+    conn.execute(
+        """UPDATE drama_synthesis_recipe SET output_url=?,output_sha256=?,output_profile=?,
+               completed_at_utc=CASE WHEN completed_at_utc='' THEN ? ELSE completed_at_utc END
+               WHERE job_id=?""",
+        (output_url, digest, output_profile, utc_now(), job_id),
+    )
+    cursor = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,))
+    return dict(zip((item[0] for item in cursor.description), cursor.fetchone()))
+
+
+class DramaSynthesisStore:
+    def __init__(self, db_path: Union[str, os.PathLike]):
+        self.db_path = str(db_path)
+        self._lock = threading.RLock()
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(os.path.abspath(self.db_path))
+        os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def ensure_storage(self) -> None:
+        statements = (
+            """CREATE TABLE IF NOT EXISTS drama_synthesis_recipe(
+                job_id TEXT PRIMARY KEY, recipe_version INTEGER NOT NULL,
+                recipe_profile TEXT NOT NULL, recipe_sha256 TEXT NOT NULL,
+                recipe_json TEXT NOT NULL, output_url TEXT NOT NULL DEFAULT '',
+                output_sha256 TEXT NOT NULL DEFAULT '', output_profile TEXT NOT NULL DEFAULT '',
+                created_at_utc TEXT NOT NULL, completed_at_utc TEXT NOT NULL DEFAULT ''
+            )""",
+            """CREATE TABLE IF NOT EXISTS drama_material_short_link(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
+                material_kind TEXT NOT NULL, content_id TEXT NOT NULL,
+                short_url TEXT NOT NULL DEFAULT '', long_url TEXT NOT NULL,
+                wrapper_sha256 TEXT NOT NULL, publish_state TEXT NOT NULL,
+                error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
+                created_at_utc TEXT NOT NULL, published_at_utc TEXT NOT NULL DEFAULT ''
+            )""",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_drama_material_short_identity ON drama_material_short_link(job_id,material_kind)",
+            """CREATE TABLE IF NOT EXISTS drama_youtube_publish(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE,
+                job_id TEXT NOT NULL, content_id TEXT NOT NULL DEFAULT '', app_id TEXT NOT NULL, channel_local_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL, youtube_account_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL, source_url TEXT NOT NULL,
+                title TEXT NOT NULL, description_template TEXT NOT NULL, description_rendered TEXT NOT NULL, comment_text TEXT NOT NULL,
+                operator_user_id TEXT NOT NULL DEFAULT '', operator_name TEXT NOT NULL DEFAULT '', privacy_status TEXT NOT NULL DEFAULT 'public',
+                duplicate_confirmed INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL, video_state TEXT NOT NULL, comment_status TEXT NOT NULL, sync_status TEXT NOT NULL DEFAULT 'pending',
+                video_id TEXT NOT NULL DEFAULT '', comment_id TEXT NOT NULL DEFAULT '',
+                resumable_session_uri TEXT NOT NULL DEFAULT '', source_size INTEGER NOT NULL DEFAULT 0,
+                next_byte INTEGER NOT NULL DEFAULT 0, unknown_outcome INTEGER NOT NULL DEFAULT 0,
+                video_attempt_count INTEGER NOT NULL DEFAULT 0, comment_attempt_count INTEGER NOT NULL DEFAULT 0,
+                source_sha256 TEXT NOT NULL DEFAULT '', source_duration_ms INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
+                lease_owner TEXT NOT NULL DEFAULT '', lease_expires_at_utc TEXT NOT NULL DEFAULT '',
+                lease_generation INTEGER NOT NULL DEFAULT 0,
+                created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+                video_published_at_utc TEXT NOT NULL DEFAULT '', comment_published_at_utc TEXT NOT NULL DEFAULT ''
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_drama_youtube_job_channel ON drama_youtube_publish(job_id,channel_id,id)",
+            "CREATE INDEX IF NOT EXISTS idx_drama_youtube_status ON drama_youtube_publish(status,unknown_outcome,id)",
+            """CREATE TABLE IF NOT EXISTS drama_youtube_sync_outbox(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, publish_id INTEGER NOT NULL,
+                entity_kind TEXT NOT NULL, external_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', attempt_count INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
+                lease_owner TEXT NOT NULL DEFAULT '', lease_generation INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at_utc TEXT NOT NULL DEFAULT '', created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+                UNIQUE(entity_kind,external_id), FOREIGN KEY(publish_id) REFERENCES drama_youtube_publish(id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS drama_youtube_publish_event(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
+                phase TEXT NOT NULL, outcome TEXT NOT NULL, safe_detail TEXT NOT NULL DEFAULT '',
+                created_at_utc TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES drama_youtube_publish(id)
+            )""",
+        )
+        with self._lock:
+            conn = self._connect()
+            try:
+                # API and both workers may start together. Serialize the
+                # PRAGMA/ALTER sequence across processes, not only this object.
+                conn.execute("BEGIN IMMEDIATE")
+                for statement in statements:
+                    conn.execute(statement)
+                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(drama_youtube_publish)")}
+                if "lease_generation" not in columns:
+                    conn.execute(
+                        "ALTER TABLE drama_youtube_publish ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "content_id" not in columns:
+                    conn.execute(
+                        "ALTER TABLE drama_youtube_publish ADD COLUMN content_id TEXT NOT NULL DEFAULT ''"
+                    )
+                # Additive migration: old workers remain on the legacy lane.
+                for name, default in (("workflow", "legacy"), ("preparation_id", ""),
+                        ("source_material_id", ""), ("approved_cover_path", ""),
+                        ("approved_cover_sha256", ""), ("reviewed_phase", "upload"),
+                        ("thumbnail_status", "pending"), ("processing_status", "pending"),
+                        ("public_status", "pending"), ("publish_at", ""), ("initial_publish_at", ""),
+                        ("schedule_status", "none"), ("schedule_command", ""),
+                        ("schedule_command_status", ""), ("schedule_operation_id", ""),
+                        ("schedule_requested_publish_at", ""),
+                        ("schedule_event_at", ""), ("schedule_write_action", ""),
+                        ("schedule_confirmed_publish_at", ""), ("schedule_next_check_at", "")):
+                    if name not in columns:
+                        conn.execute("ALTER TABLE drama_youtube_publish ADD COLUMN %s TEXT NOT NULL DEFAULT '%s'" % (name, default))
+                if "schedule_version" not in columns:
+                    conn.execute("ALTER TABLE drama_youtube_publish ADD COLUMN schedule_version INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_reviewed_preparation ON drama_youtube_publish(preparation_id) WHERE workflow='reviewed_thumbnail'")
+                conn.commit()
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        return dict(row) if row is not None else None
+
+    def freeze_recipe(self, job_id: str, recipe: Mapping[str, Any]) -> Dict[str, Any]:
+        if (
+            not JOB_ID_RE.fullmatch(str(job_id or ""))
+            or int(recipe.get("version") or 0) != RECIPE_VERSION
+            or str(recipe.get("profile") or "") != RECIPE_PROFILE
+        ):
+            raise DramaSynthesisError("drama_recipe_identity_invalid", "随机模板配方身份无效")
+        validate_source_overlay(recipe)
+        encoded = _canonical_json(recipe)
+        sha = str(recipe.get("recipe_sha256") or "")
+        if sha != _sha256_text(_canonical_json({k: v for k, v in recipe.items() if k != "recipe_sha256"})):
+            raise DramaSynthesisError("drama_recipe_hash_invalid", "随机模板配方指纹无效")
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,)).fetchone()
+                if existing is not None:
+                    if existing["recipe_json"] != encoded:
+                        raise DramaSynthesisError("drama_recipe_immutable_conflict", "任务随机模板配方已冻结", 409)
+                    conn.commit()
+                    return dict(existing)
+                conn.execute(
+                    "INSERT INTO drama_synthesis_recipe(job_id,recipe_version,recipe_profile,recipe_sha256,recipe_json,created_at_utc) VALUES(?,?,?,?,?,?)",
+                    (job_id, int(recipe["version"]), str(recipe["profile"]), sha, encoded, now),
+                )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def recipe(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute("SELECT * FROM drama_synthesis_recipe WHERE job_id=?", (job_id,)).fetchone()
+                if row is None:
+                    return None
+                item = dict(row)
+                item["recipe"] = json.loads(item.pop("recipe_json"))
+                return item
+            finally:
+                conn.close()
+
+    def complete_recipe(self, job_id: str, *, output_url: str, output_sha256: str, output_profile: str, recipe_sha256: str) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                result = complete_recipe_in_transaction(
+                    conn, job_id, output_url=output_url, output_sha256=output_sha256,
+                    output_profile=output_profile, recipe_sha256=recipe_sha256,
+                )
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def ensure_short_link(self, job_id: str, material_kind: str, content_id: str, publisher: Optional[ImmutableFilesystemPublisher], *, attribution_url: str = "") -> Dict[str, Any]:
+        if attribution_url:
+            from features.youtube_auto_publish.attribution import BASE_URL
+            parsed = urlsplit(attribution_url)
+            if (material_kind != "custom_source" or attribution_url.split("?", 1)[0] != BASE_URL
+                    or parsed.fragment or parsed.username or parsed.password):
+                raise DramaSynthesisError("attribution_invalid", "YouTube归因长链无效", 409)
+        if material_kind not in {"concat_video", "no_bgm_video", "random_template", "custom_source"}:
+            raise DramaSynthesisError("drama_short_link_material_invalid", "短链只支持视频素材")
+        long_url = attribution_url or build_long_url(job_id, content_id)
+        body = render_wrapper_html(job_id, content_id, target=long_url)
+        body_sha = hashlib.sha256(body).hexdigest()
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_material_short_link WHERE job_id=? AND material_kind=?", (job_id, material_kind)).fetchone()
+                if attribution_url:
+                    from features.youtube_auto_publish.attribution import build_url
+                    reserved = conn.execute("SELECT context FROM youtube_link_attribution WHERE task_id=?", (job_id,)).fetchone()
+                    ledger = conn.execute("SELECT * FROM drama_youtube_publish WHERE preparation_id=? AND workflow='reviewed_thumbnail'", (job_id,)).fetchone()
+                    if not row or not reserved or not ledger or build_url(json.loads(reserved['context']), dict(ledger)) != attribution_url:
+                        raise DramaSynthesisError("attribution_conflict", "归因长链与冻结发布记录不一致", 409)
+                if row is None:
+                    cursor = conn.execute(
+                        "INSERT INTO drama_material_short_link(job_id,material_kind,content_id,long_url,wrapper_sha256,publish_state,created_at_utc) VALUES(?,?,?,?,?,?,?)",
+                        (job_id, material_kind, content_id, long_url, body_sha, "pending", now),
+                    )
+                    link_id = int(cursor.lastrowid)
+                else:
+                    if attribution_url and row["publish_state"] == "pending" and not row["long_url"] and not row["wrapper_sha256"]:
+                        reserved = conn.execute("SELECT context FROM youtube_link_attribution WHERE task_id=? AND link_id=?", (job_id, row["id"])).fetchone()
+                        if not reserved or row["content_id"] != content_id:
+                            raise DramaSynthesisError("attribution_conflict", "归因短链预留身份不一致", 409)
+                        conn.execute("UPDATE drama_material_short_link SET long_url=?,wrapper_sha256=? WHERE id=?", (long_url, body_sha, row["id"]))
+                        row = conn.execute("SELECT * FROM drama_material_short_link WHERE id=?", (row["id"],)).fetchone()
+                    if row["content_id"] != content_id or row["long_url"] != long_url or row["wrapper_sha256"] != body_sha:
+                        raise DramaSynthesisError("drama_short_link_immutable_conflict", "短链目标已冻结且不一致", 409)
+                    link_id = int(row["id"])
+                    if row["publish_state"] == "published":
+                        conn.commit()
+                        published = dict(row)
+                        published["reused"] = True
+                        return published
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        short_url = f"{SHORT_BASE_URL}/{link_id}.html"
+        if publisher is None:
+            self._short_failure(link_id, "drama_short_link_publisher_not_configured", "短链发布器尚未配置")
+            raise DramaSynthesisError("drama_short_link_publisher_not_configured", "短链发布器尚未配置", 503, link_id=link_id)
+        try:
+            result = publisher.publish(link_id, body)
+        except DramaSynthesisError as exc:
+            self._short_failure(link_id, exc.code, str(exc))
+            raise
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE drama_material_short_link SET short_url=?,publish_state='published',error_code='',error_message='',published_at_utc=? WHERE id=? AND long_url=? AND wrapper_sha256=?",
+                    (short_url, utc_now(), link_id, long_url, body_sha),
+                )
+                conn.commit()
+                row = dict(conn.execute("SELECT * FROM drama_material_short_link WHERE id=?", (link_id,)).fetchone())
+                row["reused"] = bool(result.get("reused"))
+                return row
+            finally:
+                conn.close()
+
+    def _short_failure(self, link_id: int, code: str, message: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE drama_material_short_link SET publish_state='failed',error_code=?,error_message=? WHERE id=? AND publish_state<>'published'",
+                    (str(code)[:96], str(message)[:500], int(link_id)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def short_link(self, job_id: str, material_kind: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                return self._row(conn.execute("SELECT * FROM drama_material_short_link WHERE job_id=? AND material_kind=?", (job_id, material_kind)).fetchone())
+            finally:
+                conn.close()
+
+    def short_links_for_job(self, job_id: str) -> list[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                return [dict(row) for row in conn.execute("SELECT * FROM drama_material_short_link WHERE job_id=? ORDER BY id", (job_id,)).fetchall()]
+            finally:
+                conn.close()
+
+    def enqueue_youtube(self, **request: Any) -> Dict[str, Any]:
+        """Public/UI callers can never select the internal privacy lane."""
+        if (
+            request.get("operation_id") == CANARY_OPERATION_ID
+            or any(key in request for key in ("privacy_status", "_privacy_status", "canary_operation_id", "_workflow", "workflow", "_reviewed", "_publish_at", "_schedule_version", "publish_at", "schedule_version"))
+        ):
+            raise DramaSynthesisError("youtube_canary_internal_only", "内部测试不可通过正式发布入口创建", 403)
+        return self._enqueue_youtube(**request)
+
+    def enqueue_reviewed_youtube(self, *, preparation_id: str, source_material_id: str,
+                                 approved_cover_path: str, approved_cover_sha256: str,
+                                 publish_at: str = "", schedule_version: int = 0, attribution_pending: bool = False, **request: Any) -> Dict[str, Any]:
+        """Internal handoff after the preparation service freezes an approved cover.
+
+        Both workflows allocate IDs from this table because the shared HK media
+        executor caches task-{publish_id}; separate counters would mix videos.
+        """
+        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version", "_attribution_pending")):
+            raise DramaSynthesisError("youtube_reviewed_request_invalid", "审核发布请求无效", 400)
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(preparation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(source_material_id or ""))
+                or not Path(approved_cover_path).is_absolute()
+                or not re.fullmatch(r"[0-9a-f]{64}", str(approved_cover_sha256 or ""))):
+            raise DramaSynthesisError("youtube_reviewed_approval_invalid", "已审核封面或素材身份无效", 400)
+        scopes = tuple(request.get("scopes") or ())
+        if not REVIEWED_SCOPES.intersection(scopes):
+            raise DramaSynthesisError("youtube_thumbnail_scope_missing", "频道授权缺少封面及公开设置权限", 409)
+        request["scopes"] = scopes
+        return self._enqueue_youtube(_workflow=REVIEWED_WORKFLOW,
+            _reviewed=(str(preparation_id), str(source_material_id), str(approved_cover_path), approved_cover_sha256),
+            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version, _attribution_pending=attribution_pending, **request)
+
+    def enqueue_youtube_canary(
+        self, *, job_id: str, content_id: str, source_kind: str, source_url: str,
+        description_rendered: str, scopes: Iterable[str], operator_user_id: str,
+        operator_name: str = "",
+    ) -> Dict[str, Any]:
+        return self._enqueue_youtube(
+            operation_id=CANARY_OPERATION_ID, job_id=job_id, content_id=content_id,
+            app_id=CANARY_APP_ID, channel_local_id=CANARY_CHANNEL_LOCAL_ID,
+            channel_id=CANARY_CHANNEL_ID, youtube_account_id=CANARY_ACCOUNT_ID,
+            source_kind=source_kind, source_url=source_url, title=CANARY_TITLE,
+            description_template=CANARY_DESCRIPTION, description_rendered=description_rendered,
+            comment_text=CANARY_COMMENT, duplicate_confirmed=False, scopes=scopes,
+            operator_user_id=operator_user_id, operator_name=operator_name,
+            _privacy_status="unlisted",
+        )
+
+    def _enqueue_youtube(
+        self,
+        *,
+        operation_id: str,
+        job_id: str,
+        content_id: str,
+        app_id: str,
+        channel_local_id: str,
+        channel_id: str,
+        youtube_account_id: str,
+        source_kind: str,
+        source_url: str,
+        title: str,
+        description_template: str,
+        description_rendered: str,
+        comment_text: str,
+        duplicate_confirmed: bool,
+        scopes: Iterable[str],
+        operator_user_id: str = "",
+        operator_name: str = "",
+        _privacy_status: str = "public",
+        _workflow: str = "legacy",
+        _reviewed: tuple[str, str, str, str] = ("", "", "", ""),
+        _publish_at: str = "",
+        _schedule_version: int = 0,
+        _attribution_pending: bool = False,
+    ) -> Dict[str, Any]:
+        if type(_schedule_version) is not int or _schedule_version < 0:
+            raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
+        app_id, channel_local_id, youtube_account_id = str(app_id), str(channel_local_id), str(youtube_account_id)
+        # Feishu user IDs are opaque strings, not numeric advertiser IDs.
+        # Preserve them exactly; empty remains the historical unknown actor.
+        if (type(operator_user_id) is not str or len(operator_user_id) > 128
+                or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in operator_user_id)):
+            raise DramaSynthesisError("youtube_operator_invalid", "发布操作者标识无效", 400)
+        identity = dict(operation_id=operation_id, app_id=app_id, channel_local_id=channel_local_id,
+                        channel_id=channel_id, youtube_account_id=youtube_account_id, privacy_status=_privacy_status)
+        if (_privacy_status != "public" or operation_id == CANARY_OPERATION_ID) and not is_youtube_canary(identity):
+            raise DramaSynthesisError("youtube_canary_identity_invalid", "内部测试频道身份不匹配", 403)
+        if is_youtube_canary(identity) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", operator_user_id):
+            raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 400)
+        if not OPERATION_ID_RE.fullmatch(str(operation_id or "")) or not JOB_ID_RE.fullmatch(str(job_id or "")):
+            raise DramaSynthesisError("invalid_request", "发布操作ID或任务ID无效")
+        content_id = str(content_id or "").strip()
+        if not content_id or len(content_id) > 256:
+            raise DramaSynthesisError("invalid_request", "内容ID无效")
+        if not CHANNEL_ID_RE.fullmatch(str(channel_id or "")):
+            raise DramaSynthesisError("youtube_channel_invalid", "YouTube频道无效")
+        parsed = urlsplit(str(source_url or ""))
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise DramaSynthesisError("youtube_source_invalid", "待发布视频地址无效")
+        if (_workflow not in {"legacy", REVIEWED_WORKFLOW}
+                or (_workflow == REVIEWED_WORKFLOW and source_kind != "custom_source")
+                or (_workflow == "legacy" and str(source_kind or "") not in {"concat_video", "no_bgm_video", "random_template"})):
+            raise DramaSynthesisError("youtube_source_invalid", "待发布视频类型无效")
+        title = str(title or "").strip()
+        description_template = str(description_template or "").strip()
+        description_rendered = str(description_rendered or "").strip()
+        comment_text = str(comment_text or "").strip()
+        if (not 1 <= len(title) <= 100 or not description_template or not description_rendered
+                or len(description_template.encode("utf-8")) > 5000
+                or len(description_rendered.encode("utf-8")) > 5000 or len(comment_text) > 1000):
+            raise DramaSynthesisError("youtube_metadata_invalid", "YouTube标题、描述或评论超出限制")
+        capabilities = scope_capabilities(scopes)
+        if not capabilities["upload_eligible"]:
+            raise DramaSynthesisError("youtube_upload_scope_missing", "频道授权缺少视频上传权限", 409)
+        if not capabilities["identity_eligible"]:
+            raise DramaSynthesisError("youtube_identity_scope_missing", "频道授权缺少身份核验权限", 409)
+        if comment_text and not capabilities["comment_eligible"]:
+            raise DramaSynthesisError("youtube_comment_scope_missing", "频道授权缺少评论权限", 409)
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute("SELECT * FROM drama_youtube_publish WHERE operation_id=?", (operation_id,)).fetchone()
+                if existing is not None:
+                    immutable = (job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id, source_kind, source_url, title, description_template, description_rendered, comment_text, _privacy_status)
+                    stored = tuple(existing[key] for key in ("job_id", "content_id", "app_id", "channel_local_id", "channel_id", "youtube_account_id", "source_kind", "source_url", "title", "description_template", "description_rendered", "comment_text", "privacy_status"))
+                    if (immutable != stored or existing["workflow"] != _workflow
+                            or (_workflow == REVIEWED_WORKFLOW and tuple(existing[key] for key in
+                                ("preparation_id", "source_material_id", "approved_cover_path", "approved_cover_sha256")) != _reviewed)
+                            or (_workflow == REVIEWED_WORKFLOW and existing["initial_publish_at"] != _publish_at)):
+                        raise DramaSynthesisError("youtube_operation_conflict", "发布操作ID已用于不同请求", 409)
+                    conn.commit()
+                    return dict(existing)
+                if _workflow == REVIEWED_WORKFLOW:
+                    risky = conn.execute("SELECT id,status,video_id,unknown_outcome FROM drama_youtube_publish WHERE workflow=? AND source_material_id=? AND channel_id=? AND (video_id<>'' OR resumable_session_uri<>'' OR status IN ('queued','validating','downloading','uploading','submitted','processing') OR unknown_outcome=1) ORDER BY id DESC LIMIT 1", (_workflow, _reviewed[1], channel_id)).fetchone()
+                else:
+                    risky = conn.execute(
+                        "SELECT id,status,video_id,unknown_outcome FROM drama_youtube_publish WHERE workflow='legacy' AND job_id=? AND channel_id=? AND (video_state='published' OR status IN ('submitted','processing') OR unknown_outcome=1) ORDER BY id DESC LIMIT 1",
+                        (job_id, channel_id),
+                    ).fetchone()
+                if risky is not None and int(risky["unknown_outcome"]):
+                    raise DramaSynthesisError("youtube_previous_outcome_unknown", "该任务在此频道存在结果未知的发布，禁止创建替代视频", 409, prior_task_id=int(risky["id"]))
+                if risky is not None and (risky["status"] in {"submitted", "processing"} or (_workflow == REVIEWED_WORKFLOW and risky["status"] != "published")):
+                    raise DramaSynthesisError("youtube_previous_publish_in_progress", "该任务在此频道仍在处理，禁止重复发布", 409, prior_task_id=int(risky["id"]))
+                if risky is not None and not duplicate_confirmed:
+                    raise DramaSynthesisError("youtube_duplicate_confirmation_required", "该任务已在此频道发布过，需二次确认", 409, prior_task_id=int(risky["id"]))
+                comment_status = "queued" if comment_text else "skipped"
+                cursor = conn.execute(
+                    """INSERT INTO drama_youtube_publish(
+                        operation_id,job_id,content_id,app_id,channel_local_id,channel_id,youtube_account_id,
+                        source_kind,source_url,title,description_template,description_rendered,comment_text,duplicate_confirmed,
+                        operator_user_id,operator_name,privacy_status,status,video_state,comment_status,sync_status,created_at_utc,updated_at_utc,
+                        workflow,preparation_id,source_material_id,approved_cover_path,approved_cover_sha256,
+                        publish_at,initial_publish_at,schedule_version,schedule_status
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        operation_id, job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id,
+                        source_kind, source_url, title, description_template, description_rendered, comment_text, int(bool(duplicate_confirmed)),
+                        operator_user_id, str(operator_name)[:128], _privacy_status, "queued", "queued", comment_status, "pending", now, now,
+                        _workflow, *_reviewed, _publish_at, _publish_at, _schedule_version, "pending" if _publish_at else "none",
+                    ),
+                )
+                task_id = int(cursor.lastrowid)
+                if _attribution_pending:
+                    if _workflow != REVIEWED_WORKFLOW:
+                        raise DramaSynthesisError("attribution_invalid", "归因仅支持审核发布流程", 409)
+                    conn.execute("UPDATE drama_youtube_publish SET reviewed_phase='attribution_pending' WHERE id=?", (task_id,))
+                conn.execute(
+                    "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (task_id, "enqueue", "accepted", "", now),
+                )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (task_id,)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def youtube_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                return self._row(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def get_reviewed_youtube_by_preparation(self, preparation_id: str) -> Optional[Dict[str, Any]]:
+        """Recover an enqueue commit before the preparation row saved its ID."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                return self._row(conn.execute("SELECT * FROM drama_youtube_publish WHERE workflow=? AND preparation_id=?",
+                    (REVIEWED_WORKFLOW, str(preparation_id))).fetchone())
+            finally:
+                conn.close()
+
+    def request_reviewed_youtube_schedule(self, task_id: int, *, action: str, publish_at: str = "",
+                                         expected_version: int, operation_id: str) -> Dict[str, Any]:
+        """CAS desired state. Platform writes belong to the leased engine only."""
+        if action not in {"reschedule", "immediate", "cancel"} or not OPERATION_ID_RE.fullmatch(str(operation_id or "")):
+            raise DramaSynthesisError("youtube_schedule_request_invalid", "发布时间操作无效", 400)
+        target = normalize_youtube_publish_at(publish_at)
+        if (action == "reschedule") != bool(target):
+            raise DramaSynthesisError("youtube_schedule_request_invalid", "重新定时需填写时间，其他操作不能携带时间", 400)
+        if type(expected_version) is not int or expected_version < 0:
+            raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND workflow=?", (int(task_id), REVIEWED_WORKFLOW)).fetchone()
+                if row is None:
+                    raise DramaSynthesisError("youtube_publish_not_found", "YouTube发布任务不存在", 404)
+                if row["schedule_operation_id"] == operation_id:
+                    if row["schedule_command"] != action or row["schedule_requested_publish_at"] != target:
+                        raise DramaSynthesisError("youtube_operation_conflict", "此操作ID已用于不同发布时间操作", 409)
+                    conn.commit()
+                    return dict(row)
+                if int(row["schedule_version"]) != expected_version:
+                    raise DramaSynthesisError("youtube_schedule_version_conflict", "发布时间已被修改，请刷新后再操作", 409)
+                if target and target <= now:
+                    raise DramaSynthesisError("youtube_schedule_past", "定时发布时间必须晚于当前时间", 400)
+                if row["video_state"] == "published" or row["public_status"] == "succeeded" or row["schedule_status"] == "cancelled":
+                    raise DramaSynthesisError("youtube_schedule_terminal", "视频已公开或任务已取消，不能修改发布时间", 409)
+                if (row["lease_owner"] or row["schedule_status"] in {"arming", "control_pending", "control_running", "reconciling"}
+                        or int(row["unknown_outcome"]) or row["public_status"] in {"running", "unknown"}):
+                    raise DramaSynthesisError("youtube_schedule_busy", "发布或原操作结果正在核验，请稍后刷新再操作", 409)
+                # Do not race a platform deadline with a private status write.
+                limit = (datetime.fromisoformat(now.replace("Z", "+00:00")) + timedelta(seconds=YOUTUBE_SCHEDULE_MIN_LEAD_SECONDS)).isoformat().replace("+00:00", "Z")
+                if target and target <= limit:
+                    raise DramaSynthesisError("youtube_schedule_too_close", "预约时间过近，请选择至少一分钟后的时间", 409)
+                if row["schedule_confirmed_publish_at"] and row["schedule_confirmed_publish_at"] <= limit:
+                    raise DramaSynthesisError("youtube_schedule_too_close", "预约已临近，暂时不能修改，请等待平台公开状态核验", 409)
+                if row["status"] in {"failed", "unknown"} and row["schedule_status"] != "missed":
+                    raise DramaSynthesisError("youtube_schedule_failed_task", "请先处理当前发布失败，再修改发布时间", 409)
+                platform = bool(row["video_id"])
+                schedule_state = "control_pending" if platform else ("cancelled" if action == "cancel" else ("pending" if target else "none"))
+                status = "schedule_pending" if platform else ("cancelled" if action == "cancel" else "queued")
+                # Keep the existing resumable session and frozen video facts.
+                conn.execute("""UPDATE drama_youtube_publish SET publish_at=?,schedule_version=schedule_version+1,
+                    schedule_command=?,schedule_command_status=?,schedule_operation_id=?,schedule_requested_publish_at=?,schedule_status=?,schedule_event_at=?,schedule_next_check_at='',
+                    status=?,video_state=CASE WHEN video_id='' THEN 'queued' ELSE video_state END,
+                    error_code='',error_message='',unknown_outcome=0,updated_at_utc=? WHERE id=?""",
+                    (target, action, "pending" if platform else "confirmed", operation_id, target, schedule_state, now, status, now, int(task_id)))
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), "schedule", "requested" if platform else "confirmed", action + ":" + target, now))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def advance_reviewed_schedule(self, task_id: int, state: str, *, worker_id: str, lease_generation: int,
+                                  release: bool = False, command_status: Optional[str] = None,
+                                  confirmed_publish_at: Optional[str] = None, publish_at: Optional[str] = None, wait_seconds: int = 60,
+                                  write_action: Optional[str] = None,
+                                  error_code: str = "", error_message: str = "") -> Dict[str, Any]:
+        """Persist intent before PUT and confirmation only after owner readback."""
+        if state not in {"none", "pending", "arming", "armed", "control_pending", "control_running", "reconciling", "missed", "cancelled", "published"}:
+            raise ValueError("invalid schedule state")
+        if command_status is not None and command_status not in {"", "pending", "running", "unknown", "confirmed", "failed"}:
+            raise ValueError("invalid schedule command status")
+        if write_action is not None and write_action not in {"", "reschedule", "immediate", "cancel"}:
+            raise ValueError("invalid schedule write action")
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND workflow=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), REVIEWED_WORKFLOW, worker_id, int(lease_generation))).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                values: Dict[str, Any] = dict(schedule_status=state, reviewed_phase="schedule", updated_at_utc=now,
+                    error_code=error_code, error_message=error_message, unknown_outcome=int(state == "reconciling"))
+                if row["schedule_status"] != state or not row["schedule_event_at"]:
+                    values["schedule_event_at"] = now
+                if write_action is not None:
+                    values["schedule_write_action"] = write_action
+                elif state in {"none", "pending", "armed", "missed", "published", "cancelled"}:
+                    values["schedule_write_action"] = ""
+                if command_status is not None:
+                    values["schedule_command_status"] = command_status
+                if confirmed_publish_at is not None:
+                    values["schedule_confirmed_publish_at"] = normalize_youtube_publish_at(confirmed_publish_at)
+                if publish_at is not None:
+                    values["publish_at"] = normalize_youtube_publish_at(publish_at)
+                if release:
+                    values.update(lease_owner="", lease_expires_at_utc="")
+                    values["status"] = {"armed": "scheduled", "missed": "schedule_missed", "cancelled": "cancelled", "reconciling": "unknown"}.get(state, "processing")
+                    delay = max(1, min(int(wait_seconds), 300))
+                    values["schedule_next_check_at"] = (datetime.fromisoformat(now.replace("Z", "+00:00")) + timedelta(seconds=delay)).isoformat().replace("+00:00", "Z") if state in {"pending", "armed", "reconciling"} else ""
+                else:
+                    values["schedule_next_check_at"] = ""
+                conn.execute("UPDATE drama_youtube_publish SET " + ",".join(key + "=?" for key in values) + " WHERE id=?", (*values.values(), int(task_id)))
+                # Polling leaves one stable intent/confirmation event per state.
+                if row["schedule_status"] != state or (command_status is not None and row["schedule_command_status"] != command_status):
+                    conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                        (int(task_id), "schedule", state, error_code or str(row["publish_at"]), now))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def youtube_canary_task(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE operation_id=?", (CANARY_OPERATION_ID,)).fetchone()
+                if row is not None and not is_youtube_canary(dict(row)):
+                    raise DramaSynthesisError("youtube_canary_identity_invalid", "内部测试身份与持久记录不一致", 409)
+                if row is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(row["operator_user_id"] or "")):
+                    raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 409)
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def get_youtube(self, task_id: int) -> Optional[Dict[str, Any]]:
+        return self.youtube_task(task_id)
+
+    def youtube_tasks_for_job(self, job_id: str, limit: int = 50) -> list[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM drama_youtube_publish WHERE job_id=? AND privacy_status='public' AND workflow='legacy' ORDER BY id DESC LIMIT ?",
+                    (job_id, max(1, min(int(limit), 200))),
+                ).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+
+    def claim_youtube(self, worker_id: str, lease_expires_at_utc: str) -> Optional[Dict[str, Any]]:
+        return self._claim_youtube(worker_id, lease_expires_at_utc)
+
+    def claim_reviewed_youtube(self, worker_id: str, lease_expires_at_utc: str) -> Optional[Dict[str, Any]]:
+        return self._claim_youtube(worker_id, lease_expires_at_utc, reviewed=True)
+
+    def claim_youtube_canary(self, worker_id: str, lease_expires_at_utc: str, task_id: int) -> Optional[Dict[str, Any]]:
+        task = self.youtube_canary_task()
+        if task is None or int(task["id"]) != int(task_id):
+            raise DramaSynthesisError("youtube_canary_task_mismatch", "内部测试任务ID不匹配", 409)
+        return self._claim_youtube(worker_id, lease_expires_at_utc, canary_task_id=int(task_id))
+
+    def _claim_youtube(self, worker_id: str, lease_expires_at_utc: str, *, canary_task_id: Optional[int] = None, reviewed: bool = False) -> Optional[Dict[str, Any]]:
+        scope = "workflow='reviewed_thumbnail' AND privacy_status='public' AND operation_id<>?" if reviewed else "workflow='legacy' AND privacy_status='public' AND operation_id<>?"
+        params: tuple[Any, ...] = (CANARY_OPERATION_ID, utc_now())
+        unknown_reconcile = "0"
+        cadence = "1"
+        schedule_queue = "0"
+        if reviewed:
+            cadence = "reviewed_phase<>'attribution_pending' AND (schedule_next_check_at='' OR schedule_next_check_at<=?)"
+            params += (utc_now(),)
+            schedule_queue = "status IN ('scheduled','schedule_pending')"
+            unknown_reconcile = "(unknown_outcome=1 AND video_id<>'' AND comment_status<>'unknown' AND schedule_status='reconciling')"
+        if canary_task_id is not None:
+            scope = "workflow='legacy' AND id=? AND privacy_status='unlisted' AND operation_id=? AND app_id=? AND channel_local_id=? AND channel_id=? AND youtube_account_id=?"
+            params = (int(canary_task_id), CANARY_OPERATION_ID, CANARY_APP_ID, CANARY_CHANNEL_LOCAL_ID, CANARY_CHANNEL_ID, CANARY_ACCOUNT_ID, utc_now())
+            unknown_reconcile = "(unknown_outcome=1 AND comment_status<>'unknown' AND (video_id<>'' OR (resumable_session_uri<>'' AND source_size>0)))"
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    f"""SELECT * FROM drama_youtube_publish
+                       WHERE {scope}
+                         AND (lease_owner='' OR lease_expires_at_utc='' OR lease_expires_at_utc<?)
+                         AND {cadence}
+                         AND ((unknown_outcome=0 AND (status IN ('queued','validating','downloading','uploading','submitted','processing')
+                              OR {schedule_queue} OR (status='published' AND comment_status IN ('queued','retry','publishing')))) OR {unknown_reconcile})
+                       ORDER BY CASE WHEN schedule_status IN ('armed','control_pending','control_running','arming','reconciling') THEN 0 ELSE 1 END,id LIMIT 1""", params
+                ).fetchone()
+                if row is None:
+                    conn.commit()
+                    return None
+                if canary_task_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(row["operator_user_id"] or "")):
+                    raise DramaSynthesisError("youtube_operator_invalid", "内部测试操作者标识无效", 409)
+                if ((canary_task_id is not None or reviewed) and int(row["video_attempt_count"] or 0)
+                        and not row["resumable_session_uri"] and not row["video_id"]):
+                    # A crash after persisted intent may have created a session.
+                    # Without its identity there is nothing safe to reconcile.
+                    now = utc_now()
+                    fence_code = "youtube_reviewed_session_intent_unknown" if reviewed else "youtube_canary_session_intent_unknown"
+                    conn.execute(
+                        "UPDATE drama_youtube_publish SET status='unknown',video_state='unknown',unknown_outcome=1,error_code=?,error_message='已记录上传意图但缺少会话身份，禁止重建',lease_owner='',lease_expires_at_utc='',updated_at_utc=? WHERE id=?",
+                        (fence_code, now, int(row["id"])),
+                    )
+                    conn.execute(
+                        "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                        (int(row["id"]), "video", "unknown", fence_code, now),
+                    )
+                    conn.commit()
+                    return None
+                if row["comment_status"] == "publishing" and int(row["comment_attempt_count"] or 0) > 0:
+                    now = utc_now()
+                    conn.execute(
+                        "UPDATE drama_youtube_publish SET status='unknown',comment_status='unknown',unknown_outcome=1,error_code='youtube_comment_worker_interrupted_unknown',error_message='YouTube评论发布结果未知',lease_owner='',lease_expires_at_utc='',updated_at_utc=? WHERE id=? AND comment_status='publishing'",
+                        (now, int(row["id"])),
+                    )
+                    conn.execute(
+                        "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                        (int(row["id"]), "comment", "unknown", "youtube_comment_worker_interrupted_unknown", now),
+                    )
+                    conn.commit()
+                    return None
+                next_status = "validating" if row["status"] == "queued" else row["status"]
+                if reviewed and next_status in {"scheduled", "schedule_pending"}:
+                    next_status = "processing"
+                if int(row["unknown_outcome"]):
+                    next_status = "processing" if row["video_id"] else "uploading"
+                next_comment = "publishing" if row["video_state"] == "published" and row["comment_status"] in {"queued", "retry", "publishing"} else row["comment_status"]
+                updated = conn.execute(
+                    "UPDATE drama_youtube_publish SET status=?,comment_status=?,lease_owner=?,lease_expires_at_utc=?,lease_generation=lease_generation+1,updated_at_utc=? WHERE id=? AND status=? AND lease_generation=?",
+                    (next_status, next_comment, worker_id, lease_expires_at_utc, utc_now(), int(row["id"]), row["status"], int(row["lease_generation"])),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(row["id"]),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _stale_youtube_claim() -> DramaSynthesisError:
+        return DramaSynthesisError("youtube_stale_claim", "YouTube发布任务租约已失效", 409)
+
+    def renew_youtube_lease(
+        self,
+        task_id: int,
+        worker_id: str,
+        lease_generation: int,
+        lease_expires_at_utc: str,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish
+                       SET lease_expires_at_utc=?,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=?
+                          AND status IN ('validating','downloading','uploading','submitted','processing','published')""",
+                    (lease_expires_at_utc, utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def advance_youtube(self, task_id: int, status: str, *, worker_id: str, lease_generation: int, source_sha256: str = "", source_duration_ms: int = 0) -> Dict[str, Any]:
+        if status not in {"validating", "downloading", "uploading"}:
+            raise ValueError("invalid YouTube state")
+        if source_sha256 and not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+            raise DramaSynthesisError("youtube_source_identity_invalid", "视频素材指纹无效", 409)
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    "UPDATE drama_youtube_publish SET status=?,video_state=?,source_sha256=CASE WHEN ?<>'' THEN ? ELSE source_sha256 END,source_duration_ms=CASE WHEN ?>0 THEN ? ELSE source_duration_ms END,updated_at_utc=? WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (status, status, source_sha256, source_sha256, int(source_duration_ms), int(source_duration_ms), utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def set_upload_session(
+        self,
+        task_id: int,
+        session_uri: str,
+        source_size: int,
+        *,
+        worker_id: str,
+        lease_generation: int,
+    ) -> None:
+        parsed = urlsplit(str(session_uri or ""))
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or source_size <= 0:
+            raise DramaSynthesisError("youtube_resumable_session_invalid", "YouTube断点续传会话无效", 502)
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish
+                       SET status='uploading',video_state='uploading',resumable_session_uri=?,source_size=?,video_attempt_count=CASE WHEN privacy_status='unlisted' OR workflow='reviewed_thumbnail' THEN video_attempt_count ELSE video_attempt_count+1 END,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status IN ('validating','downloading','uploading') AND video_state<>'published'
+                         AND ((privacy_status='public' AND workflow='legacy') OR ((privacy_status='unlisted' OR workflow='reviewed_thumbnail') AND video_attempt_count=1 AND resumable_session_uri=''))""",
+                    (session_uri, int(source_size), utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
+                conn.commit()
+            finally:
+                conn.close()
+
+    def mark_reviewed_upload_intent(self, task_id: int, *, worker_id: str, lease_generation: int, source_size: int = 0) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                changed = conn.execute("""UPDATE drama_youtube_publish SET video_attempt_count=1,source_size=CASE WHEN ?>0 THEN ? ELSE source_size END,updated_at_utc=?
+                    WHERE id=? AND workflow='reviewed_thumbnail' AND lease_owner=? AND lease_generation=?
+                    AND video_attempt_count=0 AND resumable_session_uri='' AND video_id='' AND status='uploading'""",
+                    (int(source_size), int(source_size), utc_now(), int(task_id), worker_id, int(lease_generation))).rowcount
+                if changed != 1:
+                    raise self._stale_youtube_claim()
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                             (int(task_id), "reviewed_upload_intent", "accepted", "private", utc_now()))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def advance_reviewed_youtube(self, task_id: int, phase: str, *, worker_id: str,
+                                 lease_generation: int, **states: str) -> Dict[str, Any]:
+        if phase not in {"upload", "thumbnail", "processing", "schedule", "public", "comment", "complete"}:
+            raise ValueError("invalid reviewed phase")
+        if any(key not in {"thumbnail_status", "processing_status", "public_status"}
+               or value not in {"pending", "running", "succeeded", "failed", "unknown"} for key, value in states.items()):
+            raise ValueError("invalid reviewed stage status")
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                clauses = ["reviewed_phase=?", "updated_at_utc=?"] + [key + "=?" for key in states]
+                changed = conn.execute("UPDATE drama_youtube_publish SET " + ",".join(clauses)
+                    + " WHERE id=? AND workflow='reviewed_thumbnail' AND lease_owner=? AND lease_generation=?",
+                    (phase, utc_now(), *states.values(), int(task_id), worker_id, int(lease_generation))).rowcount
+                if changed != 1:
+                    raise self._stale_youtube_claim()
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                             (int(task_id), phase, states.get(phase + "_status", "advanced"), "", utc_now()))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def retry_reviewed_youtube(self, task_id: int) -> Dict[str, Any]:
+        """Resume the frozen failed stage; never allocate a second video task."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND workflow='reviewed_thumbnail'", (int(task_id),)).fetchone()
+                if row is None:
+                    raise DramaSynthesisError("youtube_publish_not_found", "YouTube发布任务不存在", 404)
+                if row["lease_owner"] or row["status"] not in {"failed", "unknown"}:
+                    raise DramaSynthesisError("youtube_retry_invalid", "任务当前不可重试", 409)
+                # A visibility update is idempotent for this same video. The
+                # engine reads it before any retry; insert/comment unknowns
+                # cannot use this exception and always stay fenced.
+                public_reconcile = bool(row["video_id"] and row["reviewed_phase"] == "public" and row["comment_status"] != "unknown")
+                if int(row["unknown_outcome"]) and not public_reconcile:
+                    raise DramaSynthesisError("youtube_retry_unsafe", "发布结果未知，禁止重复上传或评论", 409)
+                if row["video_state"] == "published":
+                    if row["comment_status"] != "failed":
+                        raise DramaSynthesisError("youtube_retry_unsafe", "评论当前不可重试", 409)
+                    conn.execute("UPDATE drama_youtube_publish SET status='published',comment_status='queued',unknown_outcome=0,error_code='',error_message='',updated_at_utc=? WHERE id=?", (utc_now(), int(task_id)))
+                else:
+                    state = "processing" if row["video_id"] else "queued"
+                    # Only a definite rejected initiation can reset intent.
+                    attempts = int(row["video_attempt_count"])
+                    if attempts and not row["resumable_session_uri"]:
+                        if row["error_code"] != "youtube_resumable_create_failed":
+                            raise DramaSynthesisError("youtube_retry_unsafe", "上传意图缺少会话身份，禁止重建", 409)
+                        attempts = 0
+                    conn.execute("UPDATE drama_youtube_publish SET status=?,video_state=?,video_attempt_count=?,unknown_outcome=0,error_code='',error_message='',updated_at_utc=? WHERE id=?",
+                                 (state, state, attempts, utc_now(), int(task_id)))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def mark_canary_upload_intent(self, task_id: int, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=? AND lease_owner=? AND lease_generation=?",
+                                   (int(task_id), worker_id, int(lease_generation))).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                if (not is_youtube_canary(dict(row)) or int(row["video_attempt_count"])
+                        or row["resumable_session_uri"] or row["video_id"] or row["status"] != "uploading"):
+                    raise DramaSynthesisError("youtube_canary_upload_already_attempted", "内部测试已有上传意图，禁止创建替代会话", 409)
+                conn.execute("UPDATE drama_youtube_publish SET video_attempt_count=1,updated_at_utc=? WHERE id=?", (utc_now(), int(task_id)))
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                             (int(task_id), "canary_upload_intent", "accepted", CANARY_OPERATION_ID, utc_now()))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def set_upload_offset(self, task_id: int, next_byte: int, *, worker_id: str, lease_generation: int) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish SET next_byte=?,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status IN ('uploading','submitted') AND video_state<>'published'""",
+                    (max(0, int(next_byte)), utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
+                conn.commit()
+            finally:
+                conn.close()
+
+    def video_submitted(self, task_id: int, video_id: str, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", str(video_id or "")):
+            raise DramaSynthesisError("youtube_video_identity_invalid", "YouTube视频ID无效", 502)
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish SET status='submitted',video_state='submitted',video_id=?,next_byte=source_size,unknown_outcome=0,
+                       lease_owner='',lease_expires_at_utc='',updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND video_state<>'published'""",
+                    (video_id, utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def video_processing(self, task_id: int, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    "UPDATE drama_youtube_publish SET status='processing',video_state='processing',unknown_outcome=0,lease_owner='',lease_expires_at_utc='',updated_at_utc=? WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            finally:
+                conn.close()
+
+    def video_published(self, task_id: int, video_id: str, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", str(video_id or "")):
+            raise DramaSynthesisError("youtube_video_identity_invalid", "YouTube视频ID无效", 502)
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM drama_youtube_publish WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), str(worker_id), int(lease_generation)),
+                ).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                if row["video_id"] and row["video_id"] != video_id:
+                    raise DramaSynthesisError("youtube_video_identity_conflict", "YouTube视频身份冲突", 409)
+                if row["workflow"] == REVIEWED_WORKFLOW and (row["thumbnail_status"] != "succeeded"
+                        or row["processing_status"] != "succeeded" or row["public_status"] != "succeeded"):
+                    raise DramaSynthesisError("youtube_reviewed_publish_gate", "封面、处理或公开状态尚未确认", 409)
+                terminal = row["comment_status"] in {"skipped", "published"}
+                if terminal:
+                    updated = conn.execute(
+                        """UPDATE drama_youtube_publish
+                           SET status='published',video_state='published',video_id=?,sync_status='pending',unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',video_published_at_utc=?,updated_at_utc=?
+                            WHERE id=? AND lease_owner=? AND lease_generation=? AND status IN ('submitted','processing')""",
+                        (video_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                    ).rowcount
+                else:
+                    updated = conn.execute(
+                        """UPDATE drama_youtube_publish
+                           SET status='published',comment_status='publishing',video_state='published',video_id=?,sync_status='pending',unknown_outcome=0,error_code='',error_message='',video_published_at_utc=?,updated_at_utc=?
+                            WHERE id=? AND lease_owner=? AND lease_generation=? AND status IN ('submitted','processing')""",
+                        (video_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                    ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.execute(
+                    "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), "video", "published", video_id, now),
+                )
+                payload = _canonical_json(_video_sync_payload(dict(row), video_id, now))
+                for entity_kind, external_id in (("video", video_id), ("publish_log", str(task_id))):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",
+                        (int(task_id), entity_kind, external_id, payload, "pending", now, now),
+                    )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def comment_published(self, task_id: int, comment_id: str, *, worker_id: str, lease_generation: int) -> Dict[str, Any]:
+        if not str(comment_id or "").strip():
+            raise DramaSynthesisError("youtube_comment_identity_invalid", "YouTube评论ID无效", 502)
+        now = utc_now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM drama_youtube_publish WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), str(worker_id), int(lease_generation)),
+                ).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                if row["video_state"] != "published" or not row["video_id"]:
+                    raise DramaSynthesisError("youtube_video_not_confirmed", "视频未确认发布，禁止评论", 409)
+                if row["comment_id"] and row["comment_id"] != comment_id:
+                    raise DramaSynthesisError("youtube_comment_identity_conflict", "YouTube评论身份冲突", 409)
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish
+                       SET status='published',comment_status='published',comment_id=?,sync_status='pending',unknown_outcome=0,error_code='',error_message='',lease_owner='',lease_expires_at_utc='',comment_published_at_utc=?,updated_at_utc=?,reviewed_phase=CASE WHEN workflow='reviewed_thumbnail' THEN 'complete' ELSE reviewed_phase END
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='published' AND comment_status='publishing'""",
+                    (comment_id, now, now, int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.execute(
+                    "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), "comment", "published", str(comment_id)[:200], now),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",
+                    (int(task_id), "comment", str(comment_id), _canonical_json(_comment_sync_payload(dict(row), str(comment_id), now)), "pending", now, now),
+                )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def fail_youtube(
+        self,
+        task_id: int,
+        *,
+        worker_id: str,
+        lease_generation: int,
+        phase: str,
+        code: str,
+        message: str,
+        unknown: bool,
+        retryable: bool = False,
+    ) -> Dict[str, Any]:
+        if phase not in {"video", "comment"}:
+            raise ValueError("invalid YouTube phase")
+        now = utc_now()
+        column = "video_state" if phase == "video" else "comment_status"
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM drama_youtube_publish WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (int(task_id), str(worker_id), int(lease_generation)),
+                ).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                if unknown:
+                    status, state = "unknown", "unknown"
+                elif retryable and phase == "comment":
+                    status, state = "published", "retry"
+                elif retryable and row["video_id"]:
+                    status, state = "processing", "processing"
+                elif retryable:
+                    status, state = "queued", "queued"
+                else:
+                    status, state = "failed", "failed"
+                updated = conn.execute(
+                    f"""UPDATE drama_youtube_publish
+                        SET status=?,{column}=?,unknown_outcome=?,error_code=?,error_message=?,lease_owner='',lease_expires_at_utc='',updated_at_utc=?
+                        WHERE id=? AND lease_owner=? AND lease_generation=?""",
+                    (
+                        status, state, int(bool(unknown)), str(code)[:96], str(message)[:500], now,
+                        int(task_id), str(worker_id), int(lease_generation),
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise self._stale_youtube_claim()
+                conn.execute(
+                    "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), phase, status, str(code)[:96], now),
+                )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def mark_comment_attempt(self, task_id: int, *, worker_id: str, lease_generation: int) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                updated = conn.execute(
+                    """UPDATE drama_youtube_publish
+                       SET comment_attempt_count=comment_attempt_count+1,updated_at_utc=?
+                       WHERE id=? AND lease_owner=? AND lease_generation=? AND status='published' AND comment_status='publishing'
+                         AND video_state='published' AND comment_status<>'published'""",
+                    (utc_now(), int(task_id), str(worker_id), int(lease_generation)),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    raise self._stale_youtube_claim()
+                conn.commit()
+            finally:
+                conn.close()
+
+    def retry_youtube_comment(self, task_id: int) -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone()
+                if row is None:
+                    raise DramaSynthesisError("youtube_publish_not_found", "YouTube发布任务不存在", 404)
+                if row["privacy_status"] != "public" or row["workflow"] != "legacy":
+                    raise DramaSynthesisError("youtube_canary_internal_only", "内部测试不可通过正式入口重试", 403)
+                if row["video_state"] != "published" or int(row["unknown_outcome"] or 0):
+                    raise DramaSynthesisError("youtube_comment_retry_unsafe", "评论结果不安全，禁止自动重试", 409)
+                if row["comment_status"] == "published":
+                    conn.commit()
+                    return dict(row)
+                if row["comment_status"] != "failed":
+                    raise DramaSynthesisError("youtube_comment_retry_invalid", "评论当前不可重试", 409)
+                conn.execute(
+                    "UPDATE drama_youtube_publish SET status='published',comment_status='queued',error_code='',error_message='',updated_at_utc=? WHERE id=?",
+                    (utc_now(), int(task_id)),
+                )
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def claim_youtube_sync(self, worker_id: str, lease_expires_at_utc: str, *, canary_task_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        scope = "p.privacy_status='public' AND p.operation_id<>?"
+        params: tuple[Any, ...] = (CANARY_OPERATION_ID, utc_now(), utc_now())
+        if canary_task_id is not None:
+            task = self.youtube_canary_task()
+            if task is None or int(task["id"]) != int(canary_task_id):
+                raise DramaSynthesisError("youtube_canary_task_mismatch", "内部测试任务ID不匹配", 409)
+            scope = "p.id=? AND p.privacy_status='unlisted' AND p.operation_id=? AND p.app_id=? AND p.channel_local_id=? AND p.channel_id=? AND p.youtube_account_id=? AND p.status='published' AND p.video_state='published' AND p.comment_status='published' AND p.unknown_outcome=0"
+            params = (int(canary_task_id), CANARY_OPERATION_ID, CANARY_APP_ID, CANARY_CHANNEL_LOCAL_ID, CANARY_CHANNEL_ID, CANARY_ACCOUNT_ID, utc_now(), utc_now())
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    f"SELECT o.* FROM drama_youtube_sync_outbox o JOIN drama_youtube_publish p ON p.id=o.publish_id WHERE {scope} AND (o.status IN ('pending','failed') OR (o.status='syncing' AND o.lease_expires_at_utc<>'' AND o.lease_expires_at_utc<?)) AND (o.lease_owner='' OR o.lease_expires_at_utc='' OR o.lease_expires_at_utc<?) ORDER BY o.id LIMIT 1",
+                    params,
+                ).fetchone()
+                if row is None:
+                    conn.commit()
+                    return None
+                updated = conn.execute(
+                    "UPDATE drama_youtube_sync_outbox SET status='syncing',lease_owner=?,lease_expires_at_utc=?,lease_generation=lease_generation+1,attempt_count=attempt_count+1,updated_at_utc=? WHERE id=? AND lease_generation=?",
+                    (worker_id, lease_expires_at_utc, utc_now(), int(row["id"]), int(row["lease_generation"])),
+                ).rowcount
+                if updated != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_sync_outbox WHERE id=?", (int(row["id"]),)).fetchone())
+            finally:
+                conn.close()
+
+    def hold_youtube_canary_sync(self, task_id: int, code: str) -> None:
+        """Persist a failed readback without claiming or modifying any outbox."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone()
+                if row is None or not is_youtube_canary(dict(row)):
+                    raise DramaSynthesisError("youtube_canary_task_mismatch", "内部测试任务ID不匹配", 409)
+                if row["status"] != "published" or row["lease_owner"]:
+                    raise self._stale_youtube_claim()
+                now = utc_now()
+                conn.execute(
+                    "UPDATE drama_youtube_publish SET status='unknown',unknown_outcome=1,error_code=?,error_message='内部测试同步前视频状态无法确认，已阻断同步',updated_at_utc=? WHERE id=?",
+                    (str(code)[:96], now, int(task_id)),
+                )
+                conn.execute(
+                    "INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                    (int(task_id), "canary_sync_preflight", "unknown", str(code)[:96], now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def finish_youtube_sync(self, outbox_id: int, *, worker_id: str, lease_generation: int, success: bool, code: str = "", message: str = "") -> Dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM drama_youtube_sync_outbox WHERE id=? AND lease_owner=? AND lease_generation=?", (int(outbox_id), worker_id, int(lease_generation))).fetchone()
+                if row is None:
+                    raise self._stale_youtube_claim()
+                state = "synced" if success else "failed"
+                conn.execute(
+                    "UPDATE drama_youtube_sync_outbox SET status=?,error_code=?,error_message=?,lease_owner='',lease_expires_at_utc='',updated_at_utc=? WHERE id=? AND lease_owner=? AND lease_generation=?",
+                    (state, str(code)[:96], str(message)[:500], utc_now(), int(outbox_id), worker_id, int(lease_generation)),
+                )
+                pending = conn.execute("SELECT COUNT(*) FROM drama_youtube_sync_outbox WHERE publish_id=? AND status<>'synced'", (int(row["publish_id"]),)).fetchone()[0]
+                conn.execute("UPDATE drama_youtube_publish SET sync_status=?,updated_at_utc=? WHERE id=?", ("synced" if pending == 0 else "failed", utc_now(), int(row["publish_id"])))
+                conn.commit()
+                return dict(conn.execute("SELECT * FROM drama_youtube_sync_outbox WHERE id=?", (int(outbox_id),)).fetchone())
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+
+__all__ = [
+    "COMMENT_SCOPE",
+    "IDENTITY_SCOPES",
+    "UPLOAD_SCOPES",
+    "DramaSynthesisError",
+    "DramaSynthesisStore",
+    "ImmutableFilesystemPublisher",
+    "RECIPE_CATEGORIES",
+    "RECIPE_PROFILE",
+    "SOURCE_OVERLAY_VERSION",
+    "SHORT_BASE_URL",
+    "W2A_BASE_URL",
+    "build_long_url",
+    "freeze_random_recipe",
+    "normalize_channel_scopes",
+    "render_wrapper_html",
+    "scope_capabilities",
+    "validate_source_overlay",
+]

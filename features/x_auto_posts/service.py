@@ -67,9 +67,9 @@ def _positive_id(value: Any, label: str = "ID") -> int:
 
 def _actor(payload: Dict[str, Any]) -> AuditActor:
     raw = payload.pop("_actor", {})
-    if not isinstance(raw, Mapping) or set(raw).difference({"user_id", "name"}):
+    if not isinstance(raw, Mapping) or set(raw).difference({"user_id", "name", "tenant_key"}):
         raise AutoPostServiceError("invalid_request", "operator identity is invalid", 400)
-    return AuditActor.from_values(raw.get("user_id"), raw.get("name"))
+    return AuditActor.from_values(raw.get("user_id"), raw.get("name"), raw.get("tenant_key"))
 
 
 def _query_one(query: Mapping[str, Sequence[str]], key: str, default: str = "") -> str:

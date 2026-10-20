@@ -666,7 +666,9 @@ def _validate_w2a_url(url):
     expected = ["c", "af_adset", "af_adset_id", "af_ad", "af_ad_id", "af_channel", "af_c_id", "af_dp"]
     if [key for key, _value in pairs] != expected or any(not value for _key, value in pairs):
         raise XPostError("invalid_short_link_target", "W2A参数不完整", 400)
-    if dict(pairs).get("af_channel") not in {"AIpost", "short", "long"}:
+    values = dict(pairs)
+    v2 = re.fullmatch(r"yingliang_post_CLV_VL_x_[1-9][0-9]*\*[^*]+\*[^*]+\*[^*]+\*[1-9][0-9]*", values.get("c", ""))
+    if not (v2 and re.fullmatch(r"[1-9][0-9]*", values.get("af_channel", ""))) and values.get("af_channel") not in {"AIpost", "short", "long"}:
         raise XPostError("invalid_short_link_target", "W2A渠道无效", 400)
     return str(url)
 
@@ -1639,6 +1641,8 @@ def ensure_storage(db_path):
                 )
                 """
             )
+            if "actor_tenant_key" not in {r[1] for r in conn.execute("PRAGMA table_info(x_post_manual_run)")}:
+                conn.execute("ALTER TABLE x_post_manual_run ADD COLUMN actor_tenant_key TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS x_post_manual_material_reservation (
@@ -9403,6 +9407,8 @@ class XPostStore:
                     ),
                 )
                 run_id = int(cursor.lastrowid)
+                conn.execute("UPDATE x_post_manual_run SET actor_tenant_key=? WHERE id=?",
+                             (str(actor.get("tenant_key") or "").strip()[:255], run_id))
                 for material_key in material_ids:
                     conn.execute(
                         "INSERT INTO x_post_manual_material_reservation("
@@ -19106,6 +19112,17 @@ def publish_canary(
     confirmed_post_url = ""
     confirmed_media_id = ""
     try:
+        attribution_context = None
+        if os.environ.get("X_POST_ATTRIBUTION_V2_ENABLED", "0") == "1":
+            from features.x_posts.attribution import AttributionError, load_frozen, freeze, resolve_via_loopback, build_url
+            try:
+                attribution_context = load_frozen(db_path, log["id"])
+                if attribution_context is None:
+                    attribution_context = freeze(db_path, log, resolve_via_loopback(queue["id"], log["id"]))
+                if log["long_url"] and log["long_url"] != build_url(attribution_context, log):
+                    raise XPostError("x_attribution_migration_required", "历史链接尚未完成归因迁移", 409)
+            except AttributionError as exc:
+                raise XPostError(exc.code, "发布人员归属待核实，未执行 X 发布", exc.status_code) from None
         expected_duration = float(queue.get("preflight_duration", 0) or 0)
         deferred_media_validation = bool(
             queue.get("media_validation_mode") == MEDIA_VALIDATION_DEFERRED
@@ -19135,7 +19152,7 @@ def publish_canary(
                     queue.get("body_template"),
                 )
             if not prepare_link_after_probe:
-                long_url = build_w2a_url(
+                long_url = build_url(attribution_context, log) if attribution_context else build_w2a_url(
                     {
                         "username": queue["account_username"],
                         "timestamp": int(time.time()),
@@ -19289,7 +19306,7 @@ def publish_canary(
                 else STANDARD_MEDIA_CATEGORY
             )
         if prepare_link_after_probe:
-            long_url = build_w2a_url(
+            long_url = build_url(attribution_context, log) if attribution_context else build_w2a_url(
                 {
                     "username": queue["account_username"],
                     "timestamp": int(time.time()),

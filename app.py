@@ -3648,6 +3648,8 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
+
 
 
 
@@ -3677,6 +3679,7 @@ MODULE_PERMISSIONS = {
     "tt_posts": "TikTok 社媒发布",
     "fb_page_posts": "Facebook Page 自动发布",
     "youtube_auto_publish": "YouTube 自动发布",
+    "social_analytics": "社媒数据报表",
 
 
 
@@ -3725,6 +3728,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "fb_video_publish": False,
     "drama_synthesis": False,
     "cover_synthesis": False,
     "ad_material_tasks": False,
@@ -3736,6 +3740,7 @@ DEFAULT_USER_PERMISSIONS = {
     "tt_posts": False,
     "fb_page_posts": False,
     "youtube_auto_publish": False,
+    "social_analytics": False,
     "settings": False,
 }
 
@@ -32166,50 +32171,8 @@ def screenshot_asset_name(job, spec):
 
 
 def post_screenshot_ai_source_callback(job):
-    if not AI_SOURCE_CALLBACK_ENABLED:
-        raise RuntimeError("ai source callback is disabled; generated images have not been imported")
-    if not AI_SOURCE_CALLBACK_URL or not AI_SOURCE_CALLBACK_TOKEN:
-        raise RuntimeError("ai source callback is not configured; generated images have not been imported")
-    creator = get_admin_user_callback_username(job.get("creator_user_id", "")) or str(job.get("creator_name", "") or "").strip()
-    created_at = callback_time_text(job.get("updated_at") or job.get("created_at") or "")
-    items = []
-    for spec in SCREENSHOT_SPECS:
-        url = str(job.get(spec["field"], "") or "").strip()
-        if not url:
-            continue
-        items.append({
-            "app_package": app_package_for_app_id(job.get("app_id", "")),
-            "material_id": screenshot_material_id(job.get("job_id", ""), spec["key"]),
-            "content_id": str(job.get("content_id", "") or ""),
-            "category": spec["ratio"],
-            "name": screenshot_asset_name(job, spec),
-            "url": url,
-            "email": creator,
-            "created_at": created_at,
-        })
-    if len(items) != len(SCREENSHOT_SPECS):
-        raise RuntimeError("ai source callback requires all three generated images")
-    headers = {
-        "Authorization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
-        "Authrization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
-        "Content-Type": "application/json",
-    }
-    response = requests.post(
-        AI_SOURCE_CALLBACK_URL,
-        headers=headers,
-        json=items[:50],
-        timeout=AI_SOURCE_CALLBACK_TIMEOUT,
-    )
-    if not 200 <= response.status_code < 300:
-        raise RuntimeError("ai source callback failed (%s): %s" % (response.status_code, response.text[:500]))
-    try:
-        receipt = json.loads(response.text)
-    except (TypeError, ValueError):
-        raise RuntimeError("ai source callback returned an invalid JSON receipt; reconcile before retry")
-    if not isinstance(receipt, dict) or str(receipt.get("code")) != "0":
-        message = (receipt.get("msg") or receipt.get("message") or receipt.get("error") or "missing success code") if isinstance(receipt, dict) else "invalid receipt object"
-        raise RuntimeError("ai source callback rejected import: %s" % str(message)[:500])
-    return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
+    from features.cover_material_source import upload_screenshot
+    return upload_screenshot(job)
 
 
 def notify_screenshot_ai_source_callback(job, raise_on_error=False):
@@ -56740,7 +56703,8 @@ def delete_session(session_token):
 
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        return filter_navigation(json.load(handle))
+        from features.fb_video_publish.navigation import ensure_navigation
+        return filter_navigation(ensure_navigation(json.load(handle)))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94206,6 +94170,34 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         actor["is_admin"] = actor["role"] == "admin"
         return actor
 
+    def _social_analytics_actor(self, navigation_key="socialAnalytics"):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "social_analytics"):
+            json_response(self, 403, {"error": "permission_denied", "module": "social_analytics"}, no_store=True)
+            return None
+        try:
+            navigation = load_navigation_config()
+            keys = (navigation_key,) if isinstance(navigation_key, str) else navigation_key
+            accesses = [navigation_item_access(session, key, navigation) for key in keys]
+            access = next((item for item in accesses if item.get("allowed")), accesses[0])
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": navigation_key}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
     def _youtube_auto_json(self, max_bytes):
         """Bound body reads before parsing; reject ambiguous HTTP framing."""
         lengths = self.headers.get_all("Content-Length", [])
@@ -94963,6 +94955,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if parsed.path == "/api/fb-video-publish" or parsed.path.startswith("/api/fb-video-publish/"):
+            from features.fb_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
@@ -94971,6 +94966,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/fb-post-ad-delete.html",
             "/fb-post-ad-delete.css",
             "/fb-post-ad-delete.js",
+            "/fb-pages.html",
+            "/fb-video-publish.html",
+            "/fb-video-publish-records.html",
+            "/fb-video-publish.js",
+            "/fb-video-publish.css",
         }:
             static_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
@@ -94991,9 +94991,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 404, {"error": "not_found"}, no_store=True)
             return
 
-        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
-            from features.youtube_analytics.routes import dispatch
+        if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
+            from features.social_analytics.routes import dispatch
             return dispatch(self, parsed, globals())
+
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.social_analytics.routes import dispatch
+            return dispatch(self, parsed, globals(), legacy=True)
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
@@ -98686,13 +98690,26 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if parsed.path == "/internal/x-posts/attribution/resolve":
+            from features.x_posts.attribution_runtime import dispatch
+            return dispatch(self, globals())
+        if parsed.path == "/internal/fb-video-publish/query":
+            from features.fb_video_publish.query_broker import dispatch
+            return dispatch(self, globals())
+        if parsed.path == "/api/fb-video-publish" or parsed.path.startswith("/api/fb-video-publish/"):
+            from features.fb_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
 
-        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
-            from features.youtube_analytics.routes import dispatch
+        if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
+            from features.social_analytics.routes import dispatch
             return dispatch(self, parsed, globals())
+
+        if parsed.path == "/api/youtube-analytics" or parsed.path.startswith("/api/youtube-analytics/"):
+            from features.social_analytics.routes import dispatch
+            return dispatch(self, parsed, globals(), legacy=True)
 
         if parsed.path == "/api/youtube-auto-publish" or parsed.path.startswith("/api/youtube-auto-publish/"):
             self._dispatch_youtube_auto_publish(parsed)
@@ -98906,6 +98923,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 outbound_payload = dict(request_payload)
                 outbound_payload["_actor"] = {
                     "user_id": str(session.get("user_id") or "")[:128],
+                    "tenant_key": str(session.get("tenant_key") or "")[:255],
                     "name": str(session.get("name") or "")[:200],
                 }
                 result = x_auto_post_service_request(
