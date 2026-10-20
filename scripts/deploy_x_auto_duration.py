@@ -140,7 +140,15 @@ def paused():
         for path in ("/run/x-post-daily/runner.lock", "/run/x-auto-post/scheduler.lock"):
             handle = open(path, "a+b")
             locks.append(handle)
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("another X operation holds " + path + "; retry after it completes")
+                    time.sleep(2)
         # HTTP publishing may run outside a systemd oneshot. Never interrupt it.
         with contextlib.closing(sqlite3.connect("file:" + str(POST_DB) + "?mode=ro", uri=True)) as conn:
             assert not conn.execute("SELECT 1 FROM x_post_queue WHERE status='publishing' LIMIT 1").fetchone(), "X write in flight"
@@ -169,7 +177,8 @@ def deploy():
     commit = run("git", "-C", str(SOURCE), "rev-parse", "HEAD")
     assert not run("git", "-C", str(SOURCE), "status", "--porcelain"), "source checkout is dirty"
     old = CURRENT.resolve()
-    release = DATA / "releases" / (commit + "-auto-duration")
+    # A stopped pre-cutover attempt remains available for audit; never overwrite it.
+    release = DATA / "releases" / (commit + "-auto-duration-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     shutil.copytree(old, release, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     files = list(BASELINE) + ["scripts/" + name for name in TESTS]
     files += ["scripts/deploy_x_auto_duration.py", "deploy/x-auto-duration-baseline.json",
