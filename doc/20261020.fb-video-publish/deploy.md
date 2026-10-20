@@ -57,4 +57,25 @@ python3 scripts/deploy_fb_video_publish.py --rollback /mnt/data-disk/fb-video-pu
 **只要已有任一正式短链账本，回滚必须保留 `/s2l/facebook/` 的Nginx路由，
 以保证历史帖文链接仍可访问。** 回滚前文件发生新变化时拒绝覆盖。
 
-实际提交、manifest位置、GPU验证和公网证据由上线后追加至test-report。
+## 已部署版本（2026-10-20）
+
+代码：`f5fcb5b711656f785434dd2494d608ed01d5d757`，分支 `codex/fb-video-publish-20261020`。
+release：`/mnt/data-disk/fb-video-publish/releases/f5fcb5b`。
+主 API/FB sidecar健康，新worker已启用，旧8个timers状态保持，60个文件hash均一致。
+GPU prepare-only和真实Cookie/非空素材/Page验收详见test-report。
+
+正式入口：
+
+- https://ai.yingliangads.com/fb-pages.html
+- https://ai.yingliangads.com/fb-video-publish.html
+- https://ai.yingliangads.com/fb-video-publish-records.html
+
+本次准确回滚命令：
+
+```bash
+cd /mnt/data-disk/fb-video-publish/releases/f5fcb5b
+python3 scripts/deploy_fb_video_publish.py --rollback /mnt/data-disk/fb-video-publish/backups/20261020T055525Z-f5fcb5b7/manifest.json
+```
+
+命令自动按新任务事实选择关闭入口并保留守卫，或完整恢复对应代码；不恢复旧数据库。
+若部署目标后来发生其他修改，先审查漂移再回滚，禁止绕过hash检查。

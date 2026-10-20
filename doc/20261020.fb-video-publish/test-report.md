@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-开发与本地验收已完成；生产部署、真实 API 与隔离 GPU 验证结果在上线后追加。
+2026-10-20 正式部署与验收完成，代码提交 `f5fcb5b711656f785434dd2494d608ed01d5d757`。
 模拟 Graph 不发送真实 Facebook 帖子；UI 夹具结果与生产读回分开记录。
 
 ## 测试范围
@@ -51,5 +51,44 @@ backend-verification.md、sa-code-review.md、source-link-contract.md。
 
 ## 发布建议
 
-全部阻断项修复并通过后，执行 deploy.md 中 GitHub-first、数据盘备份和增量演练流程。
-上线首次配置为空，不导入测试 Page、草稿、任务或短链。
+全部阻断项已修复并通过，按 deploy.md 完成 GitHub-first、数据盘备份和增量演练。
+上线首次配置为空，没有导入测试 Page、草稿、任务或短链。
+
+## 生产部署与真实验收（2026-10-20）
+
+- 已推送分支 `codex/fb-video-publish-20261020`，CPU 从 GitHub 检出精确提交到
+  `/mnt/data-disk/fb-video-publish/releases/f5fcb5b`。
+- 服务器 Linux 再次执行 core 41、broker 18、deployment 7、source/link 29，全部通过。
+- 05:55 UTC 执行上线；manifest：
+  `/mnt/data-disk/fb-video-publish/backups/20261020T055525Z-f5fcb5b7/manifest.json`。
+  在线 SQLite 备份、复制库增量迁移与 integrity_check 均通过；原 `fb_auto_*`
+  非指标业务事实的逐表数量与 SHA256 在迁移前后相同。
+- 60 个目标文件均逐一 SHA256 匹配。主 API PID 935255、FB sidecar PID 935230、
+  新 worker PID 935322 处于 active/running，prepare timer active/waiting。
+  原 8 个 FB timers 活跃状态全部保持；未部署任何 GPU 服务端源码。
+- 06:01 UTC 复核新 Page、草稿、批次、任务、链接、attempt 均为 0；SQLite quick_check=ok，
+  4 个跨模块保护 trigger 存在。主 API/FB sidecar/新 worker 上线后的 traceback 数均为 0。
+- 新短链目录属于 fb-auto-post，0750，Nginx 有独立继承只读 ACL。
+  公网未登录访问新 API 返回 401/cookie_auth_required；私有 broker 公网返回404；
+  非法短链路径返回404。没有为验收分配生产短链编号。
+- 已登录 Chrome 的真实 Cookie 路径完成 Page 空态、创建弹窗、2140 个真实候选 Page、
+  剧语言和三宏示例、素材非空 50 条/页、翻页仍保留 2 条后追加第 3 条、
+  未配置 Page 的引导、发布记录空态及刷新。未保存验证用配置/草稿、未提交正式批次。
+  1440/820/390 的布局与完整五配对流程由独立 Playwright API 夹具覆盖。
+
+### 隔离 GPU prepare-only
+
+使用真实 10 秒 FB 源素材，独立数据库与稳定 job：
+`fb-page-373583dba571beeeafec47b28bb7dc903babec3a895ede42`。
+成片 HTTP 200，8,326,396 字节，SHA256：
+`b57247496fa25f9c06a65ee5aa4636479b33c590feeaf49460938fc1263d68c0`。
+CPU 对公开成片重新计算 SHA、ffprobe 核实 H.264 720×1280、AAC、9.984秒；
+返回非空随机配方并冻结。隔离账本 attempt=0、link=0，未调用 Graph。
+
+服务器证据：
+
+```text
+/mnt/data-disk/fb-video-publish/evidence/production-verification.json
+/mnt/data-disk/fb-video-publish/evidence/prepare-only-20261020/evidence.json
+/mnt/data-disk/fb-video-publish/evidence/prepare-only-20261020/public-readback.json
+```
