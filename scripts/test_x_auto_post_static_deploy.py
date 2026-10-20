@@ -52,7 +52,7 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
                 source = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
                 script_version = (
                     ASSET_VERSION if page_name == "x-auto-publish-runs.html"
-                    else "20261020duration1" if page_name == "x-auto-publish-template.html"
+                    else "20261020duration20m1" if page_name == "x-auto-publish-template.html"
                     else "20261019random1"
                 )
                 self.assertIn(

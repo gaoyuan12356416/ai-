@@ -72,6 +72,8 @@ class RandomTemplateTests(unittest.TestCase):
         queue = self.manual_queue()
         self.assertIs(queue["random_template_enabled"], True)
         run = self.store.get_manual_run(queue["manual_run_id"])
+        self.assertEqual(run["duration_policy_version"], 2)
+        self.assertEqual(queue["duration_policy_version"], 2)
         self.assertIs(run["random_template_enabled"], True)
         with self.assertRaises(service.XPostError):
             self.store.create_manual_run(["501"], [2], "random-test-501", ACTOR, random_template_enabled=False)
@@ -87,6 +89,7 @@ class RandomTemplateTests(unittest.TestCase):
         args = ("601", 3, "task-601", "template-1", 1, "{{drama_name}}\n{{desc}}", ACTOR)
         run = self.store.create_auto_template_run(*args, random_template_enabled=True)
         self.assertTrue(run["random_template_enabled"])
+        self.assertEqual(run["duration_policy_version"], 2)
         self.store.claim_manual_run("auto_template")
         self.store.create_manual_plan(run["id"], [material_candidate(run, 3, "601")], trigger_source="auto_template")
         with contextlib.closing(sqlite3.connect(self.db)) as c:
@@ -242,6 +245,17 @@ class GPUContractTests(unittest.TestCase):
             self.assertEqual(gpu.validate_request(request,self.config)["source_duration"],duration)
         with self.assertRaises(media_repair.MediaRepairError):
             gpu.validate_request({**self.request,"source_duration":141},self.config)
+        for duration in (140, 140.001, 1094.871, 1200):
+            request = {**self.request, "source_duration": duration,
+                       "max_duration_seconds": 1200, "duration_policy_version": 2}
+            self.assertEqual(gpu.validate_request(request, self.config)["source_duration"], duration)
+        for fields in (
+            {"source_duration": 1200.001, "max_duration_seconds": 1200, "duration_policy_version": 2},
+            {"source_duration": 1094.871, "max_duration_seconds": 1200},
+            {"duration_policy_version": True},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(media_repair.MediaRepairError):
+                gpu.validate_request({**self.request, **fields}, self.config)
 
     def test_bad_host_profile_and_boolean_identity_rejected(self):
         for fields in ({"source_url":"https://attacker.test/a.mp4"},{"profile":"fb-random"},{"queue_id":True},{"source_size":True}):

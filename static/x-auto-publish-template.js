@@ -69,9 +69,9 @@
       basic: "X Basic",
       premium: "X Premium",
       premium_plus: "X Premium+",
-      none: "无会员 · 最长 140 秒",
-      unknown: "会员资格未知 · 最长 140 秒",
-    })[accountSubscription(item)] || "会员资格未知 · 最长 140 秒";
+      none: "无会员 · 最长 20 分钟（1200 秒）",
+      unknown: "会员资格未知 · 最长 20 分钟（1200 秒）",
+    })[accountSubscription(item)] || "会员资格未知 · 最长 20 分钟（1200 秒）";
   }
 
   function accountEligible(item) {

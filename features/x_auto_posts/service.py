@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 import json
 import os
 import random
@@ -1246,7 +1247,7 @@ def build_service_from_env(
     def media_preflight(task, account, candidate):
         timestamp = max(1, int(datetime.now(UTC).timestamp()))
         planned, rejections = _preflight_candidates(
-            media_config,
+            SimpleNamespace(**{**vars(media_config), "duration_policy_version": candidate.get("duration_policy_version", 2)}),
             [dict(candidate)],
             [_safe_account(dict(account))],
             timestamp,

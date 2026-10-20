@@ -16,7 +16,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from features.x_accounts.language import (  # noqa: E402
     canonical_drama_language,
     same_drama_language,
 )
+from features.x_posts import duration_policy as duration_rules
 from features.x_posts.service import (  # noqa: E402
     DEFAULT_SHORT_BASE_URL,
     PREMIUM_MAX_DURATION_SECONDS,
@@ -196,6 +197,7 @@ class DailyConfig:
     repair_profile: str = DEFAULT_REPAIR_PROFILE
     max_repairs_per_run: int = 6
     plan_query_path: str = "/internal/posts/daily-plan/query"
+    duration_policy_version: int = 2
 
     @classmethod
     def from_env(cls):
@@ -407,6 +409,7 @@ def _validate_repair_probe(
             502,
         ) from None
     if max_duration_seconds not in {
+        140.0,
         STANDARD_MAX_DURATION_SECONDS,
         PREMIUM_MAX_DURATION_SECONDS,
     }:
@@ -517,7 +520,7 @@ class MediaRepairClient:
         duration_policy = str(
             payload.get("duration_policy", "") or ""
         ).strip().lower()
-        if duration_policy not in {"standard", "premium"}:
+        if duration_policy not in {"standard", "standard_20m", "premium"}:
             raise MediaRepairError(
                 "x_post_media_repair_invalid_request",
                 "X media repair duration policy is invalid",
@@ -645,7 +648,7 @@ class MediaRepairClient:
             max_duration_seconds=(
                 PREMIUM_MAX_DURATION_SECONDS
                 if duration_policy == "premium"
-                else STANDARD_MAX_DURATION_SECONDS
+                else (1200.0 if duration_policy == "standard_20m" else 140.0)
             ),
         )
         return {
@@ -998,7 +1001,9 @@ class SidecarClient:
             "failed_preflight",
         }
         queue_statuses = {"queued", "publishing", "published", "failed"}
-        if not isinstance(run, dict) or set(run) != run_fields:
+        if not isinstance(run, dict) or set(run) not in (
+            run_fields, run_fields | {"duration_policy_version"}
+        ):
             raise SidecarError(
                 "x_daily_plan_query_invalid_response",
                 "Daily plan identity is invalid",
@@ -1014,6 +1019,8 @@ class SidecarClient:
         ]
         if (
             not isinstance(run_id, int)
+            or type(run.get("duration_policy_version", 1)) is not int
+            or run.get("duration_policy_version", 1) not in (1, 2)
             or isinstance(run_id, bool)
             or run_id <= 0
             or run.get("run_date") != requested_date
@@ -1049,7 +1056,9 @@ class SidecarClient:
         candidate_ranks = set()
         previous_rank = 0
         for queue in queues:
-            if not isinstance(queue, dict) or set(queue) != queue_fields:
+            if not isinstance(queue, dict) or set(queue) not in (
+                queue_fields, queue_fields | {"duration_policy_version"}
+            ):
                 raise SidecarError(
                     "x_daily_plan_query_invalid_response",
                     "Daily plan queue identity is invalid",
@@ -1076,6 +1085,8 @@ class SidecarClient:
                 or queue.get("run_date") != requested_date
                 or queue.get("source_date") != run.get("source_date")
                 or queue.get("status") not in queue_statuses
+                or type(queue.get("duration_policy_version", 1)) is not int
+                or queue.get("duration_policy_version", 1) != run.get("duration_policy_version", 1)
                 or any(
                     not isinstance(queue.get(field), str)
                     or len(queue.get(field)) > 64
@@ -1426,15 +1437,15 @@ def _media_fingerprint(media):
     return sha256, size
 
 
-def _duration_policy(account):
-    return "premium" if account.get("long_video_eligible") else "standard"
+def _duration_policy(account, policy_version=2):
+    return "premium" if account.get("long_video_eligible") else duration_rules.repair_policy({"duration_policy_version": policy_version})
 
 
-def _duration_limit(account):
+def _duration_limit(account, policy_version=2):
     return (
         PREMIUM_MAX_DURATION_SECONDS
-        if _duration_policy(account) == "premium"
-        else STANDARD_MAX_DURATION_SECONDS
+        if _duration_policy(account, policy_version) == "premium"
+        else duration_rules.standard_limit({"duration_policy_version": policy_version})
     )
 
 
@@ -1606,7 +1617,7 @@ def _preflight_candidate(
                     destination,
                     max_bytes=config.max_media_bytes,
                     timeout=config.media_timeout,
-                    max_duration_seconds=_duration_limit(account),
+                    max_duration_seconds=_duration_limit(account, getattr(config, "duration_policy_version", 2)),
                 )
             except XPostError as exc:
                 trigger_code = str(getattr(exc, "code", "") or "")
@@ -1629,7 +1640,7 @@ def _preflight_candidate(
                 source_sha256, source_size = _media_fingerprint(media)
                 state["attempted"] = repairs_attempted + 1
                 original_url = str(item["material_url"])
-                duration_policy = _duration_policy(account)
+                duration_policy = _duration_policy(account, getattr(config, "duration_policy_version", 2))
                 job_key = _repair_job_key(
                     item,
                     source_sha256,
@@ -1666,13 +1677,13 @@ def _preflight_candidate(
                     destination,
                     max_bytes=config.max_media_bytes,
                     timeout=config.media_timeout,
-                    max_duration_seconds=_duration_limit(account),
+                    max_duration_seconds=_duration_limit(account, getattr(config, "duration_policy_version", 2)),
                 )
                 final_sha256, final_size, probe = _verify_repaired_download(
                     repaired,
                     repaired_media,
                     repaired_probe,
-                    max_duration_seconds=_duration_limit(account),
+                    max_duration_seconds=_duration_limit(account, getattr(config, "duration_policy_version", 2)),
                 )
                 media = {
                     "sha256": final_sha256,
@@ -2079,6 +2090,11 @@ def execute_daily_run(
     # queries, downloads, or GPU repair. A frozen same-day plan is the only
     # source of truth for recovery and must never be regenerated.
     existing_plan = sidecar.query_daily_plan(config.plan_query_path, run_date)
+    config = replace(
+        config,
+        duration_policy_version=duration_rules.version(existing_plan["run"])
+        if existing_plan["found"] else 2,
+    )
     if existing_plan["found"]:
         existing_run = existing_plan["run"]
         existing_queues = existing_plan["queues"]

@@ -206,7 +206,7 @@ class XPostManualSidecarTests(unittest.TestCase):
                     {
                         "run_id": 17,
                         "candidates": [
-                            {"material_id": "501", "preflight_duration": 141.0}
+                            {"material_id": "501", "preflight_duration": 1201.0}
                         ],
                     }
                 )

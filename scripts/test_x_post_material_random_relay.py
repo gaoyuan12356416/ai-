@@ -139,7 +139,7 @@ class MaterialAssignmentTests(unittest.TestCase):
             account(11, premium=True, username="premium11"),
         ]
         direct, failures = self.preflight(
-            [pool_candidate(1, 140.0)], [target], relays
+            [pool_candidate(1, 1200.0)], [target], relays
         )
         self.assertFalse(failures)
         self.assertEqual(direct[0]["delivery_mode"], "direct")
@@ -151,7 +151,7 @@ class MaterialAssignmentTests(unittest.TestCase):
             return list(items)[::-1]
 
         relayed, failures = self.preflight(
-            [pool_candidate(2, 140.001)],
+            [pool_candidate(2, 1200.001)],
             [target],
             relays,
             shuffler=choose_last,
@@ -164,7 +164,7 @@ class MaterialAssignmentTests(unittest.TestCase):
     def test_no_relay_skips_long_row_and_publishes_available_short_row(self):
         publisher = mock.Mock()
         accepted, failures = self.preflight(
-            [pool_candidate(1, 180.0), pool_candidate(2, 90.0)],
+            [pool_candidate(1, 1800.0), pool_candidate(2, 90.0)],
             [account(1)],
         )
         self.assertEqual(
@@ -178,7 +178,7 @@ class MaterialAssignmentTests(unittest.TestCase):
 
     def test_single_premium_target_keeps_newest_fifo_long_material(self):
         accepted, failures = self.preflight(
-            [pool_candidate(1, 180.0), pool_candidate(2, 90.0)],
+            [pool_candidate(1, 1800.0), pool_candidate(2, 90.0)],
             [account(1, premium=True)],
         )
         self.assertFalse(failures)
@@ -192,7 +192,7 @@ class MaterialAssignmentTests(unittest.TestCase):
             account(11, "en", premium=True, username="premium11"),
         ]
         accepted, failures = self.preflight(
-            [pool_candidate(1, 180.0, "en"), pool_candidate(2, 90.0, "ja")],
+            [pool_candidate(1, 1800.0, "en"), pool_candidate(2, 90.0, "ja")],
             targets,
             relays,
         )
@@ -257,7 +257,7 @@ class MaterialRelayStoreTests(unittest.TestCase):
             "pool_created_at": str(pool["created_at"]),
             "preflight_sha256": "a" * 64,
             "preflight_size": 1024,
-            "preflight_duration": 180.0,
+            "preflight_duration": 1800.0,
             "delivery_mode": "premium_relay_repost",
             "relay_account_id": relay_id,
             "relay_account_username": "premium%s" % relay_id,
@@ -402,7 +402,7 @@ class MaterialRelayStoreTests(unittest.TestCase):
 
         saved = self.save_schedule()
         short = self.candidate(pool)
-        short["preflight_duration"] = 140.0
+        short["preflight_duration"] = 1200.0
         with self.assertRaises(service.XPostError):
             self.store.create_schedule_plan(
                 "material",
@@ -534,7 +534,7 @@ class MaterialRelayStoreTests(unittest.TestCase):
                     "delivery_mode": "premium_relay_repost",
                     "relay_account_id": 10,
                     "relay_account_username": "premium10",
-                    "preflight_duration": 180.0,
+                    "preflight_duration": 1800.0,
                     "status": "queued",
                 }
             )
@@ -559,7 +559,7 @@ class MaterialRelayStoreTests(unittest.TestCase):
 
             invalid_inserts = (
                 {"schedule_run_id": None},
-                {"preflight_duration": 140.0},
+                {"preflight_duration": 1200.0},
                 {"relay_account_id": 99},
                 {"delivery_mode": "direct"},
             )
@@ -574,7 +574,7 @@ class MaterialRelayStoreTests(unittest.TestCase):
 
             invalid_updates = (
                 "schedule_run_id=NULL",
-                "preflight_duration=140.0",
+                "preflight_duration=1200.0",
                 "relay_account_id=account_id",
                 "delivery_mode='direct'",
             )
@@ -603,6 +603,9 @@ class MaterialRelayOAuthBoundaryTests(unittest.TestCase):
         class FakeStore:
             def __init__(self, _path):
                 pass
+
+            def query_schedule_plan(self, *args):
+                return {"found": False, "run": None, "queues": []}
 
             def create_schedule_plan(self, *args, **kwargs):
                 captured["args"] = args
@@ -657,7 +660,7 @@ class MaterialRelayOAuthBoundaryTests(unittest.TestCase):
             "candidates": [
                 {
                     "material_language": "en",
-                    "preflight_duration": 180.0,
+                    "preflight_duration": 1800.0,
                     "relay_account_id": 11,
                 }
             ],
@@ -697,12 +700,12 @@ class MaterialRelayOAuthBoundaryTests(unittest.TestCase):
             "candidates": [
                 {
                     "material_language": "en",
-                    "preflight_duration": 180.0,
+                    "preflight_duration": 1800.0,
                     "relay_account_id": 99,
                 }
             ],
         }
-        with mock.patch.object(
+        with mock.patch.object(service.XPostStore, "query_schedule_plan", return_value={"found": False}), mock.patch.object(
             oauth_service, "find_account", return_value=target
         ), mock.patch.object(
             oauth_service,

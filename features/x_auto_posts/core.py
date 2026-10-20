@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from features.x_accounts.language import canonical_drama_language
+from features.x_posts import duration_policy
 
 
 UTC = timezone.utc
@@ -200,9 +201,12 @@ class RunRecord:
     started_at_utc: str
     finished_at_utc: str
 
+    duration_policy_version: int = 2
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "duration_policy_version": self.duration_policy_version,
             "run_key": self.run_key,
             "template_id": self.template_id,
             "template_version": self.template_version,
@@ -913,6 +917,7 @@ def ensure_storage(db_path: Any) -> None:
                 END
                 """
             )
+            duration_policy.migrate(conn, ("x_auto_run",))
             conn.commit()
         except Exception:
             if conn.in_transaction:
@@ -940,6 +945,7 @@ def _template_from_row(row: sqlite3.Row) -> TemplateSnapshot:
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
     raw_generation = row["metric_generation_id"]
     return RunRecord(
+        duration_policy_version=int(row["duration_policy_version"]),
         id=int(row["id"]),
         run_key=str(row["run_key"]),
         template_id=int(row["template_id"]),
@@ -1612,8 +1618,10 @@ class XAutoPostStore:
                     run_key,template_id,template_version,config_sha256,
                     trigger_type,scheduled_at_utc,shanghai_date,publish_time,
                     metric_generation_id,blacklist_snapshot_json,status,
-                    created_by_user_id,created_by_name,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)
+                    created_by_user_id,created_by_name,created_at,updated_at,
+                    duration_policy_version
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,2)
                 """,
                 (
                     clean_key,

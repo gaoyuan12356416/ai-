@@ -33,6 +33,7 @@ from features.x_accounts.language import (
     same_drama_language,
 )
 from features.x_posts.account_blockers import read_account_publish_blockers
+from features.x_posts import duration_policy
 
 
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
@@ -44,7 +45,7 @@ DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_GIF_BYTES = 15 * 1024 * 1024
-STANDARD_MAX_DURATION_SECONDS = 140.0
+STANDARD_MAX_DURATION_SECONDS = 1200.0
 # X's Premium product contract currently permits videos up to four hours on
 # supported clients.  The v2 media API documents its own tighter 512 MiB byte
 # ceiling but no separate duration ceiling for ``amplify_video``; a production
@@ -178,6 +179,7 @@ FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES = {
     ),
     "x_long_video_requires_premium": (
         "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+        "Videos longer than 1200 seconds require a token-confirmed X Premium subscription",
     ),
     "x_publish_unknown": (
         "存在待人工确认的发布结果，已暂停后续短剧发布",
@@ -218,6 +220,7 @@ FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON = (
 FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES = {
     "x_long_video_requires_premium": (
         "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+        "Videos longer than 1200 seconds require a token-confirmed X Premium subscription",
     ),
 }
 FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON = (
@@ -262,6 +265,7 @@ QUEUE_FIELDS = (
 )
 
 QUEUE_LEDGER_FIELDS = (
+    "duration_policy_version",
     "run_id",
     "catchup_run_id",
     "schedule_run_id",
@@ -377,7 +381,7 @@ def _resolved_pre_attempt_drama_duration_route_sql(
         f"WHERE route_repost.queue_id={q}.id)) OR ("
         f"{route}.resolved_delivery_mode='{PREMIUM_RELAY_REPOST_MODE}' "
         f"AND {q}.delivery_mode='{PREMIUM_RELAY_REPOST_MODE}' "
-        f"AND {q}.preflight_duration>{STANDARD_MAX_DURATION_SECONDS:g} "
+        f"AND {q}.preflight_duration>CASE {q}.duration_policy_version WHEN 1 THEN 140 ELSE 1200 END "
         f"AND {q}.relay_account_id>0 "
         f"AND {q}.relay_account_id<>{q}.account_id "
         f"AND {q}.relay_account_username<>'' "
@@ -578,7 +582,7 @@ def _positive_int(value, label):
     return parsed
 
 
-def _w2a_channel_for_duration(value):
+def _w2a_channel_for_duration(value, *, duration_policy_version=2):
     if isinstance(value, bool):
         raise XPostError("invalid_request", "视频时长无效", 400)
     try:
@@ -593,10 +597,10 @@ def _w2a_channel_for_duration(value):
         return "short"
     if duration < 0.5:
         raise XPostError("invalid_request", "视频时长无效", 400)
-    return "long" if duration > STANDARD_MAX_DURATION_SECONDS else "short"
+    return "long" if duration > duration_policy.standard_limit({"duration_policy_version": duration_policy_version}) else "short"
 
 
-def build_w2a_url(params):
+def build_w2a_url(params, *, duration_policy_version=2):
     """Build the exact Dramawave W2A attribution URL with fixed field order."""
     if not isinstance(params, dict):
         raise XPostError("invalid_request", "W2A参数必须是对象", 400)
@@ -624,7 +628,7 @@ def build_w2a_url(params):
     material_id = _clean_token(params["material_id"], "素材ID", 128)
     queue_id = _positive_int(params["queue_id"], "队列ID")
     content_id = _clean_token(params["content_id"], "content_id", 128)
-    channel = _w2a_channel_for_duration(params["video_duration_seconds"])
+    channel = _w2a_channel_for_duration(params["video_duration_seconds"], duration_policy_version=duration_policy_version)
 
     campaign = "yingliang_post_CLV_VL_%s*%snone%s*%s*%s*%s" % (
         username, timestamp, language, drama_name, tag, log_id,
@@ -1374,14 +1378,14 @@ def _material_fifo_selection_matches(
                 not math.isfinite(duration)
                 or duration < 0
                 or (
-                    duration > STANDARD_MAX_DURATION_SECONDS
+                    duration > duration_policy.standard_limit(values)
                     and delivery_mode == DIRECT_DELIVERY_MODE
                     and account_id not in premium_ids
                 )
                 or (
                     delivery_mode == PREMIUM_RELAY_REPOST_MODE
                     and (
-                        duration <= STANDARD_MAX_DURATION_SECONDS
+                        duration <= duration_policy.standard_limit(values)
                         or relay_account_id <= 0
                         or relay_account_id == account_id
                     )
@@ -3436,6 +3440,10 @@ def ensure_storage(db_path):
                 "DROP TRIGGER IF EXISTS "
                 "trg_x_post_queue_drama_assignment_source_delete"
             )
+            duration_policy.migrate(conn, (
+                "x_post_queue", "x_post_daily_run", "x_post_catchup_run",
+                "x_post_manual_run", "x_post_schedule_run",
+            ))
             conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_relay_insert")
             conn.execute(
                 """
@@ -3455,7 +3463,7 @@ def ensure_storage(db_path):
                             NEW.source_type='material'
                             AND NEW.schedule_run_id IS NULL
                         )
-                        OR NEW.preflight_duration<=140
+                        OR NEW.preflight_duration<=CASE NEW.duration_policy_version WHEN 1 THEN 140 ELSE 1200 END
                         OR NEW.relay_account_id<=0
                         OR NEW.relay_account_id=NEW.account_id
                         OR NEW.relay_account_username=''
@@ -3515,7 +3523,7 @@ def ensure_storage(db_path):
                             AND NEW.schedule_run_id IS NULL
                         )
                         OR (
-                            NEW.preflight_duration<=140
+                            NEW.preflight_duration<=CASE NEW.duration_policy_version WHEN 1 THEN 140 ELSE 1200 END
                             AND NOT (
                                 OLD.delivery_mode='premium_relay_repost'
                                 AND OLD.source_type='drama'
@@ -3523,7 +3531,7 @@ def ensure_storage(db_path):
                                 AND NEW.schedule_run_id=
                                     OLD.schedule_run_id
                                 AND OLD.media_validation_mode='deferred'
-                                AND OLD.preflight_duration=141
+                                AND OLD.preflight_duration=CASE OLD.duration_policy_version WHEN 1 THEN 141 ELSE 1201 END
                                 AND OLD.status='failed'
                                 AND NEW.status='queued'
                                 AND NEW.media_validation_mode='preflight'
@@ -3807,7 +3815,7 @@ def ensure_storage(db_path):
                             AND q.media_validation_mode='preflight'
                             AND q.preflight_sha256<>''
                             AND q.preflight_size>0
-                            AND q.preflight_duration>140
+                            AND q.preflight_duration>CASE q.duration_policy_version WHEN 1 THEN 140 ELSE 1200 END
                             AND NOT EXISTS(
                                 SELECT 1 FROM x_post_repost_ledger r
                                 WHERE r.queue_id=q.id
@@ -3856,7 +3864,7 @@ def ensure_storage(db_path):
                             AND q.media_validation_mode='preflight'
                             AND q.preflight_sha256<>''
                             AND q.preflight_size>0
-                            AND q.preflight_duration>140
+                            AND q.preflight_duration>CASE q.duration_policy_version WHEN 1 THEN 140 ELSE 1200 END
                             AND r.target_account_id=q.account_id
                             AND r.relay_account_id=q.relay_account_id
                             AND r.status='reserved'
@@ -4482,44 +4490,9 @@ def ensure_storage(db_path):
                 END
                 """
             )
-            recovery_timestamp = utc_now()
-            conn.execute(
-                "INSERT OR IGNORE INTO "
-                "x_post_drama_capability_block_recovery("
-                "pool_item_id,previous_status,previous_error_code,"
-                "recovery_reason,created_at) "
-                "SELECT p.id,p.status,p.last_error_code,"
-                "'premium_relay_repost_zero_write_migration_v1',? "
-                "FROM x_post_drama_pool p "
-                "WHERE p.status='needs_review' "
-                "AND p.last_error_code='x_long_video_requires_premium' "
-                "AND p.next_sub_number<=p.free_episode_count "
-                "AND NOT EXISTS("
-                "SELECT 1 FROM x_post_queue q "
-                "WHERE q.drama_pool_item_id=p.id "
-                "AND q.drama_replay_generation=p.replay_generation "
-                "AND q.episode_number=p.next_sub_number)",
-                (recovery_timestamp,),
-            )
-            conn.execute(
-                "UPDATE x_post_drama_pool SET "
-                "status=CASE WHEN assigned_account_id>0 "
-                "THEN 'active' ELSE 'pending' END,"
-                "last_checked_at=?,last_error_code='',"
-                "last_error_message='',updated_at=? "
-                "WHERE status='needs_review' "
-                "AND last_error_code='x_long_video_requires_premium' "
-                "AND next_sub_number<=free_episode_count "
-                "AND id IN (SELECT pool_item_id FROM "
-                "x_post_drama_capability_block_recovery) "
-                "AND NOT EXISTS("
-                "SELECT 1 FROM x_post_queue q "
-                "WHERE q.drama_pool_item_id=x_post_drama_pool.id "
-                "AND q.drama_replay_generation="
-                "x_post_drama_pool.replay_generation "
-                "AND q.episode_number=x_post_drama_pool.next_sub_number)",
-                (recovery_timestamp, recovery_timestamp),
-            )
+            # Keep the historical recovery audit table, but never clear a
+            # duration rejection during schema migration. Only a successful
+            # media recheck may release an unbound candidate.
             conn.commit()
         except Exception:
             conn.rollback()
@@ -5881,8 +5854,8 @@ class XPostStore:
                         "config_version,account_ids_json,schedule_mode,"
                         "body_template,random_template_enabled,status,"
                         "expected_count,queued_count,created_at,updated_at,"
-                        "lease_heartbeat_at"
-                        ") VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?,?)",
+                        "lease_heartbeat_at,duration_policy_version"
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?,?,2)",
                         (
                             slot_key,
                             config["source_type"],
@@ -6202,10 +6175,11 @@ class XPostStore:
         allow_material_relay=False,
         allow_deferred_media=False,
         allow_duration_pending=False,
+        duration_policy_version=2,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
-        result = {}
+        result = {"duration_policy_version": duration_policy.version({"duration_policy_version": duration_policy_version})}
         result["account_id"] = _positive_int(payload.get("account_id"), "account_id")
         username = str(payload.get("account_username", "") or "").strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
@@ -6579,7 +6553,7 @@ class XPostStore:
             source_type not in {"drama", "material"}
             or (source_type == "material" and not allow_material_relay)
             or result["preflight_duration"]
-            <= STANDARD_MAX_DURATION_SECONDS
+            <= duration_policy.standard_limit(result)
             or result["relay_account_id"] <= 0
             or result["relay_account_id"] == result["account_id"]
             or not relay_username
@@ -9404,13 +9378,8 @@ class XPostStore:
             )
             try:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_manual_run("
-                    "idempotency_key,trigger_source,publish_mode,scheduled_at,"
-                    "scheduled_timezone,run_date,source_date,"
-                    "account_ids_json,"
-                    "material_ids_json,body_template,random_template_enabled,actor_user_id,actor_name,"
-                    "status,expected_count,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    """INSERT INTO x_post_manual_run(idempotency_key,trigger_source,publish_mode,scheduled_at,scheduled_timezone,run_date,source_date,account_ids_json,material_ids_json,body_template,random_template_enabled,actor_user_id,actor_name,status,expected_count,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,2)""",
                     (
                         idempotency_key,
                         MANUAL_TRIGGER_SOURCE,
@@ -9466,7 +9435,9 @@ class XPostStore:
         body_template,
         actor=None,
         random_template_enabled=False,
+        duration_policy_version=2,
     ):
+        duration_policy_version = duration_policy.version({"duration_policy_version": duration_policy_version})
         random_template_enabled = _random_template_enabled(random_template_enabled)
         material_ids = _manual_material_ids([material_id])
         account_ids = _schedule_account_ids([account_id])
@@ -9597,8 +9568,8 @@ class XPostStore:
                     "template_ref,template_version,body_template_sha256,"
                     "run_date,source_date,account_ids_json,material_ids_json,"
                     "body_template,random_template_enabled,actor_user_id,actor_name,status,"
-                    "expected_count,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?)",
+                    "expected_count,created_at,updated_at,duration_policy_version"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?)",
                     (
                         idempotency_key,
                         AUTO_TEMPLATE_TRIGGER_SOURCE,
@@ -9616,6 +9587,7 @@ class XPostStore:
                         actor_name,
                         timestamp,
                         timestamp,
+                        duration_policy_version,
                     ),
                 )
                 run_id = int(cursor.lastrowid)
@@ -10065,6 +10037,7 @@ class XPostStore:
                 run_date=frozen["run_date"],
                 candidate_rank=index,
                 require_compliance=True,
+                duration_policy_version=duration_policy.version(frozen),
             )
             if (
                 trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
@@ -10315,6 +10288,7 @@ class XPostStore:
         run_date = _date_value(run_date, "run_date")
         publish_time = _schedule_publish_time(publish_time)
         run_fields = (
+            "duration_policy_version",
             "id",
             "slot_key",
             "source_type",
@@ -10342,6 +10316,7 @@ class XPostStore:
             "updated_at",
         )
         queue_fields = (
+            "duration_policy_version",
             "id",
             "schedule_run_id",
             "source_type",
@@ -10386,7 +10361,7 @@ class XPostStore:
                     "q.episode_number,q.material_url,q.delivery_mode,"
                     "q.relay_account_id,q.relay_account_username,"
                     "q.media_validation_mode,q.preflight_sha256,"
-                    "q.preflight_size,q.preflight_duration,"
+                    "q.preflight_size,q.preflight_duration,q.duration_policy_version,"
                     "COALESCE(d.route_version,0) AS route_version,"
                     "COALESCE(d.route_state,'') AS route_state,"
                     "COALESCE(d.resolved_delivery_mode,'') AS "
@@ -10741,12 +10716,8 @@ class XPostStore:
                 run_id = int(existing["id"])
             else:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_schedule_run("
-                    "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,random_template_enabled,status,expected_count,"
-                    "queued_count,error_code,error_message,started_at,"
-                    "finished_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,COALESCE((SELECT json_extract(snapshot_json,'$.random_template_enabled') FROM x_post_schedule_config_audit WHERE source_type=? AND config_version=?),0),'failed_preflight',?,0,?,?,?,?,?,?)",
+                    """INSERT INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,random_template_enabled,status,expected_count,queued_count,error_code,error_message,started_at,finished_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,?,COALESCE((SELECT json_extract(snapshot_json,'$.random_template_enabled') FROM x_post_schedule_config_audit WHERE source_type=? AND config_version=?),0),'failed_preflight',?,0,?,?,?,?,?,?,2)""",
                     (
                         slot_key,
                         source_type,
@@ -11757,13 +11728,8 @@ class XPostStore:
                     )
                 )
                 cursor = conn.execute(
-                    "INSERT INTO x_post_schedule_run("
-                    "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,schedule_mode,"
-                    "body_template,random_template_enabled,status,expected_count,queued_count,"
-                    "published_count,failed_count,unknown_count,"
-                    "created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,0,0,0,?,?)",
+                    """INSERT INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,status,expected_count,queued_count,published_count,failed_count,unknown_count,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,'claimed',?,0,0,0,0,?,?,2)""",
                     (
                         compensation_slot_key,
                         str(run["source_type"]),
@@ -12347,12 +12313,8 @@ class XPostStore:
                 compensation_publish_time.replace(":", ""),
             )
             cursor = conn.execute(
-                "INSERT INTO x_post_schedule_run("
-                "slot_key,source_type,run_date,publish_time,timezone,"
-                "config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,"
-                "status,expected_count,queued_count,published_count,"
-                "failed_count,unknown_count,created_at,updated_at"
-                ") VALUES(?,'drama',?,?,?,?,?,'random',?,?,'claimed',?,0,0,0,0,?,?)",
+                """INSERT INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,status,expected_count,queued_count,published_count,failed_count,unknown_count,created_at,updated_at,duration_policy_version)
+                VALUES(?,'drama',?,?,?,?,?,'random',?,?,'claimed',?,0,0,0,0,?,?,2)""",
                 (
                     slot_key,
                     current_date,
@@ -12558,6 +12520,7 @@ class XPostStore:
                 payload,
                 run_date=run_date,
                 candidate_rank=index,
+                duration_policy_version=duration_policy.version(frozen["run"]) if frozen["found"] else 2,
                 require_compliance=True,
                 allow_material_relay=(source_type == "material"),
                 allow_deferred_media=True,
@@ -13259,12 +13222,8 @@ class XPostStore:
                 partial_capacity_message = partial_capacity_message[:240]
             if schedule_run_id is None:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_schedule_run("
-                    "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,schedule_mode,"
-                    "body_template,random_template_enabled,status,expected_count,"
-                    "queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    """INSERT INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,status,expected_count,queued_count,started_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,2)""",
                     (
                         slot_key,
                         source_type,
@@ -13461,6 +13420,7 @@ class XPostStore:
                 "每日计划必须一次提交1到%s个候选" % MAX_DAILY_BATCH_SIZE,
                 409,
             )
+        policy_run = self.get_run_by_date(run_date)
         prepared = []
         account_ids = set()
         material_keys = set()
@@ -13473,6 +13433,7 @@ class XPostStore:
                 payload,
                 run_date=run_date,
                 candidate_rank=index,
+                duration_policy_version=duration_policy.version(policy_run or None),
                 require_compliance=True,
             )
             values["idempotency_key"] = "xpost:daily:%s:%s" % (run_date, values["account_id"])
@@ -13630,9 +13591,8 @@ class XPostStore:
 
             if run_id is None:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_daily_run("
-                    "run_date,source_date,status,expected_count,queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,'queued',?,?,?,?,?)",
+                    """INSERT INTO x_post_daily_run(run_date,source_date,status,expected_count,queued_count,started_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,'queued',?,?,?,?,?,2)""",
                     (
                         run_date,
                         source_date,
@@ -13804,6 +13764,7 @@ class XPostStore:
         parent_run_id = _positive_int(parent_run_id, "parent_run_id")
         reason = _catchup_reason(reason)
         run_fields = (
+            "duration_policy_version",
             "id",
             "parent_run_id",
             "catchup_key",
@@ -13825,6 +13786,7 @@ class XPostStore:
             "updated_at",
         )
         queue_fields = (
+            "duration_policy_version",
             "id",
             "run_id",
             "catchup_run_id",
@@ -13901,6 +13863,11 @@ class XPostStore:
                 409,
             )
 
+        with contextlib.closing(_connect(self.db_path)) as policy_conn:
+            policy_run = policy_conn.execute(
+                "SELECT duration_policy_version FROM x_post_catchup_run WHERE run_date=? AND parent_run_id=? AND reason=?",
+                (run_date, parent_run_id, reason),
+            ).fetchone()
         prepared = []
         account_ids = set()
         material_keys = set()
@@ -13928,6 +13895,7 @@ class XPostStore:
                 payload,
                 run_date=run_date,
                 candidate_rank=index,
+                duration_policy_version=duration_policy.version(policy_run),
                 require_compliance=True,
             )
             values["run_id"] = None
@@ -14187,11 +14155,8 @@ class XPostStore:
 
             if catchup_run_id is None:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_catchup_run("
-                    "parent_run_id,catchup_key,run_date,source_date,"
-                    "reason,account_ids_json,status,expected_count,"
-                    "queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    """INSERT INTO x_post_catchup_run(parent_run_id,catchup_key,run_date,source_date,reason,account_ids_json,status,expected_count,queued_count,started_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?,2)""",
                     (
                         parent_run_id,
                         expected_key,
@@ -14414,13 +14379,8 @@ class XPostStore:
                 recorded = True
             else:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_catchup_run("
-                    "parent_run_id,catchup_key,run_date,source_date,"
-                    "reason,account_ids_json,status,expected_count,"
-                    "queued_count,error_code,error_message,started_at,"
-                    "finished_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,'failed_preflight',?,0,"
-                    "?,?,?,?,?,?)",
+                    """INSERT INTO x_post_catchup_run(parent_run_id,catchup_key,run_date,source_date,reason,account_ids_json,status,expected_count,queued_count,error_code,error_message,started_at,finished_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,?,?,?,?,'failed_preflight',?,0,?,?,?,?,?,?,2)""",
                     (
                         parent_run_id,
                         expected_key,
@@ -14558,7 +14518,7 @@ class XPostStore:
                 )
                 or int(queue["preflight_size"] or 0) <= 0
                 or float(queue["preflight_duration"] or 0)
-                <= STANDARD_MAX_DURATION_SECONDS
+                <= duration_policy.standard_limit(queue)
                 or log is not None
                 or ledger is not None
             )
@@ -14601,7 +14561,7 @@ class XPostStore:
                 or (
                     resolved_relay
                     and float(queue["preflight_duration"] or 0)
-                    <= STANDARD_MAX_DURATION_SECONDS
+                    <= duration_policy.standard_limit(queue)
                 )
             )
         if invalid:
@@ -14768,7 +14728,7 @@ class XPostStore:
 
             duration = float(evidence["preflight_duration"])
             direct_delivery = bool(
-                duration <= STANDARD_MAX_DURATION_SECONDS
+                duration <= duration_policy.standard_limit(queue)
                 or target_long_video_eligible
             )
             selected_relay = None
@@ -15431,6 +15391,7 @@ class XPostStore:
         """Return one atomic, identity-only snapshot for daily-run recovery."""
         run_date = _date_value(run_date, "run_date")
         run_fields = (
+            "duration_policy_version",
             "id",
             "run_date",
             "source_date",
@@ -15446,6 +15407,7 @@ class XPostStore:
             "updated_at",
         )
         queue_fields = (
+            "duration_policy_version",
             "id",
             "run_id",
             "run_date",
@@ -15563,10 +15525,8 @@ class XPostStore:
                 recorded = True
             else:
                 cursor = conn.execute(
-                    "INSERT INTO x_post_daily_run("
-                    "run_date,source_date,status,expected_count,queued_count,error_code,error_message,"
-                    "started_at,finished_at,created_at,updated_at"
-                    ") VALUES(?,?,'failed_preflight',?,0,?,?,?,?,?,?)",
+                    """INSERT INTO x_post_daily_run(run_date,source_date,status,expected_count,queued_count,error_code,error_message,started_at,finished_at,created_at,updated_at,duration_policy_version)
+                    VALUES(?,?,'failed_preflight',?,0,?,?,?,?,?,?,2)""",
                     (
                         run_date,
                         source_date,
@@ -18684,6 +18644,7 @@ def probe_media(
             "invalid_configuration", "X video duration policy is invalid", 500
         ) from None
     if duration_limit not in {
+        140.0,
         STANDARD_MAX_DURATION_SECONDS,
         PREMIUM_MAX_DURATION_SECONDS,
     }:
@@ -18754,10 +18715,10 @@ def probe_media(
             422,
         )
     if duration > duration_limit:
-        if duration_limit == STANDARD_MAX_DURATION_SECONDS:
+        if duration_limit in (140.0, STANDARD_MAX_DURATION_SECONDS):
             raise XPostError(
                 "x_long_video_requires_premium",
-                "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+                "Videos longer than %g seconds require a token-confirmed X Premium subscription" % duration_limit,
                 422,
             )
         raise XPostError(
@@ -19186,7 +19147,7 @@ def publish_canary(
                         "queue_id": queue["id"],
                         "content_id": queue["content_id"],
                         "video_duration_seconds": expected_duration,
-                    }
+                    }, duration_policy_version=duration_policy.version(queue)
                 )
                 log = store.prepare_log(log["id"], long_url, short_url, post_text)
         if not prepare_link_after_probe:
@@ -19292,7 +19253,7 @@ def publish_canary(
             duration_limit = (
                 PREMIUM_MAX_DURATION_SECONDS
                 if premium_video_eligible
-                else STANDARD_MAX_DURATION_SECONDS
+                else duration_policy.standard_limit(queue)
             )
             media_probe = probe_media(
                 media["path"],
@@ -19310,18 +19271,18 @@ def publish_canary(
                     409,
                 )
             if not deferred_media_validation and expected_duration > 0 and (
-                expected_duration > STANDARD_MAX_DURATION_SECONDS
+                expected_duration > duration_policy.standard_limit(queue)
             ) != (
-                published_duration > STANDARD_MAX_DURATION_SECONDS
+                published_duration > duration_policy.standard_limit(queue)
             ):
                 raise XPostError(
                     "media_preflight_changed",
-                    "素材时长跨越140秒归因边界",
+                    "素材时长跨越冻结策略的归因边界",
                     409,
                 )
             media_category = (
                 PREMIUM_MEDIA_CATEGORY
-                if published_duration > STANDARD_MAX_DURATION_SECONDS
+                if published_duration > duration_policy.standard_limit(queue)
                 else STANDARD_MEDIA_CATEGORY
             )
         if prepare_link_after_probe:
@@ -19340,7 +19301,7 @@ def publish_canary(
                     "queue_id": queue["id"],
                     "content_id": queue["content_id"],
                     "video_duration_seconds": published_duration,
-                }
+                }, duration_policy_version=duration_policy.version(queue)
             )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
             if callable(storage_guard):

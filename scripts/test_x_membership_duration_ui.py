@@ -30,7 +30,7 @@ class XMembershipDurationUiTests(unittest.TestCase):
             self.assertIn(f'{member}"', accounts)
             self.assertNotIn(f"{member} · 最长", accounts)
 
-    def test_accounts_without_membership_keep_the_140_second_hint(self) -> None:
+    def test_accounts_without_membership_keep_the_20_minute_hint(self) -> None:
         for name in (
             "x-accounts.html",
             "x-account-list.html",
@@ -39,7 +39,7 @@ class XMembershipDurationUiTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 source = self.source(name)
-                self.assertIn("最长 140 秒", source)
+                self.assertIn("最长 20 分钟（1200 秒）", source)
 
 
 if __name__ == "__main__":

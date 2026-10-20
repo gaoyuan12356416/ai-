@@ -112,7 +112,7 @@ class PremiumRelayStoreTests(unittest.TestCase):
             "name_tag": "#Drama_%s" % pool["content_id"],
             "preflight_sha256": ("%064x" % (1000 + rank))[-64:],
             "preflight_size": 1024 + rank,
-            "preflight_duration": 180.0 if long else 90.0,
+            "preflight_duration": 1800.0 if long else 90.0,
             "delivery_mode": (
                 "premium_relay_repost" if long else "direct"
             ),
@@ -459,7 +459,7 @@ class PremiumRelayStoreTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("active", ""))
 
-    def test_migration_reopens_only_proven_zero_write_capability_block(self):
+    def test_migration_preserves_duration_error_until_media_recheck(self):
         pool = self.add_drama("LEGACY")
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute(
@@ -481,15 +481,8 @@ class PremiumRelayStoreTests(unittest.TestCase):
                 "FROM x_post_drama_capability_block_recovery WHERE pool_item_id=?",
                 (pool["id"],),
             ).fetchone()
-        self.assertEqual(row, ("pending", ""))
-        self.assertEqual(
-            audit,
-            (
-                "needs_review",
-                "x_long_video_requires_premium",
-                "premium_relay_repost_zero_write_migration_v1",
-            ),
-        )
+        self.assertEqual(row, ("needs_review", "x_long_video_requires_premium"))
+        self.assertIsNone(audit)
 
 
 class PremiumRelayApiTests(unittest.TestCase):

@@ -389,6 +389,7 @@ class XPostLedgerTests(unittest.TestCase):
         self.assertEqual(
             set(snapshot["queues"][0]),
             {
+                "duration_policy_version",
                 "id",
                 "run_id",
                 "run_date",

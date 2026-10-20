@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from features.x_accounts.language import same_drama_language
+from features.x_posts import duration_policy
 
 from .client import safe_public_message
 from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
@@ -29,7 +30,7 @@ from .x_sidecar import XPostAutoBridgeClient, XPostBridgeError
 
 
 UTC = timezone.utc
-STANDARD_VIDEO_MAX_DURATION_SECONDS = 140
+STANDARD_VIDEO_MAX_DURATION_SECONDS = 1200
 AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS = 4 * 60 * 60
 LONG_VIDEO_SUBSCRIPTION_TYPES = frozenset({"basic", "premium", "premium_plus"})
 
@@ -90,7 +91,7 @@ class AutoLiveGates:
         }
 
 
-def account_duration_limit_seconds(account: Optional[Mapping[str, Any]]) -> int:
+def account_duration_limit_seconds(account: Optional[Mapping[str, Any]], policy_version: int = 2) -> int:
     """Return the fail-closed auto-template duration limit for one account."""
 
     value = account if isinstance(account, Mapping) else {}
@@ -108,13 +109,14 @@ def account_duration_limit_seconds(account: Optional[Mapping[str, Any]]) -> int:
         and subscription_type in LONG_VIDEO_SUBSCRIPTION_TYPES
     ):
         return AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS
-    return STANDARD_VIDEO_MAX_DURATION_SECONDS
+    return int(duration_policy.standard_limit({"duration_policy_version": policy_version}))
 
 
 def selector_rules(
     config: Mapping[str, Any],
     *,
     account: Optional[Mapping[str, Any]] = None,
+    policy_version: int = 2,
 ) -> SelectionRules:
     drama = (
         config.get("drama_rule")
@@ -129,7 +131,7 @@ def selector_rules(
     duration_min = material.get("duration_min_seconds")
     duration_max = material.get("duration_max_seconds")
     if account is not None:
-        account_limit = Decimal(account_duration_limit_seconds(account))
+        account_limit = Decimal(account_duration_limit_seconds(account, policy_version))
         try:
             configured_min = (
                 None if duration_min in (None, "") else Decimal(str(duration_min))
@@ -315,7 +317,7 @@ class AutoPostExecutor:
             template_version=task.template_version,
             account_id=task.account_id,
             language=task.language,
-            rules=selector_rules(template.config, account=task.account_snapshot),
+            rules=selector_rules(template.config, account=task.account_snapshot, policy_version=self.store.get_run(task.run_id).duration_policy_version),
             now=self._now(),
         )
         self._phase_selector(claim_token).select_and_reserve(request)
@@ -407,6 +409,7 @@ class AutoPostExecutor:
 
     def _create_run(self, task: TaskRecord, body_template: str, random_template_enabled: bool = False) -> Dict[str, Any]:
         payload = {
+            "duration_policy_version": self.store.get_run(task.run_id).duration_policy_version,
             "external_task_key": f"x-auto-task-{task.id}",
             "template_ref": f"x-auto-template-{task.template_id}",
             "template_version": task.template_version,
@@ -436,6 +439,7 @@ class AutoPostExecutor:
         if existing is not None:
             return dict(run)
         candidate = dict(self.candidate_loader(task, run))
+        candidate["duration_policy_version"] = self.store.get_run(task.run_id).duration_policy_version
         candidate["body_template"] = str(run.get("body_template") or task.body_template)
         candidate["source_type"] = "material"
         candidate["source_date"] = str(run.get("source_date") or "")

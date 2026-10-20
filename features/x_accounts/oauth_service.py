@@ -34,6 +34,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from features.x_posts import duration_policy  # noqa: E402
 from features.x_accounts.language import (  # noqa: E402
     DEFAULT_DRAMA_LANGUAGE,
     canonical_drama_language,
@@ -2113,7 +2114,7 @@ def _daily_account_scope(allowed_account_ids):
     return values
 
 
-def _require_candidate_duration_capability(candidate, account):
+def _require_candidate_duration_capability(candidate, account, policy_record=None):
     raw_duration = candidate.get("preflight_duration", 0)
     try:
         duration = float(raw_duration or 0)
@@ -2125,12 +2126,12 @@ def _require_candidate_duration_capability(candidate, account):
         raise ServiceError(
             "invalid_request", "preflight_duration is invalid", 400
         )
-    if duration > 140.0 and not account.get(
+    if duration > duration_policy.standard_limit(policy_record) and not account.get(
         "long_video_publish_eligible"
     ):
         raise ServiceError(
             "x_long_video_requires_premium",
-            "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+            "Videos longer than %g seconds require a token-confirmed X Premium subscription" % duration_policy.standard_limit(policy_record),
             409,
         )
 
@@ -2646,7 +2647,7 @@ def _resolve_duration_pending_queue(store, queue, actor, contexts):
         and target.get("protected") is False
     )
     relay_accounts = []
-    if final_duration > 140.0 and not target_long_video_eligible:
+    if final_duration > duration_policy.standard_limit(queue) and not target_long_video_eligible:
         relay_accounts = _premium_relay_accounts(
             str(queue.get("run_date") or ""),
             refresh=True,
@@ -2880,7 +2881,7 @@ def publish_queue_request(
             deferred_media_validation = bool(
                 queue.get("media_validation_mode") == "deferred"
             )
-            if relay_delivery or duration > 140.0 or deferred_media_validation:
+            if relay_delivery or duration > duration_policy.standard_limit(queue) or deferred_media_validation:
                 verified_source = verify_account(
                     source_account_id,
                     actor,
@@ -2897,7 +2898,7 @@ def publish_queue_request(
                         "X account drama language no longer matches the frozen queue",
                         409,
                     )
-                if (relay_delivery or duration > 140.0) and (
+                if (relay_delivery or duration > duration_policy.standard_limit(queue)) and (
                     not verified_source.get("long_video_publish_eligible")
                     or verified_source.get("protected") is not False
                 ):
@@ -2971,7 +2972,7 @@ def publish_queue_request(
                             "X account drama language no longer matches the frozen queue",
                             409,
                         )
-                    if (relay_delivery or duration > 140.0) and (
+                    if (relay_delivery or duration > duration_policy.standard_limit(queue)) and (
                         not verified_source.get("long_video_publish_eligible")
                         or verified_source.get("protected") is not False
                     ):
@@ -2996,7 +2997,7 @@ def publish_queue_request(
                     )
                     if frozen_drama_language and not same_drama_language(verified_source.get("drama_language"), frozen_drama_language):
                         raise ServiceError("x_post_account_language_mismatch", "账号语言与冻结队列不一致", 409)
-                    if (relay_delivery or duration > 140.0) and not verified_source.get("long_video_publish_eligible"):
+                    if (relay_delivery or duration > duration_policy.standard_limit(queue)) and not verified_source.get("long_video_publish_eligible"):
                         raise ServiceError("x_post_premium_relay_unavailable", "长视频账号资格已变化", 409)
                 account, access_token = publish_contexts.enter_context(
                     publish_credentials(source_account_id, actor, "all")
@@ -3032,7 +3033,7 @@ def publish_queue_request(
                         access_token=access_token,
                         access_token_provider=publishing_token_provider(
                             source_account_id, actor, frozen_drama_language,
-                            require_premium=relay_delivery or duration > 140.0,
+                            require_premium=relay_delivery or duration > duration_policy.standard_limit(queue),
                         ),
                         public_root=POST_PUBLIC_ROOT,
                         short_base_url=POST_SHORT_BASE_URL,
@@ -3531,6 +3532,7 @@ def _public_manual_run(item):
         "account_ids",
         "material_ids",
         "random_template_enabled",
+        "duration_policy_version",
         "status",
         "expected_count",
         "queued_count",
@@ -3584,6 +3586,7 @@ def _auto_template_run(item):
         "template_version",
         "body_template_sha256",
         "random_template_enabled",
+        "duration_policy_version",
         "run_date",
         "source_date",
         "account_ids",
@@ -3660,6 +3663,7 @@ def create_post_auto_template_run_request(payload):
             payload.get("template_version"),
             payload.get("body_template"),
             AUTO_TEMPLATE_ACTOR,
+            duration_policy_version=payload.get("duration_policy_version", 2),
             random_template_enabled=payload.get("random_template_enabled", False),
         )
     except XPostError as exc:
@@ -3790,7 +3794,7 @@ def create_post_auto_template_plan_request(payload):
             "X account drama language does not match the frozen auto task language",
             409,
         )
-    _require_candidate_duration_capability(candidate, account)
+    _require_candidate_duration_capability(candidate, account, frozen)
     try:
         duration = float(candidate.get("preflight_duration", 0) or 0)
     except (TypeError, ValueError, OverflowError):
@@ -3938,7 +3942,7 @@ def create_post_manual_plan_request(payload):
     for candidate, account in zip(candidates, accounts):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
-        _require_candidate_duration_capability(candidate, account)
+        _require_candidate_duration_capability(candidate, account, frozen)
         item = dict(candidate)
         item.update(
             {
@@ -4493,6 +4497,8 @@ def create_post_schedule_plan_request(payload):
     premium_relay_accounts = {}
     source_type = str(payload.get("source_type", "") or "").strip().lower()
     run_date = str(payload.get("run_date", "") or "").strip()
+    policy_plan = store.query_schedule_plan(source_type, run_date, payload.get("publish_time"))
+    policy_record = policy_plan["run"] if policy_plan.get("found") else None
     fifo_capacity_skips = payload.get("fifo_capacity_skips", [])
     if not isinstance(fifo_capacity_skips, list):
         raise ServiceError(
@@ -4598,7 +4604,7 @@ def create_post_schedule_plan_request(payload):
             and
             source_type in {"drama", "material"}
             and math.isfinite(duration)
-            and duration > 140.0
+            and duration > duration_policy.standard_limit(policy_record)
             and not account.get("long_video_publish_eligible")
         )
         if relay_required:
@@ -4642,7 +4648,7 @@ def create_post_schedule_plan_request(payload):
                         409,
                     )
         elif not duration_pending:
-            _require_candidate_duration_capability(candidate, account)
+            _require_candidate_duration_capability(candidate, account, policy_record)
         if account.get("long_video_eligible"):
             premium_account_ids.append(int(account["id"]))
         item = dict(candidate)

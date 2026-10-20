@@ -2760,7 +2760,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )["items"][0]
         candidate = self.material_candidate(pool, 2)
         candidate.update({
-            "preflight_duration": 180.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+            "preflight_duration": 1800.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
             "relay_account_id": 9, "relay_account_username": "premium9",
         })
         relays = [{"id": value, "username": "premium%s" % value, "drama_language": "en"} for value in (9, 10)]
@@ -2787,7 +2787,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )["items"][0]
         candidate = self.material_candidate(pool, 2)
         candidate.update({
-            "preflight_duration": 180.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
+            "preflight_duration": 1800.0, "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
             "relay_account_id": 9, "relay_account_username": "premium9",
         })
         plan = self.store.create_schedule_plan(
@@ -2888,7 +2888,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.save_schedule("drama", [2], ["09:00"])
         pool = self.add_drama("LOCKED_DRAMA", free_episode_count=3)
         candidate = self.drama_candidate(pool, 2, 1)
-        candidate.update(preflight_duration=180.0, delivery_mode="premium_relay_repost",
+        candidate.update(preflight_duration=1800.0, delivery_mode="premium_relay_repost",
                          relay_account_id=9, relay_account_username="premium9")
         plan = self.store.create_schedule_plan(
             "drama", "2026-07-27", "09:00", 2, [candidate],
@@ -3484,7 +3484,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     "content_id": newest_long["content_id"],
                     "error_code": "x_long_video_requires_premium",
                     "error_message": (
-                        "Videos longer than 140 seconds require a "
+                        "Videos longer than 1200 seconds require a "
                         "token-confirmed X Premium subscription"
                     ),
                 }
@@ -3504,7 +3504,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         long_candidate = self.drama_candidate(newest_long, 2, 1)
         long_candidate.update(
             {
-                "preflight_duration": 180.0,
+                "preflight_duration": 1800.0,
                 "delivery_mode": "premium_relay_repost",
                 "relay_account_id": 9,
                 "relay_account_username": "premium9",
@@ -4742,7 +4742,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         ]
         candidates[1].update(
             {
-                "preflight_duration": 180.0,
+                "preflight_duration": 1800.0,
                 "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
                 "relay_account_id": 9,
                 "relay_account_username": "premium9",
@@ -4872,7 +4872,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             if relay_first and index == 0:
                 candidate.update(
                     {
-                        "preflight_duration": 180.0,
+                        "preflight_duration": 1800.0,
                         "delivery_mode": "premium_relay_repost",
                         "relay_account_id": 9,
                         "relay_account_username": "premium9",
@@ -4933,7 +4933,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     "preflight_sha256": ("%064x" % (600 + index))[-64:],
                     "preflight_size": 4096 + index,
                     "preflight_duration": (
-                        180.0
+                        1800.0
                         if queue["delivery_mode"] == "premium_relay_repost"
                         else 88.0 + index
                     ),
@@ -5249,7 +5249,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 0,
             )
             conn.execute(
-                "UPDATE x_post_queue SET preflight_duration=141 "
+                "UPDATE x_post_queue SET preflight_duration=1201 "
                 "WHERE id=?",
                 (relay_queue["id"],),
             )
@@ -5456,7 +5456,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             if item["queue_id"] == relay_queue["id"]
         )
         repaired["preflight_duration"] = 120.0
-        if float(old_duration) != 180.0:
+        if float(old_duration) != 1800.0:
             with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
                 conn.execute(
                     "UPDATE x_post_queue SET preflight_duration=? WHERE id=?",
@@ -5482,10 +5482,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(after["audits"], [])
 
     def test_bound_drama_short_relay_recovery_rejects_old_duration_180(self):
-        self._assert_non_placeholder_short_relay_recovery_rolls_back(180.0)
+        self._assert_non_placeholder_short_relay_recovery_rolls_back(1800.0)
 
     def test_bound_drama_short_relay_recovery_rejects_old_duration_142(self):
-        self._assert_non_placeholder_short_relay_recovery_rolls_back(142.0)
+        self._assert_non_placeholder_short_relay_recovery_rolls_back(1202.0)
 
     def test_bound_drama_failed_media_recovery_rejects_partial_and_repeat(self):
         plan, prepared = self._failed_bound_drama_media_run()
@@ -5611,7 +5611,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
         candidates[1].update(
             {
-                "preflight_duration": 180.0,
+                "preflight_duration": 1800.0,
                 "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
                 "relay_account_id": 9,
                 "relay_account_username": "premium9",
@@ -5667,7 +5667,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     "media_repair_source_sha256": ("%064x" % (200 + index))[-64:],
                     "preflight_sha256": ("%064x" % (300 + index))[-64:],
                     "preflight_size": 2048 + index,
-                    "preflight_duration": 120.0 if index == 1 else 180.0,
+                    "preflight_duration": 120.0 if index == 1 else 1800.0,
                 }
             )
         now = datetime(2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ)
@@ -6984,7 +6984,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         message = (
             "episode DRAMA-LONG:1 media preflight failed: "
-            "Videos longer than 140 seconds require a token-confirmed "
+            "Videos longer than 1200 seconds require a token-confirmed "
             "X Premium subscription"
         )
         self.store.record_schedule_failure(
@@ -7125,7 +7125,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [2],
             "x_long_video_requires_premium",
             "episode DRAMA-LONG:1 media preflight failed: Videos longer "
-            "than 140 seconds require a token-confirmed X Premium "
+            "than 1200 seconds require a token-confirmed X Premium "
             "subscription",
         )
         capability_commit = "c" * 40
@@ -7229,7 +7229,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [2],
             "x_long_video_requires_premium",
             "episode DRAMA-LONG:1 media preflight failed: Videos longer "
-            "than 140 seconds require a token-confirmed X Premium "
+            "than 1200 seconds require a token-confirmed X Premium "
             "subscription",
         )
         self.store.recover_failed_preflight_schedule_run(
@@ -7424,10 +7424,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         boundary_plan = self.store.create_schedule_plan(
             "drama", "2026-07-27", "09:00", 2, boundary_candidates
         )
+        self.assertEqual(self.store.get_schedule_run(boundary_plan["id"])["duration_policy_version"], 2)
+        self.assertEqual({q["duration_policy_version"] for q in boundary_plan["queues"]}, {2})
         boundary_cases = (
-            (139.999, False),
-            (140.0, False),
-            (140.000001, True),
+            (1199.999, False),
+            (1200.0, False),
+            (1200.000001, True),
         )
         for index, (queue, candidate, case) in enumerate(
             zip(
@@ -7479,13 +7481,13 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         ]
         first_relay = self.store.resolve_drama_duration_route(
             relay_plan["queues"][0]["id"],
-            self.duration_media_evidence(relay_candidates[0], 140.000001, 10),
+            self.duration_media_evidence(relay_candidates[0], 1200.000001, 10),
             False,
             relays,
         )
         second_relay = self.store.resolve_drama_duration_route(
             relay_plan["queues"][1]["id"],
-            self.duration_media_evidence(relay_candidates[1], 141.0, 11),
+            self.duration_media_evidence(relay_candidates[1], 1201.0, 11),
             False,
             relays,
         )
@@ -7511,7 +7513,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "drama", "2026-07-27", "09:00", 2, [candidate]
         )
         queue_id = plan["queues"][0]["id"]
-        evidence = self.duration_media_evidence(candidate, 141.0, 77)
+        evidence = self.duration_media_evidence(candidate, 1201.0, 77)
 
         waiting = self.store.resolve_drama_duration_route(
             queue_id,
@@ -7522,7 +7524,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "waiting_relay")
         self.assertEqual(waiting["delivery_mode"], "duration_pending")
         self.assertEqual(waiting["route_state"], "waiting_relay")
-        self.assertEqual(waiting["preflight_duration"], 141.0)
+        self.assertEqual(waiting["preflight_duration"], 1201.0)
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             self.assertEqual(
                 conn.execute(
@@ -7553,7 +7555,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 ("material_url=?", ("https://media.example.test/tampered.mp4",)),
                 ("preflight_sha256=?", ("f" * 64,)),
                 ("preflight_size=?", (999999,)),
-                ("preflight_duration=?", (142.0,)),
+                ("preflight_duration=?", (1202.0,)),
                 ("media_repair_profile=?", ("tampered",)),
             ):
                 with self.subTest(waiting_media_assignment=assignment):
@@ -7629,7 +7631,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 "delivery_mode": service.PREMIUM_RELAY_REPOST_MODE,
                 "relay_account_id": 4,
                 "relay_account_username": "Relay4",
-                "preflight_duration": 141.0,
+                "preflight_duration": 1201.0,
             }
         )
         self.claim_schedule_slot("2026-07-27", "10:00")
@@ -7671,7 +7673,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             conn.rollback()
             with self.assertRaises(sqlite3.IntegrityError):
                 conn.execute(
-                    "UPDATE x_post_queue SET preflight_duration=142 WHERE id=?",
+                    "UPDATE x_post_queue SET preflight_duration=1202 WHERE id=?",
                     (queue_id,),
                 )
             conn.rollback()
@@ -7688,7 +7690,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         queue_id = plan["queues"][0]["id"]
         waiting = self.store.resolve_drama_duration_route(
             queue_id,
-            self.duration_media_evidence(candidate, 141.0, 89),
+            self.duration_media_evidence(candidate, 1201.0, 89),
             False,
             [],
         )
@@ -7758,7 +7760,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         resolved = self.store.resolve_drama_duration_route(
             plan["queues"][0]["id"],
-            self.duration_media_evidence(candidate, 140.0, 301),
+            self.duration_media_evidence(candidate, 1200.0, 301),
             False,
             [],
         )
@@ -7825,7 +7827,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         resolved = self.store.resolve_drama_duration_route(
             plan["queues"][0]["id"],
-            self.duration_media_evidence(candidate, 141.0, 302),
+            self.duration_media_evidence(candidate, 1201.0, 302),
             False,
             [{"id": 3, "username": "Relay3", "drama_language": "en"}],
         )
@@ -7915,7 +7917,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         published_log = self.store.reserve_log(published_queue["id"])
         self.store.resolve_drama_duration_route(
             waiting_queue["id"],
-            self.duration_media_evidence(waiting_candidate, 141.0, 92),
+            self.duration_media_evidence(waiting_candidate, 1201.0, 92),
             False,
             [],
         )
@@ -7973,7 +7975,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         waiting_queue = self.store.resolve_drama_duration_route(
             waiting_plan["queues"][0]["id"],
-            self.duration_media_evidence(waiting_candidate, 141.0, 201),
+            self.duration_media_evidence(waiting_candidate, 1201.0, 201),
             False,
             [],
         )
@@ -8087,7 +8089,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         held_queue = self.store.resolve_drama_duration_route(
             held_plan["queues"][0]["id"],
-            self.duration_media_evidence(held_candidate, 141.0, 402),
+            self.duration_media_evidence(held_candidate, 1201.0, 402),
             False,
             [{"id": 4, "username": "Relay4", "drama_language": "en"}],
         )

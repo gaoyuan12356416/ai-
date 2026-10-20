@@ -124,7 +124,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
+  <script src="/quick-nav.js?v=20260915retired"></script>
   <script>
     (() => {
       const state = { auth: null, accounts: [], config: null, busy: false };
@@ -147,9 +147,9 @@
         basic: "X Basic",
         premium: "X Premium",
         premium_plus: "X Premium+",
-        none: "无会员 · 最长 140 秒",
-        unknown: "会员资格未知 · 最长 140 秒",
-      })[String(item && item.subscription_type || "unknown")] || "会员资格未知 · 最长 140 秒";
+        none: "无会员 · 最长 20 分钟（1200 秒）",
+        unknown: "会员资格未知 · 最长 20 分钟（1200 秒）",
+      })[String(item && item.subscription_type || "unknown")] || "会员资格未知 · 最长 20 分钟（1200 秒）";
       const formatTime = value => {
         if (!value) return "—";
         const raw = String(value);

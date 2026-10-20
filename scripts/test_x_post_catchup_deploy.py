@@ -25,15 +25,16 @@ CATCHUP_ENV_EXAMPLE = (
 
 
 class XPostCatchupDeployTest(unittest.TestCase):
-    def test_auto_publish_status_is_the_second_column(self):
+    def test_auto_publish_status_follows_preserved_operating_metrics(self):
         header = (
-            "<th>X账号</th>"
+            "<th>X账号</th><th>运营统计</th>"
             '<th class="auto-publish-col">自动发布 Post</th>'
         )
         self.assertIn(header, ACCOUNT_LIST)
         account_cell = '<td><div class="account">'
         status_cell = '<td class="auto-publish-col"><span class="status '
         self.assertLess(ACCOUNT_LIST.index(account_cell), ACCOUNT_LIST.index(status_cell))
+        self.assertLess(ACCOUNT_LIST.index("<td>${operatingMetricsHtml(item)}</td>"), ACCOUNT_LIST.index(status_cell))
         self.assertLess(
             ACCOUNT_LIST.index(status_cell),
             ACCOUNT_LIST.index("<td>${metricsHtml(item)}</td>"),

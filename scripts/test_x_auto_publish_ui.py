@@ -273,8 +273,8 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn('basic: "X Basic"', source)
         self.assertIn('premium: "X Premium"', source)
         self.assertIn('premium_plus: "X Premium+"', source)
-        self.assertIn('none: "无会员 · 最长 140 秒"', source)
-        self.assertIn('unknown: "会员资格未知 · 最长 140 秒"', source)
+        self.assertIn('none: "无会员 · 最长 20 分钟（1200 秒）"', source)
+        self.assertIn('unknown: "会员资格未知 · 最长 20 分钟（1200 秒）"', source)
         self.assertNotIn("支持长视频", source)
         self.assertNotIn("可发长视频", source)
 

@@ -24,6 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from features.x_posts import service
+from features.x_posts import duration_policy as duration_rules
 
 
 _QUEUE_IDENTITY_FIELDS = (
@@ -42,14 +43,14 @@ _ENV_PREFIX = "X_POST_DEFERRED_DRAMA_REPAIR_"
 
 
 def _queue_identity(queue):
-    return tuple(str(queue.get(field, "") or "") for field in _QUEUE_IDENTITY_FIELDS)
+    return tuple(str(queue.get(field, "") or "") for field in _QUEUE_IDENTITY_FIELDS) + duration_rules.identity_suffix(queue)
 
 
 def _duration_pending_identity(queue):
     return tuple(
         str(queue.get(field, "") or "")
         for field in _DURATION_PENDING_IDENTITY_FIELDS
-    )
+    ) + duration_rules.identity_suffix(queue)
 
 
 def _probe_raw_video_duration(
@@ -59,7 +60,7 @@ def _probe_raw_video_duration(
     timeout=30,
     runner=None,
 ):
-    """Read the source duration without applying the 140-second route limit.
+    """Read the source duration without applying the account route limit.
 
     The strict X media contract remains the responsibility of
     :func:`service.probe_media`.  This narrow inspection exists so a malformed
@@ -400,8 +401,8 @@ def prepare_deferred_drama_media(
             if media.get("media_kind") != "video":
                 raise service.XPostError("invalid_media_type", "短剧剧集必须是视频，尚未尝试发布", 422)
             premium = service._account_has_premium_video_entitlement(account)
-            duration_policy = "premium" if premium else "standard"
-            duration_limit = service.PREMIUM_MAX_DURATION_SECONDS if premium else service.STANDARD_MAX_DURATION_SECONDS
+            duration_policy = "premium" if premium else duration_rules.repair_policy(queue)
+            duration_limit = service.PREMIUM_MAX_DURATION_SECONDS if premium else duration_rules.standard_limit(queue)
             try:
                 service.probe_media(
                     media["path"], max_bytes=max_media_bytes,
@@ -562,7 +563,7 @@ class PreparedDurationPendingDramaMedia:
             valid_route = relay_account_id == 0 and not relay_username
         elif delivery_mode == service.PREMIUM_RELAY_REPOST_MODE:
             valid_route = (
-                self.final_duration > service.STANDARD_MAX_DURATION_SECONDS
+                self.final_duration > duration_rules.standard_limit(queue)
                 and relay_account_id > 0
                 and relay_account_id != int(queue.get("account_id") or 0)
                 and bool(relay_username)
@@ -804,13 +805,13 @@ def prepare_duration_pending_drama_media(
             )
             duration_policy = (
                 "premium"
-                if raw_duration > service.STANDARD_MAX_DURATION_SECONDS
-                else "standard"
+                if raw_duration > duration_rules.standard_limit(queue)
+                else duration_rules.repair_policy(queue)
             )
             duration_limit = (
                 service.PREMIUM_MAX_DURATION_SECONDS
                 if duration_policy == "premium"
-                else service.STANDARD_MAX_DURATION_SECONDS
+                else duration_rules.standard_limit(queue)
             )
             from scripts.x_post_daily_runner import (
                 REPAIRABLE_MEDIA_CODES,

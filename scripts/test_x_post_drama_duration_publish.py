@@ -36,6 +36,7 @@ def pending_queue():
         "manual_run_id": 0,
         "run_date": "2026-09-01",
         "source_type": "drama",
+        "duration_policy_version": 2,
         "status": "queued",
         "account_id": TARGET_ID,
         "account_username": "reeldrama",
@@ -156,7 +157,7 @@ class FakeStore:
             }
         )
         resolved = {**self.queue, **dict(media_evidence)}
-        if self.duration <= 140.0 or target_long_video_eligible:
+        if self.duration <= 1200.0 or target_long_video_eligible:
             resolved.update(
                 {
                     "status": "queued",
@@ -440,7 +441,7 @@ class PublishHarness:
 
 class DramaDurationPublishTest(unittest.TestCase):
     def test_short_video_resolves_direct_without_relay_and_reuses_file(self):
-        harness = PublishHarness(self, 140.0, False, [])
+        harness = PublishHarness(self, 1200.0, False, [])
         harness.relay_lookup.side_effect = AssertionError(
             "short video must not query relay accounts"
         )
@@ -471,7 +472,7 @@ class DramaDurationPublishTest(unittest.TestCase):
             "username": "premiumrelay",
             "drama_language": "en",
         }
-        harness = PublishHarness(self, 140.000001, False, [relay])
+        harness = PublishHarness(self, 1200.000001, False, [relay])
         with harness.patches():
             result = harness.publish_queue()
 
@@ -506,7 +507,7 @@ class DramaDurationPublishTest(unittest.TestCase):
         )
 
     def test_missing_relay_waits_with_zero_log_credentials_or_x_write(self):
-        harness = PublishHarness(self, 141.0, False, [])
+        harness = PublishHarness(self, 1201.0, False, [])
         with harness.patches():
             result = harness.publish_queue()
 
@@ -516,7 +517,7 @@ class DramaDurationPublishTest(unittest.TestCase):
                 "status": "waiting_relay",
                 "queue_id": QUEUE_ID,
                 "delivery_mode": "duration_pending",
-                "preflight_duration": 141.0,
+                "preflight_duration": 1201.0,
                 "error_code": "x_post_premium_relay_unavailable",
             },
         )

@@ -173,6 +173,7 @@ def queue(
     error_code="",
 ):
     return {
+        "duration_policy_version": 2,
         "id": queue_id,
         "account_id": account_id,
         "candidate_rank": rank,
@@ -1660,7 +1661,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             preflight_calls.append((candidate["content_id"], account["id"]))
             if candidate["content_id"] == "LONG" and account["id"] == 10:
                 raise CandidatePreflightError(
-                    "Videos longer than 140 seconds require Premium",
+                    "Videos longer than 1200 seconds require Premium",
                     code="x_long_video_requires_premium",
                 )
             return {
@@ -1710,7 +1711,7 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(planned[0]["delivery_mode"], "premium_relay_repost")
         self.assertEqual(planned[0]["relay_account_id"], 9)
-        self.assertEqual(planned[0]["preflight_duration"], 141.0)
+        self.assertEqual(planned[0]["preflight_duration"], 1201.0)
         self.assertEqual(planned[0]["media_validation_mode"], "deferred")
         self.assertEqual(
             preflight_calls,
@@ -1982,7 +1983,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             preflight_calls.append((candidate["content_id"], account["id"]))
             if candidate["content_id"] == "LONG" and account["id"] == 10:
                 raise CandidatePreflightError(
-                    "Videos longer than 140 seconds require Premium",
+                    "Videos longer than 1200 seconds require Premium",
                     code="x_long_video_requires_premium",
                 )
             return {
@@ -2061,7 +2062,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                                     status="waiting_relay",
                                 ),
                                 "delivery_mode": "duration_pending",
-                                "preflight_duration": 140.000001,
+                                "preflight_duration": 1200.000001,
                             },
                         ],
                     }
@@ -2084,7 +2085,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 {
                     **queue(302, 12, 2, status="waiting_relay"),
                     "delivery_mode": "duration_pending",
-                    "preflight_duration": 140.000001,
+                    "preflight_duration": 1200.000001,
                 },
             ],
         )
@@ -2101,7 +2102,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             {
                 **valid,
                 "status": "waiting_relay",
-                "preflight_duration": 140.0,
+                "preflight_duration": 1200.0,
             },
             {**valid, "relay_account_id": 9},
             {**valid, "unknown_outcome": True},
@@ -2110,7 +2111,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 **valid,
                 "delivery_mode": "direct",
                 "status": "waiting_relay",
-                "preflight_duration": 141.0,
+                "preflight_duration": 1201.0,
             },
         )
         for invalid in invalid_queues:

@@ -61,6 +61,7 @@ PREMIUM_TRIM_TARGET_SECONDS = PREMIUM_MAX_DURATION_SECONDS - 1.0
 MAX_DURATION_SECONDS = STANDARD_MAX_DURATION_SECONDS
 TRIM_TARGET_SECONDS = STANDARD_TRIM_TARGET_SECONDS
 DURATION_POLICIES = {
+    "standard_20m": (1200.0, 1199.0),
     "standard": (
         STANDARD_MAX_DURATION_SECONDS,
         STANDARD_TRIM_TARGET_SECONDS,
@@ -541,7 +542,7 @@ def validate_request(payload, profile=REPAIR_PROFILE):
     if duration_policy not in DURATION_POLICIES:
         raise MediaRepairError(
             "invalid_request",
-            "duration_policy must be standard or premium",
+            "duration_policy must be standard, standard_20m or premium",
             400,
         )
     return {
@@ -922,6 +923,7 @@ def validate_output(
         ) from None
     if max_duration_seconds not in {
         STANDARD_MAX_DURATION_SECONDS,
+        1200.0,
         PREMIUM_MAX_DURATION_SECONDS,
     }:
         raise MediaRepairError(
@@ -991,7 +993,7 @@ def validate_output(
         limit_label = (
             "4小时"
             if max_duration_seconds == PREMIUM_MAX_DURATION_SECONDS
-            else "140秒"
+            else ("1200秒" if max_duration_seconds == 1200.0 else "140秒")
         )
         raise MediaRepairError(
             "repaired_media_invalid",
@@ -1541,6 +1543,7 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "ok",
+                "duration_policies": sorted(DURATION_POLICIES),
                 "profile": getattr(self.server.processor.config, "profile", REPAIR_PROFILE),
                 "random_template_enabled": self.server.random_template is not None,
                 "random_template_manifest_sha256": self.server.random_template.assets["manifest_sha256"] if self.server.random_template else "",

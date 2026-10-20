@@ -15,6 +15,7 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 
 from . import service
+from . import duration_policy
 from .random_template_store import PreparationStore, canonical
 from .publish_media_repair import _queue_identity, _verified_local_media
 
@@ -89,7 +90,7 @@ def validate_receipt(request, result):
                  and parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password
                  and math.isfinite(duration) and abs(duration - request["source_duration"]) <= 0.05
                  and duration <= request["max_duration_seconds"]
-                 and (duration > 140) == (request["source_duration"] > 140)
+                 and (duration > duration_policy.standard_limit(request)) == (request["source_duration"] > duration_policy.standard_limit(request))
                  and recipe["asset_set_sha256"] == request["asset_manifest_sha256"])
     except (KeyError, TypeError, ValueError):
         valid = False
@@ -135,7 +136,7 @@ def prepare_random_template(*, queue, log, account, db_path, public_root, allowe
         if source.get("media_kind") == "image":
             yield prepared_media
             return
-        limit = 14400 if service._account_has_premium_video_entitlement(account) else 140
+        limit = 14400 if service._account_has_premium_video_entitlement(account) else duration_policy.standard_limit(queue)
         probe = prober(source["path"], max_bytes=max_media_bytes, timeout=timeout, max_duration_seconds=limit)
         duration = float(probe["duration"])
         existing = receipt_store.get(int(queue["id"]))
@@ -148,6 +149,10 @@ def prepare_random_template(*, queue, log, account, db_path, public_root, allowe
                    "source_sha256": source["sha256"], "source_size": source["size"], "source_duration": duration,
                    "profile": PROFILE, "asset_manifest_sha256": manifest,
                    "max_duration_seconds": existing["request"]["max_duration_seconds"] if existing else limit}
+        if not existing and duration_policy.version(queue) == 2:
+            request["duration_policy_version"] = 2
+        elif existing and "duration_policy_version" in existing["request"]:
+            request["duration_policy_version"] = existing["request"]["duration_policy_version"]
         try:
             record = receipt_store.freeze(int(queue["id"]), request)
             result = record["result"] if record["status"] == "ready" else (client or RandomTemplateClient(environ=env)).prepare(request)
@@ -163,7 +168,7 @@ def prepare_random_template(*, queue, log, account, db_path, public_root, allowe
                 raise service.XPostError("x_random_fingerprint_mismatch", "随机成片文件指纹不一致", 502)
             final = prober(media["path"], max_bytes=max_media_bytes, timeout=timeout, max_duration_seconds=limit)
             if (abs(float(final["duration"]) - duration) > 0.05
-                    or (float(final["duration"]) > 140) != (duration > 140)
+                    or (float(final["duration"]) > duration_policy.standard_limit(queue)) != (duration > duration_policy.standard_limit(queue))
                     or (final["width"], final["height"]) != (720, 1280)):
                 raise service.XPostError("x_random_output_invalid", "随机成片参数不符合发布要求", 502)
             receipt_store.complete(int(queue["id"]), result)

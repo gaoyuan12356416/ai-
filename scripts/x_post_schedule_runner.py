@@ -19,7 +19,7 @@ import re
 import sys
 import tempfile
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from features.x_posts import duration_policy
 from features.x_posts.drama_selector import (  # noqa: E402
     DRAMAWAVE_APP_ID,
     DramaPoolRejection,
@@ -254,6 +255,7 @@ class ScheduleConfig:
     previous_day_recovery_reason: str = ""
     previous_day_deployed_commit: str = ""
     drama_duration_routing_enabled: bool = False
+    duration_policy_version: int = 2
 
     @property
     def pool_check_path(self):
@@ -628,7 +630,7 @@ class ScheduleSidecarClient(SidecarClient):
                     or (
                         float(duration_value) < 0.0
                         if routing_disabled
-                        else float(duration_value) <= 140.0
+                        else float(duration_value) <= duration_policy.standard_limit(item)
                     )
                 )
             if (
@@ -881,7 +883,7 @@ class ScheduleSidecarClient(SidecarClient):
                         )
                         or (
                             status == "waiting_relay"
-                            and float(duration_value) <= 140.0
+                            and float(duration_value) <= duration_policy.standard_limit(raw)
                         )
                     )
                 )
@@ -914,6 +916,7 @@ class ScheduleSidecarClient(SidecarClient):
             seen_accounts.add(account_id)
             previous_rank = rank
             normalized = {
+                "duration_policy_version": duration_policy.version(raw),
                 "id": queue_id,
                 "account_id": account_id,
                 "candidate_rank": rank,
@@ -1563,7 +1566,7 @@ def _preflight_material_candidates(
                         code="material_duration_missing",
                     )
                 route_account = target
-                if duration > 140 and not target.get("long_video_eligible"):
+                if duration > duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}) and not target.get("long_video_eligible"):
                     relay = relay_for(language, target, material_id)
                     route_account = relay
                 try:
@@ -2091,9 +2094,9 @@ def _drama_candidates(
                     relay_item = _plan_candidate(
                         relay_account, helper_candidate, rank, timestamp
                     )
-                    # Source duration is unavailable. 141 is only a relay hint;
+                    # Source duration is unavailable. The over-limit value is only a relay hint;
                     # deferred publish probes the episode once before upload.
-                    relay_item["preflight_duration"] = 141.0
+                    relay_item["preflight_duration"] = duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}) + 1
                     planned_by_index[index] = normalize_relay_item(
                         relay_item, candidate, account, relay_account
                     )
@@ -2316,6 +2319,7 @@ def execute_schedule_tick(
         existing = sidecar.query_schedule_plan(
             config.plan_query_path, identity
         )
+        config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
         if existing["found"] and existing["queues"]:
             result = _publish_frozen_queues(
                 config,

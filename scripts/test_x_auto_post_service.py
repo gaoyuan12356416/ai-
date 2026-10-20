@@ -301,7 +301,7 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(self.bridge.verify_calls, [])
         self.assertEqual(
             selector.request.rules.material.duration_seconds.as_dict()["max"],
-            "140",
+            "600",  # Explicit template filter remains narrower than the account limit.
         )
 
     def test_account_refresh_rejects_bridge_mismatch_and_non_publishable_result(self):

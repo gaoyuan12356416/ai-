@@ -123,7 +123,7 @@ def deferred_drama_queue(store, account_id=2, username="ShortsDramhx", relay=Fal
         "episode_key": "32001:1", "drama_replay_generation": 1,
         "name_tag": "#Contract_Bride", "account_drama_language": "en",
         "media_validation_mode": "deferred", "preflight_sha256": "", "preflight_size": 0,
-        "preflight_duration": 141.0 if relay else 0.0,
+        "preflight_duration": 1201.0 if relay else 0.0,
         "delivery_mode": "premium_relay_repost" if relay else "direct",
         "relay_account_id": account_id + 10 if relay else 0,
         "relay_account_username": "premium10" if relay else "",
@@ -343,7 +343,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "88001",
                 "queue_id": 7,
                 "content_id": "32001",
-                "video_duration_seconds": 140.0,
+                "video_duration_seconds": 1200.0,
             }
         )
         parsed = urllib.parse.urlsplit(url)
@@ -382,7 +382,7 @@ class XPostsTests(unittest.TestCase):
             "queue_id": 7,
             "content_id": "32001",
         }
-        for duration, expected_channel in ((140.0, "short"), (140.000001, "long")):
+        for duration, expected_channel in ((1200.0, "short"), (1200.000001, "long")):
             with self.subTest(duration=duration):
                 url = service.build_w2a_url(
                     {**params, "video_duration_seconds": duration}
@@ -392,7 +392,7 @@ class XPostsTests(unittest.TestCase):
                 self.assertEqual(service._validate_w2a_url(url), url)
 
         historical_url = service.build_w2a_url(
-            {**params, "video_duration_seconds": 140.0}
+            {**params, "video_duration_seconds": 1200.0}
         ).replace("af_channel=short", "af_channel=AIpost")
         self.assertEqual(service._validate_w2a_url(historical_url), historical_url)
         with self.assertRaises(service.XPostError):
@@ -447,7 +447,7 @@ class XPostsTests(unittest.TestCase):
                 "page_name": "Short Drama", "page_id": "2076951197916037120",
                 "material_name": material_name, "material_id": "5221348", "queue_id": 4,
                 "content_id": "3CRScaBEY0",
-                "video_duration_seconds": 140.0,
+                "video_duration_seconds": 1200.0,
             }
         )
         values = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
@@ -591,7 +591,7 @@ class XPostsTests(unittest.TestCase):
                 "username": "ShortsDramhx", "timestamp": 1784736000, "material_language": "en",
                 "drama_name": "Drama", "tag": "safe", "log_id": 1, "page_name": "Page",
                 "page_id": "123", "material_name": "asset", "material_id": "9", "queue_id": 2,
-                "content_id": "3", "video_duration_seconds": 140.0,
+                "content_id": "3", "video_duration_seconds": 1200.0,
             }
         )
         short_root = self.root / "s2l"
@@ -624,7 +624,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "9",
                 "queue_id": 2,
                 "content_id": "3",
-                "video_duration_seconds": 140.0,
+                "video_duration_seconds": 1200.0,
             }
         )
         tracker = mock.Mock()
@@ -936,7 +936,7 @@ class XPostsTests(unittest.TestCase):
             service.probe_media(media, runner=runner_for(valid_probe_payload(fps="61/1")))
         self.assertEqual(caught.exception.code, "invalid_media_frame_rate")
         with self.assertRaises(service.XPostError) as caught:
-            service.probe_media(media, runner=runner_for(valid_probe_payload(duration="140.1")))
+            service.probe_media(media, runner=runner_for(valid_probe_payload(duration="1200.1")))
         self.assertEqual(caught.exception.code, "x_long_video_requires_premium")
         premium_result = service.probe_media(
             media,
@@ -1055,7 +1055,7 @@ class XPostsTests(unittest.TestCase):
                 "material_id": "9",
                 "queue_id": 2,
                 "content_id": "3",
-                "video_duration_seconds": 140.0,
+                "video_duration_seconds": 1200.0,
             }
         )
         with mock.patch.object(service.os.path, "ismount", return_value=False):
@@ -1450,7 +1450,7 @@ class XPostsTests(unittest.TestCase):
         )
 
     def test_premium_long_publish_uses_amplify_video_category(self):
-        queue = self.enqueue(preflight_duration=763.938005)
+        queue = self.enqueue(preflight_duration=1763.938005)
         client = ScriptedHttpClient(
             [
                 service.HttpResponse(
@@ -1467,7 +1467,7 @@ class XPostsTests(unittest.TestCase):
         with mock.patch.object(
             service,
             "probe_media",
-            return_value={"duration": 763.938005},
+            return_value={"duration": 1763.938005},
         ) as probe:
             result = service.publish_canary(
                 db_path=self.db_path,
@@ -1543,7 +1543,7 @@ class XPostsTests(unittest.TestCase):
                 "preflight_size": 0,
                 # Routing metadata is intentionally stale. Deferred mode must
                 # attribute from the single final probe, not this value.
-                "preflight_duration": 141.0,
+                "preflight_duration": 1201.0,
                 "facebook_violation_count": 0,
                 "tiktok_violation_count": 0,
                 "twitter_violation_count": 0,
@@ -1636,7 +1636,7 @@ class XPostsTests(unittest.TestCase):
                     account = {
                         "id": queue["relay_account_id"] if relay else queue["account_id"],
                         "username": queue["relay_account_username"] if relay else queue["account_username"],
-                        "subscription_type": "none" if not relay and duration <= 140 else "premium",
+                        "subscription_type": "none" if not relay and duration <= 1200 else "premium",
                     }
                     client = ScriptedHttpClient([
                         service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video"),
@@ -1674,7 +1674,7 @@ class XPostsTests(unittest.TestCase):
                     self.assertFalse(prepared_path.exists())
                     self.assertEqual([item["url"] for item in client.requests if item["method"] == "GET"], [queue["material_url"], "https://media.example.com/repaired.mp4"])
                     repairer.repair.assert_called_once()
-                    self.assertEqual(repairer.repair.call_args.args[0]["duration_policy"], "standard" if account["subscription_type"] == "none" else "premium")
+                    self.assertEqual(repairer.repair.call_args.args[0]["duration_policy"], "standard_20m" if account["subscription_type"] == "none" else "premium")
                     self.assertEqual(repairer.repair.call_args.args[0]["source_sha256"], hashlib.sha256(b"video").hexdigest())
                     frozen = store.get_queue(queue["id"])
                     for field in repair._QUEUE_IDENTITY_FIELDS + ("preflight_duration", "preflight_sha256", "preflight_size"):
@@ -1683,9 +1683,9 @@ class XPostsTests(unittest.TestCase):
                     self.assertEqual(final_log["attempt_count"], 1)
                     self.assertFalse(final_log["unknown_outcome"])
                     query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(final_log["long_url"]).query))
-                    self.assertEqual(query["af_channel"], "long" if duration > 140 else "short")
+                    self.assertEqual(query["af_channel"], "long" if duration > 1200 else "short")
                     initialize = next(item for item in client.requests if item["url"].endswith("/2/media/upload/initialize"))
-                    self.assertEqual(json.loads(initialize["body"])["media_category"], "amplify_video" if duration > 140 else "tweet_video")
+                    self.assertEqual(json.loads(initialize["body"])["media_category"], "amplify_video" if duration > 1200 else "tweet_video")
                     event = json.loads(audit.getvalue())
                     self.assertEqual(event["queue_id"], queue["id"])
                     self.assertEqual(event["duration"], duration)
@@ -1827,7 +1827,7 @@ class XPostsTests(unittest.TestCase):
                 account = {"id": 2, "username": "ShortsDramhx", "subscription_type": "premium"}
                 client = ScriptedHttpClient([service.HttpResponse(200, {"content-type": "video/mp4"}, body=b"video")])
                 with mock.patch.object(service.subprocess, "run", return_value=SimpleNamespace(
-                    returncode=0, stdout=json.dumps(valid_probe_payload(duration="763.938")),
+                    returncode=0, stdout=json.dumps(valid_probe_payload(duration="1763.938")),
                 )), mock.patch.object(repair, "_repair_client_from_env", side_effect=AssertionError("valid source must not repair")):
                     with repair.prepare_deferred_drama_media(
                         queue=queue, log=log, account=account, public_root=self.root / ("recheck-%s" % change_bytes) / "s2l",
@@ -1898,7 +1898,7 @@ class XPostsTests(unittest.TestCase):
             self.assertNotIn("private-repair-token", str(caught.exception))
 
     def test_publish_fails_if_final_probe_crosses_140_second_channel_boundary(self):
-        queue = self.enqueue(preflight_duration=140.0)
+        queue = self.enqueue(preflight_duration=1200.0)
         client = ScriptedHttpClient(
             [
                 service.HttpResponse(
@@ -1909,7 +1909,7 @@ class XPostsTests(unittest.TestCase):
             ]
         )
         with mock.patch.object(
-            service, "probe_media", return_value={"duration": 140.01}
+            service, "probe_media", return_value={"duration": 1200.01}
         ):
             with self.assertRaises(service.XPostError) as caught:
                 service.publish_canary(

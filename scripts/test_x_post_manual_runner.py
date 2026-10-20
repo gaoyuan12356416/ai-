@@ -163,10 +163,10 @@ class XPostManualRunnerTests(unittest.TestCase):
                 {
                     "material_id": "99",
                     "error_code": "x_long_video_requires_premium",
-                    "error_message": "Videos longer than 140 seconds require Premium",
+                    "error_message": "Videos longer than 1200 seconds require Premium",
                 },
                 "x_long_video_requires_premium",
-                "素材 99：视频超过140秒，所选账号没有长视频会员资格",
+                "素材 99：视频超过1200秒，所选账号没有长视频会员资格",
             ),
         ]
         for raw, expected_code, expected_message in cases:

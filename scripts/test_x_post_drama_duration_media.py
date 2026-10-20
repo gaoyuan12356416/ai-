@@ -30,6 +30,7 @@ def _queue():
     return {
         "id": 71,
         "source_type": "drama",
+        "duration_policy_version": 2,
         "status": "queued",
         "media_validation_mode": service.MEDIA_VALIDATION_DEFERRED,
         "material_id": "90001",
@@ -179,10 +180,10 @@ class DramaDurationMediaTest(unittest.TestCase):
 
     def test_boundaries_choose_policy_and_reuse_one_source_download(self):
         for raw_duration, expected_policy, relay in (
-            (139.999, "standard", False),
-            (140.0, "standard", False),
-            (140.000001, "premium", True),
-            (141.0, "premium", True),
+            (1199.999, "standard_20m", False),
+            (1200.0, "standard_20m", False),
+            (1200.000001, "premium", True),
+            (1201.0, "premium", True),
         ):
             with self.subTest(raw_duration=raw_duration):
                 queue = _queue()
@@ -246,8 +247,8 @@ class DramaDurationMediaTest(unittest.TestCase):
 
     def test_repair_policy_comes_from_raw_but_route_comes_from_final(self):
         for raw_duration, final_duration, expected_policy in (
-            (139.999, 139.0, "standard"),
-            (141.0, 139.5, "premium"),
+            (1199.999, 139.0, "standard_20m"),
+            (1201.0, 139.5, "premium"),
         ):
             with self.subTest(raw_duration=raw_duration):
                 queue = _queue()
@@ -349,11 +350,11 @@ class DramaDurationMediaTest(unittest.TestCase):
         ), mock.patch.object(
             publish_media_repair,
             "_probe_raw_video_duration",
-            return_value=141.0,
+            return_value=1201.0,
         ), mock.patch.object(
             service,
             "probe_media",
-            return_value=_probe(141.0, len(source_bytes)),
+            return_value=_probe(1201.0, len(source_bytes)),
         ):
             with publish_media_repair.prepare_duration_pending_drama_media(
                 queue=queue,

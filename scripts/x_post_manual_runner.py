@@ -8,6 +8,7 @@ publishes those rows one at a time through the existing token-owning sidecar.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import re
 import sys
@@ -18,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from features.x_posts import duration_policy
 from features.x_posts.selector import (  # noqa: E402
     select_manual_candidates,
     shanghai_now,
@@ -319,6 +321,8 @@ def _manual_rejection_fields(raw, default_code, default_message):
             code = "repaired_media_duration_invalid"
             if "4小时" in message:
                 message = "修复后视频时长超过4小时上限"
+            elif "1200秒" in message:
+                message = "修复后视频时长超过1200秒上限"
             elif "140秒" in message:
                 message = "修复后视频时长超过140秒上限"
             elif "0.5秒" in message:
@@ -337,7 +341,7 @@ def _manual_rejection_fields(raw, default_code, default_message):
         else:
             message = "视频时长不符合发布要求"
     elif code == "x_long_video_requires_premium":
-        message = "视频超过140秒，所选账号没有长视频会员资格"
+        message = "视频超过1200秒，所选账号没有长视频会员资格"
     elif code == "invalid_media_codec":
         message = "视频编码或音频格式不符合X要求"
     elif code == "invalid_media_dimensions":
@@ -491,6 +495,7 @@ def execute_manual_tick(
     if run is None:
         return {"status": "no_pending"}
 
+    config = replace(config, duration_policy_version=duration_policy.version(run))
     identity = {
         "source_type": "material",
         "run_date": run["run_date"],

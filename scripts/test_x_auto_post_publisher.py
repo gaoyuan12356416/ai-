@@ -48,8 +48,8 @@ class XAutoPostAccountDurationRuleTests(unittest.TestCase):
             "long_video_eligible": False,
         }
         rules = selector_rules(self.config(), account=account)
-        self.assertEqual(account_duration_limit_seconds(account), 140)
-        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("140"))
+        self.assertEqual(account_duration_limit_seconds(account), 1200)
+        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("1200"))
 
     def test_token_confirmed_subscription_uses_existing_upload_boundary(self):
         for subscription_type in ("basic", "premium", "premium_plus"):
@@ -75,12 +75,12 @@ class XAutoPostAccountDurationRuleTests(unittest.TestCase):
             "long_video_eligible": True,
         }
         rules = selector_rules(self.config(), account=account)
-        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("140"))
+        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("1200"))
 
     def test_standard_account_with_only_long_materials_has_no_candidate(self):
         with self.assertRaises(NoEligibleMaterial) as caught:
             selector_rules(
-                self.config(minimum=141, maximum=600),
+                self.config(minimum=1201, maximum=600),
                 account={
                     "subscription_type": "none",
                     "long_video_eligible": False,

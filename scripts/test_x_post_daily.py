@@ -1568,7 +1568,7 @@ class RunnerTests(unittest.TestCase):
             Path(destination).write_bytes(b"video")
             return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-        def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+        def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
             preflight_events.append(("probe", Path(path).name))
             return {"duration": 30.0, "width": 720, "height": 1280}
 
@@ -2002,11 +2002,11 @@ class RunnerTests(unittest.TestCase):
             }
 
         def prober(
-            path, max_bytes, timeout, max_duration_seconds=140.0
+            path, max_bytes, timeout, max_duration_seconds=1200.0
         ):
             material_id = Path(path).stem
             probes.append((material_id, max_duration_seconds))
-            if material_id == "10" and max_duration_seconds == 140.0:
+            if material_id == "10" and max_duration_seconds == 1200.0:
                 raise XPostError(
                     "x_long_video_requires_premium",
                     "premium required",
@@ -2035,10 +2035,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(
             probes,
             [
-                ("10", 140.0),
+                ("10", 1200.0),
                 ("10", 14400.0),
-                ("11", 140.0),
-                ("12", 140.0),
+                ("11", 1200.0),
+                ("12", 1200.0),
             ],
         )
 
@@ -2065,7 +2065,7 @@ class RunnerTests(unittest.TestCase):
             }
 
         def prober(
-            path, max_bytes, timeout, max_duration_seconds=140.0
+            path, max_bytes, timeout, max_duration_seconds=1200.0
         ):
             if Path(path).stem == "10":
                 raise XPostError(
@@ -2126,7 +2126,7 @@ class RunnerTests(unittest.TestCase):
                 peak_files[0] = max(peak_files[0], len(list(root.glob("*.mp4"))))
                 return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 if Path(path).stem in {"10", "11"}:
                     raise XPostError("invalid_media_codec", "rejected", 422)
                 return {"duration": 30.0, "width": 720, "height": 1280}
@@ -2196,13 +2196,13 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 if (
                     Path(path).read_bytes() == b"video"
                     and Path(path).stem == drama_resource_id
                 ):
                     raise XPostError(
-                        "invalid_media_duration", "over 140 seconds", 422
+                        "invalid_media_duration", "over 1200 seconds", 422
                     )
                 return {
                     "codec": "h264",
@@ -2264,7 +2264,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(repair_payload["pool_item_id"], 10)
         self.assertEqual(repair_payload["material_id"], drama_resource_id)
         self.assertEqual(repair_payload["source_size"], 5)
-        self.assertEqual(repair_payload["duration_policy"], "standard")
+        self.assertEqual(repair_payload["duration_policy"], "standard_20m")
         self.assertTrue(
             re.fullmatch(
                 r"[a-f0-9]{64}", repaired["media_repair_job_key"]
@@ -2300,7 +2300,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 self.assertEqual(max_duration_seconds, 14400.0)
                 self.assertEqual(Path(path).read_bytes(), b"video")
                 return {
@@ -2371,7 +2371,7 @@ class RunnerTests(unittest.TestCase):
 
             probe_limits = []
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 probe_limits.append(max_duration_seconds)
                 if Path(path).read_bytes() == b"video":
                     raise XPostError(
@@ -2446,7 +2446,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 material_id = Path(path).stem
                 if Path(path).read_bytes() == b"video" and material_id in {"10", "11"}:
                     raise XPostError(
@@ -2523,7 +2523,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(path, max_bytes, timeout, max_duration_seconds=1200.0):
                 if Path(path).stem == "10" and Path(path).read_bytes() == b"video":
                     raise XPostError(
                         "invalid_media_codec", "bad codec", 422
@@ -2579,7 +2579,7 @@ class RunnerTests(unittest.TestCase):
                 Path(destination).write_bytes(b"video")
                 return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-            def prober(_path, max_bytes, timeout, max_duration_seconds=140.0):
+            def prober(_path, max_bytes, timeout, max_duration_seconds=1200.0):
                 return {"duration": 30.0, "width": 720, "height": 1280}
 
             accepted, failures = _preflight_candidates(

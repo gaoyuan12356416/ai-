@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from . import media_repair as repair
+from . import duration_policy
 from features.fb_gpu.random_overlay import derive_recipe, load_asset_set, selected_asset_paths, validate_recipe
 from features.fb_gpu.prepare_worker import build_command
 from features.fb_gpu.render_process import RenderStalled, run_render
@@ -28,7 +29,7 @@ JOB = re.compile(r"x-random-v1-[a-f0-9]{64}\Z")
 
 
 def validate_request(raw, config):
-    if not isinstance(raw, dict) or set(raw) != FIELDS:
+    if not isinstance(raw, dict) or set(raw) not in (FIELDS, FIELDS | {"duration_policy_version"}):
         raise repair.MediaRepairError("x_random_request_invalid", "random video request fields invalid", 400)
     if (type(raw["queue_id"]) is not int or not 0 < raw["queue_id"] < 2**63
             or not JOB.fullmatch(str(raw["job_key"])) or raw["profile"] != PROFILE
@@ -37,8 +38,14 @@ def validate_request(raw, config):
             or type(raw["source_size"]) is not int or not 0 < raw["source_size"] <= config.max_source_bytes
             or type(raw["content_id"]) is not str or not 1 <= len(raw["content_id"]) <= 128
             or type(raw["max_duration_seconds"]) not in (int, float)
-            or raw["max_duration_seconds"] not in (140, 600, 14400)):
+            or raw["max_duration_seconds"] not in (140, 600, 1200, 14400)):
         raise repair.MediaRepairError("x_random_request_invalid", "random video identity or policy invalid", 400)
+    try:
+        policy_version = duration_policy.version(raw)
+    except ValueError:
+        raise repair.MediaRepairError("x_random_request_invalid", "invalid duration policy version", 400) from None
+    if raw["max_duration_seconds"] == 1200 and policy_version != 2:
+        raise repair.MediaRepairError("x_random_request_invalid", "1200 second policy requires version 2", 400)
     duration = raw["source_duration"]
     if type(duration) not in (int, float) or not math.isfinite(duration) or not 0.5 <= duration <= raw["max_duration_seconds"]:
         raise repair.MediaRepairError("x_random_duration_invalid", "random video duration invalid", 400)
@@ -157,9 +164,9 @@ class RandomTemplateProcessor:
                     probe = repair.validate_output(
                         repair._probe_payload(self.config, output, self.repair.runner), output, (720, 1280),
                         self.config.max_output_bytes, expected_duration=request["source_duration"],
-                        max_duration_seconds=140 if request["max_duration_seconds"] == 140 else 14400)
+                        max_duration_seconds=request["max_duration_seconds"] if request["max_duration_seconds"] in (140, 1200) else 14400)
                     if (abs(probe["duration"] - request["source_duration"]) > 0.05
-                            or (probe["duration"] > 140) != (request["source_duration"] > 140)
+                            or (probe["duration"] > duration_policy.standard_limit(request)) != (request["source_duration"] > duration_policy.standard_limit(request))
                             or probe["duration"] > request["max_duration_seconds"]
                             or (probe["width"], probe["height"]) != (720, 1280)):
                         raise repair.MediaRepairError("x_random_output_invalid", "random video duration or dimensions changed", 422)

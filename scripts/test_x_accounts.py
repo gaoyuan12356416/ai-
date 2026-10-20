@@ -658,7 +658,7 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertIs(item["long_video_eligible"], True)
         self.assertIs(item["long_video_publish_eligible"], True)
         service._require_candidate_duration_capability(
-            {"preflight_duration": 140.001}, item
+            {"preflight_duration": 1200.001}, item
         )
 
         refreshed_profile = {
@@ -688,13 +688,13 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertIs(downgraded["long_video_publish_eligible"], False)
         with self.assertRaises(service.ServiceError) as caught:
             service._require_candidate_duration_capability(
-                {"preflight_duration": 140.001}, downgraded
+                {"preflight_duration": 1200.001}, downgraded
             )
         self.assertEqual(
             caught.exception.code, "x_long_video_requires_premium"
         )
         service._require_candidate_duration_capability(
-            {"preflight_duration": 140.0}, downgraded
+            {"preflight_duration": 1200.0}, downgraded
         )
 
     def test_premium_relay_discovery_filters_and_orders_bound_accounts(self):
