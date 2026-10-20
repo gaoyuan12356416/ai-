@@ -2,6 +2,8 @@
 
 2026-10-20开发、离线测试、GitHub推送和服务器精确检出完成；尚未正式切换生产接口，未执行完整补传。
 
+服务器已从GitHub检出实现提交b35f1e60c5e12dc5e62ccff3e00217ed2ab7b98b并完成prepare。备份点为/mnt/data-disk/ai-cover-material-source/deployments/20261020T031048.508981Z，phase=prepared，包含主源库、YT同步库、共用上传账本在线备份。未apply、未重启；生产app SHA及YT/日报current仍与baseline.json相同。主API PID3988906及原timer保持运行。
+
 离线验证共177项：共享客户端54项、历史发现与续对账12项、受控拒绝恢复7项、旧YT回归20项、日报含交互61项、部署23项。Windows和Linux均验证核心测试。部署只替换生产单回调，保存生产app快照的实际组合验证通过，其余AST不变。
 
 真实样本：
