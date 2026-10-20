@@ -128,7 +128,12 @@ def dispatch(handler, parsed, app):
         if handler.command == "POST" and re.fullmatch(r"/api/fb-video-publish/pages/[1-9][0-9]{0,40}/pool/enable", parsed.path):
             from .identity_broker import resolve_identity
             actor = resolve_identity(app, actor["tenant_key"], actor["user_id"])
-        elif needs_mapping:
+        elif needs_mapping and not (
+            actor["is_admin"] and handler.command == "GET"
+            and parsed.path in {"/api/fb-video-publish/pages", "/api/fb-video-publish/pages/available"}
+        ):
+            # Admin Page reads have no owner filter or attribution fields.
+            # All writes and ordinary-user reads still resolve the current mapping.
             actor["business_owner_id"] = actor["sub_user_id"] = attribution_identity(app, actor)
         result = request(handler.command, parsed.path, actor=actor, payload=payload, query=query_params(parsed.query))
         if handler.command == "GET" and parsed.path == "/api/fb-video-publish/pages":

@@ -37,9 +37,22 @@ class FakeMySQL:
     def __init__(self, batches=None):
         self.calls, self.batches, self.last_rows = [], list(batches or []), []
         self.bad_desc, self.bad_name = False, False
+        self.page_rows = [
+            dict(page_id="123456", page_name="DramaWave EN", language="English", group_id="1",
+                 product="Dramawave", eligible_token_count=1),
+            dict(page_id="123456", page_name="DramaWave EN", language="English", group_id="2",
+                 product="Dramawave", eligible_token_count=1),
+            dict(page_id="123457", page_name="DramaWave CN", language="zh-tw", group_id="1",
+                 product="Dramawave", eligible_token_count=0),
+        ]
 
     def select(self, sql, params):
         self.calls.append((sql, list(params)))
+        if "ads_facebook_page_group" in sql:
+            if "TRIM(i.page_id) IN (" in sql:
+                ids = params[1:-1] if "CAST(g.user_id AS CHAR)=%s" in sql else params[1:]
+                return [row for row in self.page_rows if row["page_id"].strip() in ids]
+            return self.page_rows
         if "ads_custom_source" in sql:
             self.last_rows = self.batches.pop(0)
             return self.last_rows
@@ -200,11 +213,13 @@ class SourceTests(unittest.TestCase):
     actor = dict(tenant_key="tenant", user_id="feishu", business_owner_id="789", is_admin=False)
 
     def test_owner_scope_product_and_disabled_page_visibility(self):
-        repo, _, pages = source()
+        repo, mysql, pages = source()
         items = repo.list_pages(self.actor)
-        self.assertEqual(pages.calls[1][1], ["1", "2"])
-        self.assertEqual(pages.calls[1][2], {"is_admin": False, "owner_user_id": "789"})
+        self.assertEqual(mysql.calls[0][1], ["1479", "789"])
+        self.assertIn("CAST(g.user_id AS CHAR)=%s", mysql.calls[0][0])
+        self.assertFalse(pages.calls)
         self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["group_ids"], ["1", "2"])
         self.assertEqual(items[0]["language"], "en")
         self.assertTrue(items[1]["blocked_reason"])
         with self.assertRaises(SourceError):
@@ -230,6 +245,57 @@ class SourceTests(unittest.TestCase):
             repo.get_pages(self.actor, ["123457"])
         self.assertEqual(denied.exception.code, "page_unavailable")
         pages.legacy_conflicts.assert_not_called()
+
+    def test_selected_pages_use_one_bounded_live_query(self):
+        from features.fb_video_publish.query_broker import validate_query
+        repo, mysql, _ = source()
+        page = repo.get_pages(self.actor, ["123456"])["123456"]
+        self.assertEqual(len(mysql.calls), 1)
+        sql, params = mysql.calls[0]
+        self.assertEqual(params, ["1479", "123456", "789"])
+        self.assertIn("TRIM(i.page_id) IN (%s)", sql)
+        self.assertIn("g.is_delete=0", sql)
+        self.assertIn("g.type IN (0,1)", sql)
+        self.assertIn("i.deleted_at=0", sql)
+        self.assertNotIn("COUNT(DISTINCT", sql)
+        self.assertEqual(page["group_ids"], ["1", "2"])
+        self.assertEqual(validate_query(dict(sql=sql, params=params, schema=mysql.schema,
+                                            blacklist_schema=mysql.blacklist_schema)), (sql, params))
+        for row in mysql.page_rows:
+            if row["page_id"] == "123456":
+                row["eligible_token_count"] = 0
+        with self.assertRaises(SourceError) as denied:
+            repo.get_pages(self.actor, ["123456"])
+        self.assertEqual(denied.exception.code, "page_unavailable")
+        self.assertEqual(len(mysql.calls), 2)
+
+    def test_scope_and_product_filters_are_preserved_for_targeted_queries(self):
+        repo, mysql, _ = source()
+        with self.assertRaises(SourceError) as denied:
+            repo.list_pages(dict(self.actor, business_owner_id=""), page_ids=["123456"])
+        self.assertEqual(denied.exception.status, 403)
+        self.assertFalse(mysql.calls)
+        mysql.page_rows.append(dict(mysql.page_rows[0], page_id="123459", product="Other"))
+        items = repo.list_pages(dict(self.actor, is_admin=True, business_owner_id=""),
+                                page_ids=["123456", "123459"])
+        self.assertEqual([item["page_id"] for item in items], ["123456"])
+        self.assertNotIn("CAST(g.user_id AS CHAR)=%s", mysql.calls[0][0])
+        self.assertEqual(mysql.calls[0][1], ["1479", "123456", "123459"])
+
+    def test_page_lookup_empty_and_large_selection_are_bounded(self):
+        repo, mysql, _ = source()
+        self.assertEqual(repo.list_pages(self.actor, page_ids=[]), [])
+        self.assertFalse(mysql.calls)
+        ids = [str(i) for i in range(1000, 1201)]
+        self.assertEqual(repo.list_pages(self.actor, page_ids=ids), [])
+        self.assertEqual(len(mysql.calls), 2)
+        self.assertEqual(mysql.calls[0][1], ["1479"] + ids[:200] + ["789"])
+        self.assertEqual(mysql.calls[1][1], ["1479"] + ids[200:] + ["789"])
+
+    def test_selected_page_filter_matches_existing_identity_trimming(self):
+        repo, mysql, _ = source()
+        mysql.page_rows = [dict(mysql.page_rows[0], page_id=" 123456 ")]
+        self.assertEqual(repo.get_pages(self.actor, ["123456"])["123456"]["page_id"], "123456")
 
     def test_batch_fresh_checks_have_no_n_plus_one(self):
         rows = [raw(str(mid)) for mid in range(100, 0, -1)]

@@ -140,6 +140,37 @@ class GatewayTests(unittest.TestCase):
                     gateway.attribution_identity(app, actor)
                 self.assertEqual(ctx.exception.code, "attribution_mapping_invalid")
 
+    def test_admin_page_reads_do_not_require_unused_attribution(self):
+        session = {"tenant_key": "t", "user_id": "u", "role": "admin", "allowed": True}
+        for path in ("/pages", "/pages/available"):
+            handler = Handler(method="GET")
+            with patch.object(gateway, "attribution_identity", side_effect=AssertionError("unused mapping")), \
+                 patch("features.fb_video_publish.identity_broker.enrich_creator_names",
+                       side_effect=lambda app, tenant, result: result):
+                remote = self.dispatch(handler, session, path)
+            self.assertEqual(handler.responses[0][0], 200)
+            actor = remote.call_args.kwargs["actor"]
+            self.assertEqual(actor["tenant_key"], "t")
+            self.assertTrue(actor["is_admin"])
+            self.assertEqual(actor["business_owner_id"], "")
+            self.assertEqual(actor["sub_user_id"], "")
+
+    def test_owner_reads_and_admin_writes_still_require_current_mapping(self):
+        for role, method, path in (
+            ("user", "GET", "/pages"), ("user", "GET", "/pages/available"),
+            ("admin", "GET", "/pages/12345/pool"),
+            ("admin", "POST", "/pages"), ("admin", "POST", "/preflight"),
+            ("admin", "POST", "/batches"),
+        ):
+            session = {"tenant_key": "t", "user_id": "u", "role": role, "allowed": True}
+            handler = Handler(method=method)
+            with patch.object(gateway, "attribution_identity",
+                              side_effect=GatewayError("attribution_mapping_invalid", "missing mapping", 409)) as mapping:
+                remote = self.dispatch(handler, session, path)
+            mapping.assert_called_once()
+            remote.assert_not_called()
+            self.assertEqual(handler.responses[0][0], 409)
+
     def test_navigation_preserves_disables_and_old_child_permission(self):
         original = [{"key": "facebook_platform", "module": "fb_page_posts", "enabled": False, "items": [
             {"key": "old", "module": "fb_page_posts"},

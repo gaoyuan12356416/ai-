@@ -28,8 +28,8 @@ class Sources:
         self.materials = {str(i): {"material_id": str(i), "material_name": "素材 " + str(i), "content_id": str(i + 100),
              "language": "zh", "drama_name": "测试剧", "drama_description": "简介", "material_tag": "",
              "duration_seconds": 30, "media_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/test/" + str(i) + ".mp4"} for i in (21, 22)}
-    def list_pages(self, actor, q=""):
-        return list(self.pages.values())
+    def list_pages(self, actor, q="", *, page_ids=None):
+        return [p for pid, p in self.pages.items() if page_ids is None or pid in page_ids]
     def get_pages(self, actor, ids):
         if any(self.pages[i]["blocked_reason"] for i in ids):
             raise DomainError("page_blocked", "授权异常", 409)
@@ -95,6 +95,31 @@ class Fixture(unittest.TestCase):
 
 
 class CoreTests(Fixture):
+    def test_configured_pages_only_resolve_saved_ids_and_keep_config_language(self):
+        self.sources.pages["99"] = dict(self.sources.pages["11"], page_id="99")
+        self.sources.pages["11"]["language"] = "en"
+        with patch.object(self.sources, "list_pages", wraps=self.sources.list_pages) as lookup:
+            result = self.service.configured_pages(self.actor)
+        lookup.assert_called_once_with(self.actor, page_ids=["11", "12"])
+        self.assertEqual([p["page_id"] for p in result["items"]], ["11", "12"])
+        self.assertEqual(result["items"][0]["language"], "zh")
+        self.sources.pages.pop("12")
+        result = self.service.configured_pages(self.actor)
+        self.assertEqual([p["page_id"] for p in result["items"]], ["11"])
+
+    def test_empty_configured_pages_do_not_query_source(self):
+        with patch.object(self.store, "configs", return_value={}), patch.object(self.sources, "list_pages") as lookup:
+            self.assertEqual(self.service.configured_pages(self.actor), {"ok": True, "items": []})
+        lookup.assert_not_called()
+
+    def test_invalid_config_selections_do_not_start_source_queries(self):
+        with patch.object(self.sources, "list_pages") as lookup:
+            for ids in ([], ["11", "11"], [str(i) for i in range(1, 202)]):
+                with self.subTest(ids=len(ids)), self.assertRaises(DomainError) as rejected:
+                    self.service._config_access(self.actor, ids)
+                self.assertEqual(rejected.exception.status, 400)
+        lookup.assert_not_called()
+
     def test_preflight_readonly_real_link_budget_and_parameters(self):
         result = self.preflight(self.req())
         self.assertIn("[提交", result["items"][0]["caption"])

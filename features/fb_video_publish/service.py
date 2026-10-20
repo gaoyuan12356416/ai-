@@ -109,11 +109,16 @@ class Service:
                 "repeat_fingerprint": digest(repeats), "landing_url": "https://www.dramawavew2a.com/ads/101/2310/view"}
 
     def configured_pages(self, actor):
-        visible = {p["page_id"]: p for p in self.sources.list_pages(actor)}
-        return {"ok": True, "items": [{**c, **visible[pid], "language": c["language"]} for pid, c in self.store.configs(actor).items() if pid in visible]}
+        configs = self.store.configs(actor)
+        if not configs:
+            return {"ok": True, "items": []}
+        visible = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=list(configs))}
+        return {"ok": True, "items": [{**c, **visible[pid], "language": c["language"]} for pid, c in configs.items() if pid in visible]}
 
     def _config_access(self, actor, ids):
-        visible = {p["page_id"] for p in self.sources.list_pages(actor)}
+        if not ids or len(ids) > 200 or len(set(ids)) != len(ids):
+            raise DomainError("invalid_request", "请选择不重复的Page")
+        visible = {p["page_id"] for p in self.sources.list_pages(actor, page_ids=ids)}
         if any(pid not in visible for pid in ids):
             raise DomainError("page_not_found", "Page不存在或不在当前访问范围", 404)
 

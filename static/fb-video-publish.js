@@ -54,21 +54,29 @@
     const navKey=shell();
     try {
       auth=await api("/api/ui/topbar");
-      await QuickNav.render({container:"#quickNav",auth,activeKey:navKey});
+      // QuickNav paints its local fallback first; its config refresh must not delay page data.
+      Promise.resolve().then(()=>QuickNav.render({container:"#quickNav",auth,activeKey:navKey})).catch(()=>{
+        if (!$("quickNav").textContent.trim()) $("quickNav").textContent="导航暂时无法加载，可使用顶部入口。";
+      });
       UiTopbar.render({auth,userCard:"#userCard",authButton:"#authButton",refreshButton:"#refreshPage"});
       $("authButton").onclick=()=>UiTopbar.handleAuthAction({auth,api});
       if (!auth.authenticated) { $("gate").innerHTML="<strong>请先登录 AI 自动后台</strong><p>登录后可查看 Page 配置和发布记录。</p>"; return; }
       if (!(auth.user?.is_admin || auth.user?.permissions?.fb_video_publish)) { $("gate").innerHTML="<strong>当前账号没有 Facebook 视频发布权限</strong><p>请联系管理员在用户管理中分配“Facebook 视频发布”。</p>"; return; }
-      const result=await api("/languages"); for(const item of result.items || []) languages.set(String(item.value),item.label);
+      if(view==="publish")await loadLanguages();
       $("gate").hidden=true;$("content").hidden=false;
       if(view==="pages")await pageManagement();else if(view==="publish")await publishing();else await records();
     } catch(error) { $("gate").hidden=true; errorAt("pageError",error); }
   }
+  async function loadLanguages() {
+    const result=await api("/languages");
+    for(const item of result.items || []) languages.set(String(item.value),item.label);
+  }
 
   async function materialPickerDialog(initial, apply, options={}) {
     let staged=new Map(initial),items=[],cursor="",next="",stack=[],generation=0;
+    const languageChoices=langOptions("全部剧语言",options.language || "")+(options.language&&!languages.has(options.language)?`<option value="${esc(options.language)}" selected>${esc(lang(options.language))}</option>`:"");
     const modal=dialog("materialPicker",options.title || "选择素材（可多选）",
-      `<div id="pickerError" class="error" role="alert" hidden></div><div class="filters"><input id="materialSearch" placeholder="搜索素材名称、ID 或剧名" aria-label="搜索素材"><select id="materialLanguage" aria-label="素材语言">${langOptions("全部剧语言",options.language || "")}</select><button id="materialSearchButton" class="button">搜索</button></div><div class="row spread"><span class="helper" id="pickerCount"></span><div class="actions"><button id="pickCurrent" class="button small">全选当前页</button><button id="clearCurrent" class="button small">取消当前页</button></div></div><div id="materialChoices" class="pick-list"></div><div class="pager"><span class="helper">跨页和搜索保留已选项，最多 200 条。</span><div class="actions"><button id="materialsPrev" class="button small">上一页</button><button id="materialsNext" class="button small">下一页</button></div></div>`,
+      `<div id="pickerError" class="error" role="alert" hidden></div><div class="filters"><input id="materialSearch" placeholder="搜索素材名称、ID 或剧名" aria-label="搜索素材"><select id="materialLanguage" aria-label="素材语言">${languageChoices}</select><button id="materialSearchButton" class="button">搜索</button></div><div class="row spread"><span class="helper" id="pickerCount"></span><div class="actions"><button id="pickCurrent" class="button small">全选当前页</button><button id="clearCurrent" class="button small">取消当前页</button></div></div><div id="materialChoices" class="pick-list"></div><div class="pager"><span class="helper">跨页和搜索保留已选项，最多 200 条。</span><div class="actions"><button id="materialsPrev" class="button small">上一页</button><button id="materialsNext" class="button small">下一页</button></div></div>`,
       `<button class="button" data-close>取消</button><button id="applyMaterials" class="button primary">${esc(options.applyLabel || "使用所选素材")}</button>`);
     if(options.language)$("materialLanguage").disabled=true;
     const eligible=m=>!options.language || m.language===options.language;
@@ -78,7 +86,7 @@
     }
     async function load(){
       const gen=++generation;errorAt("pickerError","");
-      const query=new URLSearchParams({q:$("materialSearch").value,language:$("materialLanguage").value,cursor,limit:"50"});
+      const query=new URLSearchParams({q:$("materialSearch").value,language:options.language || $("materialLanguage").value,cursor,limit:"50"});
       try{const data=await api("/materials?"+query);if(!modal.isConnected||gen!==generation)return;items=data.items || [];next=data.next_cursor || "";paint();}
       catch(err){if(modal.isConnected&&gen===generation)errorAt("pickerError",err);}
     }
@@ -209,15 +217,35 @@
   }
 
   async function pageManagement() {
-    let configs=[],page=0,query="";
-    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><button id="createPage" class="button primary">创建</button></div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page"><button id="reloadPages" class="button">刷新列表</button></div><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev">上一页</button><button class="button small" id="pageNext">下一页</button></div></div></section>`;
+    let configs=[],page=0,query="",loading=false,loaded=false,languageReady=false;
+    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><button id="createPage" class="button primary" disabled>创建</button></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><button id="reloadPages" class="button">刷新列表</button></div><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function render() {
+      $("createPage").disabled=!languageReady||!loaded;
+      $("pageSearch").disabled=!loaded;$("reloadPages").disabled=loading;
+      $("pageRows").setAttribute("aria-busy",String(loading));
+      if(!loaded){
+        $("pageRows").innerHTML=`<tr><td colspan="7" class="empty">${loading?"正在加载 Page 列表…":"Page 列表加载失败，请点击“刷新列表”重试。"}</td></tr>`;
+        $("pageTotal").textContent="";$("pagePrev").disabled=true;$("pageNext").disabled=true;return;
+      }
       const rows=configs.filter(p=>`${p.page_name} ${p.page_id}`.toLowerCase().includes(query.toLowerCase()));
       page=Math.min(page,Math.max(0,Math.ceil(rows.length/20)-1));
-      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td><td><span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}">编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="7" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
+      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td><td><span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="7" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
       $("pageTotal").textContent=`共 ${rows.length} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=page===0;$("pageNext").disabled=(page+1)*20>=rows.length;
     }
-    async function load() { const data=await api("/pages");configs=data.items || [];render();errorAt("pageError",""); }
+    async function load() {
+      if(loading)return;loading=true;render();errorAt("pageError","");
+      try{const data=await api("/pages");configs=data.items || [];loaded=true;}
+      finally{loading=false;render();}
+    }
+    async function loadLanguageOptions() {
+      $("pageLanguageNotice").hidden=false;$("pageLanguageNotice").textContent="正在加载剧语言选项…";
+      try{await loadLanguages();languageReady=true;$("pageLanguageNotice").hidden=true;}
+      catch(error){
+        $("pageLanguageNotice").innerHTML=`<span>${esc("剧语言选项加载失败，创建和编辑暂不可用："+error.message)}</span> <button class="button small" id="retryPageLanguages">重试语言选项</button>`;
+        $("retryPageLanguages").onclick=()=>loadLanguageOptions();
+      }
+      render();
+    }
     $("pageSearch").oninput=e=>{query=e.target.value;page=0;render();};$("pagePrev").onclick=()=>{page--;render();};$("pageNext").onclick=()=>{page++;render();};
     $("reloadPages").onclick=e=>busy(e.target,()=>load().catch(err=>errorAt("pageError",err)));
     async function editor(existing) {
@@ -244,7 +272,7 @@
       if(edit)editor({...configs.find(p=>p.page_id===edit.dataset.editPage)});
       if(del)busy(del,async()=>{const item=configs.find(p=>p.page_id===del.dataset.deletePage);if(!confirm(`删除 ${item.page_name} 的共享配置？\n同租户其他用户也将失去此配置，素材池会停用并归档。已生成任务和历史保持不变；不会删除 Facebook Page 或授权。`))return;try{await post(`/pages/${encodeURIComponent(item.page_id)}/delete`,{config_instance_id:item.config_instance_id,expected_version:item.version});await load();toast("已删除共享配置");}catch(err){errorAt("pageError",err);}});
     };
-    await load();
+    await Promise.all([load().catch(err=>errorAt("pageError",err)),loadLanguageOptions()]);
   }
 
   async function publishing() {
