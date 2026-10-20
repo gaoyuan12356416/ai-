@@ -18,6 +18,19 @@ from scripts.x_post_daily_runner import _repair_job_key
 
 
 class DurationPolicyTests(unittest.TestCase):
+    def test_unbound_old_duration_rejection_is_rechecked_without_clearing_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = service.XPostStore(Path(tmp) / "posts.sqlite3")
+            result = store.add_pool_materials(
+                ["501"], validation_checks=[{"material_id": "501",
+                    "error_code": "material_duration_exceeds_limit", "error_message": "old duration limit"}],
+            )
+            pool_id = result["items"][0]["id"]
+            self.assertEqual([p["id"] for p in store.available_pool_items()], [pool_id])
+            self.assertEqual(store.query_pool()["items"][0]["last_error_code"], "material_duration_exceeds_limit")
+            store.record_pool_checks([{"pool_item_id": pool_id, "error_code": "", "error_message": ""}])
+            self.assertEqual(store.query_pool()["items"][0]["last_error_code"], "")
+
     def test_migration_marks_existing_only_and_is_idempotent(self):
         with sqlite3.connect(":memory:") as conn:
             conn.execute("CREATE TABLE frozen(id INTEGER PRIMARY KEY, value TEXT)")

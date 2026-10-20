@@ -194,8 +194,15 @@ def stage(host):
             copy(test, release / "scripts" / test.name)
         report = backup / "regression.txt"
         with report.open("w") as output:
-            subprocess.check_call(["python3", "-m", "unittest", "discover", "-s", "scripts",
-                                   "-p", "test_x_*.py", "-q"], cwd=release, stdout=output, stderr=output)
+            # The catalog inspects GPU source, intentionally absent from the CPU
+            # package. Run it in the exact GitHub checkout; test CPU behavior in
+            # the composite. Do not discover obsolete tests from older overlays.
+            subprocess.check_call(["python3", "-m", "unittest", "scripts.test_x_post_error_catalog", "-q"],
+                                  cwd=SOURCE, stdout=output, stderr=output)
+            modules = ["scripts." + p.stem for p in sorted((SOURCE / "scripts").glob("test_x_*.py"))
+                       if p.stem != "test_x_post_error_catalog"]
+            subprocess.check_call(["python3", "-m", "unittest", *modules, "-q"],
+                                  cwd=release, stdout=output, stderr=output)
         if shutil.which("node"):
             subprocess.check_call(["node", "scripts/test_x_auto_duration_ui.js"], cwd=release)
         snapshot(POST_DB, backup / "rehearsal-posts.sqlite3")
