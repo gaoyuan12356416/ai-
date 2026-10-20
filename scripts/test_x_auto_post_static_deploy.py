@@ -61,9 +61,13 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
                 self.assertIn(
                     f'src="/x-auto-publish-common.js?v={ASSET_VERSION}"', source
                 )
-                self.assertIn(
-                    f'src="/{script_name}?v={script_version}"', source
-                )
+                if page_name == "x-auto-publish-templates.html":
+                    # Duration-only overlays retain the deployed list asset.
+                    self.assertRegex(source, r'src="/x-auto-publish-templates\.js\?v=202610(?:09listfix1|19random1)"')
+                else:
+                    self.assertIn(
+                        f'src="/{script_name}?v={script_version}"', source
+                    )
                 self.assertIn(
                     '<meta http-equiv="Cache-Control" content="no-store, max-age=0"',
                     source,
