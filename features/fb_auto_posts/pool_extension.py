@@ -63,6 +63,9 @@ def extend_future_runs(store,run_ids,pages,materials,*,operation_id,expected_sco
             missing=[p for p in page_rows if p.page_id not in existing]
             publish_at=max(run['planned_publish_at_utc'],publish_floor) if publish_floor else run['planned_publish_at_utc']
             for page in missing:
+                from features.fb_video_publish.guards import manual_block
+                if manual_block(conn, page.page_id, execution=True):
+                    raise StoreError('fb_video_page_hold','扩容Page存在手动发布占用或未知结果',409)
                 if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status IN ('running','submitted','unknown') LIMIT 1",(page.page_id,)).fetchone():
                     raise StoreError('fb_auto_page_unknown_block','扩容Page存在未确认发布',409)
                 if conn.execute('SELECT 1 FROM fb_auto_task WHERE page_id=? AND planned_publish_at_utc=? LIMIT 1',(page.page_id,publish_at)).fetchone():

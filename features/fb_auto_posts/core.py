@@ -19,6 +19,7 @@ from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_
 from .languages import candidate_snapshots_for_pages,page_language
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
+from features.fb_video_publish.guards import manual_block, manual_excluded_materials, prepare_available
 
 
 UTC = timezone.utc
@@ -418,7 +419,8 @@ class FBAutoPostStore:
             sql += f" OR (status IN ({history_placeholders}) AND created_at_utc>=?)"
             params.extend((*historical, utc_iso(self.now_fn() - timedelta(days=days))))
         sql += ")"
-        return {str(row[0]) for row in conn.execute(sql, params)}
+        manual_cutoff = utc_iso(self.now_fn() - timedelta(days=days)) if days > 0 else ""
+        return {str(row[0]) for row in conn.execute(sql, params)} | manual_excluded_materials(conn, page_id, manual_cutoff)
 
     @staticmethod
     def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
@@ -698,7 +700,8 @@ class FBAutoPostStore:
                 # BEGIN IMMEDIATE transaction with task insertion. Concurrent
                 # planners therefore serialize, and a later slot sees the
                 # earlier planned/preparing/ready reservation before choosing.
-                unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status='unknown' LIMIT 1", (page.page_id,)).fetchone() is not None
+                unknown = (conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status='unknown' LIMIT 1", (page.page_id,)).fetchone() is not None
+                           or bool(manual_block(conn, page.page_id)))
                 language=page_language(page.language)
                 task_publish_at = planned_time(config, page.page_id, slot_key, publish_at, manual=trigger_type=="manual")
                 slot_allowed = in_slot(config, page.page_id, slot_key, manual=trigger_type=="manual", times=slot_times)
@@ -789,6 +792,8 @@ class FBAutoPostStore:
                 (now, now, cutoff),
             ).fetchone()
             if row is None:
+                conn.commit(); return None
+            if not prepare_available(conn, now, "auto", row["planned_publish_at_utc"]):
                 conn.commit(); return None
             conn.execute("UPDATE fb_auto_task SET status='preparing',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=?", (worker_id, lease, now, int(row["id"])))
             conn.commit(); return dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (int(row["id"]),)).fetchone())
@@ -896,6 +901,10 @@ class FBAutoPostStore:
                 ON v.template_id=x.template_id AND v.version=x.template_version
                 WHERE x.status='ready' AND x.planned_publish_at_utc<=? ORDER BY x.id LIMIT 1000""", (now,)).fetchall()
             for candidate in due:
+                # Manual reservations live in this same SQLite transaction domain.
+                # Keep existing auto tasks frozen while a manual Page hold exists.
+                if manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True):
+                    continue
                 try:
                     policy = task_policy(conn, candidate)
                 except (BatchError, ValueError, KeyError, TypeError, IndexError):
@@ -937,6 +946,8 @@ class FBAutoPostStore:
             rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now,)).fetchall()
             row = None
             for candidate in rows:
+                if manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True):
+                    continue
                 try:
                     policy = task_policy(conn, candidate)
                 except (BatchError, ValueError, KeyError, TypeError, IndexError):

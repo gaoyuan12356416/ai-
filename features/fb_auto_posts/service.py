@@ -192,7 +192,8 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self) -> Dict[str, Any]:
         try: length = int(self.headers.get("Content-Length", "0"))
         except ValueError: length = -1
-        if not 0 <= length <= 256 * 1024: raise ServiceError("invalid_request", "请求体大小无效", 400)
+        maximum = 4 * 1024 * 1024 if self.path.startswith("/api/fb-video-publish/") else 256 * 1024
+        if not 0 <= length <= maximum: raise ServiceError("invalid_request", "请求体大小无效", 400)
         try: value = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except (UnicodeError, ValueError): raise ServiceError("invalid_request", "请求体不是有效JSON", 400) from None
         if not isinstance(value, dict) or contains_sensitive_key(value): raise ServiceError("invalid_request", "请求体包含无效字段", 400)
@@ -206,6 +207,27 @@ class Handler(BaseHTTPRequestHandler):
         parsed, method = urlsplit(self.path), self.command
         if method == "GET" and parsed.path == "/health":
             self.send_json(200, {"ok": True, "service": "fb-auto-post", "prebuild_enabled": self.runtime.prebuild_enabled, "live_enabled": self.runtime.executor.live_enabled}); return
+        if parsed.path.startswith("/api/fb-video-publish/"):
+            if not self.internal():
+                raise ServiceError("forbidden", "内部请求未授权", 403)
+            if not hasattr(self.runtime, "manual"):
+                raise ServiceError("manual_unavailable", "手动发布模块尚未配置", 503)
+            try:
+                actor = json.loads(self.headers.get("X-FB-Video-Actor") or "{}")
+            except (ValueError, TypeError):
+                raise ServiceError("invalid_request", "操作人身份无效", 400) from None
+            result = self.runtime.manual.handle(method, parsed.path, actor,
+                       self.read_json() if method == "POST" else None, parse_qs(parsed.query, keep_blank_values=True))
+            self.send_json(200, result)
+            return
+        if parsed.path.startswith("/internal/fb-video-publish/"):
+            if method != "POST" or not self.internal():
+                raise ServiceError("forbidden", "内部请求未授权", 403)
+            if not hasattr(self.runtime, "manual_worker"):
+                raise ServiceError("manual_unavailable", "手动发布模块尚未配置", 503)
+            result = self.runtime.manual_worker.dispatch(parsed.path.rsplit("/", 1)[-1], self.read_json())
+            self.send_json(200, result)
+            return
         if parsed.path.startswith("/internal/"):
             if not self.internal(): raise ServiceError("forbidden", "内部请求未授权", 403)
             payload = self.read_json()
@@ -270,11 +292,17 @@ class Handler(BaseHTTPRequestHandler):
         try: self.dispatch()
         except Exception as exc: self.handle_error(exc)
     def handle_error(self, exc: Exception) -> None:
-        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError))
+        from features.fb_video_publish.core import DomainError
+        from features.fb_video_publish.templates import TemplateError
+        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError, DomainError, TemplateError))
         code, status, message = (getattr(exc, "code", "fb_auto_internal_error"), getattr(exc, "status", 500), str(exc)) if known else ("fb_auto_internal_error", 500, "FB自动发布服务内部错误")
         payload: Dict[str, Any] = {"ok": False, "code": code, "error": code, "message": message}
         conflicts = getattr(exc, "conflicts", [])
         if conflicts: payload["conflicts"] = conflicts
+        if getattr(exc, "accepted", None) is False:
+            payload["accepted"] = False
+        if known and getattr(exc, "details", None) is not None:
+            payload["details"] = exc.details
         self.send_json(status, payload)
 
 
@@ -323,7 +351,22 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     }
     if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 1000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
         raise ValueError("FB auto capacity configuration invalid")
-    return Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, prebuild_enabled=prebuild_enabled, **limits)
+    runtime = Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, prebuild_enabled=prebuild_enabled, **limits)
+    from features.fb_video_publish.core import Store as ManualStore
+    from features.fb_video_publish.sources import SourceRepository, BrokerReadOnlyMySQL
+    from features.fb_video_publish.service import Service as ManualService
+    from features.fb_video_publish.worker import Worker as ManualWorker
+    manual_store = ManualStore(operational_path, daily_limit=int(env.get("FB_VIDEO_DAILY_LIMIT", "1000")))
+    manual_mysql = BrokerReadOnlyMySQL(env)
+    manual_pages = PagePoolRepository(manual_mysql)
+    manual_sources = SourceRepository(manual_pages, MaterialRepository(manual_mysql))
+    manual_live = live and str(env.get("FB_VIDEO_PUBLISH_ENABLED", "0")) == "1"
+    manual_root = str(env.get("FB_VIDEO_SHORT_LINK_ROOT", "/mnt/data-disk/fb-auto-post-public/s2l/facebook"))
+    runtime.manual = ManualService(manual_store, manual_sources, token, live_enabled=manual_live, prepare_enabled=prebuild_enabled)
+    runtime.manual_worker = ManualWorker(manual_store, manual_pages, gpu, graph, sources=manual_sources,
+        live_enabled=manual_live, prepare_enabled=prebuild_enabled, short_link_root=manual_root,
+        short_link_owner=str(env.get("FB_VIDEO_SHORT_LINK_OWNER", "fb-auto-post")), rate_limit=executor._rate_limit)
+    return runtime
 
 
 def main() -> None:

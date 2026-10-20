@@ -66,6 +66,10 @@ def _gates(runtime):
 
 
 def _skip_reason(conn, store, config, page, material_id, stamp):
+    from features.fb_video_publish.guards import manual_block
+    manual_reason = manual_block(conn, page.page_id, material_id)
+    if manual_reason:
+        return manual_reason
     if daily_limit(config, page.page_id) == 0:
         return "fb_auto_page_frequency_limit"
     if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND (status='unknown' OR unknown_outcome=1) LIMIT 1", (page.page_id,)).fetchone():

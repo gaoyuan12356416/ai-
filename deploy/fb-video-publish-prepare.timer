@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare due manual Facebook videos with shared GPU capacity
+
+[Timer]
+OnBootSec=45
+OnUnitInactiveSec=30
+Unit=fb-video-publish-prepare.service
+
+[Install]
+WantedBy=timers.target

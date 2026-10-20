@@ -72,7 +72,11 @@ class GPUPrepareClient:
         except (TypeError, ValueError, OverflowError): size, duration = 0, 0
         if output == source or not re.fullmatch(r"[a-f0-9]{64}", sha) or size <= 0 or not math.isfinite(duration) or not 0 < duration <= 3600:
             raise GPUPrepareError("fb_auto_prepared_response_invalid", "GPU成片指纹或媒体元数据无效")
-        return {"media_url": output, "sha256": sha, "size_bytes": size, "duration_seconds": duration, "profile": PROFILE}
+        result = {"media_url": output, "sha256": sha, "size_bytes": size, "duration_seconds": duration, "profile": PROFILE}
+        recipe = item.get("random_overlay_recipe")
+        if isinstance(recipe, Mapping) and len(json.dumps(recipe).encode()) <= 65536:
+            result["random_overlay_recipe"] = dict(recipe)
+        return result
 
 
 class PrepareExecutor:

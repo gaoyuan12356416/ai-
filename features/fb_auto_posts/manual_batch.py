@@ -57,6 +57,11 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
     reserved = defaultdict(set)
     for r in conn.execute("SELECT page_id,material_id FROM fb_auto_task WHERE status IN ('planned','preparing','ready','running','submitted','unknown') OR (status IN ('published','failed_without_retry') AND created_at_utc>=?)", (cutoff,)):
         reserved[r[0]].add(r[1])
+    from features.fb_video_publish.guards import manual_block, manual_excluded_materials
+    for page in pages:
+        if manual_block(conn, page.page_id):
+            unknown.add(page.page_id)
+        reserved[page.page_id].update(manual_excluded_materials(conn, page.page_id, cutoff))
     by_language = defaultdict(list)
     for mid in input_ids:
         m = materials[mid]
