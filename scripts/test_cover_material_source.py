@@ -202,12 +202,25 @@ class PayloadTests(OfflineTest):
         request = material.make_payload(source(), 248)
         self.assertEqual(material.verify_final(formal(request), request), [])
         for field in ("product", "type", "content_sign", "data_source_id", "name",
-                      "category", "user_id", "initiator", "is_delete", "country", "language"):
+                      "category", "user_id", "initiator", "is_delete", "language"):
             with self.subTest(field=field):
                 row = formal(request, **{field: "incorrect"})
                 self.assertIn(field, material.verify_final(row, request))
         row = formal(request, country="us", language="EN-us", user_id="248")
         self.assertEqual(material.verify_final(row, request), [])
+
+    def test_drama_catalog_country_may_be_empty_or_different(self):
+        request = material.make_payload(source(country="US"), 248)
+        for country in ("", None, "GB", "jp"):
+            with self.subTest(country=country):
+                self.assertEqual(material.verify_final(formal(request, country=country), request), [])
+
+    def test_country_override_does_not_relax_language_or_person_validation(self):
+        request = material.make_payload(source(country="US"), 248)
+        for field, value in (("language", "ja"), ("user_id", 249), ("initiator", 249)):
+            with self.subTest(field=field):
+                result = material.verify_final(formal(request, country="", **{field: value}), request)
+                self.assertEqual(result, [field])
 
 
 class ClientTests(OfflineTest):
@@ -405,6 +418,35 @@ class LedgerTests(OfflineTest):
         self.assertEqual((result["state"], result["attempts"]), ("confirmed", 0))
         self.client.post.assert_not_called()
         self.inspect.assert_not_called()
+
+    def test_confirmed_event_records_requested_and_catalog_country_including_empty(self):
+        for index, country in enumerate(("", None, "GB")):
+            with self.subTest(country=country):
+                record = source(source_key="country-override:" + str(index), country="US")
+                request = material.make_payload(record, 248)
+                self.catalog.rows[request["content_sign"]] = [formal(request, country=country)]
+                result = self.send(record)
+                self.assertEqual(result["state"], "confirmed")
+                self.assertEqual(json.loads(result["final_json"])["country"], country)
+                raw = self.ledger.db.execute(
+                    "SELECT detail_json FROM events WHERE key=? AND state='confirmed' ORDER BY id DESC LIMIT 1",
+                    (result["key"],)).fetchone()[0]
+                evidence = json.loads(raw)
+                self.assertEqual(evidence["country_policy"], "drama_catalog_override")
+                self.assertEqual(evidence["requested_country"], "US")
+                self.assertEqual(evidence["formal_country"], country)
+        self.client.post.assert_not_called()
+
+    def test_country_override_with_wrong_language_or_person_stays_blocked(self):
+        for field, value in (("language", "ja"), ("user_id", 249), ("initiator", 249)):
+            with self.subTest(field=field):
+                record = source(source_key="country-guard:" + field)
+                request = material.make_payload(record, 248)
+                self.catalog.rows[request["content_sign"]] = [formal(request, country="", **{field: value})]
+                result = self.send(record)
+                self.assertEqual(result["state"], "blocked")
+                self.assertIn(field, result["error"])
+        self.client.post.assert_not_called()
 
     def test_sql_failure_prevents_post_and_does_not_mark_zero_or_attempted(self):
         self.catalog.find_error = RuntimeError("catalog_read_failed_2013")

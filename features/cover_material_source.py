@@ -203,9 +203,8 @@ def verify_final(row, request):
                     data_source_id=request["content_id"], name=request["name"], category=request["category"],
                     user_id=request["user_id"], initiator=request["initiator"], is_delete=0)
     differences = [key for key, value in expected.items() if str(row.get(key)) != str(value)]
-    # Stored spelling may differ in case, but not in meaning.
-    if str(row.get("country") or "").upper() != request["country"]:
-        differences.append("country")
+    # Confirmed API contract: drama catalog country overrides the requested
+    # country, including an empty catalog value. Keep both values as evidence.
     if canonical_language(row.get("language")) != request["language"]:
         differences.append("language")
     return differences
@@ -359,7 +358,11 @@ def reconcile(ledger, catalog, row):
         return ledger.change(row["key"], "blocked", error="formal_mismatch:" + ",".join(errors),
                              final_id=int(final["id"]), final_json=encoded(final))
     # A valid readback can resolve an uncertain/duplicate response without a new POST.
-    return ledger.change(row["key"], "confirmed", {"resolved_by": "content_sign_readback"},
+    return ledger.change(row["key"], "confirmed", {
+                         "resolved_by": "content_sign_readback",
+                         "country_policy": "drama_catalog_override",
+                         "requested_country": request["country"],
+                         "formal_country": final.get("country")},
                          final_id=int(final["id"]), final_json=encoded(final), error="")
 
 

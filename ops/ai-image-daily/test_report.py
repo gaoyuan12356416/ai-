@@ -194,7 +194,7 @@ class UploadLineageTests(unittest.TestCase):
         for field, value in [('content_sign', 'wrong'), ('product', 'FreeReels'),
                              ('type', 2), ('data_source_id', 'wrong'), ('category', '1:1'),
                              ('name', 'another-name'), ('user_id', 249), ('initiator', 249),
-                             ('country', 'GB'), ('language', 'fr')]:
+                             ('language', 'fr')]:
             with self.subTest(field=field):
                 row, final = upload_fixture()
                 final[field] = value
@@ -231,7 +231,7 @@ class UploadLineageTests(unittest.TestCase):
         self.assertIsNone(row['api_id'])
 
     def test_missing_api_receipt_still_requires_complete_unique_formal_readback(self):
-        for field in ('content_sign', 'name', 'user_id', 'initiator', 'country', 'language'):
+        for field in ('content_sign', 'name', 'user_id', 'initiator', 'language'):
             row, final = upload_fixture()
             row['api_id'] = None
             final.pop(field)
@@ -240,7 +240,7 @@ class UploadLineageTests(unittest.TestCase):
         row['api_id'] = None
         self.assertFalse(self.merge([row], [final, dict(final, id='3')])[0])
 
-    def test_formal_country_and_language_normalization_matches_upload_contract(self):
+    def test_formal_language_normalization_matches_upload_contract(self):
         row, final = upload_fixture()
         final.update(country='us', language='en_US', user_id='248', initiator='248')
         self.assertFalse(self.merge([row], [final])[1])
@@ -248,6 +248,27 @@ class UploadLineageTests(unittest.TestCase):
         final['language'] = 'zh_Hant'
         self.assertFalse(self.merge([row], [final])[1])
         final['language'] = 'zh-Hans'
+        self.assertFalse(self.merge([row], [final])[0])
+
+    def test_catalog_country_override_or_blank_preserves_actual_value(self):
+        for country in ('GB', '', None, 'us'):
+            with self.subTest(country=country):
+                row, final = upload_fixture()
+                final['country'] = country
+                row['api_id'] = None
+                mapped, unresolved = self.merge([row], [final])
+                self.assertFalse(unresolved)
+                self.assertEqual(mapped['2']['country'], country)
+                self.assertEqual(mapped['2']['requested_country'], 'US')
+                self.assertEqual(mapped['2']['country_policy'], 'drama_catalog_override')
+                self.assertEqual(row['request']['country'], 'US')
+                report = build_report(mapped, [], [], '2026-10-18', '2026-10-19T09:00:00+08:00')
+                self.assertEqual(report['materials'][0]['country'], country)
+                self.assertEqual(report['materials'][0]['requested_country'], 'US')
+
+    def test_catalog_country_override_does_not_allow_language_mismatch(self):
+        row, final = upload_fixture()
+        final.update(country='', language='fr')
         self.assertFalse(self.merge([row], [final])[0])
 
     def test_incomplete_request_metadata_cannot_match_missing_formal_fields(self):

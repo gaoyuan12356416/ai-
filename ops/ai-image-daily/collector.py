@@ -223,9 +223,8 @@ def merge_upload_lineage(mapped, unresolved, rows, finals, app_names):
               or final.get('category') != request.get('category')
               or final.get('name') != request['name']
               or any(str(final.get(key)) != str(request[key]) for key in ('user_id', 'initiator'))
-              or str(final.get('country') or '').strip().upper() != str(request['country']).strip().upper()
               or canonical_language(final.get('language')) != canonical_language(request['language'])):
-            reason = '新接口正式素材与签名、产品、剧目、名称、人员、国家语言或图片比例不一致'
+            reason = '新接口正式素材与签名、产品、剧目、名称、人员、语言或图片比例不一致'
         if reason:
             unresolved.append(dict(id=final_id or row['key'], name=source.get('name', ''),
                                    source=kind or 'unknown', identity=source_key, reason=reason))
@@ -275,7 +274,11 @@ def merge_upload_lineage(mapped, unresolved, rows, finals, app_names):
         mapped[final_id] = dict(final, **meta, id=final_id, ratio=final['category'] or '未知',
                                api_version='material_source_v1',
                                backfill_kind='migration' if migration else '',
-                               legacy_final_ids=sorted(legacy_ids))
+                               legacy_final_ids=sorted(legacy_ids),
+                               # The API derives country from the drama catalog;
+                               # its actual value (including blank/null) stays in final.
+                               country_policy='drama_catalog_override',
+                               requested_country=request['country'])
         resolved_sources.add(source['source_key'])
     unresolved = [item for item in unresolved if not (
         item.get('identity') in resolved_sources

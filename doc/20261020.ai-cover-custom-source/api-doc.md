@@ -6,7 +6,9 @@ POST https://aa.yingliangads.com/api/material/source，Authorization: Bearer服�
 
 数据签名=SHA256(ai-cover-source-v1:规范JSON(source_kind/source_key/app_id/sha256))。首次请求冻结；同签名元数据漂移拒绝。
 
-data.id单独保存api_id；正式库通过content_sign唯一回读，验证真实产品、content_id(data_source_id)、type1、人员、比例、country/language、name；保存final_id，不混同接收/正式ID。
+data.id单独保存api_id；正式库通过content_sign唯一回读，验证真实产品、content_id(data_source_id)、type1、人员、比例、language、name；保存final_id，不混同接收/正式ID。
+
+2026-10-20用户确认：入库程序用剧库country覆盖请求country，剧库为空时正式country也为空，这是有效成功结果。请求仍按原规则保留/补齐国家；正式country保留实际值，不要求与请求一致，也不写回素材库。confirmed事件保存country_policy=drama_catalog_override、requested_country和formal_country。语言及其他元数据验证不放宽。
 
 HTTP403不解析JSON即明确拒绝；用户于2026-10-20确认业务code403表示产品被限制，因此按明确业务拒绝记录。-1为业务拒绝，重复签名走对账；-2/非JSON/缺id/超时不确定。成功码无固定值约束。日志仅固定安全字段与响应hash，不记录token或任意响应文本。
 

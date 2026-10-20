@@ -90,7 +90,7 @@ def build_report(mapped, unresolved, facts, report_date, generated_at, optimizer
             if by_material[identity]:
                 raise ValueError('spend_precedes_formal_ingestion_' + identity)
             continue
-        public = {key:item.get(key,'') for key in ('id','name','url','source','owner','content_id','language','ratio','created_at','generated_at','is_backfill','is_delete','backfill_kind','legacy_final_ids')}
+        public = {key:item.get(key,'') for key in ('id','name','url','source','owner','content_id','language','country','requested_country','country_policy','ratio','created_at','generated_at','is_backfill','is_delete','backfill_kind','legacy_final_ids')}
         representative = first.get(item.get('identity') or 'formal:' + str(item['id']))
         public['first_ingestion_at'] = representative['created_at'] if representative else ''
         public['is_first_ingestion'] = bool(representative and str(representative['id']) == str(item['id']))
@@ -166,6 +166,7 @@ def build_report(mapped, unresolved, facts, report_date, generated_at, optimizer
                        'AF D0 ROAS = AF D0 收入合计 / 消耗合计；不混加平台收入或 IAA 收入。比例由合计重算，零分母显示 —。',
                        '正式入库数按素材创建时间及正式 ID 统计，含补传；首次入库原图数按来源图片版本去重，不含接口迁移补传，均不是当日生成张数。原图生成时间另列。',
                        '迁移补传与 YouTube 存量补传分别标记。新旧正式 ID 的真实投放指标分别计入后求和，无消耗图片仍计入相应入库数。',
+                       '新接口正式国家由剧库决定，可与请求国家不同或为空；明细和导出保留实际值，语言仍按上传契约校验。',
                        '已删除图片保留历史投放指标；负责人表示素材归属，优化师表示实际投放归属。',
                        '同类对照为当日 AI 有消耗的相同应用、相同渠道下其他图片；不把关联差异解读为因果增量。',
                        '每日原始日报保留；近 7 天趋势按本次查询重新计算，归因回补会改变结果。初次补建日报不代表历史 09:00 快照。'])
