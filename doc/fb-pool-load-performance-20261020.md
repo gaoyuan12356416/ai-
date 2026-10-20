@@ -22,5 +22,23 @@
 
 首次以 `896be83` 尝试原排空流程时，旧自动发布 runner 正在处理 8 条任务，120 秒内未排空；脚本未改文件，自动恢复原服务状态，manifest 状态为 `failed_restored`：`/mnt/data-disk/fb-video-publish/backups/page-list-20261020T103234Z-896be839/manifest.json`。随后核实旧自动发布执行直接调用来源、Graph 和 GPU，不导入本次变更的 gateway；仅新手动模块的查询/身份 broker 依赖主 API。因此本轮调整为上述主 API 单独切换，避免中断旧发布任务。主 `app.py` 不替换，前后验证哈希不变。
 
-验收不创建池、不修改计划、不发 Facebook 帖子。上线后实测及回滚清单在下方补充。
+验收不创建池、不修改计划、不发 Facebook 帖子。
+
+## 上线结果
+
+2026-10-20 18:39 北京时间上线提交 `190b586174963f589dc725b1dad0cf74c4b1639d`（功能提交 `896be83`，随后收窄部署方式）。CPU GitHub 检出 `/mnt/data-disk/fb-video-publish/releases/190b586`。
+
+- 14 个文件 SHA 匹配；3 个公网 HTML 和 JS 均 200 且与提交一致，未登录池 API 返回 401。
+- 主 API 重启加载新 gateway；主 `app.py` 哈希未变。FB sidecar PID `1219942`、worker PID `1240611`、池调度 PID `1240618` 前后不变，原定时器状态校验通过。
+- 11 张本模块业务表与在线备份逐行一致，SQLite quick_check=ok，现有短链 SHA 不变。没有生产池/任务写入。
+- 同一已登录管理员、同一 Page：上线后首次打开 **5.661 秒**，后两次 **2.626 / 2.523 秒**；修复前 **4.907 / 5.636 秒**。首次样本仍存在波动，不能保证所有请求固定在 2.6 秒以内。耗时含网络及浏览器自动化观测开销；普通用户仍需执行负责人映射。
+- 相关 Python 测试 95 项、浏览器断言 109 项，共 204 项通过。验收截图保存在本地 `output/pool-load-after-20261020.png`。
+
+备份与精确回退：
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/190b586/scripts/deploy_fb_pool_load_performance.py --rollback /mnt/data-disk/fb-video-publish/backups/pool-load-20261020T103934Z-190b5861/manifest.json
+```
+
+回退只恢复本轮 14 个代码/静态文件并重启主 API，不恢复 SQLite/短链，不重启 FB 发布进程。要求当前新模块无未结束任务或租约、无启用池，且文件和主 app.py 哈希符合 manifest。若进一步回退上一轮 Page 列表性能补丁，先回退本轮，以恢复上一轮清单要求的文件哈希。
 
