@@ -32,5 +32,28 @@
 
 上线使用 `scripts/deploy_fb_page_list_performance.py`：提交推送后按文件哈希校验，备份代码、在线 SQLite 和服务状态，暂停生产者并排空后仅重启受影响的主 API/FB sidecar，恢复原定时器状态。部署期间不跨越启用池的发布时间窗口。回滚只恢复此次代码/静态文件，保留当前数据库、任务及短链。
 
-上线提交、备份清单和修复后实测将在部署验证完成后追加。
+## 上线结果
+
+2026-10-20 18:15 北京时间上线实现提交 `0bed7dbcd4b2df0abd62105161c0a6d77bdd1a6b`，分支 `codex/fb-page-list-performance-20261020`。
+
+- GitHub 检出：`/mnt/data-disk/fb-video-publish/releases/0bed7db`。
+- 备份：`/mnt/data-disk/fb-video-publish/backups/page-list-20261020T101544Z-0bed7dbc/manifest.json`。
+- 18 个目标文件 SHA 全部匹配。3 个公网 HTML 和 JS 均 HTTP 200 且与提交一致。
+- 主 API、FB sidecar、worker、池调度均 active，原定时器启停/启用状态恢复。
+- 11 张新模块业务表与上线前 SQLite 备份逐行一致，quick_check=ok；仍仅有原 1 条成功任务。
+- 现有 `1.html` 短链 SHA256 前后相同：`5cc669233c24c2d8613d9bbed72db827fe36101dfba5ad15e9060d19dcca6dbe`。
+- 公网未登录列表返回 401，私有 SQL broker 路径返回 404。
+- 新旧全量候选 2,186 个 Page 全字段一致；定向 3 个配置一致；无负责人访问范围的普通身份返回空。
+
+修复后 sidecar `/pages` 实测 **1.985 / 1.988 秒**；同一已登录管理员浏览器首轮刷新 **5.505 秒**（更新后的资源首次加载），再次刷新 **3.296 秒**。从视频发布点击 Page 管理至真实列表出现 **3.834 秒**。时间包含网络与自动化观测开销，是本次本地连接的样本，不代表所有网络环境。
+
+验收截图：本地 `output/page-list-after-20261020.png`。338 项相关 Python / 浏览器断言通过。本次没有生产业务写入或 Facebook 测试帖子。
+
+仅回退本次性能补丁：
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/0bed7db/scripts/deploy_fb_page_list_performance.py --rollback /mnt/data-disk/fb-video-publish/backups/page-list-20261020T101544Z-0bed7dbc/manifest.json
+```
+
+该命令检查当前文件、备份、池时间窗口并排空，恢复本次 18 个文件，保持服务原状态，不恢复数据库或短链。若需进一步调用上一轮素材池功能回退，先回退此性能补丁以满足其旧文件哈希校验；不要跳过校验。
 
