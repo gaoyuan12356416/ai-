@@ -10,7 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from features.x_posts import service, random_template as rt, random_template_gpu as gpu, media_repair
+from features.x_posts import service, random_template as rt, media_repair
+import importlib.util
+if importlib.util.find_spec("features.x_posts.random_template_gpu") is not None:
+    from features.x_posts import random_template_gpu as gpu
+else:
+    gpu = None
 from features.x_posts.random_template_store import PreparationStore
 from scripts.test_x_post_priority_manual_store import material_candidate, ACTOR
 from scripts.test_x_post_media_repair import make_config, FakeCosClient, FakeRunner, source_probe
@@ -222,6 +227,7 @@ class RandomTemplateTests(unittest.TestCase):
         client.prepare.assert_not_called()
 
 
+@unittest.skipIf(gpu is None, "CPU deployment excludes the GPU-only worker module")
 class GPUContractTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
