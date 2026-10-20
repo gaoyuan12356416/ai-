@@ -29,3 +29,35 @@
 备份两个文件、在线 SQLite 和服务状态；等待任务排空后，只重启 FB sidecar，
 恢复原有 worker/timer 状态。无需数据库迁移、主 API 或 GPU 服务重启。
 回滚使用本次 manifest，仅恢复这两个源码文件，不恢复数据库、不删除短链。
+
+## 上线证据
+
+代码提交 `3a1dbb80b322008b2752471692e4672072f20429`，已先推送 GitHub，
+CPU 从该提交独立检出至 `/mnt/data-disk/fb-video-publish/releases/3a1dbb8`。
+2026-10-20 15:04 北京时间完成切换。
+
+两份运行文件 SHA256 均为
+`25ac2f5ba3ecacf9b0791fcaeb2f522f303851dc7b2251d183f41c1901a10c5f`。
+所有原 timer/worker 的 active 和 enabled 状态与备份一致；
+主 API PID 仍为 `935255`，没有重启。FB/main 健康接口正常，SQLite quick_check=ok。
+验证期间手动发布任务数为0，没有发送真实 Facebook 测试帖子。
+
+公网登录刷新后，Page `1003072359564923`（劇情瞬間）和
+`1027121640493846`（今晚追劇吧）均显示“授权可用”，旧队列禁用原因消失。
+此次操作期间用户新增的 Page 配置正常保留，最新列表共3项。
+视频发布页读取同一真实账号配置，3个Page复选框均可操作、默认未选中；
+截图中的2个Page不再禁选。验证只读取页面，不保存草稿或提交批次。
+
+部署脚本的隔离模拟覆盖：正常更新两个文件、第二文件复制失败恢复原文件、
+恢复服务状态失败后保留新文件及manifest。后者不会再次强停可能已有任务的服务；
+进入客户端恢复阶段后，后续故障需按当前事实重新排空再回滚。
+
+准确回滚命令（仅回退本次规则修改）：
+
+```bash
+cd /mnt/data-disk/fb-video-publish/releases/3a1dbb8
+python3 scripts/deploy_fb_video_legacy_overlap.py --rollback /mnt/data-disk/fb-video-publish/backups/fb-video-legacy-overlap-20261020T070420.194618Z-3a1dbb80/manifest.json
+```
+
+该命令保留数据库、任务、配置和短链；发现活动任务或未知文件hash时停止切换。
+若要继续回滚整个模块，先完成本次局部回滚，再按原 `deploy.md` 的发布事实保护流程执行。
