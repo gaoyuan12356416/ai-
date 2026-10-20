@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send the shared YouTube + X report through the existing 11:00 daily ledger."""
+"""Send the unified social report through the existing 11:00 daily ledger."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.post_daily_report.delivery import DefiniteFailure, DeliveryUnknown, send_card
-from features.social_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, collect
+from features.social_daily_report.collector import (
+    BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, FB_DB_PATH, FACEBOOK_ATTRIBUTION_DB_PATH, collect,
+)
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
 from features.social_daily_report.report import build_cards, payload_size, preview_html
 from scripts.post_daily_report import ensure_storage, atomic_write
@@ -26,6 +28,8 @@ def main(argv=None):
     parser.add_argument("--state-dir", default="/mnt/data-disk/youtube-publisher-daily-report")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--x-db", default=X_DB_PATH)
+    parser.add_argument("--fb-db", default=FB_DB_PATH)
+    parser.add_argument("--facebook-attribution-db", default=FACEBOOK_ATTRIBUTION_DB_PATH)
     parser.add_argument("--env-file", default=ENV_PATH)
     parser.add_argument("--publication-timezone", choices=["UTC"], default="UTC")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")
@@ -66,7 +70,8 @@ def main(argv=None):
         if batch:
             report, cards = batch["report"], batch["cards"]
         else:
-            report = collect(day, args.db, args.env_file, args.x_db)
+            report = collect(day, args.db, args.env_file, args.x_db,
+                             args.fb_db, args.facebook_attribution_db)
             cards = build_cards(report, CHAT_ID)
             if store:
                 store.freeze(day, CHAT_ID, report, cards)

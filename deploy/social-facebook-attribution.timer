@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh frozen Facebook attribution every minute
+RequiresMountsFor=/mnt/data-disk
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=social-facebook-attribution.service
+
+[Install]
+WantedBy=timers.target
+

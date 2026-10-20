@@ -35,14 +35,168 @@ def fixture():
         ],
         "totals": total, "platform_totals": {"youtube": youtube, "x": x},
         "quality": {"platforms": {
-            platform: dict(state="complete", source_totals=value, attributed_totals=value,
+            platform: dict(label={"youtube": "YouTube", "x": "X"}[platform],
+                           state="complete", source_totals=value, attributed_totals=value,
                            unmatched_totals=metric(), excluded_totals=metric())
             for platform, value in (("youtube", youtube), ("x", x))
         }},
     }
 
 
+def three_channel_fixture():
+    shared = fixture()
+    facebook = metric(30000, 2, installs=10, clicks=20, views=30,
+                      post_count=None, repost_count=None)
+    shared["platform_totals"]["facebook"] = facebook
+    shared["quality"]["platforms"]["facebook"] = dict(
+        label="Facebook", state="complete", source_totals=facebook, attributed_totals=facebook,
+        unmatched_totals=metric(75), excluded_totals=metric(),
+        sources={
+            "2049": dict(label="旧自动发布", state="complete", missing_dates=[],
+                         collector=dict(state="complete", freshness="fresh")),
+            "2310": dict(label="新手动发布", state="complete", missing_dates=[],
+                         collector=dict(state="complete", freshness="fresh")),
+        },
+    )
+    shared["all_rows"] = [
+        dict(owner="one", owner_tenant="tenant", owner_label="三渠道发布人", platform=platform, **value)
+        for platform, value in shared["platform_totals"].items()
+    ]
+    shared["totals"] = {key: sum(value[key] or 0 for value in shared["platform_totals"].values())
+                        for key in METRICS}
+    return shared
+
+
 class PresentationTests(unittest.TestCase):
+    def test_new_manual_owner_never_borrows_another_owners_available_source(self):
+        from features.social_analytics.adapters import normalized
+        from features.social_analytics.report import parameters, summarize
+
+        def link(platform, site, owner, created):
+            return normalized(platform, dict(
+                key=(site, ""), link_id=site, site_id=site, owner=owner, owner_label=owner,
+                tenant="tenant", channel=site, channel_label=site, drama="42", drama_label="Drama",
+                language="en", link_type="manual", date=created, excluded=False, publications=[]))
+
+        def effect(platform, site, cents):
+            return dict(platform=platform, site_id=site, date=DAY, campaign_id=site,
+                        revenue_cents=cents, refund_cents=0, clicks=1, views=2, installs=1, conversions=0)
+
+        actor = {"role": "admin", "_system_report": True}
+        for has_known_channel in (False, True):
+            with self.subTest(known_channel=has_known_channel):
+                catalog = [link("facebook", "2049", "old-owner", DAY),
+                           link("facebook", "2310", "new-owner", "2026-10-20")]
+                values = [effect("facebook", "2049", 10000)]
+                platforms = ["facebook"]
+                if has_known_channel:
+                    platforms.append("youtube")
+                    catalog.append(link("youtube", "2284", "new-owner", DAY))
+                    values.append(effect("youtube", "2284", 3000))
+                query = {"start": [DAY], "end": [DAY], "platform": platforms,
+                         "group_by": ["owner,platform"]}
+                shared = summarize(catalog, values, actor, parameters(query), "snapshot")
+                webpage = summarize(catalog, values, actor,
+                                    parameters(dict(query, group_by=["owner"])), "snapshot")
+                daily = present(shared, DAY)
+                person = next(row for row in daily["rows"] if row["owner"] == "new-owner")
+                owner_row = next(row for row in webpage["all_rows"] if row["owner"] == "new-owner")
+                for field in METRICS:
+                    self.assertEqual(person[field], owner_row[field], field)
+                self.assertEqual(person["revenue_cents"], 3000 if has_known_channel else None)
+                self.assertEqual(person["data_status"], "partial" if has_known_channel else "unavailable")
+                self.assertIsNone(person["platforms"]["facebook"]["revenue_cents"])
+                self.assertEqual(daily["totals"], metrics(shared["totals"]))
+                cards = json.dumps(build_cards(daily, CHAT), ensure_ascii=False)
+                self.assertIn("收入 **待核实**", cards)
+
+    def test_three_channel_shared_backend_matches_daily_and_csv(self):
+        from features.social_analytics.adapters import normalized
+        from features.social_analytics.report import csv_export, parameters, summarize
+        sites = [("youtube", "2284", 91037), ("x", "2116", 78042),
+                 ("facebook", "2049", 10000), ("facebook", "2310", 20000)]
+        catalog, values = [], []
+        for platform, site, cents in sites:
+            catalog.append(normalized(platform, dict(
+                key=("same-id", "unchanged attribution"), link_id=site, site_id=site,
+                owner="one", owner_label="三渠道发布人", tenant="tenant",
+                channel="account", channel_label="Account", drama="42", drama_label="Drama",
+                language="en", link_type="manual", link_type_label="手动", date=DAY, excluded=False,
+                publications=[dict(id=platform + ":" + site, date=DAY, kind="post")],
+            )))
+            values.append(dict(platform=platform, site_id=site, date=DAY, campaign_id="same-id",
+                               campaign="renamed campaign", revenue_cents=cents, refund_cents=0,
+                               clicks=10, views=15, installs=3, conversions=1))
+        actor = {"role": "admin", "_system_report": True}
+        query = {"start": [DAY], "end": [DAY], "group_by": ["owner,platform"]}
+        shared = summarize(catalog, values, actor, parameters(query), "snapshot")
+        owner_report = summarize(catalog, values, actor,
+                                 parameters(dict(query, group_by=["owner"])), "snapshot")
+        daily = present(shared, DAY)
+        for field in METRICS:
+            self.assertEqual(daily["rows"][0][field], owner_report["all_rows"][0][field], field)
+            self.assertEqual(daily["totals"][field], shared["totals"][field], field)
+        self.assertEqual(daily["platforms"]["facebook"]["totals"]["revenue_cents"], 30000)
+        self.assertEqual(daily["platforms"]["facebook"]["totals"]["published_count"], 2)
+        self.assertEqual(daily["totals"]["post_count"], 1)
+        self.assertEqual(daily["totals"]["published_count"], 4)
+        self.assertIsNone(daily["platforms"]["facebook"]["totals"]["post_count"])
+        csv = csv_export(shared).decode("utf-8-sig")
+        self.assertIn("Facebook", csv)
+        self.assertIn("不适用", csv)
+        self.assertIn("$1,990.79", json.dumps(build_cards(daily, CHAT), ensure_ascii=False))
+
+    def test_three_channels_share_person_totals_without_x_count_pollution(self):
+        shared = three_channel_fixture()
+        daily = present(shared, DAY)
+        self.assertEqual(len(daily["rows"]), 1)
+        self.assertEqual(daily["rows"][0]["revenue_cents"], 199079)
+        self.assertEqual(daily["rows"][0]["published_count"], 28)
+        self.assertEqual(daily["rows"][0]["post_count"], 4)
+        self.assertEqual(daily["rows"][0]["repost_count"], 1)
+        self.assertEqual(set(daily["rows"][0]["platforms"]), {"youtube", "x", "facebook"})
+        text = json.dumps(build_cards(daily, CHAT), ensure_ascii=False)
+        for expected in ("Facebook 渠道小计", "Facebook｜成功发布 2 条", "旧自动发布（2049）",
+                         "新手动发布（2310）", "Facebook 手动发布属于发布记录", "Facebook 待归属"):
+            self.assertIn(expected, text)
+        self.assertNotIn("Facebook｜成功发布 2 条（Post", text)
+
+    def test_channel_labels_come_from_metadata_including_future_platforms(self):
+        shared = three_channel_fixture()
+        shared["quality"]["platforms"]["facebook"]["label"] = "Facebook 主页"
+        shared["platform_totals"]["future"] = metric(7)
+        shared["quality"]["platforms"]["future"] = dict(state="complete")
+        shared["platform_metadata"] = {"future": {"label": "未来渠道"}}
+        shared["all_rows"].append(dict(owner="future", owner_label="历史内容", platform="future",
+                                      **metric(7)))
+        report = present(shared, DAY)
+        text = json.dumps(build_cards(report, CHAT), ensure_ascii=False)
+        self.assertIn("Facebook 主页 渠道小计", text)
+        self.assertIn("未来渠道 渠道小计", text)
+        self.assertIn("未来渠道｜成功发布 0 条", text)
+
+    def test_missing_facebook_source_is_explicit_and_known_amounts_survive(self):
+        shared = three_channel_fixture()
+        quality = shared["quality"]["platforms"]["facebook"]
+        quality["state"] = "partial"
+        quality["sources"]["2049"].update(state="unavailable", missing_dates=[DAY],
+            collector=dict(state="failed", freshness="stale"))
+        for value in (shared["totals"], shared["platform_totals"]["facebook"], shared["all_rows"][2]):
+            for key in ("published_count", "post_count", "repost_count"):
+                value[key] = None
+        report = present(shared, DAY)
+        self.assertEqual(report["rows"][0]["revenue_cents"], 199079)
+        self.assertEqual(report["rows"][0]["published_count"], 26)
+        self.assertIsNone(report["totals"]["published_count"])
+        self.assertEqual(report["rows"][0]["data_status"], "partial")
+        cards = build_cards(report, CHAT)
+        self.assertEqual(cards[0]["header"]["template"], "orange")
+        text = json.dumps(cards, ensure_ascii=False)
+        for expected in ("旧自动发布（2049）：待核实／未同步", "1 个日期未同步",
+                         "归属采集待核实", "归属快照已过期", "新手动发布（2310）：已有源数据",
+                         "数据不完整，以下为已知部分", "$1,990.79"):
+            self.assertIn(expected, text)
+
     def test_shared_values_preserved_in_cents(self):
         report = present(fixture(), DAY)
         self.assertEqual(report["totals"]["revenue_cents"], 169079)
@@ -121,7 +275,7 @@ class PresentationTests(unittest.TestCase):
         values = [dict(platform="youtube", date=DAY, campaign_id="youtube", campaign="",
                        clicks=1, views=2, installs=1, conversions=0, revenue_cents=12345, refund_cents=0)]
         actor = {"role": "admin", "_system_report": True}
-        base = {"start": [DAY], "end": [DAY]}
+        base = {"start": [DAY], "end": [DAY], "platform": ["youtube", "x"]}
         shared = summarize(catalog, values, actor, parameters(dict(base, group_by=["owner,platform"])),
                            "snapshot", errors={"x": "unavailable"})
         webpage = summarize(catalog, values, actor, parameters(dict(base, group_by=["owner"])),
@@ -134,11 +288,12 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("数据不完整，以下为已知部分", json.dumps(build_cards(daily, CHAT), ensure_ascii=False))
 
     def test_split_is_measured_using_actual_utf8_envelope(self):
-        shared = fixture()
+        shared = three_channel_fixture()
         shared["all_rows"] = [
             dict(owner="person-%d" % i, owner_label="多字节发布人😀" * 10,
-                 platform="youtube", **metric(100))
+                 platform=platform, **metric(100))
             for i in range(180)
+            for platform in ("youtube", "x", "facebook")
         ]
         cards = build_cards(present(shared, DAY), CHAT, limit=8000)
         self.assertGreater(len(cards), 1)
@@ -160,10 +315,13 @@ class PresentationTests(unittest.TestCase):
         routes.build_report = build_report
         with patch.dict(sys.modules, {"features.social_analytics.routes": routes}), \
              patch("features.social_daily_report.collector.read_settings", return_value={}):
-            result = collect(DAY, "/main.sqlite", "/not-read.env", "/x.sqlite")
+            result = collect(DAY, "/main.sqlite", "/not-read.env", "/x.sqlite",
+                             "/fb.sqlite", "/attribution.sqlite")
         self.assertEqual(result["totals"]["revenue_cents"], 169079)
         app, actor, query, options = captured[0]
         self.assertEqual(app["SOCIAL_ANALYTICS_X_DB_PATH"], "/x.sqlite")
+        self.assertEqual(app["SOCIAL_ANALYTICS_FB_DB_PATH"], "/fb.sqlite")
+        self.assertEqual(app["SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB"], "/attribution.sqlite")
         self.assertTrue(actor["_system_report"])
         self.assertEqual(query["group_by"], ["owner,platform"])
         self.assertEqual(query["start"], [DAY])
@@ -196,7 +354,8 @@ class PresentationTests(unittest.TestCase):
                    side_effect=lambda app, start, end, platform: (snapshots[platform], "snapshot")):
             shared = build_report(
                 {}, {"role": "admin", "_system_report": True},
-                {"start": [DAY], "end": [DAY], "group_by": ["owner,platform"]},
+                {"start": [DAY], "end": [DAY], "group_by": ["owner,platform"],
+                 "platform": ["youtube", "x"]},
             )
         report = present(shared, DAY)
         self.assertEqual(report["totals"]["revenue_cents"], 169079)
@@ -360,6 +519,19 @@ class RunnerTests(unittest.TestCase):
             main(["--date", DAY, "--preview", "--state-dir", folder])
             self.assertFalse((Path(folder) / "delivery.sqlite3").exists())
             self.assertTrue((Path(folder) / "previews" / DAY / "preview.html").exists())
+
+    def test_preview_passes_explicit_facebook_read_paths(self):
+        from scripts.social_publisher_daily_report import main
+        with tempfile.TemporaryDirectory() as folder, \
+             patch("scripts.social_publisher_daily_report.collect",
+                   return_value=present(three_channel_fixture(), DAY)) as collect, \
+             patch("scripts.social_publisher_daily_report.send_card", side_effect=AssertionError("no send")):
+            main(["--date", DAY, "--preview", "--state-dir", folder,
+                  "--db", "/main.sqlite", "--env-file", "/readonly.env", "--x-db", "/x.sqlite",
+                  "--fb-db", "/fb.sqlite", "--facebook-attribution-db", "/attribution.sqlite"])
+            collect.assert_called_once_with(DAY, "/main.sqlite", "/readonly.env", "/x.sqlite",
+                                            "/fb.sqlite", "/attribution.sqlite")
+            self.assertFalse((Path(folder) / "delivery.sqlite3").exists())
 
 
 if __name__ == "__main__":

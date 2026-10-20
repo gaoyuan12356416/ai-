@@ -2,9 +2,8 @@
   'use strict';
   const $ = selector => document.querySelector(selector);
   const API = '/api/social-analytics';
-  const dimensions = {owner:'人员',platform:'渠道',drama:'剧目',channel:'账号/频道',link_type:'链接类型',language:'语言',date:'日期'};
+  const dimensions = {owner:'人员',platform:'渠道',drama:'剧目',channel:'账号/频道/主页',link_type:'链接类型',language:'语言',date:'日期'};
   const filterKeys = ['platform','owner','drama','channel','link_type','language'];
-  const platformNames = {youtube:'YouTube',x:'X'};
   const metrics = {
     clicks:{label:'落地页点击',hint:'链接带来的点击次数',color:'#4d7ddd'},
     views:{label:'落地页访问',hint:'落地页访问次数',color:'#829acc'},
@@ -28,9 +27,21 @@
   let epoch = 0, serial = 0, exportSerial = 0, exporting = false;
   let reportController, exportController;
   let entryApplied = false;
+  let platformMetadata = {}, metricApplicability = {};
 
   function isPublicationMetric(key) { return ['published_count','post_count','repost_count','links'].includes(key); }
-  function platformLabel(value) { return platformNames[value] || String(value); }
+  function platformLabel(value) {
+    return report?.platform_metadata?.[value]?.label || report?.quality?.platforms?.[value]?.label
+      || platformMetadata[value]?.label || options.platform?.find(item => item.value === value)?.label || String(value);
+  }
+  function appliesTo(row,key) {
+    const applicability = report?.metric_applicability || report?.meta?.metric_applicability || metricApplicability;
+    const supported = applicability[key] || (['post_count','repost_count'].includes(key) ? ['x'] : null);
+    if (!supported) return true;
+    const selected = row?.platforms || (row?.platform ? [row.platform] : report?.meta?.platforms)
+      || (applied?.getAll('platform').length ? applied.getAll('platform') : options.platform?.map(item => item.value) || []);
+    return selected.some(platform => supported.includes(platform));
+  }
   function statusText(status) {
     return ({complete:'已有源数据',partial:'数据不完整',unavailable:'待核实',missing:'未同步',unsynced:'未同步'})[status] || String(status || '');
   }
@@ -39,7 +50,7 @@
     return statusText(status);
   }
   function metricDisplay(row,key) {
-    if (row.platform === 'youtube' && ['post_count','repost_count'].includes(key)) return '不适用';
+    if (!appliesTo(row,key)) return '不适用';
     return format(row[key],key);
   }
 
@@ -205,7 +216,13 @@
       const state = ['complete','partial','unavailable'].includes(value.state) ? value.state : 'unavailable';
       const dates = Array.isArray(value.missing_dates) ? value.missing_dates : [];
       const details = [dates.length ? dates.length + ' 个日期未同步' : '', value.error ? String(value.error) : ''].filter(Boolean).join(' · ');
-      return `<div class="platform-status ${state}"><span class="platform-name">${esc(platformLabel(key))}</span><strong>${esc(statusText(state))}</strong>${details ? `<span class="platform-detail">${esc(details)}</span>` : ''}</div>`;
+      const sources = Object.entries(value.sources || {}).map(([siteId,source]) => {
+        const sourceDetails = [statusText(source.state), source.missing_dates?.length ? source.missing_dates.length + ' 个日期未同步' : '', source.error || ''];
+        if (source.collector?.state && !['complete','available','ok'].includes(source.collector.state)) sourceDetails.push('归属采集待核实');
+        if (['stale','expired'].includes(source.collector?.freshness)) sourceDetails.push('归属快照已过期');
+        return `<span class="source-status" data-source="${esc(source.source_key || key + ':' + siteId)}">${esc(source.label || siteId)}（${esc(siteId)}）：${esc(sourceDetails.filter(Boolean).join(' · '))}</span>`;
+      }).join('');
+      return `<div class="platform-status ${state}" data-platform="${esc(key)}"><span class="platform-name">${esc(platformLabel(key))}</span><strong>${esc(statusText(state))}</strong>${details ? `<span class="platform-detail">${esc(details)}</span>` : ''}${sources ? `<div class="platform-sources">${sources}</div>` : ''}</div>`;
     }).join('');
   }
   function renderKpis() {
@@ -218,8 +235,8 @@
   function renderTrend() {
     if (!report) return;
     const key = $('#trend-metric').value, points = report.trend;
-    if (['post_count','repost_count'].includes(key) && applied.getAll('platform').join(',') === 'youtube') {
-      $('#trend-chart').innerHTML = emptyChart('该指标仅适用于 X','YouTube 成功发布请查看「成功发布数」');
+    if (!appliesTo(null,key)) {
+      $('#trend-chart').innerHTML = emptyChart('该指标不适用于所选渠道','发布情况请查看「成功发布数」');
       $('#trend-caption').textContent = ''; return;
     }
     const available = points.filter(row => finite(row[key]));
@@ -254,8 +271,9 @@
     $('#conversion-chart').innerHTML = stages.map(stage => { const value = report.totals[stage.key],size = finite(value) ? Math.max(0,Number(value))/max*100 : 0; return `<div class="conversion-stage"><div class="conversion-stage-head"><span>${stage.label}</span><strong>${format(value,stage.key)}</strong></div><div class="conversion-track" aria-hidden="true"><span style="width:${size}%;background:${stage.color}"></span></div><div class="conversion-rate"><span>${stage.rateLabel || '所选日期合计'}</span><span>${stage.rate ? format(report.totals[stage.rate],stage.rate) : finite(value) ? '' : '数据未同步'}</span></div></div>`; }).join('');
   }
   function renderRanking() {
-    const key = applied.get('ranking_metric'),rows = report.ranking.slice(0,10);
+    const key = applied.get('ranking_metric'),rows = report.ranking.filter(row => appliesTo(row,key)).slice(0,10);
     $('#ranking-caption').textContent = report.group_by.map(group => dimensions[group]).join(' × ') + ' · 按' + metrics[key].label + '排序';
+    if (!appliesTo(null,key)) { $('#ranking-chart').innerHTML = emptyChart('该指标不适用于所选渠道','发布情况请查看「成功发布数」'); return; }
     if (!rows.length || rows.every(row => !finite(row[key]))) { $('#ranking-chart').innerHTML = emptyChart('暂无可展示的分组排名','请调整日期或筛选条件'); return; }
     const max = Math.max(1,...rows.map(row => finite(row[key]) ? Math.abs(Number(row[key])) : 0));
     $('#ranking-chart').innerHTML = rows.map((row,index) => `<div class="ranking-row"><span class="ranking-position">${index+1}</span><div class="ranking-content"><div class="ranking-copy"><span title="${esc(row.label)}">${esc(row.label || '未标记分组')}</span><strong>${metricDisplay(row,key)}</strong></div><div class="ranking-track" aria-hidden="true"><span style="width:${finite(row[key]) ? Math.abs(Number(row[key]))/max*100 : 0}%"></span></div></div></div>`).join('');
@@ -268,7 +286,7 @@
     $('#report-body').innerHTML = report.rows.length ? report.rows.map(row => '<tr>' + displayGroups.map(key => {
       if (key === 'drama_english_name') return `<td class="dimension-cell"><strong>${esc(row.drama_english_name || ({ambiguous:'英文名待核实',unavailable:'英文名暂不可用'}[row.drama_english_status]) || '暂无英文名')}</strong></td>`;
       const value = row[key],label = row[key + '_label'] || value || '未标记';
-      return `<td class="dimension-cell"><strong>${esc(label)}</strong>${['drama','channel'].includes(key) ? `<small>${key === 'drama' ? '剧 ID：' : '账号/频道 ID：'}${esc(value || '—')}</small>` : ''}</td>`;
+      return `<td class="dimension-cell"><strong>${esc(label)}</strong>${['drama','channel'].includes(key) ? `<small>${key === 'drama' ? '剧 ID：' : '账号/频道/主页 ID：'}${esc(value || '—')}</small>` : ''}</td>`;
     }).join('') + Object.keys(metrics).map(key => `<td class="number-column">${metricDisplay(row,key)}</td>`).join('') + `<td class="data-status-cell">${esc(rowStatus(row) || (report.quality.complete ? '已有源数据' : '数据不完整'))}</td></tr>`).join('') : `<tr><td colspan="${columns.length}" class="empty-table">当前条件下没有可归属的数据，请调整日期或筛选条件。</td></tr>`;
     const {page,pages,total} = report.pagination;
     $('#page-summary').textContent = '共 ' + format(total) + ' 组' + (report.rows.length ? ' · 本页 ' + report.rows.length + ' 组' : '');
@@ -309,7 +327,8 @@
       if (!auth.authenticated) { denied({status:401,message:'请先使用飞书登录后台，再查看社媒数据报表。'}); return; }
       const result = await request(API + '/options'); if (generation !== epoch) return;
       if (!result.options || filterKeys.some(key => !Array.isArray(result.options[key]))) throw new Error('筛选数据不完整，请点击「刷新数据」重试。');
-      options = result.options; allowed = true; renderFilterOptions(); renderGroupOptions(); updateGroupLimit(); scopeLabel(result.scope);
+      options = result.options; platformMetadata = result.platform_metadata || {}; metricApplicability = result.metric_applicability || {};
+      allowed = true; renderFilterOptions(); renderGroupOptions(); updateGroupLimit(); scopeLabel(result.scope);
       $('#filter-fields').disabled = false; dateRange(7); $('#report-search').value = ''; $('#page-size').value = '50';
       $('#ranking-metric').value = 'clicks';
       if (!entryApplied) { applyEntryQuery(); entryApplied = true; await loadReport(entryQuery()); }

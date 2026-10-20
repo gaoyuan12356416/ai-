@@ -1,0 +1,25 @@
+[Unit]
+Description=Freeze Facebook reporting attribution without publisher writes
+RequiresMountsFor=/mnt/data-disk
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/youtube-publisher-daily-report/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/youtube-publisher-daily-report/current/scripts/social_facebook_attribution.py
+TimeoutStartSec=50
+UMask=0077
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data-disk/social-analytics
+# SQLite WAL readers need the containing directory; protect the database itself.
+ReadWritePaths=/mnt/data-disk/fb-auto-post-publisher -/root/drama_material_service/data
+ReadOnlyPaths=/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3
+ReadOnlyPaths=/root/drama_material_service/data/drama_material_jobs.sqlite3
+

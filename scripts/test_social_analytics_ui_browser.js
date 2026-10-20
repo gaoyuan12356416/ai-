@@ -21,7 +21,12 @@ const rows = [
   { owner: "u2", owner_label: "测试人员乙", platform: "x", platform_label: "X",
     drama: "200", drama_label: "示例剧目乙", drama_english_name: "Example Drama Two", channel: "x:account-a", channel_label: "X 测试账号", language: "en", language_label: "en", link_type: "auto", link_type_label: "自动发布",
     clicks: 1047, views: 2420, installs: 199, conversions: 9, revenue: 780.42, refunds: 0, published_count: 12, post_count: 10, repost_count: 2, links: 12 },
+  { owner: "u1", owner_label: "测试人员甲", platform: "facebook", platform_label: "Facebook",
+    drama: "300", drama_label: "示例剧目丙", drama_english_name: "Example Drama Three", channel: "facebook:page-a", channel_label: "Facebook 测试主页", language: "en", language_label: "en", link_type: "manual", link_type_label: "手动",
+    clicks: 400, views: 600, installs: 40, conversions: 4, revenue: 300, refunds: 0, published_count: 3, post_count: null, repost_count: null, links: 3 },
 ];
+const platformMetadata = {youtube:{label:"YouTube"},x:{label:"X"},facebook:{label:"Facebook"}};
+const metricApplicability = {post_count:["x"],repost_count:["x"]};
 const optionKeys = ["platform", "owner", "drama", "channel", "link_type", "language"];
 const fixtureOptions = Object.fromEntries(optionKeys.map(key => [key,
   [...new Map(rows.map(row => [row[key], {value: row[key], label: row[key + "_label"]}])).values()],
@@ -41,27 +46,42 @@ function addRates(row) {
 function report(query, mode) {
   const start = query.get("start"), end = query.get("end"), days = dates(start, end);
   const groups = (query.get("group_by") || "owner,platform").split(",");
-  const platforms = query.getAll("platform").length ? query.getAll("platform") : ["youtube", "x"];
+  const platforms = query.getAll("platform").length ? query.getAll("platform") : Object.keys(platformMetadata);
   let selected = rows.filter(row => optionKeys.every(key => !query.getAll(key).length || query.getAll(key).includes(row[key])));
   const brokenX = mode === "partial" && platforms.includes("x");
+  const partialFacebook = mode === "facebook-partial" && platforms.includes("facebook");
+  const brokenFacebook = mode === "facebook-unavailable" && platforms.includes("facebook");
+  const incomplete = brokenX || partialFacebook || brokenFacebook;
   const qualityPlatforms = Object.fromEntries(platforms.map(platform => [platform, {
-    state: brokenX && platform === "x" ? "unavailable" : "complete",
-    missing_dates: brokenX && platform === "x" ? days : [], error: brokenX && platform === "x" ? "效果数据暂不可用" : "",
+    label: platformMetadata[platform].label,
+    state: (brokenX && platform === "x") || (brokenFacebook && platform === "facebook") ? "unavailable" : partialFacebook && platform === "facebook" ? "partial" : "complete",
+    missing_dates: (brokenX && platform === "x") || ((partialFacebook || brokenFacebook) && platform === "facebook") ? days : [],
+    error: brokenX && platform === "x" ? "效果数据暂不可用" : "",
   }]));
+  if (qualityPlatforms.facebook) qualityPlatforms.facebook.sources = Object.fromEntries(["2049","2310"].map(site => {
+    const missing = brokenFacebook || (partialFacebook && site === "2049");
+    return [site, {source_key:"facebook:" + site,label:site === "2049" ? "旧自动发布" : "新手动发布",
+      state: missing ? "unavailable" : "complete",missing_dates:missing ? days : [],
+      collector:{state:missing ? "failed" : "complete",freshness:missing ? "stale" : "fresh"}}];
+  }));
   const byGroup = new Map();
   for (const original of selected) {
     const row = {...original, date: end};
-    if (brokenX && row.platform === "x") {
+    if ((brokenX && row.platform === "x") || (brokenFacebook && row.platform === "facebook")) {
       for (const key of allMetricKeys) if (!["published_count", "post_count", "repost_count", "links"].includes(key)) row[key] = null;
     }
+    if (partialFacebook && row.platform === "facebook") row.revenue = 200;
+    if (row.platform !== "x") row.post_count = row.repost_count = null;
     const key = groups.map(group => row[group]).join("|");
     if (!byGroup.has(key)) {
       byGroup.set(key, { ...Object.fromEntries(groups.flatMap(group => [[group, row[group]], [group + "_label", row[group + "_label"] || row[group]]])),
-        drama_english_name: row.drama_english_name, data_status: brokenX && (groups.includes("platform") ? row.platform === "x" : true) ? "unavailable" : "complete",
+        drama_english_name: row.drama_english_name, data_status: groups.includes("platform") ? qualityPlatforms[row.platform].state : incomplete ? "partial" : "complete",
+        platforms: [row.platform],
         ...Object.fromEntries(allMetricKeys.map(metric => [metric, row[metric]])),
       });
     } else {
       const previous = byGroup.get(key);
+      previous.platforms = [...new Set([...previous.platforms,row.platform])];
       allMetricKeys.forEach(metric => { previous[metric] = previous[metric] === null && row[metric] === null ? null : (previous[metric] || 0) + (row[metric] || 0); });
     }
   }
@@ -74,10 +94,11 @@ function report(query, mode) {
     .sort((a,b) => (b[rankingKey] || 0) - (a[rankingKey] || 0));
   return {
     totals, rows: resultRows, group_by: groups, ranking,
-    trend: days.map(day => ({...Object.fromEntries(Object.keys(totals).map(key => [key, day === end ? totals[key] : key.includes("rate") ? null : 0])), date: day, data_status: brokenX ? "partial" : "complete"})),
+    trend: days.map(day => ({...Object.fromEntries(Object.keys(totals).map(key => [key, day === end ? totals[key] : key.includes("rate") ? null : 0])), date: day, data_status: incomplete ? "partial" : "complete"})),
     pagination: {page: 1, pages: 1, total: resultRows.length, page_size: Number(query.get("page_size") || 50)},
-    quality: {complete: !brokenX, platforms: qualityPlatforms, missing_dates: brokenX ? days : [], unmatched_campaigns: 1, unmatched_totals: {revenue: 3.25}, excluded_campaigns: 0},
-    meta: {start, end, scope: "tenant", timezone: "UTC", currency: "USD", fetched_at: "2026-10-20T00:00:00Z", source_updated_at: "2026-10-20T00:00:00Z"},
+    quality: {complete: !incomplete, platforms: qualityPlatforms, missing_dates: incomplete ? days : [], unmatched_campaigns: 1, unmatched_totals: {revenue: 3.25}, excluded_campaigns: 0},
+    meta: {start, end, platforms, scope: "tenant", timezone: "UTC", currency: "USD", fetched_at: "2026-10-20T00:00:00Z", source_updated_at: "2026-10-20T00:00:00Z",metric_applicability:metricApplicability},
+    platform_metadata:platformMetadata,metric_applicability:metricApplicability,
     warnings: [],
   };
 }
@@ -108,14 +129,21 @@ async function main() {
     if (request.method !== "GET") return send(response, 405, "text/plain", "mutations disabled");
     if (url.pathname === "/api/ui/topbar") return send(response, 200, "application/json", JSON.stringify({authenticated: true, user: {user_id: "u1", name: "隔离测试用户", tenant_key: "test-only", role: "admin", is_admin: true, permissions: {social_analytics: true}}}));
     if (url.pathname === "/navigation.json") return send(response, 200, "application/json", JSON.stringify(navigation));
-    if (url.pathname === "/api/social-analytics/options") return send(response, 200, "application/json", JSON.stringify({scope: "tenant", options: fixtureOptions}));
+    if (url.pathname === "/api/social-analytics/options") return send(response, 200, "application/json", JSON.stringify({scope: "tenant", options: fixtureOptions,platform_metadata:platformMetadata,metric_applicability:metricApplicability}));
     if (url.pathname === "/api/social-analytics/report") {
       const payload = mode === "denied" ? {message: "暂无社媒数据报表权限，请联系管理员。"} : report(url.searchParams, mode);
       const code = mode === "denied" ? 403 : 200;
       if (delay) await new Promise(resolve => setTimeout(resolve, 250));
       return send(response, code, "application/json", JSON.stringify(payload));
     }
-    if (url.pathname === "/api/social-analytics/export.csv") return send(response, 200, "text/csv; charset=utf-8", "\ufeff人员,渠道,收入\n测试人员甲,YouTube,910.37\n测试人员乙,X,780.42\n");
+    if (url.pathname === "/api/social-analytics/export.csv") {
+      const result = report(url.searchParams, mode);
+      const csv = "\ufeff人员,渠道,收入,X Post 数,X Repost 数\n" + result.rows.map(row => [
+        row.owner_label || "", row.platform_label || "", row.revenue ?? "未同步",
+        ...((row.platform ? row.platform !== "x" : !result.meta.platforms.includes("x")) ? ["不适用","不适用"] : [row.post_count,row.repost_count]),
+      ].join(",")).join("\n");
+      return send(response, 200, "text/csv; charset=utf-8", csv);
+    }
     if (url.pathname === "/favicon.ico") return send(response, 204, "text/plain", "");
     const file = path.join(ROOT, "static", path.basename(url.pathname));
     if (fs.existsSync(file) && [".html", ".js", ".css"].includes(path.extname(file))) {
@@ -149,15 +177,22 @@ async function main() {
     const firstDay = new Date(yesterday); firstDay.setUTCDate(firstDay.getUTCDate()-6);
     assert.equal(await page.locator("#date-end").inputValue(), yesterday.toISOString().slice(0,10));
     assert.equal(await page.locator("#date-start").inputValue(), firstDay.toISOString().slice(0,10));
-    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,690.79");
-    assert.equal(await page.locator('[data-metric="published_count"]').textContent(), "33");
-    assert.equal(await page.locator(".platform-status").count(), 2);
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,990.79");
+    assert.equal(await page.locator('[data-metric="published_count"]').textContent(), "36");
+    assert.equal(await page.locator(".platform-status").count(), 3);
+    assert.equal(await page.locator('[data-platform="facebook"] .source-status').count(), 2);
+    assert.match(await page.locator('[data-platform="facebook"]').textContent(), /旧自动发布（2049）.*新手动发布（2310）/);
     assert.match(await page.locator("#quality-message").textContent(), /待归属收入 \$3.25/);
     assert.match(await page.locator("#report-body").textContent(), /不适用/);
     assert.equal(await page.locator('a[href="/social-analytics.html"]').count(), 1);
-    checks += 11;
+    checks += 13;
     fs.mkdirSync(OUTPUT, {recursive: true});
     await page.screenshot({path: path.join(OUTPUT, "desktop.png"), fullPage: true});
+    await page.locator("#ranking-metric").selectOption("post_count"); await loaded();
+    assert.equal(await page.locator("#ranking-chart .ranking-row").count(), 1);
+    assert.match(await page.locator("#ranking-chart").textContent(), /测试人员乙 \/ X/);
+    await page.locator("#ranking-metric").selectOption("clicks"); await loaded();
+    checks += 2;
 
     // Group constraints, English titles and URL-driven channel filters.
     await page.locator('label.group-choice').filter({has: page.locator('input[value="drama"]')}).click();
@@ -183,14 +218,60 @@ async function main() {
     const exportRequest = new URL(requests.filter(value => value.startsWith("/api/social-analytics/export.csv?")).at(-1), origin);
     assert.equal(exportRequest.searchParams.get("group_by"), "owner,platform");
     assert.equal(exportRequest.searchParams.get("start"), firstDay.toISOString().slice(0,10));
-    checks += 3;
+    const downloadStream = await download.createReadStream(), chunks = [];
+    for await (const chunk of downloadStream) chunks.push(chunk);
+    assert.match(Buffer.concat(chunks).toString("utf8"), /Facebook,300,不适用,不适用/);
+    checks += 4;
+
+    // Facebook-only and YouTube + Facebook selections cannot present X zero trends/ranks.
+    await page.goto(origin + "/social-analytics.html?platform=facebook&group_by=owner,platform&ranking_metric=post_count");
+    await loaded();
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$300.00");
+    assert.equal(await page.locator('[data-metric="published_count"]').textContent(), "3");
+    assert.match(await page.locator("#report-body").textContent(), /Facebook/);
+    assert.equal(await page.locator("#report-body tr").locator("td").filter({hasText:/^不适用$/}).count(), 2);
+    assert.match(await page.locator("#ranking-chart").textContent(), /不适用于所选渠道/);
+    await page.locator("#trend-metric").selectOption("repost_count");
+    assert.match(await page.locator("#trend-chart").textContent(), /不适用于所选渠道/);
+    await page.goto(origin + "/social-analytics.html?platform=youtube&platform=facebook&group_by=owner&ranking_metric=post_count");
+    await loaded();
+    assert.equal(await page.locator("#report-body tr").count(), 1);
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,210.37");
+    assert.match(await page.locator("#ranking-chart").textContent(), /不适用于所选渠道/);
+    await page.locator("#trend-metric").selectOption("post_count");
+    assert.match(await page.locator("#trend-chart").textContent(), /不适用于所选渠道/);
+    checks += 10;
+    // A non-X owner remains non-applicable even when the request includes X for someone else.
+    await page.goto(origin + "/social-analytics.html?group_by=owner");
+    await loaded();
+    const nonXOwner = page.locator("#report-body tr").filter({hasText:"测试人员甲"});
+    assert.equal(await nonXOwner.locator("td").filter({hasText:/^不适用$/}).count(), 2);
+    const xOwner = page.locator("#report-body tr").filter({hasText:"测试人员乙"});
+    assert.equal(await xOwner.locator("td").filter({hasText:/^不适用$/}).count(), 0);
+    checks += 2;
+    await page.goto(origin + "/social-analytics.html"); await loaded();
+
+    // One unavailable Facebook site is visible independently of its healthy sibling.
+    mode = "facebook-partial";
+    await page.locator("#refreshPage").click(); await loaded();
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,890.79");
+    assert.match(await page.locator('[data-source="facebook:2049"]').textContent(), /旧自动发布（2049）：待核实.*归属采集待核实.*归属快照已过期/);
+    assert.match(await page.locator('[data-source="facebook:2310"]').textContent(), /新手动发布（2310）：已有源数据/);
+    assert.match(await page.locator("#report-period").textContent(), /合计不完整/);
+    checks += 4;
+    await page.screenshot({path: path.join(OUTPUT, "facebook-partial.png"), fullPage: true});
+    mode = "facebook-unavailable";
+    await page.locator("#refreshPage").click(); await loaded();
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,690.79");
+    assert.match(await page.locator("#report-body tr").filter({hasText:"Facebook"}).textContent(), /—/);
+    checks += 2;
 
     // An unavailable X source cannot become a zero-valued X revenue.
     mode = "partial";
     await page.locator("#refreshPage").click(); await loaded();
     assert.match(await page.locator("#report-period").textContent(), /合计不完整/);
-    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$910.37");
-    assert.equal(await page.locator('[data-metric="published_count"]').textContent(), "33");
+    assert.equal(await page.locator('[data-metric="revenue"]').textContent(), "$1,210.37");
+    assert.equal(await page.locator('[data-metric="published_count"]').textContent(), "36");
     assert.match(await page.locator(".platform-status.unavailable").textContent(), /X待核实/);
     const xRow = page.locator("#report-body tr").filter({hasText: "测试人员乙"});
     assert.match(await xRow.textContent(), /—/);
@@ -242,12 +323,13 @@ async function main() {
     await mobile.locator('.multi-filter[data-dimension="platform"] summary').click();
     await mobile.locator('input[name="platform"][value="youtube"]').check();
     await mobile.locator('input[name="platform"][value="x"]').check();
+    await mobile.locator('input[name="platform"][value="facebook"]').check();
     const popover = await mobile.locator('.multi-filter[data-dimension="platform"] .filter-popover').boundingBox();
     assert.ok(popover.x >= 0 && popover.x + popover.width <= 391);
     await mobile.locator("#apply-filters").click(); await loaded(mobile);
     const mobileQuery = new URL(requests.filter(value => value.startsWith("/api/social-analytics/report?")).at(-1), origin).searchParams;
-    assert.deepEqual(mobileQuery.getAll("platform"), ["youtube", "x"]);
-    assert.equal(await mobile.locator('[data-metric="revenue"]').textContent(), "$1,690.79");
+    assert.deepEqual(mobileQuery.getAll("platform"), ["youtube", "x", "facebook"]);
+    assert.equal(await mobile.locator('[data-metric="revenue"]').textContent(), "$1,990.79");
     await mobile.screenshot({path: path.join(OUTPUT, "mobile.png"), fullPage: true});
     checks += 4;
     assert.deepEqual(errors, [], "page scripts must not throw");

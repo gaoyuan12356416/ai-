@@ -15,10 +15,42 @@ from features.youtube_analytics.report import ReportError
 # Future channels must provide a separate catalog adapter and a verified site.
 # Their presence here never means that their publishers are enabled.
 PLATFORMS = {
-    "youtube": {"label": "YouTube", "site_id": "2284", "storage_alias_length": 32},
-    "x": {"label": "X", "site_id": "2116", "storage_alias_length": None},
+    "youtube": {"label": "YouTube", "site_id": "2284", "storage_alias_length": 32,
+                "sources": [{"site_id": "2284", "label": "YouTube"}]},
+    "x": {"label": "X", "site_id": "2116", "storage_alias_length": None,
+          "sources": [{"site_id": "2116", "label": "X"}]},
+    "facebook": {"label": "Facebook", "storage_alias_length": None,
+                 "sources": [{"site_id": "2049", "label": "旧自动发布"},
+                             {"site_id": "2310", "label": "手动发布"}]},
 }
 MAX_CATALOG_ROWS = 100000
+
+
+def source_site(platform, site_id=None):
+    """Never infer a site for a platform with multiple publication ledgers."""
+    if platform not in PLATFORMS:
+        raise ReportError("渠道尚未接入")
+    site = str(site_id or PLATFORMS[platform].get("site_id") or "")
+    if site not in {item["site_id"] for item in PLATFORMS[platform]["sources"]}:
+        raise ReportError("渠道站点不匹配，待核实", 503)
+    return site
+
+
+def source_key(platform, site_id=None):
+    return platform + ":" + source_site(platform, site_id)
+
+
+def platform_metadata():
+    return {platform: {"label": value["label"],
+                       "sources": [dict(item) for item in value["sources"]]}
+            for platform, value in PLATFORMS.items()}
+
+
+class CatalogErrors(dict):
+    """Preserve the two-value catalog API while carrying collector health."""
+    def __init__(self):
+        super().__init__()
+        self.source_metadata = {}
 
 
 @contextmanager
@@ -70,10 +102,12 @@ def link_key(url, site):
 
 def normalized(platform, row):
     result = dict(row)
+    site = source_site(platform, row.get("site_id"))
     result.update(platform=platform, platform_label=PLATFORMS[platform]["label"],
-                  site_id=PLATFORMS[platform]["site_id"])
+                  site_id=site)
     result["channel"] = platform + ":" + str(row.get("channel") or "")
-    result["link_id"] = platform + ":" + str(row["link_id"])
+    prefix = platform + ":" + (site + ":" if len(PLATFORMS[platform]["sources"]) > 1 else "")
+    result["link_id"] = prefix + str(row["link_id"])
     result.setdefault("publications", [])
     return result
 
@@ -237,7 +271,7 @@ def read_x(path):
 
 
 def read_catalogs(app, platforms):
-    catalog, errors = [], {}
+    catalog, errors = [], CatalogErrors()
     readers = {
         "youtube": lambda: read_youtube(app["JOB_DB_PATH"]),
         "x": lambda: read_x(app.get("SOCIAL_ANALYTICS_X_DB_PATH",
@@ -245,10 +279,18 @@ def read_catalogs(app, platforms):
     }
     for platform in platforms:
         try:
+            if platform == "facebook":
+                from .facebook import read_facebook
+                values, failures, metadata = read_facebook(app)
+                catalog.extend(values)
+                errors.update(failures)
+                errors.source_metadata.update(metadata)
+                continue
             if platform not in readers:
                 raise ReportError("渠道尚未接入", 400)
             catalog.extend(readers[platform]())
         except Exception:
             # Never send SQLite paths, connection metadata or frozen contexts to HTTP.
-            errors[platform] = "发布归因账本读取失败或迁移尚未完成，待核实"
+            for spec in PLATFORMS[platform]["sources"]:
+                errors[source_key(platform, spec["site_id"])] = "发布归因账本读取失败或迁移尚未完成，待核实"
     return catalog, errors

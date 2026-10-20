@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from features.youtube_analytics.report import ReportError, add as legacy_add
 from features.youtube_analytics.titles import display_title
-from .adapters import PLATFORMS
+from .adapters import PLATFORMS, platform_metadata, source_key, source_site
 
 DIMENSIONS = ("date", "owner", "platform", "drama", "channel", "link_type", "language")
 FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents")
@@ -21,6 +21,19 @@ LABELS = dict(date="统计日期（UTC）", owner="人员", platform="渠道", d
               links="生成链接数", published_count="成功发布数", post_count="X Post 数", repost_count="X Repost 数")
 IDENTITY = ("platform", "site_id", "tenant", "owner", "drama", "channel", "language",
             "link_type", "excluded", "sub_user_id")
+
+
+def metric_applicability():
+    return {metric: ["x"] if metric in {"post_count", "repost_count"} else list(PLATFORMS)
+            for metric in METRICS}
+
+
+def public_collector_metadata(value):
+    """Only documented health fields may cross the authenticated API boundary."""
+    return {key: value[key] for key in (
+        "state", "freshness", "last_success_at", "last_attempt_at", "error", "conflict_count",
+        "pending_count", "row_count", "generation", "age_seconds", "max_age_seconds")
+            if key in value and isinstance(value[key], (str, int, float, bool, type(None)))}
 
 
 def parameters(query):
@@ -120,7 +133,8 @@ def options(catalog, actor):
     values["platform"] = {key: value["label"] for key, value in PLATFORMS.items()}
     return dict(options={
         dimension: [dict(value=key, label=value) for key, value in sorted(items.items(), key=lambda x: (x[1], x[0]))]
-        for dimension, items in values.items()}, scope=scope(actor))
+        for dimension, items in values.items()}, scope=scope(actor),
+        platform_metadata=platform_metadata(), metric_applicability=metric_applicability())
 
 
 def scope(actor):
@@ -153,10 +167,13 @@ def dto(value, available=True, publications_available=True):
     return result
 
 
-def validate_metrics(metrics, platform, days):
+def validate_metrics(metrics, platform, days, site_id=None):
     seen = set()
     for metric in metrics:
-        key = (metric["date"], str(metric.get("campaign_id") or ""))
+        site = source_site(platform, metric.get("site_id") or site_id)
+        if site_id is not None and site != source_site(platform, site_id):
+            raise ReportError("源数据站点不一致，待核实", 503)
+        key = (metric["date"], site, str(metric.get("campaign_id") or ""))
         if metric["date"] not in days or key in seen or any(metric.get(field) is None for field in FIELDS):
             raise ReportError("源数据日期、唯一性或指标不完整，本次不按零统计", 503)
         if metric.get("platform", platform) != platform:
@@ -165,25 +182,39 @@ def validate_metrics(metrics, platform, days):
         seen.add(key)
 
 
-def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None):
+def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None,
+              source_metadata=None):
     """Resolve globally before filtering; never join names or af_channel.
 
     _system_report is an internal collector capability. HTTP handlers must
     construct actors themselves and never deserialize that property.
     """
     errors, catalog_errors = errors or {}, catalog_errors or {}
+    source_metadata = source_metadata or {}
     start, end = date.fromisoformat(params["start"]), date.fromisoformat(params["end"])
     days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
     platforms = params["platforms"]
     by_id = campaign_index(catalog)
     resolved = {key: resolve(candidates) for key, candidates in by_id.items()}
-    populated = {platform: set() for platform in platforms}
+    specs = {source_key(platform, spec["site_id"]): dict(spec, platform=platform)
+             for platform in platforms for spec in PLATFORMS[platform]["sources"]}
+    populated = {key: set() for key in specs}
     platform_values = {platform: empty() for platform in platforms}
-    channel_quality = {platform: dict(source=empty(), attributed=empty(), unmatched=empty(), excluded=empty(),
+    source_values = {key: empty() for key in specs}
+    channel_quality = {key: dict(source=empty(), attributed=empty(), unmatched=empty(), excluded=empty(),
                                      unmatched_keys=set(), excluded_keys=set(), corrected_keys=set())
-                       for platform in platforms}
+                       for key in specs}
     totals, groups, trend = empty(), {}, {day: empty() for day in days}
+    group_sources = defaultdict(set)
     source_updated = ""
+
+    def failure(mapping, key):
+        return mapping.get(key) or mapping.get(specs[key]["platform"], "")
+
+    def collector_complete(key):
+        value = source_metadata.get(key, {})
+        return (value.get("state", "complete") in {"complete", "available", "ok"}
+                and value.get("freshness", "fresh") in {"fresh", "current"})
 
     def selected(row):
         return visible(row, actor) and row["platform"] in platforms and all(
@@ -195,6 +226,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         key = tuple(row[dimension] for dimension in params["groups"])
         if actor.get("_system_report") is True and "owner" in params["groups"]:
             key = (row["tenant"],) + key
+        group_sources[key].add(source_key(row["platform"], row["site_id"]))
         if key not in groups:
             groups[key] = dict(empty(), **{
                 name: row[name] for dimension in params["groups"]
@@ -205,17 +237,26 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         add(totals, value)
         add(trend[row["date"]], value)
         add(platform_values[row["platform"]], value)
+        add(source_values[source_key(row["platform"], row["site_id"])], value)
 
     for metric in metrics:
         platform, day = metric["platform"], metric["date"]
-        if platform not in platforms or platform in errors:
+        if platform not in platforms:
+            continue
+        site = source_site(platform, metric.get("site_id"))
+        source_id = source_key(platform, site)
+        if failure(errors, source_id):
             continue
         add(empty(), metric)
-        populated[platform].add(day)
+        if day not in trend:
+            raise ReportError("源数据日期超出统计范围，待核实", 503)
+        populated[source_id].add(day)
         source_updated = max(source_updated, str(metric.get("updated_at") or ""))
-        key = (platform, PLATFORMS[platform]["site_id"], str(metric.get("campaign_id") or ""))
+        key = (platform, site, str(metric.get("campaign_id") or ""))
         candidates, row = by_id.get(key, []), resolved.get(key)
-        quality = channel_quality[platform]
+        if failure(catalog_errors, source_id):
+            row = None
+        quality = channel_quality[source_id]
         # Unknown campaigns cannot be safely attributed to a tenant. Only the
         # trusted scheduled collector may see the full-source reconciliation.
         quality_visible = actor.get("_system_report") is True or (
@@ -241,6 +282,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         key = (row["platform"], row["site_id"], row["key"][0])
         if row["platform"] not in platforms:
             continue
+        if failure(catalog_errors, source_key(row["platform"], row["site_id"])):
+            continue
         for fact in row.get("publications", []):
             publications[fact["id"]].append((row, fact))
         if not resolved.get(key):
@@ -252,6 +295,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             emit(dict(row, date=days[0]), {})
     publication_conflicts = 0
     publication_conflicts_by_platform = defaultdict(int)
+    publication_conflicts_by_source = defaultdict(int)
     for candidates in publications.values():
         if (len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1
                 or any(not resolved.get((row["platform"], row["site_id"], row["key"][0]))
@@ -262,29 +306,42 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                 publication_conflicts += 1
                 for platform in {row["platform"] for row, _ in candidates}:
                     publication_conflicts_by_platform[platform] += 1
+                for source_id in {source_key(row["platform"], row["site_id"]) for row, _ in candidates}:
+                    publication_conflicts_by_source[source_id] += 1
             continue
         row, fact = candidates[0]
         if selected(row) and fact["date"] in trend:
             emit(dict(row, date=fact["date"]), {
-                "published_count": 1, "post_count": int(fact["kind"] == "post"),
-                "repost_count": int(fact["kind"] == "repost")})
+                "published_count": 1, "post_count": int(row["platform"] == "x" and fact["kind"] == "post"),
+                "repost_count": int(row["platform"] == "x" and fact["kind"] == "repost")})
 
-    def availability(included, day=None):
+    def availability(included, day=None, source_ids=None):
         needed = {day} if day else set(days)
-        available = any(populated[platform] & needed and platform not in catalog_errors for platform in included)
-        complete = all(needed <= populated[platform] and platform not in errors
-                       and platform not in catalog_errors and not publication_conflicts_by_platform[platform]
-                       for platform in included)
-        publications_available = all(platform not in catalog_errors for platform in included)
+        sources = list(source_ids) if source_ids is not None else [
+            key for key, spec in specs.items() if spec["platform"] in included]
+        available = any(populated[key] & needed and not failure(catalog_errors, key) for key in sources)
+        complete = all(needed <= populated[key] and not failure(errors, key)
+                       and not failure(catalog_errors, key) and collector_complete(key)
+                       and not publication_conflicts_by_source[key] for key in sources)
+        publications_available = any(not failure(catalog_errors, key) for key in sources)
         return available, complete, publications_available
 
-    def formatted(value, included, day=None):
-        available, complete, publication_available = availability(included, day)
-        return dict(dto(value, available, publication_available),
-                    data_status="complete" if complete else "partial" if available else "unavailable")
+    def formatted(value, included, day=None, source_ids=None):
+        available, complete, publication_available = availability(included, day, source_ids)
+        applicable = included if source_ids is None else [
+            platform for platform in platforms if any(specs[key]["platform"] == platform for key in source_ids)]
+        result = dict(dto(value, available, publication_available),
+                      data_status="complete" if complete else "partial" if available else "unavailable")
+        if source_ids is not None:
+            result.update(source_keys=sorted(source_ids), platforms=applicable)
+        if "x" not in applicable:
+            result.update(post_count=None, repost_count=None)
+        elif not any(not failure(catalog_errors, key) for key, spec in specs.items() if spec["platform"] == "x"):
+            result.update(post_count=None, repost_count=None)
+        return result
 
-    output_rows = [formatted(row, [row["platform"]] if "platform" in row else platforms, row.get("date"))
-                   for row in groups.values()]
+    output_rows = [formatted(row, [row["platform"]] if "platform" in row else platforms,
+                             row.get("date"), group_sources[key]) for key, row in groups.items()]
 
     def sort_key(row, field):
         value = row.get(field + "_label", row.get(field))
@@ -292,35 +349,79 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
 
     output_rows.sort(key=lambda row: tuple(str(row.get(key, "")) for key in params["groups"]))
     output_rows.sort(key=lambda row: sort_key(row, params["sort"]), reverse=params["direction"] == "desc")
-    ranking = sorted(output_rows, key=lambda row: sort_key(row, params["ranking_metric"]), reverse=True)[:10]
+    ranking = sorted((row for row in output_rows if row.get(params["ranking_metric"]) is not None),
+                     key=lambda row: sort_key(row, params["ranking_metric"]), reverse=True)[:10]
     ranking = [dict(row, label=" / ".join(str(row.get(key + "_label", row[key])) for key in params["groups"]))
                for row in ranking]
-    platform_quality, unmatched_total, excluded_total = {}, empty(), empty()
-    for platform, quality in channel_quality.items():
-        available, complete, publication_available = availability([platform])
+    source_quality, unmatched_total, excluded_total = {}, empty(), empty()
+    for key, quality in channel_quality.items():
+        spec = specs[key]
+        metric_available = bool(populated[key])
+        publication_available = not failure(catalog_errors, key)
+        available = metric_available and publication_available
+        complete = (set(days) <= populated[key] and not failure(errors, key)
+                    and publication_available and collector_complete(key)
+                    and not publication_conflicts_by_source[key])
         add(unmatched_total, quality["unmatched"])
         add(excluded_total, quality["excluded"])
         # This equality is integer-exact and cannot be broken by report filters.
         if any(quality["source"][field] != quality["attributed"][field] + quality["unmatched"][field]
                + quality["excluded"][field] for field in FIELDS):
             raise ReportError("归因金额或数量不守恒，待核实", 503)
-        platform_quality[platform] = dict(
-            label=PLATFORMS[platform]["label"], state="complete" if complete else "partial" if available else "unavailable",
-            missing_dates=[day for day in days if day not in populated[platform]],
-            error=errors.get(platform) or catalog_errors.get(platform) or "",
+        collector = public_collector_metadata(source_metadata.get(key, {}))
+        source_quality[key] = dict(
+            label=spec["label"], site_id=spec["site_id"], source_key=key,
+            state="complete" if complete else "partial" if available else "unavailable",
+            missing_dates=[day for day in days if day not in populated[key]],
+            error=failure(errors, key) or failure(catalog_errors, key) or collector.get("error", ""),
+            collector=collector,
             unmatched_campaigns=len(quality["unmatched_keys"]), excluded_campaigns=len(quality["excluded_keys"]),
             corrected_campaigns=len(quality["corrected_keys"]),
-            source_totals=dto(quality["source"], available),
+            source_totals=dto(quality["source"], metric_available),
             attributed_totals=dto(quality["attributed"], available),
-            unmatched_totals=dto(quality["unmatched"], available),
-            excluded_totals=dto(quality["excluded"], available),
+            unmatched_totals=dto(quality["unmatched"], metric_available),
+            excluded_totals=dto(quality["excluded"], metric_available),
             reconciliation="complete" if actor.get("_system_report") is True else "visible_candidates_only",
             publications_available=publication_available,
-            publication_conflicts=publication_conflicts_by_platform[platform],
-            publication_status="pending" if publication_conflicts_by_platform[platform] else
-                               "complete" if publication_available else "unavailable")
+            publication_conflicts=publication_conflicts_by_source[key],
+            publication_status=("unavailable" if not publication_available else
+                                "pending" if publication_conflicts_by_source[key] or not collector_complete(key)
+                                else "complete"),
+            totals=dict(dto(source_values[key], available, publication_available),
+                        data_status="complete" if complete else "partial" if available else "unavailable"))
+        if spec["platform"] != "x":
+            source_quality[key]["totals"].update(post_count=None, repost_count=None)
+    platform_quality = {}
+    for platform in platforms:
+        keys = [key for key, spec in specs.items() if spec["platform"] == platform]
+        available, complete, publication_available = availability([platform])
+        metric_available = any(populated[key] for key in keys)
+        buckets = {bucket: empty() for bucket in ("source", "attributed", "unmatched", "excluded")}
+        for key in keys:
+            for bucket in buckets:
+                add(buckets[bucket], channel_quality[key][bucket])
+        conflicts = publication_conflicts_by_platform[platform]
+        platform_quality[platform] = dict(
+            label=PLATFORMS[platform]["label"],
+            state="complete" if complete else "partial" if available else "unavailable",
+            sources={specs[key]["site_id"]: source_quality[key] for key in keys},
+            missing_dates=[day for day in days if any(day not in populated[key] for key in keys)],
+            error="；".join(dict.fromkeys(source_quality[key]["error"] for key in keys if source_quality[key]["error"])),
+            unmatched_campaigns=sum(source_quality[key]["unmatched_campaigns"] for key in keys),
+            excluded_campaigns=sum(source_quality[key]["excluded_campaigns"] for key in keys),
+            corrected_campaigns=sum(source_quality[key]["corrected_campaigns"] for key in keys),
+            source_totals=dto(buckets["source"], metric_available),
+            attributed_totals=dto(buckets["attributed"], available),
+            unmatched_totals=dto(buckets["unmatched"], metric_available),
+            excluded_totals=dto(buckets["excluded"], metric_available),
+            reconciliation="complete" if actor.get("_system_report") is True else "visible_candidates_only",
+            publications_available=publication_available, publication_conflicts=conflicts,
+            publication_status=("unavailable" if not publication_available else
+                                "complete" if all(source_quality[key]["publication_status"] == "complete" for key in keys)
+                                else "pending"))
     available, complete, _ = availability(platforms)
-    missing_dates = [day for day in days if any(day not in populated[p] for p in platforms)]
+    metric_available = any(populated.values())
+    missing_dates = [day for day in days if any(day not in populated[key] for key in specs)]
     warnings = [
         "效果按 UTC 自然日统计，覆盖全部历史链接；发布量按确认完成的 UTC 日期去重。",
         "按渠道站点内 campaign ID 唯一关联发布表或链接账本；名称与 af_channel 不参与效果归因。",
@@ -329,6 +430,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     ]
     if not complete:
         warnings.append("存在未同步日期或不可用渠道；合计仅含可用部分，不代表完整数据，不能将缺失值判为零。")
+    if any(not collector_complete(key) for key in specs):
+        warnings.append("部分发布归属采集未完成或已过期；当前仅展示已冻结的可信归属，请核对站点采集状态。")
     if any(q["unmatched_campaigns"] for q in platform_quality.values()):
         warnings.append("无法唯一归属的数据已单列待归属，不计入个人业绩。")
     if publication_conflicts:
@@ -348,15 +451,17 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         pagination=dict(page=page, page_size=params["page_size"], total=total_rows, pages=pages),
         quality=dict(platforms=platform_quality, complete=complete, missing_dates=missing_dates,
                      unmatched_campaigns=sum(q["unmatched_campaigns"] for q in platform_quality.values()),
-                     unmatched_totals=dto(unmatched_total, available),
+                     unmatched_totals=dto(unmatched_total, metric_available),
                      excluded_campaigns=sum(q["excluded_campaigns"] for q in platform_quality.values()),
-                     excluded_totals=dto(excluded_total, available),
+                     excluded_totals=dto(excluded_total, metric_available),
                      corrected_campaigns=sum(q["corrected_campaigns"] for q in platform_quality.values()),
                      publication_conflicts=publication_conflicts),
         meta=dict(start=params["start"], end=params["end"], timezone="UTC", currency="USD",
                   platforms=platforms, fetched_at=fetched_at, source_updated_at=source_updated,
                   scope=scope(actor), conversion_label=LABELS["conversions"],
-                  attribution="site_campaign_id_frozen_ledger_v3"), warnings=warnings)
+                  platform_metadata=platform_metadata(), metric_applicability=metric_applicability(),
+                  attribution="site_campaign_id_frozen_ledger_v4"),
+        platform_metadata=platform_metadata(), metric_applicability=metric_applicability(), warnings=warnings)
 
 
 def csv_export(report):
@@ -384,5 +489,7 @@ def csv_export(report):
                      data_status_label={"complete": "已有源数据", "partial": "不完整，仅含可用部分",
                                         "unavailable": "未同步／待核实"}[row["data_status"]],
                      conversion_note="源表充值人数，每日人数累加，未跨日去重")
-        writer.writerow([safe(value.get(key)) for key, _ in fields])
+        applicable = row.get("platforms", [row["platform"]] if "platform" in row else report["meta"]["platforms"])
+        writer.writerow(["不适用" if key in {"post_count", "repost_count"} and "x" not in applicable
+                         else safe(value.get(key)) for key, _ in fields])
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")

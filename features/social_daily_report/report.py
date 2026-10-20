@@ -4,7 +4,6 @@ from __future__ import annotations
 import html
 import json
 
-from .collector import PLATFORM_NAMES
 
 SAFE_PAYLOAD_BYTES = 29000
 REPORT_URL = "https://ai.yingliangads.com/social-analytics.html"
@@ -47,6 +46,26 @@ def _available(quality):
     return quality.get("state") in ("ok", "complete", "available")
 
 
+def source_lines(quality):
+    """Expose independently missing sites without making a platform look complete."""
+    result = []
+    for site_id, source in quality.get("sources", {}).items():
+        status = "已有源数据" if _available(source) else "待核实／未同步"
+        details = []
+        missing = source.get("missing_dates") or []
+        if missing:
+            details.append("%s 个日期未同步" % len(missing))
+        collector = source.get("collector") or {}
+        if collector.get("state") and not _available(collector):
+            details.append("归属采集待核实")
+        if collector.get("freshness") in ("stale", "expired"):
+            details.append("归属快照已过期")
+        result.append("%s（%s）：%s%s" % (
+            safe_name(source.get("label") or site_id), safe_name(site_id), status,
+            " · " + " · ".join(details) if details else ""))
+    return result
+
+
 def blocks(report):
     complete = all(_available(value["quality"]) for value in report["platforms"].values())
     intro = (
@@ -61,16 +80,20 @@ def blocks(report):
     for platform, value in report["platforms"].items():
         quality = value["quality"]
         status = "" if _available(quality) else "｜待核实／未同步"
-        result.append("**%s 渠道小计%s｜%s**\n%s" % (
+        subtotal = "**%s 渠道小计%s｜%s**\n%s" % (
             safe_name(value["name"]), status, published_line(value["totals"], platform),
-            metrics_line(value["totals"])))
+            metrics_line(value["totals"]))
+        sources = source_lines(quality)
+        if sources:
+            subtotal += "\n" + "\n".join(sources)
+        result.append(subtotal)
     for person in report["rows"]:
         status = "" if person.get("data_status") == "complete" else "｜数据不完整，以下为已知部分"
         text = "**%s%s｜%s**\n%s" % (
             safe_name(person["name"]), status, published_line(person), metrics_line(person))
         for platform, row in person["platforms"].items():
             text += "\n%s｜%s\n%s" % (
-                safe_name(PLATFORM_NAMES.get(platform, platform)),
+                safe_name(report["platforms"].get(platform, {}).get("name") or platform),
                 published_line(row, platform), metrics_line(row))
         result.append(text)
     for platform, value in report["platforms"].items():
@@ -89,7 +112,8 @@ def blocks(report):
         "**指标说明**\n收入为归因内购收入（USD）；激活为安装事件数；点击／访问为落地页数据。"
         "\n当日退款：%s（单列，未从收入扣除）。"
         "\nYouTube 只计已确认公开的视频；X 只计已确认完成的目标账号 Post／Repost，中转源 Post 不重复计入。"
-        "\n手动短链贡献效果，不计成功发布量；排队、上传中和结果未知均不算成功。"
+        "\nFacebook 合并 AI 后台旧自动发布与新手动发布，按确认完成的主页帖子去重；不属于 AI 后台发布账本的效果单列待归属。"
+        "\n手动短链贡献效果，不计成功发布量；Facebook 手动发布属于发布记录。排队、上传中和结果未知均不算成功。"
         "\n未接入有效日数据的曝光指标不显示数值。效果会随回传更新。"
         "\nUTC 统计日对应北京时间当天 08:00 至次日 08:00。"
         "\n[打开社媒数据报表](%s)" % (money(report["totals"].get("refund_cents")), REPORT_URL))

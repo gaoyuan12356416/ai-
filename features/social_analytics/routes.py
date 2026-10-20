@@ -9,8 +9,9 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 from features.youtube_analytics.titles import enrich
-from .adapters import PLATFORMS, read_catalogs
-from .report import ReportError, csv_export, options, parameters, summarize, validate_metrics
+from .adapters import PLATFORMS, read_catalogs, source_key, source_site
+from .report import (ReportError, csv_export, options, parameters, summarize, validate_metrics,
+                     public_collector_metadata)
 
 _cache = OrderedDict()
 _lock = threading.Lock()
@@ -18,11 +19,11 @@ TTL = 300
 MAX_ROWS = 50000
 
 
-def metric_sql(start, end, platform):
+def metric_sql(start, end, platform, site_id=None):
     start, end = date.fromisoformat(start).isoformat(), date.fromisoformat(end).isoformat()
-    if platform not in PLATFORMS:
-        raise ReportError("渠道尚未接入")
+    site = source_site(platform, site_id)
     return """SELECT HEX(JSON_OBJECT('date',CAST(dt AS CHAR),
+      'site_id','%s',
       'campaign_id',MIN(campaign_id),'campaign',MIN(campaign),
       'clicks',SUM(COALESCE(clicks,0)),'views',SUM(COALESCE(views,0)),
       'installs',SUM(COALESCE(installs,0)),'conversions',SUM(COALESCE(recharge,0)),
@@ -31,7 +32,7 @@ def metric_sql(start, end, platform):
       'updated_at',CAST(MAX(updated_at) AS CHAR)))
       FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
       WHERE site_id='%s' AND dt BETWEEN '%s' AND '%s'
-      GROUP BY dt,BINARY campaign_id LIMIT %d""" % (PLATFORMS[platform]["site_id"], start, end, MAX_ROWS + 1)
+      GROUP BY dt,BINARY campaign_id LIMIT %d""" % (site, site, start, end, MAX_ROWS + 1)
 
 
 def query_rows(app, statement, max_rows=1001):
@@ -63,18 +64,19 @@ def query_rows(app, statement, max_rows=1001):
         raise ReportError("效果数据读取失败或繁忙，请稍后重试；本次不按零统计", 503) from None
 
 
-def source(app, start, end, platform):
-    key = (start, end, platform)
+def source(app, start, end, platform, site_id=None):
+    site = source_site(platform, site_id)
+    key = (start, end, platform, site)
     with _lock:
         cached = _cache.get(key)
         if cached and time.monotonic() - cached[0] < TTL:
             _cache.move_to_end(key)
             return cached[1], cached[2]
-    result = query_rows(app, metric_sql(start, end, platform), MAX_ROWS)
+    result = query_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
     start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
     days = {(start_day + timedelta(days=i)).isoformat() for i in range((end_day - start_day).days + 1)}
-    validate_metrics(result, platform, days)
-    result = [dict(row, platform=platform) for row in result]
+    validate_metrics(result, platform, days, site_id=site)
+    result = [dict(row, platform=platform, site_id=site) for row in result]
     fetched = datetime.now(timezone.utc).isoformat()
     with _lock:
         _cache[key] = (time.monotonic(), result, fetched)
@@ -90,20 +92,25 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
     catalog, catalog_errors = read_catalogs(app, params["platforms"])
     metrics, errors, fetched = [], {}, []
     for platform in params["platforms"]:
-        try:
-            channel_rows, channel_fetched = source(app, params["start"], params["end"], platform)
-            metrics.extend(channel_rows)
-            fetched.append(channel_fetched)
-        except ReportError as exc:
-            # A capacity error needs a narrower request, not a partial export.
-            if exc.status == 400:
-                raise
-            errors[platform] = str(exc)
-        except Exception:
-            errors[platform] = "效果数据读取失败或繁忙，待核实；本次不按零统计"
+        for spec in PLATFORMS[platform]["sources"]:
+            key = source_key(platform, spec["site_id"])
+            try:
+                # Retain the single-site call contract used by existing collectors.
+                args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
+                channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
+                metrics.extend(channel_rows)
+                fetched.append(channel_fetched)
+            except ReportError as exc:
+                # A capacity error needs a narrower request, not a partial export.
+                if exc.status == 400:
+                    raise
+                errors[key] = str(exc)
+            except Exception:
+                errors[key] = "效果数据读取失败或繁忙，待核实；本次不按零统计"
     report = summarize(catalog, metrics, actor, params,
                        min(fetched) if fetched else datetime.now(timezone.utc).isoformat(),
-                       errors=errors, catalog_errors=catalog_errors)
+                       errors=errors, catalog_errors=catalog_errors,
+                       source_metadata=getattr(catalog_errors, "source_metadata", {}))
     if include_titles:
         enrich(report, lambda statement: query_rows(app, statement), export=export)
     return report
@@ -128,9 +135,25 @@ def dispatch(handler, parsed, app, *, legacy=False):
                 raise ReportError("筛选选项接口不接受参数")
             catalogs, errors = read_catalogs(app, ["youtube"] if legacy else list(PLATFORMS))
             result = options(catalogs, actor)
-            result["quality"] = {"platforms": {platform: {
-                "state": "unavailable" if platform in errors else "available", "error": errors.get(platform, "")}
-                for platform in (["youtube"] if legacy else PLATFORMS)}}
+            result["quality"] = {"platforms": {}}
+            metadata = getattr(errors, "source_metadata", {})
+            for platform in (["youtube"] if legacy else PLATFORMS):
+                sources = {}
+                for spec in PLATFORMS[platform]["sources"]:
+                    key = source_key(platform, spec["site_id"])
+                    failure = errors.get(key) or errors.get(platform, "")
+                    collector = metadata.get(key, {})
+                    state = "unavailable" if failure else collector.get("state", "available")
+                    if collector.get("freshness") == "stale" and state in {"complete", "available", "ok"}:
+                        state = "partial"
+                    sources[spec["site_id"]] = dict(spec, source_key=key, state=state, error=failure,
+                                                    collector=public_collector_metadata(collector))
+                states = [item["state"] for item in sources.values()]
+                state = ("available" if all(value in {"complete", "available", "ok"} for value in states)
+                         else "unavailable" if all(value == "unavailable" for value in states) else "partial")
+                result["quality"]["platforms"][platform] = dict(
+                    label=PLATFORMS[platform]["label"], state=state, sources=sources,
+                    error="；".join(dict.fromkeys(item["error"] for item in sources.values() if item["error"])))
             if legacy:
                 result["options"]["platform"] = [{"value": "youtube", "label": "YouTube"}]
                 for row in result["options"]["channel"]:
