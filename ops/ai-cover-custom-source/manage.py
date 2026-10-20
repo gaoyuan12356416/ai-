@@ -111,7 +111,7 @@ def main():
                     raise RuntimeError("outcome_requires_reconciliation")
         elif args.command == "reconcile":
             rows = [dict(r) for r in ledger.db.execute(
-                "SELECT * FROM uploads WHERE state IN ('accepted','unknown') ORDER BY created_at LIMIT 50")]
+                "SELECT * FROM uploads WHERE state IN ('accepted','unknown','blocked') ORDER BY created_at LIMIT 50")]
             for row in rows:
                 reconcile(ledger, catalog, row)
         elif args.command == "export":

@@ -12,6 +12,10 @@ import unittest
 spec = importlib.util.spec_from_file_location("cover_history", Path(__file__).with_name("history.py"))
 history = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(history)
+reconcile_spec = importlib.util.spec_from_file_location(
+    "cover_reconcile_legacy", Path(__file__).with_name("reconcile_legacy.py"))
+reconcile_legacy = importlib.util.module_from_spec(reconcile_spec)
+reconcile_spec.loader.exec_module(reconcile_legacy)
 from features.cover_material_source import SPECS
 from PIL import Image
 
@@ -58,7 +62,7 @@ class HistoryTests(unittest.TestCase):
         with writing(self.sync) as conn:
             conn.executescript("""
               CREATE TABLE events(id INTEGER,key TEXT,state TEXT,detail TEXT,created_at TEXT);
-              CREATE TABLE cover_sync(key TEXT,source TEXT,request TEXT,material_id TEXT,intake_id INTEGER,final_id INTEGER,state TEXT);
+              CREATE TABLE cover_sync(key TEXT,source TEXT,request TEXT,material_id TEXT,intake_id INTEGER,final_id INTEGER,state TEXT,attempts INTEGER DEFAULT 0);
             """)
         self.catalog = FakeCatalog()
 
@@ -104,7 +108,7 @@ class HistoryTests(unittest.TestCase):
         request = dict(payload=dict(material_id=1, content_id="drama", category="16:9",
                                     name="legacy-youtube", url="https://example.invalid/youtube.jpg"))
         with writing(self.sync) as conn:
-            conn.execute("INSERT INTO cover_sync VALUES (?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO cover_sync(key,source,request,material_id,intake_id,final_id,state) VALUES (?,?,?,?,?,?,?)",
                          (key, json.dumps(source), json.dumps(request), "1", 99, 199, "confirmed"))
             conn.execute("INSERT INTO events VALUES (1,?,'accepted',?,?)",
                          (key, json.dumps(dict(accepted=True, http_status=200, code=0)) if accepted else "{}",
@@ -181,6 +185,82 @@ class HistoryTests(unittest.TestCase):
     def test_cutoff_timezone_required(self):
         with self.assertRaisesRegex(ValueError, "explicit_timezone"):
             history.discover("2026-10-20 10:00:00", self.source, self.sync, self.catalog)
+
+    def test_pending_never_sent_is_excluded_but_outbound_remains_uncertain(self):
+        key = self.youtube(accepted=False)
+        with writing(self.sync) as conn:
+            conn.execute("DELETE FROM events")
+            conn.execute("UPDATE cover_sync SET state='pending',attempts=0,intake_id=NULL,final_id=NULL")
+        sources, issues = self.discover()
+        self.assertFalse(sources)
+        self.assertEqual(issues[0]["reason"], "legacy_pending_never_uploaded")
+        self.assertTrue(issues[0]["excluded"])
+        with writing(self.sync) as conn:
+            conn.execute("INSERT INTO events VALUES (2,?,'outbound_started','{}',?)",
+                         (key, "2026-10-19T03:00:00+00:00"))
+        self.assertEqual(self.discover()[1][0]["reason"], "accepted_time_evidence_missing")
+        with writing(self.sync) as conn:
+            conn.execute("DELETE FROM events")
+            conn.execute("UPDATE cover_sync SET attempts=1")
+        self.assertEqual(self.discover()[1][0]["reason"], "accepted_time_evidence_missing")
+
+    def pending_parent(self):
+        self.screenshot()
+        self.catalog.intakes[0]["remark"] = ""
+        sources, issues = self.discover()
+        parent = dict(cutoff=self.cutoff, window_hours=168, sources=sources, issues=issues,
+                      sha256=reconcile_legacy.digest(sources))
+        path = self.root / "parent.json"
+        path.write_text(history.encoded(parent), encoding="utf-8")
+        return path, parent
+
+    def test_resolved_pending_supplement_preserves_parent_and_identity(self):
+        path, parent = self.pending_parent()
+        before = path.read_bytes()
+        old_key = reconcile_legacy.identity(parent["issues"][0]["candidate"])
+        self.catalog.intakes[0]["remark"] = "101"
+        loaded, reference = reconcile_legacy.load_parent(path, parent["sha256"])
+        sources, issues, candidate_sha = reconcile_legacy.reconcile_pending(loaded, self.catalog)
+        self.assertEqual(len(sources), 1)
+        self.assertFalse(issues)
+        self.assertEqual(reconcile_legacy.identity(sources[0]), old_key)
+        self.assertEqual(sources[0]["legacy_final_ids"], [101])
+        body = reconcile_legacy.supplement_body(loaded, reference, sources, issues, candidate_sha)
+        output = self.root / "supplement.json"
+        frozen = reconcile_legacy.freeze_supplement(output, body)
+        self.assertEqual(frozen["cutoff"], parent["cutoff"])
+        self.assertEqual(frozen["parent_manifest"]["sha256"], parent["sha256"])
+        self.assertEqual(frozen["parent_manifest"]["file_sha256"], hashlib.sha256(before).hexdigest())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(reconcile_legacy.freeze_supplement(output, body), frozen)
+        modified = dict(body, issues=[dict(reason="new_state")])
+        with self.assertRaisesRegex(ValueError, "immutable_supplement"):
+            reconcile_legacy.freeze_supplement(output, modified)
+        with self.assertRaisesRegex(ValueError, "overwrite_parent"):
+            reconcile_legacy.freeze_supplement(path, body)
+
+    def test_supplement_retains_pending_and_rejects_replaced_image(self):
+        _, parent = self.pending_parent()
+        sources, issues, _ = reconcile_legacy.reconcile_pending(parent, self.catalog)
+        self.assertFalse(sources)
+        self.assertEqual(issues[0]["reason"], "legacy_final_pending")
+        self.catalog.intakes[0]["remark"] = "101"
+        image = Path(parent["issues"][0]["candidate"]["path"])
+        Image.new("RGB", (120, 120), "red").save(image)
+        sources, issues, _ = reconcile_legacy.reconcile_pending(parent, self.catalog)
+        self.assertFalse(sources)
+        self.assertEqual(issues[0]["reason"], "retained_image_sha_changed")
+
+    def test_supplement_refuses_out_of_window_candidate_and_changed_product(self):
+        _, parent = self.pending_parent()
+        self.catalog.intakes[0]["remark"] = "101"
+        self.catalog.finals[0]["product"] = "UnrelatedProduct"
+        sources, issues, _ = reconcile_legacy.reconcile_pending(parent, self.catalog)
+        self.assertFalse(sources)
+        self.assertEqual(issues[0]["reason"], "legacy_final_mismatch")
+        parent["issues"][0]["candidate"]["legacy_accepted_at"] = "2026-10-20T02:00:00+00:00"
+        with self.assertRaisesRegex(ValueError, "not_in_parent_scope"):
+            reconcile_legacy.reconcile_pending(parent, self.catalog)
 
 
 if __name__ == "__main__":

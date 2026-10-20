@@ -6,6 +6,7 @@ catalog created_at is deliberately never used as an acceptance timestamp.
 """
 import argparse
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -242,10 +243,16 @@ def _screenshot_candidates(conn, start, end):
 
 def _youtube_candidates(conn, start, end, adoption_receipts):
     accepted = {}
-    for row in conn.execute("SELECT * FROM events WHERE state='accepted' ORDER BY id"):
+    outbound = set()
+    for row in conn.execute("SELECT * FROM events ORDER BY id"):
+        if row["state"] == "outbound_started":
+            outbound.add(row["key"])
         try:
             detail = json.loads(row["detail"])
-            if detail.get("accepted") is True and detail.get("http_status") == 200 and detail.get("code") == 0:
+            if detail.get("http_status") is not None:
+                outbound.add(row["key"])
+            if (row["state"] == "accepted" and detail.get("accepted") is True
+                    and detail.get("http_status") == 200 and detail.get("code") == 0):
                 accepted.setdefault(row["key"], []).append(dict(row))
         except (ValueError, TypeError):
             continue
@@ -271,6 +278,10 @@ def _youtube_candidates(conn, start, end, adoption_receipts):
             at = timestamp(evidence["accepted_at"])
             evidence["kind"] = "youtube_adopted_durable_receipt"
         else:
+            if row["state"] == "pending" and int(row.get("attempts") or 0) == 0 and key not in outbound:
+                issues.append(_issue("youtube", key, "legacy_pending_never_uploaded",
+                                     excluded=True, attempts=0, current_state="pending"))
+                continue
             issues.append(_issue("youtube", key, "accepted_time_evidence_missing",
                                  intake_id=row.get("intake_id"), final_id=row.get("final_id"),
                                  current_state=row["state"]))
@@ -327,12 +338,29 @@ def discover(cutoff, source_db, sync_db, catalog, adoption_receipts=None):
             load_adoption_receipts() if adoption_receipts is None else adoption_receipts)
     issues.extend(yt_issues)
     candidates = screenshots + youtube
+    output, readback_issues = verify_legacy_candidates(candidates, catalog)
+    issues.extend(readback_issues)
+    return output, issues
+
+
+def verify_legacy_candidates(candidates, catalog, *, recheck_images=False):
+    """Reconcile retained candidates without changing source identity or cutoff."""
     by_mid, finals = _legacy_readback(catalog, candidates)
     output = []
-    for source in candidates:
+    issues = []
+    for original in candidates:
+        source = copy.deepcopy(original)
         matches = by_mid.get(str(source["legacy_material_id"]), [])
         base = dict(source_kind=source["source_kind"], source_key=source["source_key"],
                     legacy_accepted_at=source["legacy_accepted_at"])
+        if recheck_images:
+            try:
+                _local_image(dict(path=source["path"]),
+                             timestamp(source["legacy_accepted_at"]),
+                             source["category"], source["sha256"])
+            except (KeyError, ValueError, TypeError, OSError) as error:
+                issues.append(dict(base, reason=str(error), candidate=source))
+                continue
         if len(matches) != 1:
             issues.append(dict(base, reason="legacy_intake_not_unique", count=len(matches)))
             continue
