@@ -1,0 +1,59 @@
+{
+  "commit": "e3dd1346d0bed2ce13d21be48d22eff9e5aac8cc",
+  "deployment_tool_commit": "40c756ca8401f04137414a47c555f84baa63ea82",
+  "migration": {
+    "count": 4000,
+    "status": "verified",
+    "manifest_sha256": "db2580ffbb8a90fbad76937ed7eefd84c64d7ba85e4151930b4404433b4de4af"
+  },
+  "public_assets": true,
+  "navigation": true,
+  "admin_totals": {
+    "revenue_cents": 169079,
+    "installs": 797,
+    "clicks": 6535,
+    "views": 11543,
+    "published_count": 65,
+    "post_count": 43,
+    "repost_count": 1
+  },
+  "legacy_youtube_only": true,
+  "csv_rows": 8,
+  "normal_user_scope_verified": true,
+  "anonymous_denied": true,
+  "public_shortlinks_verified": [
+    1,
+    4022,
+    152,
+    188
+  ],
+  "daily_timer": "NextElapseUSecRealtime=Wed 2026-10-21 11:00:00 CST\nActiveState=active",
+  "delivery_ledger_unchanged": true,
+  "verified_at": "2026-10-20T08:04:10Z",
+  "runtime_attribution_resolver_verified": true,
+  "new_link_flag_enabled": true,
+  "services": {
+    "drama-material-api": "active",
+    "x-post-automation": "active",
+    "x-auto-post-service": "active"
+  },
+  "backup": "/mnt/data-disk/social-analytics/backups/20261020T075521Z-e3dd1346d0be",
+  "publication_tables_unchanged": 47,
+  "preview": {
+    "date": "2026-10-19",
+    "path": "/mnt/data-disk/social-analytics/backups/20261020T075521Z-e3dd1346d0be/report-preview/previews/2026-10-19/report.json",
+    "sha256": "5628c63691e8322fe57298bff46c51d755f31176c83606e685a852038499d6ff",
+    "totals": {
+      "revenue_cents": 169079,
+      "refund_cents": 0,
+      "installs": 797,
+      "clicks": 6535,
+      "views": 11543,
+      "conversions": 112,
+      "published_count": 65,
+      "post_count": 43,
+      "repost_count": 1
+    }
+  },
+  "status": "deployed_triggers_restored"
+}
