@@ -46,7 +46,7 @@ X 读回 `duration_ms=1094871`，使用 `tweet_video`，保留原始完整时长
    保存定时器状态、等待现有工作完成、持有发布锁、停止三个相关 API。
    备份数据库和令牌，状态变成 `cpu_quiesced_waiting_for_gpu`。
 4. 确认上述状态后，GPU 执行 `--host gpu --deploy <GPU备份目录>`。
-   必须没有活动 GPU 请求，只重启 X 媒体修复服务。健康接口返回
+   必须没有活动 GPU 请求，重启 X 媒体修复服务后恢复依赖它的通信隧道。健康接口返回
    `standard_20m` 后，CPU 自动继续迁移、切换代码及静态文件、重启服务。
    GPU 兼容性等待超时则 CPU 自动恢复。
 5. CPU 核对旧列账本哈希、令牌哈希及权限、主 API/静态文件哈希，
@@ -62,3 +62,31 @@ X 读回 `duration_ms=1094871`，使用 `tweet_video`，保留原始完整时长
 如果仍有版本 2 的待执行任务，脚本拒绝让旧代码接管，需先排空或明确冻结
 这些任务。GPU 是增量兼容版本，回滚 CPU 时保留，以支持已有冻结请求。
 备份目录含数据库与令牌，只保存在服务器私有目录，不进入 GitHub。
+
+## 上线回执
+
+- 生产业务提交：`8ac11ee079e15de3f8e72ca09abd489897debc58`。
+- CPU `43.166.187.96`：
+  `/mnt/data-disk/x-post-automation/releases/8ac11ee079e15de3f8e72ca09abd489897debc58-video-20m`。
+  备份 `/mnt/data-disk/x-post-automation/backups/20261020T043402Z-video-20m-8ac11ee079e1`。
+- GPU `43.154.250.89`：
+  `/data/x-post-media-repair/releases/8ac11ee079e15de3f8e72ca09abd489897debc58-video-20m`。
+  备份 `/data/x-post-media-repair/backups/20261020T043401Z-video-20m-8ac11ee079e1`。
+- CPU 运行回归 986 项（其中 3 项按部署环境跳过）、错误目录检查 1 项通过；
+  GPU 42 项通过，页面 JS 检查通过。三项 CPU 服务及 GPU 服务/隧道已恢复。
+- 在线数据库副本迁移两遍通过，历史列内容、令牌内容与权限在切换前后
+  一致；定时器恢复原状态。六个公网页面/脚本均返回 200，哈希匹配部署文件。
+- 已在新代码下实际探测之前验证过的原文件：1094.871 秒、182675340 字节、
+  H.264/AAC、720×1280、30fps。实施过程中没有新增真实测试 Post。
+- 首轮打包校验发现 CPU 不包含 GPU 专用源码，因此错误目录测试在 GitHub
+  源目录执行，CPU 行为测试在最终组合版本执行。线上另存的旧测试
+  `test_x_drama_label_mapping` 在原生产版本同样存在一处错误码断言失败；
+  它对应的选择器本次未变，旧测试文件保留。
+- GPU 工作服务的停止会联动停掉隧道。此次切换中已恢复隧道并从 CPU
+  读回健康状态，部署工具随后补齐了这个恢复步骤。
+
+CPU 上的精确回滚命令（会先拒绝接管未完成的版本 2 任务）：
+
+```sh
+python3 /mnt/data-disk/x-post-automation/sources/x-video-20m-20261020/scripts/deploy_x_video_20m.py --host cpu --rollback /mnt/data-disk/x-post-automation/backups/20261020T043402Z-video-20m-8ac11ee079e1
+```

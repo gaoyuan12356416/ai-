@@ -285,6 +285,9 @@ def deploy_gpu(manifest):
         run("systemctl", "stop", "x-post-media-repair.service")
         switch(GPU_LINK, Path(manifest["release"]))
         run("systemctl", "start", "x-post-media-repair.service")
+        # The tunnel is bound to the worker and stops when the worker stops.
+        # Restore its originally active state before the CPU compatibility gate.
+        run("systemctl", "start", "x-post-media-repair-tunnel.service")
         deadline = time.monotonic() + 30
         while True:
             try:
@@ -295,10 +298,12 @@ def deploy_gpu(manifest):
                     raise
                 time.sleep(1)
         manifest["status"] = "deployed"
+        assert state("x-post-media-repair-tunnel.service") == "active"
     except BaseException:
         run("systemctl", "stop", "x-post-media-repair.service")
         switch(GPU_LINK, Path(manifest["previous_release"]))
         run("systemctl", "start", "x-post-media-repair.service")
+        run("systemctl", "start", "x-post-media-repair-tunnel.service")
         manifest["status"] = "rolled_back"
         raise
     finally:
@@ -343,7 +348,11 @@ def deploy_cpu(manifest):
                     if time.monotonic() > deadline:
                         raise RuntimeError("GPU compatibility wait expired; restoring CPU")
                     time.sleep(2)
+            manifest["status"] = "migrating_cpu"
+            receipt(manifest)
             migrate(POST_DB, AUTO_DB, release)
+            manifest["status"] = "checking_migrated_ledger"
+            receipt(manifest)
             assert_ledger(POST_DB, before["post"])
             assert_ledger(AUTO_DB, before["auto"])
             for group, root in (("main", MAIN), ("nginx", NGINX)):
@@ -352,6 +361,8 @@ def deploy_cpu(manifest):
             switch(CPU_LINK, release)
             for unit in SERVICES:
                 run("systemctl", "start", unit)
+            manifest["status"] = "verifying_cpu"
+            receipt(manifest)
             cpu_health()
             assert_ledger(POST_DB, before["post"])
             assert_ledger(AUTO_DB, before["auto"])
