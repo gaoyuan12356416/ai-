@@ -50,7 +50,12 @@ STATIC = [
     "quick-nav.js", "social-analytics.html", "social-analytics.js", "social-analytics.css",
     "youtube-analytics.html", "youtube-analytics-redirect.js",
 ]
-REPORT_FILES = ["scripts/social_publisher_daily_report.py", "scripts/youtube_publisher_daily_report.py"]
+REPORT_FILES = [
+    "scripts/social_publisher_daily_report.py", "scripts/youtube_publisher_daily_report.py",
+    # The former daily release did not include web-only English-title lookup.
+    # Shared routes import it even when the card disables title enrichment.
+    "features/youtube_analytics/titles.py",
+]
 NGINX = Path("/etc/nginx/default.d/social-analytics.conf")
 X_FLAG = Path("/etc/systemd/system/x-post-automation.service.d/70-social-attribution.conf")
 REPORT_ACCESS = Path("/etc/systemd/system/youtube-publisher-daily-report.service.d/70-social-analytics.conf")
@@ -240,6 +245,12 @@ def stage(sha):
         "daily": check_readable("youtube-publisher-daily-report.service",
                                 [releases / "daily" / name for name in report_files]),
     }
+    # Compilation does not check imports. Validate the actual composite package,
+    # with no collector execution, HTTP request or delivery side effect.
+    subprocess.check_call(
+        ["/usr/bin/python3", "-c",
+         "import features.social_analytics.routes; import scripts.social_publisher_daily_report"],
+        cwd=releases / "daily")
     verify_baseline()
     protected_source = main_files + X_FILES + report_files + ["static/" + p for p in STATIC]
     protected_source += ["scripts/deploy_social_analytics.py", "scripts/social_analytics_permissions.py",
