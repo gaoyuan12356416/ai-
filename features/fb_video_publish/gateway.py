@@ -125,9 +125,15 @@ def dispatch(handler, parsed, app):
         payload = read_json(handler) if handler.command == "POST" else None
         if handler.command == "POST" and payload is None:
             return
-        if needs_mapping:
+        if handler.command == "POST" and re.fullmatch(r"/api/fb-video-publish/pages/[1-9][0-9]{0,40}/pool/enable", parsed.path):
+            from .identity_broker import resolve_identity
+            actor = resolve_identity(app, actor["tenant_key"], actor["user_id"])
+        elif needs_mapping:
             actor["business_owner_id"] = actor["sub_user_id"] = attribution_identity(app, actor)
         result = request(handler.command, parsed.path, actor=actor, payload=payload, query=query_params(parsed.query))
+        if handler.command == "GET" and parsed.path == "/api/fb-video-publish/pages":
+            from .identity_broker import enrich_creator_names
+            result = enrich_creator_names(app, actor["tenant_key"], result)
         send(200, result)
     except GatewayError as exc:
         handler.close_connection = True

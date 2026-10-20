@@ -50,14 +50,14 @@ async (page) => {
           const m=materials.find(m=>m.material_id===p.material_id),c=configs.find(c=>c.page_id===p.page_id);
           return {...p,material_name:m.material_name,page_name:c.page_name,
             caption:p.caption_template.replace(/\{name\}/g,m.drama_name).replace(/\{desc\}/g,m.drama_description).replace(/\{url\}/g,"[提交后生成独立短链]"),
-            short_url:"[提交后生成独立短链]",planned_at_utc:body.scheduled_at_utc || "",repeat_required:repeatRequired,
+            short_url:"[提交后生成独立短链]",schedule_kind:body.material_schedules?.[p.material_id]?"scheduled":"immediate",planned_at_utc:body.material_schedules?.[p.material_id] || "",repeat_required:repeatRequired,
             long_url_parameters:{c:"yingliang_post_CLV_VL_facebook_"+c.page_id+"*[提交时间与编号]",af_adset:c.page_name,af_adset_id:c.page_id,af_ad:m.material_name+"_contentid[fixture]",af_ad_id:m.material_id,af_channel:"fixture-only",af_c_id:"[提交时分配任务编号]",af_dp:"fixture-content"}};
         }),
       });
     }
     if(path==="/batches"&&method==="POST"){
       submits++;if(rejectSubmit){rejectSubmit=false;return respond({code:"preflight_changed",message:"配置已变化，请重新核对",accepted:false},409);}const old=batches.find(b=>b.operation_id===body.operation_id);if(old)return respond({batch_id:old.batch_id,operation_id:old.operation_id,batch:old,idempotent:true});
-      const b={batch_id:"a".repeat(31)+String(batches.length+1),operation_id:body.operation_id,owner_user_id:"ui-owner",created_at_utc:new Date().toISOString(),status:"queued",processing_mode:body.processing_mode,items:body.pairs.map((p,i)=>({...p,task_id:"b".repeat(30)+String(i+10),ledger_id:300+i,material_name:materials.find(m=>m.material_id===p.material_id).material_name,page_name:configs.find(c=>c.page_id===p.page_id).page_name,caption:p.caption_template.replace(/\{name\}/g,"冻结剧名").replace(/\{url\}/g,`https://example.invalid/s2l/fb/${300+i}.html`),template_version:p.config_version,page_sequence:i+1,planned_at_utc:body.scheduled_at_utc || new Date().toISOString(),short_url:`https://example.invalid/s2l/fb/${300+i}.html`,long_url:"https://www.dramawavew2a.com/ads/101/2310/view?af_ad_id="+p.material_id,status:"queued",can_cancel:true}))};batches.push(b);
+      const b={batch_id:"a".repeat(31)+String(batches.length+1),operation_id:body.operation_id,owner_user_id:"ui-owner",created_at_utc:new Date().toISOString(),status:"queued",processing_mode:body.processing_mode,items:body.pairs.map((p,i)=>({...p,task_id:"b".repeat(30)+String(i+10),ledger_id:300+i,material_name:materials.find(m=>m.material_id===p.material_id).material_name,page_name:configs.find(c=>c.page_id===p.page_id).page_name,caption:p.caption_template.replace(/\{name\}/g,"冻结剧名").replace(/\{url\}/g,`https://example.invalid/s2l/fb/${300+i}.html`),template_version:p.config_version,page_sequence:i+1,planned_at_utc:body.material_schedules?.[p.material_id] || new Date().toISOString(),short_url:`https://example.invalid/s2l/fb/${300+i}.html`,long_url:"https://www.dramawavew2a.com/ads/101/2310/view?af_ad_id="+p.material_id,status:"queued",can_cancel:true}))};batches.push(b);
       if(abortSubmit){abortSubmit=false;hideOperationOnce=true;return route.abort("failed");}return respond({batch_id:b.batch_id,batch:b,operation_id:b.operation_id});
     }
     if(path.startsWith("/operations/")){if(hideOperationOnce){hideOperationOnce=false;return respond({code:"operation_not_found",message:"未找到"},404);}const b=batches.find(b=>b.operation_id===path.split("/").pop());return b?respond({batch_id:b.batch_id,batch:b,operation_id:b.operation_id}):respond({code:"operation_not_found",message:"未找到"},404);}
@@ -135,13 +135,14 @@ async (page) => {
   await page.locator("#preflight").click();
   check(await page.locator("#pageError").innerText().then(t=>t.includes("仅支持")),"invalid pair macro blocks preflight");
   await page.locator("#pairCaption").fill("独立文案 {name} {url}");
-  await page.locator("#intervalMinutes").fill("-1");await page.locator("#preflight").click();
-  check(await page.locator("#pageError").innerText().then(t=>t.includes("整数分钟")),"negative interval blocked");
-  await page.locator("#intervalMinutes").fill("10");await page.locator('[name="processing"][value="random_overlay"]').check();
-  await page.locator("#scheduleMode").selectOption("scheduled");await page.locator("#scheduledAt").fill("2020-01-01T10:00");await page.locator("#preflight").click();
-  check(await page.locator("#pageError").innerText().then(t=>t.includes("未来")),"past Beijing schedule blocked");
+  check(await page.locator("#intervalMinutes,#scheduleMode,#scheduledAt").count()===0,"global schedule and interval removed");
+  await page.locator('[name="processing"][value="random_overlay"]').check();
+  await page.locator('[data-material-time="201"]').fill("2020-01-01T10:00");await page.locator("#preflight").click();
+  check(await page.locator("#pageError").innerText().then(t=>t.includes("未来")),"past per-material Beijing schedule blocked");
   const future=new Date(Date.now()+86400000+8*3600000).toISOString().slice(0,16);
-  await page.locator("#scheduledAt").fill(future);
+  await page.locator('[data-material-time="201"]').fill(future);
+  await page.locator('[data-material-time="202"]').fill(future);await page.locator('[data-clear-time="202"]').click();
+  check(await page.locator('[data-material-time="202"]').inputValue()==="","clearing a material time restores immediate publishing");
   await page.locator('[data-move="202"][data-direction="-1"]').click();
   await page.locator("#saveDraft").click();await page.waitForFunction(()=>document.getElementById("draftStatus").textContent.includes("已保存"));
   check(draft.materials[0].material_id==="202"&&draft.pairs.length===5,"server draft stores order and five independent pairs");
@@ -149,7 +150,8 @@ async (page) => {
   check(await page.locator("#pairRows input:checked").count()===5,"draft restores material and Page assignments");
   await page.locator("#captionPair").selectOption("201::101");
   check(await page.locator("#pairCaption").inputValue()==="独立文案 {name} {url}","draft restores edited caption");
-  check(await page.locator("#scheduledAt").inputValue()===future,"Beijing input restores without timezone drift");
+  check(await page.locator('[data-material-time="201"]').inputValue()===future,"per-material Beijing time restores without timezone drift");
+  check(draft.schema===2 && draft.material_schedules_local["201"]===future && !draft.material_schedules_local["202"],"schema 2 draft stores independent material times");
   check(await page.locator('[name="processing"][value="random_overlay"]').isChecked(),"processing mode survives refresh");
   failMaterials=true;await page.locator("#chooseMaterials").click();await page.locator("#pickerError").waitFor({state:"visible"});
   check(await page.locator("#pickerError").innerText().then(t=>t.includes("暂不可用")),"material load failure is explicit");
@@ -158,12 +160,15 @@ async (page) => {
   repeatRequired=true;
   for(const width of [1440,820,390]){
     await page.setViewportSize({width,height:900});
+    await page.locator("#selectedMaterials").scrollIntoViewIfNeeded();
+    await page.screenshot({path:`output/fb-page-pool-ui/material-time-${width}.png`});
     await page.locator("#preflight").click();await page.locator("#publishConfirmation").waitFor();
     await page.locator("#publishConfirmation details summary").first().click();
     check(await page.locator("#publishConfirmation .task-card").count()===5,`${width}: five final previews`);
     check(await page.locator("#confirmSubmit").isDisabled(),`${width}: repeated success requires acknowledgement`);
     check(await page.locator("#publishConfirmation").innerText().then(t=>t.includes("占位")&&t.includes("/ads/101/2310/view")),`${width}: placeholder and fixed 2310 destination`);
     check(await page.locator("#publishConfirmation details").first().innerText().then(t=>t.includes("af_adset_id")&&t.includes("af_channel")&&t.includes("af_c_id")),`${width}: attribution parameters rendered from preflight DTO`);
+    check(await page.locator("#publishConfirmation").innerText().then(t=>t.includes("立即发布")&&t.includes("预约")),`${width}: confirmation distinguishes immediate and scheduled pairs`);
     check(submits===0&&batches.length===0,`${width}: confirmation creates no real tasks or links`);
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${width}: no page horizontal overflow`);
     check(await page.locator("#publishConfirmation").evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1;}),`${width}: confirmation fits viewport`);
@@ -199,7 +204,9 @@ async (page) => {
   check(submits===3&&batches.length===1,"refresh reconciles original operation without another POST");
   check(await page.locator("#batchDetail .task-card").count()===5,"records show every frozen pair");
   check(await page.locator("#batchDetail").innerText().then(t=>t.includes("真实短链")&&t.includes("独立文案")),"record detail shows real short links and frozen copy");
-  check(calls.find(c=>c.path==="/batches"&&c.method==="POST").body.scheduled_at_utc===new Date(future+"+08:00").toISOString(),"Beijing schedule converted to correct UTC");
+  const submitted=calls.find(c=>c.path==="/batches"&&c.method==="POST").body;
+  check(submitted.material_schedules["201"]===new Date(future+"+08:00").toISOString()&&submitted.material_schedules["202"]===null&&submitted.material_schedules["203"]===null,"per-material Beijing schedule converted to UTC and immediate is null");
+  check(submitted.schema_version===2&&!("interval_minutes" in submitted)&&!("schedule_mode" in submitted)&&!("scheduled_at_utc" in submitted),"V2 request excludes every obsolete global scheduling field");
   await page.locator("[data-cancel-task]").first().click();await page.waitForFunction(()=>document.getElementById("batchDetail").textContent.includes("已取消"));
   check(batches[0].items.filter(t=>t.status==="cancelled").length===1,"cancel affects only one unsent task");
   batches.push({...batches[0],batch_id:"c".repeat(32),operation_id:"other-operation",items:[]});
@@ -212,6 +219,13 @@ async (page) => {
   await page.goto(base+"/fb-pages.html");await page.locator('[data-delete-page="102"]').click();await page.waitForFunction(()=>!document.querySelector('[data-delete-page="102"]'));
   check(configs.length===3,"delete removes saved Page configuration");
   check(JSON.stringify(batches)===frozen,"Page deletion leaves frozen records unchanged");
+  draft={schema:1,materials:[materials[0]],page_ids:["101"],pairs:[{material_id:"201",page_id:"101",config_instance_id:configs[0].config_instance_id,config_version:configs[0].version,caption_template:"旧草稿 {name} {url}"}],processing_mode:"original",schedule_mode:"scheduled",scheduled_at_local:future,interval_minutes:30};
+  await page.goto(base+"/fb-video-publish.html");await page.locator("#legacyDraftNotice").waitFor({state:"visible"});
+  check(await page.locator("#chooseMaterials").isDisabled()&&await page.locator("#preflight").isDisabled(),"legacy draft requires explicit time conversion before editing or publishing");
+  await page.locator("#convertDraft").click();
+  check(!(await page.locator("#chooseMaterials").isDisabled())&&await page.locator('[data-material-time="201"]').inputValue()==="","legacy conversion clears the obsolete global time");
+  await page.locator("#saveDraft").click();await page.waitForFunction(()=>document.getElementById("draftStatus").textContent.includes("已保存"));
+  check(draft.schema===2&&draft.materials.length===1&&draft.pairs[0].caption_template==="旧草稿 {name} {url}"&&Object.keys(draft.material_schedules_local).length===0,"explicit conversion preserves materials and captions in V2 draft");
   unauthorized=true;await page.goto(base+"/fb-video-publish.html");await page.locator("#gate").waitFor();
   await page.waitForFunction(()=>document.getElementById("gate").textContent.includes("没有"));
   check(await page.locator("#content").isHidden(),"unassigned new permission blocks UI");

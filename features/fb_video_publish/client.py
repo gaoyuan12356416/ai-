@@ -32,7 +32,9 @@ def route(method, path):
         if suffix == "/pages":
             return ("fbPageManagement", "fbVideoPublish"), True
         if suffix == "/materials":
-            return ("fbVideoPublish",), False
+            return ("fbVideoPublish", "fbPageManagement"), False
+        if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool(?:/operations/[a-fA-F0-9-]{32,36})?", suffix):
+            return ("fbPageManagement",), True
         if suffix == "/languages":
             return ("fbPageManagement", "fbVideoPublish"), False
         if suffix == "/draft":
@@ -44,6 +46,8 @@ def route(method, path):
         if re.fullmatch(r"/operations/[a-fA-F0-9-]{32,36}", suffix):
             return ("fbVideoPublish", "fbVideoPublishRecords"), False
     if method == "POST":
+        if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool/(?:settings|enable|pause|items(?:/preview)?|remove|move)", suffix):
+            return ("fbPageManagement",), True
         if suffix == "/pages" or re.fullmatch(r"/pages/[1-9][0-9]{0,40}(?:/delete)?", suffix):
             return ("fbPageManagement",), True
         if suffix in ("/preflight", "/batches"):

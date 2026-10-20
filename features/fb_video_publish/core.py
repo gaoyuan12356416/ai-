@@ -64,7 +64,9 @@ def id_text(value):
 
 
 def normalize_batch(raw):
-    required = {"operation_id", "material_ids", "page_ids", "pairs", "processing_mode", "schedule_mode", "scheduled_at_utc", "interval_minutes"}
+    v2 = isinstance(raw, dict) and raw.get("schema_version") == 2
+    required = {"operation_id", "material_ids", "page_ids", "pairs", "processing_mode"}
+    required |= {"schema_version", "material_schedules"} if v2 else {"schedule_mode", "scheduled_at_utc", "interval_minutes"}
     if not isinstance(raw, dict) or set(raw) != required:
         raise DomainError("invalid_request", "批次字段不完整或含未知字段")
     op = raw["operation_id"]
@@ -79,12 +81,24 @@ def normalize_batch(raw):
         if len(set(normalized)) != len(normalized):
             raise DomainError("invalid_request", "素材/Page不得重复")
         result[field] = normalized
-    if raw["processing_mode"] not in {"original", "random_overlay"} or raw["schedule_mode"] not in {"now", "scheduled"}:
+    if raw["processing_mode"] not in {"original", "random_overlay"}:
         raise DomainError("invalid_request", "加工或发布时间选项无效")
-    interval = raw["interval_minutes"]
-    if type(interval) is not int or not 0 <= interval <= 1440:
-        raise DomainError("invalid_request", "同Page间隔应为0至1440整数分钟")
-    result["scheduled_at_utc"] = stamp(parse_time(raw["scheduled_at_utc"])) if raw["schedule_mode"] == "scheduled" else ""
+    if v2:
+        schedules = raw["material_schedules"]
+        if type(raw["schema_version"]) is not int or not isinstance(schedules, dict) or set(schedules) != set(result["material_ids"]):
+            raise DomainError("invalid_schedule", "逐素材预约必须完整覆盖所选素材")
+        result["material_schedules"] = {}
+        for mid, value in schedules.items():
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise DomainError("invalid_schedule", "预约为空请使用null")
+            result["material_schedules"][mid] = None if value is None else stamp(parse_time(value))
+    else:
+        if raw["schedule_mode"] not in {"now", "scheduled"}:
+            raise DomainError("invalid_request", "发布时间选项无效")
+        interval = raw["interval_minutes"]
+        if type(interval) is not int or not 0 <= interval <= 1440:
+            raise DomainError("invalid_request", "同Page间隔应为0至1440整数分钟")
+        result["scheduled_at_utc"] = stamp(parse_time(raw["scheduled_at_utc"])) if raw["schedule_mode"] == "scheduled" else ""
     pairs = raw["pairs"]
     if not isinstance(pairs, list) or not 1 <= len(pairs) <= 200:
         raise DomainError("invalid_request", "每批请选择1至200个素材与Page配对")
@@ -107,6 +121,29 @@ def normalize_batch(raw):
         raise DomainError("page_unassigned", "存在未分配素材的Page，请分配或移除")
     clean.sort(key=lambda p: (result["material_ids"].index(p["material_id"]), result["page_ids"].index(p["page_id"])))
     result["pairs"] = clean
+    return result
+
+
+def plan_pairs(request, now):
+    """One schedule calculation for confirmation, quota and immutable freezing."""
+    v2 = request.get("schema_version") == 2
+    if v2:
+        times = {mid: now if value is None else parse_time(value)
+                 for mid, value in request["material_schedules"].items()}
+        if any(value is not None and times[mid] <= now for mid, value in request["material_schedules"].items()):
+            raise DomainError("invalid_schedule", "预约时间必须晚于当前时间", 409)
+        ordered = sorted(enumerate(request["pairs"], 1), key=lambda p: (times[p[1]["material_id"]], p[0]))
+    else:
+        start = now if request["schedule_mode"] == "now" else parse_time(request["scheduled_at_utc"])
+        if request["schedule_mode"] == "scheduled" and start <= now:
+            raise DomainError("invalid_schedule", "预约时间已经过去", 409)
+        ordered = list(enumerate(request["pairs"], 1))
+    counts, result = {}, []
+    for index, pair in ordered:
+        pid = pair["page_id"]
+        counts[pid] = counts.get(pid, 0) + 1
+        when = times[pair["material_id"]] if v2 else start + timedelta(minutes=(counts[pid] - 1) * request["interval_minutes"])
+        result.append((index, pair, counts[pid], when, when.astimezone(BJ).date().isoformat()))
     return result
 
 
@@ -174,6 +211,17 @@ class Store:
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_video_execution ON fb_video_task(page_id)
                   WHERE status IN ('running','submitted','unknown');
             """)
+            # Additive migrations leave all prior snapshots and task facts intact.
+            for table, column, definition in (
+                ("fb_video_page", "created_by_name", "TEXT NOT NULL DEFAULT ''"),
+                ("fb_video_task", "source_kind", "TEXT NOT NULL DEFAULT 'manual'"),
+                ("fb_video_task", "pool_instance_id", "TEXT NOT NULL DEFAULT ''"),
+                ("fb_video_task", "pool_sequence", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")}:
+                    conn.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
+            from .pool import install_schema
+            install_schema(conn)
             install_backstops(conn)
 
     def connect(self):
@@ -216,11 +264,18 @@ class Store:
                     raise DomainError("config_version_conflict", "Page配置已改变，请刷新", 409)
                 instance, version = (old["config_instance_id"], old["version"] + 1) if old else (uuid.uuid4().hex, 1)
                 created = old["created_at_utc"] if old else now
-                conn.execute("""INSERT INTO fb_video_page VALUES(?,?,?,?,?,?,0,?,?,?,?)
+                conn.execute("""INSERT INTO fb_video_page(tenant_key,page_id,config_instance_id,version,language,
+                    caption_template,deleted,created_by,updated_by,created_at_utc,updated_at_utc,created_by_name)
+                    VALUES(?,?,?,?,?,?,0,?,?,?,?,?)
                     ON CONFLICT(tenant_key,page_id) DO UPDATE SET config_instance_id=excluded.config_instance_id,
                     version=excluded.version,language=excluded.language,caption_template=excluded.caption_template,deleted=0,
-                    created_by=excluded.created_by,updated_by=excluded.updated_by,created_at_utc=excluded.created_at_utc,updated_at_utc=excluded.updated_at_utc""",
-                    (actor["tenant_key"], pid, instance, version, language, caption, old["created_by"] if old else actor["user_id"], actor["user_id"], created, now))
+                    created_by=excluded.created_by,created_by_name=excluded.created_by_name,updated_by=excluded.updated_by,
+                    created_at_utc=excluded.created_at_utc,updated_at_utc=excluded.updated_at_utc""",
+                    (actor["tenant_key"], pid, instance, version, language, caption, old["created_by"] if old else actor["user_id"],
+                     actor["user_id"], created, now, old["created_by_name"] if old else actor["user_name"]))
+                if old and old["language"] != language:
+                    conn.execute("""UPDATE fb_video_pool SET status='paused',pause_reason='page_language_changed',
+                        version=version+1,updated_at_utc=? WHERE config_instance_id=? AND status<>'archived'""", (now, instance))
                 row = dict(conn.execute("SELECT * FROM fb_video_page WHERE tenant_key=? AND page_id=?", (actor["tenant_key"], pid)).fetchone())
                 conn.execute("INSERT INTO fb_video_page_version VALUES(?,?,?,?)", (instance, version, canonical(row), now))
                 result.append(row)
@@ -235,6 +290,8 @@ class Store:
                 (stamp(self.now_fn()), actor["user_id"], actor["tenant_key"], pid, instance, version)).rowcount
             if not changed:
                 raise DomainError("config_version_conflict", "Page配置已改变，请刷新", 409)
+            conn.execute("""UPDATE fb_video_pool SET status='archived',pause_reason='page_deleted',
+                version=version+1,updated_at_utc=? WHERE config_instance_id=?""", (stamp(self.now_fn()), instance))
             conn.commit()
         return {"ok": True, "page_id": pid}
 
@@ -281,13 +338,8 @@ class Store:
             return {"ok": True, "batch_id": row["batch_id"], "operation_id": operation_id, "idempotent": True, "batch": self._batch_dto(conn, row)}
 
     def submit(self, actor, request, resolved, signed_facts, allow_repeat):
-        from .links import short_url, build_attribution_url
-        from .templates import render_template
         reqhash = digest(request)
-        now_dt, now = self.now_fn(), stamp(self.now_fn())
-        start = now_dt if request["schedule_mode"] == "now" else parse_time(request["scheduled_at_utc"])
-        if request["schedule_mode"] == "scheduled" and start <= now_dt:
-            raise DomainError("invalid_schedule", "预约时间已经过去", 409)
+        plans = plan_pairs(request, self.now_fn())
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             old = conn.execute("SELECT * FROM fb_video_batch WHERE tenant_key=? AND owner_user_id=? AND operation_id=?",
@@ -303,57 +355,69 @@ class Store:
                 raise DomainError("preview_changed", "配置、素材或历史发布记录已变化，请重新预览", 409)
             if repeats and allow_repeat is not True:
                 raise DomainError("repeat_confirmation_required", "请明确确认再次发布已成功的素材", 409)
-            sequences, tasks, days = {}, [], {}
-            for index, pair in enumerate(request["pairs"], 1):
-                pid, mid = pair["page_id"], pair["material_id"]
-                sequences[pid] = sequences.get(pid, 0) + 1
-                when = start + timedelta(minutes=(sequences[pid] - 1) * request["interval_minutes"])
-                day = when.astimezone(BJ).date().isoformat()
-                days[day] = days.get(day, 0) + 1
-                tasks.append((index, pair, sequences[pid], when, day))
-            for day, count in days.items():
-                used = conn.execute("SELECT COUNT(*) FROM fb_video_task WHERE planned_bj_date=? AND status<>'cancelled'", (day,)).fetchone()[0]
-                if used + count > self.daily_limit:
-                    raise DomainError("daily_capacity_exceeded", "手动发布超过预约日期的每日配额", 409)
-            bid = uuid.uuid4().hex
-            conn.execute("INSERT INTO fb_video_batch VALUES(?,?,?,?,?,?,?,?)",
-                         (bid, actor["tenant_key"], actor["user_id"], actor["user_name"], request["operation_id"], reqhash, canonical(request), now))
-            for index, pair, page_seq, when, day in tasks:
-                tid, pid, mid = uuid.uuid4().hex, pair["page_id"], pair["material_id"]
-                material, page, config = resolved["materials"][mid], resolved["pages"][pid], configs[pid]
-                lid = conn.execute("INSERT INTO fb_video_link(task_id,created_at_utc) VALUES(?,?)", (tid, now)).lastrowid
-                short = short_url(lid)
-                context = {"page_id": pid, "page_name": page["page_name"], "material_id": mid,
-                           "material_name": material["material_name"], "content_id": material["content_id"],
-                           "language": material["language"], "drama_name": material["drama_name"],
-                           "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
-                long = build_attribution_url(context, lid, now)
-                caption = render_template(pair["caption_template"], material, short)
-                snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
-                            "template_version": config["version"], "caption_template": pair["caption_template"],
-                            "language": config["language"], "actor": actor, "attribution": context,
-                            "repeat_history": repeats.get(pid + ":" + mid, [])}
-                job = "fb-page-" + hashlib.sha256(("fb-manual:v1|" + actor["tenant_key"] + "|" + tid + "|" + pid + "|" + mid).encode()).hexdigest()[:48]
-                prep_state = "ready" if request["processing_mode"] == "original" else "planned"
-                prep = {"media_url": material["media_url"], "profile": "original"} if prep_state == "ready" else {}
-                conn.execute("""INSERT INTO fb_video_task(task_id,batch_id,tenant_key,owner_user_id,page_id,material_id,
-                    content_id,sequence,page_sequence,planned_at_utc,planned_bj_date,processing_mode,snapshot_json,
-                    ledger_id,short_url,long_url,caption,gpu_job_id,prepare_state,prepared_json,created_at_utc,updated_at_utc)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (tid, bid, actor["tenant_key"], actor["user_id"], pid, mid, material["content_id"], index, page_seq,
-                     stamp(when), day, request["processing_mode"], canonical(snapshot), lid, short, long, caption,
-                     job, prep_state, canonical(prep), now, now))
-                conn.execute("UPDATE fb_video_link SET long_url=?,short_url=? WHERE id=?", (long, short, lid))
+            result = self.freeze(conn, actor, request, resolved, configs, repeats, plans)
             conn.commit()
-            batch = conn.execute("SELECT * FROM fb_video_batch WHERE batch_id=?", (bid,)).fetchone()
-            return {"ok": True, "batch_id": bid, "operation_id": request["operation_id"], "idempotent": False, "batch": self._batch_dto(conn, batch)}
+            return result
+
+    def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None):
+        """Caller owns BEGIN IMMEDIATE and all admission checks; never commits."""
+        from .links import short_url, build_attribution_url
+        from .templates import render_template
+        if not conn.in_transaction:
+            raise RuntimeError("Task freezing requires the caller transaction")
+        now = stamp(self.now_fn())
+        self.check_quota(conn, plans)
+        bid = uuid.uuid4().hex
+        conn.execute("INSERT INTO fb_video_batch VALUES(?,?,?,?,?,?,?,?)",
+                     (bid, actor["tenant_key"], actor["user_id"], actor["user_name"], request["operation_id"], digest(request), canonical(request), now))
+        for index, pair, page_seq, when, day in plans:
+            tid, pid, mid = uuid.uuid4().hex, pair["page_id"], pair["material_id"]
+            material, page, config = resolved["materials"][mid], resolved["pages"][pid], configs[pid]
+            lid = conn.execute("INSERT INTO fb_video_link(task_id,created_at_utc) VALUES(?,?)", (tid, now)).lastrowid
+            short = short_url(lid)
+            context = {"page_id": pid, "page_name": page["page_name"], "material_id": mid,
+                       "material_name": material["material_name"], "content_id": material["content_id"],
+                       "language": material["language"], "drama_name": material["drama_name"],
+                       "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
+            long = build_attribution_url(context, lid, now)
+            caption = render_template(pair["caption_template"], material, short)
+            snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
+                        "template_version": config["version"], "caption_template": pair["caption_template"],
+                        "language": config["language"], "actor": actor, "attribution": context,
+                        "repeat_history": repeats.get(pid + ":" + mid, [])}
+            if pool:
+                snapshot["pool"] = pool
+            job = "fb-page-" + hashlib.sha256(("fb-manual:v1|" + actor["tenant_key"] + "|" + tid + "|" + pid + "|" + mid).encode()).hexdigest()[:48]
+            prep_state = "ready" if request["processing_mode"] == "original" else "planned"
+            prep = {"media_url": material["media_url"], "profile": "original"} if prep_state == "ready" else {}
+            conn.execute("""INSERT INTO fb_video_task(task_id,batch_id,tenant_key,owner_user_id,page_id,material_id,
+                content_id,sequence,page_sequence,planned_at_utc,planned_bj_date,processing_mode,snapshot_json,
+                ledger_id,short_url,long_url,caption,gpu_job_id,prepare_state,prepared_json,created_at_utc,updated_at_utc,
+                source_kind,pool_instance_id,pool_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (tid, bid, actor["tenant_key"], actor["user_id"], pid, mid, material["content_id"], index, page_seq,
+                 stamp(when), day, request["processing_mode"], canonical(snapshot), lid, short, long, caption,
+                 job, prep_state, canonical(prep), now, now, "pool" if pool else "manual",
+                 pool["config_instance_id"] if pool else "", pool["slot_id"] if pool else 0))
+            conn.execute("UPDATE fb_video_link SET long_url=?,short_url=? WHERE id=?", (long, short, lid))
+        batch = conn.execute("SELECT * FROM fb_video_batch WHERE batch_id=?", (bid,)).fetchone()
+        return {"ok": True, "batch_id": bid, "operation_id": request["operation_id"], "idempotent": False, "batch": self._batch_dto(conn, batch)}
+
+    def check_quota(self, conn, plans):
+        days = {}
+        for _, _, _, _, day in plans:
+            days[day] = days.get(day, 0) + 1
+        for day, count in days.items():
+            used = conn.execute("SELECT COUNT(*) FROM fb_video_task WHERE planned_bj_date=? AND status<>'cancelled'", (day,)).fetchone()[0]
+            if used + count > self.daily_limit:
+                raise DomainError("daily_capacity_exceeded", "发布超过预约日期的每日配额", 409)
 
     @staticmethod
     def task_dto(row):
         snap = json.loads(row["snapshot_json"])
         allowed = ("task_id", "batch_id", "page_id", "material_id", "content_id", "page_sequence", "planned_at_utc",
                    "processing_mode", "status", "ledger_id", "short_url", "long_url", "caption", "prepare_state",
-                   "link_state", "graph_post_id", "unknown_outcome", "error_code", "error_message", "created_at_utc", "updated_at_utc")
+                   "link_state", "graph_post_id", "unknown_outcome", "error_code", "error_message", "created_at_utc", "updated_at_utc",
+                   "source_kind", "pool_instance_id", "pool_sequence")
         return {**{k: row[k] for k in allowed}, "page": snap["page"], "material": snap["material"],
                 "page_name": snap["page"]["page_name"], "material_name": snap["material"]["material_name"],
                 "caption_template": snap["caption_template"], "template_version": snap["template_version"],
@@ -462,13 +526,16 @@ class Store:
                     AND x.link_state='ready' AND x.planned_at_utc<=? AND NOT EXISTS(
                       SELECT 1 FROM fb_video_task prev WHERE prev.batch_id=x.batch_id AND prev.page_id=x.page_id
                       AND prev.page_sequence<x.page_sequence AND prev.status NOT IN ('published','failed','cancelled'))
+                    AND NOT EXISTS(SELECT 1 FROM fb_video_task pp WHERE x.source_kind='pool'
+                      AND pp.tenant_key=x.tenant_key AND pp.page_id=x.page_id AND pp.pool_sequence<x.pool_sequence
+                      AND pp.source_kind='pool' AND pp.status NOT IN ('published','failed','cancelled'))
                     ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now,)).fetchall()
                 row = None
                 for candidate in rows:
                     if (automatic_block(conn, candidate["page_id"], execution=True)
                             or manual_block(conn, candidate["page_id"], execution=True, exclude_task=candidate["task_id"])):
                         continue
-                    interval = json.loads(candidate["batch_request_json"])["interval_minutes"]
+                    interval = json.loads(candidate["batch_request_json"]).get("interval_minutes", 0)
                     if interval:
                         # Published rows are immutable: their final updated_at
                         # is the time Graph reconciliation confirmed success.

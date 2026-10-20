@@ -223,6 +223,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/internal/fb-video-publish/"):
             if method != "POST" or not self.internal():
                 raise ServiceError("forbidden", "内部请求未授权", 403)
+            if parsed.path in {"/internal/fb-video-publish/pool-start", "/internal/fb-video-publish/pool-tick"}:
+                if not hasattr(self.runtime, "video_pool_scheduler"):
+                    raise ServiceError("pool_unavailable", "素材池调度尚未配置", 503)
+                payload = self.read_json()
+                if (set(payload) != {"worker_id"} or not isinstance(payload["worker_id"], str)
+                        or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", payload["worker_id"])):
+                    raise ServiceError("invalid_request", "调度实例标识无效", 400)
+                scheduler = self.runtime.video_pool_scheduler
+                result = scheduler.start(payload["worker_id"]) if parsed.path.endswith("/pool-start") else scheduler.tick(payload["worker_id"])
+                self.send_json(200, result)
+                return
             if not hasattr(self.runtime, "manual_worker"):
                 raise ServiceError("manual_unavailable", "手动发布模块尚未配置", 503)
             result = self.runtime.manual_worker.dispatch(parsed.path.rsplit("/", 1)[-1], self.read_json())
@@ -294,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_error(self, exc: Exception) -> None:
         from features.fb_video_publish.core import DomainError
         from features.fb_video_publish.templates import TemplateError
-        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError, DomainError, TemplateError))
+        from features.fb_video_publish.client import GatewayError
+        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError, DomainError, TemplateError, GatewayError))
         code, status, message = (getattr(exc, "code", "fb_auto_internal_error"), getattr(exc, "status", 500), str(exc)) if known else ("fb_auto_internal_error", 500, "FB自动发布服务内部错误")
         payload: Dict[str, Any] = {"ok": False, "code": code, "error": code, "message": message}
         conflicts = getattr(exc, "conflicts", [])
@@ -356,13 +368,22 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     from features.fb_video_publish.sources import SourceRepository, BrokerReadOnlyMySQL
     from features.fb_video_publish.service import Service as ManualService
     from features.fb_video_publish.worker import Worker as ManualWorker
+    from features.fb_video_publish.identity_client import IdentityClient
+    from features.fb_video_publish.pool_scheduler import PoolScheduler
     manual_store = ManualStore(operational_path, daily_limit=int(env.get("FB_VIDEO_DAILY_LIMIT", "1000")))
     manual_mysql = BrokerReadOnlyMySQL(env)
     manual_pages = PagePoolRepository(manual_mysql)
     manual_sources = SourceRepository(manual_pages, MaterialRepository(manual_mysql))
     manual_live = live and str(env.get("FB_VIDEO_PUBLISH_ENABLED", "0")) == "1"
     manual_root = str(env.get("FB_VIDEO_SHORT_LINK_ROOT", "/mnt/data-disk/fb-auto-post-public/s2l/facebook"))
-    runtime.manual = ManualService(manual_store, manual_sources, token, live_enabled=manual_live, prepare_enabled=prebuild_enabled)
+    pool_enabled = str(env.get("FB_VIDEO_POOL_ENABLED", "0")) == "1"
+    runtime.manual = ManualService(manual_store, manual_sources, token, live_enabled=manual_live,
+        prepare_enabled=prebuild_enabled, v2_enabled=str(env.get("FB_VIDEO_V2_ENABLED", "0")) == "1",
+        pool_enabled=pool_enabled)
+    identity_resolver = IdentityClient(env).resolve
+    runtime.manual.pool.identity_resolver = identity_resolver
+    runtime.video_pool_scheduler = PoolScheduler(runtime.manual, identity_resolver,
+        live_enabled=manual_live and pool_enabled)
     runtime.manual_worker = ManualWorker(manual_store, manual_pages, gpu, graph, sources=manual_sources,
         live_enabled=manual_live, prepare_enabled=prebuild_enabled, short_link_root=manual_root,
         short_link_owner=str(env.get("FB_VIDEO_SHORT_LINK_OWNER", "fb-auto-post")), rate_limit=executor._rate_limit)

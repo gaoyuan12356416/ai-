@@ -1,0 +1,21 @@
+[Unit]
+Description=Facebook Page material pool due-slot scheduler
+After=network-online.target fb-auto-post-service.service
+Requires=fb-auto-post-service.service
+
+[Service]
+Type=simple
+User=fb-auto-post
+Group=fb-auto-post
+WorkingDirectory=/opt/fb-auto-post/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 scripts/fb_video_pool_scheduler.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

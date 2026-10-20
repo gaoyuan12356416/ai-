@@ -8,7 +8,7 @@ import json
 import re
 from datetime import timedelta
 
-from .core import DomainError, actor_checked, canonical, digest, id_text, normalize_batch, parse_time, stamp
+from .core import DomainError, actor_checked, canonical, digest, id_text, normalize_batch, plan_pairs, stamp
 from .templates import render_preview
 
 PREFIX = "/api/fb-video-publish"
@@ -20,12 +20,16 @@ LANGUAGES = {"en": "英语", "es": "西班牙语", "zh": "中文", "zh-tw": "繁
 
 
 class Service:
-    def __init__(self, store, sources, signing_key, *, live_enabled=False, prepare_enabled=True):
+    def __init__(self, store, sources, signing_key, *, live_enabled=False, prepare_enabled=True,
+                 v2_enabled=True, pool_enabled=True):
         if len(str(signing_key)) < 32:
             raise ValueError("manual preflight signing key is required")
         self.store, self.sources = store, sources
         self.signing_key, self.live_enabled = str(signing_key).encode(), live_enabled
         self.prepare_enabled = bool(prepare_enabled)
+        self.v2_enabled, self.pool_enabled = bool(v2_enabled), bool(pool_enabled)
+        from .pool import PoolService
+        self.pool = PoolService(self)
 
     @staticmethod
     def _keys(payload, required):
@@ -70,19 +74,19 @@ class Service:
 
     def preflight(self, actor, raw):
         request = normalize_batch(raw)
+        if request.get("schema_version") == 2 and not self.v2_enabled:
+            raise DomainError("v2_gate_closed", "逐素材预约功能暂时关闭", 409)
         resolved = self.resolve(actor, request)
         now = self.store.now_fn()
-        start = now if request["schedule_mode"] == "now" else parse_time(request["scheduled_at_utc"])
-        if request["schedule_mode"] == "scheduled" and start <= now:
-            raise DomainError("invalid_schedule", "预约时间必须晚于当前时间")
+        plans = plan_pairs(request, now)
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             configs, repeats = self.store.check_plan(conn, actor, request, resolved)
+            self.store.check_quota(conn, plans)
             facts = {"actor": actor, "request": request, "resolved": resolved, "configs": configs, "repeats": repeats}
-        counts, items = {}, []
-        for p in request["pairs"]:
+        items = []
+        for _, p, _, when, _ in plans:
             pid, mid = p["page_id"], p["material_id"]
-            counts[pid] = counts.get(pid, 0) + 1
             material, page = resolved["materials"][mid], resolved["pages"][pid]
             items.append({"material_id": mid, "page_id": pid, "material_name": material["material_name"],
                           "page_name": page["page_name"], "config_version": p["config_version"],
@@ -96,7 +100,9 @@ class Service:
                               "af_ad": material["material_name"] + "_contentid[" + str(material["content_id"]) + "]",
                               "af_ad_id": mid, "af_channel": actor["sub_user_id"],
                               "af_c_id": "[提交任务ID]", "af_dp": str(material["content_id"])},
-                          "planned_at_utc": stamp(start + timedelta(minutes=(counts[pid] - 1) * request["interval_minutes"])),
+                          "planned_at_utc": stamp(when),
+                          "schedule_kind": ("scheduled" if request["material_schedules"][mid] else "immediate")
+                              if request.get("schema_version") == 2 else ("scheduled" if request["schedule_mode"] == "scheduled" else "immediate"),
                           "repeat_required": pid + ":" + mid in repeats})
         return {"ok": True, "preview_token": self._token(facts), "expires_at_utc": stamp(now + timedelta(minutes=15)),
                 "preview_hash": digest(facts), "items": items, "repeat_required": bool(repeats),
@@ -129,6 +135,9 @@ class Service:
         route = path.removeprefix(PREFIX)
         if not path.startswith(PREFIX + "/"):
             raise DomainError("not_found", "接口不存在", 404)
+        pool_route = re.fullmatch(r"/pages/([1-9][0-9]{0,30})/pool(.*)", route)
+        if pool_route:
+            return self.pool.handle(method, pool_route[1], pool_route[2], actor, payload, query)
         if method == "GET":
             if route == "/languages":
                 return {"ok": True, "items": [{"value": v, "label": label} for v, label in LANGUAGES.items()]}
@@ -196,6 +205,8 @@ class Service:
                 existing = self.store.existing(actor, request["operation_id"], digest(request))
                 if existing:
                     return existing
+                if request.get("schema_version") == 2 and not self.v2_enabled:
+                    raise DomainError("v2_gate_closed", "逐素材预约功能暂时关闭", 409)
                 if not self.live_enabled:
                     raise DomainError("manual_live_gate_closed", "手动发布开关关闭，未创建任务", 409)
                 facts = self._verify(payload.get("preview_token"))
