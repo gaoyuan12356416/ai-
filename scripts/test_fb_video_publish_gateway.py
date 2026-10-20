@@ -142,7 +142,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_admin_page_reads_do_not_require_unused_attribution(self):
         session = {"tenant_key": "t", "user_id": "u", "role": "admin", "allowed": True}
-        for path in ("/pages", "/pages/available"):
+        for path in ("/pages", "/pages/available", "/pages/12345/pool"):
             handler = Handler(method="GET")
             with patch.object(gateway, "attribution_identity", side_effect=AssertionError("unused mapping")), \
                  patch("features.fb_video_publish.identity_broker.enrich_creator_names",
@@ -158,9 +158,12 @@ class GatewayTests(unittest.TestCase):
     def test_owner_reads_and_admin_writes_still_require_current_mapping(self):
         for role, method, path in (
             ("user", "GET", "/pages"), ("user", "GET", "/pages/available"),
-            ("admin", "GET", "/pages/12345/pool"),
+            ("user", "GET", "/pages/12345/pool"),
+            ("admin", "GET", "/pages/12345/pool/operations/" + "a" * 32),
             ("admin", "POST", "/pages"), ("admin", "POST", "/preflight"),
             ("admin", "POST", "/batches"),
+            ("admin", "POST", "/pages/12345/pool/settings"),
+            ("admin", "POST", "/pages/12345/pool/items/preview"),
         ):
             session = {"tenant_key": "t", "user_id": "u", "role": role, "allowed": True}
             handler = Handler(method=method)
@@ -170,6 +173,18 @@ class GatewayTests(unittest.TestCase):
             mapping.assert_called_once()
             remote.assert_not_called()
             self.assertEqual(handler.responses[0][0], 409)
+
+    def test_admin_pool_reads_still_enforce_module_and_navigation(self):
+        path = gateway.urlsplit("/api/fb-video-publish/pages/12345/pool")
+        for permitted, navigation in ((False, True), (True, False)):
+            handler = Handler(method="GET")
+            app = self.globals({"tenant_key": "t", "user_id": "u", "role": "admin", "allowed": permitted})
+            app["navigation_item_access"] = lambda *args: {"allowed": navigation}
+            with patch.object(gateway, "request") as remote, patch.object(gateway, "attribution_identity") as mapping:
+                gateway.dispatch(handler, path, app)
+            self.assertEqual(handler.responses[0][0], 403)
+            remote.assert_not_called()
+            mapping.assert_not_called()
 
     def test_navigation_preserves_disables_and_old_child_permission(self):
         original = [{"key": "facebook_platform", "module": "fb_page_posts", "enabled": False, "items": [

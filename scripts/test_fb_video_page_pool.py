@@ -193,6 +193,23 @@ class PoolTests(Fixture):
         self.assertEqual(1, result["pool"]["version"])
         self.assertEqual("paused", result["pool"]["status"])
 
+    def test_admin_pool_read_without_mapping_keeps_live_scope_and_tenant_checks(self):
+        admin = {**self.actor, "is_admin": True, "business_owner_id": "", "sub_user_id": ""}
+        with patch.object(self.sources, "list_pages", wraps=self.sources.list_pages) as pages, \
+             patch.object(self.sources, "get_materials", side_effect=AssertionError("not needed for pool read")):
+            result = self.call(method="GET", actor=admin)
+            self.assertEqual(0, result["pool"]["version"])
+            pages.assert_called_once_with(admin, page_ids=["11"])
+        with self.assertRaises(DomainError) as other:
+            self.call(method="GET", actor={**admin, "tenant_key": "another-tenant"})
+        self.assertEqual("page_not_found", other.exception.code)
+        self.sources.pages.pop("11")
+        with self.assertRaises(DomainError) as revoked:
+            self.call(method="GET", actor=admin)
+        self.assertEqual("page_not_found", revoked.exception.code)
+        with self.store.connect() as conn:
+            self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM fb_video_pool").fetchone()[0])
+
     def test_settings_times_strict_and_enable_requires_times(self):
         self.add()
         with self.assertRaises(DomainError): self.call("/enable", self.base())

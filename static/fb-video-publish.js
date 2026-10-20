@@ -103,7 +103,9 @@
   const poolStorageKey=p=>`fb-pool-pending:${auth.user?.tenant_key || ""}:${auth.user?.user_id || ""}:${p.page_id}:${p.config_instance_id}`;
   function poolPending(p){try{return JSON.parse(sessionStorage.getItem(poolStorageKey(p)) || "null");}catch(_){return null;}}
   async function openPool(page, onClose) {
+    if($("pagePool")){$("pagePool").focus();return;}
     let pool=null,items=[],counts={},tab="pending",cursor="",next="",stack=[],generation=0,writing=false;
+    let reading=false,readFailed=false,readPromise=null;
     let selected=new Set(),staged=new Map(),times=[],settingsDirty=false,pending=poolPending(page);
     const endpoint="/pages/"+encodeURIComponent(page.page_id)+"/pool";
     const stateLabels={pending:"待发布",processing:"处理中",published:"已发布",failed:"异常 / 历史",slots:"时点记录"};
@@ -113,14 +115,16 @@
       `<button class="button" data-close>关闭</button>`);
     modal.addEventListener("close",()=>onClose?.());modal.addEventListener("cancel",e=>{if(writing)e.preventDefault();});
     function remember(){try{pending?sessionStorage.setItem(poolStorageKey(page),JSON.stringify(pending)):sessionStorage.removeItem(poolStorageKey(page));}catch(_){}}
-    function identity(){if(!pool)throw new Error("请等待素材池加载。");return {config_instance_id:page.config_instance_id,expected_version:pool.version};}
+    function identity(){if(!pool||reading||readFailed)throw new Error("请先成功读取素材池最新版本。");return {config_instance_id:page.config_instance_id,expected_version:pool.version};}
     function markSettings(){settingsDirty=true;$("poolSettingsStatus").textContent="设置尚未保存";lock();}
     function paintTimes(){$("poolDailyCount").textContent=`每天发布 ${times.length} 次（每个时点一条）` ;$("poolTimes").innerHTML=times.map(t=>`<span class="time-chip">${esc(t)}<button type="button" data-remove-time="${esc(t)}" aria-label="移除时点 ${esc(t)}">×</button></span>`).join("") || '<span class="helper">尚未设置时点</span>';}
     function lock(){
       if(!modal.isConnected)return;
       modal.querySelectorAll("[data-close]").forEach(el=>el.disabled=writing);
-      $("poolControls").disabled=writing||!!pending||!pool||pool.status==="archived";
-      $("poolRefresh").disabled=writing;$("poolQueryOperation").disabled=writing;$("poolRetryOperation").disabled=writing;
+      $("poolControls").disabled=writing||reading||readFailed||!!pending||!pool||pool.status==="archived";
+      $("poolControls").setAttribute("aria-busy",String(reading));
+      $("poolRefresh").disabled=writing||reading;$("poolRefresh").textContent=reading?"正在读取最新版本…":readFailed?"重试读取，保留输入":"刷新版本并保留输入";
+      $("poolQueryOperation").disabled=writing||reading;$("poolRetryOperation").disabled=writing||reading;
       $("poolPendingPanel").hidden=!pending;$("poolPrev").disabled=!stack.length;$("poolNext").disabled=!next;
       $("poolEnable").disabled=!pool||pool.status==="enabled"||settingsDirty||!times.length;
       $("poolPause").disabled=!pool||pool.status!=="enabled";
@@ -139,19 +143,32 @@
         items.map(item=>`<article class="pool-item"><div class="row spread"><label class="check"><input type="checkbox" data-pool-item="${esc(item.id)}"${selected.has(String(item.id))?" checked":""}${(item.can_modify ?? (item.status==="pending"&&!item.task_id))?"":" disabled"}><strong>${esc(item.material_name || item.material_id)}</strong></label><span class="badge ${item.language_mismatch?"bad":""}">${esc(itemLabels[item.status] || item.status)}</span></div><p class="helper">${esc(item.material_id)} · ${esc(lang(item.language))} · ${esc(item.drama_name || "")}</p>${item.language_mismatch?'<p class="notice warning">剧语言与 Page 不匹配，请移除后重新选择。</p>':""}${item.error_message?`<p class="error">${esc(item.error_message)}</p>`:""}<div class="row spread"><span class="helper">入池 ${esc(atBJ(item.created_at_utc))}</span><div class="actions">${(item.can_modify ?? (item.status==="pending"&&!item.task_id))?`<button class="button small" data-pool-move="${esc(item.id)}" data-direction="top">置顶</button><button class="button small" data-pool-move="${esc(item.id)}" data-direction="up" aria-label="上移 ${esc(item.material_name)}">↑</button><button class="button small" data-pool-move="${esc(item.id)}" data-direction="down" aria-label="下移 ${esc(item.material_name)}">↓</button>`:""}${item.can_view_task&&item.batch_id?`<a class="button small" href="/fb-video-publish-records.html?batch=${encodeURIComponent(item.batch_id)}">查看任务 / 取消</a>`:item.task_id||item.status!=="pending"?'<span class="helper">任务详情遵循原发布记录权限</span>':""}</div></div></article>`).join("") || '<div class="empty">暂无素材</div>';
       lock();
     }
-    async function load(){
+    function load(){
+      if(readPromise)return readPromise;
       const gen=++generation;
-      try{
-        const data=await api(endpoint+"?"+new URLSearchParams({state:tab,cursor,limit:"50"}));
-        if(!modal.isConnected||gen!==generation)return;
-        if(data.pool.config_instance_id!==page.config_instance_id)throw new Error("Page 配置实例已改变，请关闭素材池并刷新 Page 列表。");
-        pool=data.pool;items=data.items || [];counts=data.counts || {};next=data.next_cursor || "";
-        if(!settingsDirty){times=[...(pool.times || [])];$("poolProcessing").value=pool.processing_mode || "original";paintTimes();$("poolSettingsStatus").textContent="已保存设置";}
-        paint();
-      }catch(err){if(modal.isConnected&&gen===generation)errorAt("poolError",err);}
+      reading=true;lock();errorAt("poolError","");
+      if(!pool){$("poolStatus").textContent="正在读取素材池设置和队列…";$("poolList").innerHTML='<div class="empty">正在加载素材池…</div>';}
+      readPromise=(async()=>{
+        try{
+          const data=await api(endpoint+"?"+new URLSearchParams({state:tab,cursor,limit:"50"}));
+          if(!modal.isConnected||gen!==generation)return;
+          if(data.pool.config_instance_id!==page.config_instance_id)throw new Error("Page 配置实例已改变，请关闭素材池并刷新 Page 列表。");
+          pool=data.pool;items=data.items || [];counts=data.counts || {};next=data.next_cursor || "";readFailed=false;
+          if(!settingsDirty){times=[...(pool.times || [])];$("poolProcessing").value=pool.processing_mode || "original";paintTimes();$("poolSettingsStatus").textContent="已保存设置";}
+          paint();
+        }catch(err){
+          if(modal.isConnected&&gen===generation){
+            readFailed=true;errorAt("poolError",err);
+            if(!pool){$("poolStatus").textContent="素材池暂时无法加载";$("poolList").innerHTML='<div class="empty">读取失败，请点击“重试读取，保留输入”。</div>';}
+          }
+        }finally{
+          readPromise=null;reading=false;if(modal.isConnected&&gen===generation)lock();
+        }
+      })();
+      return readPromise;
     }
     async function change(action,extra={}){
-      if(writing||pending)return;
+      if(writing||reading||readFailed||pending)return;
       writing=true;lock();errorAt("poolError","");
       try{const result=await post(endpoint+"/"+action,{...identity(),...extra});pool=result.pool;if(action==="settings")settingsDirty=false;if(action==="remove")selected.clear();cursor="";stack=[];await load();toast("素材池已更新");}
       catch(err){errorAt("poolError",new Error(err.message+(err.status===409?"；输入已保留，请刷新版本后重新核对。":"")));}
@@ -176,7 +193,7 @@
       }finally{writing=false;lock();}
     }
     async function reviewAdmission(){
-      if(writing||pending)return;
+      if(writing||reading||readFailed||pending)return;
       if(!staged.size){errorAt("poolError",new Error("请先选择入池素材。"));return;}
       writing=true;lock();errorAt("poolError","");
       try{
@@ -199,21 +216,21 @@
       $("poolConfirmEnable").onclick=()=>{d.close();change("enable");};
     };
     $("poolPause").onclick=()=>change("pause");
-    $("poolRefresh").onclick=()=>{errorAt("poolError","");cursor="";stack=[];load();};
-    $("poolTabs").onclick=e=>{const b=e.target.closest("[data-pool-tab]");if(b){tab=b.dataset.poolTab;cursor="";stack=[];selected.clear();load();}};
-    $("poolPrev").onclick=()=>{cursor=stack.pop() || "";load();};$("poolNext").onclick=()=>{stack.push(cursor);cursor=next;load();};
+    $("poolRefresh").onclick=()=>{if(writing||reading)return;cursor="";stack=[];load();};
+    $("poolTabs").onclick=e=>{const b=e.target.closest("[data-pool-tab]");if(b&&!writing&&!reading&&!readFailed&&b.dataset.poolTab!==tab){tab=b.dataset.poolTab;cursor="";stack=[];selected.clear();load();}};
+    $("poolPrev").onclick=()=>{if(writing||reading||readFailed||!stack.length)return;cursor=stack.pop() || "";load();};$("poolNext").onclick=()=>{if(writing||reading||readFailed||!next)return;stack.push(cursor);cursor=next;load();};
     $("poolPickMaterials").onclick=pickMaterials;
     $("poolList").onchange=e=>{const id=e.target.dataset.poolItem;if(id){e.target.checked?selected.add(id):selected.delete(id);$("poolSelectionCount").textContent=`已选 ${selected.size} 条待发布素材`;lock();}};
     $("poolList").onclick=e=>{const b=e.target.closest("[data-pool-move]");if(b)change("move",{item_id:b.dataset.poolMove,direction:b.dataset.direction});};
     $("poolRemoveSelected").onclick=()=>{if(selected.size&&confirm(`移除选中的 ${selected.size} 条待发布素材？已生成任务不会被取消。`))change("remove",{item_ids:[...selected]});};
-    $("poolQueryOperation").onclick=async()=>{if(writing)return;writing=true;lock();try{await queryAdmission();}finally{writing=false;lock();}};
+    $("poolQueryOperation").onclick=async()=>{if(writing||reading)return;writing=true;lock();try{await queryAdmission();}finally{writing=false;lock();}};
     $("poolRetryOperation").onclick=async()=>{
-      if(writing||!pending)return;writing=true;lock();const old=pending;
+      if(writing||reading||!pending)return;writing=true;lock();const old=pending;
       try{await api(endpoint+"/operations/"+encodeURIComponent(old.request.operation_id));await admitted();}
       catch(err){if(err.status===404){writing=false;await enqueue(old.request,true);}else errorAt("poolError",err);}
       finally{writing=false;lock();}
     };
-    lock();await load();if(pending){writing=true;lock();try{await queryAdmission();}finally{writing=false;lock();}}
+    lock();await load();if(!modal.isConnected)return;if(pending){writing=true;lock();try{await queryAdmission();}finally{writing=false;lock();}}
   }
 
   async function pageManagement() {

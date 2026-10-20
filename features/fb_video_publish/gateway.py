@@ -130,9 +130,12 @@ def dispatch(handler, parsed, app):
             actor = resolve_identity(app, actor["tenant_key"], actor["user_id"])
         elif needs_mapping and not (
             actor["is_admin"] and handler.command == "GET"
-            and parsed.path in {"/api/fb-video-publish/pages", "/api/fb-video-publish/pages/available"}
+            and (
+                parsed.path in {"/api/fb-video-publish/pages", "/api/fb-video-publish/pages/available"}
+                or re.fullmatch(r"/api/fb-video-publish/pages/[1-9][0-9]{0,30}/pool", parsed.path)
+            )
         ):
-            # Admin Page reads have no owner filter or attribution fields.
+            # Admin Page/listed-pool reads have no owner filter or attribution fields.
             # All writes and ordinary-user reads still resolve the current mapping.
             actor["business_owner_id"] = actor["sub_user_id"] = attribution_identity(app, actor)
         result = request(handler.command, parsed.path, actor=actor, payload=payload, query=query_params(parsed.query))
