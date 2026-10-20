@@ -212,14 +212,24 @@ class SourceTests(unittest.TestCase):
         with self.assertRaises(SourceError):
             repo.get_pages(self.actor, ["999999"])
 
-    def test_legacy_overlap_explicit_and_no_token_fields(self):
+    def test_legacy_overlap_does_not_block_manual_page_and_no_token_fields(self):
         repo, _, pages = source()
         pages.legacy = [{"overlap_page_id": "123456"}]
         item = repo.list_pages(self.actor, "EN")[0]
-        self.assertTrue(item["legacy_conflict"])
+        self.assertFalse(item["legacy_conflict"])
+        self.assertEqual(item["blocked_reason"], "")
         self.assertFalse(set(item) & {"token", "page_access_token", "access_token", "credentials"})
-        with self.assertRaises(SourceError):
-            repo.get_pages(self.actor, ["123456"])
+        self.assertEqual(repo.get_pages(self.actor, ["123456"])["123456"], item)
+        self.assertFalse(any(call[0] == "legacy" for call in pages.calls))
+
+    def test_manual_page_access_does_not_depend_on_legacy_queue_availability(self):
+        repo, _, pages = source()
+        pages.legacy_conflicts = Mock(side_effect=RuntimeError("legacy queue unavailable"))
+        self.assertEqual(repo.get_pages(self.actor, ["123456"])["123456"]["blocked_reason"], "")
+        with self.assertRaises(SourceError) as denied:
+            repo.get_pages(self.actor, ["123457"])
+        self.assertEqual(denied.exception.code, "page_unavailable")
+        pages.legacy_conflicts.assert_not_called()
 
     def test_batch_fresh_checks_have_no_n_plus_one(self):
         rows = [raw(str(mid)) for mid in range(100, 0, -1)]

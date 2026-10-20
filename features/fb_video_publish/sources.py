@@ -88,7 +88,6 @@ class SourceRepository:
             return []
         # Restrict group IDs before Page lookup; the repository repeats the owner guard.
         rows = self.pages.list_pages(group_ids, is_admin=admin, owner_user_id=owner)
-        legacy = {str(item["overlap_page_id"]) for item in self.pages.legacy_conflicts(group_ids)}
         seen, result = set(), []
         search = str(q or "").strip().casefold()
         if len(search) > 200:
@@ -101,14 +100,14 @@ class SourceRepository:
             name = str(page.page_name or pid)
             if search and search not in (pid + " " + name).casefold():
                 continue
-            conflict = pid in legacy
             authorized = int(page.eligible_token_count) > 0
-            reason = "旧版发布队列仍在使用此Page" if conflict else "" if authorized else "Page授权已失效或缺少有效授权"
+            reason = "" if authorized else "Page授权已失效或缺少有效授权"
             result.append({
                 "page_id": pid, "page_name": name, "language": page_language(page.language),
                 "eligible_token_count": int(page.eligible_token_count),
                 "group_ids": list(page.group_ids), "blocked_reason": reason,
-                "legacy_conflict": conflict,
+                # External legacy schedules do not restrict manual publishing.
+                "legacy_conflict": False,
             })
         return result
 

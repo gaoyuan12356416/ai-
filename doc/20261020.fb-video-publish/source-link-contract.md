@@ -10,8 +10,8 @@
 
 broker使用受限仓库SQL词法，不接受通用SQL：逐字符识别、每层FROM范围、精确schema.table及函数白名单。除8秒执行hint外不允许注释；逗号表列表、TABLE/CTE子查询、未知/带引号/带schema函数均拒绝。全部15种实际Page与素材查询模板经独立集成测试验证兼容。
 
-- `list_pages(actor, q='') -> list[PageDTO]`：actor包含 `is_admin: bool, business_owner_id`。普通用户按Page池负责人过滤，管理员按现有管理员范围读取；只接受app_id=1479、产品Dramawave的有效Page池。按真实PageID去重；返回名称、语言、group_ids、eligible_token_count、legacy_conflict及blocked_reason，绝不返回token。旧版启用队列与真实Page重叠时标记禁用，失效授权Page保留展示。
-- `get_pages(actor, page_ids) -> dict[PageID, PageDTO]`：每次重新读取；1–200个不重复ID；不可见Page返回404；异常授权或旧版队列占用返回409。配置可共享，但每次使用仍按调用者当前可访问范围过滤。新旧FB自动任务的活动/unknown锁由核心事务处理。
+- `list_pages(actor, q='') -> list[PageDTO]`：actor包含 `is_admin: bool, business_owner_id`。普通用户按Page池负责人过滤，管理员按现有管理员范围读取；只接受app_id=1479、产品Dramawave的有效Page池。按真实PageID去重；返回名称、语言、group_ids、eligible_token_count、legacy_conflict及blocked_reason，绝不返回token。按2026-10-20用户修订，不查询或限制外部旧Java/MySQL发布队列，兼容字段legacy_conflict固定false；失效授权Page保留展示并禁用。
+- `get_pages(actor, page_ids) -> dict[PageID, PageDTO]`：每次重新读取；1–200个不重复ID；不可见Page返回404；异常授权返回409。配置可共享，但每次使用仍按调用者当前可访问范围过滤。新旧FB自动任务在同SQLite中的活动/unknown锁由核心事务处理。
 - `search_materials(query) -> {items,next_cursor,has_more,limit}`：query包含search、language、uploader_id、cursor、limit；默认50、最大100，语言/搜索/上传人均在SQL LIMIT前过滤。搜索匹配源素材ID、素材名，或同content_id/规范语言/app1479已上架的剧名。数值ID倒序，cursor冻结首次上边界、末次扫描ID和筛选摘要；改变筛选必须重开第一页。不返回昂贵全量计数。
 - `get_materials(material_ids, need_desc=False) -> dict[MaterialID, MaterialDTO]`：1–200个不同源素材ID，最多每100个一批；每批一次素材查询、一次剧名查询、一次简介查询。无逐素材网络探测，无逐Page重复SQL。缺失、重复、越权来源、歧义元数据统一失败，不返回可被误当作完整成功的子集。
 
