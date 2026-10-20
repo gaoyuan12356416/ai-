@@ -269,10 +269,14 @@ class Ledger:
     def begin_attempt(self, key):
         with self.db:
             changed = self.db.execute("UPDATE uploads SET state='unknown',attempts=attempts+1,updated_at=? "
-                                     "WHERE key=? AND state='prepared' AND attempts=0", (utcnow(), key)).rowcount
+                                     "WHERE key=? AND state='prepared'", (utcnow(), key)).rowcount
             if changed != 1:
                 raise ValueError("outbound_already_attempted")
-            self.event(key, "outbound_started", {"api_version": "material-source-v1"})
+            row = self.get(key)
+            self.event(key, "outbound_started", {
+                "api_version": "material-source-v1",
+                "request_sha256": hashlib.sha256(row["request_json"].encode()).hexdigest(),
+                "attempt": row["attempts"]})
 
     def summary(self):
         return {r[0]: r[1] for r in self.db.execute("SELECT state,count(*) FROM uploads GROUP BY state")}
@@ -321,6 +325,10 @@ class Client:
                        "素材category参数无效", "素材标签必须为字符串", "content_id")
         receipt["validation_fields"] = [item for item in safe_errors if item in message]
         # Fixed categories only: never persist arbitrary remote text or headers.
+        # Product restriction was confirmed by the operator on 2026-10-20.
+        if numeric_code == 403:
+            receipt["reason"] = "business_product_restricted"
+            return "rejected", receipt
         if numeric_code == -1:
             if any(word in message for word in ("已经存在", "已存在", "duplicate")):
                 receipt["reason"] = "duplicate_requires_readback"
@@ -374,7 +382,7 @@ def submit(source, ledger, catalog, client, verify_image=inspect_image):
         if row["state"] == "confirmed":
             return row
         row = reconcile(ledger, catalog, row)  # Failed readback must prevent any new write.
-        if row["state"] in ("confirmed", "blocked", "rejected") or row["attempts"]:
+        if row["state"] != "prepared":
             return row
         request = json.loads(row["request_json"])
         verify_image(request["url"], source["sha256"], request["category"])
