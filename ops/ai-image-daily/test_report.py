@@ -271,6 +271,18 @@ class UploadLineageTests(unittest.TestCase):
         final.update(country='', language='fr')
         self.assertFalse(self.merge([row], [final])[0])
 
+    def test_each_upload_keeps_its_own_requested_country(self):
+        first, first_final = upload_fixture()
+        second, second_final = upload_fixture('3', source_kind='youtube')
+        second['request']['country'] = 'RU'
+        second_final['country'] = 'ru'
+        mapped, unresolved = self.merge([first, second], [first_final, second_final])
+        self.assertFalse(unresolved)
+        self.assertEqual(mapped['2']['requested_country'], 'US')
+        self.assertEqual(mapped['3']['requested_country'], 'RU')
+        self.assertEqual(mapped['2']['country'], 'US')
+        self.assertEqual(mapped['3']['country'], 'ru')
+
     def test_incomplete_request_metadata_cannot_match_missing_formal_fields(self):
         for field in ('name', 'user_id', 'initiator', 'country', 'language'):
             row, final = upload_fixture()

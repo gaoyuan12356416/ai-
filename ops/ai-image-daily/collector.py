@@ -278,7 +278,7 @@ def merge_upload_lineage(mapped, unresolved, rows, finals, app_names):
                                # The API derives country from the drama catalog;
                                # its actual value (including blank/null) stays in final.
                                country_policy='drama_catalog_override',
-                               requested_country=request['country'])
+                               requested_country=row['request']['country'])
         resolved_sources.add(source['source_key'])
     unresolved = [item for item in unresolved if not (
         item.get('identity') in resolved_sources
