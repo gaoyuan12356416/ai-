@@ -35,7 +35,8 @@ TESTS = ["test_x_auto_post_validation.py", "test_x_auto_post_publisher.py",
          "test_x_auto_post_selector.py", "test_x_auto_post_metrics.py",
          "test_x_auto_post_service.py", "test_x_auto_publish_ui.py",
          "test_x_auto_post_static_deploy.py", "test_x_post_auto_template_bridge.py",
-         "test_x_random_template.py", "test_x_auto_duration_ui.js"]
+         "test_x_random_template.py", "test_x_auto_duration_ui.js",
+         "test_x_posts.py", "test_x_post_priority_manual_store.py", "test_x_post_media_repair.py"]
 
 
 def run(*args, **kwargs):
