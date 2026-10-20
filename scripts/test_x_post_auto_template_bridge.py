@@ -152,7 +152,7 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
     def test_auto_plan_caps_duration_and_global_queue_labels_and_deduplicates(self):
         auto = self.create_auto()
         too_long = material_candidate(auto, 2, "701")
-        too_long["preflight_duration"] = 600.01
+        too_long["preflight_duration"] = 14400.01
         with self.assertRaises(service.XPostError) as duration:
             self.store.create_manual_plan(
                 auto["id"],
@@ -169,7 +169,7 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
         )
 
         candidate = material_candidate(auto, 2, "701")
-        candidate["preflight_duration"] = 600.0
+        candidate["preflight_duration"] = 14400.0
         plan = self.store.create_manual_plan(
             auto["id"],
             [candidate],
@@ -514,7 +514,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
             "501",
             "2026-08-10",
             allow_long_duration=False,
-            max_duration_seconds=600,
+            max_duration_seconds=14400,
         )
 
     def test_auto_create_accepts_only_fixed_service_actor_and_records_internal_actor(self):
@@ -566,7 +566,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
                     dict(payload, actor=ACTOR)
                 )
 
-    def test_auto_plan_retains_premium_gate_and_never_exceeds_600(self):
+    def test_auto_plan_retains_premium_gate_and_upload_boundary(self):
         class FakeStore:
             def __init__(self):
                 self.candidates = None
@@ -625,7 +625,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
                             {
                                 "material_id": "501",
                                 "material_language": "en",
-                                "preflight_duration": 600.0,
+                                "preflight_duration": 14400.0,
                             }
                         ],
                     }
@@ -652,7 +652,7 @@ class XPostAutoTemplateBoundaryTests(unittest.TestCase):
                     {
                         "run_id": 1,
                         "candidates": [
-                            {"material_id": "501", "preflight_duration": 600.01}
+                            {"material_id": "501", "preflight_duration": 14400.01}
                         ],
                     }
                 )

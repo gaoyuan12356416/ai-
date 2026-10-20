@@ -205,14 +205,16 @@ class RandomTemplateTests(unittest.TestCase):
         self.assertEqual(PreparationStore(self.db).get(queue["id"])["status"],"failed")
         self.assertEqual(self.store.reserve_log(queue["id"])["attempt_count"],0)
 
-    def test_auto_600_second_limit_and_relay_source_identity(self):
-        queue=self.manual_queue(duration=601)
+    def test_auto_long_video_uses_account_limit_and_keeps_relay_source_identity(self):
+        queue=self.manual_queue(duration=1800)
         premium={"id":2,"subscription_type":"premium","long_video_publish_eligible":True,"protected":False}
-        with self.assertRaises(service.XPostError) as error:
-            with self.prepare(queue,account=premium,auto_template=True):pass
-        self.assertEqual(error.exception.code,"x_auto_duration_out_of_range")
-        with self.prepare(queue,account=premium) as prepared:
+        client=self.client()
+        with self.prepare(queue,client,account=premium,auto_template=True) as prepared:
             self.assertIsInstance(prepared,rt.PreparedRandomTemplateMedia)
+        self.assertEqual(client.prepare.call_args.args[0]["max_duration_seconds"],14400)
+        with self.prepare(queue,client,account=premium,auto_template=True):
+            pass
+        self.assertEqual(client.prepare.call_count,1)
         relay={**queue,"delivery_mode":service.PREMIUM_RELAY_REPOST_MODE,"relay_account_id":12}
         client=self.client()
         with self.assertRaises(service.XPostError):

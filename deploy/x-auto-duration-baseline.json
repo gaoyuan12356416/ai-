@@ -1,0 +1,12 @@
+{
+  "features/x_auto_posts/validation.py": "4bcaead74c4a5e4daaf7512fa9391c9f2f1bd17989b9d0f233442df12228ac2d",
+  "features/x_auto_posts/publisher.py": "06e2e0efc143d3d36f394bffc4c2093ec70c72a10150a8eb22f622f2c424f94d",
+  "features/x_auto_posts/selector.py": "379bf5adf3a71bc1b042a192b109be5d46e167b3b4ca8437e719c0badd63a854",
+  "features/x_auto_posts/repositories.py": "cc70aea9831ad719b78d63ce225facae0baeab09e9d9c88ad1339bee6df194f2",
+  "features/x_posts/service.py": "f2f1adca99b50d88c847aa2bcf8d1629e9fd00f830e71d7db079d17dcf539a74",
+  "features/x_posts/selector.py": "cdcbb1ee041ab2893a9d49ac012243e620eeff307651dd53b53f6a0a36ef9c4e",
+  "features/x_accounts/oauth_service.py": "6f469e128946ae65698e5c6ba9f9df327f0ba0d49f9ef62859f6e6dc797cb8ac",
+  "static/x-auto-publish-template.js": "ce8ef1d16069bc266b5aa619b6b52717e8718603d589b867630872169d4215f1",
+  "static/x-auto-publish-template.html": "dffb51e547231745ab4653ec379c06e374470aaf0efbfe2aafc0a5e90e5f4677",
+  "features/x_posts/random_template.py": "9d9bed7c66a6abcc6eb669cb141f226743e841c774136d3a8f7d76831c1c32e8"
+}

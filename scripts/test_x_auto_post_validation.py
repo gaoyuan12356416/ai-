@@ -118,18 +118,16 @@ class XAutoPostValidationTests(unittest.TestCase):
                 )
             )
 
-    def test_automatic_duration_hard_ceiling_is_600_seconds(self):
-        normalized = normalize_template_payload(valid_payload())
-        self.assertEqual(normalized["material_rule"]["duration_max_seconds"], 600)
-        with self.assertRaises(ValidationError):
-            normalize_template_payload(
-                valid_payload(
-                    material_rule=metric_rule(
-                        duration_min_seconds=1,
-                        duration_max_seconds=601,
-                    )
-                )
-            )
+    def test_optional_duration_bounds_accept_long_videos_and_preserve_existing_filters(self):
+        for minimum, maximum in [(1, 600), (60, None), (None, None), ("", ""), (601, 1800), (0, 86400)]:
+            with self.subTest(minimum=minimum, maximum=maximum):
+                normalized = normalize_template_payload(valid_payload(material_rule=metric_rule(
+                    duration_min_seconds=minimum, duration_max_seconds=maximum)))
+                self.assertEqual(normalized["material_rule"]["duration_max_seconds"], None if maximum == "" else maximum)
+        for minimum, maximum in [(1, 0), (-1, None), (1, 1.5), (True, None), (1, False), (601, 600), (1, "NaN"), (1, 2**53)]:
+            with self.subTest(minimum=minimum, maximum=maximum), self.assertRaises(ValidationError):
+                normalize_template_payload(valid_payload(material_rule=metric_rule(
+                    duration_min_seconds=minimum, duration_max_seconds=maximum)))
 
     def test_schedule_is_stable_and_rejects_duplicate_times(self):
         random_payload = normalize_template_payload(

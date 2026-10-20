@@ -191,9 +191,10 @@
                     <div class="field" style="margin-bottom: 11px;">
                       <span class="field-label">素材时长（秒）</span>
                       <div class="range-grid">
-                        <input id="materialDurationMin" type="number" min="1" max="600" step="1" value="1" placeholder="最短时长" aria-label="素材最短时长" />
-                        <input id="materialDurationMax" type="number" min="1" max="600" step="1" value="600" placeholder="最长时长" aria-label="素材最长时长" />
+                        <input id="materialDurationMin" type="number" min="0" step="1" value="1" placeholder="最短时长（不限）" aria-label="素材最短时长" />
+                        <input id="materialDurationMax" type="number" min="1" step="1" placeholder="最长时长（不限）" aria-label="素材最长时长" />
                       </div>
+                      <span class="helper">留空表示不限筛选时长；实际发布按账号资格和媒体校验执行。</span>
                     </div>
                     <div class="field" style="margin-bottom: 11px;">
                       <span class="field-label">素材维度 D0 ROAS（%）</span>
@@ -281,6 +282,6 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/x-auto-publish-common.js?v=20260814language1"></script>
-  <script src="/x-auto-publish-template.js?v=20261019random1"></script>
+  <script src="/x-auto-publish-template.js?v=20261020duration1"></script>
 </body>
 </html>

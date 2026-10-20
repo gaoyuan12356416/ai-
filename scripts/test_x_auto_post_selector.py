@@ -340,6 +340,15 @@ class RuleAndWindowTests(unittest.TestCase):
 
 
 class TwoStageSelectionTests(unittest.TestCase):
+    def test_duration_above_600_is_selectable_but_upload_boundary_remains(self):
+        for duration in ("601", "1800", "14400"):
+            source = FakeSource([drama("C1")], {"C1": [material("101", "C1", duration=duration)]})
+            selected = selector(source, FakeMetricStore([])).select_and_reserve(request(rules()))
+            self.assertEqual(selected.material.source.video_duration, Decimal(duration))
+        source = FakeSource([drama("C1")], {"C1": [material("101", "C1", duration="14401")]})
+        with self.assertRaises(NoEligibleMaterial):
+            selector(source, FakeMetricStore([])).select_and_reserve(request(rules()))
+
     def test_empty_resource_types_does_not_limit_drama_type(self):
         source = FakeSource(
             [drama("C1", resource_type="2")],

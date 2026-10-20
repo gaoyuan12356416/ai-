@@ -86,7 +86,7 @@ MANUAL_TRIGGER_SOURCES = frozenset(
     {MANUAL_TRIGGER_SOURCE, AUTO_TEMPLATE_TRIGGER_SOURCE}
 )
 MANUAL_PUBLISH_MODES = frozenset({"immediate", "scheduled"})
-AUTO_TEMPLATE_MAX_DURATION_SECONDS = 600.0
+AUTO_TEMPLATE_MAX_DURATION_SECONDS = PREMIUM_MAX_DURATION_SECONDS
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
 SCHEDULE_MODES = frozenset({"fixed", "random"})
@@ -10076,7 +10076,7 @@ class XPostStore:
             ):
                 raise XPostError(
                     "x_post_auto_template_duration_exceeded",
-                    "automatic X materials cannot exceed 600 seconds",
+                    "automatic X material exceeds the supported upload duration",
                     409,
                 )
             if values["source_date"] != frozen["source_date"]:

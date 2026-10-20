@@ -327,7 +327,7 @@ class ReadOnlyRepositoryTests(unittest.TestCase):
         self.assertIn("FORCE INDEX (idx_source_type_source_id)", material_sql)
         self.assertEqual(
             material_params,
-            (6, "C1", "Dramawave", 2, 0, "en", 0, 600),
+            (6, "C1", "Dramawave", 2, 0, "en", 0, 14400),
         )
 
 

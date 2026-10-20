@@ -49,7 +49,7 @@ from .repositories import (
 UTC = timezone.utc
 MAX_DRAMA_WINDOW_DAYS = 3650
 MAX_COOLDOWN_DAYS = 3650
-MAX_SOURCE_DURATION_SECONDS = Decimal("600")
+MAX_SOURCE_DURATION_SECONDS = Decimal(4 * 60 * 60)
 _ACCOUNT_ID = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 _SORT_FIELDS = frozenset({"spend", "d0_roas"})
 _SORT_DIRECTIONS = frozenset({"asc", "desc"})

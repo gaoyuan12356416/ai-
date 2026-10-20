@@ -30,7 +30,7 @@ from .x_sidecar import XPostAutoBridgeClient, XPostBridgeError
 
 UTC = timezone.utc
 STANDARD_VIDEO_MAX_DURATION_SECONDS = 140
-AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS = 600
+AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS = 4 * 60 * 60
 LONG_VIDEO_SUBSCRIPTION_TYPES = frozenset({"basic", "premium", "premium_plus"})
 
 
@@ -444,10 +444,10 @@ class AutoPostExecutor:
             duration = float(planned.get("preflight_duration") or 0)
         except (TypeError, ValueError, OverflowError):
             duration = 0
-        if not 0 < duration <= 600:
+        if not 0 < duration <= AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS:
             raise AutoPostExecutionError(
                 "x_auto_duration_out_of_range",
-                "automatic X video duration must be at most 600 seconds",
+                "automatic X video duration exceeds the supported upload limit",
                 409,
             )
         self.bridge.storage_preflight()

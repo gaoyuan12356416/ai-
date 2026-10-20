@@ -303,10 +303,10 @@ class XAutoPublishUiTest(unittest.TestCase):
     def test_duration_resource_type_and_schedules_are_bounded(self):
         page = PAGES["template"]
         script = SCRIPTS["template"]
-        self.assertIn('id="materialDurationMin" type="number" min="1" max="600"', page)
-        self.assertIn('id="materialDurationMax" type="number" min="1" max="600"', page)
-        self.assertIn("durationMin < 1 || durationMin > 600", script)
-        self.assertIn("durationMax < 1 || durationMax > 600", script)
+        self.assertIn('id="materialDurationMin" type="number" min="0" step="1"', page)
+        self.assertIn('id="materialDurationMax" type="number" min="1" step="1"', page)
+        self.assertNotIn("durationMin > 600", script)
+        self.assertNotIn("durationMax > 600", script)
         self.assertIn("非必选；不选择时不限制短剧类型。", page)
         self.assertIn("state.selectedResourceTypes.clear()", script)
         self.assertIn("resource_type_v2: parseResourceTypes()", script)

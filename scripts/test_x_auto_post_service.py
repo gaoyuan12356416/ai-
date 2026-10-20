@@ -138,6 +138,20 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertNotIn("language", created["config"])
         self.assertNotIn("access_token", repr(accounts).lower())
 
+    def test_save_unbounded_and_long_duration_preserves_template_history(self):
+        service = self.service()
+        payload = valid_payload()
+        created = service.create_template(self.actor(payload))["template"]
+        for version, maximum in enumerate((None, 1800), start=1):
+            payload["material_rule"]["duration_max_seconds"] = maximum
+            updated = service.update_template(created["id"], self.actor({
+                **payload, "expected_version": version,
+            }))["template"]
+            self.assertEqual(updated["config"]["material_rule"]["duration_max_seconds"], maximum)
+        original = self.store.get_template(created["id"], version=1)
+        self.assertEqual(original.config["material_rule"]["duration_max_seconds"], 600)
+        self.assertEqual(self.bridge.verify_calls, [])
+
     def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
         service = self.service()
         accounts = service.accounts()

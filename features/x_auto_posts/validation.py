@@ -41,7 +41,6 @@ RESOURCE_TYPE_V2_LABELS = {
     "100": "小说",
 }
 
-MAX_X_AUTO_DURATION_SECONDS = 600
 POST_TEMPLATE_MACRO_RE = re.compile(r"\{\{([a-z_]+)\}\}")
 POST_TEMPLATE_ALLOWED_MACROS = frozenset({"drama_name", "desc", "url"})
 LANGUAGE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -226,19 +225,15 @@ def _material_rule(raw: Any) -> Dict[str, Any]:
         label="素材筛选",
         extra_required={"duration_min_seconds", "duration_max_seconds"},
     )
-    minimum = _integer(
-        value.get("duration_min_seconds"),
-        "素材最小时长",
-        0,
-        MAX_X_AUTO_DURATION_SECONDS,
-    )
-    maximum = _integer(
-        value.get("duration_max_seconds"),
-        "素材最大时长",
-        1,
-        MAX_X_AUTO_DURATION_SECONDS,
-    )
-    if minimum > maximum:
+    def duration_bound(key: str, label: str, floor: int) -> Optional[int]:
+        raw = value.get(key)
+        if raw is None or raw == "":
+            return None
+        return _integer(raw, label, floor, 2**53 - 1)
+
+    minimum = duration_bound("duration_min_seconds", "素材最小时长", 0)
+    maximum = duration_bound("duration_max_seconds", "素材最大时长", 1)
+    if minimum is not None and maximum is not None and minimum > maximum:
         raise ValidationError("invalid_request", "素材时长下限不能大于上限")
     result["duration_min_seconds"] = minimum
     result["duration_max_seconds"] = maximum
@@ -389,7 +384,6 @@ def config_hash(value: Mapping[str, Any]) -> str:
 
 __all__ = [
     "ValidationError",
-    "MAX_X_AUTO_DURATION_SECONDS",
     "canonical_json",
     "config_hash",
     "expected_version",

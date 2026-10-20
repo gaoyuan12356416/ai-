@@ -401,11 +401,11 @@
     validateRange("materialRoasMin", "materialRoasMax", "素材 D0 ROAS");
     validateRange("materialSpendMin", "materialSpendMax", "素材消耗");
     validateRange("materialDurationMin", "materialDurationMax", "素材时长");
-    const durationMin = integerValue("materialDurationMin");
-    const durationMax = integerValue("materialDurationMax");
-    if (!Number.isInteger(durationMin) || durationMin < 1 || durationMin > 600) throw new Error("素材最小时长必须为 1–600 秒的整数。");
-    if (!Number.isInteger(durationMax) || durationMax < 1 || durationMax > 600) throw new Error("素材最长时长必须为 1–600 秒的整数。");
-    if (durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
+    const durationMin = integerValue("materialDurationMin", null);
+    const durationMax = integerValue("materialDurationMax", null);
+    if (durationMin != null && (!Number.isSafeInteger(durationMin) || durationMin < 0)) throw new Error("素材最小时长必须为非负整数，或留空不限。");
+    if (durationMax != null && (!Number.isSafeInteger(durationMax) || durationMax < 1)) throw new Error("素材最长时长必须为正整数，或留空不限。");
+    if (durationMin != null && durationMax != null && durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
 
     const mode = selectedScheduleMode();
     let schedule;

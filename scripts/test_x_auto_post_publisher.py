@@ -32,7 +32,7 @@ UTC = timezone.utc
 
 class XAutoPostAccountDurationRuleTests(unittest.TestCase):
     @staticmethod
-    def config(minimum=1, maximum=600):
+    def config(minimum=1, maximum=None):
         return {
             "metric_window_days": 7,
             "platform": 0,
@@ -51,7 +51,7 @@ class XAutoPostAccountDurationRuleTests(unittest.TestCase):
         self.assertEqual(account_duration_limit_seconds(account), 140)
         self.assertEqual(rules.material.duration_seconds.maximum, Decimal("140"))
 
-    def test_token_confirmed_subscription_keeps_auto_template_600_second_cap(self):
+    def test_token_confirmed_subscription_uses_existing_upload_boundary(self):
         for subscription_type in ("basic", "premium", "premium_plus"):
             with self.subTest(subscription_type=subscription_type):
                 account = {
@@ -59,10 +59,15 @@ class XAutoPostAccountDurationRuleTests(unittest.TestCase):
                     "long_video_eligible": True,
                 }
                 rules = selector_rules(self.config(), account=account)
-                self.assertEqual(account_duration_limit_seconds(account), 600)
+                self.assertEqual(account_duration_limit_seconds(account), 14400)
                 self.assertEqual(
-                    rules.material.duration_seconds.maximum, Decimal("600")
+                    rules.material.duration_seconds.maximum, Decimal("14400")
                 )
+
+    def test_explicit_template_maximum_remains_an_operator_filter(self):
+        account = {"subscription_type": "premium", "long_video_eligible": True}
+        for maximum in (600, 1800):
+            self.assertEqual(selector_rules(self.config(maximum=maximum), account=account).material.duration_seconds.maximum, Decimal(maximum))
 
     def test_untrusted_long_video_flag_cannot_override_subscription_type(self):
         account = {

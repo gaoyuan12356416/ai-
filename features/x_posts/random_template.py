@@ -138,8 +138,6 @@ def prepare_random_template(*, queue, log, account, db_path, public_root, allowe
         limit = 14400 if service._account_has_premium_video_entitlement(account) else 140
         probe = prober(source["path"], max_bytes=max_media_bytes, timeout=timeout, max_duration_seconds=limit)
         duration = float(probe["duration"])
-        if auto_template and duration > 600:
-            raise service.XPostError("x_auto_duration_out_of_range", "自动模板视频不能超过600秒", 409)
         existing = receipt_store.get(int(queue["id"]))
         manifest = existing["request"]["asset_manifest_sha256"] if existing else env.get("X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256", "")
         if not re.fullmatch(r"[a-f0-9]{64}", manifest):
@@ -149,7 +147,7 @@ def prepare_random_template(*, queue, log, account, db_path, public_root, allowe
                    "source_url": str(source.get("source_url") or queue["material_url"]),
                    "source_sha256": source["sha256"], "source_size": source["size"], "source_duration": duration,
                    "profile": PROFILE, "asset_manifest_sha256": manifest,
-                   "max_duration_seconds": existing["request"]["max_duration_seconds"] if existing else min(limit, 600 if auto_template else 14400)}
+                   "max_duration_seconds": existing["request"]["max_duration_seconds"] if existing else limit}
         try:
             record = receipt_store.freeze(int(queue["id"]), request)
             result = record["result"] if record["status"] == "ready" else (client or RandomTemplateClient(environ=env)).prepare(request)

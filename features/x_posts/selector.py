@@ -25,7 +25,7 @@ DEFAULT_DRAMAWAVE_APP_ID = 1479
 # that can be routed to a token-confirmed Premium account.  Keep only the
 # platform/API upload boundary used by the final account-aware preflight.
 MAX_X_SOURCE_DURATION_SECONDS = 4 * 60 * 60
-AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS = 600
+AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS = MAX_X_SOURCE_DURATION_SECONDS
 MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
@@ -1129,10 +1129,9 @@ class DramawaveCandidateSelector:
         return selected, rejections
 
     def select_auto_template(self, material_ids, source_date, limit=1):
-        """Hydrate one exact auto-template material under its 600-second ceiling.
+        """Hydrate one exact auto-template material within the upload boundary.
 
-        The execution bridge deliberately resembles the manual exact-ID flow,
-        but it must never inherit the operator-only long-source exception.
+        Keep automatic source gates; the final preflight checks account entitlement.
         """
         source_date = normalize_date(source_date)
         try:
@@ -1252,7 +1251,7 @@ def select_auto_template_candidates(
     schema=DEFAULT_SCHEMA,
     now=None,
 ):
-    """Hydrate one exact auto-template material under its separate 600s gate."""
+    """Hydrate one exact auto-template material within the upload boundary."""
     return DramawaveCandidateSelector(
         connection,
         schema=schema,

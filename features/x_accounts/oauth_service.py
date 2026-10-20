@@ -65,7 +65,7 @@ MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
 MAX_DAILY_ACCOUNTS = 50
-AUTO_TEMPLATE_MAX_DURATION_SECONDS = 600.0
+AUTO_TEMPLATE_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 TRANSIENT_VERIFY_ERROR_CODES = frozenset(
     {
         "x_post_rate_limited",
@@ -3800,7 +3800,7 @@ def create_post_auto_template_plan_request(payload):
     if duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS:
         raise ServiceError(
             "x_post_auto_template_duration_exceeded",
-            "automatic X materials cannot exceed 600 seconds",
+            "automatic X material exceeds the supported upload duration",
             409,
         )
     trusted = dict(candidate)
