@@ -105,9 +105,9 @@ class DeployHelpersTests(unittest.TestCase):
                 pass
         def urlopen(url, **kwargs):
             if "/api/social-" in url:
-                raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+                raise urllib.error.HTTPError(url, 404, "not found", {}, io.BytesIO(b""))
             if "/api/youtube-" in url:
-                raise urllib.error.HTTPError(url, 401, "auth required", {}, None)
+                raise urllib.error.HTTPError(url, 401, "auth required", {}, io.BytesIO(b""))
             return Response()
         with patch.object(deploy.urllib.request, "urlopen", side_effect=urlopen), \
              patch.object(deploy, "active", return_value="active"):
