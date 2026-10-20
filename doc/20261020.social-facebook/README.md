@@ -135,3 +135,40 @@ Rollback verifies both current and backup file hashes, stops the new collector,
 restores this release's report files/configuration and the prior daily symlink,
 and restarts only the main API. It retains attribution, all publishing facts,
 short links and delivery receipts. Unknown concurrent file changes are rejected.
+
+## Production acceptance — 2026-10-20
+
+- Deployed code commit: `2fd79fbff5c305ef3bba788fc2f06dbbfefe0eb0`, fetched from
+  GitHub into `/mnt/data-disk/social-analytics/facebook-source`.
+- Backup and deployment manifest:
+  `/mnt/data-disk/social-analytics/backups/20261020T093130Z-fb-2fd79fbff5c3`.
+- Linux: all 154 social regression tests passed, including private file modes,
+  symlink rejection and changes to either daily release during the lock window.
+- Production sandbox preview for October 19: attributed income $7,630.62,
+  300 successful publications; Facebook income $5,939.83 and pending $5,875.59.
+  Report SHA256:
+  `7e914e4ac74dcace4ebea5516c0e3e0d0b59124f875dbb68d99129ee26c5fd41`.
+- Both Facebook sources froze successfully: 19,465 automatic records and one
+  manual record, zero conflicts. Minute timer runs at 09:32, 09:33 and 09:34 UTC
+  completed with zero changes; the attribution ledger is mode 0600.
+- Logged-in browser verification: all three channels, Facebook filter,
+  separate source completeness, X-only counters marked inapplicable for FB,
+  and successful CSV export. The October 19 manual source remains unavailable.
+- Only the main API restarted. FB/X publisher PIDs and the main `app.py` hash
+  are unchanged. The delivery database logical dump hash is unchanged:
+  `ffcceab8a27745d5f6a3fe06d06513b3e2a4a3251dab6547e9d7ec3f37e367de`.
+- Original daily timer remains active, next run October 21 at 11:00 Beijing.
+  No production daily message was sent during acceptance.
+
+Private production `deployment.json`, `verification.json`, source backups and
+the no-send preview remain in the backup directory above. Rollback command:
+
+```bash
+cd /mnt/data-disk/social-analytics/facebook-source
+python3 scripts/deploy_social_facebook.py rollback \
+  --backup /mnt/data-disk/social-analytics/backups/20261020T093130Z-fb-2fd79fbff5c3
+```
+
+Rollback also verifies complete old/new daily directory manifests, excluding
+Python caches, before switching. Added, deleted or modified files and symlinks
+are rejected; publication databases and delivery receipts are never restored.
