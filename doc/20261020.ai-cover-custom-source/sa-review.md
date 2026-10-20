@@ -1,0 +1,5 @@
+# 设计审查
+
+通过，发布受真实canary及全部正式读回约束。线上app为组合版本，不整文件覆盖：只替换post_screenshot_ai_source_callback并验证其他AST不变。独立shared SQLite保存出站和回执；旧YT账本保留，旧accepted/unknown只用旧协议对账。未知结果禁止重POST。
+
+API契约新版支持短剧/content_id是用户确认，真实canary必须验证。旧代码人员0不能用于新接口；系统任务明确248。旧audit action成功不代表code0。

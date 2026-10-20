@@ -32170,43 +32170,8 @@ def screenshot_asset_name(job, spec):
 
 
 def post_screenshot_ai_source_callback(job):
-    if not AI_SOURCE_CALLBACK_ENABLED:
-        return {"skipped": True, "reason": "disabled"}
-    if not AI_SOURCE_CALLBACK_URL or not AI_SOURCE_CALLBACK_TOKEN:
-        return {"skipped": True, "reason": "not_configured"}
-    creator = get_admin_user_callback_username(job.get("creator_user_id", "")) or str(job.get("creator_name", "") or "").strip()
-    created_at = callback_time_text(job.get("updated_at") or job.get("created_at") or "")
-    items = []
-    for spec in SCREENSHOT_SPECS:
-        url = str(job.get(spec["field"], "") or "").strip()
-        if not url:
-            continue
-        items.append({
-            "app_package": app_package_for_app_id(job.get("app_id", "")),
-            "material_id": screenshot_material_id(job.get("job_id", ""), spec["key"]),
-            "content_id": str(job.get("content_id", "") or ""),
-            "category": spec["ratio"],
-            "name": screenshot_asset_name(job, spec),
-            "url": url,
-            "email": creator,
-            "created_at": created_at,
-        })
-    if not items:
-        return {"skipped": True, "reason": "no_assets"}
-    headers = {
-        "Authorization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
-        "Authrization": "Bearer %s" % AI_SOURCE_CALLBACK_TOKEN,
-        "Content-Type": "application/json",
-    }
-    response = requests.post(
-        AI_SOURCE_CALLBACK_URL,
-        headers=headers,
-        json=items[:50],
-        timeout=AI_SOURCE_CALLBACK_TIMEOUT,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError("ai source callback failed (%s): %s" % (response.status_code, response.text[:500]))
-    return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
+    from features.cover_material_source import upload_screenshot
+    return upload_screenshot(job)
 
 
 def notify_screenshot_ai_source_callback(job, raise_on_error=False):

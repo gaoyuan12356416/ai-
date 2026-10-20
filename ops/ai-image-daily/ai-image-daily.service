@@ -26,6 +26,9 @@ ReadOnlyPaths=/root/drama_material_service/data/drama_material_jobs.sqlite3
 ReadOnlyPaths=/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data/drama_material_jobs.sqlite3
 ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
 ReadOnlyPaths=/mnt/data-disk/youtube-cover-material-sync/sync.sqlite3
+# Optional until the material/source upload ledger is installed.
+ReadWritePaths=-/mnt/data-disk/ai-cover-material-source
+ReadOnlyPaths=-/mnt/data-disk/ai-cover-material-source/upload.sqlite3
 # The gated mysql client shares the host FIFO socket and session lock directory.
 ReadWritePaths=/run/sql-connection-gate
 ReadWritePaths=/var/lib/sql-connection-gate/session-locks

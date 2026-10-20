@@ -1,0 +1,11 @@
+# 新入库契约
+
+POST https://aa.yingliangads.com/api/material/source，Authorization: Bearer服务端AD_MATERIAL_SOURCE_API_TOKEN；单张JSON对象。必填app_id/user_id/initiator为整数；content_id/country/language/content_sign/url/name为字符串，category为实际比例，remark存来源引用。
+
+固定语言缺省国家：enUS esES ptPT frFR deDE itIT plPL ruRU trTR arSA jaJP koKR idID thTH viVN csCZ elGR roRO zh-TW/TW zh-CN/CN。有效ISO国家保留（VI是合法地区，不能仅按语言改写）；CS无效时按cs→CZ。
+
+数据签名=SHA256(ai-cover-source-v1:规范JSON(source_kind/source_key/app_id/sha256))。首次请求冻结；同签名元数据漂移拒绝。
+
+data.id单独保存api_id；正式库通过content_sign唯一回读，验证真实产品、content_id(data_source_id)、type1、人员、比例、country/language、name；保存final_id，不混同接收/正式ID。
+
+HTTP403不解析JSON即明确拒绝；-1为业务拒绝，重复签名走对账；-2/非JSON/缺id/超时不确定。成功码无固定值约束。日志仅固定安全字段与响应hash，不记录token或任意响应文本。

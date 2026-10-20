@@ -20,6 +20,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/mnt/data-disk/youtube-cover-material-sync
+ReadWritePaths=/mnt/data-disk/ai-cover-material-source
 # SQLite in WAL mode needs to create reader sidecars even with mode=ro.
 # Keep the source database itself read-only; SQL also enforces query_only.
 ReadWritePaths=/root/drama_material_service/data

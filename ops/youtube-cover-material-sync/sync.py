@@ -11,7 +11,10 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def encoded(value):
@@ -310,12 +313,6 @@ class Publisher:
         from qcloud_cos import CosConfig, CosS3Client
         self.env = env
         self.session = requests.Session()
-        self.endpoint = env.get("AI_SOURCE_CALLBACK_URL", "https://aa.yingliangads.com/api/material/ai-source")
-        if self.endpoint != "https://aa.yingliangads.com/api/material/ai-source":
-            raise ValueError("unexpected_callback_endpoint")
-        self.token = env["AI_SOURCE_CALLBACK_TOKEN"]
-        if not self.token or env.get("AI_SOURCE_CALLBACK_ENABLED", "1").lower() in ("0", "false", "no", "off"):
-            raise ValueError("callback_disabled_or_unconfigured")
         if env.get("COS_BUCKET") != "advertising-1306474899" or env.get("COS_DOMAIN") != "advertising-1306474899.cos.ap-hongkong.myqcloud.com":
             raise ValueError("unexpected_cos_destination")
         self.cos = CosS3Client(CosConfig(Region=env["COS_REGION"], SecretId=env["COS_SECRET_ID"],
@@ -346,17 +343,7 @@ class Publisher:
             raise ValueError("public_object_readback_mismatch")
 
     def post(self, requests):
-        response = self.session.post(self.endpoint, headers={"Authorization": "Bearer " + self.token,
-                                     "Authrization": "Bearer " + self.token, "Content-Type": "application/json"},
-                                     json=requests, timeout=(5, 60), allow_redirects=False)
-        try:
-            body = response.json()
-            code = body.get("code")
-        except (ValueError, AttributeError):
-            code = None
-        # Never log arbitrary response bodies or credentials. Store only safe acceptance facts.
-        return {"http_status": response.status_code, "code": code if isinstance(code, (int, float)) else None,
-                "accepted": response.status_code == 200 and code == 0}
+        raise RuntimeError("legacy_material_post_retired")
 
 
 def tick(store, catalog, publisher, env, limit=50):
@@ -407,6 +394,54 @@ def tick(store, catalog, publisher, env, limit=50):
     for row in send:
         store.change(row["key"], "accepted" if receipt["accepted"] else "unknown", receipt,
                      error="" if receipt["accepted"] else "callback_outcome_requires_reconciliation", next_check=time.time() + 60)
+
+
+def custom_tick(store, catalog, publisher, env, limit=50):
+    """Retain old outstanding receipts; every new outbound uses the shared client."""
+    from features import cover_material_source as custom
+    waiting = store.rows(("accepted", "unknown"), limit=100)
+    for index in range(0, len(waiting), 50):
+        reconcile(store, catalog, waiting[index:index + 50])
+    todo = store.rows(("pending", "ready", "custom_pending"), limit=limit)
+    ledger = custom.Ledger(env.get("AI_COVER_SOURCE_ROOT", custom.ROOT))
+    try:
+        new_catalog, client = custom.Catalog(env), custom.Client(env)
+        for row in todo:
+            old_source = json.loads(row["source"])
+            # Legacy in-flight requests must never cross protocols.
+            if row["attempts"] and row["state"] != "custom_pending":
+                continue
+            if row["request"]:
+                frozen = json.loads(row["request"])
+                request, cos_key = frozen["payload"], frozen["cos_key"]
+            else:
+                request, cos_key = payload(old_source, {"username": ""}, env["COS_DOMAIN"])
+                frozen = {"payload": request, "cos_key": cos_key, "api_version": "material-source-v1"}
+                store.change(row["key"], row["state"], request=encoded(frozen))
+            source = dict(source_kind="youtube", source_key=row["key"], app_id=1479,
+                          content_id=old_source["content_id"], name=request["name"], url=request["url"],
+                          category=old_source["category"], language=old_source["language"], country="",
+                          sha256=old_source["sha256"], owner_email=old_source["owner_email"],
+                          owner_name=old_source["owner_name"], system_actor=False,
+                          generated_at=old_source["asset_created_at"], is_backfill=False, backfill_kind="",
+                          legacy_final_ids=[], cover_source=old_source.get("cover_source", ""))
+            try:
+                previous = ledger.get(custom.identity(source))
+                if not previous or (not previous["attempts"] and previous["state"] != "confirmed"):
+                    publisher.upload(old_source, request, cos_key)
+                result = custom.submit(source, ledger, new_catalog, client)
+                state = result["state"]
+                store.change(row["key"], "confirmed" if state == "confirmed" else
+                             ("blocked" if state in ("blocked", "rejected") else "custom_pending"),
+                             {"custom_key": result["key"], "api_version": "material-source-v1"},
+                             attempts=result["attempts"], final_id=result["final_id"],
+                             final_json=result["final_json"], error=result["error"],
+                             next_check=0 if state == "confirmed" else time.time() + 120)
+            except Exception as error:
+                store.change(row["key"], "custom_pending",
+                             error="custom_source:" + type(error).__name__, next_check=time.time() + 120)
+    finally:
+        ledger.close()
 
 
 @contextlib.contextmanager
@@ -460,7 +495,7 @@ def main(argv=None):
                 items, excluded = candidates(db, asset_root, "published")
                 store.add(items)
                 atomic_json(root / "discovery-issues.json", {"checked_at": utcnow(), "excluded": excluded})
-                tick(store, Catalog(env), Publisher(env), env, min(50, max(1, args.max_new)))
+                custom_tick(store, Catalog(env), Publisher(env), env, min(50, max(1, args.max_new)))
                 summary = dict(store.summary(), checked_at=utcnow(), discovery_exclusions=excluded)
                 atomic_json(root / "status.json", summary)
                 print(encoded(summary))
