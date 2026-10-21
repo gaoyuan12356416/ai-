@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import time
 
 from features.youtube_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, read_settings
 
@@ -103,7 +104,9 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
     app = read_settings(env_path)
     app.update(JOB_DB_PATH=db_path, SOCIAL_ANALYTICS_X_DB_PATH=x_db_path,
                SOCIAL_ANALYTICS_FB_DB_PATH=fb_db_path,
-               SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB=facebook_attribution_db_path)
+               SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB=facebook_attribution_db_path,
+               SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2,
+               SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 120)
     shared = build_report(
         app, {"role": "admin", "_system_report": True},
         {"start": [day], "end": [day], "group_by": ["owner,platform"], "page_size": ["100"]},

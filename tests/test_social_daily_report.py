@@ -108,7 +108,8 @@ class PresentationTests(unittest.TestCase):
                 self.assertIsNone(person["platforms"]["facebook"]["revenue_cents"])
                 self.assertEqual(daily["totals"], metrics(shared["totals"]))
                 cards = json.dumps(build_cards(daily, CHAT), ensure_ascii=False)
-                self.assertIn("收入 **待核实**", cards)
+                self.assertIn("数据采集未完成", cards)
+                self.assertNotIn("待核实", cards)
 
     def test_three_channel_shared_backend_matches_daily_and_csv(self):
         from features.social_analytics.adapters import normalized
@@ -156,8 +157,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(daily["rows"][0]["repost_count"], 1)
         self.assertEqual(set(daily["rows"][0]["platforms"]), {"youtube", "x", "facebook"})
         text = json.dumps(build_cards(daily, CHAT), ensure_ascii=False)
-        for expected in ("Facebook 渠道小计", "Facebook｜成功发布 2 条", "旧自动发布（2049）",
-                         "新手动发布（2310）", "Facebook 手动发布属于发布记录", "Facebook 待归属"):
+        for expected in ("渠道汇总", "**Facebook**", "发布 2 条", "未计入个人业绩", "未匹配发布记录"):
             self.assertIn(expected, text)
         self.assertNotIn("Facebook｜成功发布 2 条（Post", text)
 
@@ -171,9 +171,9 @@ class PresentationTests(unittest.TestCase):
                                       **metric(7)))
         report = present(shared, DAY)
         text = json.dumps(build_cards(report, CHAT), ensure_ascii=False)
-        self.assertIn("Facebook 主页 渠道小计", text)
-        self.assertIn("未来渠道 渠道小计", text)
-        self.assertIn("未来渠道｜成功发布 0 条", text)
+        self.assertIn("Facebook 主页", text)
+        self.assertIn("未来渠道", text)
+        self.assertIn("发布 0 条", text)
 
     def test_missing_facebook_source_is_explicit_and_known_amounts_survive(self):
         shared = three_channel_fixture()
@@ -192,10 +192,10 @@ class PresentationTests(unittest.TestCase):
         cards = build_cards(report, CHAT)
         self.assertEqual(cards[0]["header"]["template"], "orange")
         text = json.dumps(cards, ensure_ascii=False)
-        for expected in ("旧自动发布（2049）：待核实／未同步", "1 个日期未同步",
-                         "归属采集待核实", "归属快照已过期", "新手动发布（2310）：已有源数据",
-                         "数据不完整，以下为已知部分", "$1,990.79"):
+        for expected in ("旧自动发布（2049）", "数据采集未完成", "未生成业绩日报"):
             self.assertIn(expected, text)
+        self.assertNotIn("待核实", text)
+        self.assertNotIn("$1,990.79", text)
 
     def test_shared_values_preserved_in_cents(self):
         report = present(fixture(), DAY)
@@ -245,8 +245,8 @@ class PresentationTests(unittest.TestCase):
         report = present(shared, DAY)
         cards = build_cards(report, CHAT)
         text = json.dumps(cards, ensure_ascii=False)
-        for expected in ("社媒发布人日报", "YouTube", "X 渠道小计", "Post 4", "Repost 1", "campaign ID",
-                         "待归属", "手动短链贡献效果", "social-analytics.html", "历史内容发布人"):
+        for expected in ("社媒发布人日报", "YouTube", "渠道汇总", "Post 4", "Repost 1", "campaign ID",
+                         "未匹配发布记录", "手动短链只计效果", "social-analytics.html", "历史内容发布人"):
             self.assertIn(expected, text)
         self.assertLess(payload_size(cards[0], CHAT), 29000)
         self.assertIn("<!doctype html>", preview_html(cards))
@@ -259,9 +259,10 @@ class PresentationTests(unittest.TestCase):
         cards = build_cards(present(shared, DAY), CHAT)
         text = json.dumps(cards, ensure_ascii=False)
         self.assertEqual(cards[0]["header"]["template"], "orange")
-        self.assertIn("部分渠道数据不完整", text)
-        self.assertIn("X 渠道小计｜待核实／未同步", text)
-        self.assertIn("收入 **待核实**", text)
+        self.assertIn("数据采集未完成", text)
+        self.assertIn("X", text)
+        self.assertNotIn("待核实", text)
+        self.assertNotIn("$1,690.79", text)
 
     def test_partial_owner_totals_equal_shared_owner_group(self):
         from features.social_analytics.adapters import normalized
@@ -285,7 +286,7 @@ class PresentationTests(unittest.TestCase):
         for field in METRICS:
             self.assertEqual(daily["rows"][0][field], webpage["all_rows"][0][field], field)
         self.assertEqual(daily["rows"][0]["data_status"], "partial")
-        self.assertIn("数据不完整，以下为已知部分", json.dumps(build_cards(daily, CHAT), ensure_ascii=False))
+        self.assertIn("数据采集未完成", json.dumps(build_cards(daily, CHAT), ensure_ascii=False))
 
     def test_split_is_measured_using_actual_utf8_envelope(self):
         shared = three_channel_fixture()
@@ -300,7 +301,7 @@ class PresentationTests(unittest.TestCase):
         self.assertTrue(all(payload_size(card, CHAT) <= 8000 for card in cards))
         self.assertTrue(all(("（%d/%d）" % (i, len(cards))) in card["header"]["title"]["content"]
                             for i, card in enumerate(cards, 1)))
-        self.assertEqual(sum("多字节发布人" in item["text"]["content"]
+        self.assertEqual(sum("多字节发布人" in item.get("text", {}).get("content", "")
                              for card in cards for item in card["elements"]), 180)
 
     def test_collector_calls_shared_campaign_report(self):

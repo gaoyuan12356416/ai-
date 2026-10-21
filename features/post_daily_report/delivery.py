@@ -71,7 +71,9 @@ def _post(url, payload, token=None, sending=False):
     return result
 
 
-def send_card(config_path, chat_id, card, request_uuid):
+def send_card(config_path, chat_id, card, request_uuid, receive_id_type="chat_id"):
+    if receive_id_type not in ("chat_id", "open_id"):
+        raise DefiniteFailure("feishu_recipient_type_invalid")
     try:
         with open(config_path, encoding="utf-8") as handle:
             config = json.load(handle)
@@ -83,7 +85,7 @@ def send_card(config_path, chat_id, card, request_uuid):
     token = auth.get("tenant_access_token")
     if not token:
         raise DefiniteFailure("feishu_auth_token_missing")
-    result = _post(base + "/im/v1/messages?receive_id_type=chat_id",
+    result = _post(base + "/im/v1/messages?receive_id_type=" + receive_id_type,
                    {"receive_id": chat_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False, separators=(",", ":")), "uuid": request_uuid}, token, sending=True)
     message_id = result.get("data", {}).get("message_id")
     if not message_id:

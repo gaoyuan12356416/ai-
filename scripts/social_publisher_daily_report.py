@@ -16,7 +16,7 @@ from features.social_daily_report.collector import (
     BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, FB_DB_PATH, FACEBOOK_ATTRIBUTION_DB_PATH, collect,
 )
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
-from features.social_daily_report.report import build_cards, payload_size, preview_html
+from features.social_daily_report.report import build_cards, payload_size, preview_html, require_complete
 from scripts.post_daily_report import ensure_storage, atomic_write
 
 CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
@@ -72,6 +72,8 @@ def main(argv=None):
         else:
             report = collect(day, args.db, args.env_file, args.x_db,
                              args.fb_db, args.facebook_attribution_db)
+            if args.send:
+                require_complete(report)
             cards = build_cards(report, CHAT_ID)
             if store:
                 store.freeze(day, CHAT_ID, report, cards)
@@ -88,6 +90,7 @@ def main(argv=None):
         ), ensure_ascii=False), flush=True)
         if not args.send:
             return 0
+        require_complete(report)
         receipt = deliver(store, day, CHAT_ID,
                           lambda card, request_uuid: send_card(args.feishu_config, CHAT_ID, card, request_uuid))
         atomic_write(folder / "receipt.json", json.dumps(receipt, ensure_ascii=False, indent=2))

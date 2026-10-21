@@ -45,12 +45,15 @@ def query_rows(app, statement, max_rows=1001):
                SQL_GATE_WAIT_TIMEOUT_SECONDS="5", SQL_GATE_EXEC_TIMEOUT_SECONDS="12")
     statement = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; "
                  "START TRANSACTION READ ONLY; SELECT @@read_only; " + statement + "; ROLLBACK;")
+    timeout = min(25, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
+    if timeout < 1:
+        raise ReportError("日报采集时间预算已用完", 503)
     try:
         result = subprocess.run([
             "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
             "-u", str(app["ADMIN_MAPPING_MYSQL_USER"]), "--connect-timeout=3",
             "--default-character-set=utf8mb4", "--skip-reconnect", "-N", "-B", "-r"],
-            input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=25)
+            input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=timeout)
         lines = result.stdout.splitlines()
         if result.returncode or not lines or lines.pop(0) != "1":
             raise ValueError("readonly_query_failed")
@@ -72,7 +75,18 @@ def source(app, start, end, platform, site_id=None):
         if cached and time.monotonic() - cached[0] < TTL:
             _cache.move_to_end(key)
             return cached[1], cached[2]
-    result = query_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
+    # Only the scheduled collector opts into one bounded read-only retry.
+    # Keep the FIFO gate and retry only the failing source, never publication.
+    attempts = min(2, max(1, int(app.get("SOCIAL_ANALYTICS_QUERY_ATTEMPTS", 1))))
+    for attempt in range(attempts):
+        try:
+            result = query_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
+            break
+        except ReportError as exc:
+            if (exc.status != 503 or attempt + 1 == attempts
+                    or time.monotonic() + 2 >= app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf"))):
+                raise
+            time.sleep(1)
     start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
     days = {(start_day + timedelta(days=i)).isoformat() for i in range((end_day - start_day).days + 1)}
     validate_metrics(result, platform, days, site_id=site)
