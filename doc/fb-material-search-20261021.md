@@ -39,7 +39,32 @@ by verification. The three HTML entry points use a new script cache version.
   control-flow checks passed; these use a DOM fixture, not a real browser.
 - `git diff --check`: passed.
 
-Production verification and real browser results are appended after rollout.
+- Core: 44 passed; gateway: 12 passed (111 Python checks across the four suites).
+- Server reran the 37 source and 18 broker checks successfully before applying.
+
+## Production acceptance, 17:14–17:16 Beijing time
+
+- Runtime GitHub commit: `9c573ffa29f2714e9ef0c2665251c47fefe8bd7f`, release
+  `/mnt/data-disk/fb-video-publish/releases/9c573ff`.
+- Backup: `/mnt/data-disk/fb-video-publish/backups/page-list-20261021T091411Z-9c573ffa/manifest.json`.
+- Staged source via the real broker: `3174214 + ja` returned the duration
+  explanation in 3.974 s; nonexistent `999999999 + ja` returned empty in
+  4.116 s; normal Japanese catalog returned material 7715235.
+- Logged-in Chrome verified loading/disabled controls, then live search
+  `3174214 + ja`: HTTP 200 at 17:15:10 with the duration explanation.
+  Live `7715235 + ja`: HTTP 200 at 17:15:31, correct Japanese video, 806 s,
+  enabled checkbox and matching Japanese drama title. No test was published.
+- 14/14 installed file hashes match. All 11 `fb_video_*` tables equal the
+  online backup row for row. SQLite `quick_check=ok`.
+- FB sidecar restarted to PID 2558009; main API PID stayed 2136222.
+  Original service/timer states were restored; database schema was not changed.
+- Server evidence: `/mnt/data-disk/fb-video-publish/evidence/material-search-20261021.json`.
+- Browser evidence: local `output/search-3174214-live.png`.
+
+The material itself still needs valid source duration before it can meet
+the existing publishing contract. Arbitrary name/drama substring searches
+retain the 8 s limit and may still time out on broad/cold scans; no global
+full-text-search performance claim is made by this targeted ID repair.
 
 ## Deployment and rollback
 
@@ -59,7 +84,7 @@ GPU services, publisher facts and short links are unchanged.
 Rollback uses the same exact release script:
 
 ```sh
-python3 /mnt/data-disk/fb-video-publish/releases/COMMIT/scripts/deploy_fb_material_search.py --rollback /mnt/data-disk/fb-video-publish/backups/BACKUP/manifest.json
+python3 /mnt/data-disk/fb-video-publish/releases/9c573ff/scripts/deploy_fb_material_search.py --rollback /mnt/data-disk/fb-video-publish/backups/page-list-20261021T091411Z-9c573ffa/manifest.json
 ```
 
 The manifest records the exact pre-change file hashes and backup paths. The
