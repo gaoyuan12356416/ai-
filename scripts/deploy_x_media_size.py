@@ -90,10 +90,15 @@ def stage(host):
         base.copy(test, release/'scripts'/test.name)
     # Tests which inspect GPU source use the complete source tree. CPU behavior
     # is checked against the assembled runtime, never a whole-repo replacement.
-    modules = ['scripts.test_x_post_media_repair','scripts.test_x_random_template'] if host == 'gpu' else TESTS
+    modules = ['scripts.test_x_post_media_repair'] if host == 'gpu' else TESTS
     executable = str(GPU_PYTHON) if host == 'gpu' else 'python3'
     with (backup/'regression.txt').open('w') as output:
         subprocess.check_call([executable,'-m','unittest',*modules,'-q'],cwd=release,stdout=output,stderr=output)
+        if host == 'gpu':
+            # The CPU preparation client is intentionally absent from the GPU
+            # package; its combined protocol tests run in the source checkout.
+            subprocess.check_call([executable,'-m','unittest','scripts.test_x_random_template','-q'],
+                                  cwd=SOURCE,stdout=output,stderr=output)
     external = list(ENV[host])
     if host == 'cpu':
         external += [str(base.MAIN/name) for name in BASELINE['main']]
