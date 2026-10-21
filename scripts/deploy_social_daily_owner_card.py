@@ -13,11 +13,14 @@ import subprocess
 SOURCE = Path(__file__).resolve().parents[1]
 STATE = Path('/mnt/data-disk/youtube-publisher-daily-report')
 LINK = Path('/opt/youtube-publisher-daily-report/current')
-BASELINE = '4cda27e'
+BASELINE = '9b4f453620e04ad9c7a35eeedd82ae114842029b'
 FILES = (
     'features/social_daily_report/report.py',
     'features/social_daily_report/collector.py',
     'features/social_analytics/routes.py',
+    'features/social_analytics/backend_scope.py',
+    'features/social_analytics/facebook.py',
+    'features/social_analytics/report.py',
     'features/post_daily_report/delivery.py',
     'scripts/social_publisher_daily_report.py',
     'scripts/social_daily_private_preview.py',

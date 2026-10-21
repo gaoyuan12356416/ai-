@@ -183,7 +183,7 @@ def validate_metrics(metrics, platform, days, site_id=None):
 
 
 def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None,
-              source_metadata=None):
+              source_metadata=None, metric_coverage=None):
     """Resolve globally before filtering; never join names or af_channel.
 
     _system_report is an internal collector capability. HTTP handlers must
@@ -198,7 +198,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     resolved = {key: resolve(candidates) for key, candidates in by_id.items()}
     specs = {source_key(platform, spec["site_id"]): dict(spec, platform=platform)
              for platform in platforms for spec in PLATFORMS[platform]["sources"]}
-    populated = {key: set() for key in specs}
+    # Scoped zero is valid only if the unfiltered source supplied that date.
+    populated = {key: set((metric_coverage or {}).get(key, ())) for key in specs}
     platform_values = {platform: empty() for platform in platforms}
     source_values = {key: empty() for key in specs}
     channel_quality = {key: dict(source=empty(), attributed=empty(), unmatched=empty(), excluded=empty(),

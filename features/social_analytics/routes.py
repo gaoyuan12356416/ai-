@@ -67,6 +67,20 @@ def query_rows(app, statement, max_rows=1001):
         raise ReportError("效果数据读取失败或繁忙，请稍后重试；本次不按零统计", 503) from None
 
 
+def query_source_rows(app, statement, max_rows):
+    # Only the scheduled collector opts into one bounded read-only retry.
+    # Keep the FIFO gate and retry only the failing source, never publication.
+    attempts = min(2, max(1, int(app.get("SOCIAL_ANALYTICS_QUERY_ATTEMPTS", 1))))
+    for attempt in range(attempts):
+        try:
+            return query_rows(app, statement, max_rows)
+        except ReportError as exc:
+            if (exc.status != 503 or attempt + 1 == attempts
+                    or time.monotonic() + 2 >= app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf"))):
+                raise
+            time.sleep(1)
+
+
 def source(app, start, end, platform, site_id=None):
     site = source_site(platform, site_id)
     key = (start, end, platform, site)
@@ -75,18 +89,7 @@ def source(app, start, end, platform, site_id=None):
         if cached and time.monotonic() - cached[0] < TTL:
             _cache.move_to_end(key)
             return cached[1], cached[2]
-    # Only the scheduled collector opts into one bounded read-only retry.
-    # Keep the FIFO gate and retry only the failing source, never publication.
-    attempts = min(2, max(1, int(app.get("SOCIAL_ANALYTICS_QUERY_ATTEMPTS", 1))))
-    for attempt in range(attempts):
-        try:
-            result = query_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
-            break
-        except ReportError as exc:
-            if (exc.status != 503 or attempt + 1 == attempts
-                    or time.monotonic() + 2 >= app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf"))):
-                raise
-            time.sleep(1)
+    result = query_source_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
     start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
     days = {(start_day + timedelta(days=i)).isoformat() for i in range((end_day - start_day).days + 1)}
     validate_metrics(result, platform, days, site_id=site)
@@ -100,9 +103,11 @@ def source(app, start, end, platform, site_id=None):
     return result, fetched
 
 
-def build_report(app, actor, query, *, include_titles=False, export=False):
+def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
+    if ai_backend_only and actor.get("_system_report") is not True:
+        raise ReportError("AI 后台日报范围仅供内部采集", 400)
     catalog, catalog_errors = read_catalogs(app, params["platforms"])
     metrics, errors, fetched = [], {}, []
     for platform in params["platforms"]:
@@ -111,7 +116,11 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
             try:
                 # Retain the single-site call contract used by existing collectors.
                 args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
-                channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
+                if ai_backend_only and platform == "facebook":
+                    from .backend_scope import facebook_source
+                    channel_rows, channel_fetched = facebook_source(app, params["start"], params["end"], spec["site_id"])
+                else:
+                    channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
                 metrics.extend(channel_rows)
                 fetched.append(channel_fetched)
             except ReportError as exc:
@@ -121,10 +130,18 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
                 errors[key] = str(exc)
             except Exception:
                 errors[key] = "效果数据读取失败或繁忙，待核实；本次不按零统计"
+    coverage, scope_audit = None, None
+    if ai_backend_only:
+        from .backend_scope import restrict
+        catalog, metrics, coverage, scope_audit = restrict(catalog, metrics, params["end"])
     report = summarize(catalog, metrics, actor, params,
                        min(fetched) if fetched else datetime.now(timezone.utc).isoformat(),
                        errors=errors, catalog_errors=catalog_errors,
-                       source_metadata=getattr(catalog_errors, "source_metadata", {}))
+                       source_metadata=getattr(catalog_errors, "source_metadata", {}),
+                       metric_coverage=coverage)
+    if scope_audit is not None:
+        report["meta"]["content_scope"] = scope_audit["scope"]
+        report["scope_audit"] = scope_audit
     if include_titles:
         enrich(report, lambda statement: query_rows(app, statement), export=export)
     return report

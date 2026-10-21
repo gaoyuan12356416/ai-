@@ -634,6 +634,13 @@ def read_facebook(app):
                             raise AttributionError("ledger_identity_invalid")
                         identity["publications"] = json.loads(record["publications_json"])
                         identity["attribution_status"] = record["status"]
+                        if record["status"] == "frozen":
+                            # Use immutable evidence, never today's Page owner or
+                            # campaign text, to separate reused legacy IDs.
+                            evidence = obj(record["evidence_json"])
+                            fields = parse_link(evidence["task"]["long_url"], site, record["record_id"])
+                            identity["effect_source"] = {
+                                "adset_id": fields["af_adset_id"], "ad_id": fields["af_ad_id"]}
                         if record["status"] != "frozen":
                             # Keep confirmed facts so the common engine can
                             # expose publication conflicts instead of fake zero.

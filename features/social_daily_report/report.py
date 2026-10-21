@@ -73,7 +73,10 @@ def blocks(report):
                     "\n原始记录已保留；缺失数据不计为零。")]], False
     require_complete(report)
     totals = report["totals"]
-    result = [[md("**%s · UTC 自然日**\n按 campaign ID 关联用户 · 全部历史内容的当日效果" % report["report_date"])],
+    backend_only = report.get("scope") == "ai_backend_confirmed_publications_and_manual_shortlinks"
+    scope_text = ("仅 AI 后台已成功发布的内容及手动短链\n按 campaign ID 关联用户 · 历史内容的当日效果"
+                  if backend_only else "按 campaign ID 关联用户 · 全部历史内容的当日效果")
+    result = [[md("**%s · UTC 自然日**\n%s" % (report["report_date"], scope_text))],
               [{"tag": "div", "fields": [
                   {"is_short": True, "text": {"tag": "lark_md", "content": label + "\n**" + value + "**"}}
                   for label, value in (("💰 已归属收入", money(totals["revenue_cents"])),
@@ -111,7 +114,7 @@ def blocks(report):
                 exceptions.append("%s · %s：%s 组，收入 %s，激活 %s，点击 %s，访问 %s，退款 %s。" % (
                     safe_name(value["name"]), label, number(count), money(row["revenue_cents"]),
                     number(row["installs"]), number(row["clicks"]), number(row["views"]), money(row["refund_cents"])))
-    if exceptions:
+    if exceptions and not backend_only:
         result.append([{"tag": "hr"}, md("**未计入个人业绩**\n" + "\n".join(exceptions) +
                                           "\n仅将 campaign ID 唯一匹配到用户的记录计入上方数据。")])
     result.append([{"tag": "note", "elements": [{"tag": "plain_text", "content":
@@ -119,7 +122,7 @@ def blocks(report):
         "发布量只计当日确认成功记录；手动短链只计效果。UTC 当天对应北京时间 08:00 至次日 08:00。"
         % money(totals["refund_cents"])}]},
         {"tag": "action", "actions": [{"tag": "button", "type": "primary",
-         "text": {"tag": "plain_text", "content": "查看社媒数据明细"}, "url": REPORT_URL}]}])
+         "text": {"tag": "plain_text", "content": "打开社媒后台" if backend_only else "查看社媒数据明细"}, "url": REPORT_URL}]}])
     return result, True
 
 

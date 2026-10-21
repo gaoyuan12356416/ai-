@@ -85,7 +85,7 @@ def present(shared, report_date):
         "schema_version": 3, "report_date": date.fromisoformat(report_date).isoformat(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "publication_timezone": "UTC", "metric_timezone": "UTC", "currency": "USD",
-        "scope": "all_historical_content_effects_and_confirmed_publications",
+        "scope": shared.get("meta", {}).get("content_scope", "all_historical_content_effects_and_confirmed_publications"),
         "attribution": "unique_frozen_campaign_id_by_platform",
         "rows": sorted(people.values(), key=lambda row: (
             row["revenue_cents"] is None, -(row["revenue_cents"] or 0),
@@ -110,6 +110,6 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
     shared = build_report(
         app, {"role": "admin", "_system_report": True},
         {"start": [day], "end": [day], "group_by": ["owner,platform"], "page_size": ["100"]},
-        include_titles=False,
+        include_titles=False, ai_backend_only=True,
     )
     return present(shared, day)
