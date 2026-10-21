@@ -51,3 +51,28 @@ Local checks: 181 passed, one optional live-snapshot test skipped. CPU's older
 SQLite cannot construct one legacy migration fixture with DROP COLUMN; that
 fixture is explicitly version-gated (it passes locally). This patch does not
 change the schema or require SQLite DROP COLUMN in production.
+
+## Production verification, 2026-10-21 17:26 Beijing
+
+- Implementation `f5dfce95babe0ae149056ec77eb0b07b634fbc4c`; deployed GitHub
+  release `c926ef6cdd452f9798d4c2c71e32b2204d45a038` at
+  `/mnt/data-disk/fb-video-publish/releases/c926ef6` on CPU 43.166.187.96.
+- Five installed SHA256 values match the release. FB sidecar restarted and its
+  saved worker/scheduler/timer states were restored; all affected services are
+  active with zero automatic restarts. Main API PID remained 2136222.
+- All 11 module tables (35 rows) match the online pre-deploy backup, including
+  the existing failed task and its one attempt. Four short-link hashes match
+  their ledger; public failed-task link also matches. SQLite quick_check=ok.
+- CPU release checks: 106 passed, one unsupported legacy fixture skipped.
+  Tests importing the actual installed runtime: 49 worker/core and 14 Graph
+  transport tests passed. Public records page 200, unauthenticated tasks API
+  401, sidecar health ok; no post-deploy worker/traceback error markers.
+- No real Facebook test posts, historical replay, database migration or change
+  to existing schedules. Skill reference updated.
+- Durable evidence: `/mnt/data-disk/fb-video-publish/evidence/token-failover-20261021.json`.
+
+Exact code-only rollback (run on CPU, preserve DB and short links):
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/c926ef6/scripts/deploy_fb_video_token_failover.py --rollback /mnt/data-disk/fb-video-publish/backups/page-list-20261021T092612Z-c926ef6c/manifest.json
+```
