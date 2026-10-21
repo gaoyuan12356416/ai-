@@ -38,8 +38,15 @@
 
 `python3 scripts/deploy_x_media_size.py --host cpu --rollback <CPU备份目录>`
 
-GPU按同样命令使用 `--host gpu` 和GPU运行时Python。CPU先回滚，GPU应在
-所有CPU生产入口排空后回滚；保留增量兼容的GPU版本也可。回滚仅恢复代码和
+完整回滚前先停用清单中原活动的CPU触发器，等所有发布worker自然排空，
+确认无活动队列后停止CPU入口服务。先用GPU运行时Python、`--host gpu` 和
+GPU备份目录执行回滚，再执行上述CPU回滚命令，最后恢复清单中原活动触发器。
+不可让旧CPU的512 MiB成片预算与新GPU的16 GiB输出配置混跑。
+回滚仅恢复代码和
 配置，保留数据库、Token及发布历史。旧版本会重新拒绝超过512 MiB的待执行文件。
 
 部署清单、回归结果、精确提交、备份路径与实时素材验证回执保存在私有操作输出中。
+
+业务上线提交 `a2e08daf7d1978db834c24aff885e7d42bbab075`。CPU最终组合回归
+313项（3项环境跳过），GPU实际worker回归20项、源目录协议测试15项。
+切换前后发布账本和Token指纹一致，原活动触发器已恢复。
