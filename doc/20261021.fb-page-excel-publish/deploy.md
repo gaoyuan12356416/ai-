@@ -33,10 +33,12 @@ Page 管理新增 Excel 预检、原子批量发布、操作恢复与下载模�
 
 ## 回滚
 
-在 CPU 对本次 manifest 运行：
+2026-10-21 19:53 北京时间已部署 `a192ce867a1e63d2161f3ca822bfca4a4590de6a`。实际 release 为 `/mnt/data-disk/fb-video-publish/releases/a192ce8`，运行文件位于上述 MAIN、FB runtime 与 nginx 静态目录；41 个安装文件和 7 个公网资源均通过哈希核对。
+
+在 CPU 43.166.187.96 对本次成功 manifest 运行：
 
 ```bash
-python3 /mnt/data-disk/fb-video-publish/releases/<release>/scripts/deploy_fb_excel_publish.py --rollback /mnt/data-disk/fb-video-publish/backups/<backup>/manifest.json
+python3 /mnt/data-disk/fb-video-publish/releases/a192ce8/scripts/deploy_fb_excel_publish.py --rollback /mnt/data-disk/fb-video-publish/backups/excel-20261021T115310.407814Z-a192ce86/manifest.json
 ```
 
 这是功能回滚：关闭 Excel 新入口，恢复旧静态，始终保留兼容 Python 执行与对账代码。已受理 v3 或 unknown 任务不能交给旧 worker。操作查询继续可用；原池计划与旧发布入口继续按既有规则运行。
