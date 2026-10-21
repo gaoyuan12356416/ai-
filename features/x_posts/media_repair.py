@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .service import DEFAULT_MAX_MEDIA_BYTES, XPostError, download_media
+from .service import XPostError, download_media
+from .media_limits import MAX_POST_VIDEO_BYTES as DEFAULT_MAX_MEDIA_BYTES
 
 try:  # Linux production uses flock; the fallback keeps offline Windows tests usable.
     import fcntl
@@ -344,13 +345,13 @@ class WorkerConfig:
                 "X_POST_MEDIA_REPAIR_MAX_SOURCE_BYTES",
                 DEFAULT_MAX_MEDIA_BYTES,
                 1024,
-                4 * 1024 * 1024 * 1024,
+                DEFAULT_MAX_MEDIA_BYTES,
             ),
             max_output_bytes=_env_int(
                 "X_POST_MEDIA_REPAIR_MAX_OUTPUT_BYTES",
                 DEFAULT_OUTPUT_MAX_BYTES,
                 1024,
-                4 * 1024 * 1024 * 1024,
+                DEFAULT_MAX_MEDIA_BYTES,
             ),
             download_timeout=_env_int(
                 "X_POST_MEDIA_REPAIR_DOWNLOAD_TIMEOUT",
@@ -1027,7 +1028,7 @@ def validate_output(
     if size > int(max_output_bytes):
         raise MediaRepairError(
             "repaired_media_invalid",
-            "修复后视频超过512MB上限",
+            "修复后视频超过当前X上传体积上限",
             500,
         )
     return {
@@ -1425,7 +1426,7 @@ class MediaRepairProcessor:
             if output_size > int(self.config.max_output_bytes):
                 raise MediaRepairError(
                     "repaired_media_invalid",
-                    "修复后视频超过512MB上限",
+                    "修复后视频超过当前X上传体积上限",
                     500,
                 )
             output_probe = _probe_payload(self.config, output_path, self.runner)
@@ -1543,6 +1544,8 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "ok",
+                "max_source_bytes": self.server.processor.config.max_source_bytes,
+                "max_output_bytes": self.server.processor.config.max_output_bytes,
                 "duration_policies": sorted(DURATION_POLICIES),
                 "profile": getattr(self.server.processor.config, "profile", REPAIR_PROFILE),
                 "random_template_enabled": self.server.random_template is not None,

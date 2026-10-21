@@ -34,6 +34,7 @@ from features.x_accounts.language import (
 )
 from features.x_posts.account_blockers import read_account_publish_blockers
 from features.x_posts import duration_policy
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES, MAX_UPLOAD_SEGMENTS, video_byte_limit
 
 
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
@@ -42,15 +43,11 @@ DEFAULT_PUBLIC_ROOT = "/mnt/data-disk/x-post-automation/s2l"
 DEFAULT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
 DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
-DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_MEDIA_BYTES = MAX_POST_VIDEO_BYTES
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_GIF_BYTES = 15 * 1024 * 1024
 STANDARD_MAX_DURATION_SECONDS = 1200.0
-# X's Premium product contract currently permits videos up to four hours on
-# supported clients.  The v2 media API documents its own tighter 512 MiB byte
-# ceiling but no separate duration ceiling for ``amplify_video``; a production
-# canary also confirmed a raw 763.938-second upload and Post readback.  Keep the
-# entitlement token-scoped and the API byte/codec gates unchanged.
+# Preserve the existing duration contract; byte policy is maintained separately.
 PREMIUM_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 STANDARD_MEDIA_CATEGORY = "tweet_video"
@@ -18312,9 +18309,12 @@ class UrllibHttpClient:
                 response.close()
         except urllib.error.HTTPError as exc:
             try:
-                raw = exc.read(int(max_response_bytes) + 1)
-                if len(raw) > int(max_response_bytes):
-                    raw = raw[: int(max_response_bytes)]
+                # Media can be GiB-sized; an HTTP error must remain a small
+                # diagnostic response rather than a media-sized memory read.
+                error_limit = min(int(max_response_bytes), MAX_HTTP_RESPONSE_BYTES)
+                raw = exc.read(error_limit + 1)
+                if len(raw) > error_limit:
+                    raw = raw[:error_limit]
                 return HttpResponse(exc.code, exc.headers, raw)
             finally:
                 exc.close()
@@ -18666,7 +18666,7 @@ def probe_media(
     except OSError:
         raise XPostError("invalid_media", "素材文件不存在", 400) from None
     if file_size <= 0 or file_size > _positive_int(max_bytes, "素材大小上限"):
-        raise XPostError("media_too_large", "素材为空或超过512MB限制", 413)
+        raise XPostError("media_too_large", "素材为空或超过当前X上传体积上限", 413)
     run = runner or subprocess.run
     ffprobe_bin = str(
         os.environ.get("X_POST_FFPROBE_BIN", "/usr/bin/ffprobe")
@@ -18924,8 +18924,10 @@ class XApiClient:
         size = path.stat().st_size
         if size <= 0:
             raise XPostError("invalid_media", "待上传素材为空", 400)
+        if size > MAX_POST_VIDEO_BYTES:
+            raise XPostError("media_too_large", "素材超过X媒体上传接口16GiB上限", 413)
         total_segments = (size + self.chunk_bytes - 1) // self.chunk_bytes
-        if total_segments > 1000:
+        if total_segments > MAX_UPLOAD_SEGMENTS:
             raise XPostError("media_too_large", "素材分片数超过X上限", 413)
         init_body = json.dumps(
             {"media_type": str(media_type), "total_bytes": size, "media_category": str(media_category)},
@@ -19277,7 +19279,7 @@ def publish_canary(
             )
             media_probe = probe_media(
                 media["path"],
-                max_bytes=max_media_bytes,
+                max_bytes=min(max_media_bytes, video_byte_limit(premium_video_eligible)),
                 timeout=timeout,
                 max_duration_seconds=duration_limit,
             )

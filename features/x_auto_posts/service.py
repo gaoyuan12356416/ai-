@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from features.x_posts.selector import connect_read_only
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import canonical_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
@@ -1168,7 +1169,7 @@ def build_service_from_env(
     media_config = _MediaConfig(
         media_allowed_hosts=_allowed_hosts(hosts_raw),
         max_media_bytes=_env_int(
-            source, "X_AUTO_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+            source, "X_AUTO_POST_MAX_MEDIA_BYTES", MAX_POST_VIDEO_BYTES, 1024, MAX_POST_VIDEO_BYTES
         ),
         media_timeout=_env_int(source, "X_AUTO_POST_MEDIA_TIMEOUT", 30, 5, 120),
         work_dir=str(

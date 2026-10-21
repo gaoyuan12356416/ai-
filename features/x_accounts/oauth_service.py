@@ -35,6 +35,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from features.x_posts import duration_policy  # noqa: E402
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import (  # noqa: E402
     DEFAULT_DRAMA_LANGUAGE,
     canonical_drama_language,
@@ -194,7 +195,7 @@ POST_MEDIA_ALLOWED_HOSTS = tuple(
 )
 POST_HTTP_TIMEOUT_SECONDS = env_int("X_POST_HTTP_TIMEOUT_SECONDS", 30, 5, 120)
 POST_MAX_MEDIA_BYTES = env_int(
-    "X_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+    "X_POST_MAX_MEDIA_BYTES", MAX_POST_VIDEO_BYTES, 1024, MAX_POST_VIDEO_BYTES
 )
 POST_DRAMA_DURATION_ROUTING_ENABLED = env_bool(
     "X_POST_DRAMA_DURATION_ROUTING_ENABLED", False

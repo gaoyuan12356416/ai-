@@ -29,6 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_posts.drama_selector import (  # noqa: E402
     DRAMAWAVE_APP_ID,
     DramaPoolRejection,
@@ -335,9 +336,9 @@ class ScheduleConfig:
             max_media_bytes=_env_int(
                 "X_POST_SCHEDULE_MAX_MEDIA_BYTES",
                 "X_POST_DAILY_MAX_MEDIA_BYTES",
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
                 1024,
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
             ),
             media_timeout=_env_int(
                 "X_POST_SCHEDULE_MEDIA_TIMEOUT",

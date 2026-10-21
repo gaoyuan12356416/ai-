@@ -19,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ from features.x_accounts.language import (  # noqa: E402
     same_drama_language,
 )
 from features.x_posts import duration_policy as duration_rules
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES, video_byte_limit
 from features.x_posts.service import (  # noqa: E402
     DEFAULT_SHORT_BASE_URL,
     PREMIUM_MAX_DURATION_SECONDS,
@@ -234,9 +236,9 @@ class DailyConfig:
             ),
             max_media_bytes=_env_int(
                 "X_POST_DAILY_MAX_MEDIA_BYTES",
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
                 1024,
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
             ),
             media_timeout=_env_int("X_POST_DAILY_MEDIA_TIMEOUT", 30, 5, 120),
             internal_timeout=_env_int("X_POST_DAILY_INTERNAL_TIMEOUT", 900, 5, 900),
@@ -487,7 +489,7 @@ class MediaRepairClient:
         token,
         *,
         timeout=900,
-        max_output_bytes=512 * 1024 * 1024,
+        max_output_bytes=MAX_POST_VIDEO_BYTES,
         opener=None,
     ):
         self.url = str(url or "")
@@ -1556,6 +1558,11 @@ def _preflight_candidate(
     force_repair=False,
 ):
     """Validate one FIFO candidate and perform at most one repair attempt."""
+    # The account DTO has already been token-verified by the caller. Apply its
+    # Post-video cap to both original and repaired bytes, including downloads.
+    config = SimpleNamespace(**{**vars(config), "max_media_bytes": min(
+        config.max_media_bytes, video_byte_limit(bool(account.get("long_video_eligible")))
+    )})
     try:
         item = _plan_candidate(
             account,

@@ -356,7 +356,8 @@ class MediaRepairTests(unittest.TestCase):
         )
 
     def test_output_rate_control_preserves_short_defaults_and_caps_long_media(self):
-        maximum = media_repair.DEFAULT_OUTPUT_MAX_BYTES
+        # Explicit legacy budgets still work; defaults no longer force 512 MiB.
+        maximum = 512 * 1024 * 1024
         short = media_repair.output_rate_control(maximum, 139.0)
         self.assertEqual(short["video_bitrate_kbps"], 5000)
         self.assertEqual(short["video_maxrate_kbps"], 6000)
@@ -533,7 +534,7 @@ class MediaRepairTests(unittest.TestCase):
                 repaired_probe(), oversized, (720, 1280), 4
             )
         self.assertEqual(caught.exception.code, "repaired_media_invalid")
-        self.assertIn("512MB", str(caught.exception))
+        self.assertIn("当前X上传体积上限", str(caught.exception))
 
         duration = self.root / "duration.mp4"
         duration.write_bytes(b"video")
@@ -801,7 +802,9 @@ class MediaRepairTests(unittest.TestCase):
         self.assertEqual(len(cos.upload_calls), 1)
 
     def test_http_transport_has_safe_health_exact_route_and_bearer_gate(self):
-        config = SimpleNamespace(profile=media_repair.REPAIR_PROFILE)
+        config = SimpleNamespace(profile=media_repair.REPAIR_PROFILE,
+                                 max_source_bytes=media_repair.DEFAULT_MAX_MEDIA_BYTES,
+                                 max_output_bytes=media_repair.DEFAULT_OUTPUT_MAX_BYTES)
         strict_response = {
             "status": "ready",
             "reused": False,
@@ -847,6 +850,8 @@ class MediaRepairTests(unittest.TestCase):
             health = json.loads(response.read())
             self.assertEqual(response.status, 200)
             self.assertEqual(health["profile"], media_repair.REPAIR_PROFILE)
+            self.assertEqual(health["max_source_bytes"], media_repair.DEFAULT_MAX_MEDIA_BYTES)
+            self.assertEqual(health["max_output_bytes"], media_repair.DEFAULT_OUTPUT_MAX_BYTES)
             self.assertEqual(response.getheader("Cache-Control"), "no-store")
             connection.close()
 
