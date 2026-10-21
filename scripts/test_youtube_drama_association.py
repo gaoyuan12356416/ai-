@@ -24,10 +24,10 @@ DRAMA_COVER = 'https://cdn.usrgrow.com/storage/icons/drama-cover.jpg'
 
 class MetadataCase(unittest.TestCase):
     def material(self, **changes):
-        return dict(dict(content_id='dramaA', language='zh-TW', macro_name='filename', macro_desc='old'), **changes)
+        return dict(dict(app_id='1479', content_id='dramaA', language='zh-TW', macro_name='filename', macro_desc='old'), **changes)
 
     def resource(self, **changes):
-        return dict(dict(content_id='dramaA', language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER), **changes)
+        return dict(dict(app_id='1479', content_id='dramaA', language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER), **changes)
 
     def test_duplicate_episode_records_resolve_same_localized_metadata(self):
         query = Mock(return_value=encoded(self.resource(), self.resource()))
@@ -44,6 +44,43 @@ class MetadataCase(unittest.TestCase):
         self.assertIn('LIMIT 1001', sql)
         self.assertIn('COLLATE utf8mb4_unicode_ci', sql)
         self.assertIn("'cover',TRIM(COALESCE(r.cover,''))", sql)
+        self.assertIn('r.app_id=1479 AND', sql)
+
+    def test_other_product_text_and_cover_do_not_taint_same_drama(self):
+        query = Mock(return_value=encoded(self.resource(),
+                     self.resource(app_id='979', desc='Other product synopsis', cover='invalid')))
+        result = DramaMetadataResolver(query)([self.material()])[0]
+        self.assertEqual((result['drama_status'], result['macro_desc']), ('matched', '繁體劇情簡介'))
+        self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('available', DRAMA_COVER))
+
+    def test_other_product_cannot_fill_missing_material_metadata(self):
+        query = Mock(return_value=encoded(self.resource(app_id='979')))
+        result = DramaMetadataResolver(query)([self.material()])[0]
+        self.assertEqual((result['drama_status'], result['macro_name'], result['macro_desc']), ('missing', '', ''))
+        self.assertEqual(result['drama_cover_status'], 'missing')
+
+    def test_same_content_and_language_resolve_separately_for_each_product(self):
+        query = Mock(return_value=encoded(self.resource(), self.resource(app_id=979, desc='Other synopsis')))
+        result = DramaMetadataResolver(query)([self.material(), self.material(app_id=979)])
+        self.assertEqual([r['macro_desc'] for r in result], ['繁體劇情簡介', 'Other synopsis'])
+        self.assertEqual([r['drama_status'] for r in result], ['matched', 'matched'])
+        self.assertEqual(query.call_count, 2)
+        self.assertTrue(all(any('r.app_id=%s AND' % app_id in call.args[0] for call in query.call_args_list)
+                            for app_id in ('1479', '979')))
+
+    def test_missing_or_invalid_product_never_falls_back_to_global_lookup(self):
+        for app_id in (None, '', '0', '-1', '1479 OR 1=1', '1.0', '9' * 20):
+            with self.subTest(app_id=app_id):
+                query = Mock(return_value=encoded(self.resource()))
+                result = DramaMetadataResolver(query)([self.material(app_id=app_id)])[0]
+                query.assert_not_called()
+                self.assertEqual((result['drama_status'], result['macro_name'], result['macro_desc']), ('missing', '', ''))
+
+    def test_result_without_product_is_not_assigned_to_material(self):
+        resource = self.resource()
+        resource.pop('app_id')
+        result = DramaMetadataResolver(Mock(return_value=encoded(resource)))([self.material()])[0]
+        self.assertEqual(result['drama_status'], 'missing')
 
     def test_language_or_exact_content_id_mismatch_does_not_guess(self):
         query = Mock(return_value=encoded(self.resource(language='en'), self.resource(content_id='dramaa')))
@@ -51,6 +88,33 @@ class MetadataCase(unittest.TestCase):
         self.assertEqual(result['drama_status'], 'missing')
         self.assertEqual((result['macro_name'], result['macro_desc']), ('', ''))
         self.assertEqual((result['drama_cover_status'], result['drama_cover_url']), ('missing', ''))
+
+    def test_many_drama_ids_are_bounded_without_changing_results(self):
+        materials = [self.material(content_id='drama%03d' % i) for i in range(45)]
+        def query(sql):
+            values = []
+            ids = set()
+            for material in materials:
+                content_id = material['content_id']
+                literal = 'CONVERT(0x%s USING utf8mb4)' % content_id.encode().hex()
+                if literal in sql:
+                    ids.add(content_id)
+                    values.append(self.resource(content_id=content_id))
+            self.assertLessEqual(len(ids), 20)
+            return encoded(*values)
+        query = Mock(side_effect=query)
+        result = DramaMetadataResolver(query)(materials)
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(len(result), 45)
+        self.assertTrue(all(row['drama_status'] == 'matched' for row in result))
+
+    def test_total_ambiguity_bound_applies_across_batches(self):
+        materials = [self.material(content_id='drama%03d' % i) for i in range(21)]
+        batches = [encoded(*(self.resource(desc=str(i)) for i in range(600))),
+                   encoded(*(self.resource(desc=str(i)) for i in range(600, 1001)))]
+        with self.assertRaises(WorkflowError) as caught:
+            DramaMetadataResolver(Mock(side_effect=batches))(materials)
+        self.assertEqual(caught.exception.code, 'drama_query_failed')
 
     def test_conflicting_metadata_is_visible_and_not_randomly_selected(self):
         query = Mock(return_value=encoded(self.resource(), self.resource(desc='Different description')))
@@ -146,7 +210,7 @@ class AssociationWorkflowCase(unittest.TestCase):
     def setUp(self):
         WorkflowCase.setUp(self)
         self.material.update(source_job_id='', source_kind='', macro_name='video filename', macro_desc='', language='zh-TW')
-        self.drama = dict(content_id=self.material['content_id'], language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER)
+        self.drama = dict(app_id=self.material['app_id'], content_id=self.material['content_id'], language='zh-tw', name='繁體劇名', desc='繁體劇情簡介', cover=DRAMA_COVER)
         self.drama_query = Mock(side_effect=lambda sql: encoded(self.drama))
         self.source.drama_resolver = DramaMetadataResolver(self.drama_query)
 

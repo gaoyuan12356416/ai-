@@ -6,14 +6,26 @@ from .templates import WorkflowError
 
 
 class DramaMetadataResolver:
+    # A hundred videos may span ~80 dramas and tens of thousands of episode
+    # rows. Bound each index-range read without weakening the 8-second timeout.
+    CONTENT_IDS_PER_QUERY = 20
+
     def __init__(self, query_runner, schema='kunlunads_dev'):
         if not re.fullmatch(r'[A-Za-z0-9_]+', schema):
             raise ValueError('Invalid drama schema')
         self.query_runner, self.schema = query_runner, schema
 
+    @staticmethod
+    def identity(material):
+        app_id = str(material.get('app_id') or '').strip()
+        content_id = str(material.get('content_id') or '').strip()
+        language = str(material.get('language') or '').strip().casefold()
+        if re.fullmatch(r'[1-9][0-9]{0,18}', app_id) and 0 < len(content_id) <= 256 and 0 < len(language) <= 32:
+            return app_id, content_id, language
+        return None
+
     def __call__(self, materials):
-        pairs = {(m['content_id'].strip(), m['language'].strip().casefold()) for m in materials
-                 if 0 < len(m['content_id'].strip()) <= 256 and 0 < len(m['language'].strip()) <= 32}
+        pairs = {self.identity(m) for m in materials} - {None}
         matches = {key: set() for key in pairs}
         covers = {key: set() for key in pairs}
         invalid_covers = set()
@@ -21,21 +33,33 @@ class DramaMetadataResolver:
             # Resource rows repeat per episode. DISTINCT collapses identical metadata,
             # while conflicting versions remain visible and must not be guessed.
             literal = lambda value: 'CONVERT(0x%s USING utf8mb4) COLLATE utf8mb4_unicode_ci' % value.encode('utf-8').hex()
-            ids = ','.join(literal(value) for value in sorted({key[0] for key in pairs}))
-            languages = ','.join(literal(value) for value in sorted({key[1] for key in pairs}))
-            sql = ("SELECT DISTINCT HEX(JSON_OBJECT('content_id',r.content_id,"
+            sql_template = ("SELECT DISTINCT HEX(JSON_OBJECT('app_id',CAST(r.app_id AS CHAR),'content_id',r.content_id,"
                    "'language',LOWER(TRIM(r.language)),'name',TRIM(COALESCE(r.name,'')),"
                    "'desc',TRIM(COALESCE(r.`desc`,'')),'cover',TRIM(COALESCE(r.cover,'')))) "
                    "FROM `%s`.ads_drama_resource r FORCE INDEX (content_id) "
-                   "WHERE r.content_id IN (%s) AND LOWER(TRIM(r.language)) IN (%s) LIMIT 1001"
-                   % (self.schema, ids, languages))
+                   "WHERE r.app_id=%s AND r.content_id IN (%s) AND LOWER(TRIM(r.language)) IN (%s) LIMIT 1001"
+                   )
             try:
-                rows = self.query_runner(sql)
-                if len(rows) > 1000:
-                    raise ValueError('Ambiguous metadata result exceeds bound')
+                unique_rows = {}
+                # The same content ID can be distributed by several products.
+                # Scope both the SQL and returned identity to the material's app.
+                for app_id in sorted({key[0] for key in pairs}):
+                    app_pairs = {key for key in pairs if key[0] == app_id}
+                    content_ids = sorted({key[1] for key in app_pairs})
+                    languages = ','.join(literal(value) for value in sorted({key[2] for key in app_pairs}))
+                    for start in range(0, len(content_ids), self.CONTENT_IDS_PER_QUERY):
+                        ids = ','.join(literal(value) for value in content_ids[start:start + self.CONTENT_IDS_PER_QUERY])
+                        rows = self.query_runner(sql_template % (self.schema, app_id, ids, languages))
+                        if len(rows) > 1000:
+                            raise ValueError('Ambiguous metadata result exceeds bound')
+                        for row in rows:
+                            unique_rows[row[0]] = row
+                        if len(unique_rows) > 1000:
+                            raise ValueError('Ambiguous metadata result exceeds bound')
+                rows = unique_rows.values()
                 for row in rows:
                     value = json.loads(bytes.fromhex(row[0]).decode('utf-8'))
-                    key = (str(value['content_id']), str(value['language']).strip().casefold())
+                    key = (str(value.get('app_id') or ''), str(value['content_id']), str(value['language']).strip().casefold())
                     # Verify exact content IDs in Python too; SQL collation may ignore case.
                     if key in matches:
                         matches[key].add((str(value.get('name') or '').strip(),
@@ -53,7 +77,7 @@ class DramaMetadataResolver:
             except Exception:
                 raise WorkflowError('drama_query_failed','剧集信息查询暂不可用，请稍后重试',503) from None
         for material in materials:
-            key = (material['content_id'].strip(), material['language'].strip().casefold())
+            key = self.identity(material)
             values = matches.get(key, set())
             material['macro_name'] = material['macro_desc'] = ''
             material['drama_status'] = 'matched' if len(values) == 1 else 'ambiguous' if values else 'missing'
