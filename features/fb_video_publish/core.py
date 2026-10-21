@@ -602,8 +602,9 @@ class Store:
             return {"ok": True, "task_id": task["task_id"], "status": "stage_complete"}
 
     def begin_attempt(self, task, credential_id, fb_user_id):
-        """Durable intent before the first byte can reach Graph."""
+        """Renew a current claim and persist intent before any Graph write."""
         now = stamp(self.now_fn())
+        until = stamp(self.now_fn() + timedelta(seconds=1200))
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("""SELECT 1 FROM fb_video_task WHERE task_id=? AND status='running'
@@ -611,6 +612,14 @@ class Store:
             if not current:
                 conn.commit()
                 return None
+            if conn.execute("SELECT 1 FROM fb_video_attempt WHERE task_id=? AND result_kind='started'",
+                            (task["task_id"],)).fetchone():
+                conn.commit()
+                return None
+            # There may be more than eight credentials. Renew only while the
+            # existing lease is valid, after the prior write has a saved result.
+            conn.execute("UPDATE fb_video_task SET execution_until=? WHERE task_id=?",
+                         (until, task["task_id"]))
             attempt_id = conn.execute("""INSERT INTO fb_video_attempt(task_id,lease_token,credential_id,fb_user_id,
                 result_kind,created_at_utc) VALUES(?,?,?,?,'started',?)""",
                 (task["task_id"], task["claim_token"], str(credential_id), str(fb_user_id), now)).lastrowid

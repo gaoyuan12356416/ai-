@@ -290,9 +290,10 @@ class PoolTests(Fixture):
 
     def test_explicit_failure_does_not_retry_next_slot_takes_next(self):
         self.enabled(["21", "22"]); self.due(); self.ready()
-        worker = self.worker(outcomes=[GraphResult("definite_failure", error_code="fb_graph_100")])
+        worker = self.worker(outcomes=[GraphResult("definite_failure", error_code="fb_graph_100"),
+                                       GraphResult("definite_failure", error_code="fb_graph_368")])
         worker.execute_next()
-        self.assertEqual(1, len(worker.calls))
+        self.assertEqual(2, len(worker.calls))
         self.assertEqual(1, self.listing("failed")["counts"]["failed"])
         self.assertEqual(1, self.due()["slots_created"])
         self.assertEqual(["21", "22"], [t["material_id"] for t in self.tasks()])

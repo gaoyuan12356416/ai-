@@ -121,7 +121,6 @@ class Worker:
                                                              message="发布前Page、素材或成片复核失败，未调用平台"))
         if not credentials:
             return self.store.record_outcome(task, GraphResult("definite_failure", error_code="page_authorization_unavailable", message="Page已无有效授权，未调用平台"))
-        credentials = credentials[:8]
         for index, credential in enumerate(credentials):
             self.rate_limit()
             attempt_id = self.store.begin_attempt(task, credential.credential_id, credential.fb_user_id)
@@ -131,11 +130,18 @@ class Worker:
                 outcome = self.graph.publish_video(task["page_id"], credential, media_url, task["caption"])
             except Exception:
                 outcome = GraphResult("unknown", error_code="graph_outcome_unknown", message="平台请求结果无法确认，已停止重试")
-            if outcome.kind == "success" and not str(outcome.post_id or "").strip():
+            if str(outcome.post_id or "").strip():
+                # A receipt always stops further writes, even if an adapter also
+                # reports an error. Reconciliation owns the next step.
+                outcome = GraphResult("success", post_id=outcome.post_id, trace_id=outcome.trace_id)
+            elif outcome.kind == "success":
                 outcome = GraphResult("unknown", error_code="graph_receipt_missing", message="平台未返回有效发布标识，已停止重试")
-            retry_credential = outcome.kind == "credential_failure" or (
-                outcome.kind == "definite_failure" and outcome.error_code in {"fb_graph_10", "fb_graph_102", "fb_graph_190", "fb_graph_200"})
+            retry_credential = outcome.kind in {"credential_failure", "definite_failure"}
             final = not retry_credential or index == len(credentials) - 1
+            if retry_credential and final:
+                outcome = GraphResult(outcome.kind, error_code=outcome.error_code,
+                                      message=f"已尝试同Page全部{len(credentials)}个可用授权，均被Meta明确拒绝发布",
+                                      trace_id=outcome.trace_id)
             result = self.store.record_outcome(task, outcome, credential_id=credential.credential_id,
                                                fb_user_id=credential.fb_user_id, final=final, attempt_id=attempt_id)
             if final or result.get("status") == "stale_claim":

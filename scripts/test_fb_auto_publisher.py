@@ -1,4 +1,8 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import requests
 
 from features.fb_auto_posts.publisher import AutoPostExecutor, GraphResult, RequestsGraphTransport
 from features.fb_auto_posts.links import FBPostLinkError, build_short_url, build_w2a_url
@@ -32,6 +36,27 @@ class Graph:
 
 
 class PublisherTests(unittest.TestCase):
+    def test_transport_only_explicit_client_rejections_allow_failover(self):
+        credential = PageCredential("10001", "7", "1", "test-only-token")
+        cases = [(400, {"error": {"code": 368, "fbtrace_id": "safe-trace"}}, "definite_failure"),
+                 (403, {"error": {"code": 200}}, "definite_failure"),
+                 (400, {}, "unknown"), (404, {"error": "proxy error"}, "unknown"),
+                 (500, {"error": {"code": 368}}, "unknown"), (503, {}, "unknown"),
+                 (302, {}, "unknown"), (200, {}, "unknown"),
+                 (500, {"id": "receipt", "error": {"code": 368}}, "success")]
+        for status, payload, expected in cases:
+            with self.subTest(status=status, payload=payload):
+                response = SimpleNamespace(status_code=status, headers={}, json=lambda: payload)
+                session = Mock(); session.post.return_value = response
+                with patch("features.fb_auto_posts.publisher.requests.Session", return_value=session):
+                    result = RequestsGraphTransport().publish_video("10001",credential,"https://cdn.test/video.mp4","caption")
+                self.assertEqual(expected, result.kind)
+                self.assertNotIn(credential.token, repr(result))
+        for failure in (requests.Timeout(), requests.ConnectionError()):
+            session=Mock();session.post.side_effect=failure
+            with patch("features.fb_auto_posts.publisher.requests.Session",return_value=session):
+                self.assertEqual("unknown",RequestsGraphTransport().publish_video("10001",credential,"https://cdn.test/video.mp4","caption").kind)
+
     def test_graph_timeout_cannot_exceed_static_lease_budget(self):
         self.assertEqual(RequestsGraphTransport(timeout_seconds=120).timeout_seconds, 120)
         with self.assertRaises(ValueError):

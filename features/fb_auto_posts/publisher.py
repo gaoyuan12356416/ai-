@@ -77,6 +77,14 @@ class RequestsGraphTransport:
             return GraphResult("success", post_id=post_id, trace_id=trace_id)
         if 200 <= int(response.status_code) < 300:
             return GraphResult("unknown", error_code="fb_graph_id_missing", message="Meta成功响应缺少发布ID，结果待人工确认")
+        # Only a structured Graph client rejection proves the write failed.
+        # Proxy/server failures and malformed error bodies cannot authorize a
+        # second write with another credential.
+        error = payload.get("error") if isinstance(payload, Mapping) else None
+        if not (400 <= int(response.status_code) < 500 and isinstance(error, Mapping)
+                and str(error.get("code") or "").isdigit()):
+            return GraphResult("unknown", error_code="fb_graph_response_outcome_unknown",
+                               message="Meta未明确确认发布失败，结果待人工确认", trace_id=trace_id)
         code, message_text = self._safe_error(payload)
         if isinstance(payload, Mapping) and isinstance(payload.get("error"), Mapping):
             trace_id = str(payload["error"].get("fbtrace_id") or trace_id)[:128]

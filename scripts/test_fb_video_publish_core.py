@@ -309,9 +309,46 @@ class WorkerTests(Fixture):
         worker=self.worker([GraphResult("unknown")])
         self.assertEqual("unknown",worker.execute_next()["status"])
         self.assertEqual("no_pending",worker.execute_next()["status"]);self.assertEqual(1,len(worker.calls))
-    def test_noncredential_failure_stops_rotation(self):
-        self.submit();self.ready();worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_100")])
-        self.assertEqual("failed",worker.execute_next()["status"]);self.assertEqual(1,len(worker.calls))
+    def test_definite_failure_rotates_until_all_credentials_rejected(self):
+        self.submit();self.ready();worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_100"),
+                                                     GraphResult("definite_failure",error_code="fb_graph_368")])
+        self.assertEqual("failed",worker.execute_next()["status"]);self.assertEqual(2,len(worker.calls))
+        self.assertEqual("fb_graph_368",self.tasks()[0]["error_code"])
+        self.assertIn("全部2个",self.tasks()[0]["error_message"])
+        with self.store.connect() as c:
+            self.assertEqual([("0","fb_graph_100"),("1","fb_graph_368")],
+                             [tuple(r) for r in c.execute("SELECT credential_id,error_code FROM fb_video_attempt ORDER BY id")])
+    def test_368_rotates_then_unknown_stops_remaining_credentials(self):
+        self.submit();self.ready();worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_368"),GraphResult("unknown")])
+        worker.pages.eligible_credentials=lambda p: [SimpleNamespace(credential_id=str(i),fb_user_id=str(i),token="test-"+str(i)) for i in range(3)]
+        self.assertEqual("unknown",worker.execute_next()["status"]);self.assertEqual(2,len(worker.calls))
+    def test_all_credentials_including_ninth_and_later_keep_current_lease(self):
+        self.submit();self.ready()
+        def slow_response():
+            self.now+=timedelta(seconds=119)
+            self.assertEqual(0,self.store.tick()["unknown_marked"])
+            self.assertIsNone(self.store.claim("execute","competing"))
+        worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_368")]*11+
+                           [GraphResult("success",post_id="final-receipt")],before=slow_response)
+        worker.pages.eligible_credentials=lambda p: [SimpleNamespace(credential_id=str(i),fb_user_id=str(i),token="test-"+str(i)) for i in range(12)]
+        self.assertEqual("submitted",worker.execute_next()["status"])
+        self.assertEqual(12,len(worker.calls))
+        self.assertEqual(12,len({call[1].credential_id for call in worker.calls}))
+        self.assertEqual("final-receipt",self.tasks()[0]["graph_post_id"])
+        with self.store.connect() as c:
+            self.assertEqual(12,c.execute("SELECT COUNT(*) FROM fb_video_attempt").fetchone()[0])
+    def test_receipt_with_failure_never_rotates(self):
+        self.submit();self.ready();worker=self.worker([GraphResult("definite_failure",post_id="receipt",error_code="fb_graph_368")])
+        self.assertEqual("submitted",worker.execute_next()["status"]);self.assertEqual(1,len(worker.calls))
+    def test_expired_claim_cannot_renew_or_write(self):
+        self.submit();self.ready();claim=self.store.claim("execute","old")
+        self.now+=timedelta(seconds=1201)
+        self.assertIsNone(self.store.begin_attempt(claim,"1","1"))
+        self.assertEqual(1,self.store.tick()["unknown_marked"])
+    def test_inflight_intent_cannot_start_another_token(self):
+        self.submit();self.ready();claim=self.store.claim("execute","old")
+        self.assertIsNotNone(self.store.begin_attempt(claim,"1","1"))
+        self.assertIsNone(self.store.begin_attempt(claim,"2","2"))
     def test_credential_failure_can_rotate(self):
         self.submit();self.ready();worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_190"),GraphResult("success",post_id="p")])
         self.assertEqual("submitted",worker.execute_next()["status"]);self.assertEqual(2,len(worker.calls))
@@ -349,7 +386,8 @@ class WorkerTests(Fixture):
     def test_failed_predecessor_does_not_add_success_interval(self):
         self.submit(self.req([("21","11"),("22","11")],interval_minutes=10));self.ready()
         self.now+=timedelta(minutes=20)
-        worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_100"),GraphResult("success",post_id="p2")])
+        worker=self.worker([GraphResult("definite_failure",error_code="fb_graph_100"),
+                            GraphResult("definite_failure",error_code="fb_graph_368"),GraphResult("success",post_id="p2")])
         self.assertEqual("failed",worker.execute_next()["status"])
         self.assertEqual("submitted",worker.execute_next()["status"])
     def test_no_call_until_link_verified(self):
