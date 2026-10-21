@@ -73,27 +73,41 @@
   }
 
   async function materialPickerDialog(initial, apply, options={}) {
-    let staged=new Map(initial),items=[],cursor="",next="",stack=[],generation=0;
+    if($("materialPicker")){$("materialPicker").focus();return;}
+    let staged=new Map(initial),items=[],cursor="",next="",stack=[],generation=0,loading=false,emptyReason="";
     const languageChoices=langOptions("全部剧语言",options.language || "")+(options.language&&!languages.has(options.language)?`<option value="${esc(options.language)}" selected>${esc(lang(options.language))}</option>`:"");
     const modal=dialog("materialPicker",options.title || "选择素材（可多选）",
-      `<div id="pickerError" class="error" role="alert" hidden></div><div class="filters"><input id="materialSearch" placeholder="搜索素材名称、ID 或剧名" aria-label="搜索素材"><select id="materialLanguage" aria-label="素材语言">${languageChoices}</select><button id="materialSearchButton" class="button">搜索</button></div><div class="row spread"><span class="helper" id="pickerCount"></span><div class="actions"><button id="pickCurrent" class="button small">全选当前页</button><button id="clearCurrent" class="button small">取消当前页</button></div></div><div id="materialChoices" class="pick-list"></div><div class="pager"><span class="helper">跨页和搜索保留已选项，最多 200 条。</span><div class="actions"><button id="materialsPrev" class="button small">上一页</button><button id="materialsNext" class="button small">下一页</button></div></div>`,
+      `<div id="pickerError" class="error" role="alert" hidden></div><div class="filters"><input id="materialSearch" placeholder="素材完整ID（精确）、素材名称或剧名" aria-label="搜索素材"><select id="materialLanguage" aria-label="素材语言">${languageChoices}</select><button id="materialSearchButton" class="button">搜索</button></div><div class="row spread"><span class="helper" id="pickerCount" role="status"></span><div class="actions"><button id="pickCurrent" class="button small">全选当前页</button><button id="clearCurrent" class="button small">取消当前页</button></div></div><div id="materialChoices" class="pick-list"></div><div class="pager"><span class="helper">纯数字按完整素材ID精确查询。跨页和搜索保留已选项，最多 200 条。</span><div class="actions"><button id="materialsPrev" class="button small">上一页</button><button id="materialsNext" class="button small">下一页</button></div></div>`,
       `<button class="button" data-close>取消</button><button id="applyMaterials" class="button primary">${esc(options.applyLabel || "使用所选素材")}</button>`);
     if(options.language)$("materialLanguage").disabled=true;
     const eligible=m=>!options.language || m.language===options.language;
+    function lock(){
+      if(!modal.isConnected)return;
+      $("materialSearch").disabled=loading;$("materialLanguage").disabled=loading||!!options.language;
+      $("materialSearchButton").disabled=loading;$("materialSearchButton").textContent=loading?"搜索中…":"搜索";
+      $("materialsPrev").disabled=loading||!stack.length;$("materialsNext").disabled=loading||!next;
+      $("pickCurrent").disabled=loading||!items.length;$("clearCurrent").disabled=loading||!items.length;
+      $("materialChoices").setAttribute("aria-busy",String(loading));
+    }
     function paint(){
-      $("materialChoices").innerHTML=items.map(m=>`<label class="pick"><input type="checkbox" data-material="${esc(m.material_id)}"${staged.has(m.material_id)?" checked":""}${eligible(m)?"":" disabled"}><span><strong>${esc(m.material_name)}</strong><small>${esc(m.material_id)} · ${esc(lang(m.language))} · ${Number(m.duration_seconds || 0)} 秒</small><small>${esc(m.drama_name || "")}${eligible(m)?"":" · 剧语言不匹配"}</small></span></label>`).join("") || '<div class="empty">没有符合条件的素材</div>';
-      $("pickerCount").textContent=`已选择 ${staged.size} 条素材`;$("materialsPrev").disabled=!stack.length;$("materialsNext").disabled=!next;
+      $("materialChoices").innerHTML=items.map(m=>`<label class="pick"><input type="checkbox" data-material="${esc(m.material_id)}"${staged.has(m.material_id)?" checked":""}${eligible(m)?"":" disabled"}><span><strong>${esc(m.material_name)}</strong><small>${esc(m.material_id)} · ${esc(lang(m.language))} · ${Number(m.duration_seconds || 0)} 秒</small><small>${esc(m.drama_name || "")}${eligible(m)?"":" · 剧语言不匹配"}</small></span></label>`).join("") || `<div class="empty">${esc(emptyReason || "没有符合条件的素材")}</div>`;
+      $("pickerCount").textContent=`已选择 ${staged.size} 条素材`;lock();
     }
     async function load(){
+      if(loading||!modal.isConnected)return;
       const gen=++generation;errorAt("pickerError","");
       const query=new URLSearchParams({q:$("materialSearch").value,language:options.language || $("materialLanguage").value,cursor,limit:"50"});
-      try{const data=await api("/materials?"+query);if(!modal.isConnected||gen!==generation)return;items=data.items || [];next=data.next_cursor || "";paint();}
-      catch(err){if(modal.isConnected&&gen===generation)errorAt("pickerError",err);}
+      loading=true;items=[];next="";emptyReason="";lock();
+      $("materialChoices").innerHTML='<div class="empty" role="status">正在搜索素材，请稍候…</div>';
+      $("pickerCount").textContent=`已选择 ${staged.size} 条素材，正在查询…`;
+      try{const data=await api("/materials?"+query);if(!modal.isConnected||gen!==generation)return;items=data.items || [];next=data.next_cursor || "";emptyReason=data.empty_reason || "";}
+      catch(err){if(modal.isConnected&&gen===generation){emptyReason="搜索未完成，请点击搜索重试。已选素材已保留。";errorAt("pickerError",err);}}
+      finally{if(modal.isConnected&&gen===generation){loading=false;paint();}}
     }
     $("materialChoices").onchange=e=>{const id=e.target.dataset.material;if(id){e.target.checked?staged.set(id,items.find(m=>m.material_id===id)):staged.delete(id);$("pickerCount").textContent=`已选择 ${staged.size} 条素材`;}};
-    $("materialSearchButton").onclick=()=>{cursor="";stack=[];load();};$("materialLanguage").onchange=()=>{cursor="";stack=[];load();};
+    $("materialSearchButton").onclick=()=>{if(loading)return;cursor="";stack=[];load();};$("materialLanguage").onchange=()=>{if(loading)return;cursor="";stack=[];load();};
     $("materialSearch").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();$("materialSearchButton").click();}};
-    $("materialsNext").onclick=()=>{stack.push(cursor);cursor=next;load();};$("materialsPrev").onclick=()=>{cursor=stack.pop() || "";load();};
+    $("materialsNext").onclick=()=>{if(loading||!next)return;stack.push(cursor);cursor=next;load();};$("materialsPrev").onclick=()=>{if(loading||!stack.length)return;cursor=stack.pop() || "";load();};
     $("pickCurrent").onclick=()=>{items.filter(eligible).forEach(m=>staged.set(m.material_id,m));paint();};
     $("clearCurrent").onclick=()=>{items.forEach(m=>staged.delete(m.material_id));paint();};
     $("applyMaterials").onclick=()=>{if(staged.size>200){errorAt("pickerError",new Error("一次最多选择 200 条素材。"));return;}modal.close();apply(staged);};

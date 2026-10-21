@@ -382,6 +382,46 @@ class SourceTests(unittest.TestCase):
         self.assertLess(sql.index("LOWER(COALESCE(ds.name,''))"), sql.index("LIMIT"))
         self.assertEqual(params.count("Only Drama Title"), 2)
 
+    def test_numeric_search_is_exact_indexed_and_keeps_eligibility_filters(self):
+        repo, mysql, _ = source([[raw("3174214", language="ja")]])
+        result = repo.search_materials(dict(search="3174214", language="ja", uploader_id="789"))
+        self.assertEqual([m["material_id"] for m in result["items"]], ["3174214"])
+        sql, params = mysql.calls[0]
+        self.assertIn("AND s.id=%s", sql)
+        self.assertIn(3174214, params)
+        self.assertNotIn("LOCATE", sql)
+        self.assertNotIn("ads_drama_info ds", sql)
+        for guard in ("s.video_duration>0", "s.is_delete=0", "ads_facebook_post_blacklist", "d.release_status=1"):
+            self.assertIn(guard, sql)
+        self.assertIn("ja", params)
+        self.assertIn("789", params)
+        self.assertFalse(result["has_more"])
+
+    def test_unavailable_exact_id_explains_duration_without_admitting_it(self):
+        repo, mysql, _ = source([[], [raw("3174214", is_delete=0, language="ja", video_duration=0)]])
+        result = repo.search_materials(dict(search="3174214", language="ja"))
+        self.assertEqual(result["items"], [])
+        self.assertIn("时长缺失", result["empty_reason"])
+        self.assertEqual(len(mysql.calls), 2)
+        sql, params = mysql.calls[1]
+        self.assertIn("s.id=%s", sql)
+        self.assertIn("s.product=%s", sql)
+        self.assertIn("s.data_source=%s", sql)
+        self.assertEqual(params, [3174214, "6", "Dramawave"])
+
+    def test_missing_or_wrong_language_id_does_not_fall_back_to_scan(self):
+        repo, mysql, _ = source([[], []])
+        result = repo.search_materials(dict(search="999999999"))
+        self.assertIn("未找到", result["empty_reason"])
+        self.assertTrue(all("LOCATE" not in sql for sql, _ in mysql.calls))
+        repo, _, _ = source([[], [raw("42", is_delete=0)]])
+        result = repo.search_materials(dict(search="42", language="ja"))
+        self.assertIn("剧语言", result["empty_reason"])
+        repo, mysql, _ = source()
+        with self.assertRaises(SourceError):
+            repo.search_materials(dict(search="9" * 20))
+        self.assertFalse(mysql.calls)
+
     def test_strict_metadata_conflict_and_optional_description(self):
         repo, mysql, _ = source([[raw()], [raw()]])
         mysql.bad_desc = True

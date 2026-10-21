@@ -288,7 +288,15 @@ class SourceRepository:
         filters = [search, language, uploader]
         fingerprint = hashlib.sha256(json.dumps(filters, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         extra, params, boundary = [], [], ""
-        if search:
+        numeric_search = bool(re.fullmatch(r"[0-9]+", search))
+        if numeric_search:
+            if len(search) > 19:
+                raise SourceError("invalid_request", "素材ID不能超过19位")
+            # An ID lookup must never scan names/dramas (especially when the
+            # requested row fails eligibility and a LIMIT cannot stop a scan).
+            extra.append("AND s.id=%s")
+            params.append(int(search))
+        elif search:
             extra.append(f"""AND (
                 LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0
                 OR EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
@@ -338,7 +346,37 @@ class SourceRepository:
         if has_more and scanned:
             value = {"v": 1, "before": str(scanned[-1]["material_id"]), "bound": boundary or raw_ids[0], "filter": fingerprint}
             next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
-        return {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
+        result = {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
+        if numeric_search and not items and not cursor:
+            result["empty_reason"] = self._exact_search_reason(int(search), language, uploader)
+        return result
+
+    def _exact_search_reason(self, material_id: int, language: str, uploader: str) -> str:
+        # Explain ineligible IDs without weakening the publication guards or
+        # exposing records outside this catalog. This is one indexed row read.
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ s.is_delete,s.video_duration,
+                   COALESCE(s.language,'') language,COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
+              FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+             WHERE s.id=%s AND s.data_source=%s AND s.product=%s AND s.type=2 LIMIT 1
+        """, [material_id, "6", "Dramawave"])
+        if not rows:
+            return "未找到这个素材ID，请核对完整ID。"
+        row = rows[0]
+        if str(row.get("is_delete")) != "0":
+            return "该素材已删除，不能选择发布。"
+        if language and page_language(row.get("language")) != language:
+            return "该素材的剧语言与当前筛选不符，请调整语言后搜索。"
+        if uploader and str(row.get("uploader_id")) != uploader:
+            return "该素材的上传人与当前筛选不符。"
+        try:
+            duration = Decimal(str(row.get("video_duration") or 0))
+            valid_duration = duration.is_finite() and 0 < duration <= 3600
+        except InvalidOperation:
+            valid_duration = False
+        if not valid_duration:
+            return "已找到该素材，但源库的视频时长缺失或不在0至3600秒范围内，暂不能选择发布。"
+        return "已找到该素材，但未满足上架、黑名单、视频来源或同语言剧集信息等发布条件。"
 
     def get_materials(self, material_ids, need_desc: bool = False) -> dict[str, dict]:
         wanted = _ids(material_ids, MAX_MATERIALS, "素材")
