@@ -379,7 +379,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     pool_enabled = str(env.get("FB_VIDEO_POOL_ENABLED", "0")) == "1"
     runtime.manual = ManualService(manual_store, manual_sources, token, live_enabled=manual_live,
         prepare_enabled=prebuild_enabled, v2_enabled=str(env.get("FB_VIDEO_V2_ENABLED", "0")) == "1",
-        pool_enabled=pool_enabled)
+        pool_enabled=pool_enabled, excel_enabled=str(env.get("FB_VIDEO_EXCEL_ENABLED", "0")) == "1")
     identity_resolver = IdentityClient(env).resolve
     runtime.manual.pool.identity_resolver = identity_resolver
     runtime.video_pool_scheduler = PoolScheduler(runtime.manual, identity_resolver,

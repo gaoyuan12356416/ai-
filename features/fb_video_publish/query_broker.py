@@ -18,7 +18,7 @@ BLACKLIST_SCHEMA = "ads_setting"
 TABLES = {
     "ads_facebook_page_group", "ads_apps_setting", "ads_facebook_page_group_ins",
     "ads_facebook_page_post", "ads_facebook_post_publish_queue", "ads_custom_source",
-    "ads_drama_info", "ads_facebook_post_blacklist", "ads_drama_resource",
+    "ads_drama_info", "ads_facebook_post_blacklist", "ads_drama_resource", "ads_facebook_info",
 }
 
 _TOKEN = re.compile(

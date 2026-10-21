@@ -27,6 +27,8 @@ def route(method, path):
     """Return authorized navigation keys and whether fresh mapping is needed."""
     suffix = path[len(PREFIX):] if path.startswith(PREFIX + "/") else ""
     if method == "GET":
+        if re.fullmatch(r"/excel/(?:operations/[a-f0-9-]{32,36}|batches/[a-f0-9]{32})", suffix):
+            return ("fbPageManagement",), False
         if suffix == "/pages/available":
             return ("fbPageManagement",), True
         if suffix == "/pages":
@@ -46,7 +48,9 @@ def route(method, path):
         if re.fullmatch(r"/operations/[a-fA-F0-9-]{32,36}", suffix):
             return ("fbVideoPublish", "fbVideoPublishRecords"), False
     if method == "POST":
-        if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool/(?:settings|enable|pause|items(?:/preview)?|remove|move)", suffix):
+        if suffix in ("/excel/preview", "/excel/batches"):
+            return ("fbPageManagement",), True
+        if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool/(?:settings|enable|pause|items(?:/preview|/resolve)?|remove|move)", suffix):
             return ("fbPageManagement",), True
         if suffix == "/pages" or re.fullmatch(r"/pages/[1-9][0-9]{0,40}(?:/delete)?", suffix):
             return ("fbPageManagement",), True

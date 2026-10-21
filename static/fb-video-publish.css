@@ -20,3 +20,6 @@ dialog{border:1px solid #dce5f2;border-radius:18px;padding:0;width:min(980px,cal
 
 
 @media(max-width:700px){.material-schedule{max-width:100%}.pool-settings{padding:12px 0}.pool-item{padding:12px}.pool-tabs .button{flex:1}.pool-settings>.row>.actions{width:100%}.pool-settings>.row>.actions .button{flex:1}.pool-item>.row:last-child .actions{width:100%;justify-content:flex-start}#poolPendingActions>.actions{width:100%}#poolPendingActions .button{flex:1;padding:8px}#poolStatus{overflow-wrap:anywhere}}
+
+.pool-id-admission{margin:16px 0}.pool-id-admission textarea{min-height:130px;max-height:280px;font-family:ui-monospace,Consolas,monospace}.pool-id-admission .row{margin-top:12px}.pool-id-admission ul,#excelPublish ul{padding-left:22px;overflow-wrap:anywhere}.excel-upload{align-items:flex-end;flex-wrap:wrap}.excel-upload .field{flex:1;min-width:220px}#excelPublish .task-card h3{margin-top:0}#excelPublish .table-wrap{max-height:300px}#excelPublish #excelPendingText{overflow-wrap:anywhere}
+@media(max-width:700px){.section-head>.actions{flex-wrap:wrap;justify-content:flex-end}.excel-upload .field{width:100%;min-width:0;flex-basis:100%}.excel-upload>.button{flex:1}#poolAdmissionResult{max-height:270px;overflow:auto}}
