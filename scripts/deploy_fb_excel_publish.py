@@ -272,7 +272,8 @@ def accepted_new_protocol():
             base.require(index <= 10000, "Batch history exceeds safe full-restore audit; retain compatible backend")
             request = json.loads(row[0])
             base.require(isinstance(request, dict), "Cannot verify accepted batch protocol")
-            if request.get("schema_version", 1) not in (1, 2):
+            version = request.get("schema_version", 1)
+            if type(version) is not int or version not in (1, 2):
                 return True
     return False
 
