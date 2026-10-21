@@ -38,3 +38,12 @@
 `test_social_backend_scope.py` 覆盖旧系统同 ID 混入、失败任务、未来发布、手动短链保留、手动发布与短链区分、全局用户冲突、名称变化不影响归属、原始已同步日期过滤后为零、来源字段缺失以及保留来源维度的 SQL。
 
 使用 `deploy_social_daily_owner_card.py` 从 GitHub 完整 SHA 部署，基线为上一版 `9b4f453`。保存旧 release 与 delivery.sqlite3 备份，预览核验后切换日报链接；回滚仅恢复上一版代码链接，不恢复数据库、不撤回消息。旧基线包含来源冲突缺陷，回滚后应先禁用正式业绩发送或继续使用新口径预览，不能将旧结果当成新范围。
+
+## 线上验收（2026-10-21）
+
+- 代码版本：`890312d025dff43d1582fb33b53e015a77d1a8fc`，已推送 GitHub，再由 CPU 拉取完整提交部署。相关测试共 170 项：168 通过、2 项既有跳过；编译与 diff 检查通过。
+- CPU 从真实只读来源重新采集 2026-10-20 UTC 数据，与冻结回放一致：收入 $1,475.37，发布 298，激活 979，点击 10,525，访问 19,888，转化 105。完整性检查通过。
+- 修订私聊使用独立 preview ID `ai-backend-only-20261021`，收件人郜远（后台用户 `892fd2e8`）。飞书返回成功，消息 ID `om_x100b62b7301a3ca4c1cbc890bec7668`；消息读取接口确认日期、金额、AI 后台和手动短链口径正确，且没有“待核实”或范围外 $4,593.51。原命令重复执行返回 `already_sent`，没有重复发送。
+- 冻结报告、发送回执及读取校验保存在 `/mnt/data-disk/youtube-publisher-daily-report/private-previews/ai-backend-only-20261021/892fd2e8/`。原正式日报五个文件及正式投递数据库共六项 SHA256 均未变化。
+- 当前日报 release 为 `/mnt/data-disk/youtube-publisher-daily-report/releases/890312d025dff43d1582fb33b53e015a77d1a8fc-owner-card`。定时器 active，下次运行时间为 2026-10-22 11:00 Asia/Shanghai。未重启主 API，也未更改发布队列或发布记录。
+- 备份与部署清单为 `/mnt/data-disk/youtube-publisher-daily-report/backups/20261021T035301Z-owner-card/deployment.json`；需要回滚时，用本次源码内的部署脚本 `--rollback` 指向此清单。
