@@ -46,3 +46,8 @@ Rollback with the same release script and `--rollback <actual manifest.json>`.
 This hash-checks and restores only code, preserves current DB and short links,
 drains work and restores original unit states. Do not restore the DB backup.
 Record exact release, backup path and production readback below after deployment.
+
+Local checks: 181 passed, one optional live-snapshot test skipped. CPU's older
+SQLite cannot construct one legacy migration fixture with DROP COLUMN; that
+fixture is explicitly version-gated (it passes locally). This patch does not
+change the schema or require SQLite DROP COLUMN in production.

@@ -122,6 +122,8 @@ class V2Tests(Fixture):
         self.assertEqual(before, after)
 
     def test_true_pre_pool_schema_additive_migration_preserves_old_columns(self):
+        if sqlite3.sqlite_version_info < (3, 35, 0):
+            self.skipTest("Legacy fixture construction requires SQLite DROP COLUMN (3.35+)")
         self.submit()
         with self.store.connect() as c:
             c.execute("DROP INDEX idx_fb_video_pool_task_sequence")
