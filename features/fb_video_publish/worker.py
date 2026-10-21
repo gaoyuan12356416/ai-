@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import threading
 import time
 
@@ -45,6 +46,21 @@ class Worker:
         self.link_writer, self.readback, self.rng = link_writer, readback, rng or random.SystemRandom()
         self.rate_limit = rate_limit or (lambda: None)
         self._prepare_lock = threading.Lock()
+
+    def _task_credentials(self, task, snapshot=None):
+        """Re-read only the credential scope frozen for this publication."""
+        snap = json.loads(task["snapshot_json"]) if snapshot is None else snapshot
+        mode = snap.get("credential_mode", "page_pool")
+        if mode == "page_pool":
+            return self.pages.eligible_credentials(task["page_id"])
+        if mode != "operator":
+            raise DomainError("credential_policy_invalid", "任务的Token策略无效，未调用平台", 409)
+        owner = snap.get("credential_owner_id")
+        actor = snap.get("actor")
+        if (not isinstance(owner, str) or not re.fullmatch(r"[1-9][0-9]{0,30}", owner)
+                or not isinstance(actor, dict) or owner != actor.get("sub_user_id")):
+            raise DomainError("operator_identity_invalid", "个人Token的冻结操作人身份无效，未调用平台", 409)
+        return self.pages.eligible_credentials(task["page_id"], owner_user_id=owner)
 
     def prepare_next(self, worker_id="fb-video-prepare"):
         if not self.live_enabled or not self.prepare_enabled:
@@ -114,20 +130,33 @@ class Worker:
             if short_url(task["ledger_id"]) != task["short_url"]:
                 raise DomainError("short_link_identity_mismatch", "短链身份不一致", 409)
             validate_long_url(task["long_url"], task["ledger_id"])
-            credentials = self.pages.eligible_credentials(task["page_id"])
+            title = snap.get("title", "")
+            if not isinstance(title, str):
+                raise DomainError("title_invalid", "任务的视频标题无效，未调用平台", 409)
+            credentials = self._task_credentials(task, snap)
             self.rng.shuffle(credentials)
+        except DomainError as exc:
+            if exc.code in {"credential_policy_invalid", "operator_identity_invalid", "title_invalid"}:
+                return self.store.record_outcome(task, GraphResult("definite_failure", error_code=exc.code,
+                                                                 message=str(exc)))
+            return self.store.record_outcome(task, GraphResult("definite_failure", error_code="publish_preflight_failed",
+                                                             message="发布前Page、素材或成片复核失败，未调用平台"))
         except Exception:
             return self.store.record_outcome(task, GraphResult("definite_failure", error_code="publish_preflight_failed",
                                                              message="发布前Page、素材或成片复核失败，未调用平台"))
         if not credentials:
-            return self.store.record_outcome(task, GraphResult("definite_failure", error_code="page_authorization_unavailable", message="Page已无有效授权，未调用平台"))
+            personal = snap.get("credential_mode") == "operator"
+            return self.store.record_outcome(task, GraphResult("definite_failure",
+                    error_code="operator_authorization_unavailable" if personal else "page_authorization_unavailable",
+                    message="当前操作人没有该Page的有效Token，未使用其他用户授权" if personal else "Page已无有效授权，未调用平台"))
         for index, credential in enumerate(credentials):
             self.rate_limit()
             attempt_id = self.store.begin_attempt(task, credential.credential_id, credential.fb_user_id)
             if attempt_id is None:
                 return {"ok": True, "status": "stale_claim"}
             try:
-                outcome = self.graph.publish_video(task["page_id"], credential, media_url, task["caption"])
+                outcome = self.graph.publish_video(task["page_id"], credential, media_url, task["caption"],
+                                                   **({"title": title} if title else {}))
             except Exception:
                 outcome = GraphResult("unknown", error_code="graph_outcome_unknown", message="平台请求结果无法确认，已停止重试")
             if str(outcome.post_id or "").strip():
@@ -139,8 +168,9 @@ class Worker:
             retry_credential = outcome.kind in {"credential_failure", "definite_failure"}
             final = not retry_credential or index == len(credentials) - 1
             if retry_credential and final:
+                scope = "当前操作人在该Page的" if snap.get("credential_mode") == "operator" else "同Page全部"
                 outcome = GraphResult(outcome.kind, error_code=outcome.error_code,
-                                      message=f"已尝试同Page全部{len(credentials)}个可用授权，均被Meta明确拒绝发布",
+                                      message=f"已尝试{scope}{len(credentials)}个可用授权，均被Meta明确拒绝发布",
                                       trace_id=outcome.trace_id)
             result = self.store.record_outcome(task, outcome, credential_id=credential.credential_id,
                                                fb_user_id=credential.fb_user_id, final=final, attempt_id=attempt_id)
@@ -155,7 +185,7 @@ class Worker:
         if task is None:
             return {"ok": True, "status": "no_pending"}
         try:
-            credentials = self.pages.eligible_credentials(task["page_id"])
+            credentials = self._task_credentials(task)
         except Exception:
             credentials = []
         if not credentials:

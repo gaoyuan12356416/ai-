@@ -7,7 +7,7 @@ import uuid
 
 from .core import UTC, DomainError, actor_checked, canonical, digest, id_text, stamp
 from .guards import automatic_block, manual_block, published_history
-from .templates import render_preview
+from .templates import TemplateError, render_preview
 
 IDENTITY = {"config_instance_id", "expected_version"}
 ITEM_STATES = ("pending", "processing", "published", "failed", "cancelled", "removed")
@@ -276,24 +276,25 @@ class PoolService:
             conn.commit()
         return {"ok": True, "pool": result}
 
-    def _facts(self, conn, actor, pid, payload, materials):
-        config, pool = self._locked(conn, actor, pid, payload)
-        histories = {}
-        for mid in payload["material_ids"]:
-            material = materials[mid]
-            if material["language"] != config["language"]:
-                raise DomainError("language_mismatch", "素材与Page剧语言不一致", 409)
-            row = conn.execute("""SELECT 1 FROM fb_video_pool_item i LEFT JOIN fb_video_task t ON t.task_id=i.task_id
+    def _material_history(self, conn, pid, config, material):
+        mid = material["material_id"]
+        if material["language"] != config["language"]:
+            raise DomainError("language_mismatch", "素材与Page剧语言不一致", 409)
+        row = conn.execute("""SELECT 1 FROM fb_video_pool_item i LEFT JOIN fb_video_task t ON t.task_id=i.task_id
                 WHERE i.config_instance_id=? AND i.material_id=? AND (i.status='pending' OR
                   (i.status='processing' AND COALESCE(t.status,'') NOT IN ('published','failed','cancelled'))) LIMIT 1""",
-                (config["config_instance_id"], mid)).fetchone()
-            if row:
-                raise DomainError("pool_material_exists", "素材已在待发布或处理中队列", 409)
-            reason = automatic_block(conn, pid, mid) or manual_block(conn, pid, mid)
-            if reason:
-                raise DomainError(reason, "Page或素材存在未结束/结果不明任务", 409)
-            histories[mid] = published_history(conn, pid, mid)
-            render_preview(config["caption_template"], material)
+            (config["config_instance_id"], mid)).fetchone()
+        if row:
+            raise DomainError("pool_material_exists", "素材已在待发布或处理中队列", 409)
+        reason = automatic_block(conn, pid, mid) or manual_block(conn, pid, mid)
+        if reason:
+            raise DomainError(reason, "Page或素材存在未结束/结果不明任务", 409)
+        render_preview(config["caption_template"], material)
+        return published_history(conn, pid, mid)
+
+    def _facts(self, conn, actor, pid, payload, materials):
+        config, pool = self._locked(conn, actor, pid, payload)
+        histories = {mid: self._material_history(conn, pid, config, materials[mid]) for mid in payload["material_ids"]}
         facts = {"purpose": "pool-admission", "actor": actor, "page_id": pid,
                  "payload": payload, "config": config, "pool": pool, "materials": materials, "histories": histories}
         return facts, config, pool, histories
@@ -309,6 +310,62 @@ class PoolService:
                   "drama_name": materials[mid]["drama_name"], "language": materials[mid]["language"],
                   "repeat_required": bool(histories[mid])} for mid in payload["material_ids"]]
         return {"ok": True, "preview_token": self.service._token(facts), "items": items,
+                "repeat_required": any(histories.values())}
+
+    def resolve(self, actor, pid, payload):
+        """Return an ordered valid subset and a strict admission proof for it."""
+        self._identity(payload, ("material_ids",))
+        values = payload["material_ids"]
+        if not isinstance(values, list) or not 1 <= len(values) <= 200:
+            raise DomainError("invalid_request", "每次请输入1至200个素材ID")
+        entries, wanted, skipped = [], [], []
+        for row_number, value in enumerate(values, 1):
+            mid = value.strip() if isinstance(value, str) else str(value)
+            if not mid:
+                continue
+            entry = {"row_number": row_number, "material_id": mid[:128]}
+            entries.append(entry)
+            if isinstance(value, bool) or not isinstance(value, (str, int)) or not re.fullmatch(r"[1-9][0-9]{0,18}", mid):
+                skipped.append({**entry, "code": "invalid_material_id", "message": "素材ID必须为不超过19位的正整数"})
+            elif mid not in wanted:
+                wanted.append(mid)
+        resolved = self.sources.resolve_materials(wanted, need_desc=False) if wanted else {"items": {}, "errors": {}}
+        materials, failures = resolved["items"], resolved["errors"]
+        invalid_rows = {item["row_number"] for item in skipped}
+        accepted, histories, items = {}, {}, []
+        with self.store.connect() as conn:
+            conn.execute("BEGIN")
+            config, pool = self._locked(conn, actor, pid, payload)
+            for entry in entries:
+                if entry["row_number"] in invalid_rows:
+                    continue
+                mid = entry["material_id"]
+                if mid in accepted:
+                    skipped.append({**entry, "code": "duplicate_material_id", "message": "重复素材ID，已保留第一次有效输入"})
+                    continue
+                if mid in failures:
+                    skipped.append({**entry, **failures[mid]})
+                    continue
+                if mid not in materials:
+                    raise DomainError("material_source_incomplete", "素材来源结果不完整，请重试", 503)
+                try:
+                    history = self._material_history(conn, pid, config, materials[mid])
+                except (DomainError, TemplateError) as exc:
+                    if exc.status >= 500:
+                        raise
+                    skipped.append({**entry, "code": exc.code, "message": str(exc)})
+                    continue
+                accepted[mid], histories[mid] = materials[mid], history
+                items.append({**entry, "material_name": materials[mid]["material_name"],
+                              "drama_name": materials[mid]["drama_name"], "language": materials[mid]["language"],
+                              "repeat_required": bool(history)})
+            clean = {**{key: payload[key] for key in IDENTITY}, "material_ids": list(accepted)}
+            facts = {"purpose": "pool-admission", "actor": actor, "page_id": pid, "payload": clean,
+                     "config": config, "pool": pool, "materials": accepted, "histories": histories}
+        skipped.sort(key=lambda item: item["row_number"])
+        return {"ok": True, "material_ids": list(accepted), "items": items, "skipped": skipped,
+                "summary": {"total": len(entries), "valid": len(items), "skipped": len(skipped)},
+                "preview_token": self.service._token(facts) if items else "",
                 "repeat_required": any(histories.values())}
 
     def existing(self, actor, pid, operation_id, request_hash=None):
@@ -430,6 +487,8 @@ class PoolService:
                 return self.toggle(actor, pid, payload, suffix == "/enable")
             if suffix == "/items/preview":
                 return self.preview(actor, pid, payload)
+            if suffix == "/items/resolve":
+                return self.resolve(actor, pid, payload)
             if suffix in {"/remove", "/move"}:
                 return self.reorder_or_remove(actor, pid, payload, suffix == "/remove")
         raise DomainError("not_found", "素材池接口不存在", 404)

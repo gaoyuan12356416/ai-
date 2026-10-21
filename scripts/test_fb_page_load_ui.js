@@ -4,6 +4,7 @@ async (page) => {
   await page.unroute("**/api/**");
   await page.unroute("**/navigation.json");
   page.removeAllListeners("pageerror");
+  await page.evaluate(()=>sessionStorage.clear());
   const checks=[],errors=[],calls=[],materialQueries=[];
   const check=(value,name)=>{if(!value)throw new Error(name);checks.push(name);};
   const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -37,9 +38,9 @@ async (page) => {
     if(path==="/api/fb-video-publish/pages/101/pool")return respond({
       pool:{config_instance_id:config.config_instance_id,version:0,status:"paused",times:[],processing_mode:"original"},
       items:[],counts:{},next_cursor:""});
-    if(path==="/api/fb-video-publish/materials"){
-      materialQueries.push(new URL(route.request().url()).searchParams.get("language"));
-      return respond({items:[],next_cursor:""});
+    if(path==="/api/fb-video-publish/pages/101/pool/items/resolve"){
+      materialQueries.push(route.request().postDataJSON());
+      return respond({items:[],material_ids:[],skipped:[{row_number:1,material_id:"201",code:"language_mismatch",message:"素材语言与 Page 不符"}],summary:{total:1,valid:0,skipped:1}});
     }
     return respond({message:"unexpected fixture route"},404);
   });
@@ -59,12 +60,11 @@ async (page) => {
   async function verifyFixedPoolLanguage(label){
     await page.locator("[data-pool-page]").click();
     await page.waitForFunction(()=>!document.getElementById("poolControls").disabled);
-    await page.locator("#poolPickMaterials").click();
-    await page.getByText("没有符合条件的素材",{exact:true}).waitFor();
-    check(materialQueries.at(-1)==="zh",label+" pool material query keeps the configured Page language");
-    check(await page.locator("#materialLanguage").isDisabled()&&await page.locator("#materialLanguage").inputValue()==="zh",
-      label+" pool language control shows its fixed value");
-    await page.locator("#materialPicker [data-close]").first().click();
+    await page.locator("#poolMaterialIds").fill("201");await page.locator("#poolAddMaterials").click();
+    await page.getByText("成功添加 0 条，跳过 1 条",{exact:true}).waitFor();
+    check(materialQueries.at(-1).config_instance_id===config.config_instance_id&&!Object.hasOwn(materialQueries.at(-1),"language"),label+" ID validation uses the configured Page without an editable language override");
+    check(await page.locator("#poolStatus").innerText().then(text=>text.includes("剧语言 zh"))&&await page.locator("#poolAdmissionResult").innerText().then(text=>text.includes("素材语言与 Page 不符")),
+      label+" pool shows fixed Page language and server language validation");
     await page.locator("#pagePool [data-close]").first().click();
   }
   await verifyFixedPoolLanguage("pending language dictionary");

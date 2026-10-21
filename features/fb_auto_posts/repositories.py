@@ -300,20 +300,73 @@ class PagePoolRepository:
         """
         return [{"queue_id": str(row.get("queue_id") or ""), "queue_name": str(row.get("queue_name") or "")[:200], "group_id": str(row.get("group_id") or ""), "selected_group_id": str(row.get("selected_group_id") or ""), "overlap_page_id": str(row.get("overlap_page_id") or ""), "status": "enabled"} for row in self.mysql.select(sql, ids)]
 
-    def eligible_credentials(self, page_id: str) -> List[PageCredential]:
+    @staticmethod
+    def _credential_owner(owner_user_id):
+        if isinstance(owner_user_id, bool) or not re.fullmatch(r"[1-9][0-9]{0,30}", str(owner_user_id or "")):
+            raise RepositoryError("operator_identity_invalid", "个人授权的操作人身份无效", 409)
+        return str(owner_user_id)
+
+    def owner_credential_counts(self, page_ids, owner_user_id) -> Dict[str, int]:
+        """Only counts leave preflight; access tokens are read at execution."""
+        owner = self._credential_owner(owner_user_id)
+        if (not isinstance(page_ids, (list, tuple)) or len(page_ids) > 200
+                or any(isinstance(pid, bool) or not re.fullmatch(r"[1-9][0-9]{3,40}", str(pid)) for pid in page_ids)):
+            raise RepositoryError("fb_auto_page_id_invalid", "Page ID列表无效", 400)
+        wanted = list(dict.fromkeys(str(pid) for pid in page_ids))
+        if not wanted:
+            return {}
+        slots = ",".join("%s" for _ in wanted)
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(p.page_id AS CHAR) AS page_id,
+                   COUNT(DISTINCT p.page_access_token) AS credential_count
+              FROM `{self.mysql.schema}`.ads_facebook_page_post p
+              JOIN `{self.mysql.schema}`.ads_facebook_info f
+                ON CAST(p.fb_user_id AS BINARY)=CAST(f.facebookUserID AS BINARY)
+             WHERE f.user_id=%s AND p.page_id IN ({slots}) AND p.status<>1
+               AND TRIM(p.page_access_token)<>'' AND TRIM(p.fb_user_id)<>''
+             GROUP BY p.page_id
+        """, [owner, *wanted])
+        result, seen = dict.fromkeys(wanted, 0), set()
+        for row in rows:
+            pid, raw_count = str(row.get("page_id") or ""), str(row.get("credential_count"))
+            if pid not in result or pid in seen or not re.fullmatch(r"[0-9]{1,9}", raw_count):
+                raise RepositoryError("operator_credentials_invalid", "个人授权查询结果无效", 503)
+            seen.add(pid)
+            result[pid] = int(raw_count)
+        return result
+
+    def eligible_credentials(self, page_id: str, *, owner_user_id=None) -> List[PageCredential]:
         # Page authorization status is mutable.  Keep this as a live query on
         # every execute/reconcile call instead of caching the planning snapshot.
         if not re.fullmatch(r"[1-9][0-9]{3,40}", str(page_id or "")):
             raise RepositoryError("fb_auto_page_id_invalid", "Page ID无效", 400)
-        sql = f"""
-            SELECT CAST(id AS CHAR) AS credential_id,CAST(page_id AS CHAR) AS page_id,CAST(fb_user_id AS CHAR) AS fb_user_id,page_access_token
-              FROM `{self.mysql.schema}`.ads_facebook_page_post
-             WHERE page_id=%s AND status<>1 AND TRIM(page_access_token)<>''
-             ORDER BY fb_user_id
-        """
-        rows = self.mysql.select(sql, (str(page_id),))
+        owner = self._credential_owner(owner_user_id) if owner_user_id is not None else None
+        if owner is None:
+            sql = f"""
+                SELECT CAST(id AS CHAR) AS credential_id,CAST(page_id AS CHAR) AS page_id,CAST(fb_user_id AS CHAR) AS fb_user_id,page_access_token
+                  FROM `{self.mysql.schema}`.ads_facebook_page_post
+                 WHERE page_id=%s AND status<>1 AND TRIM(page_access_token)<>''
+                 ORDER BY fb_user_id
+            """
+            rows = self.mysql.select(sql, (str(page_id),))
+        else:
+            sql = f"""
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(p.id AS CHAR) AS credential_id,
+                       CAST(p.page_id AS CHAR) AS page_id,CAST(p.fb_user_id AS CHAR) AS fb_user_id,
+                       CAST(f.user_id AS CHAR) AS credential_owner_id,p.page_access_token
+                  FROM `{self.mysql.schema}`.ads_facebook_page_post p
+                  JOIN `{self.mysql.schema}`.ads_facebook_info f
+                    ON CAST(p.fb_user_id AS BINARY)=CAST(f.facebookUserID AS BINARY)
+                 WHERE p.page_id=%s AND f.user_id=%s AND p.status<>1
+                   AND TRIM(p.page_access_token)<>'' AND TRIM(p.fb_user_id)<>''
+                 ORDER BY p.fb_user_id,p.id
+            """
+            rows = self.mysql.select(sql, (str(page_id), owner))
         result, seen = [], set()
         for row in rows:
+            if owner is not None and (str(row.get("credential_owner_id") or "") != owner
+                                      or str(row.get("page_id") or "") != str(page_id)):
+                raise RepositoryError("operator_credentials_invalid", "个人授权归属不一致，未使用其他用户授权", 503)
             token = str(row.get("page_access_token") or "")
             user = str(row.get("fb_user_id") or "")
             if token and user and token not in seen:

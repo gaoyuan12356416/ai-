@@ -28,7 +28,7 @@ class GraphResult:
 
 
 class GraphTransport(Protocol):
-    def publish_video(self, page_id: str, credential: PageCredential, media_url: str, message: str) -> GraphResult: ...
+    def publish_video(self, page_id: str, credential: PageCredential, media_url: str, message: str, *, title: str = "") -> GraphResult: ...
     def reconcile_video(self, object_id: str, credential: PageCredential) -> GraphResult: ...
 
 
@@ -52,12 +52,13 @@ class RequestsGraphTransport:
         safe_code = "fb_graph_" + re.sub(r"[^a-z0-9]+", "_", code.lower())[:40]
         return safe_code, "Meta明确拒绝了发布请求，可尝试同Page的其他可用授权"
 
-    def publish_video(self, page_id: str, credential: PageCredential, media_url: str, message: str) -> GraphResult:
+    def publish_video(self, page_id: str, credential: PageCredential, media_url: str, message: str, *, title: str = "") -> GraphResult:
         session = requests.Session(); session.trust_env = False
         try:
             response = session.post(
                 f"https://graph.facebook.com/{self.api_version}/{page_id}/videos",
-                data={"file_url": media_url, "description": message, "access_token": credential.token},
+                data={"file_url": media_url, "description": message, "access_token": credential.token,
+                      **({"title": title} if title else {})},
                 timeout=self.timeout_seconds,
                 allow_redirects=False,
                 headers={"Accept": "application/json", "User-Agent": "yingliang-fb-auto-post/1"},

@@ -127,7 +127,13 @@ def normalize_batch(raw):
 def plan_pairs(request, now):
     """One schedule calculation for confirmation, quota and immutable freezing."""
     v2 = request.get("schema_version") == 2
-    if v2:
+    if request.get("schema_version") == 3:
+        times = {p["row_number"]: now if p["scheduled_at_utc"] is None else parse_time(p["scheduled_at_utc"])
+                 for p in request["pairs"]}
+        if any(p["scheduled_at_utc"] is not None and times[p["row_number"]] <= now for p in request["pairs"]):
+            raise DomainError("invalid_schedule", "预约时间必须晚于当前时间", 409)
+        ordered = sorted(enumerate(request["pairs"], 1), key=lambda item: (times[item[1]["row_number"]], item[1]["row_number"]))
+    elif v2:
         times = {mid: now if value is None else parse_time(value)
                  for mid, value in request["material_schedules"].items()}
         if any(value is not None and times[mid] <= now for mid, value in request["material_schedules"].items()):
@@ -142,7 +148,8 @@ def plan_pairs(request, now):
     for index, pair in ordered:
         pid = pair["page_id"]
         counts[pid] = counts.get(pid, 0) + 1
-        when = times[pair["material_id"]] if v2 else start + timedelta(minutes=(counts[pid] - 1) * request["interval_minutes"])
+        when = (times[pair["row_number"]] if request.get("schema_version") == 3 else
+                times[pair["material_id"]] if v2 else start + timedelta(minutes=(counts[pid] - 1) * request["interval_minutes"]))
         result.append((index, pair, counts[pid], when, when.astimezone(BJ).date().isoformat()))
     return result
 
@@ -359,7 +366,7 @@ class Store:
             conn.commit()
             return result
 
-    def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None):
+    def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None, request_hash=None):
         """Caller owns BEGIN IMMEDIATE and all admission checks; never commits."""
         from .links import short_url, build_attribution_url
         from .templates import render_template
@@ -369,7 +376,7 @@ class Store:
         self.check_quota(conn, plans)
         bid = uuid.uuid4().hex
         conn.execute("INSERT INTO fb_video_batch VALUES(?,?,?,?,?,?,?,?)",
-                     (bid, actor["tenant_key"], actor["user_id"], actor["user_name"], request["operation_id"], digest(request), canonical(request), now))
+                     (bid, actor["tenant_key"], actor["user_id"], actor["user_name"], request["operation_id"], request_hash or digest(request), canonical(request), now))
         for index, pair, page_seq, when, day in plans:
             tid, pid, mid = uuid.uuid4().hex, pair["page_id"], pair["material_id"]
             material, page, config = resolved["materials"][mid], resolved["pages"][pid], configs[pid]
@@ -387,15 +394,21 @@ class Store:
                         "repeat_history": repeats.get(pid + ":" + mid, [])}
             if pool:
                 snapshot["pool"] = pool
+            mode = request["processing_mode"]
+            if request.get("schema_version") == 3:
+                mode = pair["processing_mode"]
+                snapshot.update(row_number=pair["row_number"], title=pair["title"],
+                                credential_mode=pair["credential_mode"],
+                                credential_owner_id=actor["sub_user_id"] if pair["credential_mode"] == "operator" else "")
             job = "fb-page-" + hashlib.sha256(("fb-manual:v1|" + actor["tenant_key"] + "|" + tid + "|" + pid + "|" + mid).encode()).hexdigest()[:48]
-            prep_state = "ready" if request["processing_mode"] == "original" else "planned"
+            prep_state = "ready" if mode == "original" else "planned"
             prep = {"media_url": material["media_url"], "profile": "original"} if prep_state == "ready" else {}
             conn.execute("""INSERT INTO fb_video_task(task_id,batch_id,tenant_key,owner_user_id,page_id,material_id,
                 content_id,sequence,page_sequence,planned_at_utc,planned_bj_date,processing_mode,snapshot_json,
                 ledger_id,short_url,long_url,caption,gpu_job_id,prepare_state,prepared_json,created_at_utc,updated_at_utc,
                 source_kind,pool_instance_id,pool_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (tid, bid, actor["tenant_key"], actor["user_id"], pid, mid, material["content_id"], index, page_seq,
-                 stamp(when), day, request["processing_mode"], canonical(snapshot), lid, short, long, caption,
+                 stamp(when), day, mode, canonical(snapshot), lid, short, long, caption,
                  job, prep_state, canonical(prep), now, now, "pool" if pool else "manual",
                  pool["config_instance_id"] if pool else "", pool["slot_id"] if pool else 0))
             conn.execute("UPDATE fb_video_link SET long_url=?,short_url=? WHERE id=?", (long, short, lid))
@@ -421,6 +434,8 @@ class Store:
         return {**{k: row[k] for k in allowed}, "page": snap["page"], "material": snap["material"],
                 "page_name": snap["page"]["page_name"], "material_name": snap["material"]["material_name"],
                 "caption_template": snap["caption_template"], "template_version": snap["template_version"],
+                "row_number": snap.get("row_number"), "title": snap.get("title", ""),
+                "credential_mode": snap.get("credential_mode", "page_pool"),
                 "prepared": json.loads(row["prepared_json"]), "can_cancel": row["status"] == "queued"}
 
     def _batch_dto(self, conn, row):
@@ -429,7 +444,8 @@ class Store:
         state = "unknown" if "unknown" in statuses else ("completed" if statuses <= TERMINAL else ("running" if statuses & {"running", "submitted"} else "queued"))
         return {"batch_id": row["batch_id"], "operation_id": row["operation_id"], "owner_user_id": row["owner_user_id"],
                 "owner_name": row["owner_name"], "created_at_utc": row["created_at_utc"], "status": state,
-                "processing_mode": json.loads(row["request_json"])["processing_mode"], "items": tasks}
+                "processing_mode": json.loads(row["request_json"])["processing_mode"], "items": tasks,
+                "excel": json.loads(row["request_json"]).get("excel")}
 
     def get_batch(self, actor, bid):
         scope, args = self._scope(actor)

@@ -21,15 +21,18 @@ LANGUAGES = {"en": "英语", "es": "西班牙语", "zh": "中文", "zh-tw": "繁
 
 class Service:
     def __init__(self, store, sources, signing_key, *, live_enabled=False, prepare_enabled=True,
-                 v2_enabled=True, pool_enabled=True):
+                 v2_enabled=True, pool_enabled=True, excel_enabled=True):
         if len(str(signing_key)) < 32:
             raise ValueError("manual preflight signing key is required")
         self.store, self.sources = store, sources
         self.signing_key, self.live_enabled = str(signing_key).encode(), live_enabled
         self.prepare_enabled = bool(prepare_enabled)
         self.v2_enabled, self.pool_enabled = bool(v2_enabled), bool(pool_enabled)
+        self.excel_enabled = bool(excel_enabled)
         from .pool import PoolService
         self.pool = PoolService(self)
+        from .excel import ExcelService
+        self.excel = ExcelService(self)
 
     @staticmethod
     def _keys(payload, required):
@@ -140,6 +143,8 @@ class Service:
         route = path.removeprefix(PREFIX)
         if not path.startswith(PREFIX + "/"):
             raise DomainError("not_found", "接口不存在", 404)
+        if route.startswith("/excel/"):
+            return self.excel.handle(method, route[len("/excel"):], actor, payload)
         pool_route = re.fullmatch(r"/pages/([1-9][0-9]{0,30})/pool(.*)", route)
         if pool_route:
             return self.pool.handle(method, pool_route[1], pool_route[2], actor, payload, query)

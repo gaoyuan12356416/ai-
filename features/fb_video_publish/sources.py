@@ -397,3 +397,100 @@ class SourceRepository:
                 raise SourceError("material_unavailable", "部分素材已删除、未上架、被列入黑名单或不符合发布条件，请重新选择", 409)
             self._enrich(current, strict=True, need_desc=need_desc)
         return {material_id: found[material_id] for material_id in wanted}
+
+    def _unavailable_materials(self, ids):
+        """Explain only requested catalog IDs; never replace a failed source read."""
+        if not ids:
+            return {}
+        schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
+        slots = ",".join("%s" for _ in ids)
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,
+                   s.data_source,s.product,s.type,s.is_delete,s.video_duration,
+                   COALESCE(s.data_source_id,'') content_id,COALESCE(s.language,'') language,
+                   EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
+                     WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
+                       AND d.deploy_time>0 AND d.deploy_time<=%s
+                       AND {_language_sql('d.language')}={_language_sql('s.language')}) drama_released,
+                   EXISTS(SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
+                     WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id) content_blocked,
+                   EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
+                     JOIN `{blocked}`.ads_facebook_post_blacklist b
+                       ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
+                     WHERE db.content_id=s.data_source_id AND db.app_id=%s) series_blocked
+              FROM `{schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+             WHERE s.id IN ({slots}) LIMIT %s
+        """, ["1479", int(self.now_fn().timestamp()), "1479", *ids, len(ids) + 1])
+        raw = {}
+        for row in rows:
+            mid = str(row.get("material_id") or "")
+            if mid not in ids or mid in raw:
+                raise SourceError("material_source_ambiguous", "素材来源返回了重复或非请求ID", 503)
+            raw[mid] = row
+        result = {}
+        for mid in ids:
+            row = raw.get(mid)
+            code, message = "material_unavailable", "素材不符合当前发布条件，请刷新后核对"
+            if row is None:
+                code, message = "material_not_found", "素材ID不存在"
+            elif str(row.get("is_delete")) != "0":
+                code, message = "material_deleted", "素材已删除"
+            elif str(row.get("product") or "").casefold() != "dramawave":
+                code, message = "material_product_mismatch", "素材不属于Dramawave"
+            elif str(row.get("data_source")) != "6":
+                code, message = "material_source_mismatch", "素材不是当前支持的来源6素材"
+            elif str(row.get("type")) != "2":
+                code, message = "material_not_video", "素材不是视频"
+            elif not str(row.get("content_id") or "").strip() or not page_language(row.get("language")):
+                code, message = "material_metadata_missing", "素材缺少有效剧集或语言信息"
+            else:
+                try:
+                    duration = Decimal(str(row.get("video_duration") or 0))
+                    duration_ok = duration.is_finite() and 0 < duration <= 3600
+                except (ValueError, InvalidOperation):
+                    duration_ok = False
+                if not duration_ok:
+                    code, message = "material_duration_invalid", "素材时长缺失或不在0至3600秒范围内"
+                elif str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1":
+                    code, message = "material_blacklisted", "素材关联剧目已被列入Facebook发布黑名单"
+                elif str(row.get("drama_released")) != "1":
+                    code, message = "material_not_released", "素材未匹配到已上架的同语言Dramawave剧目"
+            result[mid] = {"code": code, "message": message}
+        return result
+
+    def resolve_materials(self, material_ids, need_desc: bool = False) -> dict:
+        """Bounded partial resolution for ID admission and Excel previews.
+
+        Per-row data errors are returned without weakening the strict legacy
+        adapter. Query failures/ambiguous source identities remain global errors.
+        """
+        if material_ids == []:
+            return {"items": {}, "errors": {}}
+        wanted = _ids(material_ids, MAX_MATERIALS, "素材")
+        if any(len(mid) > 19 for mid in wanted):
+            raise SourceError("invalid_request", "素材ID无效")
+        found, errors = {}, {}
+        for offset in range(0, len(wanted), 100):
+            chunk = wanted[offset:offset + 100]
+            rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1)
+            seen, candidates = set(), []
+            for row in rows:
+                mid = str(row.get("material_id") or "")
+                if mid not in chunk or mid in seen:
+                    raise SourceError("material_source_ambiguous", "素材来源返回了重复或非请求ID", 503)
+                seen.add(mid)
+                try:
+                    candidates.append(self._material(row))
+                except SourceError as exc:
+                    if exc.status >= 500:
+                        raise
+                    errors[mid] = {"code": exc.code, "message": str(exc)}
+            enriched = self._enrich(candidates, strict=False, need_desc=need_desc)
+            found.update((item["material_id"], item) for item in enriched)
+            for item in candidates:
+                mid = item["material_id"]
+                if mid not in found:
+                    errors[mid] = {"code": "material_metadata_ambiguous", "message": "素材缺少唯一的同语言剧名或简介"}
+            errors.update(self._unavailable_materials([mid for mid in chunk if mid not in seen]))
+        return {"items": {mid: found[mid] for mid in wanted if mid in found},
+                "errors": {mid: errors[mid] for mid in wanted if mid in errors}}

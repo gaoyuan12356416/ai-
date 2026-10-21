@@ -120,15 +120,16 @@
     if($("pagePool")){$("pagePool").focus();return;}
     let pool=null,items=[],counts={},tab="pending",cursor="",next="",stack=[],generation=0,writing=false;
     let reading=false,readFailed=false,readPromise=null;
-    let selected=new Set(),staged=new Map(),times=[],settingsDirty=false,pending=poolPending(page);
+    let selected=new Set(),times=[],settingsDirty=false,pending=poolPending(page);
     const endpoint="/pages/"+encodeURIComponent(page.page_id)+"/pool";
     const stateLabels={pending:"待发布",processing:"处理中",published:"已发布",failed:"异常 / 历史",slots:"时点记录"};
     const itemLabels={...statuses,pending:"待发布",processing:"处理中",removed:"已移除",paused:"已暂停",enabled:"已启用",archived:"已归档"};
     const modal=dialog("pagePool",page.page_name+" · 素材池",
-      `<div class="notice">同租户中有权访问此 Page 的用户共用素材池。每个时点发布一条；空池和错过的时点不补发。生成任务时使用最新 Page 文案，随后冻结。</div><div id="poolError" class="error" role="alert" hidden></div><div id="poolPendingPanel" class="notice warning" hidden><strong>入池结果待核对</strong><p id="poolPendingText">保留原操作查询，避免重复入池。</p><div class="actions"><button id="poolQueryOperation" class="button">查询原操作</button><button id="poolRetryOperation" class="button">按原操作重试</button></div></div><div class="row spread"><div id="poolStatus" class="helper">正在加载…</div><button id="poolRefresh" class="button small">刷新版本并保留输入</button></div><fieldset id="poolControls" disabled><section class="pool-settings"><div class="form-grid"><div class="field"><span>每天的发布时间（北京时间）</span><div id="poolTimes" class="time-chips"></div><span id="poolDailyCount" class="helper"></span><div class="row"><input id="poolTimeInput" type="time" aria-label="新增每日时点"><button id="poolAddTime" class="button small">添加时点</button></div><span class="helper">至少设置一个 HH:mm 时点；每个时点取队首一条。</span></div><label class="field"><span>视频加工</span><select id="poolProcessing"><option value="original">不去重（原片发布）</option><option value="random_overlay">随机加工</option></select><span class="helper">普通保存不改变启用人；首次保存保持暂停。</span></label></div><div class="row spread"><span id="poolSettingsStatus" class="helper"></span><div class="actions"><button id="poolSaveSettings" class="button">保存设置</button><button id="poolEnable" class="button primary">启用计划</button><button id="poolPause" class="button">暂停计划</button></div></div></section><nav id="poolTabs" class="fb-tabs pool-tabs">${Object.entries(stateLabels).map(([key,label])=>`<button class="button small" data-pool-tab="${key}">${label}<span data-pool-count="${key}"></span></button>`).join("")}</nav><div id="poolPendingActions" class="row spread"><div class="actions"><button id="poolPickMaterials" class="button primary">选择素材入池</button><button id="poolRemoveSelected" class="button danger">移除选中项</button></div><span id="poolSelectionCount" class="helper"></span></div><div id="poolStaged" class="notice" hidden></div><div id="poolList" class="pool-list"></div><div class="pager"><span class="helper">每页最多 50 条；已生成任务不随移除或暂停而改变。</span><div class="actions"><button id="poolPrev" class="button small">上一页</button><button id="poolNext" class="button small">下一页</button></div></div></fieldset>`,
+      `<div class="notice">同租户中有权访问此 Page 的用户共用素材池。每个时点发布一条；空池和错过的时点不补发。生成任务时使用最新 Page 文案，随后冻结。</div><div id="poolError" class="error" role="alert" hidden></div><div id="poolPendingPanel" class="notice warning" hidden><strong>入池结果待核对</strong><p id="poolPendingText">保留原操作查询，避免重复入池。</p><div class="actions"><button id="poolQueryOperation" class="button">查询原操作</button><button id="poolRetryOperation" class="button">按原操作重试</button></div></div><div class="row spread"><div id="poolStatus" class="helper">正在加载…</div><button id="poolRefresh" class="button small">刷新版本并保留输入</button></div><fieldset id="poolControls" disabled><section class="pool-settings"><div class="form-grid"><div class="field"><span>每天的发布时间（北京时间）</span><div id="poolTimes" class="time-chips"></div><span id="poolDailyCount" class="helper"></span><div class="row"><input id="poolTimeInput" type="time" aria-label="新增每日时点"><button id="poolAddTime" class="button small">添加时点</button></div><span class="helper">至少设置一个 HH:mm 时点；每个时点取队首一条。</span></div><label class="field"><span>视频加工</span><select id="poolProcessing"><option value="original">不去重（原片发布）</option><option value="random_overlay">随机加工</option></select><span class="helper">普通保存不改变启用人；首次保存保持暂停。</span></label></div><div class="row spread"><span id="poolSettingsStatus" class="helper"></span><div class="actions"><button id="poolSaveSettings" class="button">保存设置</button><button id="poolEnable" class="button primary">启用计划</button><button id="poolPause" class="button">暂停计划</button></div></div></section><nav id="poolTabs" class="fb-tabs pool-tabs">${Object.entries(stateLabels).map(([key,label])=>`<button class="button small" data-pool-tab="${key}">${label}<span data-pool-count="${key}"></span></button>`).join("")}</nav><section id="poolPendingActions" class="pool-id-admission"><label class="field"><span>添加入池素材</span><textarea id="poolMaterialIds" rows="5" placeholder="每行一个素材 ID，最多 200 条" aria-label="入池素材 ID，每行一个"></textarea></label><p class="helper">按输入顺序加入队尾；无效、重复或不符合条件的 ID 会跳过并说明原因。</p><div class="row spread"><div class="actions"><button id="poolAddMaterials" class="button primary">确定添加</button><button id="poolRemoveSelected" class="button danger">移除选中项</button></div><span id="poolSelectionCount" class="helper"></span></div><div id="poolAdmissionResult" class="notice" role="status" hidden></div></section><div id="poolList" class="pool-list"></div><div class="pager"><span class="helper">每页最多 50 条；已生成任务不随移除或暂停而改变。</span><div class="actions"><button id="poolPrev" class="button small">上一页</button><button id="poolNext" class="button small">下一页</button></div></div></fieldset>`,
       `<button class="button" data-close>关闭</button>`);
     modal.addEventListener("close",()=>onClose?.());modal.addEventListener("cancel",e=>{if(writing)e.preventDefault();});
-    function remember(){try{pending?sessionStorage.setItem(poolStorageKey(page),JSON.stringify(pending)):sessionStorage.removeItem(poolStorageKey(page));}catch(_){}}
+    $("poolMaterialIds").value=pending?.input_text || "";
+    function remember(strict=false){try{if(pending){const encoded=JSON.stringify(pending);sessionStorage.setItem(poolStorageKey(page),encoded);if(strict&&sessionStorage.getItem(poolStorageKey(page))!==encoded)throw new Error();}else sessionStorage.removeItem(poolStorageKey(page));}catch(_){if(strict)throw new Error("无法保存入池原操作，尚未提交，请检查浏览器会话存储。");}}
     function identity(){if(!pool||reading||readFailed)throw new Error("请先成功读取素材池最新版本。");return {config_instance_id:page.config_instance_id,expected_version:pool.version};}
     function markSettings(){settingsDirty=true;$("poolSettingsStatus").textContent="设置尚未保存";lock();}
     function paintTimes(){$("poolDailyCount").textContent=`每天发布 ${times.length} 次（每个时点一条）` ;$("poolTimes").innerHTML=times.map(t=>`<span class="time-chip">${esc(t)}<button type="button" data-remove-time="${esc(t)}" aria-label="移除时点 ${esc(t)}">×</button></span>`).join("") || '<span class="helper">尚未设置时点</span>';}
@@ -150,8 +151,6 @@
       document.querySelectorAll("#poolTabs [data-pool-tab]").forEach(el=>el.classList.toggle("primary",el.dataset.poolTab===tab));
       document.querySelectorAll("#poolTabs [data-pool-count]").forEach(el=>{const key=el.dataset.poolCount;el.textContent=" "+Number(key==="failed"?Number(counts.failed || 0)+Number(counts.cancelled || 0)+Number(counts.removed || 0):counts[key] || 0);});
       $("poolPendingActions").hidden=tab!=="pending";$("poolSelectionCount").textContent=`已选 ${selected.size} 条待发布素材`;
-      $("poolStaged").hidden=!staged.size;$("poolStaged").innerHTML=staged.size?`<span>已选择 ${staged.size} 条素材，尚未入池。</span> <button id="poolReviewStaged" class="button small">核对并入池</button> <button id="poolChangeStaged" class="button small">继续选择</button>`:"";
-      if(staged.size){$("poolReviewStaged").onclick=reviewAdmission;$("poolChangeStaged").onclick=pickMaterials;}
       $("poolList").innerHTML=tab==="slots"?
         items.map(item=>`<article class="pool-item"><div class="row spread"><strong>${esc(atBJ(item.slot_at_utc))} 北京时间</strong><span class="badge">${esc(itemLabels[item.status] || item.status)}</span></div><p class="helper">${esc(item.reason || "—")}${item.material_id?` · 素材 ${esc(item.material_id)}`:""}</p></article>`).join("") || '<div class="empty">暂无时点记录</div>':
         items.map(item=>`<article class="pool-item"><div class="row spread"><label class="check"><input type="checkbox" data-pool-item="${esc(item.id)}"${selected.has(String(item.id))?" checked":""}${(item.can_modify ?? (item.status==="pending"&&!item.task_id))?"":" disabled"}><strong>${esc(item.material_name || item.material_id)}</strong></label><span class="badge ${item.language_mismatch?"bad":""}">${esc(itemLabels[item.status] || item.status)}</span></div><p class="helper">${esc(item.material_id)} · ${esc(lang(item.language))} · ${esc(item.drama_name || "")}</p>${item.language_mismatch?'<p class="notice warning">剧语言与 Page 不匹配，请移除后重新选择。</p>':""}${item.error_message?`<p class="error">${esc(item.error_message)}</p>`:""}<div class="row spread"><span class="helper">入池 ${esc(atBJ(item.created_at_utc))}</span><div class="actions">${(item.can_modify ?? (item.status==="pending"&&!item.task_id))?`<button class="button small" data-pool-move="${esc(item.id)}" data-direction="top">置顶</button><button class="button small" data-pool-move="${esc(item.id)}" data-direction="up" aria-label="上移 ${esc(item.material_name)}">↑</button><button class="button small" data-pool-move="${esc(item.id)}" data-direction="down" aria-label="下移 ${esc(item.material_name)}">↓</button>`:""}${item.can_view_task&&item.batch_id?`<a class="button small" href="/fb-video-publish-records.html?batch=${encodeURIComponent(item.batch_id)}">查看任务 / 取消</a>`:item.task_id||item.status!=="pending"?'<span class="helper">任务详情遵循原发布记录权限</span>':""}</div></div></article>`).join("") || '<div class="empty">暂无素材</div>';
@@ -188,34 +187,76 @@
       catch(err){errorAt("poolError",new Error(err.message+(err.status===409?"；输入已保留，请刷新版本后重新核对。":"")));}
       finally{writing=false;lock();}
     }
-    function pickMaterials(){materialPickerDialog(staged,chosen=>{staged=chosen;paint();},{title:"选择入池素材",language:page.language,applyLabel:"核对所选素材"});}
-    async function admitted(){
-      pending=null;remember();staged.clear();selected.clear();cursor="";stack=[];await load();toast("素材已入池");
+    function reportAdmission(meta,count){
+      if(!modal.isConnected)return;
+      const skipped=meta?.skipped || [];
+      $("poolAdmissionResult").hidden=false;
+      $("poolAdmissionResult").innerHTML=`<strong>成功添加 ${count} 条，跳过 ${skipped.length} 条</strong>${skipped.length?`<ul>${skipped.map(item=>`<li>第 ${esc(item.row_number || "—")} 条输入 · ${esc(item.material_id || "—")}：${esc(item.message || item.reason || item.code)}</li>`).join("")}</ul>`:""}`;
+      if(meta?.remaining_text!==undefined)$("poolMaterialIds").value=meta.remaining_text;
+    }
+    function admissionMeta(raw,skipped,ids){
+      const added=new Set(ids.map(String));
+      const remaining=[...new Set(raw.split(/\r?\n/).map(value=>value.trim()).filter(id=>id&&!added.has(id)))];
+      return {input_text:raw,remaining_text:remaining.join("\n"),skipped};
+    }
+    async function admitted(result){
+      if(!Array.isArray(result?.items)||!result.pool||result.pool.config_instance_id!==page.config_instance_id)throw new Error("入池响应不完整，请继续查询原操作。");
+      const old=pending,count=result?.items?.length ?? old?.request?.material_ids?.length ?? 0;
+      pending=null;remember();selected.clear();cursor="";stack=[];await load();
+      reportAdmission(old,count);toast(`成功添加 ${count} 条素材`);
     }
     async function queryAdmission(){
       if(!pending)return false;
-      try{await api(endpoint+"/operations/"+encodeURIComponent(pending.request.operation_id));await admitted();return true;}
+      try{const result=await api(endpoint+"/operations/"+encodeURIComponent(pending.request.operation_id));await admitted(result);return true;}
       catch(err){if(modal.isConnected)$("poolPendingText").textContent=err.status===404?"尚未查询到原入池操作，请保留此页并按原操作重试；不要重复创建。":"暂时无法查询原操作："+err.message;return false;}
     }
-    async function enqueue(request,recovering=false){
+    async function enqueue(request,recovering=false,meta={}){
       if(writing)return;writing=true;
-      pending={request:structuredClone(request)};remember();lock();
-      try{await post(endpoint+"/items",pending.request);await admitted();}
+      const before=pending;
+      try{
+        if(!recovering)pending={request:structuredClone(request),...meta};
+        remember(true);lock();
+      }catch(err){pending=before;writing=false;lock();errorAt("poolError",err);return;}
+      try{const result=await post(endpoint+"/items",pending.request);await admitted(result);}
       catch(err){
-        if(err.data?.accepted===false&&!recovering){pending=null;remember();errorAt("poolError",new Error(err.message+"；所选素材已保留，请刷新版本后重新预检。"));}
+        if(err.data?.accepted===false&&!recovering){pending=null;remember();errorAt("poolError",new Error(err.message+"；输入已保留，请刷新版本后重新核对。"));}
         else{errorAt("poolError",new Error("入池结果需要核对，已保留原操作。"+err.message));await queryAdmission();}
       }finally{writing=false;lock();}
     }
     async function reviewAdmission(){
       if(writing||reading||readFailed||pending)return;
-      if(!staged.size){errorAt("poolError",new Error("请先选择入池素材。"));return;}
-      writing=true;lock();errorAt("poolError","");
+      const raw=$("poolMaterialIds").value,lines=raw.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
+      if(!lines.length){errorAt("poolError",new Error("请输入素材 ID，每行一个。"));return;}
+      if(lines.length>200){errorAt("poolError",new Error("每次最多输入 200 条素材 ID，请拆分后添加。"));return;}
+      writing=true;lock();errorAt("poolError","");$("poolAdmissionResult").hidden=true;
       try{
-        const request={...identity(),material_ids:[...staged.keys()]},preview=await post(endpoint+"/items/preview",request);
+        const base=identity(),preview=await post(endpoint+"/items/resolve",{...base,material_ids:lines}),skipped=preview.skipped || [],eligible=preview.items || [];
         if(!modal.isConnected)return;
-        const confirmDialog=dialog("poolAdmission","确认入池素材",`<p>向 ${esc(page.page_name)} 加入 ${staged.size} 条素材。本次核对不创建发布任务；计划在每日时点按顺序取材。</p><div id="poolAdmissionError" class="error" hidden></div>${preview.repeat_required?'<div class="notice warning"><strong>包含历史成功发布的素材</strong><label class="check"><input id="poolRepeatAck" type="checkbox">我已核对，确认允许这些素材再次发布</label></div>':""}<div class="pool-admission-list">${[...staged.values()].map(m=>`<p>${esc(m.material_name)} · ${esc(lang(m.language))}</p>`).join("")}</div>`,`<button class="button" data-close>返回选择</button><button id="poolConfirmAdmission" class="button primary"${preview.repeat_required?" disabled":""}>确认入池</button>`);
-        if($("poolRepeatAck"))$("poolRepeatAck").onchange=e=>$("poolConfirmAdmission").disabled=!e.target.checked;
-        $("poolConfirmAdmission").onclick=()=>{const allow=!!$("poolRepeatAck")?.checked;confirmDialog.close();enqueue({...request,operation_id:uid(),preview_token:preview.preview_token,allow_repeat:allow});};
+        const ids=preview.material_ids || eligible.map(item=>item.material_id);
+        if(!ids.length){reportAdmission(admissionMeta(raw,skipped,[]),0);return;}
+        const request={...base,material_ids:ids};
+        if(!preview.repeat_required&&!eligible.some(item=>item.repeat_required)){
+          writing=false;
+          await enqueue({...request,operation_id:uid(),preview_token:preview.preview_token,allow_repeat:false},false,admissionMeta(raw,skipped,ids));return;
+        }
+        const repeated=eligible.filter(item=>item.repeat_required),plain=eligible.filter(item=>!item.repeat_required);
+        const confirmDialog=dialog("poolAdmission","确认历史素材再次入池",`<p>检测到 ${repeated.length} 条素材曾成功发布。默认跳过这些素材，其余 ${plain.length} 条可继续入池。</p><div id="poolAdmissionError" class="error" role="alert" hidden></div><label class="check"><input id="poolRepeatAck" type="checkbox">我已核对，允许历史成功素材再次发布</label><div class="pool-admission-list">${repeated.map(item=>`<p>${esc(item.material_id)} · ${esc(item.material_name)} · ${esc(lang(item.language))}</p>`).join("")}</div>`,`<button class="button" data-close>返回修改</button><button id="poolConfirmAdmission" class="button primary"${plain.length?"":" disabled"}>添加 ${plain.length} 条有效素材</button>`);
+        let choosing=false;
+        confirmDialog.addEventListener("cancel",event=>{if(choosing)event.preventDefault();});
+        $("poolRepeatAck").onchange=()=>{const count=$("poolRepeatAck").checked?ids.length:plain.length;$("poolConfirmAdmission").disabled=!count;$("poolConfirmAdmission").textContent=`添加 ${count} 条有效素材`;};
+        $("poolConfirmAdmission").onclick=async()=>{
+          if(choosing)return;choosing=true;writing=true;lock();confirmDialog.querySelectorAll("button,input").forEach(el=>el.disabled=true);
+          try{
+            const allow=$("poolRepeatAck").checked,chosen=allow?ids:plain.map(item=>item.material_id);
+            const filtered=allow?skipped:[...skipped,...repeated.map(item=>({row_number:item.row_number || lines.indexOf(String(item.material_id))+1,material_id:item.material_id,code:"repeat_not_confirmed",message:"历史已成功发布，未确认再次发布"}))];
+            let token=preview.preview_token;
+            if(!allow)token=(await post(endpoint+"/items/preview",{...base,material_ids:chosen})).preview_token;
+            if(!modal.isConnected||!confirmDialog.isConnected)return;
+            confirmDialog.close();writing=false;
+            await enqueue({...base,material_ids:chosen,operation_id:uid(),preview_token:token,allow_repeat:allow},false,admissionMeta(raw,filtered,chosen));
+          }catch(err){errorAt("poolAdmissionError",err);}
+          finally{choosing=false;writing=false;lock();if(confirmDialog.isConnected)confirmDialog.querySelectorAll("button,input").forEach(el=>el.disabled=false);}
+        };
       }catch(err){errorAt("poolError",err);}
       finally{writing=false;lock();}
     }
@@ -233,14 +274,14 @@
     $("poolRefresh").onclick=()=>{if(writing||reading)return;cursor="";stack=[];load();};
     $("poolTabs").onclick=e=>{const b=e.target.closest("[data-pool-tab]");if(b&&!writing&&!reading&&!readFailed&&b.dataset.poolTab!==tab){tab=b.dataset.poolTab;cursor="";stack=[];selected.clear();load();}};
     $("poolPrev").onclick=()=>{if(writing||reading||readFailed||!stack.length)return;cursor=stack.pop() || "";load();};$("poolNext").onclick=()=>{if(writing||reading||readFailed||!next)return;stack.push(cursor);cursor=next;load();};
-    $("poolPickMaterials").onclick=pickMaterials;
+    $("poolAddMaterials").onclick=reviewAdmission;
     $("poolList").onchange=e=>{const id=e.target.dataset.poolItem;if(id){e.target.checked?selected.add(id):selected.delete(id);$("poolSelectionCount").textContent=`已选 ${selected.size} 条待发布素材`;lock();}};
     $("poolList").onclick=e=>{const b=e.target.closest("[data-pool-move]");if(b)change("move",{item_id:b.dataset.poolMove,direction:b.dataset.direction});};
     $("poolRemoveSelected").onclick=()=>{if(selected.size&&confirm(`移除选中的 ${selected.size} 条待发布素材？已生成任务不会被取消。`))change("remove",{item_ids:[...selected]});};
     $("poolQueryOperation").onclick=async()=>{if(writing||reading)return;writing=true;lock();try{await queryAdmission();}finally{writing=false;lock();}};
     $("poolRetryOperation").onclick=async()=>{
       if(writing||reading||!pending)return;writing=true;lock();const old=pending;
-      try{await api(endpoint+"/operations/"+encodeURIComponent(old.request.operation_id));await admitted();}
+      try{const result=await api(endpoint+"/operations/"+encodeURIComponent(old.request.operation_id));await admitted(result);}
       catch(err){if(err.status===404){writing=false;await enqueue(old.request,true);}else errorAt("poolError",err);}
       finally{writing=false;lock();}
     };
@@ -249,9 +290,9 @@
 
   async function pageManagement() {
     let configs=[],page=0,query="",loading=false,loaded=false,languageReady=false;
-    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><button id="createPage" class="button primary" disabled>创建</button></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><button id="reloadPages" class="button">刷新列表</button></div><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
+    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><button id="reloadPages" class="button">刷新列表</button></div><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function render() {
-      $("createPage").disabled=!languageReady||!loaded;
+      $("createPage").disabled=!languageReady||!loaded;$("excelPublishButton").disabled=!loaded;
       $("pageSearch").disabled=!loaded;$("reloadPages").disabled=loading;
       $("pageRows").setAttribute("aria-busy",String(loading));
       if(!loaded){
@@ -297,6 +338,10 @@
       });
     }
     $("createPage").onclick=()=>editor(null);
+    $("excelPublishButton").onclick=()=>{
+      if(!window.FbExcelPublish){errorAt("pageError",new Error("Excel 发布组件尚未加载，请刷新页面后重试。"));return;}
+      window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses}).catch(err=>errorAt("pageError",err));
+    };
     $("pageRows").onclick=e=>{
       const edit=e.target.closest("[data-edit-page]"),del=e.target.closest("[data-delete-page]"),pool=e.target.closest("[data-pool-page]");
       if(pool)openPool({...configs.find(p=>p.page_id===pool.dataset.poolPage)},render);
@@ -418,7 +463,7 @@
     $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>发布批次</h2><p>每条任务保留提交时的素材、Page、文案、加工方式和链接快照。</p></div><button class="button" id="reloadRecords">刷新记录</button></div><div class="table-wrap"><table><thead><tr><th>批次 / 创建时间（北京）</th><th>状态</th><th>任务数</th><th>发布人</th><th>操作</th></tr></thead><tbody id="recordRows"></tbody></table></div><div class="pager"><span class="helper">每页最多 50 个批次</span><div class="actions"><button class="button small" id="recordsPrev">上一页</button><button class="button small" id="recordsNext">下一页</button></div></div></section><section class="panel" id="batchDetail" hidden></section>`;
     async function load(){const gen=++generation;const result=await api("/batches?"+new URLSearchParams({limit:"50",cursor}));if(gen!==generation)return;items=result.items || [];next=result.next_cursor || "";$("recordRows").innerHTML=items.map(b=>`<tr><td><button class="record-open mono" data-batch="${esc(b.batch_id)}">${esc(b.batch_id)}</button><p class="helper">${esc(atBJ(b.created_at_utc))}</p></td><td><span class="badge">${esc(statuses[b.status] || b.status)}</span></td><td>${Number(b.total_tasks ?? b.task_count ?? b.items?.length ?? 0)}</td><td>${esc(b.owner_name || b.owner_user_id || "—")}</td><td><button class="button small" data-batch="${esc(b.batch_id)}">查看详情</button></td></tr>`).join("") || '<tr><td colspan="5" class="empty">尚无发布批次</td></tr>';$("recordsPrev").disabled=!stack.length;$("recordsNext").disabled=!next;}
     function safeLink(url){try{const parsed=new URL(url);return parsed.protocol==="https:"?`<a href="${esc(parsed.href)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`:esc(url);}catch(_){return esc(url || "生成中");}}
-    async function detail(id){const result=await api("/batches/"+encodeURIComponent(id)),b=result.batch;detailId=id;$("batchDetail").hidden=false;$("batchDetail").innerHTML=`<div class="section-head"><div><h2>批次详情</h2><p class="mono">${esc(b.batch_id)} · ${esc(statuses[b.status] || b.status)}</p></div><button class="button small" id="refreshDetail">刷新详情</button></div><div id="detailError" class="error" role="alert" hidden></div><p class="helper">创建时间 ${esc(atBJ(b.created_at_utc))}（北京） · ${b.processing_mode==="random_overlay"?"随机加工":"原片发布"}</p>${(b.items || []).map(t=>`<article class="task-card"><div class="row spread"><h3>${esc(t.material_name || t.material?.material_name || t.material_id)} → ${esc(t.page_name || t.page?.page_name || t.page_id)}</h3><span class="badge ${t.status==="published"?"good":["unknown","failed","blocked"].includes(t.status)?"bad":""}">${esc(statuses[t.status] || t.status)}</span></div><div class="detail-grid"><span class="mono">任务 ${esc(t.task_id)}</span><span>发布记录 ${esc(t.ledger_id)}</span><span>Page 内第 ${esc(t.page_sequence)} 条 · 模板 v${esc(t.template_version)}</span><span>计划时间 ${esc(atBJ(t.planned_at_utc))}（北京）</span></div><div class="task-caption">${esc(t.caption)}</div><div class="task-link">真实短链：${safeLink(t.short_url)}</div><details><summary>查看长链参数与冻结文案</summary><pre>${esc(t.long_url || "生成中")}</pre><pre>${esc(t.caption_template)}</pre></details>${t.error_code||t.error_message?`<div class="notice warning"><strong>${esc(t.error_code)}</strong><p>${esc(t.error_message)}</p></div>`:""}${t.graph_post_id?`<p class="helper mono">平台发布编号 ${esc(t.graph_post_id)}</p>`:""}${t.can_cancel?`<div class="actions"><button class="button small danger" data-cancel-task="${esc(t.task_id)}">取消此任务</button></div>`:""}</article>`).join("")}`;
+    async function detail(id){const result=await api("/batches/"+encodeURIComponent(id)),b=result.batch;detailId=id;$("batchDetail").hidden=false;$("batchDetail").innerHTML=`<div class="section-head"><div><h2>批次详情</h2><p class="mono">${esc(b.batch_id)} · ${esc(statuses[b.status] || b.status)}</p></div><button class="button small" id="refreshDetail">刷新详情</button></div><div id="detailError" class="error" role="alert" hidden></div><p class="helper">创建时间 ${esc(atBJ(b.created_at_utc))}（北京） · ${b.processing_mode==="mixed"?"逐行加工":b.processing_mode==="random_overlay"?"随机加工":"原片发布"}${b.excel?.filename?` · Excel ${esc(b.excel.filename)}`:""}</p>${b.excel?.skipped?.length?`<div class="notice warning"><strong>导入时跳过 ${b.excel.skipped.length} 行</strong><ul>${b.excel.skipped.map(row=>`<li>第 ${esc(row.row_number)} 行 · Page ${esc(row.page_id || "—")} / 素材 ${esc(row.material_id || "—")}：${esc(row.message || row.code)}</li>`).join("")}</ul></div>`:""}${(b.items || []).map(t=>`<article class="task-card"><div class="row spread"><h3>${esc(t.material_name || t.material?.material_name || t.material_id)} → ${esc(t.page_name || t.page?.page_name || t.page_id)}</h3><span class="badge ${t.status==="published"?"good":["unknown","failed","blocked"].includes(t.status)?"bad":""}">${esc(statuses[t.status] || t.status)}</span></div><div class="detail-grid"><span class="mono">任务 ${esc(t.task_id)}</span><span>发布记录 ${esc(t.ledger_id)}</span><span>Page 内第 ${esc(t.page_sequence)} 条 · 模板 v${esc(t.template_version)}</span><span>计划时间 ${esc(atBJ(t.planned_at_utc))}（北京）</span>${t.row_number?`<span>Excel 第 ${esc(t.row_number)} 行 · ${t.processing_mode==="random_overlay"?"随机模板":"原片"}</span><span>${t.credential_mode==="operator"?"当前操作人 Token":"默认 Token 自动轮换"}</span><span>标题：${esc(t.title || "未填写")}</span>`:""}</div><div class="task-caption">${esc(t.caption)}</div><div class="task-link">真实短链：${safeLink(t.short_url)}</div><details><summary>查看长链参数与冻结文案</summary><pre>${esc(t.long_url || "生成中")}</pre><pre>${esc(t.caption_template)}</pre></details>${t.error_code||t.error_message?`<div class="notice warning"><strong>${esc(t.error_code)}</strong><p>${esc(t.error_message)}</p></div>`:""}${t.graph_post_id?`<p class="helper mono">平台发布编号 ${esc(t.graph_post_id)}</p>`:""}${t.can_cancel?`<div class="actions"><button class="button small danger" data-cancel-task="${esc(t.task_id)}">取消此任务</button></div>`:""}</article>`).join("")}`;
       $("refreshDetail").onclick=e=>busy(e.target,()=>detail(id).catch(err=>errorAt("detailError",err)));
       $("batchDetail").onclick=e=>{const btn=e.target.closest("[data-cancel-task]");if(btn)busy(btn,async()=>{if(!confirm("取消这条尚未发送的任务？同批其他任务继续保留。"))return;try{await post("/tasks/"+encodeURIComponent(btn.dataset.cancelTask)+"/cancel",{});await detail(id);await load();toast("任务已取消");}catch(err){errorAt("detailError",err);}});};
     }

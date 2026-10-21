@@ -42,7 +42,7 @@ async (page) => {
       if(action==="settings"){pool={...pool,version:pool.version+1,times:body.times,processing_mode:body.processing_mode};return respond({pool});}
       if(action==="enable"){pool={...pool,version:pool.version+1,status:"enabled",publisher_user_id:"current-user",publisher_name:"当前用户"};return respond({pool});}
       if(action==="pause"){pool={...pool,version:pool.version+1,status:"paused"};return respond({pool});}
-      if(action==="items/preview"){previews++;return respond({preview_token:"pool-preview",repeat_required:repeatRequired,items:body.material_ids.map(id=>materials.find(m=>m.material_id===id))});}
+      if(action==="items/resolve"||action==="items/preview"){previews++;return respond({preview_token:"pool-preview",repeat_required:repeatRequired,items:body.material_ids.map((id,index)=>({...materials.find(m=>m.material_id===id),row_number:index+1,repeat_required:repeatRequired})),material_ids:body.material_ids,skipped:[],summary:{total:body.material_ids.length,valid:body.material_ids.length,skipped:0}});}
       if(action==="items"){
         admissions++;if(rejectAdmission){rejectAdmission=false;return respond({code:"material_changed",message:"素材发生变化，请重新核对",accepted:false},409);}
         const added=body.material_ids.map(id=>({...materials.find(m=>m.material_id===id),id:"item-"+(++counter),status:"pending",position:counter,created_at_utc:new Date().toISOString(),can_view_task:false}));
@@ -87,24 +87,23 @@ async (page) => {
   await page.locator("#poolTimeInput").fill("12:00");await page.locator("#poolAddTime").click();await page.locator("#poolSaveSettings").click();
   await page.waitForFunction(()=>document.getElementById("poolStatus").textContent.includes("v6"));
   check(pool.publisher_user_id==="current-user"&&pool.status==="enabled","normal settings save retains active publisher");
-  await page.locator("#poolPickMaterials").click();await page.locator('[data-material="201"]').check();await page.locator("#materialsNext").click();await page.locator('[data-material="203"]').check();
-  check(await page.locator("#materialLanguage").isDisabled()&&await page.locator("#materialLanguage").inputValue()==="zh","pool material picker locks Page drama language");
-  await page.locator("#materialsPrev").click();await page.locator('[data-material="201"]').waitFor();
-  check(await page.locator('[data-material="201"]').isChecked()&&await page.locator("#pickerCount").innerText()==="已选择 2 条素材","pool picker retains selections across pages");
-  await page.locator("#applyMaterials").click();await page.locator("#poolReviewStaged").click();await page.locator("#poolAdmission").waitFor();
+  await page.locator("#poolMaterialIds").fill(" 201 \n\n203 ");await page.locator("#poolAddMaterials").click();await page.locator("#poolAdmission").waitFor();
+  const resolved=calls.filter(x=>x.path.endsWith("/items/resolve")).at(-1).body;
+  check(resolved.config_instance_id===cfg.config_instance_id&&!Object.hasOwn(resolved,"language")&&await page.locator("#poolStatus").innerText().then(text=>text.includes("剧语言 中文")),"ID admission keeps the configured Page drama language");
+  check(resolved.material_ids.join(",")==="201,203"&&await page.locator("#poolMaterialIds").inputValue()===" 201 \n\n203 ","ID admission preserves input order and retains editable original input");
   check(previews===1&&admissions===0&&rows.length===0,"admission preview creates neither pool items nor tasks");
   check(await page.locator("#poolConfirmAdmission").isDisabled(),"previous successful publish needs explicit admission acknowledgement");
   await page.locator("#poolRepeatAck").check();rejectAdmission=true;await page.locator("#poolConfirmAdmission").click();
-  await page.waitForFunction(()=>document.getElementById("poolError").textContent.includes("所选素材已保留"));
-  check(await page.locator("#poolStaged").innerText().then(t=>t.includes("2 条"))&&!(await page.locator("#poolPickMaterials").isDisabled()),"definitive rejected admission retains selection and unlocks editor");
-  await page.locator("#poolReviewStaged").click();await page.locator("#poolRepeatAck").check();abortAdmission=true;await page.locator("#poolConfirmAdmission").click();
+  await page.waitForFunction(()=>document.getElementById("poolError").textContent.includes("输入已保留"));
+  check(await page.locator("#poolMaterialIds").inputValue()===" 201 \n\n203 "&&!(await page.locator("#poolMaterialIds").isDisabled()),"definitive rejected admission retains input and unlocks editor");
+  await page.locator("#poolAddMaterials").click();await page.locator("#poolRepeatAck").check();abortAdmission=true;await page.locator("#poolConfirmAdmission").click();
   await page.waitForFunction(()=>document.getElementById("poolPendingText").textContent.includes("尚未查询"));
-  check(await page.locator("#poolPickMaterials").isDisabled()&&rows.length===2&&admissions===2,"ambiguous accepted admission locks controls without repeating POST");
+  check(await page.locator("#poolMaterialIds").isDisabled()&&rows.length===2&&admissions===2,"ambiguous accepted admission locks controls without repeating POST");
   const originalOperation=calls.filter(x=>x.path.endsWith("/items")&&x.method==="POST").at(-1).body.operation_id;
   check(await page.evaluate(op=>Object.values(sessionStorage).some(v=>v.includes(op)),originalOperation),"original pool operation retained before submit");
   rejectReplay=true;await page.locator("#poolRetryOperation").click();
   await page.waitForFunction(()=>document.getElementById("poolError").textContent.includes("本次重试未受理"));
-  check(await page.locator("#poolPickMaterials").isDisabled()&&rows.length===2&&admissions===3,"replay accepted:false cannot unlock the earlier ambiguous pool operation");
+  check(await page.locator("#poolMaterialIds").isDisabled()&&rows.length===2&&admissions===3,"replay accepted:false cannot unlock the earlier ambiguous pool operation");
   check(calls.filter(x=>x.path.endsWith("/items")&&x.method==="POST").at(-1).body.operation_id===originalOperation,"pool retry preserves exact original operation identifier");
   await page.locator("#pagePool [data-close]").first().click();
   await page.waitForFunction(()=>document.querySelector('[data-pool-page="101"]').textContent.includes("待核对"));
@@ -112,7 +111,7 @@ async (page) => {
   hideOperation=false;await page.reload();await page.locator('[data-pool-page="101"]').click();
   await page.waitForFunction(()=>document.getElementById("poolPendingPanel").hidden&&document.querySelectorAll("#poolList .pool-item").length===2);
   check(admissions===3&&rows.length===2&&await page.evaluate(()=>sessionStorage.length===0),"reopening reconciles original admission without duplicate POST");
-  repeatRequired=false;await page.locator("#poolPickMaterials").click();await page.locator('[data-material="202"]').check();await page.locator("#applyMaterials").click();await page.locator("#poolReviewStaged").click();await page.locator("#poolConfirmAdmission").click();
+  repeatRequired=false;await page.locator("#poolMaterialIds").fill("202");await page.locator("#poolAddMaterials").click();
   await page.waitForFunction(()=>!document.getElementById("poolNext").disabled);
   check(rows.length===3&&await page.locator("#poolList .pool-item").count()===2,"pool list follows cursor pagination");
   await page.locator("#poolNext").click();await page.locator('[data-pool-item="item-3"]').waitFor();
