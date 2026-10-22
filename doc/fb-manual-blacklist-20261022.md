@@ -27,3 +27,18 @@
 部署：GitHub精确提交检出后执行 `python3 scripts/deploy_fb_manual_blacklist.py` 演练，随后同命令加 `--apply`；部署器校验基线SHA、排空、在线备份、只重启FB sidecar并恢复原timer/worker状态。
 
 回滚：同release执行 `python3 scripts/deploy_fb_manual_blacklist.py --rollback <本次manifest.json>`。须先对账未完成手动任务，避免恢复黑名单后拦住新受理任务；不恢复旧SQLite，不删除短链。
+
+## 2026-10-22 17:19 北京时间上线验收
+
+- 实现 `6d11214`，实际部署提交 `7b64d8353781575d0e5797ed52469577517b1275`，已推送 GitHub 分支 `codex/fb-manual-blacklist-20261022`。
+- CPU `43.166.187.96` GitHub release `/mnt/data-disk/fb-video-publish/releases/7b64d83`；安装目标 `/opt/fb-auto-post/current/features/fb_video_publish` 和 `/root/drama_material_service/features/fb_video_publish`，8个文件SHA核对通过。
+- 截图可读的6个素材真实来源比对：默认规则6个全部命中黑名单；手动规则6个全部通过。运行中HTTP Excel preview从0有效/6跳过变为6有效/0跳过。未创建批次、未调用Graph发布。
+- 生产5项专门回归通过；本地source/core/Excel/pool/broker及自动来源回归均通过。现有51任务冻结字段、51短链保留。无数据库迁移。
+- FB sidecar窄重启，worker/scheduler和9个timer原启停状态恢复；主API PID保持3770172。健康通过，未登录公网API保持401，部署后error级日志0行。
+- 只读证据：`/mnt/data-disk/fb-video-publish/evidence/manual-blacklist-{before,after,deployed}-20261022.json`。
+
+准确回滚命令（先对账未完成手动任务，保留现库）：
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/7b64d83/scripts/deploy_fb_manual_blacklist.py --rollback /mnt/data-disk/fb-video-publish/backups/page-list-20261022T091917Z-7b64d835/manifest.json
+```
