@@ -13,7 +13,7 @@ Page 管理新增 Excel 预检、原子批量发布、操作恢复与下载模�
 - 原发布开关、加工开关、每日额度继续生效，未改变 GPU 容量。
 - `features/fb_video_publish` 修改同步 `/root/drama_material_service` 和 `/opt/fb-auto-post/current`；`features/fb_auto_posts/{service,repositories,publisher}.py` 只同步 FB runtime。主 API 的旧 publisher 等副本不同且不执行此发布链，不覆盖。
 - 7 个静态资源同步 MAIN/static、FB/static、`/usr/share/nginx/html`；三页缓存版本同步更新。
-- 无数据库迁移，新协议字段保存在原请求和任务 JSON 快照内。服务机已有 openpyxl。
+- 无数据库迁移，新协议字段保存在原请求和任务 JSON 快照内。Excel 依赖必须对 `fb-auto-post` 服务用户可见；root 私有目录安装不能满足运行时要求。详见 `doc/fb-excel-runtime-fix-20261022.md`。
 
 ## GitHub-first 部署步骤
 

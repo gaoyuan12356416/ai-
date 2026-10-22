@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import deploy_fb_page_list_performance as previous
+from check_fb_excel_runtime import check_as_service_user
 
 base, pool_release = previous.base, previous.pool_release
 ROOT = Path(__file__).resolve().parents[1]
@@ -455,6 +456,8 @@ def main():
             rollback(args.rollback)
             return
         commit = verified_commit(args.remote_ref)
+        # Test the actual unprivileged Python identity before any service stop.
+        check_as_service_user(ROOT)
         targets = stage_targets()
         enabled = assert_pool_window()
         print(json.dumps({"preflight_ok": True, "commit": commit, "files": len(targets),
