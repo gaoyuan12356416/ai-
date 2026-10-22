@@ -56,7 +56,7 @@ def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h
     filters = []
     for index, path in enumerate(paths):
         command += ["-i", str(path)]
-        filters += ["[%d:v:0]settb=1/30,setpts=PTS-STARTPTS[v%d]" % (index, index),
+        filters += ["[%d:v:0]settb=1/30,setpts=PTS-STARTPTS,fps=30[v%d]" % (index, index),
                     "[%d:a:0]aresample=48000,asetpts=PTS-STARTPTS[a%d]" % (index, index)]
     video, audio = "v0", "a0"
     length = recipe["clips"][0]["end_frame"] - recipe["clips"][0]["start_frame"]
@@ -70,11 +70,11 @@ def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h
         else:
             filters += ["[%s][%s][v%d][a%d]concat=n=2:v=1:a=1[%s][%s]" %
                         (video, audio, index, index, new_video, new_audio)]
-        # concat chooses AVTB and marks frame_rate unknown (1/0). Restoring
-        # only time_base is insufficient: a later xfade rejects that link on
-        # production FFmpeg. Explicit CFR restores both properties after every
-        # join, including fade -> cut -> fade chains and assembly-tree nodes.
-        filters += ["[%s]fps=30,settb=1/30,setpts=N[tv%d]" % (new_video, index)]
+        # concat chooses AVTB; production FFmpeg 7.1 also clears frame_rate in
+        # setpts (unlike FFmpeg 8's default strip_fps=false). fps MUST be last
+        # after every timestamp rewrite, including each source above, so every
+        # xfade input has an explicit CFR link and matching 1/30 time_base.
+        filters += ["[%s]settb=1/30,setpts=N,fps=30[tv%d]" % (new_video, index)]
         video, audio = "tv%d" % index, new_audio
         length += recipe["clips"][index]["end_frame"] - recipe["clips"][index]["start_frame"]
     filters += ["[%s]trim=end_frame=%d,setpts=N/(30*TB),format=yuv420p[outv]" % (video, length),
