@@ -50,6 +50,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS ve_task(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project_id TEXT NOT NULL DEFAULT '',
               operation_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,
               created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(owner,operation_id));
+            CREATE TABLE IF NOT EXISTS ve_project_version(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project_id TEXT NOT NULL,
+              version INTEGER NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+              UNIQUE(project_id,version));
+            CREATE TABLE IF NOT EXISTS ve_batch(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project_id TEXT NOT NULL,
+              operation_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+              UNIQUE(owner,operation_id));
+            CREATE TABLE IF NOT EXISTS ve_output(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL UNIQUE,
+              batch_id TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ve_source_kind_status ON ve_source(kind,status,updated_at);
             CREATE INDEX IF NOT EXISTS ve_task_status ON ve_task(status,created_at,id);
             CREATE TABLE IF NOT EXISTS ve_lease(name TEXT PRIMARY KEY,holder TEXT NOT NULL,expires_at INTEGER NOT NULL);
@@ -85,7 +93,7 @@ class Store:
 
     @staticmethod
     def table(kind):
-        require(kind in {'source', 'upload', 'project', 'task'}, 'invalid_record', '记录类型无效')
+        require(kind in {'source', 'upload', 'project', 'task', 'project_version', 'batch', 'output'}, 'invalid_record', '记录类型无效')
         return 've_' + kind
 
     def get(self, kind, record_id, db=None):

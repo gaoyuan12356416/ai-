@@ -47,6 +47,23 @@ test('edits made during first save are flushed before a new project replaces the
   assert.equal(app.calls.filter(call=>call.options.method==='POST').length,1);
 });
 
+test('catalog product choices use the existing product label and retain its app identifier',async()=>{
+  const app=await browser(async url=>url.endsWith('/catalog/products')?response({items:[{app_id:'2310',app:'DramaWave',label:'DramaWave | 美国 | 英语'},{app_id:'8123',app:'HotDrama'}]}):null);
+  await app.field('addDrama').click();const markup=app.field('productPicker').innerHTML;
+  assert.match(markup,/<option value="2310">DramaWave \| 美国 \| 英语<\/option>/);
+  assert.match(markup,/<option value="8123">HotDrama<\/option>/);
+});
+
+test('real catalog never sends an unbounded empty or single-character name search',async()=>{
+  const app=await browser(async url=>url.includes('/catalog/dramas?')?response({items:[]}):null);
+  app.field('productPicker').value='2310';await app.field('productPicker').emit('change');
+  app.field('dramaSearch').value='她';await app.field('searchDramas').click();
+  assert.equal(app.calls.filter(call=>call.url.includes('/catalog/dramas?')).length,0);
+  app.field('dramaSearch').value='她的';await app.field('searchDramas').click();
+  const requests=app.calls.filter(call=>call.url.includes('/catalog/dramas?'));
+  assert.equal(requests.length,1);assert.match(requests[0].url,new RegExp(`q=${encodeURIComponent('她的')}`));
+});
+
 test('unknown create outcome retries exactly the frozen operation then saves newer edits as a version',async()=>{
   let firstBody,remote,attempts=0;
   const app=await browser(async(url,options)=>{

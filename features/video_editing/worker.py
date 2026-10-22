@@ -96,6 +96,7 @@ class Dispatcher:
         with self.store.transaction() as db:
             current=self.store.get('task',row['id'],db)
             if current['status']=='completed': return
+            if current['status']=='resume_queued' and row['status']!='resume_queued':return
             d=current['data'];d['error_code']=str(code)[:100];d['error_message']=message
             self.store.update('task',row['id'],{'status':status,'data':d},db)
             if status=='failed' and row['kind']=='probe':
@@ -127,15 +128,27 @@ class Dispatcher:
         require(response.get('job_id',row['id'])==row['id'],'gpu_identity_conflict','GPU 任务身份不匹配',409)
         status=response.get('status')
         if status in {'failed','recovery_required'}:
-            code=str(response.get('error_code') or 'gpu_render_failed')
+            error=response.get('error') if isinstance(response.get('error'),dict) else {}
+            code=str(error.get('code') or response.get('error_code') or 'gpu_render_failed')
             if not re.fullmatch(r'[A-Za-z0-9_]{1,100}',code): code='gpu_render_failed'
-            self.fail_or_hold(row,status,code,'制作失败，可查看配置后恢复同一任务')
+            messages={'video_editing_disk_budget':'GPU 临时空间不足，请稍后恢复同一任务',
+                      'video_editing_source_changed':'原始视频内容已改变，请重新选择素材或剧集',
+                      'source_changed':'原始视频内容已改变，请重新选择素材或剧集',
+                      'video_editing_transition_too_long':'转场片段过短，请检查淡入淡出时长',
+                      'video_editing_last_transition':'最后一个片段不能设置过渡，请检查时间线',
+                      'video_editing_clip_too_short':'保留片段必须至少包含一帧，请调整时间线',
+                      'video_editing_probe_failed':'无法读取视频信息，请检查源视频是否有效',
+                      'video_editing_output_invalid':'成片规格或音画时长校验失败，请恢复同一任务',
+                      'video_editing_storage_unavailable':'剪辑 COS 存储尚未配置，请联系管理员',
+                      'recovery_required':'GPU 服务已恢复，请继续同一任务'}
+            self.fail_or_hold(row,status,code,messages.get(code,'制作失败，可查看配置后恢复同一任务'))
             return
         if status!='completed':
             require(status in {'queued','running','pending'},'gpu_status_invalid','GPU 状态无效',503)
             with self.store.transaction() as db:
                 current=self.store.get('task',row['id'],db)
                 if current['status']=='completed':return
+                if current['status']=='resume_queued' and row['status']!='resume_queued':return
                 d=current['data'];d['stage']=str(response.get('stage') or status)[:80]
                 progress=response.get('progress',0)
                 d['progress']=progress if isinstance(progress,(int,float,dict)) else 0
@@ -166,6 +179,10 @@ class Dispatcher:
             if current['status']=='completed':return
             d=current['data'];d.update(result=result,progress=100,stage='completed');d.pop('error_code',None);d.pop('error_message',None)
             self.store.update('task',row['id'],{'status':'completed','data':d},db)
+            if row['kind']=='render' and d.get('output_id'):
+                output=self.store.get('output',d['output_id'],db)
+                require(output and output['task_id']==row['id'],'output_identity_conflict','成片账本身份不一致',409)
+                self.store.update('output',output['id'],{'status':'ready','data':result},db)
             if row['kind']=='probe':
                 source=self.store.get('source',d['source_id'],db)
                 if source and source['status']!='deleted' and source['data'].get('probe_task_id')==row['id']:

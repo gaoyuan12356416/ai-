@@ -135,6 +135,14 @@ class UploadTests(unittest.TestCase):
         with self.store.transaction() as db:self.store.update('upload',row['id'],{'status':'completing'},db)
         self.assertEqual(self.uploads.reconcile(row['id'],ACTOR)['status'],'completing')
         with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
+    def test_crashed_completion_can_recover_same_upload_after_deadline(self):
+        row=self.create();self.signed(row)
+        with self.store.transaction() as db:
+            current=self.uploads.get(row['id'],ACTOR,db);current['data']['completion_started_at']=1
+            self.store.update('upload',row['id'],{'status':'completing','data':current['data']},db)
+        self.assertEqual(self.uploads.reconcile(row['id'],ACTOR)['status'],'completing_unknown')
+        self.assertEqual(self.uploads.complete(row['id'],ACTOR)['status'],'completed')
+        self.assertEqual(len(self.cos.initializations),1)
     def test_limits(self):
         with self.assertRaises(VideoEditingError):self.create(MAX_BYTES+1)
         row=self.create(PART_BYTES+3);self.assertEqual(row['data']['part_count'],2)

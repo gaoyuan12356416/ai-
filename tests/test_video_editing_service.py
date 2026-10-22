@@ -2,11 +2,13 @@ import copy
 import tempfile
 import os
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 from features.video_editing import VideoEditingError
 from features.video_editing.recipe import recipe_fingerprint
+from features.video_editing.catalog import Catalog
 from features.video_editing.store import Store,owner
 from features.video_editing.service import Service
 from features.video_editing.uploads import Uploads
@@ -67,6 +69,15 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(VideoEditingError):self.service.save_project(draft,ACTOR)
         draft=self.draft();draft['dramas'][0]['clips'][1]['source_id']=E2
         with self.assertRaises(VideoEditingError):self.service.save_project(draft,ACTOR)
+    def test_removed_product_source_cannot_create_new_work_but_old_batch_survives(self):
+        p=self.project();task=self.render(p)
+        self.service.catalog=Catalog(self.store,SimpleNamespace(list_products=lambda:[{'app_id':'other_app'}]))
+        with self.assertRaises(VideoEditingError):self.service.source(E,ACTOR)
+        with self.assertRaises(VideoEditingError):self.service.save_project(self.draft(),ACTOR)
+        with self.assertRaises(VideoEditingError):
+            self.service.render(p['id'],{'operation_id':'new_render_2','expected_version':1},ACTOR)
+        self.assertEqual(self.render(p)['id'],task['id'])
+        self.assertEqual(self.service.task(task['id'],ACTOR)['id'],task['id'])
     def test_frozen_render_independent_of_future_project_and_asset_edits(self):
         p=self.project();task=self.render(p);frozen=self.service.task(task['id'],ACTOR)['data']['payload']
         changed=self.draft();changed['dramas'][0]['clips'][1]['end_ms']=7000;changed['expected_version']=1
@@ -75,6 +86,20 @@ class ServiceTests(unittest.TestCase):
     def test_render_idempotence_and_one_task_per_drama(self):
         p=self.project();first=self.render(p);second=self.render(p)
         self.assertEqual(first['id'],second['id']);self.assertEqual(self.store.list('task')[1],1)
+    def test_batch_version_and_output_ledgers_survive_edit_and_retry(self):
+        p=self.project();task=self.render(p)
+        self.assertTrue(task['batch_id'].startswith('vb_'));self.assertTrue(task['output_id'].startswith('vo_'))
+        batch=self.store.get('batch',task['batch_id']);snapshot=self.store.get('project_version',task['project_version_id'])
+        output=self.store.get('output',task['output_id'])
+        self.assertEqual(batch['data']['task_ids'],[task['id']]);self.assertEqual(snapshot['data'],self.draft())
+        self.assertEqual(output['task_id'],task['id']);self.assertEqual(output['status'],'pending')
+        changed=self.draft();changed['dramas'][0]['clips'][1]['end_ms']=7000;changed['expected_version']=1
+        self.service.save_project(changed,ACTOR,p['id']);self.service.mutate_asset(A,ACTOR,delete=True)
+        retry=self.render(p)
+        self.assertEqual((retry['batch_id'],retry['output_id'],retry['id']),(task['batch_id'],task['output_id'],task['id']))
+        self.assertEqual(self.store.get('project_version',task['project_version_id'])['data'],self.draft())
+        with self.assertRaises(VideoEditingError):
+            self.service.render(p['id'],{'operation_id':'render_op_1','expected_version':2},ACTOR)
     def test_repeat_selected_asset_supported(self):
         draft=self.draft();extra=copy.deepcopy(draft['dramas'][0]['clips'][0]);extra['id']='again';draft['dramas'][0]['clips'].append(extra)
         p=self.service.save_project(draft,ACTOR);self.assertEqual(len(self.service.task(self.render(p)['id'],ACTOR)['data']['payload']['recipe']['clips']),3)
@@ -83,6 +108,7 @@ class ServiceTests(unittest.TestCase):
         p=self.service.save_project(draft,ACTOR)
         with self.assertRaises(VideoEditingError):self.render(p)
         self.assertEqual(self.store.list('task')[1],0)
+        for kind in ('batch','project_version','output'):self.assertEqual(self.store.list(kind)[1],0)
     def test_worker_unknown_does_not_create_second_job(self):
         p=self.project();task=self.render(p)
         self.service.render(p['id'],{'operation_id':'render_op_2','expected_version':1},ACTOR)
@@ -107,12 +133,22 @@ class ServiceTests(unittest.TestCase):
         with patch.object(worker,'verify_artifact'):
             worker.tick();worker.tick()
         self.assertEqual(len(calls),1);self.assertEqual(self.service.task(task['id'],ACTOR)['status'],'completed')
+        output=self.store.get('output',task['output_id'])
+        self.assertEqual(output['status'],'ready');self.assertEqual(output['data'],result)
+        self.assertEqual(self.service.task_dto(self.service.task(task['id'],ACTOR))['output']['id'],output['id'])
         with self.assertRaises(VideoEditingError):self.service.resume(task['id'],ACTOR)
     def test_wrong_gpu_recipe_cannot_complete(self):
         p=self.project();task=self.render(p)
         worker=Dispatcher(self.service,lambda *_:{'job_id':task['id'],'status':'completed','result':{
             'job_id':task['id'],'task_type':'video_editing_v1','operation':'render','recipe_sha256':'0'*64}})
         worker.tick();self.assertEqual(self.service.task(task['id'],ACTOR)['status'],'unknown')
+    def test_gpu_runtime_nested_error_retains_safe_code_and_message(self):
+        p=self.project();task=self.render(p)
+        worker=Dispatcher(self.service,lambda *_:{'job_id':task['id'],'status':'failed',
+                          'error':{'code':'video_editing_source_changed','message':'SECRET_SIGNED_URL'}})
+        worker.tick();result=self.service.task_dto(self.service.task(task['id'],ACTOR))
+        self.assertEqual(result['status'],'failed');self.assertEqual(result['error_code'],'video_editing_source_changed')
+        self.assertNotIn('SECRET',result['error_message']);self.assertIn('原始视频',result['error_message'])
     def test_probe_reuses_active_and_completed_metadata(self):
         with self.store.transaction() as db:self.store.update('source',A,{'status':'uploaded'},db)
         a=self.service.enqueue_probe(A,ACTOR);b=self.service.enqueue_probe(A,ACTOR)
@@ -145,6 +181,21 @@ class ServiceTests(unittest.TestCase):
         worker=Dispatcher(self.service,transport);worker.tick();worker.tick()
         self.assertEqual(calls,['POST']);self.assertEqual(self.service.task(task['id'],ACTOR)['status'],'queued')
         self.assertEqual(self.service.task(task['id'],ACTOR)['data']['stage'],'waiting_gpu_capacity')
+    def test_user_resume_during_stale_poll_is_not_lost(self):
+        for reply in ('failed','running','missing','transport_error'):
+            with self.subTest(reply=reply):
+                p=self.project()
+                task=self.service.render(p['id'],{'operation_id':'race_'+reply,'expected_version':1},ACTOR)['items'][0]
+                with self.store.transaction() as db:self.store.update('task',task['id'],{'status':'unknown'},db)
+                def transport(method,path,payload):
+                    self.service.resume(task['id'],ACTOR)
+                    if reply=='transport_error':raise TimeoutError('must not log signed URL')
+                    return None if reply=='missing' else {'job_id':task['id'],'status':reply}
+                Dispatcher(self.service,transport).tick()
+                self.assertEqual(self.service.task(task['id'],ACTOR)['status'],'resume_queued')
+                with self.store.transaction() as db:
+                    self.store.update('task',task['id'],{'status':'cancelled'},db)
+                    db.execute('DELETE FROM ve_lease')
 
 
 if __name__=='__main__':unittest.main()

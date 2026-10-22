@@ -1,8 +1,12 @@
 """Read-only adapter for the existing product/drama catalog."""
 import hashlib
 import ipaddress
+import os
 import re
+import signal
 import socket
+import subprocess
+import types
 from urllib.parse import urlsplit
 import requests
 
@@ -15,7 +19,49 @@ class Catalog:
         self.store,self.app=store,app
 
     def products(self):
-        return self.app.list_products()
+        return self._bounded_app_function('list_products')()
+
+    def _bounded_app_function(self,name):
+        function=getattr(self.app,name)
+        if not isinstance(function,types.FunctionType) or not hasattr(self.app,'MYSQL_BASE_CMD'):
+            return function
+        # Reuse the live catalog's variant selection without mutating app
+        # globals shared with concurrent production requests.
+        scope=dict(function.__globals__);scope['run_mysql']=self._query
+        for key in ('pick_drama_variant',name):
+            original=scope.get(key)
+            if isinstance(original,types.FunctionType):
+                bounded=types.FunctionType(original.__code__,scope,original.__name__,original.__defaults__,original.__closure__)
+                bounded.__kwdefaults__=original.__kwdefaults__
+                scope[key]=bounded
+        return scope[name]
+
+    def _query(self,sql):
+        if not hasattr(self.app,'MYSQL_BASE_CMD'):
+            return self.app.run_mysql(sql)
+        command=list(self.app.MYSQL_BASE_CMD)
+        require(command and '63353' not in command,'catalog_read_endpoint_invalid','目录查询端点无效',503)
+        env=os.environ.copy()
+        if self.app.MYSQL_PASSWORD:env['MYSQL_PWD']=self.app.MYSQL_PASSWORD
+        env['MYSQL_MAX_EXECUTION_TIME_MS']='5000'
+        command=[command[0],'--connect-timeout=3',*command[1:],'SET SESSION MAX_EXECUTION_TIME=5000; '+sql]
+        process=None
+        try:
+            # Keep the configured host-wide SQL gate; a process group lets a
+            # timeout close the gate and its mysql child, not leave an orphan.
+            process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env,
+                                     start_new_session=os.name!='nt')
+            stdout,_=process.communicate(timeout=15)
+            require(process.returncode==0,'catalog_query_failed','目录查询未完成，请缩短条件或使用剧目编号',503)
+            return [line.split('\t') for line in stdout.splitlines() if line.strip()]
+        except subprocess.TimeoutExpired:
+            if os.name!='nt':os.killpg(process.pid,signal.SIGKILL)
+            else:process.kill()
+            process.communicate()
+            raise VideoEditingError('catalog_query_timeout','目录查询超时，请使用完整剧目编号或更长的剧名前缀',503) from None
+        except VideoEditingError:raise
+        except Exception:
+            raise VideoEditingError('catalog_query_failed','目录查询暂不可用，请稍后重试',503) from None
 
     def require_product(self,app_id):
         require(str(app_id) in {str(p.get('app_id','')) for p in self.products()},'product_not_available','产品不在当前可用目录中',403)
@@ -23,23 +69,29 @@ class Catalog:
     def dramas(self,app_id,query):
         app_id=str(app_id).strip(); query=str(query).strip()
         require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}',app_id),'product_required','请选择产品')
+        require(0<len(query)<=100,'query_required','请输入完整剧目编号或至少两个字的剧名前缀')
+        exact=bool(re.fullmatch(r'[0-9]{1,32}',query))
+        require(exact or len(query)>=2,'query_required','剧名前缀至少输入两个字')
         self.require_product(app_id)
-        require(len(query)<=100,'query_invalid','搜索内容过长')
         db=str(self.app.DB_NAME); table=str(self.app.SOURCE_TABLE)
         require(re.fullmatch(r'[A-Za-z0-9_]+',db) and re.fullmatch(r'[A-Za-z0-9_]+',table),'catalog_configuration_invalid','剧集目录配置无效',503)
         quote=lambda value: "'"+str(value).replace('\\','\\\\').replace("'","''")+"'"
         where='app_id='+quote(app_id)+" AND type=2 AND sub_number>0 AND sub_url<>''"
-        if query:
-            where+=' AND (CAST(content_id AS CHAR)='+quote(query)+' OR name LIKE '+quote('%'+query.replace('%','\\%').replace('_','\\_')+'%')+')'
-        sql='SELECT CAST(content_id AS CHAR),MAX(name),COUNT(DISTINCT sub_number),MAX(cover) FROM `'+db+'`.`'+table+'` WHERE '+where+' GROUP BY content_id ORDER BY MAX(updated_at) DESC LIMIT 50'
-        rows=self.app.run_mysql(sql)
-        return [{'app_id':app_id,'content_id':str(r[0]),'title':str(r[1]),'episode_count':int(r[2]),'cover_url':str(r[3])} for r in rows]
+        where+=' AND content_id='+quote(query) if exact else ' AND name LIKE '+quote(query.replace('%','\\%').replace('_','\\_')+'%')
+        index='content_id' if exact else 'name'
+        sql='SELECT /*+ MAX_EXECUTION_TIME(5000) */ CAST(content_id AS CHAR),name,all_episodes_count,cover FROM `'+db+'`.`'+table+'` FORCE INDEX (`'+index+'`) WHERE '+where+' LIMIT 500'
+        rows=self._query(sql);items=[];seen=set()
+        for row in rows:
+            if str(row[0]) in seen:continue
+            seen.add(str(row[0]));items.append({'app_id':app_id,'content_id':str(row[0]),'title':str(row[1]),'episode_count':int(row[2]),'cover_url':str(row[3])})
+            if len(items)>=50:break
+        return items
 
     def episodes(self,app_id,content_id,actor):
         require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}',str(app_id)) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',str(content_id)),
                 'drama_invalid','剧目编号无效')
         self.require_product(app_id)
-        rows=self.app.fetch_drama_episodes(str(content_id),app_id=str(app_id))
+        rows=self._bounded_app_function('fetch_drama_episodes')(str(content_id),app_id=str(app_id))
         result=[]
         with self.store.transaction() as db:
             for item in rows:

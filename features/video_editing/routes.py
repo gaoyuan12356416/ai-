@@ -75,6 +75,6 @@ def handle(handler,method,app_module):
     except (TypeError,ValueError,KeyError):
         app_module.json_response(handler,400,{'code':'request_invalid','error':'请求参数无效'},no_store=True)
     except Exception:
-        logging.exception('video editing request failed: %s %s',method,parsed.path)
+        logging.warning('video editing request failed: %s %s',method,parsed.path)
         app_module.json_response(handler,503,{'code':'video_editing_unavailable','error':'剪辑服务暂时不可用，请稍后重试'},no_store=True)
     return True

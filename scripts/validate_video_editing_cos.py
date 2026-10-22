@@ -94,7 +94,7 @@ def dispatch(payload,app,root):
     if op.startswith('catalog_'):
         catalog=Catalog(store,app)
         if op=='catalog_products':
-            items=[{k:v for k,v in row.items() if k in {'app_id','name','product_name','app_name'}} for row in catalog.products()]
+            items=[{k:v for k,v in row.items() if k in {'app_id','name','product_name','app_name','label','app'}} for row in catalog.products()]
         elif op=='catalog_dramas':
             items=[{k:v for k,v in row.items() if k!='cover_url'} for row in catalog.dramas(payload.get('app_id',''),payload.get('q',''))]
         else:

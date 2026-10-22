@@ -55,6 +55,8 @@ class Service:
         row=self.store.get('source',sid,db)
         require(row and row['status']!='deleted' and (row['kind']=='episode' or row['status']=='ready' or can_manage(row,actor)),
                 'source_not_found','素材不存在或尚不可使用',404)
+        if row['kind']=='episode' and self.catalog is not None:
+            self.catalog.require_product(row['data'].get('app_id',''))
         if ready:
             require(row['status']=='ready','source_not_ready','请等待所有素材校验完成',409)
         return row
@@ -207,10 +209,24 @@ class Service:
         from .recipe import validate_recipe
         with self.store.transaction() as db:
             project=self.project(pid,actor,db); draft=project['data']
+            batch=self.store.row(db.execute('SELECT * FROM ve_batch WHERE owner=? AND operation_id=?',(owner(actor),op)).fetchone())
+            if batch:
+                require(batch['project_id']==pid and type(payload.get('expected_version')) is int and
+                        batch['data']['project_version']==payload['expected_version'],
+                        'operation_conflict','同一制作操作内容已变化',409)
+                return {'batch_id':batch['id'],'project_version_id':batch['data']['project_version_id'],
+                        'items':[self.task_dto(self.store.get('task',tid,db)) for tid in batch['data']['task_ids']]}
             require(type(payload.get('expected_version')) is int and payload['expected_version']==project['version'],'project_version_conflict','项目已被更新，请刷新后制作',409)
             require(draft['asset_id'] and draft['dramas'],'project_incomplete','请选择素材和短剧')
             self.source(draft['asset_id'],actor,db,ready=True)
-            result=[]
+            result=[];batch_id=identifier('vb_')
+            version_id='vv_'+hashlib.sha256((pid+':'+str(project['version'])).encode()).hexdigest()[:32]
+            saved=self.store.get('project_version',version_id,db)
+            if saved:
+                require(encode(saved['data'])==encode(draft),'project_snapshot_conflict','项目版本快照不一致',409)
+            else:
+                self.store.insert('project_version',{'id':version_id,'owner':project['owner'],'project_id':pid,
+                                  'version':project['version'],'data':draft},db)
             for index,drama in enumerate(draft['dramas']):
                 clips=drama['clips']
                 require(clips and any(c['source_id']==draft['asset_id'] for c in clips) and any(c['source_id']!=draft['asset_id'] for c in clips),
@@ -225,14 +241,24 @@ class Service:
                 if prior:
                     require(prior['project_id']==pid and prior['data'].get('project_version')==project['version'] and encode(prior['data']['payload']['recipe'])==encode(recipe),
                             'operation_conflict','同一制作操作内容已变化',409)
+                    prior['data'].update(batch_id=batch_id,project_version_id=version_id,output_id='vo_'+prior['id'][3:])
+                    self.store.update('task',prior['id'],{'data':prior['data']},db)
                     result.append(prior);continue
                 self.require_intake()
                 tid=identifier('ve_')
-                data={'project_version':project['version'],'drama_title':drama['title'],'app_id':drama['app_id'],'content_id':drama['content_id'],
+                data={'project_version':project['version'],'project_version_id':version_id,'batch_id':batch_id,'output_id':'vo_'+tid[3:],
+                      'drama_title':drama['title'],'app_id':drama['app_id'],'content_id':drama['content_id'],
                       'stage':'queued','progress':0,'payload':{'job_id':tid,'task_type':'video_editing_v1','operation':'render','recipe':recipe}}
                 self.store.insert('task',{'id':tid,'owner':owner(actor),'project_id':pid,'operation_id':task_operation,'kind':'render','status':'queued','data':data},db)
                 result.append(self.store.get('task',tid,db))
-        return {'items':[self.task_dto(r) for r in result]}
+            self.store.insert('batch',{'id':batch_id,'owner':owner(actor),'project_id':pid,'operation_id':op,
+                'data':{'project_version':project['version'],'project_version_id':version_id,'task_ids':[r['id'] for r in result]}},db)
+            for row in result:
+                output_id=row['data']['output_id']
+                if self.store.get('output',output_id,db) is None:
+                    self.store.insert('output',{'id':output_id,'owner':row['owner'],'task_id':row['id'],'batch_id':batch_id,
+                        'status':'ready' if row['status']=='completed' else 'pending','data':row['data'].get('result') or {}},db)
+        return {'batch_id':batch_id,'project_version_id':version_id,'items':[self.task_dto(r) for r in result]}
 
     def task(self,tid,actor):
         row=self.store.get('task',tid)
@@ -243,11 +269,12 @@ class Service:
         d=row['data']; result=d.get('result') or {}; artifact=result.get('artifact') or {}
         output=None
         if row['status']=='completed' and row['kind']=='render':
-            output={**{k:v for k,v in artifact.items() if k not in {'url','key','bucket'}},
+            output={'id':d.get('output_id','vo_'+row['id'][3:]),**{k:v for k,v in artifact.items() if k not in {'url','key','bucket'}},
                     'preview_url':self.signed_url(artifact),'download_url':self.signed_url(artifact,download=True),
                     'thumbnail_url':self.signed_url(result.get('thumbnail') or {}),'metadata':{k:artifact[k] for k in ('duration_ms','width','height','fps','has_audio') if k in artifact}}
             output['expires_at']=now()+900
         return {'id':row['id'],'project_id':row['project_id'],'kind':row['kind'],'status':row['status'],'drama_title':d.get('drama_title',''),
+                'batch_id':d.get('batch_id',''),'project_version_id':d.get('project_version_id',''),'output_id':d.get('output_id',''),
                 'stage':d.get('stage',row['status']),'progress':d.get('progress',0),'error_code':d.get('error_code',''),
                 'error_message':d.get('error_message',''),'output':output,'created_at':row['created_at'],'updated_at':row['updated_at']}
 

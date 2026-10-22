@@ -177,6 +177,20 @@ class Uploads:
                 if current['status']!='completed': self._accept_head(current,head,db)
             return self.get(upload_id,actor)
         if row['status'] in {'completing','completing_unknown','aborting','abort_unknown'}:
+            if row['status']=='completing' and now()-d.get('completion_started_at',row['updated_at'])>=120:
+                # A crashed API process may leave the pre-call marker behind.
+                # Expiry only enables explicit retry of the frozen same upload.
+                with self.store.transaction() as db:
+                    current=self.get(upload_id,actor,db)
+                    if current['status']=='completing' and now()-current['data'].get('completion_started_at',current['updated_at'])>=120:
+                        self.store.update('upload',upload_id,{'status':'completing_unknown'},db)
+                return self.get(upload_id,actor)
+            if row['status']=='aborting' and now()-d.get('abort_started_at',row['updated_at'])>=120:
+                with self.store.transaction() as db:
+                    current=self.get(upload_id,actor,db)
+                    if current['status']=='aborting' and now()-current['data'].get('abort_started_at',current['updated_at'])>=120:
+                        self.store.update('upload',upload_id,{'status':'abort_unknown'},db)
+                return self.get(upload_id,actor)
             return row
         if not d['upload_id']:
             # Reconcile the unique server-generated key; an uncertain create
@@ -230,6 +244,7 @@ class Uploads:
             require(not d.get('completion_parts') or d['completion_parts']==manifest,
                     'part_identity_mismatch','完成请求的分片身份已改变',409)
             d['completion_parts']=manifest
+            d['completion_started_at']=now()
             self.store.update('upload',upload_id,{'status':'completing','data':d},db)
         try:
             self.client.complete_multipart_upload(Bucket=self.bucket,Key=d['key'],UploadId=d['upload_id'],
@@ -256,7 +271,8 @@ class Uploads:
         with self.store.transaction() as db:
             current=self.get(upload_id,actor,db)
             require(current['status'] in {'uploading','initializing_unknown','abort_unknown'},'upload_cannot_abort','上传正在处理，请稍后刷新',409)
-            self.store.update('upload',upload_id,{'status':'aborting'},db)
+            current['data']['abort_started_at']=now()
+            self.store.update('upload',upload_id,{'status':'aborting','data':current['data']},db)
         try: self.client.abort_multipart_upload(Bucket=self.bucket,Key=d['key'],UploadId=d['upload_id'])
         except Exception as exc:
             if _status(exc)!=404:
