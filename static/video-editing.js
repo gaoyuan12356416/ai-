@@ -154,13 +154,13 @@
     const drama=currentDrama(); const clips=drama && drama.clips || []; const duration=totalDuration(clips);
     if(!clips.length){$('previewA').style.opacity=0;$('previewB').style.opacity=0;$('previewPlaceholder').classList.remove('hidden');$('previewMessage').textContent=demo?'演示画面，正式素材校验后可播放':'添加素材与剧集后即可预览';$('previewExpiry').textContent='';}
     if (!clips.find(clip => clip.id === state.selectedClip)) state.selectedClip=clips.length ? clips[0].id : null;
-    $('previewTitle').textContent=drama ? drama.title : '选择剧集，开始你的故事';
+    $('previewTitle').textContent=drama ? drama.title : '选择短剧后预览';
     $('timelineDuration').textContent=`预计 ${seconds(duration)} 秒 · ${clips.length} 片段`;
     const maxWidth=Math.max(105, Math.min(250, 800/Math.max(1,clips.length)));
     $('timeline').innerHTML=layout(clips).map(({clip,index,length,start}) => {
       const source=state.sources[clip.source_id]; const isAsset=source && source.kind==='asset';
       return `<button class="timeline-clip ${isAsset?'asset':''} ${clip.id===state.selectedClip?'selected':''}" draggable="true" data-clip-id="${esc(clip.id)}" style="width:${Math.max(105,Math.min(280,maxWidth+Math.log2(Math.max(1,length/1000))*7))}px" title="${esc(sourceTitle(source))}"><span class="clip-index">${time(start)}</span><strong>${isAsset?'▧':'▤'} ${esc(sourceTitle(source))}</strong><small>${seconds(clip.start_ms)}—${seconds(clip.end_ms)} 秒${clip.mute?' · 静音':''}</small>${clip.transition==='fade'&&index<clips.length-1?'<span class="transition-mark" title="0.3 秒交叉淡化">⋈</span>':''}</button>`;
-    }).join('') || '<div class="timeline-empty">添加剧集，将故事铺到时间线上</div>';
+    }).join('') || '<div class="timeline-empty">添加剧集后开始剪辑</div>';
     const errors=clips.length ? validateClips(clips,state.sources) : [];
     $('validationErrors').textContent=errors.join('；'); $('validationErrors').classList.toggle('hidden',!errors.length);
     $('totalTime').textContent=time(duration); $('playhead').max=Math.max(1,duration); state.playMs=Math.min(state.playMs,Math.max(0,duration)); updatePlayhead(); renderInspector();
