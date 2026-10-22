@@ -586,8 +586,12 @@ class WorkerHTTPTests(unittest.TestCase):
 
     def test_worker_binds_strict_async_and_legacy_sync_cache_callbacks(self):
         runtime = self.worker.get_runtime()
-        self.assertIs(runtime.cached_result, self.strict_cache)
-        self.assertIs(runtime.sync_cached_result, self.legacy_cache)
+        payload = render_payload()
+        runtime.cached_result(payload)
+        self.strict_cache.assert_called_once_with(payload)
+        self.legacy_cache.assert_not_called()
+        runtime.sync_cached_result(payload)
+        self.legacy_cache.assert_called_once_with(payload)
 
     def test_async_auth_validation_query_and_resume_routes(self):
         self.assertEqual(self.request("POST", "/api/gpu-video/jobs", render_payload(), "bad")[0], 401)

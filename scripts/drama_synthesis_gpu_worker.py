@@ -27,6 +27,11 @@ from features.drama_synthesis.youtube_media import YouTubeMediaExecutorService  
 from features.drama_synthesis.composition import RENDERER_PROFILE  # noqa: E402
 from features.drama_synthesis.prefetch import prefetch_episodes  # noqa: E402
 from features.drama_synthesis.media_pipeline import download_worker_count  # noqa: E402
+from features.video_editing.gpu_integration import (  # noqa: E402
+    RuntimeAdapter, from_app as editing_from_app, mixed_validate, mixed_fingerprint,
+    public_result as editing_public_result, task_kind,
+)
+from features.video_editing.recipe import TASK_TYPE as EDITING_TASK_TYPE, JOB_RE as EDITING_JOB_RE  # noqa: E402
 from features.drama_synthesis.gpu_compositor import (  # noqa: E402
     KERNEL_TEMPLATE, SOURCE_OVERLAY_KERNEL_TEMPLATE, SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE,
     compositor_filter_threads, compositor_lanes, runtime_identity,
@@ -59,6 +64,12 @@ RUNTIME = None
 RUNTIME_LOCK = threading.Lock()
 YOUTUBE_MEDIA = None
 YOUTUBE_MEDIA_LOCK = threading.Lock()
+EDITING_SERVICE = None
+
+
+def editing_intake_enabled():
+    marker = Path(os.environ.get("VIDEO_EDITING_DISABLED_FILE", "/etc/video-editing/intake.disabled"))
+    return os.environ.get("VIDEO_EDITING_GPU_ENABLED", "0") == "1" and not marker.exists()
 
 
 def prefetch_configuration(environ=None):
@@ -74,7 +85,7 @@ def prefetch_configuration(environ=None):
 
 
 def get_runtime():
-    global RUNTIME
+    global RUNTIME, EDITING_SERVICE
     with RUNTIME_LOCK:
         if RUNTIME is None:
             root = getattr(drama_app, "WORK_ROOT", None)
@@ -87,9 +98,15 @@ def get_runtime():
             except ValueError:
                 raise runtime_error("gpu_runtime_unavailable") from None
             prefetch_enabled, prefetch_overlap = prefetch_configuration()
+            EDITING_SERVICE = editing_from_app(drama_app)
+            adapter = RuntimeAdapter(EDITING_SERVICE, legacy_execute=drama_app.handle_gpu_video_render,
+                legacy_cached=cache, legacy_sync_cached=sync_cache,
+                legacy_resume=getattr(drama_app, "gpu_video_resume_ready", None))
             RUNTIME = AsyncRuntime(
-                root, drama_app.handle_gpu_video_render, cache, sync_cached_result=sync_cache,
-                can_resume=getattr(drama_app, "gpu_video_resume_ready", None),
+                root, adapter.execute, adapter.cached, sync_cached_result=adapter.sync_cached,
+                can_resume=adapter.resume, validate_payload=mixed_validate, fingerprint=mixed_fingerprint,
+                public_result=editing_public_result,
+                can_prefetch=lambda payload: task_kind(payload) == "drama",
                 render_slots=RENDER_SLOTS, queue_limit=limit,
                 dispatcher_workers=RENDER_CONCURRENCY,
                 prefetch=(lambda payload, **kwargs: prefetch_episodes(payload, root, **kwargs))
@@ -178,14 +195,20 @@ class Handler(BaseHTTPRequestHandler):
                 "source_overlay_cuda_kernel_sha256": hashlib.sha256(SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE.read_bytes()).hexdigest(),
                 "release_sha": RELEASE_SHA,
                 "runtime_identity": RUNTIME_IDENTITY,
+                "video_editing_enabled": editing_intake_enabled(),
+                "video_editing_profile": "video-editing-720-v1",
             })
             return
-        if self.path.startswith("/api/gpu-video/jobs/"):
+        editing_get = re.fullmatch(r"/api/gpu-video/video-editing/jobs/(ve_[0-9a-f]{32})", self.path)
+        if editing_get or self.path.startswith("/api/gpu-video/jobs/"):
             if not self._authorized():
                 self._reply(401, {"code": "unauthorized"})
                 return
             try:
-                self._reply(200, get_runtime().get(self.path[len("/api/gpu-video/jobs/"):]))
+                job_id = editing_get[1] if editing_get else self.path[len("/api/gpu-video/jobs/"):]
+                if not editing_get and job_id.startswith("ve_"):
+                    raise runtime_error("gpu_job_not_found", 404)
+                self._reply(200, get_runtime().get(job_id))
             except DramaSynthesisError as exc:
                 error = safe_error(exc)
                 self._reply(exc.status, {"code": error["code"], "error": error["message"]})
@@ -213,12 +236,14 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(401, {"code": "unauthorized"})
             return
         resume_match = re.fullmatch(r"/api/gpu-video/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/resume", self.path)
+        editing_submit = self.path == "/api/gpu-video/video-editing/jobs"
+        editing_resume = re.fullmatch(r"/api/gpu-video/video-editing/jobs/(ve_[0-9a-f]{32})/resume", self.path)
         youtube_media_paths = {
             "/api/gpu-video/youtube-media/prepare": "prepare",
             "/api/gpu-video/youtube-media/upload": "upload",
             "/api/gpu-video/youtube-media/cleanup": "cleanup",
         }
-        if self.path not in {"/api/gpu-video/render", "/api/gpu-video/cover", "/api/gpu-video/jobs"} and self.path not in youtube_media_paths and not resume_match:
+        if self.path not in {"/api/gpu-video/render", "/api/gpu-video/cover", "/api/gpu-video/jobs"} and self.path not in youtube_media_paths and not resume_match and not editing_submit and not editing_resume:
             self._reply(404, {"code": "not_found"})
             return
         try:
@@ -240,6 +265,31 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception:
                 self._reply(500, {"code": "youtube_media_failed", "error": "香港YouTube媒体服务执行失败"})
+            return
+        if editing_submit or editing_resume:
+            try:
+                if task_kind(payload) != EDITING_TASK_TYPE:
+                    raise runtime_error("invalid_request", 400)
+                mixed_validate(payload)
+                if editing_submit:
+                    if not editing_intake_enabled():
+                        raise runtime_error("video_editing_disabled", 503)
+                    self._reply(202, get_runtime().submit(payload))
+                else:
+                    if payload["job_id"] != editing_resume[1]:
+                        raise runtime_error("invalid_job_id", 400)
+                    self._reply(202, get_runtime().resume(payload, payload.get("expected_generation")))
+            except DramaSynthesisError as exc:
+                error = safe_error(exc)
+                self._reply(exc.status, {"code": error["code"], "error": error["message"]})
+            except Exception:
+                self._reply(503, {"code": "gpu_runtime_unavailable", "error": "制作节点暂不可用"})
+            return
+        try:
+            if task_kind(payload) != "drama":
+                raise runtime_error("invalid_request", 400)
+        except DramaSynthesisError as exc:
+            self._reply(exc.status, {"code": exc.code, "error": safe_error(exc)["message"]})
             return
         if not valid_job_id(payload):
             self._reply(400, {"code": "invalid_job_id"})
@@ -281,6 +331,17 @@ def main():
         raise SystemExit("loopback host and worker token are required")
     runtime = get_runtime()  # reconcile before any authoritative GET 404
     server = ThreadingHTTPServer((host, port), Handler)
+    cleanup_stop = threading.Event()
+    def cleanup_loop():
+        while not cleanup_stop.wait(3600):
+            try:
+                EDITING_SERVICE.cleanup_failed(runtime)
+            except Exception:
+                # Cleanup is bounded to stopped failed jobs. Retain evidence on
+                # any filesystem/state error; never kill an active renderer.
+                pass
+    cleanup_thread = threading.Thread(target=cleanup_loop, name="video-editing-cleanup", daemon=True)
+    cleanup_thread.start()
 
     def shutdown(_signum, _frame):
         runtime.stop_intake()
@@ -292,6 +353,8 @@ def main():
     try:
         server.serve_forever()
     finally:
+        cleanup_stop.set()
+        cleanup_thread.join(timeout=2)
         runtime.stop_intake()
         server.server_close()
         runtime.close(timeout=30)

@@ -480,7 +480,8 @@ class AsyncRuntime:
     def __init__(self, root, execute, cached_result, *, sync_cached_result=None, can_resume=None,
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
                  dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True,
-                 prefetch=None, prefetch_during_download=False):
+                 prefetch=None, prefetch_during_download=False, validate_payload=None,
+                 public_result=None, can_prefetch=None):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
         if type(dispatcher_workers) is not int or not 1 <= dispatcher_workers <= 8:
@@ -498,6 +499,10 @@ class AsyncRuntime:
         self.execute, self.cached_result = execute, cached_result
         self.sync_cached_result = sync_cached_result or cached_result
         self.can_resume = can_resume
+        # Optional media-task adapters retain the exact legacy contract by default.
+        self.validate_payload = validate_payload or validate_render_payload
+        self.public_result_adapter = public_result
+        self.can_prefetch = can_prefetch or (lambda payload: True)
         self.prefetch = prefetch
         if type(prefetch_during_download) is not bool:
             raise ValueError("prefetch_during_download must be boolean")
@@ -592,7 +597,7 @@ class AsyncRuntime:
                               if key in METRICS and type(value) in (int, float)
                               and math.isfinite(value) and 0 <= value <= 1e18}
         if record["status"] == "completed":
-            result["result"] = self._public_result(record["result"], record["job_id"])
+            result["result"] = self._public_result(record["result"], record["job_id"], record["_payload"])
         if record.get("error"):
             result["error"] = safe_error(runtime_error(record["error"].get("code", "gpu_render_failed")))
         return result
@@ -627,9 +632,13 @@ class AsyncRuntime:
         if not self._healthy:
             raise runtime_error("gpu_runtime_unverified")
 
-    def _public_result(self, value, job_id):
+    def _public_result(self, value, job_id, payload=None):
         if not isinstance(value, dict) or value.get("job_id", job_id) != job_id:
             raise runtime_error("gpu_render_failed", 500)
+        if self.public_result_adapter is not None:
+            projected = self.public_result_adapter(value, payload)
+            if projected is not None:
+                return projected
         result = gpu_cache.public_result(value)
         # Preserve the legacy trivial success envelope without arbitrary fields.
         if type(value.get("ok")) is bool:
@@ -653,13 +662,13 @@ class AsyncRuntime:
     def _complete(self, record, result):
         now = self._timestamp()
         record.update(status="completed", stage="completed", error=None,
-                      result=self._public_result(result, record["job_id"]),
+                      result=self._public_result(result, record["job_id"], record["_payload"]),
                       completed_at=record.get("completed_at") or now,
                       heartbeat_at=now, last_progress_at=now, _resource_blocked=False)
         self._save(record)
 
     def submit(self, payload):
-        validate_render_payload(payload)
+        self.validate_payload(payload)
         fingerprint = self.fingerprint(payload)
         job_id = payload["job_id"]
         with self._submission_lock(job_id):
@@ -694,7 +703,7 @@ class AsyncRuntime:
             return self._dto(record)
 
     def resume(self, payload, expected_generation):
-        validate_render_payload(payload)
+        self.validate_payload(payload)
         if type(expected_generation) is not int or expected_generation < 1:
             raise runtime_error("invalid_request", 400)
         fingerprint, job_id = self.fingerprint(payload), payload["job_id"]
@@ -977,6 +986,8 @@ class AsyncRuntime:
                         or not queued or not self._prefetch_allowed()):
                     continue
                 record = queued[0]
+                if not self.can_prefetch(record["_payload"]):
+                    continue
                 generation = record["generation"]
                 same_generation = record.get("_prefetch_attempted_generation") == generation
                 attempts = record.get("_prefetch_attempts", 1) if same_generation else 0
