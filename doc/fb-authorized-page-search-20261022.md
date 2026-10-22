@@ -46,4 +46,35 @@
 回退入口拒绝恢复旧代码。先完成任务对账和计划处理，再回退；不能清库或恢复旧 SQLite。**
 现有配置、任务和短链保留；回退后未入池 Page 的新搜索/配置访问会回到旧限制。
 
-部署结果、准确 manifest 路径和线上验证数据在验收后补充。
+## 已部署与验收
+
+2026-10-22 14:59 北京时间已部署运行提交
+`c29fdba40329957c358046a6dac36c5a841540f0`，GitHub 分支
+`codex/fb-authorized-page-search-20261022`。CPU release 为
+`/mnt/data-disk/fb-video-publish/releases/c29fdba`。
+
+- 两个运行文件 SHA 与 GitHub release 一致。仅 FB sidecar 从 PID 2771323 重启为
+  3835745；主 API PID 3770172 未变，两者 active，原 timers/worker 状态恢复。
+- 本地 229 项回归检查通过，CPU 45 项来源/权限/链接检查通过。上线前真实只读验证：
+  管理员及用户803均可见目标10个；用户868只见本人授权6个；用户841对这10个不可见，
+  但其原池授权的3个待发布Page仍可用，用户824的1个待发布Page也可用。
+- 上线后实际 sidecar HTTP `/api/fb-video-publish/pages/available?q=<ID>` 逐项验证
+  10/10返回一个精确匹配，均有符合数据库资格条件的授权，单次约2.0～2.2秒。
+  普通用户803可见、用户841不可见的权限对照通过。
+- 已登录管理员浏览器的创建配置弹窗实测 Billionaire Drama Club、Heartbeat Stories、
+  ReelMagic World、StoryLuxe、反轉劇情社，显示对应ID与“可创建配置”。没有提交配置或测试发布。
+- 备份中14条配置记录全部保留，51条任务冻结内容、51条短链全部保留。
+  验收时配置表为15条，出现并发新增，不能声称整个数据库前后完全一致。
+
+备份清单：
+`/mnt/data-disk/fb-video-publish/backups/page-list-20261022T065905Z-c29fdba4/manifest.json`
+
+服务器只读证据：
+`/mnt/data-disk/fb-video-publish/evidence/authorized-pages-candidate-20261022.json`
+和 `authorized-pages-deployed-20261022.json`。
+
+准确回滚命令（必须先满足前述任务/池排空限制；保留数据库及短链）：
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/c29fdba/scripts/deploy_fb_authorized_pages.py --rollback /mnt/data-disk/fb-video-publish/backups/page-list-20261022T065905Z-c29fdba4/manifest.json
+```
