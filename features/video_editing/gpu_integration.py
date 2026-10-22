@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -11,7 +12,8 @@ import shutil
 import time
 
 from features.drama_synthesis import async_runtime as runtime
-from features.drama_synthesis.local_checkpoint import atomic_write_record, read_record, load_completed, save_completed
+from features.drama_synthesis.cos_upload import _head as authenticated_head
+from features.drama_synthesis.local_checkpoint import atomic_write_record, read_record, load_completed, save_completed, file_fingerprint
 from . import recipe as contract
 from .media import checked_workdir, remove_workdir, upload_private, verified_source_download, verify_receipt
 from .render import build_normalize_command, build_assemble_command, assembly_layers, probe_media, run_ffmpeg, validate_output
@@ -131,7 +133,7 @@ class EditingService:
         if not contract.JOB_RE.fullmatch(job_id):
             raise runtime.runtime_error("invalid_job_id", 400)
         path = Path(self.config.state_root).absolute() / job_id
-        if path.is_symlink() or path.parent.is_symlink():
+        if any(item.is_symlink() for item in (path, *path.parents)):
             raise runtime.runtime_error("gpu_runtime_unverified")
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         return path
@@ -159,7 +161,163 @@ class EditingService:
     def can_resume(self, payload):
         value = contract.validate_payload(payload)
         state = self._state(value["job_id"])
-        return not (state / "expired.json").exists()
+        try:
+            expiry, epoch, consumed = self._recovery_state(state, contract.payload_fingerprint(value))
+            if expiry is not None and not consumed:
+                self._verify_unused_expiry(value, state, self._client(), expiry, epoch)
+            return True
+        except Exception:
+            # Unknown storage, malformed evidence and legacy unbound markers
+            # are never permission to recreate media or create another upload.
+            return False
+
+    @staticmethod
+    def _resume_error():
+        return runtime.runtime_error("gpu_job_resume_unavailable", 409)
+
+    def _expiry(self, path, fingerprint):
+        value = read_record(path)
+        if value is None:
+            return None
+        before = file_fingerprint(path)
+        value = read_record(path)
+        if (before != file_fingerprint(path)
+                or set(value) != {"version", "fingerprint", "expired_generation", "expired_at", "reason"}
+                or type(value["version"]) is not int or value["version"] != 1
+                or value["fingerprint"] != fingerprint
+                or type(value["expired_generation"]) is not int or value["expired_generation"] < 1
+                or type(value["expired_at"]) not in (int, float) or not math.isfinite(value["expired_at"])
+                or value["expired_at"] <= 0 or value["reason"] != "failed_media_retention"):
+            raise self._resume_error()
+        return value, before["sha256"]
+
+    def _epoch_directory(self, state, epoch):
+        path = state / epoch["local_checkpoint_dir"]
+        if any(item.is_symlink() for item in (path, *path.parents)) or (path.exists() and not path.is_dir()):
+            raise self._resume_error()
+        return path
+
+    def _recovery_state(self, state, fingerprint):
+        expiry = self._expiry(state / "expired.json", fingerprint)
+        epoch = read_record(state / "scratch_epoch.json")
+        if epoch is None:
+            return expiry, None, False
+        if (expiry is None or set(epoch) != {"version", "fingerprint", "admitted_generation", "consumed_expired_sha256", "local_checkpoint_dir"}
+                or type(epoch["version"]) is not int or epoch["version"] != 1
+                or epoch["fingerprint"] != fingerprint
+                or type(epoch["admitted_generation"]) is not int or epoch["admitted_generation"] < 1
+                or not contract.SHA_RE.fullmatch(str(epoch["consumed_expired_sha256"]))
+                or epoch["local_checkpoint_dir"] != "local-attempts/g%d" % epoch["admitted_generation"]):
+            raise self._resume_error()
+        self._epoch_directory(state, epoch)
+        same = epoch["consumed_expired_sha256"] == expiry[1]
+        if same:
+            if epoch["admitted_generation"] <= expiry[0]["expired_generation"]:
+                raise self._resume_error()
+        else:
+            # A second retention pass must have archived the exact marker that
+            # admitted the previous epoch before replacing the current marker.
+            history = state / "expiry-history" / (epoch["consumed_expired_sha256"] + ".json")
+            if any(item.is_symlink() for item in (history, *history.parents)):
+                raise self._resume_error()
+            previous = self._expiry(history, fingerprint)
+            if (previous is None or previous[1] != epoch["consumed_expired_sha256"]
+                    or previous[0]["expired_generation"] >= epoch["admitted_generation"]
+                    or epoch["admitted_generation"] > expiry[0]["expired_generation"]):
+                raise self._resume_error()
+        return expiry, epoch, same
+
+    def _verify_unused_expiry(self, value, state, client, expiry, epoch, *, check_remote=True):
+        """Require positive absence of all upload intent and all output objects."""
+        fingerprint = contract.payload_fingerprint(value)
+        work = Path(self.config.root).absolute() / value["job_id"]
+        if any(item.is_symlink() for item in (work, *work.parents)) or work.exists():
+            raise self._resume_error()  # Retention deletion was not confirmed.
+        local_name = re.compile(r"(?:thumbnail|preview|clip-[0-9]{4}|join-[0-9]{2}-[0-9]{4})\.local\.json(?:\.failure\.json)?")
+        uploads = ("material.mp4",) if value["operation"] == "render" else ("thumbnail.jpg", "preview.mp4")
+        locks = {name + ".upload.json.lock" for name in uploads}
+        for path in state.rglob("*"):
+            relative = path.relative_to(state).as_posix()
+            if path.is_symlink():
+                raise self._resume_error()
+            if path.is_dir():
+                if relative not in {"local-attempts", "expiry-history"} and not re.fullmatch(r"local-attempts/g[1-9][0-9]*", relative):
+                    raise self._resume_error()
+                if relative.startswith("local-attempts/g") and (epoch is None or int(path.name[1:]) > epoch["admitted_generation"]):
+                    raise self._resume_error()  # No unreferenced future attempt may become the new epoch.
+                continue
+            if not path.is_file():
+                raise self._resume_error()
+            if relative in {"expired.json", "scratch_epoch.json"}:
+                continue  # Already checked strictly above.
+            if relative in locks and path.stat().st_size == 0:
+                continue  # A durable empty flock file is not upload intent.
+            record = read_record(path)
+            if relative == "input.json":
+                if (set(record) != {"fingerprint", "created_at"} or record["fingerprint"] != fingerprint
+                        or type(record["created_at"]) not in (int, float) or not math.isfinite(record["created_at"])):
+                    raise self._resume_error()
+            elif re.fullmatch(r"expiry-history/[0-9a-f]{64}\.json", relative):
+                previous = self._expiry(path, fingerprint)
+                if previous[1] != path.stem or previous[0]["expired_generation"] >= expiry[0]["expired_generation"]:
+                    raise self._resume_error()
+            elif local_name.fullmatch(path.name) and (path.parent == state or re.fullmatch(r"local-attempts/g[1-9][0-9]*", path.parent.relative_to(state).as_posix())):
+                if path.name.endswith(".failure.json"):
+                    context = record.get("context", {})
+                    if (record.get("version") != 1 or record.get("kind") != "drama_random_render_failure"
+                            or context.get("recipe_sha256") != contract.recipe_fingerprint(value["recipe"], value["operation"])
+                            or context.get("job_id", value["job_id"]) != value["job_id"]):
+                        raise self._resume_error()
+                elif (set(record) != {"version", "identity", "artifact", "result"} or record["version"] != 1
+                        or record.get("identity", {}).get("fingerprint") != fingerprint
+                        or not isinstance(record.get("result"), dict)
+                        or type(record.get("artifact", {}).get("size_bytes")) is not int
+                        or record["artifact"]["size_bytes"] <= 0
+                        or not contract.SHA_RE.fullmatch(str(record["artifact"].get("sha256", "")))):
+                    raise self._resume_error()
+            else:
+                # Includes every upload checkpoint, hidden atomic-write residue,
+                # unknown sidecar and evidence in an unexpected subdirectory.
+                raise self._resume_error()
+        if check_remote:
+            prefix = self.config.prefix.rstrip("/") + "/" + ("outputs" if value["operation"] == "render" else "probes") + "/" + value["job_id"]
+            for name in uploads:
+                if authenticated_head(client, {"bucket": self.config.bucket, "key": prefix + "/" + name}) is not None:
+                    raise self._resume_error()
+
+    def _local_state(self, value, state, client):
+        fingerprint = contract.payload_fingerprint(value)
+        expiry, epoch, consumed = self._recovery_state(state, fingerprint)
+        if expiry is None:
+            return state
+        context = runtime.capture_context()
+        if context is None or context.job_id != value["job_id"] or type(context.generation) is not int:
+            raise self._resume_error()
+        def require_active():
+            active = context.runtime._active(context)
+            if active is None or active["fingerprint"] != fingerprint or context.generation <= expiry[0]["expired_generation"]:
+                raise self._resume_error()
+        with context.runtime._mutex:
+            require_active()
+            if consumed:
+                if context.generation < epoch["admitted_generation"]:
+                    raise self._resume_error()
+                return self._epoch_directory(state, epoch)
+        # Recheck in the executing slot, but never hold the shared runtime
+        # mutex over COS I/O: an unavailable HEAD must not block legacy GETs or
+        # heartbeats. Revalidate the active owner and all local evidence before
+        # committing the new pointer after that network call.
+        self._verify_unused_expiry(value, state, client, expiry, epoch)
+        with context.runtime._mutex:
+            require_active()
+            if self._recovery_state(state, fingerprint) != (expiry, epoch, False):
+                raise self._resume_error()
+            self._verify_unused_expiry(value, state, client, expiry, epoch, check_remote=False)
+            epoch = {"version": 1, "fingerprint": fingerprint, "admitted_generation": context.generation,
+                "consumed_expired_sha256": expiry[1], "local_checkpoint_dir": "local-attempts/g%d" % context.generation}
+            self._epoch_directory(state, epoch)
+            atomic_write_record(state / "scratch_epoch.json", epoch)
+            return self._epoch_directory(state, epoch)
 
     def _local_render(self, path, state, identity, command, duration, *, diagnostic_context=None):
         completed = load_completed(state, path, identity)
@@ -179,8 +337,7 @@ class EditingService:
             return cached
         job_id, recipe = value["job_id"], value["recipe"]
         state, client = self._state(job_id), self._client()
-        if (state / "expired.json").exists():
-            raise runtime.runtime_error("gpu_job_resume_unavailable", 409)
+        local_state = self._local_state(value, state, client)
         work = checked_workdir(self.config.root, job_id)
         fingerprint = contract.payload_fingerprint(value)
         duration = sum(c["end_frame"] - c["start_frame"] for c in recipe["clips"]) / 30 if value["operation"] == "render" else 0
@@ -223,7 +380,7 @@ class EditingService:
             thumb = work / "thumbnail.jpg"
             thumb_cmd = [self.config.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(sources[sid]),
                          "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "3", str(thumb)]
-            self._local_render(thumb, state / "thumbnail.local.json", {"fingerprint": fingerprint, "kind": "thumbnail"}, thumb_cmd, 0.04,
+            self._local_render(thumb, local_state / "thumbnail.local.json", {"fingerprint": fingerprint, "kind": "thumbnail"}, thumb_cmd, 0.04,
                 diagnostic_context=diagnostic_context)
             result["thumbnail"] = upload("thumbnail.jpg", thumb, content_type="image/jpeg")
             if (info["video_codec"] != "h264" or (info["has_audio"] and info["audio_codec"] != "aac")
@@ -233,7 +390,7 @@ class EditingService:
                     raise contract.error("video_editing_disk_budget", SAFE_ERRORS["video_editing_disk_budget"], 503)
                 preview = work / "preview.mp4"
                 clip = {"start_frame": 0, "end_frame": contract.ms_to_frame(info["duration_ms"]), "fit": "contain", "mute": False}
-                self._local_render(preview, state / "preview.local.json", {"fingerprint": fingerprint, "kind": "preview"},
+                self._local_render(preview, local_state / "preview.local.json", {"fingerprint": fingerprint, "kind": "preview"},
                     build_normalize_command(sources[sid], clip, preview, has_audio=info["has_audio"],
                         ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), info["duration_ms"] / 1000,
                     diagnostic_context=diagnostic_context)
@@ -247,7 +404,7 @@ class EditingService:
                 count = clip["end_frame"] - clip["start_frame"]
                 command = build_normalize_command(sources[clip["source_id"]], clip, path,
                     has_audio=infos[clip["source_id"]]["has_audio"], ffmpeg=self.config.ffmpeg, encoder=self.config.encoder)
-                self._local_render(path, state / ("clip-%04d.local.json" % index),
+                self._local_render(path, local_state / ("clip-%04d.local.json" % index),
                     {"fingerprint": fingerprint, "clip_id": clip["id"]}, command, count / 30,
                     diagnostic_context=diagnostic_context)
                 validate_output(probe_media(path, ffprobe=self.config.ffprobe), count)
@@ -258,7 +415,7 @@ class EditingService:
             for layer in layers:
                 for group in layer:
                     output = work / (group["name"] + ".mp4")
-                    self._local_render(output, state / (group["name"] + ".local.json"),
+                    self._local_render(output, local_state / (group["name"] + ".local.json"),
                         {"fingerprint": fingerprint, "kind": group["name"]},
                         build_assemble_command([segments[name] for name in group["inputs"]], group["recipe"], output,
                             ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), group["frames"] / 30,
@@ -278,7 +435,7 @@ class EditingService:
     def cleanup_failed(self, shared_runtime, *, now=None, retention_seconds=86400):
         """Expire only terminal failures with positively stopped child processes."""
         now = time.time() if now is None else now
-        candidates = []
+        candidates, cleaned = [], []
         with shared_runtime._mutex:
             for record in shared_runtime._records.values():
                 if (record["status"] != "failed" or task_kind(record["_payload"]) != contract.TASK_TYPE
@@ -292,9 +449,32 @@ class EditingService:
                 state = self._state(job_id)
                 if read_record(state / "result.json") is not None:
                     continue
-                atomic_write_record(state / "expired.json", {"expired_at": now, "reason": "failed_media_retention"})
+                record = shared_runtime._records[job_id]
+                fingerprint = contract.payload_fingerprint(record["_payload"])
+                generation = record.get("generation")
+                if type(generation) is not int or generation < 1 or record.get("fingerprint") != fingerprint:
+                    continue
+                try:
+                    previous = self._expiry(state / "expired.json", fingerprint)
+                except Exception:
+                    continue  # Never turn a legacy/corrupt marker into permission.
+                if previous is not None and previous[0]["expired_generation"] > generation:
+                    continue
+                if previous is None or previous[0]["expired_generation"] < generation:
+                    if previous is not None:
+                        archive = state / "expiry-history" / (previous[1] + ".json")
+                        if any(item.is_symlink() for item in (archive, *archive.parents)):
+                            raise self._resume_error()
+                        saved = self._expiry(archive, fingerprint)
+                        if saved is None:
+                            atomic_write_record(archive, previous[0])
+                        if file_fingerprint(archive)["sha256"] != previous[1]:
+                            raise self._resume_error()
+                    atomic_write_record(state / "expired.json", {"version": 1, "fingerprint": fingerprint,
+                        "expired_generation": generation, "expired_at": now, "reason": "failed_media_retention"})
                 remove_workdir(self.config.root, job_id)
-        return candidates
+                cleaned.append(job_id)
+        return cleaned
 
 
 class RuntimeAdapter:
