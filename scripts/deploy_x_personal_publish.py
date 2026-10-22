@@ -171,7 +171,7 @@ def quote(name):
     return '"' + name.replace('"', '""') + '"'
 
 
-def database_facts(path, projection=None, *, tables=None):
+def database_facts(path, projection=None, *, tables=None, user_startup=False):
     """Hash only original columns, so additive defaults do not alter old evidence."""
     with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)) as conn:
         conn.execute('PRAGMA query_only=ON')
@@ -181,6 +181,11 @@ def database_facts(path, projection=None, *, tables=None):
             projection = {name: [r[1] for r in conn.execute('PRAGMA table_info(' + quote(name) + ')')]
                           for name, in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
                           if tables is None or name in tables}
+        if user_startup:
+            # Existing startup refreshes updated_at unconditionally. Keep every
+            # other user field (including session-sourced avatars) under guard.
+            projection = {name: [c for c in columns if not (name == 'drama_admin_user' and c == 'updated_at')]
+                          for name, columns in projection.items()}
         facts = {}
         for table, columns in projection.items():
             # Order by the complete projection also works for WITHOUT ROWID tables.
@@ -188,6 +193,15 @@ def database_facts(path, projection=None, *, tables=None):
             checksum, count = hashlib.sha256(), 0
             for row in conn.execute('SELECT ' + fields + ' FROM ' + quote(table) + ' ORDER BY ' + fields):
                 values = [({'blob': v.hex()} if isinstance(v, bytes) else v) for v in row]
+                if user_startup and table == 'drama_admin_user' and values[columns.index('role')] == 'admin':
+                    index = columns.index('permissions_json')
+                    permissions = json.loads(values[index])
+                    require(isinstance(permissions, dict), 'invalid admin permission map')
+                    if 'x_video_publish' in permissions:
+                        require(permissions['x_video_publish'] is True, 'unexpected personal publishing admin grant')
+                        permissions.pop('x_video_publish')
+                    # Only the new admin module grant is expected from startup.
+                    values[index] = json.dumps(permissions, sort_keys=True, separators=(',', ':'))
                 checksum.update(json.dumps(values, ensure_ascii=True, separators=(',', ':')).encode() + b'\n')
                 count += 1
             facts[table] = {'count': count, 'sha256': checksum.hexdigest()}
@@ -537,7 +551,7 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
         # Take the large main database online, before the short service cutover.
         snapshot(Path(config['paths']['main_db']), backup / 'main_db.sqlite3')
         main_tables = config.get('main_invariant_tables', ['drama_admin_user'])
-        main_before = database_facts(Path(config['paths']['main_db']), tables=main_tables)
+        main_before = database_facts(Path(config['paths']['main_db']), tables=main_tables, user_startup=True)
         stopped = False
         try:
             # Close browser mutation entry first, then recheck the independent worker.
@@ -574,7 +588,8 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
             health(config)
             for key, path in db_paths(config).items():
                 before = manifest['database_before'][key]
-                require(database_facts(path, before['columns']) == before, 'legacy ledger changed: ' + key)
+                require(database_facts(path, before['columns'], user_startup=key == 'main_db') == before,
+                        'legacy ledger changed: ' + key)
             require(token_facts(config) == manifest['tokens_before'], 'token fingerprints changed')
             require(personal_rows(config) == 0, 'unexpected personal tasks created')
             reload_nginx(config)
