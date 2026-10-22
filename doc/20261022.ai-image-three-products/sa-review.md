@@ -8,10 +8,10 @@
 | SA-02 | P1 | 同一图片跨产品投放，来源与消耗归属混淆 | 来源产品决定产出，事实行 app_id 决定效果；总素材数按正式 ID 去重 | 代码及 fixture 通过 |
 | SA-03 | P1 | 多来源认领相同正式 ID，或重名应用归属不明 | 应用映射冲突阻断；正式 ID 来源冲突移至待核对且排除正式 cohort | 代码及 fixture 通过 |
 | SA-04 | P1 | 新旧正式 ID 消耗遗漏或迁移双计原图 | 新旧 ID 均保留指标；首次原图按来源版本去重，缺旧映射不得推算首次原图 | 代码及 fixture 通过 |
-| SA-05 | P1 | 对照组混入其他产品、未投放应用或渠道 | 按每天、产品、app、channel 实际 AI 消耗 cell 匹配其他图片并减去已识别 AI | 代码及 fixture 通过，待实际数据 |
-| SA-06 | P1 | 查询失败显示零，或发布中断造成前后资源混用 | 读取错误直接失败；冻结 manifest、资源先发布、首页最后切换，保留旧成功页 | 待故障测试与发布验证 |
+| SA-05 | P1 | 对照组混入其他产品、未投放应用或渠道 | 按每天、产品、app、channel 实际 AI 消耗 cell 匹配其他图片并减去已识别 AI | 代码、fixture 及逐日真实原始数据独立审计通过 |
+| SA-06 | P1 | 查询失败显示零，或发布中断造成前后资源混用 | 读取错误直接失败；冻结 manifest、资源先发布、首页最后切换，保留旧成功页 | 故障测试、独立 failed health 展示及123个冻结对象公网校验通过 |
 | SA-07 | P2 | 相同 content_id 在不同产品中合并 | 剧目分组 key 包含来源产品，名称仅显示，不作为唯一标识 | 代码及 fixture 通过 |
-| SA-08 | P2 | 压缩体积达标但浏览器仍自动拉取原图 | 首屏 HTML/必要数据 <=150 KiB gzip；无原图自动请求；三次冷启动记录实际中位数 | 待浏览器验收 |
+| SA-08 | P2 | 压缩体积达标但浏览器仍自动拉取原图 | 首屏 HTML/必要数据 <=150 KiB gzip；无原图自动请求；三次冷启动记录实际中位数 | 公网35.70KiB，三次冷启动中位1.0381秒，首屏0明细/原图请求，通过 |
 
 接口约定：`resolve_scope(app_rows)` 返回 products、app_names、app_to_product、excluded_apps；`collect_lineage(..., multi_product=True)` 启用新版；`merge_product_lineages(parts)` 合并经来源验证的各产品映射。`build_report(..., scope=scope)` 返回 schema 3，未传 scope 时保留旧 schema 2 兼容路径。
 

@@ -13,5 +13,26 @@
 
 先停止本日报timer/service。用本次release的report.py --restore-public <v3-state/backups/run>恢复有旧版本的可变对象，必须通过完整哈希及metadata漂移守卫；首次新建的v3对象保留，历史/版本资源不删除。随后本次deploy.py --rollback <deploy-backups/stamp>恢复旧unit与代码指针；确认旧服务state不变后systemctl enable --now ai-image-daily.timer。不得恢复/覆盖任何业务数据库或重发素材。
 
-实际SHA、安装备份、发布备份及验收路径写入test-report.md。
+## 本次精确版本与回滚命令
+
+已安装运行版本 `60c4e7c02da1db0ecfddb4feea31ce8a162ed0c2`。安装备份为 `/mnt/data-disk/deploy/ai-image-daily/backups/20261022T024858.819262Z`，发布备份为 `/mnt/data-disk/ai-image-daily-v3/backups/20261022T103659212933`。旧代码指针为 release `8424ded609372ca12709fca60e5b0a1bd88cf096`。
+
+下面是需回滚时执行的命令，本次上线未执行回滚。先停止唯一日报调度，恢复旧固定入口，再恢复代码与 units；恢复操作带哈希和元数据漂移检查：
+
+```bash
+systemctl stop ai-image-daily.timer
+systemctl stop ai-image-daily.service
+python3 -B /mnt/data-disk/deploy/ai-image-daily/releases/60c4e7c02da1db0ecfddb4feea31ce8a162ed0c2/ops/ai-image-daily/report.py \
+  --state /mnt/data-disk/ai-image-daily-v3 \
+  --env-file /root/drama_material_service/.env \
+  --restore-public /mnt/data-disk/ai-image-daily-v3/backups/20261022T103659212933
+python3 -B /mnt/data-disk/deploy/ai-image-daily/releases/60c4e7c02da1db0ecfddb4feea31ce8a162ed0c2/ops/ai-image-daily/deploy.py \
+  --rollback /mnt/data-disk/deploy/ai-image-daily/backups/20261022T024858.819262Z
+readlink -f /opt/ai-image-daily/current
+systemctl cat ai-image-daily.service ai-image-daily.timer
+```
+
+确认返回旧 release、旧 state 与原 09:00/09:10/09:30 配置，且 `restore-receipt.json` 校验成功后，再执行 `systemctl enable --now ai-image-daily.timer`。首次上线前不存在的新 v3 首页、历史页与版本资源会保留；旧固定入口恢复旧版内容。不得删除历史资源或覆盖业务数据库。若任一漂移检查失败，保留现场并先核对后续发布，不绕过校验。
+
+全部实测结果见 `test-report.md`；服务器验收记录为 `/mnt/data-disk/ai-image-daily-v3/acceptance.json`。
 
