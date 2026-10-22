@@ -526,6 +526,8 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
     require(manifest['pool_state'].get('ActiveState') != 'active', 'existing personal scheduler active; review separately')
     backup = Path(manifest['backup'])
     with paused(config, manifest):
+        require(Path(config['paths']['current']).resolve() == Path(manifest['previous_release']),
+                'current release changed during drain; restage on the new composite')
         verify_baseline(config)
         require(personal_rows(config) == 0, 'personal tasks already exist before first rollout')
         targets = [Path(config['paths'][g]) / n for g in external_groups(config) for n in config['files'][g]]
