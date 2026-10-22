@@ -34,9 +34,13 @@ def main():
     db = 'file:/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3?mode=ro'
     with sqlite3.connect(db, uri=True) as conn:
         row = conn.execute('SELECT snapshot_json FROM fb_video_task WHERE page_id=? ORDER BY created_at_utc DESC LIMIT 1', (args.page_id,)).fetchone()
-        if not row:
-            raise RuntimeError('Need an existing trusted operator snapshot for this Page')
-        actor = json.loads(row[0])['actor']
+        if row:
+            actor = json.loads(row[0])['actor']
+        else:
+            config = conn.execute('SELECT tenant_key,created_by FROM fb_video_page WHERE page_id=? AND deleted=0', (args.page_id,)).fetchall()
+            if len(config) != 1:
+                raise RuntimeError('Need a unique existing Page configuration owner')
+            actor = dict(tenant_key=config[0][0], user_id=config[0][1])
     actor = IdentityClient(env).resolve(actor['tenant_key'], actor['user_id'])
     workbook = Workbook()
     sheet = workbook.active
