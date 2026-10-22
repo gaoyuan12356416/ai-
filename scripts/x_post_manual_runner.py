@@ -107,7 +107,8 @@ def _manual_identity(raw):
         or (
             publish_mode == "scheduled"
             and not re.fullmatch(
-                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:00Z",
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
+                + (r"[0-9]{2}Z" if raw.get("copy_contract_version", 1) == 2 else r"00Z"),
                 scheduled_at,
             )
         )
@@ -432,6 +433,7 @@ def _manual_candidates(
         )
     for candidate in candidates:
         candidate["body_template"] = run["body_template"]
+        candidate["copy_contract_version"] = int(run.get("copy_contract_version", 1))
         candidate["source_type"] = "material"
         candidate["source_date"] = run["source_date"]
     timestamp = max(1, int(shanghai_now(now).timestamp()))

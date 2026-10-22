@@ -320,6 +320,28 @@
         "order": 50,
         "module": "x_accounts",
         "adminOnly": true
+      },
+      {
+        "key": "xVideoPublish",
+        "label": "手动发布",
+        "description": "个人账号选材、配对与定时发布",
+        "kind": "page",
+        "href": "/x-video-publish.html",
+        "module": "x_video_publish",
+        "adminOnly": false,
+        "enabled": true,
+        "order": 23
+      },
+      {
+        "key": "xVideoPublishRecords",
+        "label": "手动发布记录",
+        "description": "查看手动、素材池和 Excel 发布批次",
+        "kind": "page",
+        "href": "/x-video-publish.html?view=records",
+        "module": "x_video_publish",
+        "adminOnly": false,
+        "enabled": true,
+        "order": 24
       }
     ]
   },

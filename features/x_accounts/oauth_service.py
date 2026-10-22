@@ -1259,6 +1259,7 @@ def set_account_publish_approval(account_id, approved, actor):
 
 
 def set_account_drama_language(account_id, drama_language, actor):
+    personal_pool_paused = False
     try:
         normalized_language = canonical_drama_language(drama_language)
     except ValueError as exc:
@@ -1334,6 +1335,15 @@ def set_account_drama_language(account_id, drama_language, actor):
                         "X account record does not exist",
                         404,
                     )
+                pool_schema = "xpost_language_guard" if attached else "main"
+                if conn.execute("SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name='x_video_publish_pool'" % pool_schema).fetchone():
+                    changed = conn.execute(
+                        "UPDATE %s.x_video_publish_pool SET status='paused',language=?,"
+                        "pause_reason='account_language_changed',effective_at_utc=?,"
+                        "version=version+1,updated_at_utc=? WHERE account_id=? AND language<>?" % pool_schema,
+                        (normalized_language, timestamp, timestamp, account_id, normalized_language),
+                    )
+                    personal_pool_paused = bool(changed.rowcount)
                 conn.commit()
             finally:
                 if conn.in_transaction:
@@ -1347,7 +1357,10 @@ def set_account_drama_language(account_id, drama_language, actor):
         actor,
         x_user_id=x_user_id,
     )
-    return find_account(account_id)
+    result = find_account(account_id)
+    if personal_pool_paused:
+        result["personal_pool_paused"] = True
+    return result
 
 
 def update_account_error(account_id, status, error):
@@ -1592,7 +1605,7 @@ def youtube_share_request(action, payload):
         raise ServiceError(exc.code, str(exc), exc.status) from None
 
 
-def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False):
+def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False, personal_run_id=None):
     """Refresh before each upload request without releasing the outer lock."""
     def current_token(*, verify_now=False):
         XPostError, _store, _publish = _x_posts_api()
@@ -1602,6 +1615,11 @@ def publishing_token_provider(account_id, actor, frozen_language="", require_pre
                 preserve_transient_status=True, require_publish_approved=True,
             )
             with publish_credentials(account_id, actor, "all") as (account, token):
+                if personal_run_id:
+                    # Recheck ownership and live operator permission before each
+                    # X request, including after a long upload. Do not reinterpret
+                    # our own in-flight post_creating ledger as a retry here.
+                    _personal_owner_guard(personal_run_id)
                 if frozen_language and not same_drama_language(account.get("drama_language"), frozen_language):
                     raise ServiceError("x_post_account_language_mismatch", "X account language changed during upload", 409)
                 if require_premium and (
@@ -2779,6 +2797,7 @@ def publish_queue_request(
                 manual_run_id,
                 expected_manual_trigger_source or "manual",
             )
+            _personal_run_guard(manual_run_id)
             if (
                 expected_manual_trigger_source == "auto_template"
                 and str(manual_run.get("status") or "")
@@ -3004,6 +3023,7 @@ def publish_queue_request(
                     publish_credentials(source_account_id, actor, "all")
                 )
                 try:
+                    _personal_run_guard(manual_run_id, account)
                     if frozen_drama_language and not same_drama_language(
                         account.get("drama_language"),
                         frozen_drama_language,
@@ -3035,6 +3055,7 @@ def publish_queue_request(
                         access_token_provider=publishing_token_provider(
                             source_account_id, actor, frozen_drama_language,
                             require_premium=relay_delivery or duration > duration_policy.standard_limit(queue),
+                            personal_run_id=manual_run_id,
                         ),
                         public_root=POST_PUBLIC_ROOT,
                         short_base_url=POST_SHORT_BASE_URL,
@@ -3896,9 +3917,13 @@ def create_post_manual_run_request(payload):
 
 
 def query_post_manual_run_request(payload, run_id):
-    _material_pool_actor(payload)
+    actor = _material_pool_actor(payload)
+    from features.x_video_publish.core import read_personal_task
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task and (task["tenant_key"], task["user_id"]) != (actor["tenant_key"], actor["user_id"]):
+            raise ServiceError("x_video_batch_not_found", "发布任务不存在", 404)
         item = XPostStore(POST_DB_PATH).get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3914,6 +3939,52 @@ def claim_post_manual_run_request(payload):
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}
+
+
+def _personal_owner_guard(run_id):
+    """Permission-only guard usable while the current post is in flight."""
+    from features.x_video_publish.core import read_personal_task
+    from features.x_video_publish.transport import broker
+    from features.x_video_publish.errors import PublishingError
+    XPostError, _, _ = _x_posts_api()
+    try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task is None:
+            return None
+        owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'mine'))
+        frozen_account = task['account_snapshot']
+        if str(current.get('x_user_id') or '') != str(frozen_account.get('x_user_id') or ''):
+            raise ServiceError('x_video_account_changed', '账号身份已改变', 409)
+        return task, current
+    except PublishingError as exc:
+        raise ServiceError(exc.code, str(exc), exc.status) from None
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def _personal_run_guard(run_id, account=None):
+    """Revalidate personal owner and live backend permission before queue/X writes."""
+    if not run_id:
+        return None
+    from features.x_video_publish.core import read_personal_task, assert_personal_run_publishable
+    from features.x_video_publish.transport import broker
+    from features.x_video_publish.errors import PublishingError
+    XPostError, _, _ = _x_posts_api()
+    try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task is None:
+            return None
+        owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'mine'))
+        assert_personal_run_publishable(POST_DB_PATH, run_id, current)
+        if account is not None:
+            assert_personal_run_publishable(POST_DB_PATH, run_id, account)
+        return task
+    except PublishingError as exc:
+        raise ServiceError(exc.code, str(exc), exc.status) from None
+    except XPostError as exc:
+        _raise_x_post_error(exc)
 
 
 def create_post_manual_plan_request(payload):
@@ -3939,12 +4010,16 @@ def create_post_manual_plan_request(payload):
             409,
         )
     accounts = _manual_publish_accounts(list(frozen["account_ids"]))
+    personal_task = _personal_run_guard(run_id)
     trusted = []
     for candidate, account in zip(candidates, accounts):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
         _require_candidate_duration_capability(candidate, account, frozen)
         item = dict(candidate)
+        if personal_task is not None:
+            item['account_drama_language'] = personal_task['drama_language']
+            item['copy_contract_version'] = 2
         item.update(
             {
                 "account_id": int(account["id"]),
@@ -5137,6 +5212,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path.startswith("/internal/video-publish/"):
+            from features.x_video_publish.runtime import dispatch
+            return dispatch(self, sys.modules[__name__], parsed.path)
         if not parsed.path.startswith("/internal/"):
             self.send_text(404, "not found\n")
             return

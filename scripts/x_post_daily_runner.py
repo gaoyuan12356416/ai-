@@ -1414,6 +1414,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
         item["drama_name"],
         item["description"],
         item.get("body_template"),
+        copy_contract_version=int(item.get("copy_contract_version", 1)),
     )
     return item
 

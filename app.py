@@ -3648,6 +3648,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
 
 
@@ -3728,6 +3729,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "x_video_publish": False,
     "fb_video_publish": False,
     "drama_synthesis": False,
     "cover_synthesis": False,
@@ -56704,7 +56706,8 @@ def delete_session(session_token):
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
-        return filter_navigation(ensure_navigation(json.load(handle)))
+        from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
+        return filter_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94955,6 +94958,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if parsed.path == "/api/x-video-publish" or parsed.path.startswith("/api/x-video-publish/"):
+            from features.x_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if parsed.path == "/api/fb-video-publish" or parsed.path.startswith("/api/fb-video-publish/"):
             from features.fb_video_publish.gateway import dispatch
             return dispatch(self, parsed, globals())
@@ -94971,6 +94977,15 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/fb-video-publish-records.html",
             "/fb-video-publish.js",
             "/fb-video-publish.css",
+            "/x-video-publish.html",
+            "/x-video-publish.js",
+            "/x-video-publish.css",
+            "/x-excel-publish.js",
+            "/x-video-account-settings.js",
+            "/x-video-account-settings.css",
+            "/vendor/xlsx.full.min.js",
+            "/vendor/LICENSE.sheetjs.txt",
+            "/templates/x-publishing-template.xlsx",
         }:
             static_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
@@ -98690,6 +98705,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if parsed.path in {"/internal/x-video-publish/identity", "/internal/x-video-publish/source"}:
+            from features.x_video_publish.identity_broker import dispatch
+            return dispatch(self, globals(), parsed.path.rsplit("/", 1)[-1])
+        if parsed.path == "/api/x-video-publish" or parsed.path.startswith("/api/x-video-publish/"):
+            from features.x_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if parsed.path == "/internal/x-posts/attribution/resolve":
             from features.x_posts.attribution_runtime import dispatch
             return dispatch(self, globals())

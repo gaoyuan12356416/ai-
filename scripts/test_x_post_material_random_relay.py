@@ -597,6 +597,15 @@ class MaterialRelayStoreTests(unittest.TestCase):
 
 
 class MaterialRelayOAuthBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.db_path = Path(self.temporary.name) / "x-post.sqlite3"
+        service.XPostStore(self.db_path)
+        self.db_patch = mock.patch.object(oauth_service, "POST_DB_PATH", self.db_path)
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
+
     def test_material_plan_preserves_requested_current_same_language_relay(self):
         captured = {}
 

@@ -433,6 +433,17 @@ class XPostAutoTemplateStoreTests(unittest.TestCase):
 
 
 class XPostAutoTemplateBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.db_path = Path(self.temporary.name) / "x-post.sqlite3"
+        # Upload guards use a real isolated ledger, independently of fake API
+        # stores below. Do not bypass personal-task/owner checks in these tests.
+        service.XPostStore(self.db_path)
+        self.db_patch = mock.patch.object(oauth_service, "POST_DB_PATH", self.db_path)
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
+
     @staticmethod
     def account(long_video=True):
         return {

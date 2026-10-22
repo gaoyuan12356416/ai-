@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
 from features.x_accounts import oauth_service as service
-from features.x_posts import XPostError
+from features.x_posts import XPostError, XPostStore
 
 
 class FakeStore:
@@ -85,6 +87,15 @@ class FakeStore:
 
 class XPostManualSidecarTests(unittest.TestCase):
     def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.db_path = Path(self.temporary.name) / "x-post.sqlite3"
+        # The personal guard remains real even when the legacy store API is
+        # faked. Never let that guard read the machine's default publishing DB.
+        XPostStore(self.db_path)
+        self.db_patch = mock.patch.object(service, "POST_DB_PATH", self.db_path)
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
         self.store = FakeStore()
         self.api_patch = mock.patch.object(
             service,

@@ -263,6 +263,7 @@ QUEUE_FIELDS = (
 
 QUEUE_LEDGER_FIELDS = (
     "duration_policy_version",
+    "copy_contract_version",
     "run_id",
     "catchup_run_id",
     "schedule_run_id",
@@ -861,7 +862,12 @@ def _render_post_text(
     return before_description + rendered_description + after_description
 
 
-def build_post_text(short_url, drama_name, description, body_template=None):
+def build_post_text(short_url, drama_name, description, body_template=None, *, copy_contract_version=1):
+    if copy_contract_version == 2:
+        from features.x_video_publish.templates import render_caption
+        return render_caption(body_template, drama_name, description, short_url)
+    if copy_contract_version != 1:
+        raise XPostError("invalid_post_template", "Unknown copy contract version", 400)
     return _render_post_text(
         short_url,
         drama_name,
@@ -3242,13 +3248,15 @@ def ensure_storage(db_path):
                       AND (
                           length(NEW.scheduled_at)<>20
                           OR NEW.scheduled_at NOT GLOB
-                             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:00Z'
+                             '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'
+                          OR (COALESCE(NEW.copy_contract_version,1)<>2
+                              AND substr(NEW.scheduled_at,18,2)<>'00')
                           OR strftime(
-                              '%Y-%m-%dT%H:%M:00Z',
+                              '%Y-%m-%dT%H:%M:%SZ',
                               NEW.scheduled_at
                           ) IS NULL
                           OR strftime(
-                              '%Y-%m-%dT%H:%M:00Z',
+                              '%Y-%m-%dT%H:%M:%SZ',
                               NEW.scheduled_at
                           )<>NEW.scheduled_at
                       )
@@ -4497,6 +4505,8 @@ def ensure_storage(db_path):
             # Keep the historical recovery audit table, but never clear a
             # duration rejection during schema migration. Only a successful
             # media recheck may release an unbound candidate.
+            from features.x_video_publish.core import ensure_core_schema
+            ensure_core_schema(conn)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -4785,7 +4795,7 @@ def _manual_idempotency_key(value):
         ) from None
 
 
-def _manual_publish_timing(publish_mode=None, scheduled_at=None):
+def _manual_publish_timing(publish_mode=None, scheduled_at=None, *, allow_seconds=False):
     mode = str(publish_mode or "immediate").strip().lower()
     if mode not in MANUAL_PUBLISH_MODES:
         raise XPostError(
@@ -4822,10 +4832,10 @@ def _manual_publish_timing(publish_mode=None, scheduled_at=None):
             "scheduled_at必须包含时区",
             400,
         )
-    if parsed.second or parsed.microsecond:
+    if parsed.microsecond or (parsed.second and not allow_seconds):
         raise XPostError(
             "invalid_request",
-            "scheduled_at必须精确到分钟",
+            "scheduled_at必须精确到秒" if allow_seconds else "scheduled_at必须精确到分钟",
             400,
         )
     normalized = parsed.astimezone(timezone.utc)
@@ -6180,10 +6190,14 @@ class XPostStore:
         allow_deferred_media=False,
         allow_duration_pending=False,
         duration_policy_version=2,
+        copy_contract_version=1,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
         result = {"duration_policy_version": duration_policy.version({"duration_policy_version": duration_policy_version})}
+        if type(copy_contract_version) is not int or copy_contract_version not in (1, 2):
+            raise XPostError("invalid_post_template", "Unknown copy contract version", 400)
+        result["copy_contract_version"] = copy_contract_version
         result["account_id"] = _positive_int(payload.get("account_id"), "account_id")
         username = str(payload.get("account_username", "") or "").strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
@@ -6318,10 +6332,14 @@ class XPostStore:
             raise XPostError("invalid_request", "source_type无效", 400)
         result["source_type"] = source_type
         result["random_template_enabled"] = _random_template_enabled(payload.get("random_template_enabled", False))
-        result["body_template"] = _normalize_post_template(
-            payload.get("body_template"),
-            source_type,
-        )
+        if copy_contract_version == 2:
+            from features.x_video_publish.templates import normalize_caption
+            result["body_template"] = normalize_caption(payload.get("body_template"))
+        else:
+            result["body_template"] = _normalize_post_template(
+                payload.get("body_template"),
+                source_type,
+            )
         requested_delivery_mode = str(
             payload.get("delivery_mode", DIRECT_DELIVERY_MODE) or ""
         ).strip().lower()
@@ -9177,6 +9195,7 @@ class XPostStore:
         ) = _manual_publish_timing(
             item.get("publish_mode"),
             item.get("scheduled_at"),
+            allow_seconds=int(item.get("copy_contract_version", 1)) == 2,
         )
         if str(item.get("scheduled_timezone") or "") != SCHEDULE_TIMEZONE:
             raise XPostError(
@@ -9191,10 +9210,14 @@ class XPostStore:
         item["material_ids"] = _manual_material_ids(
             _json_array(item.pop("material_ids_json"), "material_ids"),
         )
-        item["body_template"] = _normalize_post_template(
-            item.get("body_template"),
-            "material",
-        )
+        if int(item.get("copy_contract_version", 1)) == 2:
+            from features.x_video_publish.templates import normalize_caption
+            item["body_template"] = normalize_caption(item.get("body_template"))
+        else:
+            item["body_template"] = _normalize_post_template(
+                item.get("body_template"),
+                "material",
+            )
         item["error_message"] = redact_text(item.get("error_message"), 500)
         return item
 
@@ -9639,6 +9662,15 @@ class XPostStore:
                 "AND (status='running' OR publish_mode='immediate' "
                 "OR (publish_mode='scheduled' AND scheduled_at<>'' "
                 "AND scheduled_at<=?)) "
+                "AND NOT EXISTS (SELECT 1 FROM x_video_publish_task self_task "
+                "JOIN x_video_publish_task sibling ON sibling.batch_id=self_task.batch_id "
+                "JOIN x_post_manual_run sr ON sr.id=sibling.manual_run_id "
+                "LEFT JOIN x_post_queue sq ON sq.manual_run_id=sr.id "
+                "LEFT JOIN x_post_publish_log sl ON sl.queue_id=sq.id "
+                "WHERE self_task.manual_run_id=x_post_manual_run.id "
+                "AND (sr.status IN ('needs_review','stopped') OR sr.unknown_count>0 "
+                "OR COALESCE(sl.unknown_outcome,0)=1 "
+                "OR sl.status IN ('post_creating','repost_creating'))) "
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
                 "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
                 "ELSE created_at END,created_at,id LIMIT 1",
@@ -9977,12 +10009,14 @@ class XPostStore:
                     "手动发布任务已结束",
                     409,
                 )
-            conn.execute(
-                "UPDATE x_post_manual_material_reservation "
-                "SET state='released',release_reason=?,updated_at=? "
-                "WHERE manual_run_id=? AND state='active'",
-                (code, timestamp, run_id),
-            )
+            from features.x_video_publish.core import personal_task, settle_personal_reservations
+            if personal_task(conn, run_id) is None:
+                conn.execute(
+                    "UPDATE x_post_manual_material_reservation "
+                    "SET state='released',release_reason=?,updated_at=? "
+                    "WHERE manual_run_id=? AND state='active'",
+                    (code, timestamp, run_id),
+                )
             conn.execute(
                 "UPDATE x_post_manual_run SET status='failed_preflight',"
                 "queued_count=0,published_count=0,failed_count=0,"
@@ -9990,6 +10024,7 @@ class XPostStore:
                 "finished_at=?,updated_at=? WHERE id=?",
                 (code, message, timestamp, timestamp, run_id),
             )
+            settle_personal_reservations(conn, run_id, timestamp)
             conn.commit()
         result = self.get_manual_run(run_id, trigger_source)
         result["recorded"] = True
@@ -10006,6 +10041,13 @@ class XPostStore:
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
         frozen = self.get_manual_run(run_id, trigger_source)
+        personal = None
+        if int(frozen.get("copy_contract_version", 1)) == 2:
+            from features.x_video_publish.core import personal_task, personal_batch_held
+            with contextlib.closing(_connect(self.db_path)) as personal_conn:
+                personal = personal_task(personal_conn, run_id)
+                if personal is None or personal_batch_held(personal_conn, personal["batch_id"]):
+                    raise XPostError("x_post_unknown_outcome", "个人发布批次不存在或已暂停", 409, True)
         account_ids = list(frozen["account_ids"])
         material_ids = list(frozen["material_ids"])
         if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE and (
@@ -10038,12 +10080,31 @@ class XPostStore:
                     "manual_run_id": run_id,
                 }
             )
+            if personal is not None:
+                payload["account_drama_language"] = personal["drama_language"]
+                from features.x_video_publish.templates import render_caption
+                snapshot = json.loads(personal["source_snapshot_json"])
+                frozen_copy = render_caption(
+                    personal["caption"], snapshot.get("drama_name"),
+                    snapshot.get("drama_description", snapshot.get("description")),
+                    "https://preview.invalid/0.html",
+                )
+                current_copy = render_caption(
+                    personal["caption"], payload.get("drama_name"),
+                    payload.get("description"), "https://preview.invalid/0.html",
+                )
+                if frozen_copy != current_copy or (
+                    snapshot.get("content_id") is not None
+                    and str(snapshot["content_id"]) != str(payload.get("content_id") or "")
+                ):
+                    raise XPostError("x_video_material_changed", "素材归属或文案数据已变更，请重新核对发布", 409)
             values = self._queue_payload(
                 payload,
                 run_date=frozen["run_date"],
                 candidate_rank=index,
                 require_compliance=True,
                 duration_policy_version=duration_policy.version(frozen),
+                copy_contract_version=int(frozen.get("copy_contract_version", 1)),
             )
             if (
                 trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
@@ -10109,6 +10170,10 @@ class XPostStore:
                 "WHERE id=? AND trigger_source=?",
                 (run_id, trigger_source),
             ).fetchone()
+            if personal is not None:
+                from features.x_video_publish.core import personal_batch_held
+                if personal_batch_held(conn, personal["batch_id"]):
+                    raise XPostError("x_post_unknown_outcome", "个人发布批次已暂停", 409, True)
             if not run:
                 conn.rollback()
                 raise XPostError(
@@ -10242,7 +10307,7 @@ class XPostStore:
                         tuple(values[field] for field in columns)
                         + (timestamp, timestamp),
                     )
-                if reservation_rows:
+                if reservation_rows and personal is None:
                     consumed = conn.execute(
                         "UPDATE x_post_manual_material_reservation "
                         "SET state='consumed',release_reason='',updated_at=? "
@@ -10253,6 +10318,9 @@ class XPostStore:
                         raise sqlite3.IntegrityError(
                             "x_post_manual_material_reservation consume mismatch"
                         )
+                if personal is not None:
+                    from features.x_video_publish.core import settle_personal_reservations
+                    settle_personal_reservations(conn, run_id, timestamp)
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError(
@@ -19152,6 +19220,7 @@ def publish_canary(
                     queue.get("drama_name"),
                     queue["description"],
                     queue.get("body_template"),
+                    copy_contract_version=int(queue.get("copy_contract_version", 1)),
                 )
             if not prepare_link_after_probe:
                 long_url = build_url(attribution_context, log) if attribution_context else build_w2a_url(

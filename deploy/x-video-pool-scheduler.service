@@ -1,0 +1,36 @@
+[Unit]
+Description=Personal X account material pool slot scheduler
+After=network-online.target x-post-automation.service
+Wants=network-online.target
+Requires=x-post-automation.service
+RequiresMountsFor=/mnt/data-disk/x-post-automation
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=simple
+User=x-post-daily
+Group=x-post-daily
+WorkingDirectory=/opt/x-post-automation/current
+EnvironmentFile=/etc/x-post-daily.env
+EnvironmentFile=/etc/x-video-publish.env
+ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_video_pool_scheduler.py
+Restart=on-failure
+RestartSec=10
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+RestrictRealtime=true
+InaccessiblePaths=/var/lib/x-post-automation /etc/ssh
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
