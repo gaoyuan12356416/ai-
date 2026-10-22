@@ -12,13 +12,14 @@ class RuntimeProbeTests(unittest.TestCase):
     def test_uses_service_identity_and_ignores_private_python_paths(self):
         with patch.object(probe.subprocess, "check_output", return_value="fb-auto-post\n"), \
                 patch.object(probe.subprocess, "run") as run, \
-                patch.dict(os.environ, {"PYTHONPATH": "/root/private", "PYTHONUSERBASE": "/root/.local"}):
+                patch.dict(os.environ, {"PYTHONPATH": "/root/private", "PYTHONUSERBASE": "/root/.local",
+                                        "PYTHONNOUSERSITE": "1"}):
             probe.check_as_service_user(Path.cwd())
         args, kwargs = run.call_args
         self.assertEqual(args[0][:6], ["runuser", "-u", "fb-auto-post", "--", "/usr/bin/python3", "-"])
         self.assertNotIn("PYTHONPATH", kwargs["env"])
         self.assertNotIn("PYTHONUSERBASE", kwargs["env"])
-        self.assertEqual(kwargs["env"]["PYTHONNOUSERSITE"], "1")
+        self.assertNotIn("PYTHONNOUSERSITE", kwargs["env"])
         self.assertTrue(kwargs["check"])
 
     def test_failed_runtime_probe_aborts(self):

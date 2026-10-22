@@ -18,8 +18,10 @@ def check_as_service_user(root):
     if user != "fb-auto-post":
         raise RuntimeError("Unexpected FB service identity; inspect before deployment")
     env = {k: v for k, v in os.environ.items()
-           if k not in {"PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"}}
-    env["PYTHONNOUSERSITE"] = "1"
+           if k not in {"PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONNOUSERSITE"}}
+    # Match the service's normal site initialization. On this RHEL Python,
+    # PYTHONNOUSERSITE also removes the shared /usr/local site-packages path.
+    # runuser sets HOME=/nonexistent, so root's private user site stays excluded.
     subprocess.run([
         "runuser", "-u", user, "--", "/usr/bin/python3", "-", str(Path(root).resolve())
     ], input=Path(__file__).read_text(encoding="utf-8"), text=True,
