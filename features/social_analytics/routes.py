@@ -41,11 +41,15 @@ def query_rows(app, statement, max_rows=1001):
         raise ReportError("报表只读数据源配置异常", 503)
     env = dict(os.environ)
     env.pop("SQL_GATE_BYPASS", None)
+    # The scheduled report opts into a bounded longer query budget; HTTP stays
+    # at eight seconds. Keep the FIFO gate and the overall collection deadline.
+    statement_ms = min(20000, max(1000, int(app.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000))))
+    statement_seconds = (statement_ms + 999) // 1000
     env.update(MYSQL_PWD=app["ADMIN_MAPPING_MYSQL_PASSWORD"], SQL_GATE_JOB_NAME="social-analytics",
-               SQL_GATE_WAIT_TIMEOUT_SECONDS="5", SQL_GATE_EXEC_TIMEOUT_SECONDS="12")
-    statement = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; "
+               SQL_GATE_WAIT_TIMEOUT_SECONDS="5", SQL_GATE_EXEC_TIMEOUT_SECONDS=str(statement_seconds + 4))
+    statement = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=%d; " % statement_ms +
                  "START TRANSACTION READ ONLY; SELECT @@read_only; " + statement + "; ROLLBACK;")
-    timeout = min(25, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
+    timeout = min(statement_seconds + 17, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
     if timeout < 1:
         raise ReportError("日报采集时间预算已用完", 503)
     try:
@@ -56,6 +60,8 @@ def query_rows(app, statement, max_rows=1001):
             input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=timeout)
         lines = result.stdout.splitlines()
         if result.returncode or not lines or lines.pop(0) != "1":
+            if "ERROR 3024 (HY000)" in result.stderr:
+                raise ReportError("效果查询超时（MySQL 3024）；本次不按零统计", 503)
             raise ValueError("readonly_query_failed")
         result_rows = [json.loads(bytes.fromhex(line).decode("utf-8")) for line in lines if line.strip()]
         if len(result_rows) > max_rows:

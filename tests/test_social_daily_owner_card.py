@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from features.social_analytics import routes
 from features.social_daily_report.collector import present
@@ -42,6 +43,50 @@ class OwnerCardTests(unittest.TestCase):
                 main(["--date", day, "--send", "--state-dir", folder])
             send.assert_not_called()
             freeze.assert_not_called()
+            failures = list((Path(folder) / "failures" / day).glob("*.json"))
+            self.assertEqual(len(failures), 1)
+            evidence = json.loads(failures[0].read_text(encoding="utf-8"))
+            self.assertEqual(evidence["reason"], "daily_report_sources_incomplete")
+            self.assertEqual(evidence["quality"]["platforms"]["youtube"]["state"], "unavailable")
+
+    def test_daily_query_has_more_time_without_bypassing_gate_or_overall_deadline(self):
+        app = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT=63350,
+                   ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-only-secret")
+        success = SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+        for requested, sql_ms, gate_seconds, process_seconds in [(None, 8000, "12", 25),
+                                                                (20000, 20000, "24", 37),
+                                                                (999999, 20000, "24", 37)]:
+            settings = dict(app)
+            if requested is not None:
+                settings["SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS"] = requested
+            with patch.object(routes.subprocess, "run", return_value=success) as run, \
+                 patch.dict(routes.os.environ, {"SQL_GATE_BYPASS": "1"}):
+                routes.query_rows(settings, "SELECT 1")
+            self.assertEqual(run.call_args.args[0][0], "/usr/bin/mysql")
+            kwargs = run.call_args.kwargs
+            self.assertIn("MAX_EXECUTION_TIME=%d" % sql_ms, kwargs["input"])
+            self.assertEqual(kwargs["env"]["SQL_GATE_EXEC_TIMEOUT_SECONDS"], gate_seconds)
+            self.assertEqual(kwargs["timeout"], process_seconds)
+            self.assertNotIn("SQL_GATE_BYPASS", kwargs["env"])
+        settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=110)
+        with patch.object(routes.time, "monotonic", return_value=100), \
+             patch.object(routes.subprocess, "run", return_value=success) as run:
+            routes.query_rows(settings, "SELECT 1")
+            self.assertEqual(run.call_args.kwargs["timeout"], 10)
+        with patch.object(routes.time, "monotonic", return_value=110), \
+             patch.object(routes.subprocess, "run") as run:
+            with self.assertRaises(routes.ReportError):
+                routes.query_rows(settings, "SELECT 1")
+            run.assert_not_called()
+
+    def test_mysql_timeout_has_safe_persistent_reason(self):
+        app = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT=63350,
+                   ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-only-secret")
+        failure = SimpleNamespace(returncode=1, stdout="1\n", stderr="ERROR 3024 (HY000): test-only-secret")
+        with patch.object(routes.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(routes.ReportError, "MySQL 3024") as raised:
+                routes.query_rows(app, "SELECT 1")
+        self.assertNotIn("test-only-secret", str(raised.exception))
 
     def test_read_retry_is_bounded_and_keeps_completed_source_cached(self):
         routes._cache.clear()

@@ -73,7 +73,19 @@ def main(argv=None):
             report = collect(day, args.db, args.env_file, args.x_db,
                              args.fb_db, args.facebook_attribution_db)
             if args.send:
-                require_complete(report)
+                try:
+                    require_complete(report)
+                except ValueError as exc:
+                    # Preserve safe source diagnostics before any batch is frozen.
+                    failure = dict(status="collection_failed", date=day, reason=str(exc),
+                                   quality=report["quality"], checked_at=datetime.now(BEIJING).isoformat())
+                    failed = state / "failures" / day
+                    failed.mkdir(parents=True, exist_ok=True)
+                    path = failed / (datetime.now(BEIJING).strftime("%H%M%S-%f") + ".json")
+                    atomic_write(path, json.dumps(failure, ensure_ascii=False, indent=2))
+                    print(json.dumps(dict(status="collection_failed", date=day, reason=str(exc),
+                                          diagnostic_path=str(path)), ensure_ascii=False), flush=True)
+                    raise
             cards = build_cards(report, CHAT_ID)
             if store:
                 store.freeze(day, CHAT_ID, report, cards)

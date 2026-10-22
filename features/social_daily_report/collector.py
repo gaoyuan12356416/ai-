@@ -106,6 +106,7 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
                SOCIAL_ANALYTICS_FB_DB_PATH=fb_db_path,
                SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB=facebook_attribution_db_path,
                SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2,
+               SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 120)
     shared = build_report(
         app, {"role": "admin", "_system_report": True},
