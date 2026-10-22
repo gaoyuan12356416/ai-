@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AI自动后台视频剪辑工具使用说明：素材上传、短剧选集、删除中间内容、插入素材、转场、GPU制作、预览下载与常见问题。">
+  <meta name="color-scheme" content="light">
+  <title>视频剪辑使用说明 · AI自动后台</title>
+  <style>
+    :root{--blue:#2563eb;--navy:#142744;--ink:#1e293b;--muted:#64748b;--line:#dce4ef;--bg:#f4f7fb;--pale:#eef4ff;--green:#147563;--amber:#925617}
+    *{box-sizing:border-box}html{scroll-padding-top:26px}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif}a{color:var(--blue);text-underline-offset:3px}a:focus-visible,summary:focus-visible{outline:3px solid #93b5ff;outline-offset:4px}p{margin:10px 0}h1,h2,h3{line-height:1.4;margin:0;color:#142744}h1{font-size:34px;letter-spacing:-.6px}h2{font-size:23px}h3{font-size:17px;margin:24px 0 8px}strong{font-weight:650}ul,ol{padding-left:23px;margin:10px 0}li{padding-left:3px;margin:6px 0}code{font:inherit;background:#f0f3f8;border-radius:4px;padding:1px 5px}small{font-size:12px}button,a,summary{-webkit-tap-highlight-color:transparent}
+    .layout{max-width:1392px;margin:auto;display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}.side{background:var(--navy);color:#d4e0f3;padding:30px 22px;align-self:start;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-weight:700;font-size:18px;color:white;display:flex;align-items:center;gap:11px}.mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#0d9488);font-size:14px}.brand-sub{font-size:11px;color:#a9bdd9;margin:2px 0 28px 47px}.side-label{font-size:12px;color:#95acce;margin:20px 10px 10px}.side nav a{display:block;padding:7px 10px;border-radius:6px;text-decoration:none;font-size:13px;color:#d4e0f3}.side nav a:hover{background:#233d64;color:white}.side nav span{color:#8fa9cd;display:inline-block;width:24px}.side-foot{font-size:12px;color:#9eb3ce;margin:27px 10px 0;border-top:1px solid #344660;padding-top:18px}.main{padding:36px 42px 55px;min-width:0}.hero{padding-bottom:25px}.eyebrow{font-size:12px;color:var(--muted);margin-bottom:9px}.hero p{color:#52637b;font-size:16px;max-width:760px}.hero-bottom{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:20px}.meta{color:var(--muted);font-size:12px}.button{display:inline-flex;align-items:center;justify-content:center;background:var(--blue);color:white;text-decoration:none;padding:9px 16px;border-radius:7px;font-size:14px;font-weight:600}.button:hover{background:#1d4ed8}.card{background:white;border:1px solid var(--line);border-radius:12px;padding:26px 28px;margin-bottom:22px;box-shadow:0 3px 12px #14274404}.card:target{border-color:#9ab9f9}.section-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}.num{display:grid;place-items:center;flex:0 0 31px;height:31px;font-size:13px;font-weight:700;background:var(--pale);color:var(--blue);border-radius:8px}.lead{font-size:14px;color:var(--muted);margin-top:0}.limits{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:19px 0 14px}.limit{padding:13px 10px;border:1px solid var(--line);border-radius:8px;background:#f8faff}.limit b{display:block;font-size:22px;line-height:1.4;color:#1e3a65}.limit span{font-size:12px;color:var(--muted)}.flow{display:flex;gap:0;margin:20px 0 12px;list-style:none;padding:0}.flow li{position:relative;flex:1;margin:0;padding:0 17px 0 0;font-size:13px}.flow li:last-child{padding-right:0}.flow li:not(:last-child):after{content:'→';position:absolute;right:6px;top:6px;color:#8da4c5}.flow b{display:block;font-size:14px}.flow small{display:block;color:var(--muted);margin-top:2px}.flow .dot{font-size:12px;color:var(--blue);font-weight:700;display:block;margin-bottom:4px}.callout{border-left:3px solid #749df3;background:#f0f5ff;border-radius:0 7px 7px 0;padding:12px 15px;margin:16px 0;font-size:14px}.callout p:first-child{margin-top:0}.callout p:last-child{margin-bottom:0}.callout.amber{border-left-color:#dba14e;background:#fff8ee;color:#6e481d}.callout.green{border-left-color:#5ba897;background:#eef8f4;color:#275e50}.muted{color:var(--muted);font-size:13px}.key{display:inline-block;font-size:13px;line-height:1.55;padding:1px 6px;border:1px solid #d7e0ed;border-radius:4px;background:#f7f9fc;color:#284262;white-space:normal}.steps{counter-reset:step;list-style:none;padding:0}.steps>li{counter-increment:step;position:relative;padding:0 0 0 32px;margin:15px 0}.steps>li:before{content:counter(step);position:absolute;left:0;top:2px;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#eaf1fc;color:var(--blue);font-size:12px;font-weight:bold}.steps p{margin:4px 0;color:#52637b;font-size:14px}.table-wrap{overflow-x:auto;margin:16px 0;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.75}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{background:#f5f8fc;font-weight:600;color:#415572}tr:last-child td{border-bottom:0}td:first-child{font-weight:600}th:first-child{width:24%}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}.mini-card{border:1px solid var(--line);border-radius:8px;padding:16px}.mini-card h3{margin:0 0 6px;font-size:15px}.mini-card p{font-size:13px;margin:5px 0;color:#52637b}.status{display:inline-block;border-radius:4px;font-size:12px;padding:1px 7px;background:#eef4ff;color:#325a9d}.status.ready{background:#e8f6ef;color:#19704f}.status.wait{background:#fff4df;color:#95641f}.status.failure{background:#fff0ef;color:#a3463b}
+    .map{border:1px solid #cbd8ea;border-radius:9px;overflow:hidden;margin:18px 0;background:#f7f9fd;font-size:12px;line-height:1.65}.map-toolbar{padding:10px 13px;background:#fff;border-bottom:1px solid var(--line);display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap}.map-toolbar b{font-size:13px}.map-main{display:grid;grid-template-columns:1fr 1.8fr 1.05fr;min-height:205px}.map-pane{padding:15px 13px}.map-pane+.map-pane{border-left:1px solid var(--line)}.zone{display:inline-grid;place-items:center;width:20px;height:20px;background:var(--blue);color:white;font-size:11px;border-radius:5px;margin-right:5px}.map-item{margin:9px 0;padding:7px 8px;background:#fff;border:1px solid var(--line);border-radius:5px}.map-item.selected{border-color:#b5cdf7;background:#edf3ff;color:#1d4ed8}.map-video{height:122px;background:#172234;color:#c9d4e6;display:grid;place-items:center;border-radius:6px;margin:10px auto 0;max-width:190px}.map-preview{text-align:center;color:#64748b;font-size:11px;margin:7px 0}.map-timeline{border-top:1px solid var(--line);padding:12px 13px;background:#fff}.track{display:flex;gap:5px;margin:11px 0 5px}.clip{display:flex;align-items:center;justify-content:center;min-height:43px;flex:1;border:1px solid #bad0fa;border-radius:5px;background:#eaf1ff;color:#2c589b;font-size:12px;text-align:center;padding:4px}.clip.asset{background:#fff3d9;border-color:#e9cd91;color:#846020;flex:.5}.map-caption{font-size:12px;color:var(--muted);text-align:center;margin-top:8px}.legend{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;margin:14px 0}.legend div{font-size:13px}.legend b{color:var(--blue);margin-right:5px}.example{border:1px solid #cbdcf8;border-radius:9px;background:#f9fbff;padding:18px;margin:19px 0}.example-title{font-size:15px;font-weight:650;color:#264a80;margin-bottom:8px}.ruler{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin:7px 0 4px}.cut-track{display:flex;gap:3px;min-height:49px;margin-bottom:8px}.cut-part{padding:7px 3px;text-align:center;border:1px solid #b9cff6;border-radius:4px;background:#e7f0ff;font-size:12px;color:#315a94;display:grid;place-items:center;line-height:1.5}.cut-part.drop{background:repeating-linear-gradient(135deg,#fff2ed,#fff2ed 7px,#ffe8df 7px,#ffe8df 14px);border-color:#e2ac98;color:#92543c}.cut-part small{display:block;font-size:11px}.after-arrow{text-align:center;margin:10px;color:#536e96;font-size:12px}.example-math{text-align:right;font-size:12px;color:#536e96}.faq details{border-bottom:1px solid var(--line);padding:13px 0}.faq details:last-child{border-bottom:0}.faq summary{cursor:pointer;font-size:14px;font-weight:600;padding-right:10px}.faq details p{font-size:13px;color:#52637b;margin:9px 0 2px 18px}.checklist{list-style:none;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}.checklist li{font-size:13px;margin:0;padding-left:24px;position:relative}.checklist li:before{content:'✓';position:absolute;left:0;top:1px;color:#187b65;font-weight:bold}.footer{font-size:12px;color:var(--muted);text-align:center;padding:10px 0 0}.footer a{color:#526c91}.back-top{display:inline-block;margin-top:8px}.print-hint{font-size:12px;color:var(--muted);margin-top:14px}
+    @media(min-width:1450px){.layout{border-left:1px solid #dbe4ef;border-right:1px solid #dbe4ef}}
+    @media(max-width:1050px){.layout{grid-template-columns:205px minmax(0,1fr)}.side{padding:26px 15px}.main{padding:28px 25px}.card{padding:23px}.brand{font-size:16px}.brand-sub{font-size:10px}.flow{flex-wrap:wrap;gap:14px}.flow li{flex:0 0 calc(33.333% - 10px)}.flow li:after{display:none}}
+    @media(max-width:760px){.layout{display:block}.side{position:static;height:auto;padding:18px 20px}.brand-sub{margin-bottom:14px}.side-label,.side-foot{display:none}.side nav{display:flex;gap:5px 9px;overflow-x:auto;padding-bottom:3px;flex-wrap:wrap}.side nav a{font-size:12px;padding:4px 7px;background:#203958}.side nav span{display:none}.main{padding:23px 16px 36px}h1{font-size:28px}h2{font-size:21px}.hero p{font-size:14px}.card{padding:21px 18px;margin-bottom:16px}.limits{grid-template-columns:1fr 1fr}.limit b{font-size:21px}.two-col{grid-template-columns:1fr}.flow li{flex-basis:calc(50% - 8px)}.legend,.checklist{grid-template-columns:1fr}.map-main{grid-template-columns:1fr 1fr}.map-pane:last-child{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:6px}.map-pane:last-child>b{grid-column:1/-1}.map-pane:last-child .map-item{margin:3px 0}.map-video{height:110px}.map-pane{padding:11px 9px}.map-toolbar .key{font-size:11px}.clip{font-size:10px;padding:4px 2px}.section-head{gap:9px}.num{flex-basis:28px;height:28px}.table-wrap{margin-left:-3px;margin-right:-3px}th,td{padding:10px 9px;min-width:85px}th:first-child{width:26%}.hero-bottom{gap:12px}.callout{padding:11px 12px}.cut-part{font-size:11px}.example{padding:13px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+    @page{size:A4;margin:15mm 13mm}
+    @media print{body{background:white;font-size:10pt;line-height:1.65}.layout{display:block;max-width:none}.side,.hero .button,.back-top,.print-hint{display:none}.main{padding:0}.hero{padding-bottom:10px}h1{font-size:25pt}h2{font-size:17pt}h3{font-size:12pt}.hero p{font-size:11pt}.card{padding:17px 19px;margin-bottom:16px;box-shadow:none;border-color:#bbc7d8}.section-head,h3{break-after:avoid}.callout,.mini-card,.map,.example,.limits,tr,details{break-inside:avoid}.table-wrap{overflow:visible}.two-col{grid-template-columns:1fr 1fr}a{text-decoration:none;color:#244a85}.faq details>p{display:block!important}.faq details::details-content{display:block!important;content-visibility:visible!important}.footer{font-size:9pt}.status,.key,.clip,.cut-part,.limit,.callout{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+  </style>
+</head>
+<body id="top">
+<div class="layout">
+  <aside class="side" aria-label="使用说明目录">
+    <div class="brand"><span class="mark" aria-hidden="true">AI</span>AI自动后台</div>
+    <div class="brand-sub">ai.yingliangads.com</div>
+    <div class="side-label">视频剪辑 · 使用说明</div>
+    <nav>
+      <a href="#quickstart"><span>01</span>开始使用</a>
+      <a href="#workspace"><span>02</span>认识工作台</a>
+      <a href="#upload"><span>03</span>上传与管理素材</a>
+      <a href="#dramas"><span>04</span>创建项目与添加剧集</a>
+      <a href="#cut"><span>05</span>剪切、删除与排序</a>
+      <a href="#insert"><span>06</span>插入素材与公共设置</a>
+      <a href="#effects"><span>07</span>画面、声音与转场</a>
+      <a href="#save"><span>08</span>保存与撤销</a>
+      <a href="#render"><span>09</span>制作、预览与下载</a>
+      <a href="#faq"><span>10</span>常见问题</a>
+      <a href="#check"><span>11</span>出片前检查</a>
+    </nav>
+    <div class="side-foot">适用：视频剪辑第一期<br>更新：2026-10-22<br>此页可保存、转发或打印。</div>
+  </aside>
+  <main class="main">
+    <header class="hero">
+      <div class="eyebrow">AI自动后台 / 操作手册</div>
+      <h1>视频剪辑使用说明</h1>
+      <p>上传一个素材，搭配多部短剧分别剪辑、分别出片。按下面的步骤完成选集、删减、插入、转场和成片下载。</p>
+      <div class="hero-bottom">
+        <div class="meta">第一期 · 更新于 2026 年 10 月 22 日 · 按当前正式页面编写</div>
+        <a class="button" href="https://ai.yingliangads.com/video-editing.html" target="_blank" rel="noopener noreferrer">打开视频剪辑 ↗</a>
+      </div>
+    </header>
+
+    <section class="card" id="quickstart">
+      <div class="section-head"><span class="num">01</span><h2>开始使用</h2></div>
+      <p>先使用飞书登录 AI 后台，再进入<strong>视频剪辑</strong>。如果看不到入口，请让管理员分配“视频剪辑”权限；能查询哪些短剧，还取决于你的产品权限。</p>
+      <ol class="flow" aria-label="操作流程">
+        <li><span class="dot">第 1 步</span><b>上传素材</b><small>等待“可剪辑”</small></li>
+        <li><span class="dot">第 2 步</span><b>添加短剧</b><small>逐剧勾选剧集</small></li>
+        <li><span class="dot">第 3 步</span><b>剪辑与插入</b><small>每部剧单独编辑</small></li>
+        <li><span class="dot">第 4 步</span><b>制作成片</b><small>后台 GPU 执行</small></li>
+        <li><span class="dot">第 5 步</span><b>预览与下载</b><small>逐部剧取得结果</small></li>
+      </ol>
+      <div class="limits">
+        <div class="limit"><b>8 GiB</b><span>默认单个上传文件上限</span></div>
+        <div class="limit"><b>20 部</b><span>默认每个项目最多短剧数</span></div>
+        <div class="limit"><b>720 × 1280</b><span>固定竖屏输出分辨率</span></div>
+        <div class="limit"><b>MP4 · 30 fps</b><span>H.264 视频 / AAC 音频</span></div>
+      </div>
+      <p class="muted">一个项目选择一个素材，允许在时间线中重复插入；每部短剧单独生成一条成片。容量限制若由管理员调整，以页面提示为准。</p>
+      <div class="callout"><strong>三处入口各有用途：</strong>“素材库”负责上传和选素材，“剪辑工作台”负责编辑，“制作任务”负责看进度和取成片。</div>
+    </section>
+
+    <section class="card" id="workspace">
+      <div class="section-head"><span class="num">02</span><h2>认识剪辑工作台</h2></div>
+      <p class="lead">先选项目内容，再在时间线上选中片段，右侧就会出现该片段的设置。</p>
+      <div class="map" role="img" aria-label="工作台示意：顶部为项目和保存制作，左侧为素材和短剧，中间为预览，右侧为片段设置，下方为时间线和多剧公共设置。">
+        <div class="map-toolbar"><b><span class="zone">A</span> 项目名称 / 打开项目</b><span>新建　撤销　保存草稿　<span class="key">制作成片</span></span></div>
+        <div class="map-main">
+          <div class="map-pane"><b><span class="zone">B</span>项目内容</b><div class="map-item">已选素材</div><div class="map-item selected">短剧 A · 当前编辑</div><div class="map-item">短剧 B</div><span class="muted">＋ 添加短剧与剧集</span></div>
+          <div class="map-pane"><b><span class="zone">C</span>播放预览</b><div class="map-video">▶　定位剪切位置</div><div class="map-preview">播放 / 时间线播放位置 / 回到开头</div></div>
+          <div class="map-pane"><b><span class="zone">D</span>片段设置</b><div class="map-item">入点、出点</div><div class="map-item">完整显示 / 铺满裁切</div><div class="map-item">原声、与下一片段衔接</div><div class="map-item">切割 / 删除</div></div>
+        </div>
+        <div class="map-timeline"><b><span class="zone">E</span>当前短剧时间线</b><div class="track"><div class="clip asset">插入素材</div><div class="clip">第 1 集 · 保留段</div><div class="clip">第 1 集 · 保留段</div><div class="clip">第 2 集</div></div><span class="muted">拖动排序 / 左移、右移 / 插入素材 / 多剧公共设置</span></div>
+      </div>
+      <p class="map-caption">操作区域示意，非真实项目截图；按钮名称以正式页面为准。</p>
+      <div class="legend">
+        <div><b>A</b>命名、打开、保存项目，以及提交制作。</div>
+        <div><b>B</b>选择素材，切换当前要编辑的短剧。</div>
+        <div><b>C</b>播放并移动位置，找到要保留或删除的内容。</div>
+        <div><b>D</b>只修改当前选中的片段。</div>
+        <div><b>E</b>查看拼接顺序，插入素材或应用公共设置。</div>
+      </div>
+    </section>
+
+    <section class="card" id="upload">
+      <div class="section-head"><span class="num">03</span><h2>上传与管理素材</h2></div>
+      <ol class="steps">
+        <li><strong>打开“素材库”。</strong><p>点击 <span class="key">上传本地素材</span>，或把视频拖入上传区域。可以一次选择多个文件。</p></li>
+        <li><strong>等待上传完成，再等待媒体校验。</strong><p>页面显示上传进度。文件由浏览器直接传到 COS；上传到 100% 后，仍需确认视频可读取、时长等信息，显示 <span class="status ready">可剪辑</span> 后才能使用。</p></li>
+        <li><strong>预览并选用素材。</strong><p>按素材名称搜索，点击 <span class="key">预览</span> 检查内容，再点 <span class="key">用于剪辑</span>，或回到工作台点击 <span class="key">选择一个素材</span>。</p></li>
+      </ol>
+      <div class="two-col">
+        <div class="mini-card"><h3>上传中断怎么续传？</h3><p>在同一浏览器重新选择同一个、未改动的原文件。不要改文件名、修改文件内容或清除站点数据；页面会尝试继续原上传。</p><p>短期上传签名到期会重新申请；遇到持续错误，请按页面提示处理。</p></div>
+        <div class="mini-card"><h3>谁能使用和管理素材？</h3><p>有模块权限的同事共享使用素材；上传者和管理员可改名、删除。普通用户管理自己的项目和任务，管理员可查看全部。</p><p>删除是软删除，不会删除已提交任务引用的对象及已有成片。</p></div>
+      </div>
+      <div class="callout"><strong>两个“取消”含义不同：</strong>上传条目的“取消”会终止该上传会话；选集弹窗的“取消等待”仅取消自动加入时间线，详见下一节。</div>
+      <p class="muted">普通用户手动选文件上传，不需要安装或修改任何浏览器自动化扩展。素材和成片保存在 COS，通过临时链接预览、下载。</p>
+    </section>
+
+    <section class="card" id="dramas">
+      <div class="section-head"><span class="num">04</span><h2>创建项目与添加剧集</h2></div>
+      <ol class="steps">
+        <li><strong>新建并命名。</strong><p>在“剪辑工作台”点击 <span class="key">＋ 新建</span>，填写易于识别的项目名称，例如“竖屏素材 A · 两部剧剪辑”。</p></li>
+        <li><strong>选择一个素材。</strong><p>从共享素材库中选择已通过媒体校验的素材。此时只是指定项目使用哪个素材，<strong>还没有将素材拼进时间线</strong>。</p></li>
+        <li><strong>搜索短剧。</strong><p>点击 <span class="key">＋ 添加短剧与剧集</span>，选择产品，输入完整剧 ID 或至少两个字的剧名前缀，再点 <span class="key">搜索</span>。</p></li>
+        <li><strong>选择剧集并添加。</strong><p>点击短剧，勾选所需剧集，点一次 <span class="key">添加所选剧集</span>。还未就绪的剧集会进入媒体校验；等待全部所选剧集就绪后统一加入。</p></li>
+        <li><strong>继续添加其他短剧。</strong><p>重复以上操作。点击左侧短剧名称，切换它自己的时间线；每部剧的剪切、顺序和出片结果相互独立。</p></li>
+      </ol>
+      <div class="callout green"><strong>看到“已就绪 2/3，完成后自动添加”时：</strong>保持弹窗打开等待即可，不必重复点击。这里的 2/3 表示所选 3 集中已有 2 集校验就绪，不是整条成片的制作进度。</div>
+      <p><span class="key">取消等待</span>、关闭弹窗、按 Esc，或切换产品、短剧、项目，会取消本次自动加入。已排队的后台媒体校验仍会继续，稍后可重新选择并添加，复用已完成的校验。关闭整个页面后也不会自动往项目加入剧集。</p>
+    </section>
+
+    <section class="card" id="cut">
+      <div class="section-head"><span class="num">05</span><h2>剪切、删除与排序</h2></div>
+      <h3>只保留一段：调整入点和出点</h3>
+      <p>点击时间线片段，在右侧“保留范围”中输入 <span class="key">入点 / 秒</span> 和 <span class="key">出点 / 秒</span>，或拖动入点、出点滑块。例如原视频长 60 秒，入点填 5、出点填 45，表示保留原视频第 5～45 秒，共 40 秒。</p>
+      <div class="callout"><strong>注意两种时间：</strong>入点、出点指<strong>原视频中的时间</strong>；播放器下方显示的是<strong>整条时间线的播放位置</strong>。前面插入素材、删除内容或加入淡化后，两者通常不再相同。</div>
+      <h3>删掉中间：切两次，再删中间片段</h3>
+      <div class="example">
+        <div class="example-title">示例：60 秒视频，删除原视频第 10～20 秒</div>
+        <p class="muted">为方便对照，示例假设该集从时间线 0 秒开始，尚未插入素材或设置淡化。</p>
+        <div class="ruler"><span>原视频 0 秒</span><span>60 秒</span></div>
+        <div class="cut-track" aria-label="原视频分成保留0至10秒、删除10至20秒、保留20至60秒三段">
+          <div class="cut-part" style="flex:1">保留<small>0–10 秒</small></div>
+          <div class="cut-part drop" style="flex:1">删除<small>10–20 秒</small></div>
+          <div class="cut-part" style="flex:4">保留<small>20–60 秒</small></div>
+        </div>
+        <div class="after-arrow">在 10 秒、20 秒处切割 → 选择中间片段 → 删除</div>
+        <div class="cut-track" aria-label="删除后的时间线由两个保留片段拼接，总时长50秒">
+          <div class="cut-part" style="flex:1">原 0–10 秒</div>
+          <div class="cut-part" style="flex:4">原 20–60 秒</div>
+        </div>
+        <div class="example-math">直接切换：10 秒 + 40 秒 = 50 秒成片</div>
+      </div>
+      <ol class="steps">
+        <li><strong>在删除起点切割。</strong><p>选中该集，移动播放位置到 10 秒，点击 <span class="key">✂ 在播放位置切割</span>。</p></li>
+        <li><strong>选中后半段，再在删除终点切割。</strong><p>点击刚产生的后半段（原 10～60 秒），移动播放位置到 20 秒，再点击切割。</p></li>
+        <li><strong>删除中间那段。</strong><p>选择原 10～20 秒片段，点击 <span class="key">删除选中片段</span>。播放检查新的连接点。</p></li>
+      </ol>
+      <p>需要删除同一集的多个区间，就重复操作。每删一段，后续内容在时间线上的位置会前移；请重新定位画面，不要直接沿用原视频秒数作为时间线播放位置。</p>
+      <div class="two-col">
+        <div class="mini-card"><h3>整集移除</h3><p>选中该集任一片段，点击“移除此剧集的全部片段”，移除当前短剧时间线中这一集的全部引用。误操作可立即撤销。</p></div>
+        <div class="mini-card"><h3>调整顺序</h3><p>拖动时间线片段，或选中后点“左移 / 右移”。拆分后的片段可以分别排序；当前每部短剧最多 300 个片段。</p></div>
+      </div>
+    </section>
+
+    <section class="card" id="insert">
+      <div class="section-head"><span class="num">06</span><h2>插入素材与公共设置</h2></div>
+      <h3>手动插入：适合每部剧精细编辑</h3>
+      <ol class="steps">
+        <li><strong>确定插入点。</strong><p>插在剧集中间时，先在目标位置切割，再选中相邻片段；片头、片尾可直接选择。</p></li>
+        <li><strong>打开“插入素材”。</strong><p>点击 <span class="key">＋ 插入素材</span>，设置本次引用的素材入点、出点。</p></li>
+        <li><strong>选择位置并确认。</strong><p>选择“选中片段之前”“选中片段之后”“片头”或“片尾”，点击 <span class="key">插入时间线</span>。</p></li>
+      </ol>
+      <p>同一个素材可多次插入，每次分别设置保留范围、画面适配和声音。只在左侧选好素材，不会自动加入成片。</p>
+      <h3>多剧公共设置：一次应用到所有短剧</h3>
+      <p>在时间线下方“多剧公共设置”中，选好“素材位置”和“衔接”，点击 <span class="key">应用到所有短剧</span>。</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>素材位置</th><th>点击后会怎样</th><th>适用场景</th></tr></thead>
+        <tbody>
+          <tr><td>片头 / 片尾</td><td>替换各剧中当前素材已有的插入引用，再把<strong>整段素材</strong>放到指定位置；同时应用所选衔接。</td><td>先给所有短剧统一片头或片尾，再逐剧精修。</td></tr>
+          <tr><td>仅应用衔接</td><td>只统一各切点的衔接方式，保留当前素材引用的位置和裁剪。</td><td>已精修好插入位置，只想统一直接切换或淡化。</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout amber"><strong>应用前确认：</strong>公共设置会保留剧集已有剪切点和顺序，但“片头 / 片尾”会替换已编辑的素材插入。建议先应用公共规则，再逐剧调整；精修完成后要保留素材位置，请使用“仅应用衔接”。</div>
+    </section>
+
+    <section class="card" id="effects">
+      <div class="section-head"><span class="num">07</span><h2>画面、声音与转场</h2></div>
+      <p>先选中时间线片段，再在右侧设置。下面的画面和声音选项只影响当前片段。</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>设置</th><th>效果与操作</th></tr></thead>
+        <tbody>
+          <tr><td>完整显示</td><td>默认选项。完整保留原画面，比例不一致时空白补黑，适合需要保留边缘字幕或画面内容的素材。</td></tr>
+          <tr><td>铺满裁切</td><td>居中裁切并铺满竖屏，画面两侧或上下内容可能被裁掉；请检查人物与字幕。</td></tr>
+          <tr><td>保留片段原声</td><td>默认保留。取消勾选可将当前片段静音；没有音轨的原视频不会自动增加配乐。</td></tr>
+          <tr><td>直接切换</td><td>默认衔接方式，前一段结束后直接进入下一段。</td></tr>
+          <tr><td>交叉淡化 · 0.3 秒</td><td>当前片段与下一片段重叠淡化 0.3 秒，声音同步过渡。最后一段没有后续转场。</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout"><strong>时长怎么算？</strong>所有保留片段的时长相加，再减去每个淡化切点的 0.3 秒重叠。例如 5 秒 + 10 秒，中间使用一次交叉淡化，预计总时长为 <strong>14.7 秒</strong>。</div>
+      <p>片段太短、无法容纳相邻淡化时，页面会指出具体短剧和片段位置。需要延长保留范围，或把相关切点改为直接切换后再制作；系统不会悄悄改变你选择的效果。</p>
+      <p class="muted">浏览器预览主要用于定位和检查片段顺序。最终转场、声音同步和画面适配，请以制作出的成片为准。</p>
+    </section>
+
+    <section class="card" id="save">
+      <div class="section-head"><span class="num">08</span><h2>保存与撤销</h2></div>
+      <ul>
+        <li><strong>自动保存：</strong>修改后会保存草稿，也可主动点击 <span class="key">保存草稿</span>。离开前确认出现“已保存”或“已自动保存 · vN”，其中 N 是项目版本号。</li>
+        <li><strong>继续编辑：</strong>用 <span class="key">打开项目…</span> 选择已保存项目。媒体信息载入时先等待；失败时点 <span class="key">重试载入</span>。</li>
+        <li><strong>撤销：</strong>点击 <span class="key">↶ 撤销</span> 回退当前页面、当前项目的最近编辑。刷新或重新打开项目后，不保留这段撤销历史。</li>
+        <li><strong>版本冲突：</strong>多个标签页或多人同时修改时，按提示处理。需要保住当前未保存内容，可点 <span class="key">将本地修改另存副本</span>；确认不需要本地修改后，再刷新读取服务器版本。</li>
+      </ul>
+      <p class="muted">修改已提交制作的项目，会形成新版本。已经提交的配方和已有成片不会被新的草稿覆盖。</p>
+    </section>
+
+    <section class="card" id="render">
+      <div class="section-head"><span class="num">09</span><h2>制作、预览与下载</h2></div>
+      <ol class="steps">
+        <li><strong>逐剧检查，再点击“制作成片”。</strong><p>确认各剧的保留内容、素材插入和转场。一次提交会为每部短剧创建独立制作任务。</p></li>
+        <li><strong>在“制作任务”看进度。</strong><p>任务由 GPU 服务器执行下载、剪切、拼接和成片上传。提交成功并出现任务后，即使离开页面，后台也会继续处理。</p></li>
+        <li><strong>完成后预览、下载。</strong><p>在该剧任务中点击 <span class="key">预览</span> 或 <span class="key">下载</span>。原素材和成片使用临时访问链接，页面提示有效期；过期后重新点击获取新链接。</p></li>
+      </ol>
+      <div class="table-wrap"><table>
+        <thead><tr><th>看到的阶段</th><th>含义</th><th>你需要做什么</th></tr></thead>
+        <tbody>
+          <tr><td><span class="status wait">排队</span></td><td>等待制作槽位，与其他视频任务共享 GPU 调度。</td><td>等待即可，不需要重复提交。</td></tr>
+          <tr><td><span class="status">准备 / 下载</span></td><td>获取原素材、剧集并检查媒体；大文件可能耗时较长。</td><td>查看当前阶段进度，稍后再看。</td></tr>
+          <tr><td><span class="status">制作</span></td><td>按保存的片段、顺序和转场制作。</td><td>等待；显示的进度属于当前阶段。</td></tr>
+          <tr><td><span class="status">上传</span></td><td>成片正在存入 COS 并核实结果。</td><td>等到“制作完成”再取成片。</td></tr>
+          <tr><td><span class="status ready">制作完成</span></td><td>该剧成片已可用。</td><td>预览检查，再下载。</td></tr>
+          <tr><td><span class="status failure">失败 / 结果待核实</span></td><td>某阶段失败，或暂时无法确认上传结果。</td><td>按错误提示处理，在原任务点“核实并重试”。</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout"><strong>重试只处理需要恢复的任务：</strong>同一项目版本重复提交会返回原批次。某一部剧失败时，用它自己的“核实并重试”，其他已成功的剧无需重做。需要改剪辑内容时，先修改并保存新版本，再提交制作。</div>
+      <p><strong>成片规格固定：</strong>MP4、H.264 / AAC、720 × 1280、30 fps。下载后建议完整播放一遍，重点检查切点、音画同步、字幕是否被裁切。</p>
+      <div class="callout amber"><strong>外部制作及盈量入库：待接入。</strong>当前可完成剪辑出片、预览和下载；不会自动调用外部制作接口，也不会自动推送盈量自定义素材库。</div>
+    </section>
+
+    <section class="card faq" id="faq">
+      <div class="section-head"><span class="num">10</span><h2>常见问题</h2></div>
+      <p class="lead">点击问题展开。异常时保留页面提示和对应项目、任务信息，便于管理员定位。</p>
+      <details open><summary>点击“添加所选剧集”后为什么没有立即出现片段？</summary><p>先看弹窗的媒体校验进度。出现“已就绪 x/y，完成后自动添加”表示请求已受理，全部所选剧集就绪后会统一加入。保持弹窗打开，不要反复点；如果明确报错，按该条提示处理。</p></details>
+      <details open><summary>点“取消等待”会停止 GPU 校验或制作吗？</summary><p>不会。它只取消这一次自动加入时间线的意图，已经排队的后台媒体校验仍会继续，也不会取消已经提交的制作任务。下次重新添加时可使用已完成的校验。</p></details>
+      <details><summary>素材已选好，为什么成片里没有？</summary><p>选择项目素材不等于插入。请点击“插入素材”并确认“插入时间线”，或使用多剧公共设置添加片头、片尾；提交前检查时间线上是否确实有素材片段。</p></details>
+      <details><summary>上传到 100% 后，为什么还不能使用？</summary><p>文件上传和媒体校验是两个阶段。等素材显示“可剪辑”再选用；若提示校验异常，可使用“核实媒体校验”。结果未知时先核实原会话，不要重复上传同一内容。</p></details>
+      <details><summary>搜索不到短剧怎么办？</summary><p>先确认产品选对；剧 ID 要填写完整，剧名搜索至少输入两个字的前缀。仍查不到时，请管理员核对你的产品权限和该剧的数据状态。</p></details>
+      <details><summary>为什么切割按钮提示“请将播放位置移到片段内部”？</summary><p>必须先选中要切的片段，再将播放位置放到它的内部，不能在片段的起点或终点重复切割。注意播放器时间是整条时间线位置，入点、出点则是原视频时间。</p></details>
+      <details><summary>为什么应用公共片头后，之前插入的素材不见了？</summary><p>公共“片头 / 片尾”会替换当前素材已有的插入引用，并重新插入整段素材。可以立即撤销；保留精修过的素材位置和裁剪时，请改选“仅应用衔接”。剧集本身的剪切点和顺序会保留。</p></details>
+      <details><summary>制作等待较久，能不能关闭页面？</summary><p>确认提交成功、已出现制作任务后可以关闭。排队、下载大体积剧集和成片上传都需要时间；稍后打开“制作任务”或点击“刷新任务”查看。还在本地上传或尚未保存草稿时，请先完成这些步骤。</p></details>
+      <details><summary>一部剧失败了，要把整个项目重新做一遍吗？</summary><p>不需要。找到失败或结果待核实的原任务，按提示使用“核实并重试”。无法确认远端结果时，系统可能继续核实；不要新建重复任务绕过。共享校验若提示无恢复权限，请联系发起人或管理员。</p></details>
+      <details><summary>视频链接过期或下载失败怎么办？</summary><p>回到素材或成片的原记录，重新点击预览、下载获取临时链接。不要把过期的临时链接作为永久交付地址；这份使用说明的公开 COS 地址与视频的临时访问链接不同。</p></details>
+      <details><summary>能直接推送到盈量自定义素材库吗？</summary><p>本期不支持自动推送，外部制作接口显示“待接入”。当前先下载剪辑成片，后续接口接入后的操作以新版说明为准。</p></details>
+    </section>
+
+    <section class="card" id="check">
+      <div class="section-head"><span class="num">11</span><h2>出片前检查</h2></div>
+      <ul class="checklist">
+        <li>每部短剧都选对了剧集和顺序。</li>
+        <li>不需要的中间内容已切割并删除。</li>
+        <li>素材已真正插入每条所需时间线。</li>
+        <li>素材各次插入的保留范围已确认。</li>
+        <li>画面适配不会裁掉人物或关键字幕。</li>
+        <li>原声、静音和每个切点的衔接已检查。</li>
+        <li>短片段与淡化的校验提示已处理。</li>
+        <li>草稿已保存，预计时长符合预期。</li>
+      </ul>
+      <p class="print-hint">保存此 HTML 可离线阅读。需要 PDF 时，可使用浏览器“打印 → 另存为 PDF”。</p>
+    </section>
+    <footer class="footer">AI自动后台 · 视频剪辑使用说明 · 2026-10-22<br>文档示例仅用于讲解操作；具体状态与限制以正式页面提示为准。<br><a class="back-top" href="#top">返回顶部 ↑</a></footer>
+  </main>
+</div>
+</body>
+</html>
