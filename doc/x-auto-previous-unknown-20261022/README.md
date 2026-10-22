@@ -41,7 +41,12 @@ trigger states. Never restore an older database or token backup over live data.
 Before releasing a historical account hold, obtain the exact Post through X's
 read API and match author, expanded text, media key and creation time against the
 frozen log. Use `scripts.x_post_gap_recovery.reconcile_direct_post` first in dry-run
-mode, then under the shared publisher lock after an online database backup. It
+mode, then after an online database backup. Confirmed direct-Post reconciliation
+holds a SQLite write transaction and rejects any active write on the same account;
+it does not require an unrelated batch to release the global runner lock. The
+original failed/unknown state and exact platform evidence are validated inside
+that transaction before updating anything. All rearm/retry operations still
+require the global runner lock. The confirmed reconciliation
 retains an audit of the original queue/log, attaches the confirmed Post ID and
 updates the pool/run through existing aggregation. Never retry that old Post.
 Keep account-specific evidence, backups and receipts outside Git.

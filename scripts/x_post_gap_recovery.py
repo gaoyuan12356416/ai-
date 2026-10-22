@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Audited operator recovery; never calls X or selects replacement content.
 
-Call under the shared runner lock after a backup and current account verify.
+Rearm/retry operations require the shared runner lock after a backup and current
+account verify. Confirmed direct-Post reconciliation is transactionally scoped:
+it checks for an active write on that account inside BEGIN IMMEDIATE and never
+rearms work, so unrelated accounts need not finish their entire batch first.
 All operations default to read-only and permit one transition per identity.
 """
 import contextlib
@@ -70,6 +73,13 @@ def reconcile_direct_post(db_path, queue_id, post, *, actor, apply=False):
         l = c.execute("SELECT * FROM x_post_publish_log WHERE queue_id=?", (queue_id,)).fetchone()
         if not q or not l or q['source_type'] != 'material' or q['delivery_mode'] != 'direct' or q['status'] != 'failed' or l['status'] != 'failed' or l['unknown_outcome'] != 1 or not l['x_media_id']:
             raise ValueError("Expected unresolved direct material Post")
+        if c.execute(
+            "SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+            "WHERE q.account_id=? AND q.id<>? AND (q.status='publishing' "
+            "OR l.status IN ('media_uploading','post_creating','repost_creating')) LIMIT 1",
+            (q['account_id'], queue_id),
+        ).fetchone():
+            raise ValueError("Account has an active publication; reconcile after it finishes")
         a = c.execute("SELECT x_user_id FROM x_authorized_account WHERE id=?", (q['account_id'],)).fetchone()
         post_id = str(post.get('id') or '')
         published = datetime.fromisoformat(str(post.get('created_at', '')).replace('Z', '+00:00'))
