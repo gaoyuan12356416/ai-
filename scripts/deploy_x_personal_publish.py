@@ -283,16 +283,23 @@ def restore_trigger_states(states):
 @contextlib.contextmanager
 def paused(config, manifest):
     import fcntl
-    # Long GPU preparation must not hold unrelated Auto/metric timers paused.
-    # Wait for a quiet window first, then drain the short trigger-stop race.
+    # Do not hold Auto execution during long legacy GPU preparation. Once the
+    # other workers are quiet, hold only new Auto execution while its current
+    # upload finishes; schedule creation/metrics continue during that drain.
     drain_timeout = int(config.get('drain_timeout_seconds', 180))
     require(180 <= drain_timeout <= 7500, 'invalid worker drain timeout')
-    wait_idle(lambda: any(is_busy(u) for u in WORKERS), 'publisher worker', timeout=drain_timeout)
+    wait_idle(lambda: any(is_busy(u) for u in WORKERS if u != 'x-auto-post-runner.service'),
+              'legacy preparation worker', timeout=drain_timeout)
     states = {unit: unit_state(unit) for unit in TRIGGERS}
     manifest['trigger_states'] = states
     save(manifest)
     handles = []
     try:
+        execution_triggers = ['x-auto-post-runner.timer', 'x-auto-post-runner.path']
+        active_execution = [u for u in execution_triggers if states[u].get('ActiveState') == 'active']
+        if active_execution:
+            run('systemctl', 'stop', *active_execution)
+        wait_idle(lambda: any(is_busy(u) for u in WORKERS), 'publisher worker', timeout=drain_timeout)
         active = [u for u, state in states.items() if state.get('ActiveState') == 'active']
         if active:
             run('systemctl', 'stop', *active)
