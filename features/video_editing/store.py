@@ -56,10 +56,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS ve_batch(id TEXT PRIMARY KEY,owner TEXT NOT NULL,project_id TEXT NOT NULL,
               operation_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
               UNIQUE(owner,operation_id));
+            CREATE TABLE IF NOT EXISTS ve_render_operation(owner TEXT NOT NULL,operation_id TEXT NOT NULL,
+              project_id TEXT NOT NULL,project_version INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at INTEGER NOT NULL,
+              PRIMARY KEY(owner,operation_id));
             CREATE TABLE IF NOT EXISTS ve_output(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL UNIQUE,
               batch_id TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ve_source_kind_status ON ve_source(kind,status,updated_at);
             CREATE INDEX IF NOT EXISTS ve_task_status ON ve_task(status,created_at,id);
+            CREATE INDEX IF NOT EXISTS ve_batch_project_created ON ve_batch(project_id,created_at);
             CREATE TABLE IF NOT EXISTS ve_lease(name TEXT PRIMARY KEY,holder TEXT NOT NULL,expires_at INTEGER NOT NULL);
             ''')
 

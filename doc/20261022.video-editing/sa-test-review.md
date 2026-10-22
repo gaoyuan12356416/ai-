@@ -1,3 +1,26 @@
-# Test design review
-Cases cover lost edit identity in caches and GPU concurrency outside existing scheduling. Release also requires real COS privacy/readback and real rendered-media evidence; HTTP 200/JS syntax/mocks are insufficient. Check ownership, short fades, stale revisions, unknown outcomes and persisted mixed-type recovery.
-Independent implementation review and executed results remain pending workstream completion.
+# SA 测试评审
+
+## 结论
+
+测试设计与独立实施审查已完成，已执行结果覆盖来源身份、权限、未知结果、版本冲突、逐剧编辑、真实COS与GPU制作。最新完整回归为Python117项（116通过、1项可选COS SDK跳过）、JS23项全部通过（模型9、浏览器事件/API契约14）、旧模块回归215项（209通过、6跳过），均无失败。Python包含BUG-006新增9项用例，已由后端负责人和主实施分别执行；子集复测与真实验收组不重复累计。
+
+合成素材的两条独立时间线已在真实GPU出片并完成下载、完整解码、逐帧及音频区间检查。完成任务的独立监听进程停启恢复也已实测通过。正式Chrome双真实剧成片仍在进行中，不能把模拟网络、合成素材或隔离恢复结果等同于完整业务验收。
+
+## 已验证的关键边界
+
+- 共享ready素材可读、个人项目和任务隔离、原始来源身份及当前产品可用性校验；权限用例基于可信会话桩，多人实会话矩阵仍需另验。
+- 多段删除、排序、重复素材、公共设置不覆盖逐剧剪切，30fps端点及0.3秒淡化扣时，短片段明确拒绝，保存竞态与同operation_id提交幂等。BUG-006跨新operation_id的同版本重提已在本地修复，新增9项覆盖并发、各任务状态、新版本、历史重复批次、操作冲突及管理员归属；部署与线上回读待主实施。
+- COS实际两分片、原会话续传、重复完成、过期签名续签、匿名403与CORS预检；CPU只接收元数据。
+- GPU成片真实格式、配方帧序、contain / cover、淡化、静音、缓存、私有回执与成功临时目录清理。
+- 隔离任务 `ve_4483dabb553b53369d18aff38f18bd6f` 完成后，停止并重启同一独立listener，再GET和重复POST命中cached；generation=1，COS ETag / LastModified / SHA与账本hash不变。正式GPU及发布服务PID、旧23份账本不变，CPU claim已恢复。
+- 首次CPU分发sys缺失与Nginx路由缺失已修复，真实未登录JSON401确认新接口到达鉴权层；401不证明登录后的业务完成。
+
+## 当前验收与剩余限制
+
+正式Chrome已完成真实剧集探测、6/2秒裁剪、2/4秒切割并删除中间片段、整集移除后撤销和重排；已选择系统验收共享素材并提交双剧项目。冻结版本与逐剧配方核对通过，正式双剧成片及最终播放下载仍等待结果。
+
+Chrome自动文件选择因扩展未开启file URL访问而受阻。系统验收操作者通过标准生产服务创建上传、工作站直传COS及正常probe的链路已通过；该证据不能替代浏览器文件选择、浏览器直传和断线续传验收。
+
+完成态隔离停启没有在下载或渲染中kill进程，也没有重启正式GPU服务。BUG-006本地修复和回归已通过，确切提交部署及线上回读仍待完成；运行中断后的同ID恢复、旧新任务同时排队的调度压测、多人真实权限矩阵、失败临时媒体保留24小时后的清理仍不能由现有结果自动判为通过。外部制作 / 盈量推送是本期预留项。
+
+详细计数、持久证据与当前边界见 `test-report.md`、`final-backend-review.md`；部署事实以 `deploy.md` 为准。

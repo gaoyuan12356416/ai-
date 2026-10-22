@@ -2,6 +2,9 @@ import copy
 import tempfile
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from threading import Barrier
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -71,12 +74,14 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(VideoEditingError):self.service.save_project(draft,ACTOR)
     def test_removed_product_source_cannot_create_new_work_but_old_batch_survives(self):
         p=self.project();task=self.render(p)
+        changed=self.service.save_project({**self.draft(),'expected_version':1},ACTOR,p['id'])
         self.service.catalog=Catalog(self.store,SimpleNamespace(list_products=lambda:[{'app_id':'other_app'}]))
         with self.assertRaises(VideoEditingError):self.service.source(E,ACTOR)
         with self.assertRaises(VideoEditingError):self.service.save_project(self.draft(),ACTOR)
         with self.assertRaises(VideoEditingError):
-            self.service.render(p['id'],{'operation_id':'new_render_2','expected_version':1},ACTOR)
+            self.service.render(p['id'],{'operation_id':'new_render_2','expected_version':changed['version']},ACTOR)
         self.assertEqual(self.render(p)['id'],task['id'])
+        self.assertEqual(self.service.render(p['id'],{'operation_id':'reload_old_version','expected_version':1},ACTOR)['items'][0]['id'],task['id'])
         self.assertEqual(self.service.task(task['id'],ACTOR)['id'],task['id'])
     def test_frozen_render_independent_of_future_project_and_asset_edits(self):
         p=self.project();task=self.render(p);frozen=self.service.task(task['id'],ACTOR)['data']['payload']
@@ -111,7 +116,8 @@ class ServiceTests(unittest.TestCase):
         for kind in ('batch','project_version','output'):self.assertEqual(self.store.list(kind)[1],0)
     def test_worker_unknown_does_not_create_second_job(self):
         p=self.project();task=self.render(p)
-        self.service.render(p['id'],{'operation_id':'render_op_2','expected_version':1},ACTOR)
+        another=self.project()
+        self.service.render(another['id'],{'operation_id':'render_op_2','expected_version':1},ACTOR)
         calls=[]
         def transport(method,path,payload):
             calls.append((method,path))
@@ -155,12 +161,14 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(a['data']['probe_task_id'],b['data']['probe_task_id']);self.assertEqual(self.store.list('task')[1],1)
     def test_runtime_intake_file_blocks_new_work_preserves_reads(self):
         project=self.project();task=self.render(project)
+        changed=self.service.save_project({**self.draft(),'expected_version':1},ACTOR,project['id'])
         marker=Path(self.tmp.name)/'intake.disabled'
         with patch.dict(os.environ,{'VIDEO_EDITING_DISABLED_FILE':str(marker)}):
             self.assertTrue(self.service.config()['enabled']);marker.write_text('paused')
             self.assertFalse(self.service.config()['enabled'])
-            with self.assertRaises(VideoEditingError):self.service.render(project['id'],{'operation_id':'new_render_2','expected_version':1},ACTOR)
+            with self.assertRaises(VideoEditingError):self.service.render(project['id'],{'operation_id':'new_render_2','expected_version':changed['version']},ACTOR)
             self.assertEqual(self.render(project)['id'],task['id'])
+            self.assertEqual(self.service.render(project['id'],{'operation_id':'reload_while_closed','expected_version':1},ACTOR)['items'][0]['id'],task['id'])
             self.assertEqual(self.service.task(task['id'],ACTOR)['id'],task['id'])
             marker.unlink();self.assertTrue(self.service.config()['enabled'])
     def test_resume_uses_same_id_and_generation_compare_swap(self):
@@ -196,6 +204,131 @@ class ServiceTests(unittest.TestCase):
                 with self.store.transaction() as db:
                     self.store.update('task',task['id'],{'status':'cancelled'},db)
                     db.execute('DELETE FROM ve_lease')
+
+    def test_new_operations_reuse_every_state_of_the_same_saved_version(self):
+        for status in ('queued','running','unknown','recovery_required','failed','completed'):
+            with self.subTest(status=status):
+                p=self.project();payload={'operation_id':'initial_'+status,'expected_version':1}
+                first=self.service.render(p['id'],payload,ACTOR);tid=first['items'][0]['id']
+                with self.store.transaction() as db:self.store.update('task',tid,{'status':status},db)
+                again=self.service.render(p['id'],{'operation_id':'reload_'+status,'expected_version':1},ACTOR)
+                self.assertEqual(again['batch_id'],first['batch_id'])
+                self.assertEqual(again['items'][0]['id'],tid)
+                self.assertEqual(again['items'][0]['output_id'],first['items'][0]['output_id'])
+                self.assertEqual(again['items'][0]['status'],status)
+        self.assertEqual(self.store.list('batch')[1],6)
+        self.assertEqual(self.store.list('task')[1],6)
+        self.assertEqual(self.store.list('output')[1],6)
+
+    def test_concurrent_tabs_with_different_operations_create_one_batch(self):
+        p=self.project();barrier=Barrier(2)
+        def submit(index):
+            barrier.wait(timeout=5)
+            return self.service.render(p['id'],{'operation_id':'concurrent_tab_'+str(index),'expected_version':1},ACTOR)
+        with ThreadPoolExecutor(max_workers=2) as pool:answers=list(pool.map(submit,(1,2)))
+        self.assertEqual(answers[0]['batch_id'],answers[1]['batch_id'])
+        for kind in ('task','batch','output','project_version'):self.assertEqual(self.store.list(kind)[1],1)
+        with closing(self.store.connect()) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM ve_render_operation').fetchone()[0],2)
+
+    def test_editing_creates_new_version_but_old_operation_conflicts_remain(self):
+        p=self.project();first=self.service.render(p['id'],{'operation_id':'original_submit','expected_version':1},ACTOR)
+        changed=self.draft();changed['dramas'][0]['clips'][1]['end_ms']=7000
+        self.service.save_project({**changed,'expected_version':1},ACTOR,p['id'])
+        second=self.service.render(p['id'],{'operation_id':'edited_submit','expected_version':2},ACTOR)
+        self.assertNotEqual(first['batch_id'],second['batch_id'])
+        self.assertEqual(self.service.render(p['id'],{'operation_id':'reload_original','expected_version':1},ACTOR)['batch_id'],first['batch_id'])
+        for op,version in (('original_submit',2),('reload_original',2)):
+            with self.assertRaises(VideoEditingError) as caught:self.service.render(p['id'],{'operation_id':op,'expected_version':version},ACTOR)
+            self.assertEqual(caught.exception.code,'operation_conflict')
+        another=self.project()
+        with self.assertRaises(VideoEditingError) as caught:self.service.render(another['id'],{'operation_id':'reload_original','expected_version':1},ACTOR)
+        self.assertEqual(caught.exception.code,'operation_conflict')
+
+    def test_mixed_batch_reuse_does_not_retry_failed_or_completed_tasks(self):
+        draft=self.draft();other=copy.deepcopy(draft['dramas'][0]);other['content_id']='other';other['clips'][1]['source_id']=E2;draft['dramas'].append(other)
+        p=self.service.save_project(draft,ACTOR)
+        first=self.service.render(p['id'],{'operation_id':'mixed_initial','expected_version':1},ACTOR)
+        complete,failed=[t['id'] for t in first['items']]
+        with self.store.transaction() as db:
+            self.store.update('task',complete,{'status':'completed'},db);self.store.update('task',failed,{'status':'failed'},db)
+        again=self.service.render(p['id'],{'operation_id':'mixed_reload','expected_version':1},ACTOR)
+        self.assertEqual([t['status'] for t in again['items']],['completed','failed'])
+        self.service.resume(failed,ACTOR)
+        self.assertEqual(self.service.task(complete,ACTOR)['status'],'completed')
+        self.assertEqual(self.service.task(failed,ACTOR)['status'],'resume_queued')
+        self.assertEqual(self.store.list('task')[1],2)
+        with self.assertRaises(VideoEditingError):self.service.resume(complete,ACTOR)
+
+    def test_admin_submission_records_project_owner_and_actual_submitter(self):
+        p=self.project();first=self.service.render(p['id'],{'operation_id':'admin_submission','expected_version':1},ADMIN)
+        task=self.service.task(first['items'][0]['id'],ACTOR)
+        for kind,rid in (('task',task['id']),('batch',first['batch_id']),('output',task['data']['output_id'])):
+            self.assertEqual(self.store.get(kind,rid)['owner'],owner(ACTOR))
+        self.assertEqual(task['data']['submitted_by'],owner(ADMIN))
+        self.assertEqual(self.store.get('batch',first['batch_id'])['data']['submitted_by'],owner(ADMIN))
+        self.assertEqual(self.service.render(p['id'],{'operation_id':'owner_reload','expected_version':1},ACTOR)['batch_id'],first['batch_id'])
+        with self.assertRaises(VideoEditingError):self.service.render(p['id'],{'operation_id':'unrelated_user','expected_version':1},OTHER)
+
+    def test_same_operation_from_distinct_admins_does_not_collide_under_project_owner(self):
+        one=self.project();two=self.project();admin2={**ADMIN,'user_id':'admin2'}
+        first=self.service.render(one['id'],{'operation_id':'same_external_operation','expected_version':1},ADMIN)
+        second=self.service.render(two['id'],{'operation_id':'same_external_operation','expected_version':1},admin2)
+        self.assertNotEqual(first['batch_id'],second['batch_id'])
+        self.assertNotEqual(self.store.get('batch',first['batch_id'])['operation_id'],self.store.get('batch',second['batch_id'])['operation_id'])
+
+    def _legacy_batch(self,p,op,legacy_actor=ACTOR):
+        response=self.service.render(p['id'],{'operation_id':op,'expected_version':1},legacy_actor)
+        with self.store.transaction() as db:
+            batch=self.store.get('batch',response['batch_id'],db)
+            batch['data'].pop('request_operation_id',None);batch['data'].pop('submitted_by',None)
+            db.execute('UPDATE ve_batch SET owner=?,operation_id=? WHERE id=?',(owner(legacy_actor),op,batch['id']))
+            self.store.update('batch',batch['id'],{'data':batch['data']},db)
+            for task in response['items']:
+                db.execute('UPDATE ve_task SET owner=? WHERE id=?',(owner(legacy_actor),task['id']))
+                db.execute('UPDATE ve_output SET owner=? WHERE id=?',(owner(legacy_actor),task['output_id']))
+            db.execute('DELETE FROM ve_render_operation')
+        return response
+
+    def test_legacy_request_maps_once_and_preserves_its_batch_operation(self):
+        p=self.project();first=self._legacy_batch(p,'legacy_submit')
+        another=self.project()
+        with self.assertRaises(VideoEditingError) as caught:self.service.render(another['id'],{'operation_id':'legacy_submit','expected_version':1},ACTOR)
+        self.assertEqual(caught.exception.code,'operation_conflict')
+        again=self.service.render(p['id'],{'operation_id':'legacy_submit','expected_version':1},ACTOR)
+        alias=self.service.render(p['id'],{'operation_id':'new_browser_operation','expected_version':1},ACTOR)
+        self.assertEqual(again['batch_id'],first['batch_id']);self.assertEqual(alias['batch_id'],first['batch_id'])
+        self.assertEqual(self.store.get('batch',first['batch_id'])['operation_id'],'legacy_submit')
+        with self.assertRaises(VideoEditingError):self.service.render(another['id'],{'operation_id':'legacy_submit','expected_version':1},ACTOR)
+
+    def test_legacy_admin_owned_batch_cannot_leak_tasks_to_project_owner(self):
+        p=self.project();first=self._legacy_batch(p,'legacy_admin_submit',ADMIN)
+        with self.assertRaises(VideoEditingError) as caught:
+            self.service.render(p['id'],{'operation_id':'owner_new_operation','expected_version':1},ACTOR)
+        self.assertEqual(caught.exception.code,'batch_task_permission_conflict')
+        self.assertEqual(caught.exception.status,409)
+        with closing(self.store.connect()) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM ve_render_operation').fetchone()[0],0)
+        with self.assertRaises(VideoEditingError):self.service.task(first['items'][0]['id'],ACTOR)
+        self.assertEqual(self.service.render(p['id'],{'operation_id':'admin_reload','expected_version':1},ADMIN)['batch_id'],first['batch_id'])
+        self.assertEqual(self.store.get('task',first['items'][0]['id'])['owner'],owner(ADMIN))
+
+    def test_legacy_duplicate_versions_keep_original_operations_and_new_ops_use_earliest(self):
+        p=self.project();first=self._legacy_batch(p,'legacy_first')
+        batch=self.store.get('batch',first['batch_id'])
+        # Model an older release that accepted two operations for one version.
+        later=copy.deepcopy(batch);later['id']='vb_legacy_later';later['operation_id']='legacy_later'
+        task=copy.deepcopy(self.store.get('task',first['items'][0]['id']));task['id']='ve_'+'1'*32;task['operation_id']='legacy_later_0'
+        task['data'].update(batch_id=later['id'],output_id='vo_'+'1'*32)
+        output=copy.deepcopy(self.store.get('output',first['items'][0]['output_id']))
+        output.update(id=task['data']['output_id'],task_id=task['id'],batch_id=later['id'])
+        later['data']['task_ids']=[task['id']]
+        with self.store.transaction() as db:
+            self.store.insert('batch',later,db);self.store.insert('task',task,db);self.store.insert('output',output,db)
+        alias=self.service.render(p['id'],{'operation_id':'fresh_browser','expected_version':1},ACTOR)
+        original=self.service.render(p['id'],{'operation_id':'legacy_later','expected_version':1},ACTOR)
+        self.assertEqual(alias['batch_id'],first['batch_id']);self.assertEqual(original['batch_id'],later['id'])
+        self.assertEqual(original['items'][0]['id'],task['id'])
+        self.assertEqual(self.store.list('batch')[1],2)
+        self.assertEqual(self.store.get('batch',later['id'])['operation_id'],'legacy_later')
 
 
 if __name__=='__main__':unittest.main()

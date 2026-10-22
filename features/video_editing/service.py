@@ -12,6 +12,7 @@ from .store import Store, can_manage, encode, identifier, now, owner
 from .uploads import Uploads, MAX_BYTES, PART_BYTES
 
 PROFILE='video-editing-720-v1'
+MAX_DRAMAS=20
 TERMINAL={'completed','failed','cancelled'}
 
 
@@ -36,7 +37,7 @@ class Service:
         require(self.intake_enabled,'video_editing_intake_disabled','新剪辑任务已暂停，已有任务仍可查询和恢复',503)
 
     def config(self):
-        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':20,'profile':PROFILE,
+        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':MAX_DRAMAS,'profile':PROFILE,
                 'worker_configured':bool(self.gpu_url and self.gpu_token),'cos_configured':bool(self.uploads.client and self.uploads.bucket)}
 
     def signed_url(self,artifact,download=False):
@@ -156,7 +157,7 @@ class Service:
             source=self.source(asset_id,actor)
             require(source['kind']=='asset','asset_invalid','请选择素材库视频')
         dramas=payload.get('dramas',[])
-        require(isinstance(dramas,list) and len(dramas)<=20,'drama_count_invalid','最多选择20部短剧')
+        require(isinstance(dramas,list) and len(dramas)<=MAX_DRAMAS,'drama_count_invalid',f'最多选择{MAX_DRAMAS}部短剧')
         normalized=[];seen=set()
         for drama in dramas:
             require(isinstance(drama,dict) and not(set(drama)-{'app_id','content_id','title','clips'}),'drama_invalid','剧目配置无效')
@@ -204,22 +205,59 @@ class Service:
             row=self.project(pid,actor,db)
         return self.project_dto(row)
 
+    def _render_batch_result(self,batch,actor,db):
+        require(batch is not None,'batch_not_found','制作批次不存在，请联系管理员核查',409)
+        tasks=[self.store.get('task',tid,db) for tid in batch['data']['task_ids']]
+        # Old administrator-created tasks retain their original ownership.
+        # Reusing a version must never become a way to bypass task() access.
+        require(all(task and can_manage(task,actor) for task in tasks),
+                'batch_task_permission_conflict','此版本已有制作批次，请管理员查看原批次',409)
+        return {'batch_id':batch['id'],'project_version_id':batch['data']['project_version_id'],
+                'items':[self.task_dto(task) for task in tasks]}
+
+    def _remember_render_operation(self,db,actor_owner,op,pid,version,batch):
+        db.execute('INSERT INTO ve_render_operation(owner,operation_id,project_id,project_version,batch_id,created_at) VALUES(?,?,?,?,?,?)',
+                   (actor_owner,op,pid,version,batch['id'],now()))
+
     def render(self,pid,payload,actor):
         op=operation_id(payload.get('operation_id'))
+        actor_owner=owner(actor);expected=payload.get('expected_version')
         from .recipe import validate_recipe
         with self.store.transaction() as db:
             project=self.project(pid,actor,db); draft=project['data']
-            batch=self.store.row(db.execute('SELECT * FROM ve_batch WHERE owner=? AND operation_id=?',(owner(actor),op)).fetchone())
-            if batch:
-                require(batch['project_id']==pid and type(payload.get('expected_version')) is int and
-                        batch['data']['project_version']==payload['expected_version'],
+            mapped=db.execute('SELECT * FROM ve_render_operation WHERE owner=? AND operation_id=?',(actor_owner,op)).fetchone()
+            if mapped:
+                require(mapped['project_id']==pid and type(expected) is int and mapped['project_version']==expected,
                         'operation_conflict','同一制作操作内容已变化',409)
-                return {'batch_id':batch['id'],'project_version_id':batch['data']['project_version_id'],
-                        'items':[self.task_dto(self.store.get('task',tid,db)) for tid in batch['data']['task_ids']]}
-            require(type(payload.get('expected_version')) is int and payload['expected_version']==project['version'],'project_version_conflict','项目已被更新，请刷新后制作',409)
+                return self._render_batch_result(self.store.get('batch',mapped['batch_id'],db),actor,db)
+            # Existing releases keyed a batch directly by caller + request op.
+            # Preserve those exact historical identities before canonical reuse.
+            batch=self.store.row(db.execute('SELECT * FROM ve_batch WHERE owner=? AND operation_id=?',(actor_owner,op)).fetchone())
+            if batch and 'request_operation_id' in batch['data']:
+                batch=None
+            if batch:
+                require(batch['project_id']==pid and type(expected) is int and batch['data']['project_version']==expected,
+                        'operation_conflict','同一制作操作内容已变化',409)
+                result=self._render_batch_result(batch,actor,db)
+                self._remember_render_operation(db,actor_owner,op,pid,expected,batch)
+                return result
+            require(type(expected) is int and expected>=1,'project_version_conflict','项目版本无效，请刷新后制作',409)
+            # A browser reload, another tab or an administrator uses a new op.
+            # The first accepted batch for this saved version remains canonical.
+            rows=db.execute('SELECT * FROM ve_batch WHERE project_id=? ORDER BY created_at,rowid',(pid,)).fetchall()
+            batch=next((row for row in (self.store.row(r) for r in rows) if row['data']['project_version']==expected),None)
+            if batch:
+                result=self._render_batch_result(batch,actor,db)
+                self._remember_render_operation(db,actor_owner,op,pid,expected,batch)
+                return result
+            require(expected==project['version'],'project_version_conflict','项目已被更新，请刷新后制作',409)
             require(draft['asset_id'] and draft['dramas'],'project_incomplete','请选择素材和短剧')
             self.source(draft['asset_id'],actor,db,ready=True)
             result=[];batch_id=identifier('vb_')
+            # New tasks belong to the project owner even when submitted by an
+            # administrator. Request operations remain scoped to their caller.
+            record_owner=project['owner']
+            internal_op='submit_'+hashlib.sha256((actor_owner+'\0'+op).encode()).hexdigest()
             version_id='vv_'+hashlib.sha256((pid+':'+str(project['version'])).encode()).hexdigest()[:32]
             saved=self.store.get('project_version',version_id,db)
             if saved:
@@ -236,8 +274,8 @@ class Service:
                     source=self.source(sid,actor,db,ready=True); d=source['data']; meta=d['metadata']
                     sources.append({'source_id':sid,'kind':source['kind'],'url':d['url'],'identity':d['identity'],**meta})
                 recipe=validate_recipe({'version':1,'profile':PROFILE,'sources':sources,'clips':clips},operation='render')
-                task_operation=op+'_'+str(index)
-                prior=self.store.row(db.execute('SELECT * FROM ve_task WHERE owner=? AND operation_id=?',(owner(actor),task_operation)).fetchone())
+                task_operation=internal_op+'_'+str(index)
+                prior=self.store.row(db.execute('SELECT * FROM ve_task WHERE owner=? AND operation_id=?',(record_owner,task_operation)).fetchone())
                 if prior:
                     require(prior['project_id']==pid and prior['data'].get('project_version')==project['version'] and encode(prior['data']['payload']['recipe'])==encode(recipe),
                             'operation_conflict','同一制作操作内容已变化',409)
@@ -247,17 +285,20 @@ class Service:
                 self.require_intake()
                 tid=identifier('ve_')
                 data={'project_version':project['version'],'project_version_id':version_id,'batch_id':batch_id,'output_id':'vo_'+tid[3:],
+                      'submitted_by':actor_owner,'request_operation_id':op,
                       'drama_title':drama['title'],'app_id':drama['app_id'],'content_id':drama['content_id'],
                       'stage':'queued','progress':0,'payload':{'job_id':tid,'task_type':'video_editing_v1','operation':'render','recipe':recipe}}
-                self.store.insert('task',{'id':tid,'owner':owner(actor),'project_id':pid,'operation_id':task_operation,'kind':'render','status':'queued','data':data},db)
+                self.store.insert('task',{'id':tid,'owner':record_owner,'project_id':pid,'operation_id':task_operation,'kind':'render','status':'queued','data':data},db)
                 result.append(self.store.get('task',tid,db))
-            self.store.insert('batch',{'id':batch_id,'owner':owner(actor),'project_id':pid,'operation_id':op,
-                'data':{'project_version':project['version'],'project_version_id':version_id,'task_ids':[r['id'] for r in result]}},db)
+            self.store.insert('batch',{'id':batch_id,'owner':record_owner,'project_id':pid,'operation_id':internal_op,
+                'data':{'project_version':project['version'],'project_version_id':version_id,'task_ids':[r['id'] for r in result],
+                        'submitted_by':actor_owner,'request_operation_id':op}},db)
             for row in result:
                 output_id=row['data']['output_id']
                 if self.store.get('output',output_id,db) is None:
                     self.store.insert('output',{'id':output_id,'owner':row['owner'],'task_id':row['id'],'batch_id':batch_id,
                         'status':'ready' if row['status']=='completed' else 'pending','data':row['data'].get('result') or {}},db)
+            self._remember_render_operation(db,actor_owner,op,pid,expected,self.store.get('batch',batch_id,db))
         return {'batch_id':batch_id,'project_version_id':version_id,'items':[self.task_dto(r) for r in result]}
 
     def task(self,tid,actor):
