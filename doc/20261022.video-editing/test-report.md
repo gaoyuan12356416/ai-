@@ -2,9 +2,9 @@
 
 ## 测试结论
 
-截至2026-10-22，本地功能Python117项（116通过、1项可选COS SDK跳过）、JS23项全部通过、旧模块回归215项（209通过、6跳过），均无失败。Python117项包含BUG-006新增的9项回归，已由后端负责人和主实施分别执行；同项目同版本跨刷新重提重复批次的P1问题已完成本地修复、独立代码审查与回归，确切提交部署及线上回读待主实施完成。
+截至2026-10-22，BUG-007候选已实现失败scratch清理后的有条件恢复，本地功能Python126项（125通过、1项可选COS SDK跳过），独立review已通过、无阻断问题，真实隔离恢复通过，生产部署与独立回读通过。BUG-006已部署历史基线为Python117项（116通过、1跳过）；按 `9fc968a98924e658895240a8763162a2b97c207f` 窄范围部署后，服务器service29项及正式Chrome刷新重提回读通过。JS23项全部通过；旧模块最终215项为209通过、6跳过，GPU实施者已完成本轮复跑，各阶段不累加。
 
-真实COS分片、续传、重复完成、过期续签、私有性及CORS预检已验证。真实GPU使用合成素材完成3个probe和两条独立时间线出片，下载解码、逐帧内容、适配、淡化、音频区间、缓存与成功临时目录清理通过；完成任务的独立listener停启恢复也已通过。正式Chrome双真实剧成片仍在进行中，自动文件选择受扩展file URL访问权限阻挡，运行中断恢复及混合生产队列未覆盖，不能据此宣布整体上线验收通过。
+真实COS分片、续传、重复完成、过期续签、私有性及CORS预检已验证。合成素材的真实GPU出片、逐帧及音频区间检查，以及完成任务的独立listener停启恢复已通过。正式Chrome提交的双真实剧也已分别完成12.0秒和9.7秒成片，独立授权下载、完整解码、SHA / 大小 / COS身份与成功临时目录清理通过。两部成片均在浏览器完整播放到ended且无media.error；浏览器下载落盘回执与本地文件上传未完成。运行中断恢复及真实混合生产队列等剩余项仍须明确保留。
 
 ## 测试范围
 
@@ -14,11 +14,11 @@
 
 | 类型 | 数量 | 通过 | 失败 | 跳过 / 未完成 |
 | --- | --- | --- | --- | --- |
-| 本地功能 Python（含BUG-006新增9项回归） | 117 | 116 | 0 | 1：可选 COS SDK |
+| 本地功能 Python（含BUG-007修复） | 126 | 125 | 0 | 1：可选 COS SDK；独立review通过；真实隔离恢复通过，生产部署与独立回读通过 |
 | JS 纯模型 / MD5 | 9 | 9 | 0 | 0 |
 | JS 浏览器事件 / API 契约（模拟网络） | 14 | 14 | 0 | 0 |
 | JS 语法检查 | 1 | 1 | 0 | 0 |
-| 旧模块回归（GPU实施者证据） | 215 | 209 | 0 | 6 |
+| 旧模块最终回归（BUG-007后复跑） | 215 | 209 | 0 | 6 |
 | 本地浏览器逐剧隔离 / 删除 / 撤销 | 1 组 | 1 组 | 0 | 0 |
 | 真实 COS 原会话上传 / 续传 / 完成 / 私有性 | 1 组 | 1 组 | 0 | 0 |
 | 真实 COS 1秒签名过期与续签 | 1 组 | 1 组 | 0 | 0 |
@@ -29,12 +29,15 @@
 | GPU重复缓存 / 私有COS回执 / 成功临时目录清理 | 1 组 | 1 组 | 0 | 0 |
 | GPU切换后的独立health / 环境 / 历史账本回读 | 1 组 | 1 组 | 0 | helper首次检查异常，独立回读完成 |
 | 完成态任务独立listener停启 / GET / 重复POST缓存 | 1 组 | 1 组 | 0 | 未执行运行中kill注入 |
-| 正式Chrome双真实剧成片与最终播放 / 下载 | 进行中 | — | — | 已提交，尚无最终验收结论 |
+| 正式Chrome提交双真实剧出片 / 授权下载校验 | 2 | 2 | 0 | 浏览器播放与下载回执单独记录 |
+| 正式Chrome成片完整播放 | 2 | 2：A ended12秒、B ended9.7秒 | 0 | 0；两片media.error均为空 |
+| 浏览器下载落盘回执 | 待验收 | — | — | 下载事件超时；Chrome下载页被浏览器安全策略禁止 |
 | 浏览器文件选择 / 直传 / 断线续传 | 待验收 | — | — | 扩展未开启file URL访问，自动文件选择受阻 |
 | 运行中断恢复 / 混合生产队列 | 待验收 | — | — | 未覆盖 |
-| 同项目同版本跨刷新重提（BUG-006） | 新增9项，已计入Python总数 | 9 | 0 | 本地修复通过，部署及线上回读待主实施 |
+| 同项目同版本跨刷新重提（BUG-006） | 新增9项，已计入Python总数；另1组线上 | 全部通过 | 0 | 原batch / task / output及generation不变，仅新增操作映射 |
+| 失败临时目录清理后恢复（BUG-007） | 1组真实FFmpeg / COS隔离验收 | 1组 | 0 | 清理now模拟+86401秒；生产部署与独立回读通过 |
 
-测试组数量不能与单元用例直接相加。Python117为BUG-006修复后已执行的完整回归，包含新增9项幂等用例及既有4项部署启动检查回归；旧模块215及真实COS / GPU统计来自主实施和GPU实施者的执行证据。跳过不计为通过，独立后端子集41项、service子集29项及其他重叠复测不另行累计。主实施另确认diff检查与Python3.9 AST检查通过；BUG-006部署提交及线上回读待补，主机及持久证据位置以 `deploy.md` 和验收记录为准。
+测试组数量不能与单元用例直接相加。Python126由主实施、后端负责人和GPU实施者分别独立执行，均为125通过、1项可选SDK跳过；runtime子集18项全部通过，已计入126。BUG-007新增9项恢复测试中的最后一项验证慢COS HEAD不持有共享runtime锁、不阻塞旧任务GET。117是BUG-006已部署历史基线，不另行叠加。GPU实施者最终复跑旧模块215项，209通过、6跳过；跳过不计为通过。独立后端子集41项、service子集29项及服务器29项复测均不另加。BUG-007独立review通过无阻断，CPU核心 `f29f45ff51946a2e5709137d91e7539f6e36041f` 和GPU核心 `1747c5cd560903032b90ce18d961bc1fe3caddb6` 已推送GitHub；GPU候选真实隔离恢复通过，生产窄更新和最终独立回读通过。主机及持久证据以 `deploy.md` 和验收记录为准。
 
 ## 缺陷情况
 
@@ -42,7 +45,7 @@
 
 部署helper在systemctl启动返回后立即检查HTTP，遇到监听尚未就绪时进入异常路径，见 `bugs/BUG-004.md`。本地已补有限启动轮询和4项回归；线上当前版本由主实施独立回读确认，本次helper修复未再次执行线上部署。
 
-首次CPU安装缺少局部sys导入与Nginx专用路由，已按 `c6d394ab` 修复并真实回读未登录JSON401，见 `bugs/BUG-005.md`。随后发现同版本跨刷新重提重复批次的P1缺口，已按项目版本复用既有批次并保留历史操作映射，新增9项回归通过，见 `bugs/BUG-006.md`；本地通过不等于线上已安装该修复。
+首次CPU安装缺少局部sys导入与Nginx专用路由，已按 `c6d394ab` 修复并真实回读未登录JSON401，见 `bugs/BUG-005.md`。同版本跨刷新重提重复批次的BUG-006已修复、窄范围部署并通过正式Chrome重提及服务端回读。BUG-007修复前缺少清理后恢复路径；当前候选仅在无上传意图、固定COS输出认证HEAD明确404、expiry绑定配方及原generation时，以CAS沿同job建立新generation和scratch epoch。上传未知、对象存在或核实失败继续阻挡重建，真实隔离恢复已通过，生产部署与独立回读通过。
 
 ## 验证证据
 
@@ -105,20 +108,47 @@ python -B -m unittest scripts.test_drama_synthesis_gpu_runtime scripts.test_dram
 
 本项是“完成→独立listener停启→GET→重复POST”的实际恢复，既不是运行中kill下载 / 渲染进程，也不是重启正式GPU服务。证据为本地 `output/video-editing-validation/isolated-recovery-results.json` 及GPU `/data/drama-synthesis-gpu/validation/recovery/completed_restart_20261022_a/` 的before / after / replay / acceptance文件；具体操作和边界见 `final-backend-review.md`。
 
-### 正式Chrome业务验收进展
+### BUG-007清理后原ID恢复的真实隔离验收
 
-已完成真实两集ready后添加、6/2秒裁剪、2/4秒切割删除中间内容、整集删除后撤销、重排及选择系统验收共享素材。随后正式双剧项目已提交，版本16的草稿、冻结项目版本和逐任务配方一致；公共设置没有覆盖裁剪点。两剧配方预计12.0秒与9.7秒，这是冻结配方计算值，不是成片成功证据。当前双真实剧出片及最终预览 / 下载仍进行中，后续结果由主实施另行汇总。
+候选 `1747c5cd560903032b90ce18d961bc1fe3caddb6` 的任务 `ve_0acb6a25ed8c5137aee7286f6df8a7a4` 在generation1强制disk_budget失败，该阶段0媒体执行、0上传。确认停止后调用cleanup时模拟now+86401秒，再以原ID和原generation CAS恢复为generation2，真实执行FFmpeg并上传私有COS；原expiry未改，scratch epoch绑定generation2及expiry摘要。**模拟时间用于触发24小时清理分支，没有实际等待24小时。**
+
+最终1.7秒H.264 / AAC、720×1280、30fps成片为778617字节。调用计数download1 / ffmpeg3 / create multipart1 / upload part1 / complete1 / abort0；重复resume、submit和独立runtime重启后均命中cached，没有新增调用。匿名HEAD403、scratch清理通过，旧liveworker及全部live账本不变，发布进程不变；隔离进程停止，GPU计算空闲，safe_to_restore_claim=true。该隔离快照内CPU协调器仍暂停，随后生产更新完成后的恢复状态见下一节。
+
+证据为 `output/video-editing-validation/bug007-preupload_expiry_20261022_a-results.json` 及GPU `/data/drama-synthesis-gpu/validation/bug007/preupload_expiry_20261022_a`。该项证明候选在模拟到期后的真实恢复，不是运行中kill恢复；生产部署使用下一节的独立回读证据。
+
+### BUG-007生产更新最终回读
+
+GPU已部署 `1747c5cd560903032b90ce18d961bc1fe3caddb6`，备份 `/data/drama-synthesis-gpu/deploy-backups/compatible-update-20261022T061934Z-1747c5cd5609`。全部29份live账本hash不变，busy=0、制作并发1、队列容量沿代码默认8，GPU PID1560374与隧道active。原两条正式任务保持completed、generation=1及原完成时间，scratch不存在；此29份是本次更新基线，区别于早期验收核对的23份旧账本。
+
+CPU API PID3770172在本次GPU更新中未重启；旧claimer PID3797297和剪辑worker PID3797300已恢复active，发布进程2937249 / 2576490不变，CPU与GPU接单均开启。BUG-007生产部署及独立回读通过，本缺陷关闭。
+
+本地证据为 `output/video-editing-validation/final-production-readback.json` 和 `compatible-gpu-update.json`；CPU证据 `/mnt/data-disk/video-editing/validation/final-production-readback.json`，GPU证据为上述备份目录的 `final-readback.json`。并发配置与账本保持不等于已执行真实旧新混合队列压测。
+
+### 正式Chrome双剧成片与线上幂等验收
+
+已完成真实剧集ready后添加、6/2秒裁剪、2/4秒切割删除中间内容、整集删除后撤销、重排及选择系统验收共享素材。正式双剧项目版本16的草稿、冻结项目版本和逐任务配方一致，公共设置没有覆盖裁剪点。两条任务现均completed、generation=1，且按同一制作槽串行执行；对应成片ready，batch / version / output稳定ID与冻结配方不变。
+
+| 正式成片 | 帧数 / 时长 | 大小 | 媒体与对象核验 |
+| --- | --- | --- | --- |
+| A：1wwAOKT9Tz | 360帧 / 12.0秒 | 6,405,219字节 | H.264 / AAC、720×1280、30fps、SAR1:1、48kHz双声道；音视频时长差0 |
+| B：uWmMdxk9BE | 291帧 / 9.7秒 | 5,395,571字节 | 同规格，音视频时长差0 |
+
+两片均通过授权私有URL下载、SHA256 / 字节数 / 认证HEAD一致性、完整解码和匿名HEAD403检查；成功scratch已删除，旧23份GPU账本hash不变。证据为 `output/video-editing-validation/formal-output-acceptance-summary.json`、`production-finished-media-validation.json`、`formal-output-receipts.json`。该数据确认格式、时长与文件完整性，不等同于逐处人工人声口型判断。
+
+BUG-006按 `9fc968a98924e658895240a8763162a2b97c207f` 仅部署service / store两个文件并重启API，服务器service29项通过，worker与发布进程PID不变。正式Chrome刷新、重新打开项目v16再点击制作后，服务端仍为1个原batch、2个原task和2个原output；任务completed及generation=1不变，仅新增1个operation映射。CPU证据为 `/mnt/data-disk/video-editing/validation/browser-reload-idempotence.json`。
+
+浏览器素材可播放；A和B成片均完整播放至ended，currentTime分别等于duration12秒和9.7秒，paused=true、readyState=4、media.error为空。A曾缓冲较慢，最终已完成播放。浏览器下载事件等待超时，Chrome下载页受浏览器安全策略禁止，不能声称UI落盘回执通过；上述独立授权下载校验不替代该浏览器回执。最终播放与下载观察保存在 `output/video-editing-validation/browser-finished-preview.json`。用户已登录，但尚找不到扩展file URL访问开关，浏览器自动本地文件上传仍未验收。
 
 ## 遗留风险
 
-- COS传输、匿名拒绝与CORS预检已有实测；Chrome自动文件选择因扩展file URL访问未开启而受阻，浏览器直传 / 中断续传仍待验收。标准服务层直传不替代浏览器操作，实际大文件速率不在本次统计中。
-- `?demo=1` 不含真实媒体；浏览器预览交叉淡化用于定位。GPU合成测试素材的切点、格式、画音淡化和音视频时长已核验，正式业务媒体的预览、播放 / 下载和人声口型同步仍需登录页面验收。
+- COS传输、匿名拒绝与CORS预检已有实测；用户已登录但找不到扩展file URL访问开关，Chrome自动文件选择受阻，浏览器直传 / 中断续传仍待验收。标准服务层直传不替代浏览器操作，实际大文件速率不在本次统计中。
+- `?demo=1` 不含真实媒体；浏览器预览交叉淡化用于定位。正式双剧完整解码、授权下载校验及浏览器完整播放均通过；浏览器下载落盘回执待补，不将音视频时长相同等同于逐处人声口型同步判断。
 - 完成态隔离停启和缓存回读已通过；下载 / 渲染中断后的同ID恢复、正式GPU服务中断与旧新任务同时排队的调度压测未由该证据覆盖。
-- 同项目同版本跨新operation_id重复批次已完成本地修复及117项回归；确切提交部署和线上同版本重提回读尚待主实施完成，不提前标记生产修复完成。
-- 普通有权限 / 无模块权限用户与管理员的多人实会话矩阵、失败临时媒体保留24小时后的清理仍需独立证据。
+- BUG-007候选已实现有条件恢复：无上传意图、固定COS输出认证HEAD404、绑定expiry及新generation epoch，并通过原generation CAS后才可沿原ID恢复；上传结果未知仍须先核实。独立review已通过，真实隔离恢复、生产部署和独立回读均通过，本缺陷已关闭。
+- 普通有权限 / 无模块权限用户与管理员的多人实会话矩阵、8GiB文件上限实传仍需独立证据。失败清理后的真实FFmpeg / COS恢复已用模拟now+86401秒验证，未实际等待自然24小时。
 - 项目和任务列表当前各返回最新100条，无翻页参数；素材库支持分页。
 - 真实多人同时编辑发生冲突时必须保留本地草稿，不能以测试里的同内容回读逻辑覆盖他人不同内容。
 
 ## 发布建议
 
-BUG-006本地修复、独立审查和117项回归已通过，下一步按确切提交窄范围部署并核对线上同版本重提结果，再汇总正式Chrome双真实剧成片验收。合成素材GPU出片、COS私有回执、缓存、成功临时目录清理及完成态隔离恢复已通过；浏览器文件选择 / 直传 / 中断续传、业务成片播放下载、多人实会话权限、运行中断恢复和旧新混合队列保留为明确限制。仅因文档补充不重做已通过检查；后续实现变化须执行相关回归。
+正式双剧独立出片、浏览器完整播放、私有COS下载与文件核验、成功临时目录清理、完成态隔离恢复及BUG-006线上刷新重提已通过。BUG-007候选本地126项回归通过，独立review及旧模块最终回归已通过，真实隔离恢复已通过，生产部署与独立回读已完成；浏览器文件选择 / 直传 / 中断续传、浏览器下载落盘回执、多人实会话权限、运行中断恢复、旧新混合队列与8GiB实传保留为明确限制。仅因文档补充不重做已通过检查，后续实现变化须执行相关回归。

@@ -4,7 +4,7 @@
 
 2026-10-22，独立工作树 `D:\codex\worktrees\video-editing-v1-20261022`。初次终审核对权限隔离、批次 / 版本 / 成片账本、上传未知结果恢复、CPU 存储边界；该阶段只新增本文，不修改功能代码、不执行服务器变更或故障注入。初次记录时工作树 HEAD 为 `c39cce6e54a6d658e1dacae9e7a503d7bb8f4089`，恢复验收辅助脚本与测试尚有待提交文件；测试针对记录时工作树。后续获准完成的真实隔离重启和上线只读核对见文末补充，不能把两个阶段混为一次未变更检查。
 
-本轮60项后端与辅助工具子集全部通过，无失败、无跳过；其中真实COS SDK签名构造测试使用虚拟凭证和固定时钟，不调用COS。后续BUG-006修复后，后端负责人和主实施分别执行完整Python117项（116通过、1项可选COS SDK跳过）；另有JS23项通过、旧模块215项（209通过、6跳过），子集不另行叠加。同版本跨刷新重提重复批次问题已完成本地修复、新增9项回归及独立只读审查，部署及线上回读待主实施。权限测试基于可信会话桩，不能替代多人实会话；GPU合成素材成片、隔离完成态恢复及正式UI进展见后文，不计入本轮60项。
+本轮60项后端与辅助工具子集全部通过，无失败、无跳过；其中真实COS SDK签名构造测试使用虚拟凭证和固定时钟，不调用COS。后续BUG-006完成117项、窄范围部署、服务器service29项和正式Chrome刷新重提回读。BUG-007候选126项由主实施、后端负责人、GPU实施者分别运行，均125通过、1项可选SDK跳过；runtime18项通过，含慢COS HEAD不阻塞旧任务GET的并发用例。独立review通过无阻断；CPU核心f29f45ff、GPU核心1747c5cd已推送，GPU候选真实隔离恢复通过，生产部署与独立回读通过。JS23项通过，GPU实施者最终旧模块215项为209通过6跳过，子集不叠加。权限测试基于可信会话桩，不能替代多人实会话；合成与正式双剧成片、隔离完成态恢复及浏览器边界见后文。
 
 ## 权限与来源边界
 
@@ -98,13 +98,13 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 
 | 范围 | 当前进展与限制 |
 | --- | --- |
-| CFR修复后的真实GPU出片 | 合成素材两条独立时间线已通过真实COS / GPU、完整解码、逐帧内容和音频区间核验；正式双真实剧出片仍进行中 |
-| 正式登录页面全链路 | 真实剧集探测、裁剪 / 切割 / 删除 / 撤销 / 重排和双剧提交已执行；Chrome自动文件选择受扩展file URL权限阻挡，浏览器直传 / 中断续传及最终业务成片播放下载未全部完成 |
-| COS与临时媒体 | 合成成片HEAD / SHA / 私有性及成功临时目录清理通过；失败媒体保留24小时后的清理没有在本补充中完成实测 |
+| CFR修复后的真实GPU出片 | 合成素材逐帧 / 音频区间核验通过；正式双真实剧已完成12.0秒 / 360帧和9.7秒 / 291帧，授权下载、完整解码、SHA / 大小与COS身份通过 |
+| 正式登录页面全链路 | 真实剧集编辑、提交和双剧出片已执行；素材可播，A / B均完整播放至ended 12秒 / 9.7秒且无media.error；本地文件选择受file URL权限阻挡，浏览器下载落盘无确认回执 |
+| COS与临时媒体 | 合成及正式成片HEAD / SHA / 私有性与成功scratch清理通过；BUG-007候选仅无上传意图、固定输出认证HEAD全404、绑定expiry与新generation epoch时允许原ID恢复，上传未知仍阻挡重建；本地回归通过，真实隔离恢复通过，生产部署与独立回读通过 |
 | 已完成任务重启恢复 | 独立listener在任务完成后停启、GET和重复POST缓存实测通过，详见下一节；不再是“辅助脚本仅完成单测” |
 | 下载 / 渲染中断恢复 | 未执行运行中kill注入，也未用真实生产任务补故障窗口；当前完成态恢复不能替代此项 |
 | 混合队列与多人权限 | 单槽配置、旧23份账本保持有真实回读；旧新任务同时待执行调度压测及普通有权限 / 无模块权限 / 管理员实会话矩阵未覆盖 |
-| 同版本跨刷新重复提交 | BUG-006已完成本地修复，新增9项回归及独立只读审查通过；完整Python117项为116通过、1可选SDK跳过；确切提交部署及线上回读待主实施 |
+| 同版本跨刷新重复提交 | BUG-006已按9fc968a部署，服务器29项通过；正式Chrome刷新重开v16重提后原batch1 / task2 / output2、completed与gen1不变，仅新增操作映射1条 |
 
 外部制作接口与推送盈量自定义素材库依然是明确预留范围，本期不执行请求，也不声称已对接。
 
@@ -140,7 +140,7 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 
 证据：本地 `output/video-editing-validation/final-readonly-audit.json` 与 `final-probe-readback.json`；GPU 旧账本对照 `/data/drama-synthesis-gpu/deploy-backups/video-editing-20261022T050848Z/ledger-hashes.json`。本次没有读取或输出密钥、Cookie、签名 URL，也没有写服务器验收文件。
 
-剩余边界：正式Chrome自动文件选择因扩展未开启file URL访问而受阻，尚不能声称浏览器直传完整验收通过；系统验收标准服务层直传成功见下一节，不能替代浏览器操作。主实施者继续完成双真实剧成片UI验收。多人实会话矩阵、下载或渲染中断的同ID恢复、旧新任务同时待执行调度压测仍未由本补充覆盖。共享槽位配置、完成态隔离停启幂等与旧账本保持有真实证据，但不等同于上述故障或并发场景全部完成。BUG-006同版本重复批次已完成本地修复及117项回归，部署与线上回读待主实施。
+该13:21快照不包含后续双剧render，后续两片完成与BUG-006线上回读见文末。当前保留的边界为：用户已登录但找不到扩展file URL访问开关，浏览器自动上传未验收；系统验收标准服务层直传不替代浏览器操作；浏览器下载事件超时且下载页受安全策略禁止，无UI落盘回执。多人实会话矩阵、下载或渲染中断的同ID恢复、旧新任务同时待执行调度压测及8GiB实传仍未覆盖。共享槽位配置、完成态隔离停启幂等与旧账本保持有真实证据，不等同于上述场景全部通过；BUG-007候选有条件恢复已实现，本地回归通过，真实隔离恢复通过，生产部署与独立回读通过。
 
 ## 标准服务层合成素材验收补充
 
@@ -165,4 +165,37 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 | 1wwAOKT9Tz | 素材 0–6；第 1 集 0–2；素材 0–1.2；第 2 集 0–2；第 1 集 4–6 | 前四段结束 fade；最后 cut；第三段 cover + mute，其他 contain + 原声 | 12.0 秒 |
 | uWmMdxk9BE | 素材 0–6；第 1 集 0–4 | fade / cut；contain + 原声 | 9.7 秒 |
 
-批次 `vb_df3389c779154302a94f2101511cf456`，稳定版本 `vv_386cb31c43ed220ab3b191abdcd81e9f`。韩剧任务 `ve_1cd8849bcc86492b8ebadbcdb7a440f2`、西语任务 `ve_84fd6aa852844b9a930a5d17176fc8c3`，对应已预分配成片 ID `vo_1cd8849bcc86492b8ebadbcdb7a440f2`、`vo_84fd6aa852844b9a930a5d17176fc8c3`。该首次快照为韩剧 running、西语 queued、两成片 pending；不是成功成片证据，完成与 COS 回执应另行保存。
+批次 `vb_df3389c779154302a94f2101511cf456`，稳定版本 `vv_386cb31c43ed220ab3b191abdcd81e9f`。韩剧任务 `ve_1cd8849bcc86492b8ebadbcdb7a440f2`、西语任务 `ve_84fd6aa852844b9a930a5d17176fc8c3`，对应已预分配成片 ID `vo_1cd8849bcc86492b8ebadbcdb7a440f2`、`vo_84fd6aa852844b9a930a5d17176fc8c3`。该首次快照为韩剧 running、西语 queued、两成片 pending；保留为提交时证据，后续完成结果见下一节。
+
+## 正式双剧完成与BUG-006线上回读
+
+已读取本地 `output/video-editing-validation/formal-output-acceptance-summary.json`、`production-finished-media-validation.json` 与 `formal-output-receipts.json`，三份记录相互一致。两任务现均completed且generation=1，原批次 / 版本 / 成片ID和冻结裁剪不变；韩剧于北京时间13:44:00完成，西语13:44:06开始、13:44:15完成，同一槽串行执行。
+
+| 成片 | 帧数 / 音视频时长 | 字节数 | SHA256 |
+| --- | --- | --- | --- |
+| A：1wwAOKT9Tz | 360帧；视频 / 音频均12.0秒 | 6405219 | `6a162d2db1dfd461366cc6caee2e6a0e074cda33811e7f64227399dc41e6dd87` |
+| B：uWmMdxk9BE | 291帧；视频 / 音频均9.7秒 | 5395571 | `e3629a91f1d13444bfebf5a2f1d017cd5a23bc6e317d0dfca039d25523828b54` |
+
+均为H.264 / AAC、720×1280、30fps、yuv420p、SAR1:1、48kHz双声道，音视频时长差0。独立授权私有URL下载的SHA / 大小与认证HEAD和GPU回执一致，完整解码通过，匿名HEAD403，成功scratch删除，旧23份账本hash不变。媒体证据只确认技术时长与文件完整性，不替代逐处人工口型同步判断。
+
+主实施按 `9fc968a98924e658895240a8763162a2b97c207f` 仅部署CPU service / store两文件并重启API，服务器service29项通过，worker与发布进程PID不变。正式Chrome刷新重新打开项目v16再点击制作后，服务端batch1 / task2 / output2仍为上述原ID，completed及generation=1不变，只新增1条operation alias。CPU持久证据为 `/mnt/data-disk/video-editing/validation/browser-reload-idempotence.json`；BUG-006生产修复与该真实场景回读通过。
+
+浏览器素材可播，A / B均已完整播放至ended，currentTime等于duration12秒 / 9.7秒，paused=true、readyState=4、media.error为空；A曾缓冲较慢，最终已完成播放。最终证据为 `output/video-editing-validation/browser-finished-preview.json`。浏览器下载事件超时，Chrome下载页被浏览器安全策略禁止，未取得UI落盘回执；独立授权私有URL下载通过不替代此回执。用户已登录但找不到扩展file URL开关，浏览器自动上传仍未验收。BUG-007真实隔离恢复和生产部署回读已通过；运行中kill恢复、真实旧新混合队列、多人实会话和8GiB实传仍待独立证据。
+
+## BUG-007候选的真实隔离恢复
+
+已读取本地 `output/video-editing-validation/bug007-preupload_expiry_20261022_a-results.json`，ok=true；GPU原始目录为 `/data/drama-synthesis-gpu/validation/bug007/preupload_expiry_20261022_a`。候选release `1747c5cd560903032b90ce18d961bc1fe3caddb6`，隔离job `ve_0acb6a25ed8c5137aee7286f6df8a7a4`。
+
+generation1强制 `video_editing_disk_budget` 失败，未执行媒体或上传。确认停止后将cleanup的now模拟推进86401秒，经固定输出不存在与无上传证据核实，以原ID CAS恢复generation2。**这是模拟到期分支，没有实际等待24小时。** 原expiry保持，epoch绑定原expiry SHA且local_checkpoint_dir为 `local-attempts/g2`。
+
+真实执行FFmpeg并完成私有COS成片：1.7秒、720×1280、30fps、H.264 / AAC，778617字节，SHA256 `92c147cf96a7f05a312ddb7e742b6f1fb47a6820b5fcd2eba6d3a3280b7ad995`。最终调用数download1、ffmpeg3、create multipart1、upload part1、complete1、abort0；重复resume / submit和独立runtime重启后cached，调用不增加。匿名HEAD403和scratch清理通过。
+
+liveworker、全部live账本及发布进程保持不变，隔离进程已停止，GPU计算空闲，safe_to_restore_claim=true。该隔离快照内CPU协调器仍暂停，之后生产窄更新与协调器恢复已完成，见下一节。该隔离验收未kill正在下载或渲染的任务，未覆盖真实旧新混合队列、多人实会话或8GiB实传。
+
+## 最终生产更新与恢复确认
+
+已读取 `output/video-editing-validation/final-production-readback.json` 和 `compatible-gpu-update.json`。GPU已由81f75eca更新到 `1747c5cd560903032b90ce18d961bc1fe3caddb6`；备份为 `/data/drama-synthesis-gpu/deploy-backups/compatible-update-20261022T061934Z-1747c5cd5609`，其中 `final-readback.json` 保存GPU独立回读。CPU持久证据为 `/mnt/data-disk/video-editing/validation/final-production-readback.json`。
+
+全部29份live账本hash保持不变，busy=0、render_concurrency=1；队列容量沿代码默认8，未改为额外制作槽。GPU PID1560374与隧道active，原正式任务 `ve_1cd8849bcc86492b8ebadbcdb7a440f2`、`ve_84fd6aa852844b9a930a5d17176fc8c3` 均completed、generation=1、原completed_at不变且scratch不存在。29份为本次更新时的全量账本，前期23份旧账本保持的证据继续作为历史阶段记录。
+
+CPU API PID3770172在本次更新中未重启；旧claimer PID3797297和剪辑worker PID3797300恢复active，发布服务PID2937249 / 2576490不变。CPU与GPU接单入口均开启，BUG-007生产部署及独立回读通过，缺陷关闭。仍未实际等待自然24小时、执行运行中kill、真实混合队列压力测试、多人权限实会话或8GiB实传；浏览器自动上传和下载落盘回执也仍未验收。
