@@ -23,9 +23,14 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("content_id='123'",sql);self.assertIn('LIMIT 500',sql)
         self.assertNotIn('GROUP BY',sql);self.assertNotIn('ORDER BY',sql)
     def test_name_search_uses_bounded_index_prefix(self):
+        self.query.side_effect=[[],[['123','Example',20,'cover']]]
         self.catalog.dramas('app','Example');sql=self.query.call_args.args[0]
         self.assertIn('FORCE INDEX (`name`)',sql);self.assertIn("name LIKE 'Example%'",sql)
         self.assertIn('MAX_EXECUTION_TIME(5000)',sql)
+    def test_actual_alphanumeric_content_id_is_exact_without_name_scan(self):
+        self.catalog.dramas('app','1wwAOKT9Tz');sql=self.query.call_args.args[0]
+        self.assertIn("content_id='1wwAOKT9Tz'",sql);self.assertNotIn('LIKE',sql)
+        self.assertEqual(self.query.call_count,1)
     def test_mysql_timeout_closes_process_group_and_keeps_gate(self):
         self.app.MYSQL_BASE_CMD=['/usr/bin/mysql','-P','63350','-e'];self.app.MYSQL_PASSWORD='dummy'
         process=Mock(pid=123);process.communicate.side_effect=[subprocess.TimeoutExpired('mysql',15),('','')]

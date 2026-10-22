@@ -70,17 +70,23 @@ class Catalog:
         app_id=str(app_id).strip(); query=str(query).strip()
         require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}',app_id),'product_required','请选择产品')
         require(0<len(query)<=100,'query_required','请输入完整剧目编号或至少两个字的剧名前缀')
-        exact=bool(re.fullmatch(r'[0-9]{1,32}',query))
-        require(exact or len(query)>=2,'query_required','剧名前缀至少输入两个字')
+        numeric=bool(re.fullmatch(r'[0-9]{1,32}',query))
+        identifier_query=bool(re.fullmatch(r'[A-Za-z0-9_-]{1,100}',query))
+        require(numeric or len(query)>=2,'query_required','剧名前缀至少输入两个字')
         self.require_product(app_id)
         db=str(self.app.DB_NAME); table=str(self.app.SOURCE_TABLE)
         require(re.fullmatch(r'[A-Za-z0-9_]+',db) and re.fullmatch(r'[A-Za-z0-9_]+',table),'catalog_configuration_invalid','剧集目录配置无效',503)
         quote=lambda value: "'"+str(value).replace('\\','\\\\').replace("'","''")+"'"
         where='app_id='+quote(app_id)+" AND type=2 AND sub_number>0 AND sub_url<>''"
-        where+=' AND content_id='+quote(query) if exact else ' AND name LIKE '+quote(query.replace('%','\\%').replace('_','\\_')+'%')
-        index='content_id' if exact else 'name'
-        sql='SELECT /*+ MAX_EXECUTION_TIME(5000) */ CAST(content_id AS CHAR),name,all_episodes_count,cover FROM `'+db+'`.`'+table+'` FORCE INDEX (`'+index+'`) WHERE '+where+' LIMIT 500'
-        rows=self._query(sql);items=[];seen=set()
+        def search(index,condition):
+            sql='SELECT /*+ MAX_EXECUTION_TIME(5000) */ CAST(content_id AS CHAR),name,all_episodes_count,cover FROM `'+db+'`.`'+table+'` FORCE INDEX (`'+index+'`) WHERE '+where+condition+' LIMIT 500'
+            return self._query(sql)
+        # Existing drama IDs are commonly ten mixed-case alphanumeric chars.
+        # Try the identifier index first, before interpreting a token as a title.
+        rows=search('content_id',' AND content_id='+quote(query)) if identifier_query else []
+        if not rows and not numeric:
+            rows=search('name',' AND name LIKE '+quote(query.replace('%','\\%').replace('_','\\_')+'%'))
+        items=[];seen=set()
         for row in rows:
             if str(row[0]) in seen:continue
             seen.add(str(row[0]));items.append({'app_id':app_id,'content_id':str(row[0]),'title':str(row[1]),'episode_count':int(row[2]),'cover_url':str(row[3])})
