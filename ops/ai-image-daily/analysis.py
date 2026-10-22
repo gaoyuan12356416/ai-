@@ -67,7 +67,11 @@ def first_ingestions(mapped):
     return first
 
 
-def build_report(mapped, unresolved, facts, report_date, generated_at, optimizer_names=None, snapshot_kind='scheduled'):
+def build_report(mapped, unresolved, facts, report_date, generated_at, optimizer_names=None, snapshot_kind='scheduled', scope=None):
+    if scope is not None:
+        from analysis_v3 import build_report_v3
+        return build_report_v3(mapped, unresolved, facts, report_date, generated_at,
+                               optimizer_names or {}, snapshot_kind, scope)
     optimizer_names = optimizer_names or {}
     checks = validate_pool(facts, mapped)
     day = dt.date.fromisoformat(report_date)

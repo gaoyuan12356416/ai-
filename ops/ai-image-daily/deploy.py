@@ -13,7 +13,7 @@ import subprocess
 
 UNITS = ("ai-image-daily.service", "ai-image-daily.timer")
 ROOT = Path("/mnt/data-disk/deploy/ai-image-daily")
-STATE = Path("/mnt/data-disk/ai-image-daily")
+STATE = Path("/mnt/data-disk/ai-image-daily-v3")
 CURRENT = Path("/opt/ai-image-daily/current")
 UNITS_DIR = Path("/etc/systemd/system")
 MODULE = "ops/ai-image-daily"

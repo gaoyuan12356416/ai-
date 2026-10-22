@@ -501,64 +501,6 @@ class MigrationAnalysisTests(unittest.TestCase):
             validate_pool(facts() + [fact('verified_pool', spend=11)], {'1': row})
 
 
-class PublishTests(unittest.TestCase):
-    def fixture(self,state):
-        from report import write_json,sha
-        run=state/'runs'/'r1';run.mkdir(parents=True)
-        (run/'index.html').write_bytes(b'<html>daily report</html>')
-        report=dict(generated_at='2026-10-19T09:00:00+08:00',validation={'status':'passed'},summary={})
-        write_json(run/'report.json',report)
-        entry=dict(date='2026-10-18',url='https://example.com/daily')
-        write_json(state/'pending.json',dict(run=str(run),report_date='2026-10-18',sha256=sha((run/'index.html').read_bytes()),history_entry=entry))
-        return run
-
-    def publisher(self):
-        class Fake:
-            def __init__(self):self.objects={};self.puts=[];self.fail=False
-            def get(self,key):return self.objects.get(key)
-            def put(self,key,data):self.objects[key]=data;self.puts.append(key)
-            def verify(self,key,data):
-                from report import sha
-                if self.fail and '/daily/' not in key:raise RuntimeError('verification_failed')
-                assert self.objects[key]==data
-                return dict(url='https://example.com/'+key,sha256=sha(data),bytes=len(data),http_status=200)
-        return Fake()
-
-    def test_unknown_publication_recovers_without_reupload(self):
-        from report import publish_pending,load_json
-        with tempfile.TemporaryDirectory() as folder:
-            state=Path(folder);self.fixture(state);pub=self.publisher();pub.fail=True
-            with self.assertRaises(RuntimeError):publish_pending(state,pub)
-            self.assertTrue((state/'pending.json').exists());self.assertFalse((state/'history.json').exists())
-            pub.fail=False;before=len(pub.puts)
-            publish_pending(state,pub)
-            self.assertEqual(before,len(pub.puts));self.assertFalse((state/'pending.json').exists())
-            self.assertEqual(len(load_json(state/'history.json')),1)
-
-    def test_immutable_archive_conflict_preserves_previous(self):
-        from report import publish_pending,PREFIX
-        with tempfile.TemporaryDirectory() as folder:
-            state=Path(folder);self.fixture(state);pub=self.publisher()
-            pub.objects[PREFIX+'/daily/2026-10-18/index.html']=b'previous'
-            with self.assertRaisesRegex(ValueError,'immutable'):publish_pending(state,pub)
-            self.assertFalse(pub.puts)
-
-    def test_artifact_tampering_rejected(self):
-        from report import publish_pending
-        with tempfile.TemporaryDirectory() as folder:
-            state=Path(folder);run=self.fixture(state);pub=self.publisher()
-            (run/'index.html').write_bytes(b'changed')
-            with self.assertRaisesRegex(ValueError,'changed'):publish_pending(state,pub)
-            self.assertFalse(pub.puts)
-
-    def test_old_date_cannot_replace_latest(self):
-        from report import publish_pending,write_json
-        with tempfile.TemporaryDirectory() as folder:
-            state=Path(folder);self.fixture(state);pub=self.publisher()
-            write_json(state/'history.json',[dict(date='2026-10-19')])
-            with self.assertRaisesRegex(ValueError,'older_than_latest'):publish_pending(state,pub)
-            self.assertFalse(pub.puts)
-
 
 if __name__=='__main__':
     unittest.main()

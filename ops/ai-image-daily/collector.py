@@ -16,6 +16,41 @@ METRIC_SQL = {'spend': 'spend', 'af_revenue_d0': 'af_revenue0', 'impressions': '
 CAT_FIELDS = ('id', 'product', 'type', 'data_source', 'data_source_id', 'content_sign', 'name', 'url',
               'category', 'language', 'country', 'created_at', 'is_delete', 'user_id', 'initiator', 'designer', 'remark')
 UPLOAD_LEDGER = '/mnt/data-disk/ai-cover-material-source/upload.sqlite3'
+ROOT_PRODUCTS = {'1479': 'DramaWave', '2373': 'MoboShort', '3360': 'MoboReels'}
+
+
+def resolve_scope(rows):
+    """Freeze the three root apps and explicitly named W2A children only."""
+    by_id, by_name, excluded = {}, {}, []
+    products = {key: dict(id=key, name=name, apps=[]) for key, name in ROOT_PRODUCTS.items()}
+    roots = set()
+    for raw in rows:
+        app_id, name = str(raw['id']), str(raw.get('name') or '').strip()
+        parent = str(raw.get('root', raw.get('ads_app_id', '0')))
+        root = app_id if app_id in ROOT_PRODUCTS else parent
+        is_root = app_id in ROOT_PRODUCTS
+        w2a = bool(re.match(r'^(?:\[w2a\]|W2aPage\[)', name, re.I))
+        app = dict(id=app_id, name=name, root=root, kind='app' if is_root else 'w2a')
+        if root not in ROOT_PRODUCTS or not (is_root or w2a):
+            excluded.append(dict(raw, reason='not_selected_root_or_w2a'))
+            continue
+        if not name or (app_id in by_id and by_id[app_id] != app):
+            raise ValueError('ambiguous_app_identity')
+        # Fact app_id contains the exact backend app NAME, not its numeric ID.
+        if name in by_name and by_name[name] != root:
+            raise ValueError('ambiguous_app_name')
+        if app_id in by_id:
+            continue
+        by_id[app_id], by_name[name] = app, root
+        products[root]['apps'].append(app)
+        if is_root:
+            roots.add(root)
+    if roots != set(ROOT_PRODUCTS):
+        raise ValueError('selected_product_root_missing')
+    for product in products.values():
+        product['apps'].sort(key=lambda item: int(item['id']))
+    return dict(products=list(products.values()), app_names=sorted(by_name),
+                app_to_product=by_name, excluded_apps=excluded)
 
 
 def literal(value):
@@ -286,9 +321,20 @@ def merge_upload_lineage(mapped, unresolved, rows, finals, app_names):
     return mapped, unresolved
 
 
-def collect_lineage(catalog, source_db, sync_db, upload_db=UPLOAD_LEDGER):
-    apps = catalog.query("SELECT JSON_OBJECT('id',id,'name',name) FROM ads_apps_setting WHERE id=1479 OR ads_app_id=1479")
-    if not any(r['id'] == 1479 for r in apps):
+def collect_lineage(catalog, source_db, sync_db, upload_db=UPLOAD_LEDGER,
+                    multi_product=False, _product=None):
+    if multi_product:
+        app_rows = catalog.query("SELECT JSON_OBJECT('id',id,'name',name,'root',ads_app_id) FROM ads_apps_setting WHERE id IN (1479,2373,3360) OR ads_app_id IN (1479,2373,3360)")
+        scope = resolve_scope(app_rows)
+        parts = []
+        for product in scope['products']:
+            mapped, unresolved, _, counts = collect_lineage(
+                catalog, source_db, sync_db, upload_db, _product=product)
+            parts.append((product, mapped, unresolved, counts))
+        mapped, unresolved, counts = merge_product_lineages(parts)
+        return mapped, unresolved, scope, counts
+    apps = _product['apps'] if _product else catalog.query("SELECT JSON_OBJECT('id',id,'name',name) FROM ads_apps_setting WHERE id=1479 OR ads_app_id=1479")
+    if not _product and not any(r['id'] == 1479 for r in apps):
         raise ValueError('dramawave_root_missing')
     app_ids, app_names = {str(r['id']) for r in apps}, sorted({r['name'] for r in apps})
     db = readonly(source_db)
@@ -298,16 +344,26 @@ def collect_lineage(catalog, source_db, sync_db, upload_db=UPLOAD_LEDGER):
         ad_rows = [dict(r) for r in db.execute('SELECT a.*,t.creator_name,t.app_id FROM ad_material_asset a JOIN ad_material_task t ON t.task_id=a.task_id WHERE a.status=? AND t.app_id IN (' + placeholders + ')', ['uploaded'] + sorted(app_ids))]
     finally:
         db.close()
-    db = readonly(sync_db)
-    try:
-        yt_rows = [dict(r) for r in db.execute('SELECT key,source,state,final_id,material_id FROM cover_sync')]
-    finally:
-        db.close()
+    yt_rows = []
+    if not _product or _product['id'] == '1479':
+        db = readonly(sync_db)
+        try:
+            yt_rows = [dict(r) for r in db.execute('SELECT key,source,state,final_id,material_id FROM cover_sync')]
+        finally:
+            db.close()
     finals = catalog.materials('product=' + literal('Drama-AI素材') + ' AND type=1')
     mids = sorted({str(int(hashlib.sha1((j['job_id'] + ':' + size).encode()).hexdigest()[:15], 16)) for j in jobs for size in ('square_1x1','landscape_1_91x1','portrait_4x5') if j.get(size + '_url')})
     intakes = []
     for part in chunks(mids, 500):
         intakes += catalog.materials('data_source=102 AND data_source_id IN (' + ','.join(literal(x) for x in part) + ')')
+    if _product:
+        # The intake receipt is authoritative even if an old formal image was
+        # assigned a business product instead of the historical shared AI pool.
+        known = {str(row['id']) for row in finals}
+        direct_ids = sorted({str(row.get('remark') or '').strip() for row in intakes
+                             if str(row.get('remark') or '').strip().isdigit()} - known)
+        for part in chunks(direct_ids):
+            finals += catalog.materials('id IN (' + ','.join(literal(x) for x in part) + ')')
     for part in chunks(ad_rows):
         if part:
             finals += catalog.materials('content_sign IN (' + ','.join(literal(x['asset_id']) for x in part) + ')')
@@ -334,12 +390,38 @@ def collect_lineage(catalog, source_db, sync_db, upload_db=UPLOAD_LEDGER):
                                                upload_ledger=len(upload_rows) if upload_rows is not None else None)
 
 
+def merge_product_lineages(parts):
+    mapped, unresolved, claims = {}, [], defaultdict(set)
+    counts = {'products': {}}
+    for product, items, pending, product_counts in parts:
+        root, name = str(product['id']), product['name']
+        counts['products'][root] = product_counts
+        for key, item in items.items():
+            key = str(key)
+            claims[key].add(root)
+            mapped[key] = dict(item, id=key, source_product_id=root, source_product_name=name)
+        for item in pending:
+            unresolved.append(dict(item, source_product_id=root, source_product_name=name))
+    for key, roots in claims.items():
+        if len(roots) > 1:
+            item = mapped.pop(key)
+            unresolved.append(dict(id=key, name=item.get('name', ''), source='unknown',
+                                   source_product_ids=sorted(roots),
+                                   reason='同一正式素材被多个来源产品认领'))
+    counts['formal_images'] = len(mapped)
+    counts['unresolved'] = len(unresolved)
+    return mapped, unresolved, counts
+
+
 def fact_projection():
     return ','.join("'%s',COALESCE(SUM(%s),0)" % (k, v) for k,v in METRIC_SQL.items())
 
 
 def collect_days(catalog, ids, apps, dates):
     """Three daily views share one MVCC snapshot, avoiding live-update drift."""
+    multi = isinstance(apps, dict)
+    if multi:
+        apps = apps['app_names']
     app_filter = ','.join(literal(x) for x in apps)
     results = []
     for day in dates:
@@ -350,14 +432,19 @@ def collect_days(catalog, ids, apps, dates):
             # An independent aggregate covers every verified ID regardless of its
             # product label. The old product pool remains for unknown-lineage audits.
             sqls.append("SELECT JSON_OBJECT('kind','verified_pool','dt'," + literal(day) +
+                        (",'app_id',app_id,'platform',platform" if multi else '') +
                         ",'latest_updated',MAX(updated_at)," + fact_projection() +
                         ') FROM ads_custom_source_insight FORCE INDEX(idx_ridstype) WHERE ' + common +
                         ' AND source_type=3 AND resource_type=1 AND resource_id IN (' +
-                        ','.join(literal(x) for x in part) + ')')
+                        ','.join(literal(x) for x in part) + ')' + (' GROUP BY app_id,platform' if multi else ''))
         sqls.append("SELECT JSON_OBJECT('kind','market','dt',dt,'platform',platform,'app_id',app_id,'resource_type',resource_type,'latest_updated',MAX(updated_at)," + fact_projection() + ') FROM ads_custom_source_insight FORCE INDEX(`as`) WHERE ' + common + ' GROUP BY dt,platform,app_id,resource_type')
-        sqls.append("SELECT JSON_OBJECT('kind','pool','dt',dt,'id',resource_id,'latest_updated',MAX(updated_at)," + fact_projection() + ') FROM ads_custom_source_insight FORCE INDEX(pss) WHERE ' + common + ' AND product=' + literal('Drama-AI素材') + ' AND source_type=3 AND resource_type=1 GROUP BY dt,resource_id')
+        sqls.append("SELECT JSON_OBJECT('kind','pool','dt',dt,'id',resource_id," + ("'app_id',app_id,'platform',platform," if multi else '') + "'latest_updated',MAX(updated_at)," + fact_projection() + ') FROM ads_custom_source_insight FORCE INDEX(pss) WHERE ' + common + ' AND product=' + literal('Drama-AI素材') + ' AND source_type=3 AND resource_type=1 GROUP BY dt,resource_id' + (',app_id,platform' if multi else ''))
+        if multi:
+            # This row proves the query executed successfully even if all product
+            # totals are genuinely empty. Missing this sentinel is not zero spend.
+            sqls.append("SELECT JSON_OBJECT('kind','coverage','dt'," + literal(day) + ",'ok',1)")
         rows = catalog.query(';'.join(sqls))
-        if not any(r['kind'] == 'market' for r in rows):
+        if not any(r['kind'] == ('coverage' if multi else 'market') for r in rows):
             raise RuntimeError('market_date_missing_' + day)
         results += rows
         print(json.dumps({'phase':'daily_snapshot','date':day,'rows':len(rows)}), flush=True)
