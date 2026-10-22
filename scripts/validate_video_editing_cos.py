@@ -111,7 +111,15 @@ def dispatch(payload,app,root):
     uploads=Uploads(store,CosS3Client(conf,retry=0),bucket,region,'video-editing/validation/'+run_id)
     if op=='create':row=uploads.create(payload,actor)
     elif op=='sign':
-        return {'ok':True,'op':op,'item':uploads.sign(str(payload.get('upload_id','')),payload.get('part_number'),payload,actor)}
+        from features.video_editing import uploads as uploads_module
+        expires=payload.get('validation_expiry_seconds',600)
+        require(type(expires) is int and 1<=expires<=600,'invalid_validation_expiry','验证签名时长须为1至600秒')
+        previous=uploads_module.SIGN_SECONDS
+        try:
+            uploads_module.SIGN_SECONDS=expires
+            return {'ok':True,'op':op,'item':uploads.sign(str(payload.get('upload_id','')),payload.get('part_number'),payload,actor)}
+        finally:
+            uploads_module.SIGN_SECONDS=previous
     else:row=getattr(uploads,op)(str(payload.get('upload_id','')),actor)
     item=uploads.dto(row)
     if row['status']=='completed':
