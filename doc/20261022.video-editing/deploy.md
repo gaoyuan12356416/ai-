@@ -85,3 +85,19 @@ This closes new uploads/probes/render submissions while preserving reads, existi
 本次范围仅 `static/video-editing.html`、`.css`、`.js`，缓存版本 `20261022-responsive-actions-1`。标准布局及 shared quick-nav/ui-topbar 保持；CPU/GPU逻辑、账本、配方、任务及COS成片不变。先提交推送 GitHub，再从确切提交取三个文件，分别原子替换 `/usr/share/nginx/html` 与 `/root/drama_material_service/static`。发布前比对本轮 live manifest、数据盘 UUID、服务身份和候选清洁状态，备份六个目标文件；发布后校验公网字节哈希与既有进程 PID，不重启服务。
 
 此次页面回滚可仅还原六个目标文件至上一标准样式版本 `866e9d6e4d4a5b7578999fcf65de38b933ac3948`，保留全部后台/GPU兼容版本和业务状态；无需关闭制作或恢复历史数据库。具体新提交、备份路径和回读结果在发布完成后补充。
+
+## BUG-008 实际静态发布回读
+
+2026-10-22 15:27（北京时间），GitHub已推送分支 `codex/video-editing-responsive-actions-20261022`，CPU从确切提交 `ecb040032cb2c96d5b45056be5a611c0c514b178` 拉取并完成六个静态目标文件更新。公网HTML/CSS/JS均HTTP200，字节SHA与提交一致；shared quick-nav/ui-topbar校验不变。API、编辑worker、旧制作worker及两个YouTube发布服务的前后PID分别保持3770172、3797300、3797297、2937249、2576490，未重启任何服务，也未修改GPU。
+
+备份：`/mnt/data-disk/video-editing/backups/responsive-20261022T072730Z-ecb040032cb2`。仅回滚本次页面：
+
+```sh
+python3 /mnt/data-disk/video-editing/backups/responsive-20261022T072730Z-ecb040032cb2/rollback.py
+```
+
+该命令先验证六个目标与备份哈希及允许路径，再原子恢复上一标准样式版本。它不恢复数据库、任务或GPU版本。部署回执和公网哈希为 `output/video-editing-responsive-validation/deployment.json`；服务端备份内 `manifest.json` 保存相同证据。
+
+本地审查JS为Windows CRLF，发布Git blob为LF；已逐字节确认仅换行差异。Git/public JS SHA256 `c4d0f0c0ce583561b079b063ac6f84244b6695ab5917ae4218e7f89bb2189f00`。本次新增一条本地技能上下文规则并保留其余条目；个人技能仓库已有未提交改动，本次未混合提交该仓库，memory文件未修改。
+
+最终视觉复核发现取消按钮隐藏时主操作被flex靠左，追加一条CSS将“添加所选剧集”固定靠右，保持后台弹窗惯例；缓存版本递增为 `20261022-responsive-actions-2`。JS逻辑不变，51项逻辑测试和慢请求验收仍对应同一Git JS blob；仅复查按钮位置与公网静态文件。
