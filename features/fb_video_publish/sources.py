@@ -78,11 +78,11 @@ class SourceRepository:
             if not re.fullmatch(r"[A-Za-z0-9_]+", schema):
                 raise ValueError("invalid source schema")
 
-    def _page_rows(self, actor: Mapping[str, Any], page_ids=None) -> list[dict]:
+    def _page_rows(self, actor: Mapping[str, Any], page_ids=None, *, search="") -> list[dict]:
         admin = actor.get("is_admin") is True
         owner = str(actor.get("business_owner_id") or "")
         if not admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner):
-            raise SourceError("fb_auto_owner_mapping_missing", "当前账号未唯一映射到Page池负责人", 403)
+            raise SourceError("fb_auto_owner_mapping_missing", "当前账号未唯一映射到Facebook授权用户", 403)
         if page_ids is not None:
             if page_ids == []:
                 return []
@@ -92,28 +92,46 @@ class SourceRepository:
             batches = [None]
         result = []
         for batch in batches:
-            page_sql = "" if batch is None else " AND TRIM(i.page_id) IN (" + ",".join("%s" for _ in batch) + ")"
-            owner_sql = "" if admin else " AND CAST(g.user_id AS CHAR)=%s"
-            # Read only the requested identities. Group summary counts are not
-            # used by this module and must not precede every configured list.
+            page_sql = "" if batch is None else " AND TRIM(p.page_id) IN (" + ",".join("%s" for _ in batch) + ")"
+            # The trusted email mapping resolves the same business user used by
+            # operator-only credentials. Also preserve existing pool-owner grants
+            # so accepted tasks do not lose access; membership is never required
+            # when the current user has a personal Facebook authorization.
+            owner_sql = "" if admin else f""" AND (EXISTS (
+                SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_info f
+                 WHERE f.user_id=%s
+                   AND CAST(p.fb_user_id AS BINARY)=CAST(f.facebookUserID AS BINARY)
+                   AND TRIM(p.fb_user_id)<>'')
+                OR p.page_id IN (
+                    SELECT i.page_id FROM `{self.mysql.schema}`.ads_facebook_page_group g
+                    JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
+                    JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
+                     WHERE g.user_id=%s AND g.is_delete=0 AND g.type IN (0,1)
+                       AND g.app_id=1479 AND LOWER(a.name)='dramawave' AND i.deleted_at=0))"""
+            params = ([] if admin else [owner, owner]) + (batch or [])
+            exact_id = bool(re.fullmatch(r"[1-9][0-9]{0,30}", search))
+            search_sql, having = "", ""
+            if search:
+                if exact_id:
+                    # Full numeric IDs use the Page index, never a full catalog
+                    # read followed by application-side substring filtering.
+                    search_sql = " AND p.page_id=%s"
+                else:
+                    having = """ HAVING LOCATE(%s,LOWER(CONCAT(TRIM(p.page_id),' ',
+                        COALESCE(MAX(TRIM(p.page_name)),''))))>0"""
+                params.append(search)
             sql = f"""
-                SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(g.id AS CHAR) AS group_id,
-                       CAST(i.page_id AS CHAR) AS page_id,
-                       LOWER(TRIM(COALESCE(i.language,''))) AS language,
-                       COALESCE(a.name,'') AS product,
-                       COALESCE((SELECT MAX(TRIM(pn.page_name)) FROM `{self.mysql.schema}`.ads_facebook_page_post pn
-                                  WHERE pn.page_id=i.page_id AND pn.status<>1
-                                    AND TRIM(pn.page_access_token)<>'' AND TRIM(COALESCE(pn.page_name,''))<>''),'') AS page_name,
-                       (SELECT COUNT(*) FROM `{self.mysql.schema}`.ads_facebook_page_post p
-                         WHERE p.page_id=i.page_id AND p.status<>1 AND TRIM(p.page_access_token)<>'') AS eligible_token_count
-                  FROM `{self.mysql.schema}`.ads_facebook_page_group g
-                  JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
-                  JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
-                 WHERE g.is_delete=0 AND g.type IN (0,1) AND g.app_id=%s
-                   AND i.deleted_at=0 AND TRIM(i.page_id)<>''{page_sql}{owner_sql}
-                 ORDER BY g.id,i.page_id LIMIT 20001
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ TRIM(p.page_id) AS page_id,
+                       COALESCE(MAX(LOWER(TRIM(p.language))),'') AS language,
+                       COALESCE(MAX(TRIM(p.page_name)),'') AS page_name,
+                       COUNT(CASE WHEN p.status<>1 AND TRIM(p.page_access_token)<>''
+                             THEN 1 END) AS eligible_token_count
+                  FROM `{self.mysql.schema}`.ads_facebook_page_post p
+                 WHERE TRIM(p.page_id)<>''{owner_sql}{page_sql}{search_sql}
+                 GROUP BY p.page_id{having}
+                 ORDER BY p.page_id LIMIT 20001
             """
-            rows = self.mysql.select(sql, ["1479"] + (batch or []) + ([] if admin else [owner]))
+            rows = self.mysql.select(sql, params)
             if len(rows) > 20000 or len(result) + len(rows) > 20000:
                 raise SourceError("page_source_too_large", "Page来源超过安全范围，请缩小选择范围", 503)
             result.extend(rows)
@@ -124,20 +142,15 @@ class SourceRepository:
         if len(search) > 200:
             raise SourceError("invalid_request", "Page搜索内容过长")
         grouped = {}
-        for row in self._page_rows(actor, page_ids):
-            if str(row.get("product") or "").casefold() != "dramawave":
-                continue
+        for row in self._page_rows(actor, page_ids, search=search):
             pid = str(row.get("page_id") or "").strip()
             if not pid:
                 continue
-            gid = str(row.get("group_id") or "")
             item = grouped.setdefault(pid, {
                 "page_id": pid, "page_name": str(row.get("page_name") or pid).strip()[:255],
                 "language": page_language(str(row.get("language") or "")[:32]),
                 "eligible_token_count": int(row.get("eligible_token_count") or 0), "group_ids": [],
             })
-            if gid not in item["group_ids"]:
-                item["group_ids"].append(gid)
         result = []
         for pid, page in sorted(grouped.items()):
             name = page["page_name"]
@@ -146,7 +159,7 @@ class SourceRepository:
             authorized = page["eligible_token_count"] > 0
             reason = "" if authorized else "Page授权已失效或缺少有效授权"
             result.append({
-                **page, "group_ids": sorted(page["group_ids"], key=int), "blocked_reason": reason,
+                **page, "blocked_reason": reason,
                 # External legacy schedules do not restrict manual publishing.
                 "legacy_conflict": False,
             })
@@ -156,7 +169,7 @@ class SourceRepository:
         wanted = _ids(page_ids, 200, "Page")
         available = {page["page_id"]: page for page in self.list_pages(actor, page_ids=wanted)}
         if any(pid not in available for pid in wanted):
-            raise SourceError("page_not_found", "所选Page不在当前账号可访问的DramaWave范围内", 404)
+            raise SourceError("page_not_found", "所选Page不在当前账号可访问的Facebook授权范围内", 404)
         for pid in wanted:
             page = available[pid]
             if page["blocked_reason"]:
