@@ -94,7 +94,8 @@ def release_check(candidate, *, base=BASE, git=run):
     git("git", "-C", str(candidate), "merge-base", "--is-ancestor", BASELINE, candidate.name)
     changed = git("git", "-C", str(candidate), "diff", "--name-only", BASELINE, candidate.name).splitlines()
     allowed = {"features/drama_synthesis/async_runtime.py", "scripts/drama_synthesis_gpu_worker.py",
-               "scripts/deploy_video_editing_gpu.py", "scripts/test_drama_synthesis_gpu_runtime.py"}
+               "scripts/deploy_video_editing_gpu.py", "scripts/test_drama_synthesis_gpu_runtime.py",
+               "scripts/validate_video_editing_recovery.py"}
     if not changed or any(p not in allowed and not p.startswith(("features/video_editing/", "tests/test_video_editing_",
                                                                "doc/20261022.video-editing/")) for p in changed):
         raise DeployError("candidate_contains_unrelated_changes")
