@@ -59,7 +59,8 @@ class DeployTests(unittest.TestCase):
     def test_apply_preflight_failure_never_stops_service_or_writes_configuration(self):
         old = {"DRAMA_WORK_ROOT": "/work"}
         identity = mock.Mock(return_value=SimpleNamespace(pw_uid=1001, pw_gid=1001))
-        with mock.patch.object(deploy, "wait_for_idle"), mock.patch.dict("sys.modules", {"pwd": SimpleNamespace(getpwnam=identity)}), \
+        with mock.patch.object(deploy, "wait_for_idle"), mock.patch.object(deploy, "wait_for_media_idle"), \
+             mock.patch.dict("sys.modules", {"pwd": SimpleNamespace(getpwnam=identity)}), \
              mock.patch.object(deploy, "run", side_effect=deploy.DeployError("command_failed")) as run, \
              mock.patch.object(deploy, "backup_configuration") as backup, mock.patch.object(deploy, "atomic") as atomic:
             with self.assertRaises(deploy.DeployError):
@@ -79,6 +80,7 @@ class DeployTests(unittest.TestCase):
                  mock.patch.multiple(deploy, BASE=base, CONFIG=base / "config", ENV_FILE=base / "gpu.env", MARKER=base / "closed"), \
                  mock.patch.object(deploy, "run", return_value='{"ok": true}') as run, \
                  mock.patch.object(deploy, "wait_for_idle", return_value=snapshot), \
+                 mock.patch.object(deploy, "wait_for_media_idle"), \
                  mock.patch.object(deploy, "wait_worker_stopped"), \
                  mock.patch.object(deploy, "ledger_snapshot", return_value=snapshot), \
                  mock.patch.object(deploy, "backup_configuration", return_value=[]), \
@@ -92,6 +94,52 @@ class DeployTests(unittest.TestCase):
                 switch.assert_called_once_with(base / "releases" / deploy.BASELINE)
                 self.assertEqual(snapshot["hashes"], {"old.json": "frozen"})
                 self.assertTrue(any(call.args == ("systemctl", "start", deploy.TUNNEL) for call in run.call_args_list))
+
+    def test_media_guard_sees_python_upload_socket_without_child_or_ledger(self):
+        with tempfile.TemporaryDirectory() as folder:
+            proc = Path(folder); process = proc / "123"
+            (process / "fd").mkdir(parents=True); (process / "net").mkdir()
+            (process / "task/123").mkdir(parents=True)
+            (process / "task/123/children").write_text("")
+            (process / "fd/3").touch(); (process / "fd/4").touch()
+            listener = "0: 0100007F:2253 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1001 0 100\n"
+            upload = "1: 0100007F:2253 0100007F:D001 01 00000000:00000000 00:00000000 00000000 1001 0 101\n"
+            (process / "net/tcp").write_text("header\n" + listener + upload)
+            (process / "net/tcp6").write_text("header\n")
+            def target(fd): return {"3": "socket:[100]", "4": "socket:[101]"}[fd.name]
+            with mock.patch.object(deploy.os, "readlink", side_effect=target):
+                value = deploy.worker_media_snapshot({}, pid=123, proc_root=proc)
+                self.assertTrue(value["busy"]); self.assertEqual(value["connections"], 1)
+                self.assertEqual(value["children"], 0)
+                (process / "net/tcp").write_text("header\n" + listener)
+                self.assertFalse(deploy.worker_media_snapshot({}, pid=123, proc_root=proc)["busy"])
+                (process / "task/123/children").write_text("456")
+                self.assertTrue(deploy.worker_media_snapshot({}, pid=123, proc_root=proc)["busy"])
+
+    def test_media_guard_blocks_pending_connections_and_open_media(self):
+        with tempfile.TemporaryDirectory() as folder:
+            proc = Path(folder); process = proc / "123"; media = proc / "media"
+            (process / "fd").mkdir(parents=True); (process / "net").mkdir()
+            (process / "task/123").mkdir(parents=True)
+            (process / "task/123/children").write_text("")
+            (process / "fd/3").touch(); (process / "fd/4").touch()
+            (process / "net/tcp").write_text("header\n0: 0100007F:2253 00000000:0000 0A 00000000:00000001 00:00000000 00000000 1001 0 100\n")
+            (process / "net/tcp6").write_text("header\n")
+            with mock.patch.object(deploy.os, "readlink", side_effect=lambda fd: "socket:[100]" if fd.name == "3" else str(media) + "/task-1/source.mp4"):
+                value = deploy.worker_media_snapshot({"DRAMA_YOUTUBE_MEDIA_ROOT": str(media)}, pid=123, proc_root=proc)
+                self.assertTrue(value["busy"])
+                self.assertEqual(value["listen_pending"], 1); self.assertEqual(value["media_handles"], 1)
+            (process / "net/tcp").unlink()
+            with mock.patch.object(deploy.os, "readlink", return_value="socket:[100]"):
+                with self.assertRaises(deploy.DeployError): deploy.worker_media_snapshot({}, pid=123, proc_root=proc)
+
+    def test_media_wait_never_treats_unknown_or_active_as_idle(self):
+        with mock.patch.object(deploy, "worker_media_snapshot", return_value={"busy": True}):
+            with self.assertRaisesRegex(deploy.DeployError, "youtube_media_not_drained"):
+                deploy.wait_for_media_idle({}, 0, quiet_seconds=0)
+        with mock.patch.object(deploy, "worker_media_snapshot", side_effect=deploy.DeployError("media_activity_unverified")):
+            with self.assertRaisesRegex(deploy.DeployError, "media_activity_unverified"):
+                deploy.wait_for_media_idle({}, 0, quiet_seconds=0)
 
 
 if __name__ == "__main__": unittest.main()

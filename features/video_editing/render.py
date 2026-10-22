@@ -70,8 +70,11 @@ def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h
         else:
             filters += ["[%s][%s][v%d][a%d]concat=n=2:v=1:a=1[%s][%s]" %
                         (video, audio, index, index, new_video, new_audio)]
-        # concat chooses AVTB whereas xfade needs matching 1/30 time bases.
-        filters += ["[%s]settb=1/30,setpts=PTS-STARTPTS[tv%d]" % (new_video, index)]
+        # concat chooses AVTB and marks frame_rate unknown (1/0). Restoring
+        # only time_base is insufficient: a later xfade rejects that link on
+        # production FFmpeg. Explicit CFR restores both properties after every
+        # join, including fade -> cut -> fade chains and assembly-tree nodes.
+        filters += ["[%s]fps=30,settb=1/30,setpts=N[tv%d]" % (new_video, index)]
         video, audio = "tv%d" % index, new_audio
         length += recipe["clips"][index]["end_frame"] - recipe["clips"][index]["start_frame"]
     filters += ["[%s]trim=end_frame=%d,setpts=N/(30*TB),format=yuv420p[outv]" % (video, length),
@@ -150,10 +153,11 @@ def probe_media(path, *, ffprobe="ffprobe"):
         raise error("video_editing_probe_failed", "视频没有可处理的画面或时长") from None
 
 
-def run_ffmpeg(command, duration_seconds, *, progress_callback=None):
+def run_ffmpeg(command, duration_seconds, *, progress_callback=None, diagnostic_path=None, diagnostic_context=None):
     budget = min(86400, max(300, int(duration_seconds * 8 + 120)))
     return run_render_with_progress(command, timeout=budget, duration_seconds=max(duration_seconds, 0.04),
-                                    stall_timeout=900, progress_callback=progress_callback)
+                                    stall_timeout=900, progress_callback=progress_callback,
+                                    diagnostic_path=diagnostic_path, diagnostic_context=diagnostic_context)
 
 
 def validate_output(info, expected_frames):

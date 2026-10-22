@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -160,11 +161,15 @@ class EditingService:
         state = self._state(value["job_id"])
         return not (state / "expired.json").exists()
 
-    def _local_render(self, path, state, identity, command, duration):
+    def _local_render(self, path, state, identity, command, duration, *, diagnostic_context=None):
         completed = load_completed(state, path, identity)
         if completed is not None:
             return
-        run_ffmpeg(command, duration)
+        # Durable, allowlisted runner evidence lives outside the removable media
+        # directory. The shared runner stores hashes/tags, never raw stderr,
+        # transport URLs, command arguments or credentials.
+        run_ffmpeg(command, duration, diagnostic_path=state.with_name(state.name + ".failure.json"),
+                   diagnostic_context=diagnostic_context)
         save_completed(state, path, identity, {})
 
     def execute(self, payload):
@@ -196,6 +201,12 @@ class EditingService:
             sources[source["source_id"]], infos[source["source_id"]], downloads[source["source_id"]] = path, info, downloaded
         result = {"job_id": job_id, "task_type": contract.TASK_TYPE, "operation": value["operation"],
                   "recipe_sha256": contract.recipe_fingerprint(recipe, value["operation"])}
+        primary = downloads[recipe["sources"][0]["source_id"]]
+        source_set = [{"source_id": s["source_id"], "identity": {**s["identity"], "sha256": downloads[s["source_id"]]["sha256"]}}
+                      for s in recipe["sources"]]
+        diagnostic_context = {"recipe_sha256": result["recipe_sha256"],
+            "source_sha256": primary["sha256"], "source_size_bytes": primary["size_bytes"],
+            "asset_set_sha256": hashlib.sha256(contract.canonical_json(source_set).encode()).hexdigest()}
         prefix = self.config.prefix.rstrip("/") + "/" + ("outputs" if value["operation"] == "render" else "probes") + "/" + job_id
 
         def upload(name, path, metadata=None, content_type="video/mp4"):
@@ -212,7 +223,8 @@ class EditingService:
             thumb = work / "thumbnail.jpg"
             thumb_cmd = [self.config.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(sources[sid]),
                          "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "3", str(thumb)]
-            self._local_render(thumb, state / "thumbnail.local.json", {"fingerprint": fingerprint, "kind": "thumbnail"}, thumb_cmd, 0.04)
+            self._local_render(thumb, state / "thumbnail.local.json", {"fingerprint": fingerprint, "kind": "thumbnail"}, thumb_cmd, 0.04,
+                diagnostic_context=diagnostic_context)
             result["thumbnail"] = upload("thumbnail.jpg", thumb, content_type="image/jpeg")
             if (info["video_codec"] != "h264" or (info["has_audio"] and info["audio_codec"] != "aac")
                     or "mp4" not in info["format_name"].split(",") or info["container_brand"] == "qt"
@@ -223,7 +235,8 @@ class EditingService:
                 clip = {"start_frame": 0, "end_frame": contract.ms_to_frame(info["duration_ms"]), "fit": "contain", "mute": False}
                 self._local_render(preview, state / "preview.local.json", {"fingerprint": fingerprint, "kind": "preview"},
                     build_normalize_command(sources[sid], clip, preview, has_audio=info["has_audio"],
-                        ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), info["duration_ms"] / 1000)
+                        ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), info["duration_ms"] / 1000,
+                    diagnostic_context=diagnostic_context)
                 preview_info = validate_output(probe_media(preview, ffprobe=self.config.ffprobe), clip["end_frame"])
                 result["preview"] = upload("preview.mp4", preview, preview_info)
         else:
@@ -235,7 +248,8 @@ class EditingService:
                 command = build_normalize_command(sources[clip["source_id"]], clip, path,
                     has_audio=infos[clip["source_id"]]["has_audio"], ffmpeg=self.config.ffmpeg, encoder=self.config.encoder)
                 self._local_render(path, state / ("clip-%04d.local.json" % index),
-                    {"fingerprint": fingerprint, "clip_id": clip["id"]}, command, count / 30)
+                    {"fingerprint": fingerprint, "clip_id": clip["id"]}, command, count / 30,
+                    diagnostic_context=diagnostic_context)
                 validate_output(probe_media(path, ffprobe=self.config.ffprobe), count)
                 segments["clip-%04d" % index] = path
             runtime.emit_progress("concatenating")
@@ -247,7 +261,8 @@ class EditingService:
                     self._local_render(output, state / (group["name"] + ".local.json"),
                         {"fingerprint": fingerprint, "kind": group["name"]},
                         build_assemble_command([segments[name] for name in group["inputs"]], group["recipe"], output,
-                            ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), group["frames"] / 30)
+                            ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), group["frames"] / 30,
+                        diagnostic_context=diagnostic_context)
                     validate_output(probe_media(output, ffprobe=self.config.ffprobe), group["frames"])
                     segments[group["name"]] = output
             output = segments[final_name]

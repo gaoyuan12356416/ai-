@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 import hashlib
+import json
 from unittest import mock
 from pathlib import Path
 
@@ -18,7 +19,8 @@ def recipe_fixture():
         "identity": {"size_bytes": 100, "etag": "v1"}, "duration_ms": 5000, "width": 320, "height": 180, "has_audio": True}],
         "clips": [{"id": "a", "source_id": "s", "start_ms": 500, "end_ms": 1500, "transition": "fade"},
                   {"id": "b", "source_id": "s", "start_ms": 2000, "end_ms": 3000, "transition": "cut", "mute": True},
-                  {"id": "c", "source_id": "s", "start_ms": 3500, "end_ms": 4500, "transition": "cut", "fit": "cover"}]}
+                  {"id": "c", "source_id": "s", "start_ms": 3500, "end_ms": 4500, "transition": "fade", "fit": "cover"},
+                  {"id": "d", "source_id": "s", "start_ms": 1000, "end_ms": 2000, "transition": "cut"}]}
 
 
 class RenderTests(unittest.TestCase):
@@ -39,7 +41,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("pad=720:1280", graph); self.assertIn("aresample=48000", graph)
         muted = build_normalize_command("source.mp4", recipe["clips"][1], "out.mp4", has_audio=True)
         self.assertIn("anullsrc", muted[muted.index("-filter_complex") + 1])
-        joined = build_assemble_command(["a.mp4", "b.mp4", "c.mp4"], recipe, "joined.mp4")
+        joined = build_assemble_command(["a.mp4", "b.mp4", "c.mp4", "d.mp4"], recipe, "joined.mp4")
         graph = joined[joined.index("-filter_complex") + 1]
         self.assertIn("xfade=transition=fade:duration=0.3:offset=0.700000000", graph)
         self.assertIn("acrossfade=d=0.3", graph); self.assertIn("concat=n=2", graph)
@@ -58,14 +60,35 @@ class RenderTests(unittest.TestCase):
                 run_ffmpeg(build_normalize_command(source, clip, path, has_audio=(index != 2), encoder="libx264"), 1)
                 validate_output(probe_media(path), 30); paths.append(path)
             final = root / "result.mp4"
-            run_ffmpeg(build_assemble_command(paths, recipe, final, encoder="libx264"), 2.7)
+            run_ffmpeg(build_assemble_command(paths, recipe, final, encoder="libx264"), 3.4)
             info = validate_output(probe_media(final), output_frames(recipe))
             self.assertEqual((info["width"], info["height"]), (720, 1280))
-            self.assertLessEqual(abs(info["duration_ms"] - 2700), 34)
+            self.assertLessEqual(abs(info["duration_ms"] - 3400), 34)
             # Decode the final video and audio, catching malformed joins rather
             # than treating a successful mux/ffprobe alone as media acceptance.
             subprocess.run(["ffmpeg", "-v", "error", "-i", str(final), "-f", "null", "-"],
                            check=True, capture_output=True, timeout=30)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
+    def test_failed_ffmpeg_retains_safe_diagnostic_outside_media(self):
+        with tempfile.TemporaryDirectory(prefix="video-editing-diagnostic-") as root:
+            root = Path(root); state = root / "state/clip.local.json"; state.parent.mkdir()
+            output = root / "media.mp4"
+            service = EditingService(Config(root / "media", root / "state", "b", "r"), lambda: None)
+            context = {"recipe_sha256": "a" * 64, "source_sha256": "b" * 64,
+                       "source_size_bytes": 100, "asset_set_sha256": "c" * 64}
+            command = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=duration=0.1",
+                       "-vf", "private_diagnostic_test_filter", "-y", str(output)]
+            with self.assertRaises(Exception):
+                service._local_render(output, state, {"fingerprint": "d" * 64}, command, .1,
+                                      diagnostic_context=context)
+            diagnostic = json.loads(state.with_name(state.name + ".failure.json").read_text())
+            self.assertNotEqual(diagnostic["process"]["returncode"], 0)
+            self.assertGreater(diagnostic["stderr"]["bytes"], 0)
+            self.assertFalse(diagnostic["stderr"]["raw_stored"])
+            self.assertEqual(diagnostic["context"], context)
+            self.assertNotIn("private_diagnostic_test_filter", json.dumps(diagnostic))
+            self.assertFalse(state.exists())
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_real_service_probe_render_private_receipts_cleanup_and_replay(self):
