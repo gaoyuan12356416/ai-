@@ -186,3 +186,10 @@ CPU 兼容 GPU runtime 的 `error.code` 及旧顶层 `error_code`，保留受限
 - 同一素材 soft-delete 不删除已冻结任务的 COS 对象；撤销入口或回滚页面仍须保留识别新任务的 GPU 调度器。
 - 外部制作 / 盈量入库本期没有调用路由，页面仅显示待接入，不会自动上传给外部后台。
 - `?demo=1` 使用明确标注的内存模拟数据，代码阻止对 `/api/video-editing` 发出业务请求；正式模式 API 失败不会回退假数据。
+
+
+## 2026-10-22 前端等待契约
+
+本次不新增或改变HTTP接口。`catalog/probe`返回表示原校验任务已创建/核实，不表示媒体已ready。前端固定选集后跟踪已有来源状态，全部ready才自动添加；取消等待仅取消页面自动续加，不撤销后台任务。共享来源原校验任务无法按用户读取时，仍遵守来源可见性和任务权限，不创建替代任务。
+
+`catalog/probe`没有客户端operation_id，不能套用render的operation_id重试规则。probe写响应未知时保留source级核实记录，仅GET来源；暂时unprobed或私有task 404均不作为前次未受理证据。已经拿到probe_task_id则跟踪/显式恢复原task。

@@ -79,3 +79,9 @@ chmod 644 /etc/video-editing/intake.disabled
 ```
 
 This closes new uploads/probes/render submissions while preserving reads, existing upload completion and same-task recovery. Keep the CPU coordinator running to reconcile accepted tasks, keep GPU release `1747c5cd` or a newer compatible mixed reader, and retain all ledgers/COS outputs. The marker directory must remain traversable by the non-root GPU worker (0755 directory, 0644 marker); secret environment files remain 0600. The administrative navigation setting can then hide the new entry. Do not restore the pre-install SQLite evidence copy or the old GPU reader after editor acceptance. Source context for this feature is maintained in this repository's requirement/interface/test/deploy documents; personal skill and memory files were not modified.
+
+## BUG-008 页面交互更新方案（2026-10-22）
+
+本次范围仅 `static/video-editing.html`、`.css`、`.js`，缓存版本 `20261022-responsive-actions-1`。标准布局及 shared quick-nav/ui-topbar 保持；CPU/GPU逻辑、账本、配方、任务及COS成片不变。先提交推送 GitHub，再从确切提交取三个文件，分别原子替换 `/usr/share/nginx/html` 与 `/root/drama_material_service/static`。发布前比对本轮 live manifest、数据盘 UUID、服务身份和候选清洁状态，备份六个目标文件；发布后校验公网字节哈希与既有进程 PID，不重启服务。
+
+此次页面回滚可仅还原六个目标文件至上一标准样式版本 `866e9d6e4d4a5b7578999fcf65de38b933ac3948`，保留全部后台/GPU兼容版本和业务状态；无需关闭制作或恢复历史数据库。具体新提交、备份路径和回读结果在发布完成后补充。

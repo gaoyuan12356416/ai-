@@ -28,3 +28,12 @@
 BUG-007随后已部署GPU1747c5cd并完成独立回读：全部29份账本hash不变、busy0 / 并发1 / 队列代码默认8，原正式两任务completed / gen1 / 原时间戳与scratch清理保持。CPU API未重启，旧claimer和剪辑worker恢复active，发布进程不变，GPU与隧道active、两端接单开启。`final-production-readback.json` 与 `compatible-gpu-update.json` 证明该生产闭环；不扩大为真实混合队列压测或浏览器自动上传 / 下载落盘回执通过。
 
 详细计数、持久证据与当前边界见 `test-report.md`、`final-backend-review.md`；部署事实以 `deploy.md` 为准。
+
+
+## 2026-10-22 异步交互测试复核
+
+独立审查发现原harness的classList/属性操作为空实现、click忽略disabled、dialog关闭无事件、API对象没有JSON快照、checkbox跨DOM重绘错误保留。先修这些真实性问题再断言加载/防重/自动续加，避免模拟器掩盖页面缺陷。两处旧测试要求再次点击添加，须改成自动完成并补关闭/切换/失败反例。
+
+## BUG-008 最终测试评审
+
+测试执行实际前端脚本和事件处理，使用可控延迟 API 回执；修正 disabled、classList、aria、dialog close/cancel、动态 checkbox 重建和 JSON 快照行为，防止伪通过。最终42个浏览器合约与9个模型用例全部通过。新增风险包括批量 probe 部分失败/坏回执、在途取消后重入、读失败但其他并发尚未结束、共享 task 权限隐藏及 owner 原任务未知状态。真实浏览器慢请求与正式页面回读由主实施单独记账。

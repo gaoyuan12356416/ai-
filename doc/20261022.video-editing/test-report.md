@@ -152,3 +152,14 @@ BUG-006按 `9fc968a98924e658895240a8763162a2b97c207f` 仅部署service / store�
 ## 发布建议
 
 正式双剧独立出片、浏览器完整播放、私有COS下载与文件核验、成功临时目录清理、完成态隔离恢复及BUG-006线上刷新重提已通过。BUG-007候选本地126项回归通过，独立review及旧模块最终回归已通过，真实隔离恢复已通过，生产部署与独立回读已完成；浏览器文件选择 / 直传 / 中断续传、浏览器下载落盘回执、多人实会话权限、运行中断恢复、旧新混合队列与8GiB实传保留为明确限制。仅因文档补充不重做已通过检查，后续实现变化须执行相关回归。
+
+
+## BUG-008 交互响应最终验收（2026-10-22）
+
+`node --test tests/test_video_editing_frontend.js tests/test_video_editing_browser_contract.js`：51项全部通过（42浏览器事件合约、9模型），0跳过。实施、测试与独立审查分别复跑；不是累加为153项。JS语法、差异检查及技能要求的8文件Python编译通过。
+
+正式修复前账本第三集从创建到ready约23秒，GPU执行14.424秒；四轮80次来源读取中76次读未选且无校验任务的剧集。此等待含真实媒体下载/校验，并非SQL耗时；不承诺修改页面后真实GPU校验瞬间完成。
+
+冻结版本真实Chrome连接loopback延迟fixture：产品/搜索/剧集读取各延迟2秒、probe回执延迟3秒，第三集18秒后才ready。点击后立即看到“已就绪2/3”、忙态和取消等待；无需第二次点击，最终自动出现3片/30秒并保存v1。记录仅1次probe POST，来源GET全部指向第三集，未查询已ready的前两集和未选来源。详情 `output/video-editing-responsive-validation/browser-fixture-summary.json`、`fixture-events.json` 及 `local-waiting-final.png` / `local-auto-added-final.png`。这是慢请求交互验收，不是真实GPU吞吐基准。
+
+独立审核另验证了A项目载入期间切B失败仍可重试、A的旧轮询错误不污染B等待。51项覆盖关闭/ESC/取消、连续点击、目录乱序、批量部分4xx/坏2xx、unknown提交、共享task403/404、owner恢复原ID、失败排空单飞、项目源加载锁定和保存不被列表刷新拖住。服务端/上传/GPU实现本次未改，既有未验收的真实大文件和故障注入边界仍按前文保留。

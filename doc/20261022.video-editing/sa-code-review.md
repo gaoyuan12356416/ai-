@@ -59,3 +59,15 @@ BUG-006仅部署service / store两个文件，API重启后worker与发布进程P
 BUG-007另有候选1747c5cd的真实隔离验收：`ve_0acb6a25ed8c5137aee7286f6df8a7a4` gen1强制disk_budget失败且0媒体 / 0上传，模拟cleanup now+86401秒后原ID CAS恢复gen2，真实FFmpeg和私有COS成功。download1 / ffmpeg3 / create1 / part1 / complete1 / abort0，重复resume、submit与独立runtime重启缓存无新增调用；expiry保持、epoch绑定、匿名403和scratch清理通过。旧liveworker / 全账本未改，隔离已退出、GPU空闲；生产1747更新和最终独立回读已通过。该项没有自然等待24小时或kill运行中任务，证据为 `bug007-preupload_expiry_20261022_a-results.json`。
 
 最终GPU release1747c5cd，全部29份账本hash未改，busy0、并发1、队列沿代码默认8；原正式两任务completed / gen1 / 完成时间保持、scratch不存在。CPU API3770172未因本次更新重启，旧claimer3797297 / editor3797300恢复active，publisher2937249 / 2576490不变，GPU1560374和隧道active、两端接单开启。证据 `output/video-editing-validation/final-production-readback.json` 与 `compatible-gpu-update.json`；BUG-007生产关闭，剩余未验收场景仍按测试报告保留。
+
+## BUG-008 交互响应修复独立审查（2026-10-22）
+
+独立只读审核冻结 JS SHA256 `a201e572d982b39921af3fc0fa1a574514b6c6f3442648d29cbd652425f5df65`，51/51 前端测试、语法和差异检查通过，无剩余阻断。
+
+- 待添加意图绑定项目对象、项目代次和弹窗代次，固定所选 IDs；消费一次后再修改草稿。普通自动保存分配项目 ID 不会误取消等待。
+- 轮询并发3，单飞锁等待所有在途读取排空；旧等待的错误及恢复回调不能覆盖新等待。
+- probe 在发送前按 source 登记在途请求；关闭/取消不删除未知记录。部分4xx、断线及不完整2xx均需逐源正向核实，不盲重发。
+- task 403/404可能是权限隐藏；共享 probing 保持来源观察，不建替代任务。可读原任务的 unknown/recovery_required 显示异常，只有用户再点才恢复同一 task；轮询不自动写入。
+- 项目先显示后读取媒体，读取期间锁定修改/制作；切换另一项目失败会恢复当前项目的重试入口。保存成功不等待项目列表刷新。
+
+审核人员另用实际事件 harness 独立复现“项目 A 媒体加载中切 B 失败”与“旧 A 轮询错误晚于 B 新等待”，两例修复后均通过。未改服务器/后端/GPU；不能将异步模拟测试等同于真实 GPU 故障注入。

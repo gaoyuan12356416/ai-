@@ -21,3 +21,12 @@ GPU scratch is allowed. Clean success only after COS verification. Failed scratc
 
 ## Release
 Use clean branch, preserve dirty original checkout and composite CPU runtime. Scoped AST CPU patch; exact live GPU source-overlay baseline with reviewed overlays. Preserve legacy fingerprints/results/prefetch and publishing services. Rollback after new records exist retains mixed-type reader/resume.
+
+
+## 2026-10-22 交互响应与等待反馈修正
+
+用户反馈“交互响应慢、点击后无响应、无即时反馈”。打开弹窗、查询、选剧、添加、保存、制作、预览及刷新等异步操作，应在等待网络前显示状态并防止同一动作重复提交。媒体校验是实际后台工作，不承诺瞬间完成；必须持续展示本次所选集数的已就绪进度和可采取的操作。
+
+点击添加后固定本次剧目、剧集和项目身份，所选剧集全部通过校验后自动加入时间线一次，无需再次点击。关闭弹窗、取消等待、切换产品/短剧或切换项目应取消自动添加，已入队的原校验任务继续按既有规则运行。失败须在弹窗内提示具体剧集和原因；不得只在弹窗背后的toast显示。
+
+轮询仅处理本次所选未就绪来源和已知恢复任务，避免查询无关未校验剧集；限定并发且轮询不重叠。晚到响应不能覆盖新搜索、产品、剧目、项目或已关闭弹窗。同一写请求不自动重发，保留原operation ID和未知结果核实语义。保持上一轮后台标准样式、共享登录导航和GPU单槽位。
