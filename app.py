@@ -3648,6 +3648,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "video_editing": "视频剪辑",
 
 
 
@@ -3725,6 +3726,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "video_editing": False,
     "drama_synthesis": False,
     "cover_synthesis": False,
     "ad_material_tasks": False,
@@ -55941,7 +55943,8 @@ def delete_session(session_token):
 
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        return filter_navigation(json.load(handle))
+        from features.video_editing.navigation import ensure_navigation
+        return ensure_navigation(filter_navigation(json.load(handle)))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94176,6 +94179,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "GET", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
@@ -97889,6 +97896,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "POST", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
@@ -100547,6 +100558,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "DELETE", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
@@ -101068,6 +101083,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        json_response(self, 404, {"error": "not_found"})
+
+    def do_PATCH(self):
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "PATCH", sys.modules[__name__])
+            return
         json_response(self, 404, {"error": "not_found"})
 
 

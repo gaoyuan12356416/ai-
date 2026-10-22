@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +21,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 from features.fb_gpu.random_overlay import load_asset_set, selected_asset_paths, validate_recipe
 
+from .asset_cache import VERSION as ASSET_CACHE_VERSION, cache_root as asset_cache_root, selected_entries
+
 from .composition import (
     CANVAS_FPS,
     CANVAS_HEIGHT,
@@ -29,8 +32,9 @@ from .composition import (
     compile_random_overlay_spec,
     composition_sha256,
     plan_chunks,
+    validate_composition_spec,
 )
-from .core import DramaSynthesisError, RECIPE_PROFILE
+from .core import DramaSynthesisError, RECIPE_PROFILE, validate_source_overlay
 from .local_checkpoint import (
     atomic_write_record,
     checkpoint_error,
@@ -51,6 +55,9 @@ DEFAULT_COMPOSITOR_LANES = 1
 DEFAULT_FILTER_THREADS = 2
 DEFAULT_RUNTIME_IDENTITY = "ffmpeg-opencl-nvenc-runtime-v1"
 KERNEL_TEMPLATE = Path(__file__).with_name("opencl") / "random_overlay_v2.cl"
+SOURCE_OVERLAY_KERNEL_TEMPLATE = Path(__file__).with_name("opencl") / "random_overlay_source_v1.cl"
+CUDA_KERNEL_TEMPLATE = Path(__file__).with_name("cuda") / "random_overlay_v1.cu"
+SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE = Path(__file__).with_name("cuda") / "random_overlay_source_v1.cu"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 _THREAD_LOCKS: Dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -103,6 +110,15 @@ def compositor_filter_threads(value: Any = None) -> int:
     if isinstance(raw, bool) or not re.fullmatch(r"[1-4]", str(raw)):
         raise compositor_error()
     return int(raw)
+
+
+def frame_pipeline(value=None):
+    raw = os.environ.get("DRAMA_GPU_FRAME_PIPELINE", "opencl") if value is None else value
+    if raw not in {"opencl", "cuda"}:
+        raise compositor_error()
+    if raw == "cuda" and asset_cache_root() is None:
+        raise compositor_error()
+    return raw
 
 
 def runtime_identity(value: Any = None) -> str:
@@ -254,7 +270,16 @@ def _clean_main_geometry(scale: float) -> Dict[str, int]:
     return {"main_width": main_width, "main_height": main_height}
 
 
+def kernel_template_path(spec: Mapping[str, Any], *, cuda: bool = False) -> Path:
+    """Keep frozen six-layer scenes on their original kernel and cache identity."""
+    validate_composition_spec(spec)
+    if len(spec["layers"]) == 7:
+        return SOURCE_OVERLAY_CUDA_KERNEL_TEMPLATE if cuda else SOURCE_OVERLAY_KERNEL_TEMPLATE
+    return CUDA_KERNEL_TEMPLATE if cuda else KERNEL_TEMPLATE
+
+
 def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = None) -> Dict[str, str]:
+    template_path = kernel_template_path(spec)
     main = spec["layers"][1]
     tint = spec["layers"][2]
     rotation = main["transform"]["rotation_millidegrees"] / 1000.0 * math.pi / 180.0
@@ -273,7 +298,14 @@ def compile_opencl_kernel(spec: Mapping[str, Any], template: Optional[str] = Non
         "#define SCENE_TINT_OPACITY %.9ff" % opacity,
         "",
     ))
-    body = _safe_kernel_template() if template is None else str(template)
+    if len(spec["layers"]) == 7:
+        overlay = spec["layers"][6]
+        prefix += "\n".join((
+            "#define SCENE_SOURCE_OVERLAY_SCALE %.9ff" % (overlay["transform"]["scale_bp"] / 10000.0),
+            "#define SCENE_SOURCE_OVERLAY_OPACITY %.9ff" % (overlay["opacity_bp"] / 10000.0),
+            "",
+        ))
+    body = _safe_kernel_template(template_path) if template is None else str(template)
     if "__kernel void compose_random_overlay_v2" not in body:
         raise compositor_error()
     text = prefix + body
@@ -358,6 +390,7 @@ def build_opencl_chunk_command(
     chunk: Mapping[str, Any],
     kernel_path: Path,
     device: Optional[str] = None,
+    asset_cache_entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> list[str]:
     device = opencl_device(device)
     threads = compositor_filter_threads()
@@ -372,9 +405,15 @@ def build_opencl_chunk_command(
     for category in ("border", "opacity_video", "corners", "tint"):
         duration = float(asset_durations.get(category) or 0)
         phase = (start % duration) if duration > 0 else 0.0
-        command.extend(_input_arguments(
-            Path(assets[category]), asset_media_types[category], phase, threads
-        ))
+        if asset_cache_entries:
+            command.extend([
+                "-threads", str(threads), "-stream_loop", "-1",
+                "-c:v", "rawvideo", "-i", str(asset_cache_entries[category]["path"]),
+            ])
+        else:
+            command.extend(_input_arguments(
+                Path(assets[category]), asset_media_types[category], phase, threads
+            ))
     # The source may switch from a 16:9 intro to portrait episodes. FFmpeg
     # reinitializes the input filter chain at that boundary, so STARTPTS would
     # reset a second time and overlap the episode with the intro. The input
@@ -385,9 +424,15 @@ def build_opencl_chunk_command(
         "format=rgba,hwupload[source]" % CANVAS_FPS
     ]
     for index, label in enumerate(("border", "opacity", "corners", "tint"), start=1):
+        category = ("border", "opacity_video", "corners", "tint")[index-1]
+        duration = float(asset_durations.get(category) or 0)
+        phase = start % duration if duration > 0 else 0
+        # input -ss together with -stream_loop repeats the seeked GOP/tail,
+        # not the full animation. Trim the continuous loop before uploading.
+        trim = "trim=start=%.6f," % phase if asset_cache_entries and phase else ""
         graph_parts.append(
-            "[%d:v]fps=%d,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]"
-            % (index, CANVAS_FPS, label)
+            "[%d:v]%sfps=%d,setpts=PTS-STARTPTS,format=rgba,hwupload[%s]"
+            % (index, trim, CANVAS_FPS, label)
         )
     graph_parts.append(
         "[source][border][opacity][corners][tint]"
@@ -410,6 +455,19 @@ def build_opencl_chunk_command(
         "-frames:v", str(int(chunk["frame_count"])), "-movflags", "+faststart", str(output),
     ])
     return command
+
+
+def build_native_chunk_command(*, ffmpeg, source, output, spec, recipe, asset_durations,
+                               chunk, plan_path, cache_directory=None):
+    directory = asset_cache_root(cache_directory)
+    if directory is None:
+        raise compositor_error()
+    plan = {"spec": spec, "source": str(source), "output": str(output), "ffmpeg": ffmpeg,
+            "chunk": dict(chunk), "assets": recipe["assets"], "asset_durations": asset_durations,
+            "asset_cache_root": str(directory)}
+    _atomic_write_text(plan_path, canonical_json(plan))
+    script = Path(__file__).resolve().parents[2] / "scripts" / "render_drama_native_chunk.py"
+    return [sys.executable, str(script), "--plan", str(plan_path)]
 
 
 def build_join_command(ffmpeg: str, concat_file: Path, output: Path) -> list[str]:
@@ -769,6 +827,7 @@ def _validate_recipe_and_assets(recipe: Mapping[str, Any], asset_root: Path, man
     actual_sha = hashlib.sha256(_canonical_recipe(recipe).encode("utf-8")).hexdigest()
     if not HEX.fullmatch(supplied_sha) or supplied_sha != actual_sha:
         raise DramaSynthesisError("drama_recipe_hash_invalid", "随机模板配方指纹无效", 409)
+    source_overlay = validate_source_overlay(recipe)
     try:
         assets = load_asset_set(asset_root, str(manifest_sha256 or "").lower())
     except Exception:
@@ -787,6 +846,8 @@ def _validate_recipe_and_assets(recipe: Mapping[str, Any], asset_root: Path, man
             "tint_opacity_bp": recipe.get("tint_opacity_bp"),
             "version": 1,
         }
+        if source_overlay is not None:
+            fb_recipe["source_overlay"] = source_overlay
         validate_recipe(fb_recipe, assets)
     except Exception:
         raise DramaSynthesisError("drama_recipe_asset_mismatch", "随机模板配方与GPU素材不一致", 409) from None
@@ -852,6 +913,8 @@ def render_chunked_random_output(
     content_identity = {
         "version": 2,
         "backend": BACKEND,
+        "asset_cache_version": ASSET_CACHE_VERSION if asset_cache_root() else None,
+        "frame_pipeline": frame_pipeline(),
         "renderer_profile": RENDERER_PROFILE,
         "runtime": runtime_fingerprint,
         "recipe_sha256": supplied_sha,
@@ -861,6 +924,8 @@ def render_chunked_random_output(
         "chunk_plan_sha256": chunk_plan_sha,
         "chunk_count": len(chunks),
     }
+    if frame_pipeline() == "cuda":
+        content_identity["cuda_kernel"] = file_fingerprint(kernel_template_path(spec, cuda=True))
     content_sha = hashlib.sha256(canonical_json(content_identity).encode("utf-8")).hexdigest()
     root = cache_root() / content_sha[:2] / content_sha
     chunks_root = root / "chunks"
@@ -895,6 +960,7 @@ def render_chunked_random_output(
     if output_path.exists() or output_path.is_symlink():
         raise checkpoint_error(conflict=True)
     selected = {key: Path(value) for key, value in selected_asset_paths(fb_recipe, asset_set).items()}
+    cached_assets = selected_entries(fb_recipe)
     media_types = {key: fb_recipe["assets"][key]["media_type"] for key in selected}
     asset_durations = {}
     for key, path in selected.items():
@@ -946,22 +1012,37 @@ def render_chunked_random_output(
                             render_needed = True
                             info = None
                     if render_needed:
-                        command = build_opencl_chunk_command(
-                            ffmpeg=ffmpeg,
-                            source=source_path,
-                            output=temporary,
-                            spec=spec,
-                            assets=selected,
-                            asset_media_types=media_types,
-                            asset_durations=asset_durations,
-                            chunk=row,
-                            kernel_path=kernel_path,
-                        )
+                        native = frame_pipeline() == "cuda"
+                        if native:
+                            raw_partial = temporary.with_name(temporary.name + ".native.h264")
+                            if raw_partial.exists() or raw_partial.is_symlink():
+                                if not may_clean_partial or raw_partial.is_symlink() or not raw_partial.is_file():
+                                    raise checkpoint_error()
+                                raw_partial.unlink()
+                            command = build_native_chunk_command(
+                                ffmpeg=ffmpeg, source=source_path, output=temporary, spec=spec,
+                                recipe=fb_recipe, asset_durations=asset_durations, chunk=row,
+                                plan_path=chunks_root / ("chunk-%05d.native.json" % row["index"]),
+                            )
+                        else:
+                            command = build_opencl_chunk_command(
+                                ffmpeg=ffmpeg,
+                                source=source_path,
+                                output=temporary,
+                                spec=spec,
+                                assets=selected,
+                                asset_media_types=media_types,
+                                asset_durations=asset_durations,
+                                chunk=row,
+                                kernel_path=kernel_path,
+                                asset_cache_entries=cached_assets,
+                            )
                         try:
                             if runner is None:
                                 from .gpu import run_render_with_progress
                                 run_render_with_progress(
                                     command,
+                                    ffmpeg_progress=not native,
                                     timeout=render_timeout,
                                     absolute_timeout=render_timeout,
                                     configured_timeout=render_timeout,

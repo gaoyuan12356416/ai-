@@ -28,7 +28,7 @@ from features.fb_gpu.random_overlay import (
     validate_recipe,
 )
 
-from .core import DramaSynthesisError, RECIPE_CATEGORIES, RECIPE_PROFILE
+from .core import DramaSynthesisError, RECIPE_CATEGORIES, RECIPE_PROFILE, validate_source_overlay
 from .local_checkpoint import (
     atomic_write_record, checkpoint_error, file_fingerprint, load_completed, read_record, save_completed,
 )
@@ -352,7 +352,7 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
                              configured_timeout=None, diagnostic_path=None, diagnostic_context=None, stall_timeout=None,
                              popen=None, progress_callback=None, monotonic=None,
                              progress_offset_seconds=0.0, progress_total_seconds=None,
-                             progress_frame_offset=0):
+                             progress_frame_offset=0, ffmpeg_progress=True):
     """Track one child with monotonic extension, stall fencing and safe evidence."""
     from .async_runtime import clear_process, emit_progress, process_launch, record_process
 
@@ -386,7 +386,10 @@ def run_render_with_progress(command, *, timeout, duration_seconds, absolute_tim
             raise _timeout_configuration_error()
     monotonic = monotonic or time.monotonic
     popen = popen or subprocess.Popen
-    tracked_command = [command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
+    if type(ffmpeg_progress) is not bool:
+        raise _timeout_configuration_error()
+    tracked_command = ([command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
+                       if ffmpeg_progress else list(command))
     updates = queue.Queue(maxsize=8)
     proc = None
     reader = None
@@ -808,6 +811,7 @@ def _render_random_output_legacy(
     actual_sha = hashlib.sha256(_canonical(unsigned).encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[0-9a-f]{64}", supplied_sha) or supplied_sha != actual_sha:
         raise DramaSynthesisError("drama_recipe_hash_invalid", "随机模板配方指纹无效", 409)
+    source_overlay = validate_source_overlay(recipe)
     assets = load_asset_set(Path(asset_root), str(manifest_sha256 or "").lower())
     fb_recipe = {
         "asset_set_sha256": recipe.get("asset_set_sha256"),
@@ -817,6 +821,8 @@ def _render_random_output_legacy(
         "tint_opacity_bp": int(recipe.get("tint_opacity_bp") or 0),
         "version": 1,
     }
+    if source_overlay is not None:
+        fb_recipe["source_overlay"] = source_overlay
     try:
         validate_recipe(fb_recipe, assets)
     except Exception:
@@ -857,7 +863,7 @@ def _render_random_output_legacy(
     fd, temporary = tempfile.mkstemp(prefix=".random-render-", suffix=".mp4", dir=str(output_path.parent))
     os.close(fd)
     temporary_path = Path(temporary)
-    config = SimpleNamespace(ffmpeg=ffmpeg)
+    config = SimpleNamespace(ffmpeg=ffmpeg, compositor_backend="cpu_legacy")
     started_record = {"version": 1, "identity": identity, "artifact": None,
                       "result": None, "temporary_name": temporary_path.name}
     verified_render = False
@@ -1055,6 +1061,19 @@ def render_random_output(
     timeout: Optional[int] = None,
     runner=None,
 ) -> Dict[str, Any]:
+    # Jobs freeze this SHA at creation. Keep historical catalogs selectable
+    # from trusted deployment configuration when the default pool expands.
+    from features.random_overlay_catalog import AssetCatalogError, resolve_asset_catalog
+    try:
+        asset_root, manifest_sha256 = resolve_asset_catalog(
+            asset_root=asset_root,
+            manifest_sha256=manifest_sha256,
+            requested_sha256=recipe.get("asset_set_sha256"),
+        )
+    except AssetCatalogError as exc:
+        raise DramaSynthesisError(
+            "drama_template_catalog_unavailable", "随机模板目录版本不可用", 503
+        ) from exc
     backend = compositor_backend()
     if backend == "opencl_fused_v2":
         from .gpu_compositor import render_chunked_random_output

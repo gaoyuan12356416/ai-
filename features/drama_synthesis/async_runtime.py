@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -34,7 +35,7 @@ STAGES = frozenset({
     "queued", "starting", "rendering", "downloading", "normalizing",
     "waiting_cover", "rendering_intro", "concatenating", "removing_bgm",
     "rendering_random", "uploading", "verifying", "completed", "failed",
-    "recovery_required",
+    "recovery_required", "prefetching", "prefetched",
 })
 METRICS = frozenset({
     "bytes_done", "bytes_total", "episodes_done", "episodes_total",
@@ -52,6 +53,9 @@ ADVANCEMENT_METRICS = METRICS - {
 }
 TERMINAL = frozenset({"completed", "failed"})
 ERROR_MESSAGES = {
+    "drama_intro_cover_invalid": "片头封面无法解码或尺寸超限，请检查封面图片",
+    "drama_intro_cover_color_unsupported": "片头封面的色彩信息无法转换为 sRGB，请更换封面",
+    "drama_intro_cover_source_changed": "片头封面在读取时发生变化，已停止制作，请重试",
     "gpu_job_input_conflict": "任务制作参数与已保存的执行不一致，已停止重复制作",
     "gpu_job_not_found": "未找到制作记录",
     "gpu_queue_full": "制作等待队列已满，请稍后重试",
@@ -475,7 +479,9 @@ def clear_process(pid):
 class AsyncRuntime:
     def __init__(self, root, execute, cached_result, *, sync_cached_result=None, can_resume=None,
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
-                 dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True):
+                 dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True,
+                 prefetch=None, prefetch_during_download=False, validate_payload=None,
+                 public_result=None, can_prefetch=None):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
         if type(dispatcher_workers) is not int or not 1 <= dispatcher_workers <= 8:
@@ -493,6 +499,17 @@ class AsyncRuntime:
         self.execute, self.cached_result = execute, cached_result
         self.sync_cached_result = sync_cached_result or cached_result
         self.can_resume = can_resume
+        # Optional media-task adapters retain the exact legacy contract by default.
+        self.validate_payload = validate_payload or validate_render_payload
+        self.public_result_adapter = public_result
+        self.can_prefetch = can_prefetch or (lambda payload: True)
+        self.prefetch = prefetch
+        if type(prefetch_during_download) is not bool:
+            raise ValueError("prefetch_during_download must be boolean")
+        self.prefetch_during_download = prefetch_during_download
+        self._prefetcher = None
+        self._prefetch_job = None
+        self._prefetch_stop = threading.Event()
         self.fingerprint, self.clock, self.process_probe = fingerprint, clock, process_probe
         self.render_slots = render_slots or threading.BoundedSemaphore(1)
         self.dispatcher_workers = dispatcher_workers
@@ -580,7 +597,7 @@ class AsyncRuntime:
                               if key in METRICS and type(value) in (int, float)
                               and math.isfinite(value) and 0 <= value <= 1e18}
         if record["status"] == "completed":
-            result["result"] = self._public_result(record["result"], record["job_id"])
+            result["result"] = self._public_result(record["result"], record["job_id"], record["_payload"])
         if record.get("error"):
             result["error"] = safe_error(runtime_error(record["error"].get("code", "gpu_render_failed")))
         return result
@@ -615,9 +632,13 @@ class AsyncRuntime:
         if not self._healthy:
             raise runtime_error("gpu_runtime_unverified")
 
-    def _public_result(self, value, job_id):
+    def _public_result(self, value, job_id, payload=None):
         if not isinstance(value, dict) or value.get("job_id", job_id) != job_id:
             raise runtime_error("gpu_render_failed", 500)
+        if self.public_result_adapter is not None:
+            projected = self.public_result_adapter(value, payload)
+            if projected is not None:
+                return projected
         result = gpu_cache.public_result(value)
         # Preserve the legacy trivial success envelope without arbitrary fields.
         if type(value.get("ok")) is bool:
@@ -641,13 +662,13 @@ class AsyncRuntime:
     def _complete(self, record, result):
         now = self._timestamp()
         record.update(status="completed", stage="completed", error=None,
-                      result=self._public_result(result, record["job_id"]),
+                      result=self._public_result(result, record["job_id"], record["_payload"]),
                       completed_at=record.get("completed_at") or now,
                       heartbeat_at=now, last_progress_at=now, _resource_blocked=False)
         self._save(record)
 
     def submit(self, payload):
-        validate_render_payload(payload)
+        self.validate_payload(payload)
         fingerprint = self.fingerprint(payload)
         job_id = payload["job_id"]
         with self._submission_lock(job_id):
@@ -682,7 +703,7 @@ class AsyncRuntime:
             return self._dto(record)
 
     def resume(self, payload, expected_generation):
-        validate_render_payload(payload)
+        self.validate_payload(payload)
         if type(expected_generation) is not int or expected_generation < 1:
             raise runtime_error("invalid_request", 400)
         fingerprint, job_id = self.fingerprint(payload), payload["job_id"]
@@ -940,6 +961,101 @@ class AsyncRuntime:
         for dispatcher in self._dispatchers:
             dispatcher.start()
         self._heartbeat.start()
+        if self.prefetch is not None:
+            self._prefetcher = threading.Thread(target=self._prefetch_loop, name="drama-gpu-prefetch", daemon=True)
+            self._prefetcher.start()
+
+    def _prefetch_allowed(self):
+        # Download overlap is opt-in and separately bounded by the worker's
+        # aggregate connection budget. This lane never performs media work.
+        active = [row for row in self._records.values() if row["status"] == "running"]
+        stages = {
+            "concatenating", "removing_bgm", "rendering", "rendering_random", "uploading", "verifying",
+        }
+        if self.prefetch_during_download:
+            stages.update({"downloading", "normalizing"})
+        return bool(active) and all(row["stage"] in stages for row in active)
+
+    def _prefetch_loop(self):
+        while not self._stop.wait(0.25):
+            lock = None
+            with self._mutex:
+                queued = sorted((row for row in self._records.values() if row["status"] == "queued"),
+                                key=lambda row: (row["created_at"], row["job_id"]))
+                if (not self._accepting or not self._healthy or self._resource_blocked()
+                        or not queued or not self._prefetch_allowed()):
+                    continue
+                record = queued[0]
+                if not self.can_prefetch(record["_payload"]):
+                    continue
+                generation = record["generation"]
+                same_generation = record.get("_prefetch_attempted_generation") == generation
+                attempts = record.get("_prefetch_attempts", 1) if same_generation else 0
+                if same_generation and (
+                        record["stage"] == "prefetched"
+                        or record.get("_prefetch_result") in {"completed", "failed"}
+                        or attempts >= 3
+                        or self.clock() < record.get("_prefetch_retry_after", 0)):
+                    continue
+                lock = _FileLock(self.root / "locks" / (record["job_id"] + ".lock"))
+                if not lock.acquire():
+                    continue
+                self._prefetch_job = record["job_id"]
+                self._prefetch_stop.clear()
+                record.update(stage="prefetching", _prefetch_attempted_generation=generation,
+                              _prefetch_attempts=attempts + 1, _prefetch_result="running")
+                try:
+                    self._save(record)
+                except Exception:
+                    self._prefetch_job = None
+                    lock.release()
+                    return
+                payload = deepcopy(record["_payload"])
+
+            def progress(**metrics):
+                with self._mutex:
+                    current = self._records[record["job_id"]]
+                    if current["status"] != "queued" or current["generation"] != generation:
+                        self._prefetch_stop.set()
+                        return
+                    current["progress"] = {key: value for key, value in metrics.items()
+                                           if key in METRICS and type(value) in (int, float)
+                                           and math.isfinite(value) and 0 <= value <= 1e18}
+                    current["heartbeat_at"] = current["last_progress_at"] = self._timestamp()
+                    self._save(current)
+
+            ok, error_code = False, None
+            try:
+                self.prefetch(payload, stop_event=self._prefetch_stop, progress_callback=progress)
+                ok = not self._prefetch_stop.is_set()
+            except Exception as exc:
+                # Never log exception text: request errors may contain source URLs.
+                code = getattr(exc, "code", None)
+                error_code = code if code in ERROR_MESSAGES or code in {
+                    "drama_prefetch_stopped", "drama_prefetch_budget_exceeded", "drama_prefetch_path_invalid",
+                } else "drama_prefetch_internal_error"
+            finally:
+                with self._mutex:
+                    self._prefetch_job = None
+                    current = self._records[record["job_id"]]
+                    if current["status"] == "queued" and current["generation"] == generation:
+                        current["stage"] = "prefetched" if ok else "queued"
+                        retry = error_code == "drama_episode_download_failed" and attempts + 1 < 3
+                        interrupted = self._prefetch_stop.is_set()
+                        current["_prefetch_result"] = (
+                            "completed" if ok else "stopped" if interrupted else "retry_wait" if retry else "failed")
+                        current["_prefetch_retry_after"] = self.clock() + 30 * (attempts + 1) if retry else 0
+                        current["_prefetch_error"] = {"code": error_code, "at": self._timestamp()} if error_code else None
+                        if error_code and not interrupted:
+                            logging.getLogger(__name__).warning(
+                                "drama prefetch stopped job_id=%s generation=%d attempt=%d code=%s retry=%s",
+                                current["job_id"], generation, attempts + 1, error_code, retry)
+                        try:
+                            self._save(current)
+                        except Exception:
+                            pass
+                    lock.release()
+                    self._wake.set()
 
     def _dispatch(self):
         while not self._stop.is_set():
@@ -950,6 +1066,10 @@ class AsyncRuntime:
                                 key=lambda row: (row["created_at"], row["job_id"]))
                 if queued and self._healthy and not self._resource_blocked() and self.render_slots.acquire(blocking=False):
                     record = queued[0]
+                    if self._prefetch_job == record["job_id"]:
+                        # The active render finished. Hand off the partial files
+                        # before allowing this same job to start its renderer.
+                        self._prefetch_stop.set()
                     lock = _FileLock(self.root / "locks" / (record["job_id"] + ".lock"))
                     if not lock.acquire():
                         lock = None
@@ -988,12 +1108,17 @@ class AsyncRuntime:
     def stop_intake(self):
         with self._mutex:
             self._accepting = False
+            self._prefetch_stop.set()
 
     def close(self, timeout=30):
         self.stop_intake()
         self._stop.set()
         self._wake.set()
         deadline = time.monotonic() + timeout
+        if self._prefetcher is not None:
+            self._prefetcher.join(timeout=max(0, deadline - time.monotonic()))
+            if self._prefetcher.is_alive():
+                return False
         for dispatcher in self._dispatchers:
             dispatcher.join(timeout=max(0, deadline - time.monotonic()))
             if dispatcher.is_alive():

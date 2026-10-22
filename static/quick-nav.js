@@ -1,6 +1,12 @@
 (function () {
   const DEFAULT_NAV = [
     {
+      key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
+      items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
+        description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
+        href: "/video-editing.html", module: "video_editing", enabled: true }],
+    },
+    {
       key: "ad_control",
       label: "AI自动规则调控",
       order: 5,
@@ -526,6 +532,7 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
+    videoEditing: "/video-editing.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -568,6 +575,15 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    if (!normalized.some(group => group && Array.isArray(group.items) &&
+        group.items.some(item => item && item.key === "videoEditing"))) {
+      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+      const editorGroup = normalized.find(group => group && group.key === "video_editing");
+      if (editorGroup) {
+        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
+      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+    }
     let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
     if (!tiktokPlatform) {
       tiktokPlatform = {

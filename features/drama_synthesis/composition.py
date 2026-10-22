@@ -15,7 +15,7 @@ import os
 import re
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
-from .core import DramaSynthesisError, RECIPE_PROFILE
+from .core import DramaSynthesisError, RECIPE_PROFILE, validate_source_overlay
 
 
 SPEC_VERSION = 1
@@ -122,6 +122,7 @@ def compile_random_overlay_spec(
     """Compile the immutable random recipe into a renderer-neutral scene."""
     if not isinstance(recipe, Mapping) or recipe.get("profile") != RECIPE_PROFILE:
         raise composition_error()
+    source_overlay = validate_source_overlay(recipe)
     if not isinstance(renderer_profile, str) or not re.fullmatch(r"[a-z0-9-]{16,100}", renderer_profile):
         raise composition_error()
     duration = _positive_float(source_info.get("duration"))
@@ -169,6 +170,16 @@ def compile_random_overlay_spec(
             ),
             "transform": {"rotation_millidegrees": 0, "scale_bp": 10000},
             "z_index": z_index,
+        })
+    if source_overlay is not None:
+        layers.append({
+            "id": "source-overlay",
+            "kind": "video",
+            "source": "input",
+            "fit": "cover",
+            "opacity_bp": source_overlay["opacity_bp"],
+            "transform": {"rotation_millidegrees": 0, "scale_bp": source_overlay["scale_bp"]},
+            "z_index": 6,
         })
     spec = {
         "version": SPEC_VERSION,
@@ -241,11 +252,12 @@ def validate_composition_spec(spec: Any) -> Dict[str, Any]:
     }:
         raise composition_error()
     layers = spec.get("layers")
-    if not isinstance(layers, Sequence) or isinstance(layers, (str, bytes)) or len(layers) != 6:
+    if not isinstance(layers, Sequence) or isinstance(layers, (str, bytes)) or len(layers) not in {6, 7}:
         raise composition_error()
-    if [row.get("id") if isinstance(row, Mapping) else None for row in layers] != [
+    expected_ids = [
         "source-background", "source-main", "asset-tint", "asset-opacity_video", "asset-border", "asset-corners"
-    ]:
+    ] + (["source-overlay"] if len(layers) == 7 else [])
+    if [row.get("id") if isinstance(row, Mapping) else None for row in layers] != expected_ids:
         raise composition_error()
     expected_layer_fields = {"id", "kind", "source", "fit", "opacity_bp", "transform", "z_index"}
     for index, row in enumerate(layers):
@@ -262,7 +274,14 @@ def validate_composition_spec(spec: Any) -> Dict[str, Any]:
             raise composition_error()
         _strict_int(transform.get("rotation_millidegrees"), -360000, 360000)
         _strict_int(transform.get("scale_bp"), 1, 100000)
-        if index < 2:
+        if index == 6:
+            if row.get("kind") != "video" or row.get("source") != "input" or row.get("fit") != "cover":
+                raise composition_error()
+            _strict_int(row.get("z_index"), 6, 6)
+            _strict_int(row.get("opacity_bp"), 200, 500)
+            _strict_int(transform.get("rotation_millidegrees"), 0, 0)
+            _strict_int(transform.get("scale_bp"), 11000, 15000)
+        elif index < 2:
             if row.get("kind") != "video" or row.get("source") != "input":
                 raise composition_error()
         else:
