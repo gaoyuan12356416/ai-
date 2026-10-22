@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import time
 import urllib.request
+import urllib.error
 
 from patch_video_editing import patch_app, patch_nav
 
@@ -60,12 +61,22 @@ def require_idle():
         conn.close()
 
 
-def healthy():
+def healthy(require_editor=True):
     for attempt in range(20):
         try:
             with urllib.request.urlopen('http://127.0.0.1:8787/api/auth/status', timeout=2) as response:
                 if response.status == 200 and isinstance(json.load(response), dict):
-                    return
+                    if not require_editor:
+                        return
+                    # A legacy health route cannot prove the new dispatch is
+                    # installed. Its unauthenticated response must be JSON 401.
+                    try:
+                        with urllib.request.urlopen('http://127.0.0.1:8787/api/video-editing/config', timeout=2):
+                            pass
+                    except urllib.error.HTTPError as error:
+                        with error:
+                            if error.code == 401 and isinstance(json.load(error), dict):
+                                return
         except Exception:
             pass
         time.sleep(1)
@@ -97,6 +108,8 @@ def prepare(stage, expected_app, expected_nav):
     add(ROOT / 'scripts/video_editing_worker.py', (stage / 'scripts/video_editing_worker.py').read_bytes(), guard_new=True)
     add(Path('/etc/systemd/system/video-editing-worker.service'),
         (stage / 'deploy/video-editing-worker.service').read_bytes(), guard_new=True)
+    add(Path('/etc/nginx/default.d/video-editing.conf'),
+        (stage / 'deploy/video-editing-nginx.conf').read_bytes(), guard_new=True)
     add(Path('/etc/systemd/system/drama-material-api.service.d/99-zzzz-video-editing.conf'),
         b'[Service]\nEnvironmentFile=/etc/video-editing/video-editing.env\n', guard_new=True)
     config = b'''VIDEO_EDITING_DB=/mnt/data-disk/video-editing/state.sqlite3
@@ -163,9 +176,11 @@ def main():
                 installed.append(path)
                 if sha(path) != row['new']:
                     raise RuntimeError('Installed file hash mismatch')
+            run('nginx', '-t')
             run('systemctl', 'daemon-reload')
             run('systemctl', 'start', UNIT)
             healthy()
+            run('systemctl', 'reload', 'nginx')
         except BaseException:
             # New intake is still disabled; no editor execution is admitted.
             for path in reversed(installed):
@@ -176,7 +191,9 @@ def main():
                     path.unlink(missing_ok=True)
             run('systemctl', 'daemon-reload')
             run('systemctl', 'start', UNIT)
-            healthy()
+            healthy(require_editor=False)
+            run('nginx', '-t')
+            run('systemctl', 'reload', 'nginx')
             manifest['status'] = 'failed_restored'
             atomic(manifest_path, json.dumps(manifest, indent=2).encode(), 0o600)
             raise

@@ -41,6 +41,7 @@ def patch_app(source):
             '        if urlparse(self.path).path.startswith("/api/video-editing/")'
             ' or urlparse(self.path).path in {"/video-editing.html", '
             '"/video-editing.js", "/video-editing.css"}:\n'
+            '            import sys\n'
             '            from features.video_editing.app_bridge import handle as video_editing_handle\n'
             '            video_editing_handle(self, "' + method + '", sys.modules[__name__])\n'
             '            return\n'
@@ -50,6 +51,26 @@ def patch_app(source):
             if "video_editing_handle" not in body:
                 edits.append((function.body[0].lineno - 1,
                               function.body[0].lineno - 1, block))
+            else:
+                # An earlier installer added the bridge but implicitly relied
+                # on a global sys import absent from the composite live app.
+                # Repair only that existing branch; do not replace its handler.
+                branches = [node for node in function.body if isinstance(node, ast.If)
+                            and any(isinstance(child, ast.ImportFrom)
+                                    and child.module == "features.video_editing.app_bridge"
+                                    and any(alias.name == "handle" and alias.asname == "video_editing_handle"
+                                            for alias in child.names) for child in node.body)]
+                if len(branches) != 1:
+                    raise ValueError("Unexpected existing video editing dispatch: " + method)
+                branch = branches[0]
+                bridge = next(child for child in branch.body if isinstance(child, ast.ImportFrom)
+                              and child.module == "features.video_editing.app_bridge")
+                imported = any(isinstance(child, ast.Import) and child.lineno < bridge.lineno
+                               and any(alias.name == "sys" and alias.asname in (None, "sys")
+                                       for alias in child.names) for child in branch.body)
+                if not imported:
+                    edits.append((bridge.lineno - 1, bridge.lineno - 1,
+                                  " " * bridge.col_offset + "import sys\n"))
         else:
             edits.append((handler.end_lineno, handler.end_lineno,
                           '\n    def do_' + method + '(self):\n' + block +
