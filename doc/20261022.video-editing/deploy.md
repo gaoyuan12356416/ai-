@@ -101,3 +101,12 @@ python3 /mnt/data-disk/video-editing/backups/responsive-20261022T072730Z-ecb0400
 本地审查JS为Windows CRLF，发布Git blob为LF；已逐字节确认仅换行差异。Git/public JS SHA256 `c4d0f0c0ce583561b079b063ac6f84244b6695ab5917ae4218e7f89bb2189f00`。本次新增一条本地技能上下文规则并保留其余条目；个人技能仓库已有未提交改动，本次未混合提交该仓库，memory文件未修改。
 
 最终视觉复核发现取消按钮隐藏时主操作被flex靠左，追加一条CSS将“添加所选剧集”固定靠右，保持后台弹窗惯例；缓存版本递增为 `20261022-responsive-actions-2`。JS逻辑不变，51项逻辑测试和慢请求验收仍对应同一Git JS blob；仅复查按钮位置与公网静态文件。
+
+最终上线提交为 `8d1e9c0de72037f97993ad5ecd9426d41d1e6f66`（15:31北京时间），缓存版本 `20261022-responsive-actions-2`。视觉修正再次通过同样的六文件/公网哈希/原进程验证。最新备份 `/mnt/data-disk/video-editing/backups/responsive-20261022T073147Z-8d1e9c0de720`，JS blob与首发完全一致。当前若需完整回滚BUG-008至 `866e9d6`，必须先还原对齐补丁，再还原交互补丁；以下两步均有当前文件哈希保护：
+
+```sh
+python3 /mnt/data-disk/video-editing/backups/responsive-20261022T073147Z-8d1e9c0de720/rollback.py
+python3 /mnt/data-disk/video-editing/backups/responsive-20261022T072730Z-ecb040032cb2/rollback.py
+```
+
+仅执行第一步会退到已修复交互的 `ecb0400`；按顺序执行两步才回到本次修改前的标准页面。两步均保留后端、GPU及所有业务数据，不重启服务。

@@ -163,3 +163,5 @@ BUG-006按 `9fc968a98924e658895240a8763162a2b97c207f` 仅部署service / store�
 冻结版本真实Chrome连接loopback延迟fixture：产品/搜索/剧集读取各延迟2秒、probe回执延迟3秒，第三集18秒后才ready。点击后立即看到“已就绪2/3”、忙态和取消等待；无需第二次点击，最终自动出现3片/30秒并保存v1。记录仅1次probe POST，来源GET全部指向第三集，未查询已ready的前两集和未选来源。详情 `output/video-editing-responsive-validation/browser-fixture-summary.json`、`fixture-events.json` 及 `local-waiting-final.png` / `local-auto-added-final.png`。这是慢请求交互验收，不是真实GPU吞吐基准。
 
 独立审核另验证了A项目载入期间切B失败仍可重试、A的旧轮询错误不污染B等待。51项覆盖关闭/ESC/取消、连续点击、目录乱序、批量部分4xx/坏2xx、unknown提交、共享task403/404、owner恢复原ID、失败排空单飞、项目源加载锁定和保存不被列表刷新拖住。服务端/上传/GPU实现本次未改，既有未验收的真实大文件和故障注入边界仍按前文保留。
+
+正式Chrome发布后回读：缓存版本responsive-actions-2；产品读取、搜索、剧集加载均在请求完成前显示忙态；真实目录返回44集，前三集已就绪。原验收项目保持v16、两剧5片/12秒和2片/9.7秒，原两条任务保持制作完成。此次只读回看原项目/任务，未提交新的正式probe/render或改变草稿。正式反馈截图为 `output/video-editing-responsive-validation/production-feedback-final.png`，页面读取记录为 `production-browser.json`。
