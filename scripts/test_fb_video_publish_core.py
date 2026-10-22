@@ -34,10 +34,10 @@ class Sources:
         if any(self.pages[i]["blocked_reason"] for i in ids):
             raise DomainError("page_blocked", "授权异常", 409)
         return copy.deepcopy({i: self.pages[i] for i in ids})
-    def get_materials(self, ids, need_desc=False):
+    def get_materials(self, ids, need_desc=False, *, enforce_blacklist=True):
         assert not need_desc, "Only the pair using desc may require it"
         return copy.deepcopy({i: self.materials[i] for i in ids})
-    def search_materials(self, query):
+    def search_materials(self, query, *, enforce_blacklist=True):
         return {"items": list(self.materials.values()), "next_cursor": None, "has_more": False}
 
 

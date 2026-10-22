@@ -70,7 +70,7 @@ class Service:
         pages = self.sources.get_pages(actor, request["page_ids"])
         if request["processing_mode"] == "random_overlay" and not self.prepare_enabled:
             raise DomainError("prepare_gate_closed", "视频加工服务未启用，请选择不加工", 409)
-        materials = self.sources.get_materials(request["material_ids"], need_desc=False)
+        materials = self.sources.get_materials(request["material_ids"], need_desc=False, enforce_blacklist=False)
         if set(pages) != set(request["page_ids"]) or set(materials) != set(request["material_ids"]):
             raise DomainError("source_scope_changed", "素材或Page不再可用", 409)
         return {"pages": pages, "materials": materials}
@@ -156,7 +156,8 @@ class Service:
             if route == "/pages":
                 return self.configured_pages(actor)
             if route == "/materials":
-                return {"ok": True, **self.sources.search_materials({**query, "search": query.get("q", query.get("search", ""))})}
+                return {"ok": True, **self.sources.search_materials(
+                    {**query, "search": query.get("q", query.get("search", ""))}, enforce_blacklist=False)}
             if route == "/draft":
                 return self.store.draft(actor)
             if route in {"/batches", "/tasks"}:

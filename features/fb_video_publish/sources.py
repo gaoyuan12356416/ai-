@@ -176,7 +176,7 @@ class SourceRepository:
                 raise SourceError("page_unavailable", f"Page {pid}：" + page["blocked_reason"], 409)
         return {pid: available[pid] for pid in wanted}
 
-    def _conditions(self):
+    def _conditions(self, *, enforce_blacklist=True):
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         source_language, drama_language = _language_sql("s.language"), _language_sql("d.language")
         sql = f"""
@@ -186,17 +186,22 @@ class SourceRepository:
             AND EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
                 WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
                 AND d.deploy_time>0 AND d.deploy_time<=%s AND {drama_language}={source_language})
+        """
+        params = ["6", "Dramawave", "1479", int(self.now_fn().timestamp())]
+        if enforce_blacklist:
+            sql += f"""
             AND NOT EXISTS (SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
                 WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id)
             AND NOT EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
                 JOIN `{blocked}`.ads_facebook_post_blacklist b
                   ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
                 WHERE db.content_id=s.data_source_id AND db.app_id=%s)
-        """
-        return sql, ["6", "Dramawave", "1479", int(self.now_fn().timestamp()), "1479"]
+            """
+            params.append("1479")
+        return sql, params
 
-    def _select(self, extra="", params=(), limit=101):
-        condition, base_params = self._conditions()
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True):
+        condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist)
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
@@ -279,7 +284,7 @@ class SourceRepository:
             result.append(item)
         return result
 
-    def search_materials(self, query: Mapping[str, Any]) -> dict:
+    def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True) -> dict:
         if not isinstance(query, Mapping):
             raise SourceError("invalid_request", "素材筛选格式无效")
         search = str(query.get("search") or "").strip()
@@ -341,7 +346,7 @@ class SourceRepository:
                 params.extend([decoded["before"], boundary])
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise SourceError("invalid_cursor", "分页标识无效或筛选条件已改变，请从第一页重新加载") from None
-        rows = self._select(" ".join(extra), params, limit + 1)
+        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist)
         raw_ids = [str(row.get("material_id") or "") for row in rows]
         if (any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in raw_ids)
                 or len(raw_ids) != len(set(raw_ids)) or raw_ids != sorted(raw_ids, key=int, reverse=True)):
@@ -361,10 +366,10 @@ class SourceRepository:
             next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
         result = {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
         if numeric_search and not items and not cursor:
-            result["empty_reason"] = self._exact_search_reason(int(search), language, uploader)
+            result["empty_reason"] = self._exact_search_reason(int(search), language, uploader, enforce_blacklist=enforce_blacklist)
         return result
 
-    def _exact_search_reason(self, material_id: int, language: str, uploader: str) -> str:
+    def _exact_search_reason(self, material_id: int, language: str, uploader: str, *, enforce_blacklist=True) -> str:
         # Explain ineligible IDs without weakening the publication guards or
         # exposing records outside this catalog. This is one indexed row read.
         rows = self.mysql.select(f"""
@@ -389,16 +394,18 @@ class SourceRepository:
             valid_duration = False
         if not valid_duration:
             return "已找到该素材，但源库的视频时长缺失或不在0至3600秒范围内，暂不能选择发布。"
-        return "已找到该素材，但未满足上架、黑名单、视频来源或同语言剧集信息等发布条件。"
+        gates = "上架、黑名单、视频来源" if enforce_blacklist else "上架、视频来源"
+        return f"已找到该素材，但未满足{gates}或同语言剧集信息等发布条件。"
 
-    def get_materials(self, material_ids, need_desc: bool = False) -> dict[str, dict]:
+    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True) -> dict[str, dict]:
         wanted = _ids(material_ids, MAX_MATERIALS, "素材")
         if any(len(value) > 19 for value in wanted):
             raise SourceError("invalid_request", "素材ID无效")
         found = {}
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
-            rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1)
+            rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
+                                enforce_blacklist=enforce_blacklist)
             current = []
             for row in rows:
                 item = self._material(row)
@@ -407,16 +414,28 @@ class SourceRepository:
                 found[item["material_id"]] = item
                 current.append(item)
             if {item["material_id"] for item in current} != set(chunk):
-                raise SourceError("material_unavailable", "部分素材已删除、未上架、被列入黑名单或不符合发布条件，请重新选择", 409)
+                gates = "已删除、未上架、被列入黑名单" if enforce_blacklist else "已删除、未上架"
+                raise SourceError("material_unavailable", f"部分素材{gates}或不符合发布条件，请重新选择", 409)
             self._enrich(current, strict=True, need_desc=need_desc)
         return {material_id: found[material_id] for material_id in wanted}
 
-    def _unavailable_materials(self, ids):
+    def _unavailable_materials(self, ids, *, enforce_blacklist=True):
         """Explain only requested catalog IDs; never replace a failed source read."""
         if not ids:
             return {}
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         slots = ",".join("%s" for _ in ids)
+        blocked_fields = "0 content_blocked,0 series_blocked"
+        params = ["1479", int(self.now_fn().timestamp())]
+        if enforce_blacklist:
+            blocked_fields = f"""
+                   EXISTS(SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
+                     WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id) content_blocked,
+                   EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
+                     JOIN `{blocked}`.ads_facebook_post_blacklist b
+                       ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
+                     WHERE db.content_id=s.data_source_id AND db.app_id=%s) series_blocked"""
+            params.append("1479")
         rows = self.mysql.select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,
                    s.data_source,s.product,s.type,s.is_delete,s.video_duration,
@@ -425,15 +444,10 @@ class SourceRepository:
                      WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
                        AND d.deploy_time>0 AND d.deploy_time<=%s
                        AND {_language_sql('d.language')}={_language_sql('s.language')}) drama_released,
-                   EXISTS(SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
-                     WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id) content_blocked,
-                   EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
-                     JOIN `{blocked}`.ads_facebook_post_blacklist b
-                       ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
-                     WHERE db.content_id=s.data_source_id AND db.app_id=%s) series_blocked
+                   {blocked_fields}
               FROM `{schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
              WHERE s.id IN ({slots}) LIMIT %s
-        """, ["1479", int(self.now_fn().timestamp()), "1479", *ids, len(ids) + 1])
+        """, params + [*ids, len(ids) + 1])
         raw = {}
         for row in rows:
             mid = str(row.get("material_id") or "")
@@ -464,14 +478,14 @@ class SourceRepository:
                     duration_ok = False
                 if not duration_ok:
                     code, message = "material_duration_invalid", "素材时长缺失或不在0至3600秒范围内"
-                elif str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1":
+                elif enforce_blacklist and (str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1"):
                     code, message = "material_blacklisted", "素材关联剧目已被列入Facebook发布黑名单"
                 elif str(row.get("drama_released")) != "1":
                     code, message = "material_not_released", "素材未匹配到已上架的同语言Dramawave剧目"
             result[mid] = {"code": code, "message": message}
         return result
 
-    def resolve_materials(self, material_ids, need_desc: bool = False) -> dict:
+    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True) -> dict:
         """Bounded partial resolution for ID admission and Excel previews.
 
         Per-row data errors are returned without weakening the strict legacy
@@ -485,7 +499,8 @@ class SourceRepository:
         found, errors = {}, {}
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
-            rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1)
+            rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
+                                enforce_blacklist=enforce_blacklist)
             seen, candidates = set(), []
             for row in rows:
                 mid = str(row.get("material_id") or "")
@@ -504,6 +519,7 @@ class SourceRepository:
                 mid = item["material_id"]
                 if mid not in found:
                     errors[mid] = {"code": "material_metadata_ambiguous", "message": "素材缺少唯一的同语言剧名或简介"}
-            errors.update(self._unavailable_materials([mid for mid in chunk if mid not in seen]))
+            errors.update(self._unavailable_materials([mid for mid in chunk if mid not in seen],
+                                                     enforce_blacklist=enforce_blacklist))
         return {"items": {mid: found[mid] for mid in wanted if mid in found},
                 "errors": {mid: errors[mid] for mid in wanted if mid in errors}}

@@ -261,7 +261,7 @@ class ExcelService:
         ids = list(dict.fromkeys(r["page_id"] for r in rows if r["page_id"] in configs))
         pages = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=ids)} if ids else {}
         mids = list(dict.fromkeys(r["material_id"] for r in rows if r["page_id"] in pages))
-        lookup = self.sources.resolve_materials(mids, need_desc=False) if mids else {"items": {}, "errors": {}}
+        lookup = self.sources.resolve_materials(mids, need_desc=False, enforce_blacklist=False) if mids else {"items": {}, "errors": {}}
         counts = self._operator_counts(actor, [r for r in rows if r["page_id"] in pages])
         materials, accepted, seen, now = lookup["items"], [], set(), self.store.now_fn()
         with self.store.connect() as conn:
