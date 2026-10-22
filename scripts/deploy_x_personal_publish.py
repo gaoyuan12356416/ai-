@@ -277,7 +277,12 @@ def paused(config, manifest):
         active = [u for u, state in states.items() if state.get('ActiveState') == 'active']
         if active:
             run('systemctl', 'stop', *active)
-        wait_idle(lambda: any(is_busy(u) for u in WORKERS), 'publisher worker')
+        # Existing planners can legitimately spend a long time in read-only
+        # material selection. Keep their triggers paused and let them finish;
+        # never turn a release drain into a forced termination.
+        drain_timeout = int(config.get('drain_timeout_seconds', 180))
+        require(180 <= drain_timeout <= 7500, 'invalid worker drain timeout')
+        wait_idle(lambda: any(is_busy(u) for u in WORKERS), 'publisher worker', timeout=drain_timeout)
         for value in LOCKS:
             path = Path(value)
             require(path.parent.is_dir(), 'shared lock directory missing')

@@ -100,5 +100,6 @@
       "queued",
       "publishing"
     ]
-  }
+  },
+  "drain_timeout_seconds": 7500
 }
