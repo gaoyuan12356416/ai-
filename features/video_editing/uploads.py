@@ -194,7 +194,7 @@ class Uploads:
             raise VideoEditingError('cos_reconcile_failed','无法核查上传分片，请稍后重试',503) from None
         with self.store.transaction() as db:
             current=self.get(upload_id,actor,db)
-            if current['status'] not in {'completed','aborted'}:
+            if current['status'] in {'initializing','initializing_unknown','uploading'}:
                 current['data']['upload_id']=d['upload_id']; current['data']['uploaded_parts']=parts
                 self.store.update('upload',upload_id,{'status':'uploading','data':current['data']},db)
         return self.get(upload_id,actor)
@@ -202,19 +202,38 @@ class Uploads:
     def complete(self,upload_id,actor):
         self.configured(); row=self.reconcile(upload_id,actor)
         if row['status']=='completed': return row
+        # A lost completion response can mean that COS never received it. Only
+        # retry the same UploadId after reading the exact originally signed
+        # parts; never initialize another session or overwrite another object.
+        recovered_parts=None
+        if row['status']=='completing_unknown':
+            try:
+                recovered_parts=self._parts(row['data'])
+            except Exception:
+                # NoSuchUpload may also mean a previous completion succeeded.
+                # A second HEAD is authoritative; an absent object stays unknown.
+                checked=self.reconcile(upload_id,actor)
+                if checked['status']=='completed':return checked
+                raise VideoEditingError('cos_complete_unknown','COS 合并状态仍待核查，请稍后重试',503) from None
         with self.store.transaction() as db:
             row=self.get(upload_id,actor,db); d=row['data']
-            require(row['status']=='uploading','upload_not_completable','上传尚不可完成',409)
-            parts=sorted(d['uploaded_parts'],key=lambda p:p['part_number'])
+            if row['status']=='completed':return row
+            require(row['status']=='uploading' or (row['status']=='completing_unknown' and recovered_parts is not None),
+                    'upload_not_completable','上传尚不可完成',409)
+            parts=sorted(recovered_parts if recovered_parts is not None else d['uploaded_parts'],key=lambda p:p['part_number'])
             require([p['part_number'] for p in parts]==list(range(1,d['part_count']+1)),'parts_incomplete','部分分片尚未上传',409)
             for p in parts:
                 expected=d['parts'].get(str(p['part_number']))
                 require(expected and p['size_bytes']==expected['size_bytes'] and p['etag'].strip('"').lower()==base64.b64decode(expected['content_md5']).hex(),
                     'part_identity_mismatch','分片内容校验不一致',409)
-            self.store.update('upload',upload_id,{'status':'completing'},db)
+            manifest=[{'PartNumber':p['part_number'],'ETag':p['etag']} for p in parts]
+            require(not d.get('completion_parts') or d['completion_parts']==manifest,
+                    'part_identity_mismatch','完成请求的分片身份已改变',409)
+            d['completion_parts']=manifest
+            self.store.update('upload',upload_id,{'status':'completing','data':d},db)
         try:
             self.client.complete_multipart_upload(Bucket=self.bucket,Key=d['key'],UploadId=d['upload_id'],
-                MultipartUpload={'Part':[{'PartNumber':p['part_number'],'ETag':p['etag']} for p in parts]},
+                MultipartUpload={'Part':manifest},
                 Metadata={'x-cos-forbid-overwrite':'true'})
             head=self._head(d)
             require(head is not None,'cos_complete_unknown','COS 合并结果待核查',503)

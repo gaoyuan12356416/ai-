@@ -84,6 +84,19 @@ test('a true version conflict preserves unsaved draft and prevents project repla
   assert.equal(app.field('projectName').value,'my unsaved draft');assert.match(app.field('saveStatus').textContent,/版本冲突/);
 });
 
+test('explicit save-copy resolves a conflict without writing over the other saved project',async()=>{
+  const projects=new Map();let next=1;
+  const app=await browser(async(url,options)=>{
+    if(options.method==='POST'){const body=JSON.parse(options.body);const record={...body,id:`vp_copy_${next++}`,version:1};delete record.operation_id;projects.set(record.id,record);return response({item:record});}
+    if(options.method==='PATCH'){const remote=projects.get('vp_copy_1');projects.set(remote.id,{...remote,name:'other editor',version:2});return response({code:'project_version_conflict',error:'项目已被更新'},409);}
+    if(url.endsWith('/projects/vp_copy_1'))return response({item:projects.get('vp_copy_1')});
+  });
+  await app.rename('initial');await app.field('saveProject').click();await app.rename('my kept edits');await app.field('saveProject').click();
+  await app.field('saveCopy').click();
+  assert.equal(projects.size,2);assert.equal(projects.get('vp_copy_1').name,'other editor');
+  assert.equal(projects.get('vp_copy_2').name,'my kept edits · 副本');assert.match(app.field('saveStatus').textContent,/v1/);
+});
+
 test('multipart resume reconciles COS, renews an expired signature and never stores credentials',async()=>{
   const buffer=Buffer.from('abcdefghijklmnopq');const file={name:'sample.mp4',size:buffer.length,type:'video/mp4',lastModified:123,slice:(start,end)=>new Blob([buffer.subarray(start,end)])};
   const fingerprint=`${file.name}|${file.size}|${file.lastModified}`;

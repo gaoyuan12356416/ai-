@@ -104,6 +104,32 @@ class UploadTests(unittest.TestCase):
         with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
         self.assertEqual(self.uploads.reconcile(row['id'],ACTOR)['status'],'completed')
         self.assertEqual(self.uploads.complete(row['id'],ACTOR)['status'],'completed');self.assertEqual(self.cos.completions,1)
+    def test_unknown_completion_retries_only_same_upload_and_manifest(self):
+        row=self.create();self.signed(row)
+        with patch.object(self.cos,'complete_multipart_upload',side_effect=TimeoutError('secret URL')) as request:
+            with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
+            original=request.call_args.kwargs
+        self.assertEqual(self.uploads.get(row['id'],ACTOR)['status'],'completing_unknown')
+        with patch.object(self.cos,'complete_multipart_upload',wraps=self.cos.complete_multipart_upload) as request:
+            self.assertEqual(self.uploads.complete(row['id'],ACTOR)['status'],'completed')
+            self.assertEqual(request.call_args.kwargs,original)
+        self.assertEqual(len(self.cos.initializations),1)
+    def test_unknown_completion_without_upload_or_object_stays_unknown(self):
+        row=self.create();self.signed(row)
+        with patch.object(self.cos,'complete_multipart_upload',side_effect=TimeoutError()):
+            with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
+        with patch.object(self.cos,'list_parts',side_effect=Missing()):
+            with self.assertRaises(VideoEditingError) as caught:self.uploads.complete(row['id'],ACTOR)
+        self.assertEqual(caught.exception.code,'cos_complete_unknown')
+        self.assertEqual(self.uploads.get(row['id'],ACTOR)['status'],'completing_unknown')
+        self.assertEqual(self.cos.completions,0);self.assertEqual(len(self.cos.initializations),1)
+    def test_unknown_completion_rejects_changed_parts(self):
+        row=self.create();self.signed(row)
+        with patch.object(self.cos,'complete_multipart_upload',side_effect=TimeoutError()):
+            with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
+        self.cos.parts['remote-1'][0]['ETag']='"'+('0'*32)+'"'
+        with self.assertRaises(VideoEditingError):self.uploads.complete(row['id'],ACTOR)
+        self.assertEqual(self.cos.completions,0)
     def test_completing_does_not_reset_to_uploading(self):
         row=self.create()
         with self.store.transaction() as db:self.store.update('upload',row['id'],{'status':'completing'},db)

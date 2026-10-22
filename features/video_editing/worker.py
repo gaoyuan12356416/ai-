@@ -88,7 +88,7 @@ class Dispatcher:
             else:
                 self.fail_or_hold(row,'unknown',exc.code,'制作状态待核查，请稍后刷新')
         except Exception:
-            logging.exception('video editing GPU status check failed for %s',row['id'])
+            logging.warning('video editing GPU status check failed for %s',row['id'])
             self.fail_or_hold(row,'unknown','gpu_transport_unknown','GPU 连接中断，系统将继续核查同一任务')
         return True
 

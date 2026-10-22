@@ -19,7 +19,7 @@ def main():
     worker=Dispatcher(get_service(app))
     while True:
         try:worker.tick()
-        except Exception:logging.exception('video editing dispatcher tick failed')
+        except Exception:logging.warning('video editing dispatcher tick failed; retrying durable task state')
         if args.once:return
         time.sleep(max(1,args.interval))
 

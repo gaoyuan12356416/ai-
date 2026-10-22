@@ -147,6 +147,7 @@
     $('projectName').value=state.project.name || ''; $('dramaCount').textContent=`${state.project.dramas.length} 部`;
     $('selectedAssetName').textContent=selectedAsset() ? sourceTitle(selectedAsset()) : '选择一个素材';
     $('undoEdit').disabled=!state.undo.length;
+    $('saveCopy').classList.toggle('hidden',!state.conflicted);
     $('renderProject').disabled=!state.project.dramas.length || !state.project.asset_id || state.config.intake_enabled===false || state.config.worker_configured===false;
     $('dramaList').innerHTML=state.project.dramas.map((drama,index) => `<div class="drama-row ${index===state.activeDrama?'active':''}"><span class="drama-cover">${esc((drama.title||'剧').slice(0,1))}</span><button data-drama-index="${index}"><strong>${esc(drama.title || drama.content_id)}</strong><small>${drama.clips.length} 片段 · ${seconds(totalDuration(drama.clips))} 秒</small></button><button class="remove-drama" data-remove-drama="${index}" title="移除此短剧" aria-label="移除此短剧">×</button></div>`).join('') || '<div class="empty">还没有短剧</div>';
     const drama=currentDrama(); const clips=drama && drama.clips || []; const duration=totalDuration(clips);
@@ -232,12 +233,12 @@
       try{saved=item(await api(projectId?`${ROOT}/projects/${encodeURIComponent(projectId)}`:`${ROOT}/projects`,{method:projectId?'PATCH':'POST',body:projectId?{...data,expected_version:state.project.version}:{...data,operation_id:state.pendingCreate.operation_id}}));}
       catch(error){if(projectId&&(error.status===409||!error.status)){const remote=item(await api(`${ROOT}/projects/${encodeURIComponent(projectId)}`));if(canonical(serializeProject(remote))===canonical(data))saved=remote;else throw error;}else throw error;}
       if(state.project!==savingProject)return saved;
-      state.project.id=saved.id;state.project.version=saved.version;state.operationId=null;state.pendingCreate=null;
+      state.project.id=saved.id;state.project.version=saved.version;state.operationId=null;state.pendingCreate=null;state.conflicted=false;$('saveCopy').classList.add('hidden');
       if(state.revision===revision)state.dirty=false;
       $('saveStatus').textContent=state.dirty?'有未保存修改':`已自动保存 · v${saved.version}`;
       await loadProjects();if(explicit)toast('草稿已保存');return state.project;
     })();
-    try{return await state.saving;}catch(error){$('saveStatus').textContent=error.status===409?'版本冲突，请重新打开项目':'保存失败 · 可重试';throw error;}finally{state.saving=null;}
+    try{return await state.saving;}catch(error){if(error.status===409){state.conflicted=true;$('saveCopy').classList.remove('hidden');}$('saveStatus').textContent=error.status===409?'版本冲突 · 可另存副本保留修改':'保存失败 · 可重试';throw error;}finally{state.saving=null;}
   }
   async function loadProjects(){if(demo)return;const response=await api(`${ROOT}/projects`);state.projects=response.items||[];renderProjectPicker();}
   function renderProjectPicker(){$('projectPicker').innerHTML='<option value="">打开项目…</option>'+state.projects.map(project=>`<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('');}
@@ -249,7 +250,7 @@
   }
   async function openProject(id){
     if(!id)return;const requestSeq=++state.projectLoadSeq;await flushDraft();stopPreview();const project=demo?clone(state.projects.find(entry=>entry.id===id)):item(await api(`${ROOT}/projects/${encodeURIComponent(id)}`));
-    if(!project||requestSeq!==state.projectLoadSeq)return;state.project=project;state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;
+    if(!project||requestSeq!==state.projectLoadSeq)return;state.project=project;state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;
     await Promise.all([...new Set(project.dramas.flatMap(drama=>drama.clips.map(clip=>clip.source_id)))].map(id=>ensureSource(id).catch(error=>toast(error.message,true))));
     if(state.project!==project||requestSeq!==state.projectLoadSeq)return;
     $('saveStatus').textContent=demo?'模拟草稿 · 仅本页':`已保存 · v${project.version}`;renderEditor();setView('editor');
@@ -352,6 +353,7 @@
     $('projectPicker').addEventListener('change',run(event=>openProject(event.target.value)));
     $('newProject').addEventListener('click',run(async()=>{await flushDraft();state.projectLoadSeq++;stopPreview();clearTimeout(state.saveTimer);state.project={name:'未命名剪辑项目',asset_id:'',dramas:[]};state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;$('saveStatus').textContent='尚未保存';renderEditor();}));
     $('saveProject').addEventListener('click',run(()=>saveProject()));$('renderProject').addEventListener('click',run(renderProject));
+    $('saveCopy').addEventListener('click',run(async()=>{if(state.saving)await state.saving.catch(()=>{});const copy=serializeProject();copy.name=(copy.name||'剪辑项目').slice(0,115)+' · 副本';state.project=copy;state.projectLoadSeq++;state.revision++;state.undo=[];state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;state.dirty=true;renderEditor();await saveProject(true);}));
     $('undoEdit').addEventListener('click',()=>{if(!state.undo.length)return;stopPreview();const id=state.project.id,version=state.project.version;state.project={...state.undo.pop(),id,version};state.dirty=true;state.revision++;renderEditor();scheduleSave();});
     $('chooseAsset').addEventListener('click',run(async()=>{await loadAssets();$('assetDialog').showModal();}));
     $('goUpload').addEventListener('click',()=>{$('assetDialog').close();setView('library');});
