@@ -9,6 +9,27 @@ from scripts import deploy_video_editing_gpu as deploy
 
 
 class DeployTests(unittest.TestCase):
+    def test_release_allowlist_admits_exact_recovery_validator_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root).resolve(); candidate = base / "releases" / ("a" * 40)
+            candidate.mkdir(parents=True)
+            changed = ["features/video_editing/" + name + ".py" for name in ("gpu_integration", "recipe", "render", "media")]
+            changed.append("scripts/validate_video_editing_recovery.py")
+            def git(*args):
+                if "rev-parse" in args: return candidate.name
+                if "diff" in args: return "\n".join(changed)
+                return ""
+            original_resolve = Path.resolve
+            def resolve(path, *args, **kwargs):
+                if path == base / "current": return base / "releases" / deploy.BASELINE
+                return original_resolve(path, *args, **kwargs)
+            with mock.patch.object(Path, "is_symlink", lambda path: path == base / "current"), \
+                 mock.patch.object(Path, "resolve", resolve):
+                self.assertEqual(deploy.release_check(candidate, base=base, git=git), changed)
+                changed[-1] = "scripts/validate_video_editing_recovery_extra.py"
+                with self.assertRaisesRegex(deploy.DeployError, "candidate_contains_unrelated_changes"):
+                    deploy.release_check(candidate, base=base, git=git)
+
     def test_environment_overrides_preserve_legacy_and_close_intake(self):
         old = {"COS_BUCKET": "advertising-12345", "COS_REGION": "ap-hongkong",
                "COS_SECRET_KEY": "never-output", "DRAMA_FFMPEG": "/opt/ffmpeg"}
