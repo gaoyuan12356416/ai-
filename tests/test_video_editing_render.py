@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import hashlib
 import json
+import re
 from unittest import mock
 from pathlib import Path
 
@@ -68,6 +69,22 @@ class RenderTests(unittest.TestCase):
             # than treating a successful mux/ffprobe alone as media acceptance.
             subprocess.run(["ffmpeg", "-v", "error", "-i", str(final), "-f", "null", "-"],
                            check=True, capture_output=True, timeout=30)
+            # FFmpeg 7.1 clears link frame_rate in setpts; FFmpeg 8 preserves
+            # it by default. Emulate the production behavior when the newer
+            # binary exposes strip_fps so this regression is caught locally.
+            help_text = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=setpts"],
+                capture_output=True, text=True, check=True).stdout
+            if "strip_fps" in help_text:
+                legacy = root / "result-legacy-setpts.mp4"
+                command = build_assemble_command(paths, recipe, legacy, encoder="libx264")
+                graph_index = command.index("-filter_complex") + 1
+                command[graph_index], count = re.subn(r"(?<!a)setpts=([^;,\[]+)",
+                    r"setpts=\1:strip_fps=1", command[graph_index])
+                self.assertGreaterEqual(count, 7)
+                run_ffmpeg(command, 3.4)
+                validate_output(probe_media(legacy), output_frames(recipe))
+                subprocess.run(["ffmpeg", "-v", "error", "-i", str(legacy), "-f", "null", "-"],
+                               check=True, capture_output=True, timeout=30)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg unavailable")
     def test_failed_ffmpeg_retains_safe_diagnostic_outside_media(self):

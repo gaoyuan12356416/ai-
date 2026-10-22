@@ -64,6 +64,48 @@ test('real catalog never sends an unbounded empty or single-character name searc
   assert.equal(requests.length,1);assert.match(requests[0].url,new RegExp(`q=${encodeURIComponent('她的')}`));
 });
 
+test('actual GPU metric DTOs show clip time, transferred bytes and steps as stage progress, never total percent',async()=>{
+  const tasks=[
+    {id:'ve_time',status:'running',stage:'rendering_random',progress:{out_time_seconds:2.4,duration_seconds:9.9,frame:72,fps:30,percent:24.24}},
+    {id:'ve_download',status:'running',stage:'downloading',progress:{download_bytes:1048576,total_bytes:4194304}},
+    {id:'ve_upload',status:'running',stage:'uploading',progress:{uploaded_bytes:2097152,upload_bytes_total:8388608}},
+    {id:'ve_steps',status:'running',stage:'normalizing',progress:{completed_steps:0,total_steps:4}},
+    {id:'ve_legacy_download',status:'running',stage:'prefetching',progress:{downloaded_bytes:3145728,total_bytes:6291456}},
+  ];
+  const app=await browser(async url=>url.endsWith('/tasks')?response({items:tasks,total:tasks.length}):null);
+  const markup=app.field('taskList').innerHTML;
+  assert.match(markup,/制作中 · 当前阶段：当前片段 2\.4 \/ 9\.9 秒/);
+  assert.match(markup,/下载素材 · 当前阶段：已下载 1\.0 MiB \/ 4\.0 MiB/);
+  assert.match(markup,/上传中 · 当前阶段：已上传 2\.0 MiB \/ 8\.0 MiB/);
+  assert.match(markup,/处理片段 · 当前阶段：已完成 0 \/ 4 步/);
+  assert.match(markup,/预下载素材 · 当前阶段：已下载 3\.0 MiB \/ 6\.0 MiB/);
+  assert.doesNotMatch(markup,/%|rendering_random|\[object Object\]/);
+});
+
+test('runtime stages and waiting states have Chinese labels without exposing unknown technical stage names',async()=>{
+  const stages={queued:'排队中',starting:'准备制作',rendering:'制作中',downloading:'下载素材',normalizing:'处理片段',waiting_cover:'等待封面',rendering_intro:'制作片头',concatenating:'拼接制作',removing_bgm:'处理背景音乐',rendering_random:'制作中',uploading:'上传中',verifying:'校验成片',completed:'制作完成',failed:'失败',recovery_required:'等待恢复',prefetching:'预下载素材',prefetched:'素材已就绪',verification:'校验成片',waiting_gpu_capacity:'等待制作资源',future_internal_stage:'处理中'};
+  const items=Object.entries(stages).map(([stage],i)=>({id:`ve_stage_${i}`,status:'running',stage,progress:{}}));
+  const app=await browser(async url=>url.endsWith('/tasks')?response({items,total:items.length}):url.includes('/assets?')?response({items:[{id:'va_stage',name:'素材',status:'starting',size_bytes:1}],total:1}):null);
+  const labels=Array.from(app.field('taskList').innerHTML.matchAll(/<p class="micro">([^<]*)<\/p>/g),match=>match[1]);
+  assert.deepEqual(labels,Object.values(stages));
+  assert.match(app.field('assetGrid').innerHTML,/准备制作/);
+  assert.doesNotMatch(app.field('taskList').innerHTML,/future_internal_stage|rendering_random/);
+});
+
+test('numeric task progress stays compatible while invalid or incomplete metric DTOs do not invent progress',async()=>{
+  const tasks=[
+    {id:'ve_fraction',status:'running',stage:'rendering',progress:0.5},
+    {id:'ve_integer',status:'running',stage:'rendering',progress:42},
+    {id:'ve_complete',status:'completed',stage:'completed',progress:100},
+    {id:'ve_bad',status:'running',stage:'rendering_random',progress:{out_time_seconds:-1,duration_seconds:0,completed_steps:'3',total_steps:5,percent:88}},
+    {id:'ve_partial',status:'running',stage:'downloading',progress:{download_bytes:1048576}},
+    {id:'ve_unknown',status:'running',stage:'rendering_random',progress:{out_time_seconds:1,duration_seconds:0}},
+  ];
+  const app=await browser(async url=>url.endsWith('/tasks')?response({items:tasks,total:tasks.length}):null);
+  const labels=Array.from(app.field('taskList').innerHTML.matchAll(/<p class="micro">([^<]*)<\/p>/g),match=>match[1]);
+  assert.deepEqual(labels,['制作中 · 50%','制作中 · 42%','制作完成 · 100%','制作中','下载素材 · 当前阶段：已下载 1.0 MiB','制作中']);
+});
+
 test('unknown create outcome retries exactly the frozen operation then saves newer edits as a version',async()=>{
   let firstBody,remote,attempts=0;
   const app=await browser(async(url,options)=>{
