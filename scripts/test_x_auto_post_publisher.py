@@ -326,6 +326,58 @@ class XAutoPostPublisherTests(unittest.TestCase):
             )
         )
 
+    def test_previous_unknown_post_stops_only_the_unqueued_attempt(self):
+        token, task = self._preparing()
+        bridge = FakeBridge(task)
+        bridge.has_queue = False
+        bridge.storage_preflight = lambda: {}
+        def reject_plan(*args):
+            raise XPostBridgeError(
+                "x_post_unknown_outcome", "Previous Post requires review", 409,
+                unknown_outcome=True,
+            )
+        bridge.create_plan = reject_plan
+        executor = self._executor(bridge)
+        with self.assertRaises(AutoPostExecutionError) as caught:
+            executor._query_or_plan(task, bridge._run(), {})
+        self.assertEqual(caught.exception.code, "x_post_account_needs_review")
+        result = executor._retry_or_fail(task, "prepare", caught.exception, token)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.execution_run_id, 9001)
+        self.assertFalse(result.unknown_outcome)
+        self.assertFalse(self.store.material_is_reserved("123456"))
+        self.assertEqual(bridge.record_calls, 1)
+        self.assertEqual(bridge.publish_calls, 0)
+
+    def test_plan_readback_with_queue_wins_over_unknown_response(self):
+        _token, task = self._preparing()
+        bridge = FakeBridge(task)
+        bridge.storage_preflight = lambda: {}
+        def lost_response(*args):
+            raise XPostBridgeError(
+                "x_post_unknown_outcome", "Unknown response", 409,
+                unknown_outcome=True,
+            )
+        bridge.create_plan = lost_response
+        result = self._executor(bridge)._query_or_plan(
+            task, bridge._run(with_queue=False), {}
+        )
+        self.assertEqual(result["queues"][0]["id"], 9002)
+        self.assertEqual(bridge.record_calls, 0)
+        self.assertEqual(bridge.publish_calls, 0)
+
+    def test_transport_unknown_without_queue_is_not_known_account_rejection(self):
+        _token, task = self._preparing()
+        bridge = FakeBridge(task)
+        bridge.has_queue = False
+        bridge.storage_preflight = lambda: {}
+        def timeout(*args):
+            raise XPostBridgeError("x_bridge_timeout", "Timeout", 503, unknown_outcome=True)
+        bridge.create_plan = timeout
+        result = self._executor(bridge)._query_or_plan(task, bridge._run(), {})
+        self.assertEqual(result["queues"], [])
+        self.assertEqual(bridge.record_calls, 0)
+
     def test_no_candidate_persists_rejection_counts_without_publish_or_reservation(self):
         claim = self.store.claim_next_executable_task(worker_id="no-candidate", lease_seconds=120, now=self.clock())
         task = self.store.get_task(self.task.id)
