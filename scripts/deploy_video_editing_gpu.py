@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 BASELINE = "223577b41466d03fd330625441ab3b7c1d86e843"
@@ -186,6 +188,30 @@ def check_health(value, release, previous=None):
             raise DeployError("legacy_health_changed")
         if value.get("video_editing_enabled") is not False or value.get("video_editing_profile") != "video-editing-720-v1":
             raise DeployError("editing_intake_not_closed")
+
+
+def wait_for_health(release, previous=None, *, timeout=60):
+    """Wait only for a not-yet-bound listener; never retry a bad identity/config.
+
+    systemd Type=simple may report start success before the HTTP server binds.
+    HTTP errors, timeouts, invalid JSON and health mismatches are not readiness
+    delays and must fail immediately. Exception details must remain private.
+    """
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            value = health()
+        except (urllib.error.URLError, OSError) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if not isinstance(reason, OSError) or reason.errno != errno.ECONNREFUSED:
+                raise DeployError("worker_health_unavailable") from None
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise DeployError("worker_health_start_timeout") from None
+            time.sleep(min(.5, remaining))
+            continue
+        check_health(value, release, previous)
+        return value
 
 
 def backup_configuration(directory):
@@ -363,7 +389,7 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
         run("systemctl", "daemon-reload")
         run("systemctl", "start", WORKER, timeout=360)
         run("systemctl", "start", TUNNEL, timeout=60)
-        check_health(health(), candidate.name, previous_health)
+        wait_for_health(candidate.name, previous_health)
         actual = effective_env()
         if any(actual.get(key) != value for key, value in overrides.items()):
             raise DeployError("effective_editor_environment_mismatch")
@@ -397,7 +423,7 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
             run("systemctl", "daemon-reload")
         run("systemctl", "start", WORKER, timeout=360)
         run("systemctl", "start", TUNNEL)
-        check_health(health(), BASELINE)
+        wait_for_health(BASELINE)
         raise
 
 

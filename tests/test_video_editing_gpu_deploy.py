@@ -1,9 +1,11 @@
+import errno
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import urllib.error
 
 from scripts import deploy_video_editing_gpu as deploy
 
@@ -76,6 +78,58 @@ class DeployTests(unittest.TestCase):
             deploy.check_health(dict(new, render_concurrency=2), "a" * 40, old)
         with self.assertRaises(deploy.DeployError):
             deploy.check_health(dict(new, video_editing_enabled=True), "a" * 40, old)
+
+    def test_startup_health_waits_for_refused_listener_then_checks_identity(self):
+        old = {"ok": True, "release_sha": deploy.BASELINE, "render_concurrency": 1}
+        new = dict(old, release_sha="a" * 40, video_editing_enabled=False,
+                   video_editing_profile="video-editing-720-v1")
+        refused = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
+        with mock.patch.object(deploy, "health", side_effect=[refused, new]) as health, \
+             mock.patch.object(deploy.time, "sleep") as sleep:
+            self.assertEqual(deploy.wait_for_health("a" * 40, old), new)
+            self.assertEqual(health.call_count, 2)
+            sleep.assert_called_once()
+
+    def test_startup_health_refused_listener_has_finite_deadline(self):
+        refused = ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        with mock.patch.object(deploy, "health", side_effect=refused) as health, \
+             mock.patch.object(deploy.time, "monotonic", side_effect=[0, 0, 1]), \
+             mock.patch.object(deploy.time, "sleep") as sleep:
+            with self.assertRaisesRegex(deploy.DeployError, "worker_health_start_timeout"):
+                deploy.wait_for_health("a" * 40, timeout=1)
+            self.assertEqual(health.call_count, 2)
+            sleep.assert_called_once_with(.5)
+
+    def test_startup_health_never_waits_through_identity_or_configuration_mismatch(self):
+        old = {"ok": True, "release_sha": deploy.BASELINE, "render_concurrency": 1}
+        new = dict(old, release_sha="a" * 40, video_editing_enabled=False,
+                   video_editing_profile="video-editing-720-v1")
+        for bad, code in [
+            (dict(new, release_sha=deploy.BASELINE), "worker_health_release_mismatch"),
+            (dict(new, ok=False), "worker_health_release_mismatch"),
+            (dict(new, render_concurrency=2), "legacy_health_changed"),
+            (dict(new, video_editing_enabled=True), "editing_intake_not_closed"),
+        ]:
+            with self.subTest(code=code), mock.patch.object(deploy, "health", return_value=bad) as health, \
+                 mock.patch.object(deploy.time, "sleep") as sleep:
+                with self.assertRaisesRegex(deploy.DeployError, code):
+                    deploy.wait_for_health("a" * 40, old)
+                health.assert_called_once(); sleep.assert_not_called()
+
+    def test_startup_health_does_not_retry_http_timeout_or_invalid_json(self):
+        failures = [urllib.error.HTTPError("http://127.0.0.1/healthz", 503, "unavailable", {}, None),
+                    urllib.error.URLError(TimeoutError("timeout")),
+                    json.JSONDecodeError("invalid", "", 0)]
+        for failure in failures:
+            try:
+                with self.subTest(error=type(failure).__name__), \
+                     mock.patch.object(deploy, "health", side_effect=failure) as health, \
+                     mock.patch.object(deploy.time, "sleep") as sleep:
+                    with self.assertRaises((deploy.DeployError, json.JSONDecodeError)):
+                        deploy.wait_for_health("a" * 40)
+                    health.assert_called_once(); sleep.assert_not_called()
+            finally:
+                if isinstance(failure, urllib.error.HTTPError): failure.close()
 
     def test_apply_preflight_failure_never_stops_service_or_writes_configuration(self):
         old = {"DRAMA_WORK_ROOT": "/work"}
