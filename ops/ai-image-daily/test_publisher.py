@@ -175,6 +175,35 @@ class PublishTests(unittest.TestCase):
             report.restore_public(self.state, self.pub, status['backup'])
         self.assertEqual(puts, self.pub.puts)
 
+    def test_rollback_restores_previous_successful_health_with_prior_homepage(self):
+        old = dict(data=b'<html>2026-10-20 homepage</html>', metadata={})
+        self.pub.objects[report.PREFIX + '/index.html'] = copy.deepcopy(old)
+        previous = dict(report_date='2026-10-20', generated_at='2026-10-21T09:00:00+08:00', version='prior')
+        # A prior failed attempt still identifies the homepage's last success.
+        report.publish_health(self.pub, dict(state='failed', schema_version=3,
+            report_date=previous['report_date'], last_success=previous, error_type='RuntimeError'))
+        status = self.publish()
+        # Independent health may change after publishing without blocking rollback.
+        report.publish_health(self.pub, dict(state='failed', schema_version=3,
+            report_date=self.date, last_success=dict(report_date=self.date, generated_at=self.data['generated_at'], version='v1')))
+        with patch('builtins.print'):
+            result = report.restore_public(self.state, self.pub, status['backup'])
+        self.assertEqual(self.pub.objects[report.PREFIX + '/index.html'], old)
+        self.assertEqual(report.object_json(self.pub.get(report.PREFIX + '/status.json')),
+                         dict(state='published', schema_version=3, **previous))
+        self.assertIsNotNone(result['health_restored'])
+
+    def test_initial_upgrade_rollback_preserves_new_homepage_health(self):
+        self.pub.objects[report.LEGACY_INDEX] = dict(data=b'<html>legacy home</html>', metadata={})
+        status = self.publish()
+        health = self.pub.get(report.PREFIX + '/status.json')
+        home = self.pub.get(report.PREFIX + '/index.html')
+        with patch('builtins.print'):
+            result = report.restore_public(self.state, self.pub, status['backup'])
+        self.assertEqual(self.pub.get(report.PREFIX + '/status.json'), health)
+        self.assertEqual(self.pub.get(report.PREFIX + '/index.html'), home)
+        self.assertTrue(result['health_preserved'])
+
     def test_prefix_guard_allows_only_exact_legacy_entry(self):
         for key in ('other/index.html', report.PREFIX + '/../secret', report.PREFIX + '//index.html',
                     report.PREFIX + '/x\\y', report.PREFIX + '/%2e%2e/x',

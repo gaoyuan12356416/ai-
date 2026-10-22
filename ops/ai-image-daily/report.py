@@ -259,7 +259,7 @@ def object_json(obj):
     return json.loads(gzip.decompress(data) if obj['metadata'].get('ContentEncoding') == 'gzip' else data)
 
 
-def backup_mutable(state, run, manifest, observed):
+def backup_mutable(state, run, manifest, observed, previous_health=None):
     backup = state / 'backups' / run.name
     path = backup / 'rollback.json'
     installed = {item['key']: dict(sha256=item['stored_sha256'], metadata=item['metadata'])
@@ -281,7 +281,15 @@ def backup_mutable(state, run, manifest, observed):
         if obj is not None:
             atomic_bytes(backup / filename, obj['data'])
         previous.append(dict(key=key, file=filename, fingerprint=fingerprint(obj)))
+    previous_success = None
+    if observed.get(PREFIX + '/index.html') is not None and previous_health is not None:
+        health = object_json(previous_health)
+        prior = health.get('last_success') if health.get('state') == 'failed' else health
+        if prior and prior.get('report_date') and prior.get('version') and prior.get('generated_at'):
+            previous_success = {key: prior[key] for key in ('report_date', 'generated_at', 'version')}
+            dt.date.fromisoformat(previous_success['report_date'])
     meta = dict(schema_version=3, installed=installed, previous=previous,
+                previous_success=previous_success,
                 manifest_sha256=sha((run / 'manifest.json').read_bytes()))
     write_json(path, meta)
     return backup, meta
@@ -309,7 +317,7 @@ def publish_pending(state, publisher):
         previous_dates = {row['date'] for row in object_json(remote_history)}
         if not previous_dates.issubset({row['date'] for row in manifest['history']}):
             raise ValueError('public_history_regression')
-    backup, rollback = backup_mutable(state, run, manifest, observed)
+    backup, rollback = backup_mutable(state, run, manifest, observed, remote_status)
     originals = {row['key']: row['fingerprint'] for row in rollback['previous']}
     for key, expected in originals.items():
         if fingerprint(observed[key]) not in (expected, rollback['installed'][key]):
@@ -409,7 +417,17 @@ def restore_public(state, publisher, backup):
         if not same(current, data, previous['metadata']):
             publisher.put(key, data, previous['metadata'])
         receipts[key] = publisher.verify(key, data, previous['metadata'])
-    result = dict(restored=receipts, retained_new_objects=retained, immutable_objects_preserved=True)
+    # Health is not content and may have changed during a failed attempt. Restore
+    # its saved successful state only when the prior v3 homepage was restored.
+    # On a first installation there is no prior v3 homepage: the new one remains
+    # available, so its current health stays valid even if the old alias reverted.
+    previous_home = next((row for row in meta['previous'] if row['key'] == PREFIX + '/index.html'), None)
+    health_receipt = None
+    if previous_home and previous_home['fingerprint'] is not None and meta.get('previous_success'):
+        health_receipt = publish_health(publisher, dict(state='published', schema_version=3,
+                                                        **meta['previous_success']))
+    result = dict(restored=receipts, retained_new_objects=retained, immutable_objects_preserved=True,
+                  health_restored=health_receipt, health_preserved=health_receipt is None)
     write_json(backup / 'restore-receipt.json', result)
     print(json.dumps(result, ensure_ascii=False), flush=True)
     return result
