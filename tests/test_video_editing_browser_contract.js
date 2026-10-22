@@ -12,14 +12,22 @@ const response=(payload,status=200)=>({ok:status>=200&&status<300,status,json:as
 // A minimal browser contract harness exercises real event handlers and asynchronous API calls.
 // It intentionally does not reproduce the editing or save implementation.
 async function browser(handler,extras={}){
-  const elements=new Map(),calls=[],timers=new Map();let nextTimer=1;
+  const elements=new Map(),calls=[],timers=new Map(),intervals=[],documentEvents={},episodeChecks=new Map(),createdElements=[];let nextTimer=1;
   class Element{
     constructor(id){this.id=id;this.value='';this.textContent='';this.innerHTML='';this.dataset={};this.style={};this.listeners={};this.files=[];this.classList={add(){},remove(){},toggle(){}};}
     addEventListener(type,fn){(this.listeners[type]||(this.listeners[type]=[])).push(fn);}
     emit(type,event={}){return Promise.all((this.listeners[type]||[]).map(fn=>fn({target:this,...event})));}
+    closest(selectors){return selectors.split(',').some(selector=>{const match=selector.match(/^\[data-([a-z-]+)\]$/);return match&&Object.hasOwn(this.dataset,match[1].replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase()));})?this:null;}
     setAttribute(){}removeAttribute(){}pause(){}load(){}click(){return this.emit('click');}showModal(){this.open=true;}close(){this.open=false;}play(){return Promise.resolve();}
   }
-  const document={hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);},querySelectorAll(){return [];},addEventListener(){},createElement(){return new Element();}};
+  const fits=['contain','cover'].map(fit=>{const el=new Element(`fit-${fit}`);el.dataset.fit=fit;return el;});
+  const document={hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);},querySelectorAll(selector){
+    if(selector==='[data-fit]')return fits;
+    if(selector==='.episode-select:checked'){
+      const markup=elements.get('catalogEpisodes')?.innerHTML||'';
+      return Array.from(markup.matchAll(/class="episode-select"[^>]*value="([^"]+)"/g),match=>{if(!episodeChecks.has(match[1])){const el=new Element();el.value=match[1];episodeChecks.set(match[1],el);}return episodeChecks.get(match[1]);}).filter(el=>el.checked);
+    }return [];
+  },addEventListener(type,fn){(documentEvents[type]||(documentEvents[type]=[])).push(fn);},createElement(){const el=new Element();createdElements.push(el);return el;}};
   const fetch=async(url,options={})=>{calls.push({url,options,body:options.body?JSON.parse(options.body):null});const custom=await handler(url,options,calls);if(custom)return custom;
     if(url==='/api/ui/topbar')return response({authenticated:true,user:{name:'Tester',role:'admin',tenant_key:'tenant'}});
     if(url.endsWith('/config'))return response({item:{enabled:true,intake_enabled:true,worker_configured:true,cos_configured:true}});
@@ -27,9 +35,13 @@ async function browser(handler,extras={}){
     throw new Error(`Unexpected request ${options.method||'GET'} ${url}`);
   };
   const window={document,crypto:crypto.webcrypto,addEventListener(){},QuickNav:{render:async()=>{}},UiTopbar:{render(){},handleAuthAction:async()=>{}}};
-  const context={window,document,fetch,URLSearchParams,location:{search:'',pathname:'/video-editing.html'},performance:{now:()=>0},requestAnimationFrame:()=>0,cancelAnimationFrame(){},setInterval(){},setTimeout(fn){const id=nextTimer++;timers.set(id,fn);return id;},clearTimeout(id){timers.delete(id);},console,...extras};
+  const context={window,document,fetch,URLSearchParams,location:{search:'',pathname:'/video-editing.html'},performance:{now:()=>0},requestAnimationFrame:()=>0,cancelAnimationFrame(){},setInterval(fn){intervals.push(fn);},setTimeout(fn){const id=nextTimer++;timers.set(id,fn);return id;},clearTimeout(id){timers.delete(id);},console,...extras};
   vm.runInNewContext(script,context,{filename:'video-editing.js'});for(let i=0;i<6;i++)await tick();
-  return {elements,calls,timers,field:id=>document.getElementById(id),rename:async name=>{const input=document.getElementById('projectName');input.value=name;await input.emit('change');},response};
+  return {elements,calls,timers,createdElements,field:id=>document.getElementById(id),rename:async name=>{const input=document.getElementById('projectName');input.value=name;await input.emit('change');},response,
+    clickData:async(dataset,container)=>{const target=new Element();target.dataset=dataset;return container?document.getElementById(container).emit('click',{target}):Promise.all((documentEvents.click||[]).map(fn=>fn({target})));},
+    checkEpisodes(ids){for(const id of ids){if(!episodeChecks.has(id)){const el=new Element();el.value=id;episodeChecks.set(id,el);}}for(const [id,el] of episodeChecks)el.checked=ids.includes(id);},
+    fit:fit=>fits.find(el=>el.dataset.fit===fit).click(),poll:()=>Promise.all(intervals.map(fn=>fn())),
+  };
 }
 
 test('edits made during first save are flushed before a new project replaces the working draft',async()=>{
@@ -104,6 +116,90 @@ test('numeric task progress stays compatible while invalid or incomplete metric 
   const app=await browser(async url=>url.endsWith('/tasks')?response({items:tasks,total:tasks.length}):null);
   const labels=Array.from(app.field('taskList').innerHTML.matchAll(/<p class="micro">([^<]*)<\/p>/g),match=>match[1]);
   assert.deepEqual(labels,['制作中 · 50%','制作中 · 42%','制作完成 · 100%','制作中','下载素材 · 当前阶段：已下载 1.0 MiB','制作中']);
+});
+
+test('real event workflow keeps two dramas independent through probe, editing, batch submit and refreshed output links',async()=>{
+  const id=(prefix,n)=>prefix+String(n).padStart(32,'0');
+  const asset={id:id('va_',1),source_id:id('va_',1),kind:'asset',name:'共享素材',status:'ready',can_manage:true,metadata:{duration_ms:8000,width:1920,height:1080,has_audio:true},preview_url:'https://cos.example.test/asset',expires_at:Math.floor(Date.now()/1000)+900};
+  const dramas=[{app_id:'2310',content_id:'AbCd123456',title:'第一部'},{app_id:'2310',content_id:'XyZ0987654',title:'第二部'}];
+  const source=(n,drama)=>({id:id('vep_',n),source_id:id('vep_',n),kind:'episode',...drama,name:`${drama.title}第${n}集`,episode_number:n,status:n===3?'ready':'unprobed',metadata:n===3?{duration_ms:30000,width:720,height:1280,has_audio:true}:{},preview_url:`https://cos.example.test/episode-${n}`,expires_at:Math.floor(Date.now()/1000)+900});
+  const sources=new Map([asset,...[1,2,3].map(n=>source(n,dramas[n===3?1:0]))].map(s=>[s.id,s]));
+  const projectId=id('vp_',1),submissions=[],batches=new Map();let remote=null,tasks=[];
+  const app=await browser(async(url,options)=>{
+    const method=options.method||'GET',body=options.body&&JSON.parse(options.body);
+    if(url.includes('/assets?'))return response({items:[asset],total:1});
+    if(url.endsWith('/catalog/products'))return response({items:[{app_id:'2310',app:'DramaWave',label:'DramaWave · 英语'}]});
+    if(url.includes('/catalog/dramas?'))return response({items:dramas});
+    if(url.includes('/catalog/episodes?')){const contentId=new URL(url,'https://local.test').searchParams.get('content_id');return response({items:[...sources.values()].filter(s=>s.content_id===contentId)});}
+    if(url.endsWith('/catalog/probe')){assert.deepEqual(body.source_ids,[id('vep_',1),id('vep_',2)]);const items=body.source_ids.map(sid=>{const s=sources.get(sid);s.status='probing';s.probe_task_id=id('ve_',100+s.episode_number);return s;});return response({items});}
+    if(url.includes('/sources/'))return response({item:sources.get(url.split('/').at(-1))});
+    if(url.endsWith('/projects')&&method==='POST'){assert.deepEqual(Object.keys(body).sort(),['asset_id','dramas','name','operation_id']);remote={...body,id:projectId,version:1};delete remote.operation_id;return response({item:remote});}
+    if(url.endsWith(`/projects/${projectId}`)&&method==='PATCH'){assert.equal(body.expected_version,remote.version);remote={...body,id:projectId,version:remote.version+1};delete remote.expected_version;return response({item:remote});}
+    if(url.endsWith('/projects'))return response({items:remote?[remote]:[],total:remote?1:0});
+    if(url.endsWith(`/projects/${projectId}/render`)){assert.equal(body.expected_version,remote.version);submissions.push(body);if(!batches.has(body.operation_id)){const batch_id=id('vb_',batches.size+1),project_version_id=id('vv_',remote.version);tasks=remote.dramas.map((drama,index)=>({id:id('ve_',index+1),project_id:projectId,batch_id,project_version_id,output_id:id('vo_',index+1),drama_title:drama.title,status:'queued',stage:'queued',progress:0,output:null}));batches.set(body.operation_id,JSON.parse(JSON.stringify({batch_id,project_version_id,items:tasks,draft:remote})));}return response(batches.get(body.operation_id));}
+    if(url.endsWith('/tasks'))return response({items:tasks,total:tasks.length});
+    if(url.includes('/tasks/')){const task=tasks.find(t=>t.id===url.split('/').at(-1));assert.ok(task);return response({item:{...task,status:'completed',stage:'completed',progress:100,output:{id:task.output_id,preview_url:'https://cos.example.test/output-fresh',download_url:'https://cos.example.test/download-fresh',expires_at:Math.floor(Date.now()/1000)+900,metadata:{duration_ms:27000,width:720,height:1280,fps:30,has_audio:true}}}});}
+  });
+  const clips=()=>Array.from(app.field('timeline').innerHTML.matchAll(/data-clip-id="([^"]+)"/g),match=>match[1]);
+  const chooseClip=async index=>{await app.clickData({clipId:clips()[index]},'timeline');await tick();};
+  const change=async(id,value)=>{app.field(id).value=value;await app.field(id).emit('change');};
+  const seek=async milliseconds=>{app.field('playhead').value=milliseconds;await app.field('playhead').emit('input');await tick();};
+  await app.rename('两剧验收');await app.clickData({pickAsset:asset.id});
+  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='AbCd123456';await app.field('searchDramas').click();
+  await app.clickData({catalogIndex:'0'},'catalogDramas');app.checkEpisodes([id('vep_',1),id('vep_',2)]);await app.field('addEpisodes').click();
+  assert.equal(app.field('dramaCount').textContent,'0 部');assert.match(app.field('catalogStatus').textContent,/媒体校验/);
+  for(const n of [1,2])Object.assign(sources.get(id('vep_',n)),{status:'ready',metadata:{duration_ms:30000,width:720,height:1280,has_audio:n===1}});
+  await app.poll();await app.field('addEpisodes').click();assert.equal(app.field('dramaCount').textContent,'1 部');
+  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='XyZ0987654';await app.field('searchDramas').click();await app.clickData({catalogIndex:'1'},'catalogDramas');app.checkEpisodes([id('vep_',3)]);await app.field('addEpisodes').click();
+  assert.equal(app.field('dramaCount').textContent,'2 部');
+  app.field('commonPosition').value='start';app.field('commonTransition').value='cut';await app.field('applyCommon').click();
+  await app.clickData({dramaIndex:'0'},'dramaList');await chooseClip(1);await change('clipStart',2);await change('clipEnd',20);
+  await seek(12000);await app.field('splitClip').click();await chooseClip(2);await seek(15000);await app.field('splitClip').click();await chooseClip(2);await app.field('removeClip').click();
+  await chooseClip(3);await app.field('moveLeft').click();await app.field('removeEpisode').click();assert.equal(clips().length,3);await app.field('undoEdit').click();assert.equal(clips().length,4);
+  await chooseClip(1);await app.field('insertAsset').click();app.field('insertStart').value=.5;app.field('insertEnd').value=1.5;app.field('insertPosition').value='after';await app.field('confirmInsert').click();await app.fit('cover');app.field('clipSound').checked=false;await app.field('clipSound').emit('change');
+  app.field('commonPosition').value='none';app.field('commonTransition').value='fade';await app.field('applyCommon').click();
+  await app.field('saveProject').click();assert.ok(remote);const frozen=JSON.parse(JSON.stringify(remote));
+  assert.deepEqual(remote.dramas[0].clips.filter(c=>c.source_id===id('vep_',1)).map(c=>[c.start_ms,c.end_ms]),[[2000,6000],[9000,20000]]);
+  assert.deepEqual(remote.dramas[1].clips.map(c=>[c.source_id,c.start_ms,c.end_ms]),[[asset.id,0,8000],[id('vep_',3),0,30000]]);
+  assert.equal(remote.dramas[0].clips.filter(c=>c.source_id===asset.id).length,2);
+  assert.ok(remote.dramas[0].clips.some(c=>c.source_id===asset.id&&c.fit==='cover'&&c.mute&&c.start_ms===500));
+  assert.equal(remote.dramas[0].clips.at(-1).transition,'cut');assert.equal(app.field('validationErrors').textContent,'');
+  await app.field('renderProject').click();assert.equal(tasks.length,2);assert.match(app.field('taskList').innerHTML,/第一部/);assert.match(app.field('taskList').innerHTML,/第二部/);
+  await app.field('renderProject').click();assert.equal(submissions[1].operation_id,submissions[0].operation_id);assert.equal(batches.size,1);
+  await app.clickData({previewTask:tasks[0].id});assert.equal(app.field('mediaPlayer').src,'https://cos.example.test/output-fresh');assert.equal(app.field('mediaDialog').open,true);assert.match(app.field('mediaExpiry').textContent,/链接有效期至/);
+  await app.clickData({downloadTask:tasks[0].id});assert.equal(app.createdElements.at(-1).href,'https://cos.example.test/download-fresh');assert.equal(app.createdElements.at(-1).rel,'noopener noreferrer');
+  await app.field('undoEdit').click();await app.field('renderProject').click();assert.equal(batches.size,2);assert.notEqual(submissions.at(-1).operation_id,submissions[0].operation_id);assert.ok(submissions.at(-1).expected_version>submissions[0].expected_version);assert.deepEqual(batches.get(submissions[0].operation_id).draft,frozen);
+});
+
+test('adding episodes resumes the original probe and keeps tracking even while the source remains failed',async()=>{
+  const source={id:'vep_waiting',source_id:'vep_waiting',kind:'episode',app_id:'2310',content_id:'AbCd123456',status:'failed',name:'第1集',metadata:{},probe_task_id:'ve_original'};let resumed=false,probeStatus='unknown';
+  const app=await browser(async(url,options)=>{
+    if(url.endsWith('/catalog/products'))return response({items:[{app_id:'2310',app:'DramaWave'}]});
+    if(url.includes('/catalog/dramas?'))return response({items:[{app_id:'2310',content_id:'AbCd123456',title:'待校验剧'}]});
+    if(url.includes('/catalog/episodes?'))return response({items:[source]});
+    if(url.endsWith('/tasks/ve_original'))return response({item:{id:'ve_original',status:probeStatus,kind:'probe'}});
+    if(url.endsWith('/tasks/ve_original/resume')){assert.equal(options.method,'POST');resumed=true;probeStatus='resume_queued';return response({item:{id:'ve_original',status:probeStatus,kind:'probe'}});}
+    if(url.endsWith('/sources/vep_waiting'))return response({item:source});
+  });
+  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='AbCd123456';await app.field('searchDramas').click();await app.clickData({catalogIndex:'0'},'catalogDramas');app.checkEpisodes([source.id]);await app.field('addEpisodes').click();
+  assert.equal(resumed,true);assert.equal(app.calls.some(call=>call.url.endsWith('/catalog/probe')),false);assert.match(app.field('catalogStatus').textContent,/恢复/);
+  await app.poll();assert.equal(app.field('dramaCount').textContent,'0 部');
+  probeStatus='completed';source.status='ready';source.metadata={duration_ms:10000,width:720,height:1280};await app.poll();assert.match(app.field('catalogEpisodes').innerHTML,/10 秒/);
+  await app.field('addEpisodes').click();assert.equal(app.field('dramaCount').textContent,'1 部');
+});
+
+test('actual expires_at refreshes a timeline source and leaving the project rejects its late preview response',async()=>{
+  const source={id:'vep_late',source_id:'vep_late',kind:'episode',status:'ready',metadata:{duration_ms:10000},preview_url:'https://cos.example.test/expired',expires_at:Math.floor(Date.now()/1000)-1};
+  const project={id:'vp_late',name:'原项目',version:1,asset_id:'',dramas:[{app_id:'2310',content_id:'AbCd123456',title:'原剧',clips:[{id:'clip_late',source_id:source.id,start_ms:0,end_ms:10000,fit:'contain',mute:false,transition:'cut'}]}]};
+  let sourceReads=0,finish;const late=new Promise(resolve=>{finish=resolve;});
+  const app=await browser(async url=>{
+    if(url.endsWith('/projects'))return response({items:[project],total:1});
+    if(url.endsWith('/projects/vp_late'))return response({item:project});
+    if(url.endsWith('/sources/vep_late')){if(++sourceReads===1)return response({item:source});await late;return response({item:{...source,preview_url:'https://cos.example.test/late',expires_at:Math.floor(Date.now()/1000)+900}});}
+  });
+  app.field('projectPicker').value=project.id;await app.field('projectPicker').emit('change');await app.clickData({clipId:'clip_late'},'timeline');await tick();assert.equal(sourceReads,2);
+  await app.field('newProject').click();finish();for(let i=0;i<4;i++)await tick();
+  assert.equal(app.field('projectName').value,'未命名剪辑项目');assert.equal(app.field('previewA').src,undefined);assert.equal(app.field('previewMessage').textContent,'添加素材与剧集后即可预览');
 });
 
 test('unknown create outcome retries exactly the frozen operation then saves newer edits as a version',async()=>{
