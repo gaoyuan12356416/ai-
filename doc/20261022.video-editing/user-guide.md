@@ -2,6 +2,8 @@
 
 完整图解版见 [HTML 使用说明](user-guide.html)，包括工作台示意、删除中间内容的分步示例和常见问题。
 
+公开阅读：[视频剪辑使用说明（COS HTML）](https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/codex-artifacts/html/20261022/video-editing-user-guide-20261022_163727/index.html)。2026-10-22 发布，源提交 `bea4979cf52e8f71b6560e99c58fca502a8f6ede`；38,032 字节，SHA256 `428180e2423304609ed4e7fa523110cdb1c97bb28b27b8aefa00bafc1ce7b4d1`。匿名 HEAD/GET 200、HTML 类型及字节校验通过，浏览器已确认正式 COS 页面可读；本地桌面与 390px 排版、目录跳转、问答展开已验证。本次仅发布文档，未修改服务、任务或桶权限；技能上下文不变。文档源回滚点为 `67fd47a`，保留已发布 COS 对象，不涉及后台程序回滚。
+
 入口：[AI 后台视频剪辑](https://ai.yingliangads.com/video-editing.html)。使用原有飞书登录；管理员可在用户管理中分配“视频剪辑”权限。剧目列表还受现有产品权限控制。
 
 ## 1. 上传与选择素材
