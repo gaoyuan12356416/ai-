@@ -102,8 +102,8 @@ class DeployTests(unittest.TestCase):
             (process / "task/123").mkdir(parents=True)
             (process / "task/123/children").write_text("")
             (process / "fd/3").touch(); (process / "fd/4").touch()
-            listener = "0: 0100007F:2257 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1001 0 100\n"
-            upload = "1: 0100007F:2257 0100007F:D001 01 00000000:00000000 00:00000000 00000000 1001 0 101\n"
+            listener = "0: 0100007F:2253 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1001 0 100\n"
+            upload = "1: 0100007F:2253 0100007F:D001 01 00000000:00000000 00:00000000 00000000 1001 0 101\n"
             (process / "net/tcp").write_text("header\n" + listener + upload)
             (process / "net/tcp6").write_text("header\n")
             def target(fd): return {"3": "socket:[100]", "4": "socket:[101]"}[fd.name]
@@ -123,7 +123,7 @@ class DeployTests(unittest.TestCase):
             (process / "task/123").mkdir(parents=True)
             (process / "task/123/children").write_text("")
             (process / "fd/3").touch(); (process / "fd/4").touch()
-            (process / "net/tcp").write_text("header\n0: 0100007F:2257 00000000:0000 0A 00000000:00000001 00:00000000 00000000 1001 0 100\n")
+            (process / "net/tcp").write_text("header\n0: 0100007F:2253 00000000:0000 0A 00000000:00000001 00:00000000 00000000 1001 0 100\n")
             (process / "net/tcp6").write_text("header\n")
             with mock.patch.object(deploy.os, "readlink", side_effect=lambda fd: "socket:[100]" if fd.name == "3" else str(media) + "/task-1/source.mp4"):
                 value = deploy.worker_media_snapshot({"DRAMA_YOUTUBE_MEDIA_ROOT": str(media)}, pid=123, proc_root=proc)

@@ -240,6 +240,67 @@ def wait_for_idle(work_root, timeout):
         time.sleep(2)
 
 
+def worker_media_snapshot(env, *, pid=None, proc_root=Path("/proc")):
+    """Read-only legacy HTTP-media guard, including Python uploads without a PID.
+
+    Release 223577b has no independent YouTube request ledger or lock. Cached
+    task directories are not proof of active work. Its accepted HTTP sockets,
+    outbound sockets, open media files and ffprobe children are authoritative
+    conservative activity signals. Nothing here inspects request bodies/URLs.
+    """
+    pid = str(pid if pid is not None else property_value(WORKER, "MainPID"))
+    if not pid.isdigit() or int(pid) <= 0: raise DeployError("media_worker_not_running")
+    process = proc_root / pid
+    media_root = Path(env.get("DRAMA_YOUTUBE_MEDIA_ROOT", str(BASE / "work/youtube-publish")))
+    try:
+        sockets, media_handles = set(), 0
+        for fd in (process / "fd").iterdir():
+            try: target = os.readlink(fd)
+            except FileNotFoundError: continue  # A completed request closed it.
+            match = re.fullmatch(r"socket:\[(\d+)\]", target)
+            if match: sockets.add(match[1])
+            if target.startswith(str(media_root) + "/"): media_handles += 1
+        connections, pending, listeners = 0, 0, 0
+        for name in ("tcp", "tcp6"):
+            for line in (process / "net" / name).read_text().splitlines()[1:]:
+                fields = line.split()
+                if len(fields) <= 9 or fields[9] not in sockets: continue
+                if fields[3] == "0A":
+                    if int(fields[1].rsplit(":", 1)[1], 16) == int(env.get("DRAMA_GPU_PORT", "8787")):
+                        listeners += 1
+                        pending += int(fields[4].split(":", 1)[1], 16)
+                else:
+                    # Retained outbound keepalive connections may conservatively
+                    # delay a rollout, but must never hide a client-disconnected
+                    # upload still sending to Google in a request thread.
+                    connections += 1
+        children = set()
+        for task in (process / "task").iterdir():
+            try: children.update((task / "children").read_text().split())
+            except FileNotFoundError: continue
+        if not listeners: raise DeployError("media_listener_unverified")
+        return {"pid": int(pid), "connections": connections, "listen_pending": pending,
+            "children": len(children), "media_handles": media_handles,
+            "busy": bool(connections or pending or children or media_handles)}
+    except (OSError, ValueError, IndexError):
+        raise DeployError("media_activity_unverified") from None
+
+
+def wait_for_media_idle(env, timeout, *, quiet_seconds=3):
+    end = time.monotonic() + timeout
+    quiet_since = None
+    while True:
+        snapshot = worker_media_snapshot(env)
+        now = time.monotonic()
+        if snapshot["busy"]:
+            quiet_since = None
+        else:
+            if quiet_since is None: quiet_since = now
+            if now - quiet_since >= quiet_seconds: return snapshot
+        if now >= end: raise DeployError("youtube_media_not_drained")
+        time.sleep(.25)
+
+
 def wait_worker_stopped(timeout=60):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -259,6 +320,7 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
     identity = pwd.getpwnam("drama-synthesis-gpu")
     work_root = old_env["DRAMA_WORK_ROOT"]
     wait_for_idle(work_root, drain_timeout)
+    wait_for_media_idle(old_env, max(3, drain_timeout))
     python = str(BASE / "runtime/current/bin/python")
     # Existing preflight exercises the real compositor and guarded import.
     # New code is checked with the effective live environment plus only the
@@ -270,6 +332,7 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
         if json.loads(preflight).get("ok") is not True: raise ValueError()
     except (ValueError, TypeError): raise DeployError("candidate_preflight_failed") from None
     wait_for_idle(work_root, 0)
+    wait_for_media_idle(old_env, max(3, drain_timeout))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = BASE / "deploy-backups" / ("video-editing-" + stamp)
     manifest = backup_configuration(backup)
@@ -282,6 +345,10 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
     atomic(MARKER, b"intake disabled for verified video editing rollout\n", 0o644)
     changed = False
     try:
+        # Recheck directly before stopping; never stop a publisher to make this
+        # pass. Legacy code cannot make observation and SIGTERM atomic, so the
+        # initial upgrade still requires the operator's quiet maintenance window.
+        wait_for_media_idle(old_env, 0, quiet_seconds=0)
         run("systemctl", "stop", "--no-block", WORKER)
         wait_worker_stopped()
         before = wait_for_idle(work_root, 0)
@@ -319,6 +386,8 @@ def apply(candidate, old_env, overrides, previous_health, *, drain_timeout):
             # after our health check. Do not interrupt it to perform rollback.
             if ledger_snapshot(work_root)["busy"]:
                 raise DeployError("active_reader_retained_operator_recovery_required") from None
+            if property_value(WORKER, "MainPID") != "0":
+                wait_for_media_idle(old_env, 0, quiet_seconds=0)
             run("systemctl", "stop", "--no-block", WORKER)
             wait_worker_stopped()
             wait_for_idle(work_root, 0)
@@ -350,10 +419,12 @@ def main(argv=None):
         overrides = new_environment(old_env, args.candidate.name, bucket=args.bucket, region=args.region)
         old_health = health(); check_health(old_health, BASELINE)
         snapshot = ledger_snapshot(old_env["DRAMA_WORK_ROOT"])
+        media = worker_media_snapshot(old_env)
         if snapshot["mixed"]: raise DeployError("baseline_mixed_records_unexpected")
         if not args.apply:
             result = {"ok": True, "dry_run": True, "release": args.candidate.name, "files": files,
                 "ledger_counts": snapshot["counts"], "busy_records": snapshot["busy"],
+                "media_activity": media,
                 "preflight": "required_during_apply", "intake_after_apply": "closed",
                 "cos_acl": "private_enforced_by_uploader", "service_units": [WORKER, TUNNEL]}
         else:
