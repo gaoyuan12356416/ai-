@@ -53,3 +53,45 @@ Local result: 319 Python tests and 13 frontend integration cases passed.
 Python compilation, shipped JavaScript syntax and overlay compilation passed.
 
 A concurrent live source-pool fix was detected before activation and retained: indexed Dramawave resource/deployment reads and clearing stale UI pool errors after successful reads. Cache tags were advanced to the combined release.
+
+## Production receipt
+
+Deployed on 2026-10-23 at approximately 11:08 Beijing time.
+
+- Commit: `fbfc738d288603401e11af601b03a4845125b16f`.
+- Release: `/mnt/data-disk/x-post-automation/releases/20261023T030155Z-personal-fbfc738d28`.
+- Backup: `/mnt/data-disk/x-post-automation/backups/20261023T030155Z-personal-fbfc738d28`.
+- Previous release: `/mnt/data-disk/x-post-automation/releases/20261022T120433Z-personal-30f1d0518a`.
+- Manifest: `deployed`, original triggers restored, legacy ledger projections and
+  token fingerprints unchanged. One existing personal task was retained; the
+  upgrade created no tasks. The existing pool and all three items were retained.
+- Main API, X sidecar, X Auto and X pool scheduler are active. Existing FB sidecar,
+  pool scheduler, publish worker and YouTube publishing workers remain active.
+- Public read-only checks passed 13/13; ten asset hashes match the GitHub checkout,
+  unauthenticated requests are rejected and internal routes remain private.
+- Authenticated browser verification: 42 settings buttons and 42 pool buttons
+  enabled, another owner's default-copy dialog opens, eight table columns retained,
+  and the five-step publishing workspace lists all 42 accounts (35 eligible).
+  Neither page has document-level horizontal overflow. Browser verification uses the existing
+  admin login; ordinary non-admin cross-owner behavior is covered by isolated tests.
+- No production configuration saves, pool writes, test batches or X posting calls
+  were used. Existing business tasks continue normally. Captured console errors
+  matched the pre-existing browser-extension message-channel warnings; no
+  application-script error was observed.
+
+Verification evidence: `manifest.json` and `production-readonly.json` inside the
+backup; local test logs and browser screenshots in
+`D:\codex\artifacts\x-shared-access-20261023`.
+After the concurrent source fix was merged, 113 affected Python cases passed;
+all five deployment regression cases also passed after the upgrade-guard change.
+
+Exact rollback command (the script checks compatibility before changing code):
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/source
+python3 scripts/deploy_x_personal_publish.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T030155Z-personal-fbfc738d28
+```
+
+Rollback restores the prior code/configuration only. New task creation or a
+shared-pool operator change blocks rollback until reconciled with a compatible
+executor. Never restore a database or token archive over live state.
