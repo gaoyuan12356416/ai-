@@ -51,3 +51,5 @@ change actual account settings, enable plans, add materials or create test tasks
 
 Local result: 319 Python tests and 13 frontend integration cases passed.
 Python compilation, shipped JavaScript syntax and overlay compilation passed.
+
+A concurrent live source-pool fix was detected before activation and retained: indexed Dramawave resource/deployment reads and clearing stale UI pool errors after successful reads. Cache tags were advanced to the combined release.

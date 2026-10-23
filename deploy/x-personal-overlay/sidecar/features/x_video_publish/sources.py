@@ -89,14 +89,16 @@ class SourceRepository:
         if contents:
             marks = ','.join('%s' for _ in contents)
             resource_rows = self.mysql.select(f'''SELECT r.content_id,r.series_code,r.language,r.name drama_name,
-                r.labels drama_labels,r.desc drama_description FROM `{self.schema}`.ads_drama_resource r
-                WHERE r.content_id IN ({marks}) ORDER BY r.id LIMIT 4001''', contents)
+                r.labels drama_labels,r.desc drama_description
+                FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
+                WHERE r.content_id IN ({marks}) AND r.app_id=1479
+                ORDER BY r.id LIMIT 4001''', contents)
             if len(resource_rows) > 4000:
                 raise PublishingError('source_mapping_too_large','关联剧目数据超出校验范围，请缩小素材选择后重试',503)
             for r in resource_rows:
                 dramas[str(r['content_id'])].append(r)
             deployment_rows = self.mysql.select(f'''SELECT i.content_id,i.app_id,i.app,i.language,i.deploy_time
-                FROM `{self.schema}`.ads_drama_info i WHERE i.content_id IN ({marks}) AND i.app_id=1479
+                FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac) WHERE i.content_id IN ({marks}) AND i.app_id=1479
                 ORDER BY i.app LIMIT 4001''', contents)
             if len(deployment_rows) > 4000:
                 raise PublishingError('source_mapping_too_large','关联投放数据超出校验范围，请缩小素材选择后重试',503)
@@ -108,6 +110,8 @@ class SourceRepository:
             selected, rejected = selector.select_manual(material_ids[start:start+50],previous_source_date(),limit=50)
             for r in rejected:
                 errors[r['material_id']] = {'code':r['error_code'],'message':r['error_message']}
+                if r['error_code'] == 'drama_mapping_ambiguous':
+                    errors[r['material_id']]['message'] = '同一 Dramawave 剧目存在不同的剧名、剧集编号或简介，请核对源库剧目信息'
             for r in selected:
                 mid = r['material_id']
                 if r.get('media_kind') != 'video':
@@ -137,18 +141,22 @@ class SourceRepository:
         if re.fullmatch(r'[0-9]+',q):
             clauses.append('s.id=%s');params.append(q)
         elif q:
-            clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r
-                WHERE r.content_id=s.data_source_id AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
+            clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
+                WHERE r.content_id=s.data_source_id AND r.app_id=1479 AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
         if language:
             aliases = [language,'jp'] if language=='ja' else [language]
-            clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r
-                WHERE r.content_id=s.data_source_id AND LOWER(REPLACE(TRIM(r.language),'_','-'))
+            # Every eligible result also needs a same-language deployment row.
+            # Use its small indexed set for the prefilter; full resource identity
+            # and language validation still runs below before returning a video.
+            clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
+                WHERE i.content_id=s.data_source_id AND i.app_id=1479 AND LOWER(REPLACE(TRIM(i.language),'_','-'))
                 IN ({','.join('%s' for _ in aliases)}))''');params.extend(aliases)
-        raw = self.mysql.select(f'''SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s
+        raw = self.mysql.select(f'''SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
             WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
         resolved = self._resolve_rows(selected,raw[:limit]) if selected else {'items':{},'errors':{}}
-        items = [resolved['items'][mid] for mid in selected if mid in resolved['items']]
+        items = [resolved['items'][mid] for mid in selected if mid in resolved['items']
+                 and (not language or resolved['items'][mid]['language'] == language)]
         return {'items':items,'next_cursor':selected[-1] if len(raw)>limit else '',
                 'empty_reason':next(iter(resolved['errors'].values()),{}).get('message','没有符合条件的视频') if not items else ''}
 
