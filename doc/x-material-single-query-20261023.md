@@ -30,5 +30,49 @@ The installer snapshots affected code/SQLite/tokens, drains workers, checks live
 file hashes, restores original service and trigger states, and verifies ledger
 and token fingerprints. Its rollback restores only the preceding code file.
 
-Production measurements and the exact rollback command will be appended after
-candidate equivalence checks and deployment.
+## Production acceptance
+
+- Release: 4317b66d13f0e39dce3d46faf9146e89586a248a, pushed to GitHub and
+  checked out at /mnt/data-disk/x-personal-publishing/material-single-query-4317b66.
+- CPU: 43.166.187.96. Updated the one repository module in
+  /root/drama_material_service and /opt/x-post-automation/current (two files).
+- Backup: /mnt/data-disk/x-post-automation/backups/20261023T073938Z-source-4317b66d/manifest.json.
+- Deployment status: deployed; both installed hashes match. Publisher ledger and
+  token fingerprints were preserved, all original trigger states restored, and
+  drama-material-api, x-post-automation, x-auto-post-service and
+  x-video-pool-scheduler are active.
+- Windows and Linux each passed:
+  `python -m unittest discover -s scripts -p 'test_x_video_publish_*.py'`
+  (113 tests); `git diff --check` passed locally.
+- Candidate and previous live source responses matched exactly for 7424637,
+  7781416 and their two-ID revalidation. Live Japanese/ja/jp, incorrect English,
+  cursor exclusion and nonexistent-ID checks behaved as expected. EXPLAIN still
+  shows PRIMARY for exact source reads, content_id for resources and ac for
+  deployment information; only bounded derived results are scanned.
+
+| ID / condition | Before (seconds) | After deployment (seconds) |
+| --- | ---: | --- |
+| 7424637, existing duration | 6.5733 | 2.6671, 2.5406, 2.4642 (mean 2.5573) |
+| 7781416, first duration read | 10.1436 | 5.6543 |
+| 7781416, measured duration cached | not measured in this comparison | 2.4641, 2.6397 |
+
+Before measurements ran the previous source repository against the live replica;
+after measurements called the restarted production source HTTP service, including
+the gate, database connection, mapping validation and applicable metadata read.
+These are server-side samples, excluding public-browser network transit. No
+source-row result cache was added. All result digests matched the previous code.
+
+The public browser also returned ID 7424637 with its Japanese title and 861-second
+duration; Nginx recorded HTTP 200. A timed repeat from clicking Search to the
+checkbox becoming visible took 2.928 seconds, including automation control
+latency. No materials were selected and no verification Post was created.
+The local evidence directory D:/codex/artifacts/x-material-single-query-20261023/
+contains acceptance.json, deployment.json, browser-timing.json and
+material-7424637.png.
+
+Exact rollback on the CPU server (code only; current publisher data is retained):
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/material-single-query-4317b66
+python3 scripts/deploy_x_material_single_query.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T073938Z-source-4317b66d/manifest.json
+```
