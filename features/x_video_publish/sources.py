@@ -213,13 +213,24 @@ class SourceRepository:
         if exact_id:
             clauses.append('s.id=%s');params.append(q)
         elif q:
-            # A complete drama title identifies that drama, even when the
-            # selected language has no video. Do not fall back to a full source
-            # scan in that case. Fetch through the existing (source,content)
-            # index, enumerating all source kinds rather than restricting them.
-            titles = self.mysql.select(f'''SELECT DISTINCT r.content_id
-                FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
-                WHERE r.app_id=1479 AND r.name=%s LIMIT 101''', [q])
+            # A localized title identifies a series, not only that language's
+            # content ID. Expand through the small, indexed drama-info catalog;
+            # retain direct title matches when a series code is absent. Each
+            # branch is bounded, and full per-content validation still follows.
+            titles = self.mysql.select(f'''SELECT DISTINCT matched.content_id FROM (
+                (SELECT DISTINCT r.content_id
+                 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
+                 WHERE r.app_id=1479 AND r.name=%s LIMIT 101)
+                UNION ALL
+                (SELECT DISTINCT i.content_id
+                 FROM (SELECT DISTINCT r.series_code
+                       FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
+                       WHERE r.app_id=1479 AND r.name=%s
+                         AND TRIM(r.series_code) NOT IN ('','0') LIMIT 101) title_series
+                 STRAIGHT_JOIN `{self.schema}`.ads_drama_info i FORCE INDEX(scoo)
+                   ON i.series_code=title_series.series_code
+                 WHERE i.app_id=1479 AND TRIM(i.content_id)<>'' LIMIT 101)
+                ) matched LIMIT 101''', [q,q])
             if len(titles) > 100:
                 raise PublishingError('source_mapping_too_large','同名剧目过多，请使用完整素材 ID 查询',503)
             if titles:

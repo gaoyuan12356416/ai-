@@ -389,6 +389,12 @@ class FakeMySQL:
         if 's.id<%s' in sql:
             cursor = params[sql.split('s.id<%s')[0].count('%s')]
             rows = [r for r in rows if int(r['material_id']) < int(cursor)]
+        if 's.data_source_id IN (' in sql:
+            before, after = sql.split('s.data_source_id IN (', 1)
+            start = before.count('%s')
+            count = after.split(')', 1)[0].count('%s')
+            contents = params[start:start+count]
+            rows = [r for r in rows if r['content_id'] in contents]
         return rows
 
     def resource_rows(self, sql):
@@ -428,7 +434,11 @@ class SourceBoundaryTests(unittest.TestCase):
         self.assertEqual(len(mysql.calls), 4)
         title_sql, title_params = mysql.calls[0]
         self.assertIn('FORCE INDEX(name)', title_sql)
-        self.assertEqual(title_params, ['Fixture drama'])
+        self.assertIn('FORCE INDEX(scoo)', title_sql)
+        self.assertIn('i.series_code=title_series.series_code', title_sql)
+        self.assertIn("TRIM(r.series_code) NOT IN ('','0')", title_sql)
+        self.assertIn('i.app_id=1479', title_sql)
+        self.assertEqual(title_params, ['Fixture drama', 'Fixture drama'])
         sql, params = mysql.calls[1]
         self.assertIn('STRAIGHT_JOIN', sql)
         self.assertIn('s.data_source_id IN (%s)', sql)
@@ -444,6 +454,33 @@ class SourceBoundaryTests(unittest.TestCase):
         with self.assertRaises(PublishingError) as caught:
             SourceRepository(mysql).listing({'q': 'Fixture drama'})
         self.assertEqual(caught.exception.code, 'source_mapping_too_large')
+
+    def test_title_returns_translations_but_keeps_language_product_and_cursor_filters(self):
+        class TranslatedMySQL(FakeMySQL):
+            def resource_rows(self, sql):
+                return [{"content_id": r['content_id'], "series_code": "same-series",
+                         "language": r['material_language'], "drama_name": "Localized title " + r['material_language'],
+                         "drama_labels": "Romance", "drama_description": "Description " + r['material_language']}
+                        for r in self.sources]
+
+            def deployment_rows(self):
+                return [{"content_id": r['content_id'], "app_id": 1479, "app": "fixture-app",
+                         "language": r['material_language'], "deploy_time": 0} for r in self.sources]
+
+        mysql = TranslatedMySQL(count=5)
+        for row, language in zip(mysql.sources, ['en', 'ko', 'ja', 'zh-TW', 'en']):
+            row.update(content_id='content-' + row['material_id'], material_language=language)
+        mysql.exact_titles = [{'content_id': r['content_id']} for r in mysql.sources[:4]]
+        source = SourceRepository(mysql)
+        query = {'q': 'Original English title'}
+        self.assertEqual([r['material_id'] for r in source.listing(query)['items']], ['101','102','103','104'])
+        self.assertEqual([r['material_id'] for r in source.listing({**query,'language':'ja'})['items']], ['103'])
+        self.assertEqual([r['material_id'] for r in source.listing({**query,'language':'ko'})['items']], ['102'])
+        self.assertEqual(source.listing({**query,'language':'de'})['items'], [])
+        self.assertEqual([r['material_id'] for r in source.listing({**query,'cursor':'103'})['items']], ['101','102'])
+        mysql.sources[1]['product'] = 'Dramawave'
+        self.assertEqual([r['material_id'] for r in source.listing(query)['items']], ['101','103','104'])
+        self.assertEqual([r['material_id'] for r in source.listing({**query,'product':'Dramawave'})['items']], ['102'])
 
     def test_catalog_products_and_cross_product_exact_ids(self):
         mysql = FakeMySQL()
