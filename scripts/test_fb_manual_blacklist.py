@@ -1,4 +1,4 @@
-"""Operator waiver covers selection, preview, submit and execution, never pools."""
+"""Manual blacklist waiver and strict defaults; Page pools also waive as of 2026-10-23."""
 import sys
 import unittest
 from pathlib import Path
@@ -68,11 +68,11 @@ class ManualFlowTests(Fixture):
             self.assertEqual(1, len(worker.calls))
             self.assertTrue(all(c.kwargs['enforce_blacklist'] is False for c in read.call_args_list))
 
-    def test_pool_execution_keeps_blacklist(self):
+    def test_unknown_task_kind_keeps_blacklist(self):
         self.submit()
         self.ready()
         with self.store.connect() as conn:
-            conn.execute("UPDATE fb_video_task SET source_kind='pool'")
+            conn.execute("UPDATE fb_video_task SET source_kind='unknown-kind'")
         def guarded(ids, **kwargs):
             self.assertTrue(kwargs['enforce_blacklist'])
             raise SourceError('material_blacklisted', 'blocked', 409)
