@@ -88,6 +88,8 @@ class GraphClient:
         self.max_objects = max_objects
         self.sleep = sleeper or time.sleep
         self.read_workers = 1 if session is not None else 4
+        self.stop = lambda: False
+        self.delete_stop = lambda: False
         self.http = session if session is not None else requests.Session()
         # No transport retries, especially not for DELETE. GET retry policy is
         # implemented explicitly below and never follows a redirect.
@@ -169,6 +171,8 @@ class GraphClient:
     def _get(self, path, user_id, params=None):
         token = self._token(user_id)
         for attempt in range(self.get_retries + 1):
+            if self.stop():
+                raise InterruptedError('stop_requested')
             transient = False
             delay = float(2 ** attempt)
             try:
@@ -268,9 +272,11 @@ class GraphClient:
         """Each production read worker owns its HTTP session and connection pool."""
         if self.read_workers == 1:
             return self
-        return GraphClient(self.tokens, self.version, self.timeout,
+        reader = GraphClient(self.tokens, self.version, self.timeout,
                            get_retries=self.get_retries, max_pages=self.max_pages,
                            max_objects=self.max_objects)
+        reader.stop = self.stop
+        return reader
 
     def _bounded_reads(self, function, items, stop=lambda: False):
         items = iter(items)
@@ -314,7 +320,7 @@ class GraphClient:
     def list_accounts(self):
         accounts, errors = {}, []
         finished = 0
-        for user_id, per_user, error in self._bounded_reads(self._user_accounts, sorted(self.tokens)):
+        for user_id, per_user, error in self._bounded_reads(self._user_accounts, sorted(self.tokens), self.stop):
             finished += 1
             progress = getattr(self, 'on_discovery_progress', None)
             if callable(progress):
@@ -403,6 +409,8 @@ class GraphClient:
 
     def delete(self, kind, object_id, user_id, account_id):
         """Verify identity, then send at most one DELETE; never rotate tokens."""
+        if self.delete_stop():
+            return {'status': 'failed', 'code': 'cancelled_before_delete', 'request_sent': False}
         try:
             identifier = _object_id(object_id)
             aid = _object_id(account_id, account=True)
@@ -413,6 +421,8 @@ class GraphClient:
                         "confirmed_deleted": True, "request_sent": False, "object": record}
         except GraphError as error:
             return {"status": "failed", "request_sent": False, "error": error.as_dict()}
+        if self.delete_stop():
+            return {'status': 'failed', 'code': 'cancelled_before_delete', 'request_sent': False}
         try:
             response = self.http.request(
                 "DELETE", self.base + identifier, params={},

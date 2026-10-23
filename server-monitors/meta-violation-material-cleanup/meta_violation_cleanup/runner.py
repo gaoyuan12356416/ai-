@@ -101,6 +101,7 @@ class Runner:
         self.runtime.update(run_id,stage='account_discovery',vio_rows=len(violations),policy_rows=len(policy_rows),material_count=len(evidence['materials']))
         if isinstance(self.graph,GraphClient):
             self.graph.on_discovery_progress=lambda data:self.runtime.update(run_id,**data)
+            self.graph.stop=self.stop
         discovery=self.graph.list_accounts()
         errors=list(discovery['errors']);account_results=[];candidates=[];skip=Counter();product_counts=Counter();mapping_gaps=Counter()
         accounts=discovery['accounts']
@@ -373,6 +374,7 @@ class Runner:
                 # bounds lock-held mutation/preflight work near 10:00.
                 isolated_graph=GraphClient(self.graph.tokens,version=self.graph.version,
                     timeout=min(self.graph.timeout,20),get_retries=0)
+                isolated_graph.delete_stop=self.stop
                 self.execution_graph=isolated_graph
             self.runtime.update(run_id,stage='executing',shared_job_id=job_id,shared_run_id=shared_run,canary_deferred_ads=limited)
             for cid,items in groups.items():

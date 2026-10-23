@@ -67,6 +67,31 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_stop_cancels_next_page_without_returning_partial_inventory(self):
+        client,session,_=self.client([page([ad()], 'cursor')])
+        original=session.request
+        def request(*args,**kwargs):
+            result=original(*args,**kwargs)
+            client.stop=lambda:True
+            return result
+        session.request=request
+        with self.assertRaises(InterruptedError):
+            client.list_ads('100','1')
+        self.assertEqual(len(session.calls),1)
+
+    def test_stop_after_identity_get_does_not_send_delete(self):
+        client,session,_=self.client([Response(creative())])
+        original=session.request
+        def request(*args,**kwargs):
+            result=original(*args,**kwargs)
+            client.delete_stop=lambda:True
+            return result
+        session.request=request
+        result=client.delete('creative','20','1','100')
+        self.assertFalse(result['request_sent'])
+        self.assertEqual(result['code'],'cancelled_before_delete')
+        self.assertEqual([call[0] for call in session.calls],['GET'])
+
     def test_already_deleted_identity_is_verified_without_delete_request(self):
         client, session, _ = self.client([Response(creative(status='DELETED'))])
         result = client.delete('creative', '20', '1', '100')
