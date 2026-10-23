@@ -9,6 +9,7 @@ import json
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -86,6 +87,7 @@ class GraphClient:
         self.max_pages = max_pages
         self.max_objects = max_objects
         self.sleep = sleeper or time.sleep
+        self.read_workers = 1 if session is not None else 4
         self.http = session if session is not None else requests.Session()
         # No transport retries, especially not for DELETE. GET retry policy is
         # implemented explicitly below and never follows a redirect.
@@ -262,12 +264,40 @@ class GraphClient:
             params["after"] = cursor
         raise GraphError("inventory_limit", "Meta inventory exceeded the configured page limit")
 
-    def list_accounts(self):
-        accounts, errors = {}, []
-        for user_id in sorted(self.tokens):
+    def _reader(self):
+        """Each production read worker owns its HTTP session and connection pool."""
+        if self.read_workers == 1:
+            return self
+        return GraphClient(self.tokens, self.version, self.timeout,
+                           get_retries=self.get_retries, max_pages=self.max_pages,
+                           max_objects=self.max_objects)
+
+    def _bounded_reads(self, function, items, stop=lambda: False):
+        items = iter(items)
+        with ThreadPoolExecutor(max_workers=self.read_workers) as pool:
+            pending = set()
+            exhausted = False
+            while pending or not exhausted:
+                while not exhausted and len(pending) < self.read_workers:
+                    if stop():
+                        raise InterruptedError('stop_requested')
+                    try:
+                        item = next(items)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending.add(pool.submit(function, item))
+                if pending:
+                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        yield future.result()
+
+    def _user_accounts(self, user_id):
+        reader = self._reader()
+        try:
             per_user = set()
             try:
-                for rows in self._pages("me/adaccounts", user_id,
+                for rows in reader._pages("me/adaccounts", user_id,
                                         {"fields": "id,account_id", "limit": 100}):
                     for row in rows:
                         aid = _object_id(row.get("account_id") or row.get("id"), account=True)
@@ -275,12 +305,44 @@ class GraphClient:
                             raise GraphError("account_mismatch", "Meta account identifiers disagree")
                         per_user.add(aid)
             except GraphError as error:
-                errors.append(dict(user_id=user_id, **error.as_dict()))
+                return user_id, set(), dict(user_id=user_id, **error.as_dict())
+            return user_id, per_user, None
+        finally:
+            if reader is not self:
+                reader.close()
+
+    def list_accounts(self):
+        accounts, errors = {}, []
+        for user_id, per_user, error in self._bounded_reads(self._user_accounts, sorted(self.tokens)):
+            if error:
+                errors.append(error)
                 continue
             # Publish an identity's accounts only after all of its pages finish.
             for aid in sorted(per_user):
                 accounts.setdefault(aid, {"user_ids": []})["user_ids"].append(user_id)
+        for info in accounts.values():
+            info['user_ids'].sort()
+        errors.sort(key=lambda item: item['user_id'])
         return {"accounts": accounts, "errors": errors}
+
+    def _account_ads(self, item):
+        account, info = item
+        reader = self._reader()
+        errors = []
+        try:
+            for uid in info['user_ids']:
+                try:
+                    return account, reader.list_ads(account, uid), uid, errors
+                except GraphError as exc:
+                    errors.append({'user_id': str(uid), 'error': exc.as_dict()})
+            return account, None, None, errors
+        finally:
+            if reader is not self:
+                reader.close()
+
+    def iter_account_ads(self, accounts, stop=lambda: False):
+        """At most four read-only account scans; never parallelize DELETE or SQL."""
+        yield from self._bounded_reads(self._account_ads, sorted(accounts.items()), stop)
 
     def _record(self, data, object_id=None, account_id=None, kind="ad"):
         if not isinstance(data, dict):

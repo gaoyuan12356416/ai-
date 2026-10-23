@@ -3,6 +3,8 @@ import json
 import pathlib
 import sys
 import unittest
+import threading
+import time
 
 import requests
 
@@ -65,6 +67,34 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_bounded_read_workers_do_not_submit_unbounded_inventory(self):
+        client = GraphClient({'1': 'synthetic-token'})
+        lock = threading.Lock()
+        state = {'active': 0, 'peak': 0}
+        def work(item):
+            with lock:
+                state['active'] += 1
+                state['peak'] = max(state['peak'], state['active'])
+            time.sleep(0.02)
+            with lock:
+                state['active'] -= 1
+            return item
+        try:
+            result = list(client._bounded_reads(work, range(12)))
+            self.assertEqual(sorted(result), list(range(12)))
+            self.assertLessEqual(state['peak'], 4)
+            self.assertGreater(state['peak'], 1)
+        finally:
+            client.close()
+
+    def test_account_read_fallback_is_readonly_and_keeps_failure_evidence(self):
+        session = Session([Response({'error': {'code': 190, 'message': 'expired'}}, 400),
+                           page([ad()])])
+        client = GraphClient({'1': 'first-token', '2': 'second-token'}, session=session)
+        account, ads, user, errors = next(client.iter_account_ads({'100': {'user_ids': ['1', '2']}}))
+        self.assertEqual((account, user, len(ads), len(errors)), ('100', '2', 1, 1))
+        self.assertTrue(all(call[0] == 'GET' for call in session.calls))
+
     def client(self, responses, **kwargs):
         session = Session(responses)
         sleeps = []
