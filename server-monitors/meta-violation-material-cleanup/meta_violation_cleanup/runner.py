@@ -65,12 +65,15 @@ class Runner:
         return product_scope(reader() if callable(reader) else self.source.products())
 
     def lineage_data(self, ids, violation_rows=()):
-        data={}
-        for part in chunks(list(ids)):
-            data.update(self.source.lineages(part))
-        keys=set(source_keys(data))
-        keys.update(source_keys({'violations':violation_rows}))
-        sources=self.source.sources(sorted(keys))
+        data={};ids=list(ids)
+        if not ids and not violation_rows:return {},{}
+        with self.sql_snapshot():
+            for part in chunks(ids):
+                self.check_stop()
+                data.update(self.source.lineages(part))
+            keys=set(source_keys(data))
+            keys.update(source_keys({'violations':violation_rows}))
+            sources=self.source.sources(sorted(keys))
         return data,sources
 
     def account_inventories(self,accounts):

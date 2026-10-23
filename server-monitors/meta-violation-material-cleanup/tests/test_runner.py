@@ -179,9 +179,11 @@ class RunnerTests(unittest.TestCase):
         manifest=self.manifest(runner);state={'active':False,'snapshots':0,'scopes':0}
         @contextmanager
         def snapshot():
-            state['active']=True;state['snapshots']+=1
+            was_active=state['active']
+            state['active']=True
+            if not was_active:state['snapshots']+=1
             try:yield
-            finally:state['active']=False
+            finally:state['active']=was_active
         source.snapshot=snapshot
         def scope_products():
             self.assertTrue(state['active']);state['scopes']+=1

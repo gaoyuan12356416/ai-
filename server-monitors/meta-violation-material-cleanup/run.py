@@ -83,6 +83,7 @@ def summary(runtime, run_id):
             result[key] = data[key]
     for key in ("vio_rows", "policy_rows", "material_count", "candidate_ads", "candidate_creatives",
                 "accounts_total", "accounts_finished", "coverage_errors", "rule1_ads", "rule2_ads",
+                "identities_total", "identities_finished", "identities_failed", "accounts_discovered",
                 "shared_creatives", "remaining_ads"):
         if isinstance(data.get(key), int):
             result[key] = data[key]
