@@ -244,7 +244,10 @@ class SqlSource:
         if not (1 <= self.query_timeout <= 120 and 60 <= self.session_timeout <= 3600 and
                 1 <= self.page_size <= 2000 and 1 <= self.lineage_batch_size <= 200):
             raise SqlSourceError("unsafe_sql_limits")
-        self._command = ["/usr/bin/mysql", "--no-defaults", "--protocol=TCP", "--host=101.32.56.53",
+        # The installed FIFO wrapper prepends its own mysql options. MySQL only
+        # accepts --no-defaults as the first option, so it cannot be used here.
+        # Endpoint/user/protocol are explicit and every session proves read-only.
+        self._command = ["/usr/bin/mysql", "--protocol=TCP", "--host=101.32.56.53",
                          "--port=63350", "--user=" + user, "--connect-timeout=5",
                          "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names",
                          "--unbuffered", "--quick", "--skip-reconnect"]
