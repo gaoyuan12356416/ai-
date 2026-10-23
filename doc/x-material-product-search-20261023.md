@@ -55,3 +55,32 @@ Rollback restores only the scoped code files. Current queues, pool state,
 publication receipts, credentials and unrelated services remain current.
 No test Post, new admission or historical replay is part of acceptance.
 Skill context is unchanged; this repository note carries the change contract.
+
+## Production receipt
+
+- GitHub release: `9695b734675dd9a421800b8e70233f138c9d8160`.
+- CPU host: `43.166.187.96`. Main API: `/root/drama_material_service`;
+  X runtime: `/opt/x-post-automation/current`; public static: `/usr/share/nginx/html`.
+- Pulled source: `/mnt/data-disk/x-personal-publishing/catalog-product-9695b73`.
+- Backup: `/mnt/data-disk/x-post-automation/backups/20261023T064254Z-source-9695b734/manifest.json`.
+- Installer status `deployed`. All 10 installed file hashes and both public
+  static-asset hashes matched. Ledger and token fingerprints were unchanged
+  during cutover; original triggers and the active personal pool scheduler
+  were restored. Main API, X sidecar and its Auto dependency are active.
+- Linux regression: the same 110 backend tests passed before deployment.
+- Candidate full-source reads (including metadata validation) returned 10
+  social videos in 8.158 seconds; the reported full title returned no Japanese
+  videos in 4.097 seconds and 48 English videos in 8.771 seconds. Exact
+  material ID 7783665 matched despite selecting the social product, 6.703
+  seconds. These are timestamped samples of a changing source library.
+- Browser verification loaded the social picker, switched to Dramawave and
+  rendered 48 real title-search results while retaining one staged selection.
+  The original full-title plus Japanese filter returned the normal empty state
+  without a red error. Nginx confirmed HTTP 200 for these same browser requests.
+
+Exact code rollback on the CPU server:
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/catalog-product-9695b73
+python3 scripts/deploy_x_catalog_product.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T064254Z-source-9695b734/manifest.json
+```
