@@ -39,7 +39,7 @@ async (page) => {
   await page.locator('#applyMaterials').click();
   await page.locator('#selectPages').click();
   await page.locator('#matchPairs').click();
-  check(await page.locator('#pairRows input:checked').count()===2,'cross language and unconfigured Page paired');
+  check(await page.locator('#pairRows input:checked').count()===1,'cross language configured Page paired; unconfigured Page excluded');
   await page.locator('#captionPair').selectOption('201::101');
   check(await page.locator('#pairCaption').inputValue()==='','blank caption inherits default');
   check(await page.locator('#pairTitle').getAttribute('placeholder')==='Updated Page title','title default visible');
@@ -49,7 +49,7 @@ async (page) => {
   check(await page.locator('#pairTitle').inputValue()==='Explicit title','reset caption preserves independent title');
   await page.locator('#preflight').click();
   await page.locator('#publishConfirmation').waitFor();
-  check(last.pairs.length===2&&last.pairs[1].config_version===0,'unconfigured Page reaches preflight');
+  check(last.pairs.length===1&&last.pairs[0].page_id==='101','only managed Page reaches preflight');
   check(last.pairs[0].title==='Explicit title'&&last.pairs[0].caption_template==='','independent text fields reach preflight');
   check(errors.length===0,'no JavaScript page errors');
   return {checks};
