@@ -371,19 +371,25 @@
     },
     {
       key: "social_reports",
-      label: "社媒数据报表",
+      label: "数据报表",
       order: 50,
       module: "social_analytics",
       items: [
         {
           key: "socialAnalytics",
-          label: "发布效果分析",
+          label: "社媒效果分析",
           description: "按人员、渠道和剧目分析发布、点击、安装及付费转化",
           kind: "page",
           href: "/social-analytics.html",
           module: "social_analytics",
           enabled: true,
           order: 10,
+        },
+        {
+          key: "aiImageDaily", label: "AI 图片素材日报",
+          description: "查看三产品 AI 图片产出、投放效果及历史日报",
+          kind: "page", href: "/ai-image-daily.html",
+          module: "social_analytics", enabled: true, order: 20,
         },
       ],
     },
@@ -606,6 +612,22 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    // Upgrade saved and cached navigation without replacing other groups or ACLs.
+    const reportDefault = DEFAULT_NAV.find(group => group.key === "social_reports");
+    let reports = normalized.find(group => group && group.key === "social_reports");
+    if (!reports) {
+      reports = cloneNav([reportDefault])[0];
+      normalized.push(reports);
+    } else {
+      reports.label = "数据报表";
+      if (!Array.isArray(reports.items)) reports.items = [];
+      const analytics = reports.items.find(item => item && item.key === "socialAnalytics");
+      if (analytics) analytics.label = "社媒效果分析";
+      if (!reports.items.some(item => item && item.key === "aiImageDaily")) {
+        reports.items.push(cloneNav(reportDefault.items.filter(item => item.key === "aiImageDaily"))[0]);
+      }
+    }
+
     if (!normalized.some(group => group && Array.isArray(group.items) &&
         group.items.some(item => item && item.key === "videoEditing"))) {
       const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");

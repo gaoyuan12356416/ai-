@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>AI 图片素材日报 · 数据报表</title>
+  <link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
+  <link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
+  <style>
+    .report-main{min-width:0}.report-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:20px 0;padding:16px;background:#fff;border:1px solid #e2e9ee;border-radius:14px}.report-toolbar p{flex:1;margin:0;color:#64748b;font-size:13px}.report-frame{display:block;width:100%;height:calc(100vh - 245px);min-height:600px;border:1px solid #e2e9ee;border-radius:14px;background:#fff}.report-message{padding:18px;background:#fff;border:1px solid #e2e9ee;border-radius:12px;color:#64748b}.report-main [hidden]{display:none!important}@media(max-width:760px){.report-frame{height:75vh;min-height:520px}.report-toolbar{align-items:flex-start}.report-toolbar p{flex-basis:100%}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">剧</div><div><strong>AI自动后台</strong><small>内容制作与发布管理</small></div></div>
+    <nav id="quickNav" class="nav" aria-label="后台主导航"></nav>
+    <div class="sidebar-note"><strong>数据报表</strong><span>内容产出与投放效果</span></div>
+  </aside>
+  <main class="main report-main">
+    <header class="topbar">
+      <div><h1>AI 图片素材日报</h1><p>DramaWave · MoboShort · MoboReels</p></div>
+      <div class="toolbar"><div class="user-card" id="userCard"></div><button class="btn btn-secondary" id="authButton" type="button">登录</button><button class="btn btn-secondary" id="refreshPage" type="button">刷新</button></div>
+    </header>
+    <div id="reportMessage" class="report-message" role="status" aria-live="polite">正在核验报表权限…</div>
+    <section id="reportPanel" hidden aria-label="AI 图片日报">
+      <div class="report-toolbar">
+        <p>每日北京时间 09:00 更新昨日数据。可在报表内切换历史日期，实际数据日期以报表标注为准。</p>
+        <button class="btn btn-secondary" id="latestReport" type="button">最新日报</button>
+        <a class="btn btn-secondary" id="openReport" target="_blank" rel="noopener noreferrer">独立窗口查看</a>
+      </div>
+      <iframe id="reportFrame" class="report-frame" title="三产品 AI 图片素材日报" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox"></iframe>
+    </section>
+  </main>
+</div>
+<script src="/quick-nav.js?v=20261023-data-reports-v1"></script>
+<script src="/ui-topbar.js?v=20260903-1"></script>
+<script src="/ai-image-daily.js?v=20261023-data-reports-v1"></script>
+</body>
+</html>
