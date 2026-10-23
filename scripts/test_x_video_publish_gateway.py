@@ -376,26 +376,46 @@ class FakeMySQL:
             "material_name": "Fixture video", "material_language": "en", "content_id": "fixture-content",
             "source_tag_name": "fixture", "video_duration": 45, "thumbnail_url": "https://images.example.invalid/1.png"} for i in range(count)]
 
+    def source_rows(self, sql, params):
+        if "WHERE s.id IN" in sql:
+            return [dict(r) for r in self.sources if r["material_id"] in params]
+        rows = copy.deepcopy(self.sources)
+        if 's.product=%s' in sql:
+            product = params[sql.split('s.product=%s')[0].count('%s')]
+            rows = [r for r in rows if r['product'] == product]
+        if 's.id=%s' in sql:
+            mid = params[sql.split('s.id=%s')[0].count('%s')]
+            rows = [r for r in rows if r['material_id'] == mid]
+        if 's.id<%s' in sql:
+            cursor = params[sql.split('s.id<%s')[0].count('%s')]
+            rows = [r for r in rows if int(r['material_id']) < int(cursor)]
+        return rows
+
+    def resource_rows(self, sql):
+        return [{"content_id": "fixture-content", "series_code": "fixture-series", "language": "en",
+                     "drama_name": "Fixture drama", "drama_labels": "Romance", "drama_description": "Fixture description"} for _ in range(self.resource_count)]
+
+    def deployment_rows(self):
+        return [{"content_id": "fixture-content", "app_id": 1479, "app": "fixture-app", "language": "en", "deploy_time": 0} for _ in range(self.deploy_count)]
+
     def select(self, sql, params):
         self.calls.append((sql, list(params)))
+        if sql.startswith('SELECT bundle.row_kind'):
+            source_sql = sql.split('UNION ALL')[0]
+            rows = self.source_rows(source_sql, params[:source_sql.count('%s')])
+            records = [('material', row) for row in rows]
+            if any(r.get('content_id') for r in rows):
+                records += [('drama', row) for row in self.resource_rows(sql)]
+                records += [('deploy', row) for row in self.deployment_rows()]
+            return [{'row_kind': kind, 'row_json': json.dumps(row)} for kind, row in records]
         if 'SELECT DISTINCT r.content_id' in sql:
             return copy.deepcopy(self.exact_titles)
         if "FROM `fixture_schema`.ads_custom_source" in sql:
-            if "WHERE s.id IN" in sql:
-                return [dict(r) for r in self.sources if r["material_id"] in params]
-            rows = copy.deepcopy(self.sources)
-            if 's.product=%s' in sql:
-                product = params[sql.split('s.product=%s')[0].count('%s')]
-                rows = [r for r in rows if r['product'] == product]
-            if 's.id=%s' in sql:
-                mid = params[sql.split('s.id=%s')[0].count('%s')]
-                rows = [r for r in rows if r['material_id'] == mid]
-            return rows
+            return self.source_rows(sql, params)
         if "FROM `fixture_schema`.ads_drama_resource" in sql:
-            return [{"content_id": "fixture-content", "series_code": "fixture-series", "language": "en",
-                     "drama_name": "Fixture drama", "drama_labels": "Romance", "drama_description": "Fixture description"} for _ in range(self.resource_count)]
+            return self.resource_rows(sql)
         if "FROM `fixture_schema`.ads_drama_info" in sql:
-            return [{"content_id": "fixture-content", "app_id": 1479, "app": "fixture-app", "language": "en", "deploy_time": 0} for _ in range(self.deploy_count)]
+            return self.deployment_rows()
         raise AssertionError("Unexpected source query")
 
 
@@ -447,13 +467,12 @@ class SourceBoundaryTests(unittest.TestCase):
     def test_product_scope_ignores_foreign_description_but_rejects_real_conflicts(self):
         class MixedProducts(FakeMySQL):
             conflict = False
-            def select(self, sql, params):
-                rows = super().select(sql, params)
-                if "FROM `fixture_schema`.ads_drama_resource" in sql:
-                    foreign = {**rows[0], "drama_description": "Other product copy"}
-                    # Simulate SQL scope, not a permissive fallback to the first row.
-                    if self.conflict or "r.app_id=1479" not in sql:
-                        rows.append(foreign)
+            def resource_rows(self, sql):
+                rows = super().resource_rows(sql)
+                foreign = {**rows[0], "drama_description": "Other product copy"}
+                # Simulate SQL scope, not a permissive fallback to the first row.
+                if self.conflict or "r.app_id=1479" not in sql:
+                    rows.append(foreign)
                 return rows
         mysql = MixedProducts()
         result = SourceRepository(mysql).resolve(["101"])
@@ -476,18 +495,44 @@ class SourceBoundaryTests(unittest.TestCase):
         self.assertIn("r.app_id=1479", resource_sql)
         self.assertIn("FORCE INDEX(content_id)", resource_sql)
 
-    def test_resolve_and_listing_each_use_at_most_three_bounded_queries(self):
+    def test_exact_reads_use_one_query_and_browse_keeps_bounded_queries(self):
         mysql = FakeMySQL()
         source = SourceRepository(mysql)
         result = source.resolve(["101", "102", "103"])
         self.assertEqual(len(result["items"]), 3)
-        self.assertEqual(len(mysql.calls), 3)
+        self.assertEqual(len(mysql.calls), 1)
         self.assertTrue(all("LIMIT" in sql for sql, _ in mysql.calls))
+        sql, params = mysql.calls[0]
+        self.assertEqual(sql.count('UNION ALL'), 2)
+        self.assertEqual(sql.count('LIMIT 4001'), 2)
+        self.assertEqual(sql.count('SELECT DISTINCT TRIM(s.data_source_id)'), 2)
+        self.assertEqual(params, ['101','102','103']*3)
+        self.assertIn('r.app_id=1479',sql)
+        self.assertIn('i.app_id=1479',sql)
+        mysql.calls.clear()
+        self.assertEqual(len(source.listing({'q':'101'})['items']),1)
+        self.assertEqual(len(mysql.calls),1)
+        mysql.calls.clear()
+        self.assertEqual(source.listing({'q':'101','cursor':'100'})['items'],[])
+        self.assertEqual(len(mysql.calls),1)
         mysql.calls.clear()
         listing = source.listing({"limit": "2"})
         self.assertEqual(len(listing["items"]), 2)
         self.assertEqual(listing["next_cursor"], "102")
         self.assertEqual(len(mysql.calls), 3)
+
+    def test_single_query_keeps_unicode_nulls_and_rejects_bad_bundle(self):
+        mysql = FakeMySQL()
+        mysql.sources[0].update(material_name='日本語视频😀', thumbnail_url=None)
+        result = SourceRepository(mysql).listing({'q':'101'})
+        self.assertEqual(result['items'][0]['material_name'],'日本語视频😀')
+        self.assertEqual(result['items'][0]['thumbnail_url'],'')
+        for record in ({'row_kind':'unknown','row_json':'{}'}, {'row_kind':'material','row_json':'[]'},
+                       {'row_kind':'material','row_json':'private invalid JSON'}):
+            with patch.object(mysql,'select',return_value=[record]), self.assertRaises(PublishingError) as error:
+                SourceRepository(mysql).resolve(['101'])
+            self.assertEqual(error.exception.code,'source_result_invalid')
+            self.assertNotIn('private',str(error.exception))
 
     def test_mapping_limit_overflow_fails_closed_before_selector(self):
         for which in ("resource_count", "deploy_count"):

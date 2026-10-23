@@ -1,5 +1,6 @@
 """Fixed, bounded X catalog reads using the existing exact-material policy."""
 import os
+import json
 import re
 import time
 from collections import defaultdict
@@ -91,34 +92,80 @@ class SourceRepository:
     def resolve(self, material_ids):
         material_ids = ids(material_ids)
         marks = ','.join('%s' for _ in material_ids)
-        rows = self.mysql.select(f'''SELECT {self._projection()}
-            FROM `{self.schema}`.ads_custom_source s WHERE s.id IN ({marks}) LIMIT 200''', material_ids)
-        return self._resolve_rows(material_ids, rows, recover_duration=True)
+        rows, mappings = self._read_exact_bundle(f's.id IN ({marks})', material_ids)
+        return self._resolve_rows(material_ids, rows, recover_duration=True, mappings=mappings)
 
-    def _resolve_rows(self, material_ids, rows, *, recover_duration=False):
-        # Listing already has these exact source rows: reuse its bounded read so
-        # resolve/browse use three queries; exact-title search adds one lookup.
+    def _read_exact_bundle(self, where, params):
+        """Fetch source + both mapping sets in one gated connection/statement.
+
+        Each bounded branch keeps its own rows. Joining resource and deployment
+        rows together would multiply duplicates and hide the original limits.
+        Only exact-ID callers may use this path; broad catalog scans stay separate.
+        """
+        contents = f'''SELECT DISTINCT TRIM(s.data_source_id) content_id
+            FROM `{self.schema}`.ads_custom_source s WHERE {where}
+            AND TRIM(s.data_source_id)<>'' LIMIT 200'''
+        records = self.mysql.select(f'''SELECT bundle.row_kind,bundle.row_json FROM (
+            (SELECT 'material' row_kind,JSON_OBJECT(
+                'material_id',CAST(s.id AS CHAR),'product',s.product,'material_type',s.type,
+                'material_is_deleted',s.is_delete,'material_url',s.url,'material_name',s.name,
+                'material_language',s.language,'content_id',TRIM(s.data_source_id),
+                'source_tag_name',s.tag_name,'video_duration',s.video_duration,
+                'thumbnail_url',s.cover) row_json
+             FROM `{self.schema}`.ads_custom_source s WHERE {where} LIMIT 200)
+            UNION ALL
+            (SELECT 'drama' row_kind,JSON_OBJECT(
+                'content_id',r.content_id,'series_code',r.series_code,'language',r.language,
+                'drama_name',r.name,'drama_labels',r.labels,'drama_description',r.desc) row_json
+             FROM ({contents}) selected_contents
+             STRAIGHT_JOIN `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
+                ON r.content_id=selected_contents.content_id
+             WHERE r.app_id=1479 ORDER BY r.id LIMIT 4001)
+            UNION ALL
+            (SELECT 'deploy' row_kind,JSON_OBJECT(
+                'content_id',i.content_id,'app_id',i.app_id,'app',i.app,
+                'language',i.language,'deploy_time',i.deploy_time) row_json
+             FROM ({contents}) selected_contents
+             STRAIGHT_JOIN `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
+                ON i.content_id=selected_contents.content_id
+             WHERE i.app_id=1479 ORDER BY i.app LIMIT 4001)
+            ) bundle''', [*params,*params,*params])
+        buckets = {'material': [], 'drama': [], 'deploy': []}
+        try:
+            for record in records:
+                payload = json.loads(record['row_json'])
+                if not isinstance(payload, dict):
+                    raise ValueError()
+                buckets[record['row_kind']].append(payload)
+            if len(buckets['material']) > 200:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError):
+            raise PublishingError('source_result_invalid','素材数据格式无效，请稍后重试',503) from None
+        return buckets['material'], (buckets['drama'], buckets['deploy'])
+
+    def _resolve_rows(self, material_ids, rows, *, recover_duration=False, mappings=None):
+        # Exact-ID reads supply both mapping sets from one SQL snapshot. Ordinary
+        # browsing reuses its source rows and fetches the same bounded mappings.
         raw = {str(r['material_id']):r for r in rows}
         contents = list(dict.fromkeys(str(r.get('content_id') or '') for r in rows if r.get('content_id')))
         dramas, deploy = defaultdict(list), defaultdict(list)
-        if contents:
+        resource_rows, deployment_rows = mappings if mappings is not None else ([], [])
+        if contents and mappings is None:
             marks = ','.join('%s' for _ in contents)
             resource_rows = self.mysql.select(f'''SELECT r.content_id,r.series_code,r.language,r.name drama_name,
                 r.labels drama_labels,r.desc drama_description
                 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
                 WHERE r.content_id IN ({marks}) AND r.app_id=1479
                 ORDER BY r.id LIMIT 4001''', contents)
-            if len(resource_rows) > 4000:
-                raise PublishingError('source_mapping_too_large','关联剧目数据超出校验范围，请缩小素材选择后重试',503)
-            for r in resource_rows:
-                dramas[str(r['content_id'])].append(r)
             deployment_rows = self.mysql.select(f'''SELECT i.content_id,i.app_id,i.app,i.language,i.deploy_time
                 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac) WHERE i.content_id IN ({marks}) AND i.app_id=1479
                 ORDER BY i.app LIMIT 4001''', contents)
-            if len(deployment_rows) > 4000:
-                raise PublishingError('source_mapping_too_large','关联投放数据超出校验范围，请缩小素材选择后重试',503)
-            for r in deployment_rows:
-                deploy[str(r['content_id'])].append(r)
+        if len(resource_rows) > 4000 or len(deployment_rows) > 4000:
+            raise PublishingError('source_mapping_too_large','关联剧目或投放数据超出校验范围，请缩小素材选择后重试',503)
+        for r in resource_rows:
+            dramas[str(r['content_id'])].append(r)
+        for r in deployment_rows:
+            deploy[str(r['content_id'])].append(r)
         selector = CachedSelector(raw,dramas,deploy,
                                   probe_deadline=time.monotonic()+8 if recover_duration else None)
         result, errors = {}, {}
@@ -194,10 +241,14 @@ class SourceRepository:
             clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
                 WHERE i.content_id=s.data_source_id AND i.app_id=1479 AND LOWER(REPLACE(TRIM(i.language),'_','-'))
                 IN ({','.join('%s' for _ in aliases)}))''');params.extend(aliases)
-        raw = self.mysql.select(f'''SELECT {self._projection()} FROM {source_from}
-            WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
+        mappings = None
+        if exact_id:
+            raw, mappings = self._read_exact_bundle(' AND '.join(clauses), params)
+        else:
+            raw = self.mysql.select(f'''SELECT {self._projection()} FROM {source_from}
+                WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
-        resolved = self._resolve_rows(selected,raw[:limit],recover_duration=exact_id) if selected else {'items':{},'errors':{}}
+        resolved = self._resolve_rows(selected,raw[:limit],recover_duration=exact_id,mappings=mappings) if selected else {'items':{},'errors':{}}
         items = [resolved['items'][mid] for mid in selected if mid in resolved['items']
                  and (not language or resolved['items'][mid]['language'] == language)]
         return {'items':items,'next_cursor':selected[-1] if len(raw)>limit else '',
