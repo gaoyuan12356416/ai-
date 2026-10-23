@@ -108,7 +108,8 @@ class SqlSourceTests(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/mysql")
         self.assertIn("--port=63350", command)
-        self.assertIn("--no-defaults", command)
+        self.assertNotIn("--no-defaults", command)  # FIFO prepends its own options.
+        self.assertIn("--protocol=TCP", command)
         self.assertNotIn("synthetic-secret", " ".join(command))
         self.assertNotIn("-e", command)
         self.assertEqual(popen.call_args.kwargs["env"]["MYSQL_PWD"], "synthetic-secret")
