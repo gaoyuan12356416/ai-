@@ -17,7 +17,9 @@ BASE = 'd35d455'
 REF = 'refs/heads/codex/x-personal-source-fix-20261023'
 FILES = ['features/x_video_publish/sources.py', 'features/x_posts/selector.py',
          'static/x-video-account-settings.js', 'static/x-account-list.html', 'static/x-video-publish.html']
-UNITS = ['drama-material-api.service', 'x-post-automation.service']
+# X Auto is BindsTo/PartOf the X sidecar and stops with it. Restore the
+# established dependency group even though its application files are untouched.
+UNITS = list(base.SERVICES)
 TABLES = ['x_post_queue', 'x_post_publish_log', 'x_post_manual_run',
           'x_video_publish_batch', 'x_video_publish_task', 'x_video_publish_pool',
           'x_video_publish_pool_item', 'x_video_publish_pool_slot', 'x_video_publish_pool_operation']

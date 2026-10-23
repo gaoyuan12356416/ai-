@@ -42,7 +42,7 @@ and failed read/preview followed by successful retry without submission.
 Use `scripts/deploy_x_personal_source_fix.py` from the exact pushed branch.
 It verifies each previous file against d35d455, backs up code/SQLite/tokens,
 drains existing workers under the original deployment locks, avoids enabled
-pool trigger windows, and restarts only main API and X sidecar. Original trigger
+pool trigger windows, and restarts main API and X sidecar plus its X Auto service dependency. Original trigger
 states and the personal pool scheduler are restored. It verifies ledger and
 token hashes without restoring any historical database or sending test Posts.
 
@@ -58,3 +58,11 @@ personal-module installer to roll back this patch.
 
 Skill context was left unchanged; this repository note records the repair.
 Production commit, manifest and final readback will be appended after deployment.
+
+The initial attempt at 10:46 waited for account 19's 10:45 task to publish
+successfully. Its health check detected that X Auto had been stopped by the X
+sidecar's systemd dependency. All 13 files were restored to their previous bytes;
+all eight trigger states and the personal pool scheduler were read back restored.
+The deployment helper now restores the existing three-service dependency group.
+Initial attempt manifest: `/mnt/data-disk/x-post-automation/backups/20261023T024619Z-source-dab9bf01/manifest.json`
+(`failed_restored`). No historical task was retried or database restored.
