@@ -1,6 +1,12 @@
 (function () {
   const DEFAULT_NAV = [
     {
+      key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
+      items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
+        description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
+        href: "/video-editing.html", module: "video_editing", enabled: true }],
+    },
+    {
       key: "ad_control",
       label: "AI自动规则调控",
       order: 5,
@@ -75,6 +81,16 @@
           module: "ad_control_center",
           enabled: true,
           order: 70,
+        },
+        {
+          key: "fbPostAdDelete",
+          label: "Meta 剧集广告删除",
+          description: "按产品和剧 ID 删除 Creative、Ad、Video",
+          kind: "page",
+          href: "/fb-post-ad-delete.html",
+          module: "ad_control_center",
+          enabled: true,
+          order: 80,
         },
       ],
     },
@@ -216,7 +232,6 @@
       key: "facebook_platform",
       label: "Facebook 社媒",
       order: 38,
-      module: "fb_page_posts",
       items: [
         {
           key: "fbAutoPublishTemplates",
@@ -351,6 +366,24 @@
           module: "youtube_auto_publish",
           enabled: true,
           order: 20,
+        },
+      ],
+    },
+    {
+      key: "social_reports",
+      label: "社媒数据报表",
+      order: 50,
+      module: "social_analytics",
+      items: [
+        {
+          key: "socialAnalytics",
+          label: "发布效果分析",
+          description: "按人员、渠道和剧目分析发布、点击、安装及付费转化",
+          kind: "page",
+          href: "/social-analytics.html",
+          module: "social_analytics",
+          enabled: true,
+          order: 10,
         },
       ],
     },
@@ -526,6 +559,7 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
+    videoEditing: "/video-editing.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -538,11 +572,14 @@
     fbAutoPublishRuns: "/fb-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xVideoPublish: "/x-video-publish.html",
+    xVideoPublishRecords: "/x-video-publish.html?view=records",
     xAutoPublishTemplates: "/x-auto-publish-templates.html",
     xAutoPublishRuns: "/x-auto-publish-runs.html",
     xPostMaterialPool: "/x-post-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
+    socialAnalytics: "/social-analytics.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -550,6 +587,7 @@
     adControlRun: "/ad-control-run.html",
     adControlTokens: "/ad-control-tokens.html",
     adControlLogs: "/ad-control-logs.html",
+    fbPostAdDelete: "/fb-post-ad-delete.html",
     settings: "/settings.html",
     navigation: "/navigation.html",
     users: "/users.html",
@@ -568,6 +606,36 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    if (!normalized.some(group => group && Array.isArray(group.items) &&
+        group.items.some(item => item && item.key === "videoEditing"))) {
+      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+      const editorGroup = normalized.find(group => group && group.key === "video_editing");
+      if (editorGroup) {
+        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
+      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+    }
+    // Migrate both saved server navigation and cached legacy navigation.
+    let assetItem;
+    normalized.forEach(group => {
+      group.items = (group.items || []).filter(item => {
+        if (item.key !== "fbPostAdDelete") return true;
+        assetItem = item;
+        return false;
+      });
+    });
+    let assetGroup = normalized.find(group => group.key === "meta_asset_delete");
+    if (!assetGroup) {
+      assetGroup = { key: "meta_asset_delete", label: "Meta 广告清理", order: 6, module: "fb_ad_asset_delete", items: [] };
+      normalized.push(assetGroup);
+    }
+    assetGroup.module = "fb_ad_asset_delete";
+    assetGroup.items.push(Object.assign({}, assetItem || {}, {
+      key: "fbPostAdDelete", label: "Meta 剧集广告删除", kind: "page",
+      description: "按产品和剧 ID 删除 Creative、Ad、Video",
+      href: "/fb-post-ad-delete.html", module: "fb_ad_asset_delete", order: 10,
+      enabled: !assetItem || assetItem.enabled !== false,
+    }));
     let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
     if (!tiktokPlatform) {
       tiktokPlatform = {
@@ -655,12 +723,17 @@
         key: "facebook_platform",
         label: "Facebook 社媒",
         order: 38,
-        module: "fb_page_posts",
         items: [],
       };
       normalized.push(facebookPlatform);
     }
     if (!Array.isArray(facebookPlatform.items)) facebookPlatform.items = [];
+    // FB_VIDEO_PUBLISH_NAVIGATION_V1
+    delete facebookPlatform.module;
+    const fbVideoItems = [{"key": "fbPageManagement", "label": "Page 管理", "description": "设置 Page 剧语言和发布文案", "kind": "page", "href": "/fb-pages.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 30}, {"key": "fbVideoPublish", "label": "视频批量发布", "description": "按剧语言匹配素材与 Page", "kind": "page", "href": "/fb-video-publish.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 40}, {"key": "fbVideoPublishRecords", "label": "批量发布记录", "description": "查看批次、冻结文案和发布结果", "kind": "page", "href": "/fb-video-publish-records.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 50}];
+    fbVideoItems.forEach(item => {
+      if (!facebookPlatform.items.some(existing => existing && existing.key === item.key)) facebookPlatform.items.push(item);
+    });
     if (!facebookPlatform.items.some(item => item && item.key === "fbAutoPublishTemplates")) {
       facebookPlatform.items.push({
         key: "fbAutoPublishTemplates",
@@ -689,6 +762,19 @@
     }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      [
+        { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
+        { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
+      ].forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item, kind: "page", module: "x_accounts", adminOnly: false, enabled: true });
+        }
+      });
+      xPlatform.items.forEach(item => {
+        if (["xAccountList", "xVideoPublish", "xVideoPublishRecords"].includes(item?.key)) {
+          item.module = "x_accounts"; item.adminOnly = false;
+        }
+      });
       const xAutoPublishTemplatesExists = xPlatform.items.some(
         item => item && item.key === "xAutoPublishTemplates"
       );
@@ -752,7 +838,15 @@
       const postLogs = xPlatform.items.find(item => item && item.key === "xPostLogs");
       if (postLogs && Number(postLogs.order || 0) <= 40) postLogs.order = 50;
     }
-    return normalized;
+    // Apply after the Meta cleanup migration so legacy saved/cached navigation
+    // cannot resurrect retired groups or remove the independent cleanup page.
+    const retiredGroups = new Set(["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]);
+    const retiredModules = new Set(["ad_control_center", "ad_control_v3", "ad_material_tasks", "ad_material_test"]);
+    return normalized
+      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
+      .map(group => Object.assign({}, group, {
+        items: (group.items || []).filter(item => !retiredModules.has(item.module)),
+      }));
   }
 
   function readStoredConfig() {
@@ -822,7 +916,7 @@
       navCache = config;
       writeStoredConfig(config);
     } catch (error) {
-      navCache = readStoredConfig() || cloneNav(DEFAULT_NAV);
+      navCache = readStoredConfig() || normalizeNavConfig(DEFAULT_NAV);
     }
     return navCache;
   }
@@ -903,7 +997,7 @@
     injectStyle();
     container.classList.add("quick-nav-root");
     const initialOptions = renderOptions(options);
-    const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
+    const initialConfig = navCache || readStoredConfig() || normalizeNavConfig(DEFAULT_NAV);
     container.innerHTML = buildNavHtml(initialConfig, initialOptions);
     setActive(container, initialOptions.activeKey);
     bindEvents(container, initialConfig, initialOptions);
