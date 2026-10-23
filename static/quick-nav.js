@@ -565,6 +565,8 @@
     fbAutoPublishRuns: "/fb-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xVideoPublish: "/x-video-publish.html",
+    xVideoPublishRecords: "/x-video-publish.html?view=records",
     xAutoPublishTemplates: "/x-auto-publish-templates.html",
     xAutoPublishRuns: "/x-auto-publish-runs.html",
     xPostMaterialPool: "/x-post-material-pool.html",
@@ -744,6 +746,19 @@
     }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      [
+        { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
+        { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
+      ].forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item, kind: "page", module: "x_accounts", adminOnly: false, enabled: true });
+        }
+      });
+      xPlatform.items.forEach(item => {
+        if (["xAccountList", "xVideoPublish", "xVideoPublishRecords"].includes(item?.key)) {
+          item.module = "x_accounts"; item.adminOnly = false;
+        }
+      });
       const xAutoPublishTemplatesExists = xPlatform.items.some(
         item => item && item.key === "xAutoPublishTemplates"
       );

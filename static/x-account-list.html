@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>X 账号列表 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/x-video-account-settings.css?v=20261023shared2" />
   <style>
     :root { color-scheme:light; --ink:#13233a; --muted:#687894; --line:#dce5f1; --blue:#2563eb; --green:#149b67; --amber:#c47a0a; --red:#d13f4d; --panel:#fff; }
     * { box-sizing:border-box; }
@@ -43,7 +44,7 @@
     .filters input:focus,.filters select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
     .result-count { margin-left:auto; color:var(--muted); font-size:13px; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
-    table { width:100%; min-width:2620px; border-collapse:collapse; background:#fff; }
+    table { width:100%; min-width:1480px; border-collapse:collapse; background:#fff; }
     th,td { padding:13px 14px; border-bottom:1px solid #e8eef6; vertical-align:top; text-align:left; font-size:13px; }
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
@@ -102,7 +103,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>X 账号列表</h1><p>管理员查看全部已接入的 X 账号、公众资料及后台启用状态。</p></div>
+        <div class="title"><h1>X 账号列表</h1><p>查看全部已接入的 X 账号，统一管理发布设置与账号素材池。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -111,7 +112,7 @@
       </header>
 
       <section id="loginGate" class="panel gate hidden"><strong>请先登录 AI 自动后台</strong><span>登录后才能查看 X 账号列表。</span></section>
-      <section id="adminGate" class="panel gate hidden"><strong>仅管理员可以查看 X 账号列表</strong><span>当前页面包含全部用户授权的 X 账号信息。</span></section>
+      <section id="adminGate" class="panel gate hidden"><strong>需要 X 平台推广权限</strong><span>当前页面包含全部用户授权的 X 账号信息。</span></section>
 
       <div id="pageRoot" class="hidden">
         <section class="stats">
@@ -130,7 +131,7 @@
         <section class="panel">
           <div class="section-head">
             <div><h2>全部授权账号</h2><p>勾选“允许发布”且授权有效的账号会进入发布池；短期 Access Token 到期时会在实际执行前自动续期，只有无法续期时才需要重新授权。</p></div>
-            <button id="reloadAccounts" class="button" type="button">刷新列表</button>
+            <div class="xp-actions"><a id="xPersonalWorkspace" class="button hidden" href="/x-video-publish.html">X 发布工作台</a><button id="xOpenExcel" class="button hidden" type="button">Excel 发布</button><button id="reloadAccounts" class="button" type="button">刷新列表</button></div>
           </div>
           <div class="filters">
             <input id="searchInput" type="search" autocomplete="off" aria-label="搜索 X 账号" placeholder="搜索名称、@账号、X ID、授权人或地区" />
@@ -150,8 +151,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Access Token / 自动续期</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="15" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>后台状态</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -161,7 +162,10 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915retired"></script>
+  <script src="/x-video-account-settings.js?v=20261023shared2"></script>
+  <script src="/vendor/xlsx.full.min.js?v=0.20.3"></script>
+  <script src="/x-excel-publish.js?v=20261023shared2"></script>
+  <script src="/quick-nav.js?v=20261023xshared2"></script>
   <script>
     (() => {
       const state = { auth:null, accounts:[], statsMeta:null };
@@ -332,7 +336,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="15" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="8" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -341,19 +345,16 @@
           const accountHeading = accountUrl
             ? `<a class="profile-link" href="${escapeHtml(accountUrl)}" target="_blank" rel="noopener noreferrer"><strong>${accountName}</strong></a>`
             : `<strong>${accountName}</strong>`;
-          const scopes = Array.isArray(item.scopes) ? item.scopes : [];
-          const missingScopes = Array.isArray(item.missing_scopes) ? item.missing_scopes : [];
           const meta = statusMeta[item.status] || [item.status || "未知","error"];
           const publishApproved = item.publish_approved === true;
           const credentialPublishEligible = item.credential_publish_eligible === true;
           const autoPublishConfigured = item.daily_auto_publish_configured === true;
-          const ownerName = item.owner_name || item.authorized_by_name || item.owner_user_id || item.authorized_by_user_id || "—";
-          const ownerEmail = item.owner_email || item.authorized_by_email || "";
-          const xCreatedAt = item.x_created_at || "";
-          const profileSyncAt = item.last_profile_sync_at || "";
           const verifyButton = item.status === "disabled" || item.status === "disconnected" || item.status === "revoke_pending"
             ? `<button class="button small" type="button" disabled>${item.status === "disabled" ? "已停用" : (item.status === "disconnected" ? "已解除授权" : "旧退出待处理")}</button>`
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
+          const own = window.XVideoPublish.account(item.id);
+          const enabled = window.XVideoPublish.allowed(state.auth) && !!own;
+          const publishingReason = !window.XVideoPublish.allowed(state.auth) ? "未开通 X 平台推广权限" : !own ? "账号信息尚未加载，请刷新列表" : "";
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
             <td>${operatingMetricsHtml(item)}</td>
@@ -361,28 +362,26 @@
             <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.access_token_status === "expired_refreshable" || item.access_token_status === "missing_refreshable" ? "发布池可选；执行时自动续期" : "发布池可选") : (publishApproved ? "授权不可用，发布池不可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
-            <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
-            <td><div class="chip-list">${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("") || "—"}${missingScopes.map(scope => `<span class="chip missing">缺少 ${escapeHtml(scope)}</span>`).join("")}</div></td>
-            <td><div class="owner">${escapeHtml(ownerName)}${ownerEmail ? `<div class="subtle">${escapeHtml(ownerEmail)}</div>` : ""}</div></td>
-            <td><div class="meta-stack">首次：${escapeHtml(formatTime(item.first_authorized_at))}<div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></div></td>
-            <td>${accessTokenHtml(item)}</td>
-            <td><div class="meta-stack">校验：${escapeHtml(formatTime(item.last_verified_at))}<div class="subtle">资料：${escapeHtml(formatTime(profileSyncAt))}</div></div></td>
-            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">停用：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
-            <td>${verifyButton}</td>
+            <td><div class="xp-row-actions">${verifyButton}<button class="button small" data-x-settings="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">发布设置</button><button class="button small" data-x-pool="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">素材池</button></div>${publishingReason ? `<div class="xp-row-reason">${escapeHtml(publishingReason)}</div>` : ""}</td>
           </tr>`;
         }).join("");
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="15" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">正在加载…</td></tr>`;
         try {
-          const result = await api("/api/admin/x-accounts");
+          const [result] = await Promise.all([
+            api("/api/admin/x-accounts"),
+            window.XVideoPublish.allowed(state.auth)
+              ? window.XVideoPublish.refreshAccounts().catch(() => { window.XVideoPublish.accounts=[]; })
+              : Promise.resolve(),
+          ]);
           state.accounts = Array.isArray(result.items) ? result.items : [];
           state.statsMeta = result.operating_stats_meta || null;
           renderStats(); renderOperatingSummary(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="15" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }
@@ -421,11 +420,11 @@
       async function setDramaLanguage(id, dramaLanguage, select) {
         select.disabled = true;
         try {
-          await api(`/api/admin/x-accounts/${encodeURIComponent(id)}/drama-language`, {
+          const result = await api(`/api/admin/x-accounts/${encodeURIComponent(id)}/drama-language`, {
             method:"POST",
             body:JSON.stringify({ drama_language:canonicalLanguage(dramaLanguage) }),
           });
-          toast(`剧语言已更新为 ${canonicalLanguage(dramaLanguage)}`);
+          toast(`剧语言已更新为 ${canonicalLanguage(dramaLanguage)}${result.item?.personal_pool_paused ? "；账号素材池已暂停，请核对素材语言后重新启用" : ""}`);
         } catch (error) {
           toast(`保存失败：${error.message}`);
         } finally {
@@ -441,7 +440,12 @@
         el("authButton").addEventListener("click", () => window.UiTopbar.handleAuthAction({ auth:state.auth, api }));
         const user = state.auth && state.auth.user;
         if (!(state.auth && state.auth.authenticated && user)) { el("loginGate").classList.remove("hidden"); return; }
-        if (!user.is_admin) { el("adminGate").classList.remove("hidden"); return; }
+        if (!window.XVideoPublish.allowed(state.auth)) { el("adminGate").classList.remove("hidden"); return; }
+        window.XVideoPublish.auth=state.auth;
+        if (window.XVideoPublish.allowed(state.auth)) {
+          el("xPersonalWorkspace").classList.remove("hidden");
+          el("xOpenExcel").classList.remove("hidden");
+        }
         el("pageRoot").classList.remove("hidden");
         await loadData();
       }
@@ -452,6 +456,9 @@
       el("accountRows").addEventListener("click", event => {
         const button = event.target.closest("[data-verify-id]");
         if (button) verifyAccount(button.dataset.verifyId, button);
+        const settings=event.target.closest("[data-x-settings]"),pool=event.target.closest("[data-x-pool]");
+        if(settings && !settings.disabled) window.XVideoPublish.openSettings(settings.dataset.xSettings,loadData).catch(error=>toast(error.message));
+        if(pool && !pool.disabled) window.XVideoPublish.openPool(pool.dataset.xPool).catch(error=>toast(error.message));
       });
       el("accountRows").addEventListener("change", event => {
         const languageSelect = event.target.closest("[data-drama-language-id]");
@@ -462,6 +469,7 @@
         const checkbox = event.target.closest("[data-publish-approval-id]");
         if (checkbox) setPublishApproval(checkbox.dataset.publishApprovalId, checkbox.checked, checkbox);
       });
+      el("xOpenExcel").addEventListener("click",()=>window.XVideoPublish.openExcel().catch(error=>toast(error.message)));
       init();
     })();
   </script>

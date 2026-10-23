@@ -71,7 +71,7 @@ class XAccountsAppContractTest(unittest.TestCase):
     def test_account_pages_separate_authorization_from_short_access_token(self):
         for source in (X_ACCOUNT_LIST_SOURCE, X_ACCOUNTS_PERSONAL_SOURCE):
             self.assertIn("授权有效", source)
-            self.assertIn("Access Token / 自动续期", source)
+            self.assertIn("access_token_status", source)
             self.assertIn("expired_refreshable", source)
             self.assertIn("authorization_refreshable", source)
             self.assertIn("已到期，可自动续期", source)
@@ -153,7 +153,7 @@ class XAccountsAppContractTest(unittest.TestCase):
             X_ACCOUNT_LIST_SOURCE,
         )
         self.assertGreaterEqual(
-            X_ACCOUNT_LIST_SOURCE.count('colspan="15"'),
+            X_ACCOUNT_LIST_SOURCE.count('colspan="8"'),
             4,
         )
         self.assertNotIn('colspan="12"', X_ACCOUNT_LIST_SOURCE)
@@ -303,8 +303,8 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         self.assertIn('_require_cookie_module("x_accounts")', owner)
         self.assertIn('query_x_authorized_accounts(x_accounts_actor(session), scope="mine")', owner)
-        self.assertIn("_require_cookie_admin()", admin)
-        self.assertIn('query_x_authorized_accounts(x_accounts_actor(session), scope="all")', admin)
+        self.assertIn('_require_cookie_module("x_accounts")', admin)
+        self.assertIn('query_x_authorized_accounts(x_platform_accounts_actor(session), scope="platform")', admin)
 
     def test_verify_and_logout_pass_server_session_actor(self):
         post_routes = source_between(
@@ -312,32 +312,32 @@ class XAccountsAppContractTest(unittest.TestCase):
             'if parsed.path == "/api/admin/users/role":',
         )
         self.assertIn('verify_x_account(account_id, x_accounts_actor(session), scope="mine")', post_routes)
-        self.assertIn('verify_x_account(account_id, x_accounts_actor(session), scope="all")', post_routes)
+        self.assertIn('verify_x_account(account_id, x_platform_accounts_actor(session), scope="platform")', post_routes)
         self.assertIn("logout_x_account(account_id, x_accounts_actor(session))", post_routes)
-        self.assertIn("_require_cookie_admin()", post_routes)
+        self.assertIn("x_platform_accounts_actor(session)", post_routes)
         self.assertIn('_require_cookie_module("x_accounts")', post_routes)
 
-    def test_publish_approval_route_is_admin_only_same_origin_and_audited(self):
+    def test_publish_approval_route_is_platform_permission_same_origin_and_audited(self):
         route = source_between(
             'x_admin_publish_approval_match = re.match(',
             'x_verify_match = re.match(r"^/api/x-accounts/',
         )
-        self.assertIn("_require_cookie_admin()", route)
+        self.assertIn('_require_cookie_module("x_accounts")', route)
         self.assertIn("_require_same_origin_json()", route)
         self.assertIn("set_x_account_publish_approval(", route)
-        self.assertIn("x_accounts_actor(session)", route)
+        self.assertIn("x_platform_accounts_actor(session)", route)
         self.assertIn('"admin_set_x_account_publish_approval"', route)
         self.assertIn('"admin_set_x_account_publish_approval_failed"', route)
 
-    def test_drama_language_route_is_admin_only_same_origin_and_audited(self):
+    def test_drama_language_route_is_platform_permission_same_origin_and_audited(self):
         route = source_between(
             "x_admin_drama_language_match = re.match(",
             'x_verify_match = re.match(r"^/api/x-accounts/',
         )
-        self.assertIn("_require_cookie_admin()", route)
+        self.assertIn('_require_cookie_module("x_accounts")', route)
         self.assertIn("_require_same_origin_json()", route)
         self.assertIn("set_x_account_drama_language(", route)
-        self.assertIn("x_accounts_actor(session)", route)
+        self.assertIn("x_platform_accounts_actor(session)", route)
         self.assertIn('"admin_set_x_account_drama_language"', route)
         self.assertIn('"admin_set_x_account_drama_language_failed"', route)
 

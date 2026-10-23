@@ -3648,6 +3648,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
 
 
@@ -3728,6 +3729,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "x_video_publish": False,
     "fb_video_publish": False,
     "drama_synthesis": False,
     "cover_synthesis": False,
@@ -42182,6 +42184,15 @@ def x_accounts_actor(session):
     }
 
 
+def x_platform_accounts_actor(session):
+    from features.x_video_publish.identity_broker import resolve_identity
+    from features.x_video_publish.errors import PublishingError
+    try:
+        return resolve_identity(globals(), str(session.get("tenant_key") or ""), str(session.get("user_id") or ""))
+    except PublishingError as exc:
+        raise XAccountsClientError(exc.code, str(exc), exc.status) from None
+
+
 def x_post_drama_verification_actor(session):
     """Use all-account verification only after the drama-page permission gate."""
     actor = x_accounts_actor(session)
@@ -56704,7 +56715,8 @@ def delete_session(session_token):
 def load_navigation_config():
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
-        return filter_navigation(ensure_navigation(json.load(handle)))
+        from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
+        return filter_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94955,6 +94967,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+        if parsed.path == "/api/x-video-publish" or parsed.path.startswith("/api/x-video-publish/"):
+            from features.x_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if parsed.path == "/api/fb-video-publish" or parsed.path.startswith("/api/fb-video-publish/"):
             from features.fb_video_publish.gateway import dispatch
             return dispatch(self, parsed, globals())
@@ -94971,6 +94986,15 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/fb-video-publish-records.html",
             "/fb-video-publish.js",
             "/fb-video-publish.css",
+            "/x-video-publish.html",
+            "/x-video-publish.js",
+            "/x-video-publish.css",
+            "/x-excel-publish.js",
+            "/x-video-account-settings.js",
+            "/x-video-account-settings.css",
+            "/vendor/xlsx.full.min.js",
+            "/vendor/LICENSE.sheetjs.txt",
+            "/templates/x-publishing-template.xlsx",
         }:
             static_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
@@ -95322,11 +95346,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-accounts":
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             try:
                 session = self._session() or {}
-                accounts = query_x_authorized_accounts(x_accounts_actor(session), scope="all")
+                accounts = query_x_authorized_accounts(x_platform_accounts_actor(session), scope="platform")
                 json_response(
                     self,
                     200,
@@ -98690,6 +98714,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+        if parsed.path in {"/internal/x-video-publish/identity", "/internal/x-video-publish/source"}:
+            from features.x_video_publish.identity_broker import dispatch
+            return dispatch(self, globals(), parsed.path.rsplit("/", 1)[-1])
+        if parsed.path == "/api/x-video-publish" or parsed.path.startswith("/api/x-video-publish/"):
+            from features.x_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
         if parsed.path == "/internal/x-posts/attribution/resolve":
             from features.x_posts.attribution_runtime import dispatch
             return dispatch(self, globals())
@@ -100463,7 +100493,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         x_admin_verify_match = re.match(r"^/api/admin/x-accounts/(\d+)/verify$", parsed.path)
         if x_admin_verify_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100471,7 +100501,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             account_id = x_admin_verify_match.group(1)
             append_audit_log(session, "admin_verify_x_account_attempted", "x_account", account_id, {})
             try:
-                result = verify_x_account(account_id, x_accounts_actor(session), scope="all")
+                result = verify_x_account(account_id, x_platform_accounts_actor(session), scope="platform")
                 item = result.get("item", result) if isinstance(result, dict) else {}
                 append_audit_log(
                     session,
@@ -100498,7 +100528,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if x_admin_publish_approval_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100514,7 +100544,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = set_x_account_publish_approval(
                     account_id,
                     approved,
-                    x_accounts_actor(session),
+                    x_platform_accounts_actor(session),
                 )
                 item = result.get("item", result) if isinstance(result, dict) else {}
                 append_audit_log(
@@ -100552,7 +100582,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if x_admin_drama_language_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100569,7 +100599,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = set_x_account_drama_language(
                     account_id,
                     payload.get("drama_language"),
-                    x_accounts_actor(session),
+                    x_platform_accounts_actor(session),
                 )
                 item = (
                     result.get("item", result)
