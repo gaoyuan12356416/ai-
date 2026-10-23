@@ -42,7 +42,7 @@ class PoolScheduler:
         # Status synchronization must precede selecting any next head. The core
         # derives outcomes from the durable runner/log, including unknown holds.
         for row in rows:
-            actor = {"tenant_key": row["tenant_key"], "user_id": row["user_id"]}
+            actor = self._operator(dict(row))
             self.pool.sync_outcomes(actor, row["account_id"])
         results = []
         with self.pool.connection() as conn:
@@ -58,12 +58,20 @@ class PoolScheduler:
                     key = (*owner, pool["real_account_id"], at.date().isoformat(), value)
                     if conn.execute("SELECT 1 FROM x_video_publish_pool_slot WHERE tenant_key=? AND user_id=? AND real_account_id=? AND bj_date=? AND slot_time=?", key).fetchone():
                         continue
-                    actor = {"tenant_key": owner[0], "user_id": owner[1]}
+                    actor = self._operator(pool)
                     item = conn.execute("SELECT * FROM x_video_publish_pool_item WHERE tenant_key=? AND user_id=? AND account_id=? AND status='pending' AND task_id='' ORDER BY position,id LIMIT 1", (*owner, pool["account_id"])).fetchone()
                     config = self.pool._config_facts(actor, pool["account_id"], conn)
                     results.append({"pool": pool, "item": dict(item) if item else None, "at": at,
                                     "key": key, "actor": actor, "config_facts": config})
         return sorted(results, key=lambda item: (item["at"], item["key"]))
+
+    @staticmethod
+    def _operator(pool):
+        # Historical pools retain their initiator; new edits record the real operator.
+        return {'tenant_key': pool.get('operator_tenant_key') or pool['tenant_key'],
+                'user_id': pool.get('operator_user_id') or pool['user_id'],
+                'name': pool.get('operator_name') or '', 'x_platform_access': True,
+                '_pool_subject': [pool['tenant_key'], pool['user_id']]}
 
     def _resolve(self, candidate):
         actor = self.pool._fresh_actor(candidate["actor"])

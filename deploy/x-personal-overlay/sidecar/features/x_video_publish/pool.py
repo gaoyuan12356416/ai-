@@ -36,6 +36,8 @@ def subject(actor):
     tenant, user = str(actor.get("tenant_key") or ""), str(actor.get("user_id") or "")
     if not tenant or not user:
         raise XPostError("invalid_actor", "需要有效的当前用户身份", status=403)
+    if actor.get("x_platform_access") is True and actor.get("_pool_subject"):
+        return tuple(actor["_pool_subject"])
     return tenant, user
 
 
@@ -88,6 +90,10 @@ def install_schema(conn):
         account_id INTEGER NOT NULL,request_hash TEXT NOT NULL,response_json TEXT NOT NULL,
         created_at_utc TEXT NOT NULL,PRIMARY KEY(tenant_key,user_id,idempotency_key));
     """)
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(x_video_publish_pool)')}
+    for name in ('operator_tenant_key', 'operator_user_id', 'operator_name'):
+        if name not in columns:
+            conn.execute('ALTER TABLE x_video_publish_pool ADD COLUMN ' + name + " TEXT NOT NULL DEFAULT ''")
 
 
 class PoolService:
@@ -114,23 +120,36 @@ class PoolService:
             raise XPostError("pool_gate_closed", "账号素材池暂未启用", status=409)
 
     def _fresh_actor(self, actor):
-        owner = subject(actor)
+        owner = (str(actor.get('tenant_key') or ''), str(actor.get('user_id') or ''))
         fresh = self.identity_validator(*owner)
-        if not isinstance(fresh, dict) or subject(fresh) != owner:
+        if not isinstance(fresh, dict) or (str(fresh.get('tenant_key') or ''), str(fresh.get('user_id') or '')) != owner:
             raise XPostError("identity_inactive", "计划发布人当前身份不匹配", status=403)
+        if fresh.get('x_platform_access') is True and actor.get('_pool_subject'):
+            fresh = {**fresh, '_pool_subject': actor['_pool_subject']}
         return fresh
 
+    def _scope(self, actor, aid):
+        """Share an existing account pool without moving or resetting its rows."""
+        if actor.get('x_platform_access') is True:
+            with self.connection() as conn:
+                rows = conn.execute('SELECT tenant_key,user_id FROM x_video_publish_pool WHERE account_id=? LIMIT 2', (aid,)).fetchall()
+            if len(rows) > 1:
+                raise XPostError('pool_version_conflict', '账号存在多个历史素材池，请核对后合并', 409)
+            actor['_pool_subject'] = list(rows[0]) if rows else [actor['tenant_key'], actor['user_id']]
+
     def _account(self, actor, aid):
-        tenant, user = subject(actor)
+        tenant, user = str(actor.get('tenant_key') or ''), str(actor.get('user_id') or '')
         aid = id_text(aid)
         account = self.account_resolver(actor, aid)
         if (not isinstance(account, dict) or str(account.get("id") or account.get("account_id")) != aid
-                or account.get("owner_tenant_key") != tenant or str(account.get("owner_user_id")) != user):
+                or (actor.get('x_platform_access') is not True and
+                    (account.get("owner_tenant_key") != tenant or str(account.get("owner_user_id")) != user))):
             raise XPostError("account_not_found", "未找到当前用户的X账号", status=404)
         if not ID.fullmatch(str(account.get("x_user_id") or "")):
             raise XPostError("account_identity_invalid", "X账号身份无效", status=409)
         if not language(account.get("drama_language") or account.get("language")):
             raise XPostError("account_language_invalid", "请先配置账号剧语言", status=409)
+        self._scope(actor, aid)
         return account
 
     @staticmethod
@@ -165,6 +184,10 @@ class PoolService:
                 "pause_reason": "", "effective_at_utc": "", "created_at_utc": "", "updated_at_utc": ""}
 
     def _locked(self, conn, actor, aid, payload, account):
+        if actor.get('x_platform_access') is True:
+            existing = conn.execute('SELECT tenant_key,user_id FROM x_video_publish_pool WHERE account_id=?', (aid,)).fetchall()
+            if len(existing) > 1 or existing and tuple(existing[0]) != subject(actor):
+                raise XPostError('pool_version_conflict', '素材池已被其他操作人更新，请刷新后重试', 409)
         pool = self._row(conn, actor, aid, account)
         if pool["version"] != self._version(payload):
             raise XPostError("pool_version_conflict", "素材池已改变，请刷新后重试", status=409)
@@ -178,9 +201,12 @@ class PoolService:
           real_account_id,language,effective_at_utc,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?,?)""",
           (*subject(actor), aid, str(account["x_user_id"]), language(account.get("drama_language") or account.get("language")), now, now, now))
 
-    def _bump(self, conn, actor, aid):
+    def _bump(self, conn, actor, aid, *, record_operator=False):
         conn.execute("UPDATE x_video_publish_pool SET version=version+1,updated_at_utc=? WHERE tenant_key=? AND user_id=? AND account_id=?",
                      (stamp(self.now_fn()), *subject(actor), aid))
+        if record_operator and actor.get('x_platform_access') is True:
+            conn.execute('UPDATE x_video_publish_pool SET operator_tenant_key=?,operator_user_id=?,operator_name=? WHERE tenant_key=? AND user_id=? AND account_id=?',
+                         (actor['tenant_key'], actor['user_id'], str(actor.get('name') or ''), *subject(actor), aid))
         return self._dto(self._row(conn, actor, aid))
 
     @staticmethod
@@ -253,7 +279,7 @@ class PoolService:
             self._ensure(conn, actor, aid, account)
             conn.execute("UPDATE x_video_publish_pool SET times_json=?,processing_mode=?,effective_at_utc=? WHERE tenant_key=? AND user_id=? AND account_id=?",
                          (canonical(sorted(times)), mode, stamp(self.now_fn()), *subject(actor), aid))
-            result = self._bump(conn, actor, aid)
+            result = self._bump(conn, actor, aid, record_operator=True)
             conn.commit()
         return {"pool": result}
 
@@ -279,7 +305,7 @@ class PoolService:
             self._ensure(conn, actor, aid, account)
             conn.execute("UPDATE x_video_publish_pool SET status=?,pause_reason=?,effective_at_utc=? WHERE tenant_key=? AND user_id=? AND account_id=?",
                          ("enabled" if enable else "paused", "" if enable else "operator_paused", stamp(self.now_fn()), *subject(actor), aid))
-            result = self._bump(conn, actor, aid)
+            result = self._bump(conn, actor, aid, record_operator=True)
             conn.commit()
         return {"pool": result}
 
@@ -379,6 +405,7 @@ class PoolService:
 
     def existing(self, actor, aid, key, request_hash=None):
         aid, key = id_text(aid), self._operation_key(key)
+        self._scope(actor, aid)
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM x_video_publish_pool_operation WHERE tenant_key=? AND user_id=? AND idempotency_key=?", (*subject(actor), key)).fetchone()
         if row is None:
@@ -432,7 +459,7 @@ class PoolService:
                     position,material_name,language,material_json,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (*subject(actor), aid, mid, position, name, lang, canonical(material), now, now)).lastrowid
                 items.append({"item_id": str(item_id), "material_id": mid, "material_name": name, "status": "pending", "position": position})
-            result = {"pool": self._bump(conn, actor, aid), "items": items, "idempotent": False}
+            result = {"pool": self._bump(conn, actor, aid, record_operator=True), "items": items, "idempotent": False}
             conn.execute("INSERT INTO x_video_publish_pool_operation VALUES(?,?,?,?,?,?,?)", (*subject(actor), key, aid, request_hash, canonical(result), now))
             conn.commit()
         return result
@@ -469,7 +496,7 @@ class PoolService:
                     if other:
                         conn.execute("UPDATE x_video_publish_pool_item SET position=?,updated_at_utc=? WHERE id=?", (other["position"], now, row["id"]))
                         conn.execute("UPDATE x_video_publish_pool_item SET position=?,updated_at_utc=? WHERE id=?", (row["position"], now, other["id"]))
-            result = self._bump(conn, actor, aid)
+            result = self._bump(conn, actor, aid, record_operator=True)
             conn.commit()
         return {"pool": result}
 
@@ -480,6 +507,7 @@ class PoolService:
 
     def sync_outcomes(self, actor, aid):
         """Read durable task outcomes, then update pool views; never retry tasks."""
+        self._scope(actor, aid)
         with self.connection() as conn:
             rows = conn.execute("SELECT id,task_id,batch_id FROM x_video_publish_pool_item WHERE tenant_key=? AND user_id=? AND account_id=? AND status IN ('processing','unknown')", (*subject(actor), aid)).fetchall()
         batches, updates = {}, []

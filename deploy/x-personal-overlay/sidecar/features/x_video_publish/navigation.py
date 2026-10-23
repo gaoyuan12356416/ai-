@@ -2,11 +2,11 @@
 from copy import deepcopy
 
 ITEMS = [
-    {'key': 'xVideoPublish', 'label': '手动发布', 'description': '个人账号选材、配对与定时发布',
-     'kind': 'page', 'href': '/x-video-publish.html', 'module': 'x_video_publish',
+    {'key': 'xVideoPublish', 'label': '手动发布', 'description': '全部账号选材、配对与定时发布',
+     'kind': 'page', 'href': '/x-video-publish.html', 'module': 'x_accounts',
      'adminOnly': False, 'enabled': True, 'order': 23},
     {'key': 'xVideoPublishRecords', 'label': '手动发布记录', 'description': '查看手动、素材池和 Excel 发布批次',
-     'kind': 'page', 'href': '/x-video-publish.html?view=records', 'module': 'x_video_publish',
+     'kind': 'page', 'href': '/x-video-publish.html?view=records', 'module': 'x_accounts',
      'adminOnly': False, 'enabled': True, 'order': 24},
 ]
 
@@ -24,4 +24,7 @@ def ensure_navigation(config):
         raise ValueError('X navigation items must be a list')
     keys = {i.get('key') for i in group['items'] if isinstance(i, dict)}
     group['items'].extend(deepcopy(i) for i in ITEMS if i['key'] not in keys)
+    for item in group['items']:
+        if item.get('key') in {'xAccountList', 'xVideoPublish', 'xVideoPublishRecords'}:
+            item.update(module='x_accounts', adminOnly=False)
     return result

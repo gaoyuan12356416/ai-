@@ -6,7 +6,7 @@ from .errors import PublishingError
 from .transport import MAX_BYTES, sidecar
 
 PREFIX='/api/x-video-publish'
-UNTRUSTED={'actor','_actor','owner','tenant_key','user_id','owner_user_id','owner_tenant_key','role','is_admin','credentials','token'}
+UNTRUSTED={'actor','_actor','owner','tenant_key','user_id','owner_user_id','owner_tenant_key','role','is_admin','credentials','token','x_platform_access','_pool_subject'}
 
 def route(method,path):
     suffix=path[len(PREFIX):] if path.startswith(PREFIX+'/') else ''
@@ -61,9 +61,6 @@ def dispatch(handler,parsed,app):
         from .identity_broker import resolve_identity
         actor=resolve_identity(app,str(session['tenant_key']),str(session['user_id']),publishing=handler.command=='POST')
         if handler.command=='POST':
-            # Settings and creation require the creation entry, even if records remain visible.
-            if not app['navigation_item_access'](session,'xVideoPublish',app['load_navigation_config']()).get('allowed'):
-                raise PublishingError('permission_denied','手动发布入口不可用',403)
             payload=read_json(handler)
             if payload is None:
                 return

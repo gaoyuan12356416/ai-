@@ -64,15 +64,15 @@ class FakeOAuth:
 
     def list_accounts(self, actor, scope):
         self.scope_calls.append(scope)
-        assert scope == "mine"
+        assert scope in {"mine", "platform"}
         return {"items": [copy.deepcopy(row) for row in self.rows.values()
-            if (row["owner_tenant_key"], row["owner_user_id"]) == (actor["tenant_key"], actor["user_id"])]}
+            if scope == "platform" or (row["owner_tenant_key"], row["owner_user_id"]) == (actor["tenant_key"], actor["user_id"])]}
 
     def find_scoped_account_row(self, aid, actor, scope):
         self.scope_calls.append(scope)
-        assert scope == "mine"
+        assert scope in {"mine", "platform"}
         row = self.rows.get(str(aid))
-        if not row or (row["owner_tenant_key"], row["owner_user_id"]) != (actor["tenant_key"], actor["user_id"]):
+        if not row or scope != "platform" and (row["owner_tenant_key"], row["owner_user_id"]) != (actor["tenant_key"], actor["user_id"]):
             raise PublishingError("account_not_found", "Not owned", 404)
         return copy.deepcopy(row)
 
@@ -113,7 +113,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.job_path = root / "jobs.sqlite"
         with closing(sqlite3.connect(self.job_path)) as conn, conn:
             conn.execute("CREATE TABLE drama_admin_user(tenant_key TEXT,user_id TEXT,name TEXT,role TEXT,status TEXT,permissions_json TEXT)")
-            conn.execute("INSERT INTO drama_admin_user VALUES(?,?,?,?,?,?)", (ACTOR["tenant_key"], ACTOR["user_id"], ACTOR["name"], "user", "active", '["x_video_publish"]'))
+            conn.execute("INSERT INTO drama_admin_user VALUES(?,?,?,?,?,?)", (ACTOR["tenant_key"], ACTOR["user_id"], ACTOR["name"], "user", "active", '["x_accounts"]'))
         self.nav = {"xVideoPublish": True, "xVideoPublishRecords": True}
         self.session = {**ACTOR, "auth_type": "feishu"}
         self.app = {"JOB_DB_PATH": str(self.job_path), "SESSION_COOKIE_NAME": "session",
@@ -153,8 +153,8 @@ class GatewayServiceTests(unittest.TestCase):
         other = {**ACTOR, "user_id": "owner-b"}
         self.assertEqual(self.service.store.settings(other)["items"], [])
         denied, _ = self.dispatch("POST", "/accounts/3/settings", {"expected_version": 0, "caption_template": "Other"})
-        self.assertEqual(denied[0], 404)
-        self.assertTrue(all(scope == "mine" for scope in self.oauth.scope_calls))
+        self.assertEqual(denied[0], 200)
+        self.assertTrue(all(scope == "platform" for scope in self.oauth.scope_calls))
 
     def test_permission_is_read_fresh_not_from_cookie(self):
         self.assertEqual(self.dispatch("GET", "/accounts")[0][0], 200)
@@ -172,10 +172,10 @@ class GatewayServiceTests(unittest.TestCase):
             conn.execute("UPDATE drama_admin_user SET status='disabled'")
         self.assertEqual(self.dispatch("GET", "/accounts")[0][0], 403)
 
-    def test_records_only_navigation_denies_creation(self):
+    def test_platform_permission_does_not_require_separate_publish_navigation(self):
         self.nav["xVideoPublish"] = False
         self.assertEqual(self.dispatch("GET", "/batches")[0][0], 200)
-        self.assertEqual(self.dispatch("POST", "/preflight", self.manual())[0][0], 403)
+        self.assertEqual(self.dispatch("POST", "/preflight", self.manual())[0][0], 200)
 
     def test_csrf_missing_origin_cross_site_and_wrong_host_are_rejected(self):
         for headers in ({"Origin": None}, {"Sec-Fetch-Site": "cross-site"}, {"Origin": "https://evil.example.invalid"}, {"Origin": "null"}):
@@ -231,7 +231,7 @@ class GatewayServiceTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_manual_material_reservation").fetchone()[0], 2)
 
-    def test_manual_unassigned_empty_caption_and_foreign_account_fail(self):
+    def test_manual_invalid_inputs_fail_but_other_accounts_are_allowed(self):
         for change in (lambda p: p["pairs"].pop(), lambda p: p["pairs"][0].update(caption_template="")):
             payload = self.manual()
             change(payload)
@@ -240,8 +240,8 @@ class GatewayServiceTests(unittest.TestCase):
         payload["account_ids"].append("3")
         payload["pairs"][0]["account_id"] = "3"
         response, _ = self.dispatch("POST", "/preflight", payload)
-        self.assertEqual(len(response[1]["skipped"]), 1)
-        self.assertEqual(self.dispatch("POST", "/batches", {"preview_id": response[1]["preview_id"], "idempotency_key": "fixture-invalid-manual"})[0][0], 409)
+        self.assertEqual(len(response[1]["skipped"]), 0)
+        self.assertEqual(self.dispatch("POST", "/batches", {"preview_id": response[1]["preview_id"], "idempotency_key": "fixture-invalid-manual"})[0][0], 200)
 
     def test_excel_invalid_processing_and_ids_are_row_errors(self):
         account = self.oauth.rows["1"]["x_user_id"]
@@ -278,12 +278,12 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(denied[0], 400)
         self.assertEqual(self.service.store.list_batches(ACTOR)["total"], 0)
 
-    def test_changed_owner_and_permission_cannot_commit_old_preview(self):
+    def test_changed_account_owner_does_not_revoke_operator_access(self):
         preview = self.dispatch("POST", "/preflight", self.manual())[0][1]
         self.oauth.rows["1"]["owner_user_id"] = "owner-b"
         response, _ = self.dispatch("POST", "/batches", {"preview_id": preview["preview_id"], "idempotency_key": "fixture-owner-drift"})
-        self.assertEqual(response[0], 404)
-        self.assertEqual(self.service.store.list_batches(ACTOR)["total"], 0)
+        self.assertEqual(response[0], 200)
+        self.assertEqual(self.service.store.list_batches(ACTOR)["total"], 1)
 
     def test_account_and_batch_dto_contains_no_owner_or_credentials(self):
         self.oauth.rows["1"].update(access_token="fixture-private", token_store_key="fixture-path")
@@ -292,7 +292,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertNotIn("fixture-private", text)
         self.assertNotIn("token_store_key", text)
         self.assertNotIn("owner_user_id", text)
-        self.assertEqual({r["account_id"] for r in response[1]["items"]}, {"1", "2"})
+        self.assertEqual({r["account_id"] for r in response[1]["items"]}, {"1", "2", "3"})
         self.assertEqual(batch_dto({"id": 1, "source": "manual", "created_at": "x", "status": "stopped", "tasks": []})["status"], "stopped")
 
     def test_internal_broker_requires_loopback_single_bearer_no_forwarding(self):

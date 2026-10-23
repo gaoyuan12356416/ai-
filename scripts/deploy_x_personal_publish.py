@@ -295,6 +295,8 @@ def paused(config, manifest):
     save(manifest)
     handles = []
     try:
+        if config.get('allow_existing_pool_scheduler') and unit_state(POOL).get('ActiveState') == 'active':
+            run('systemctl', 'stop', POOL)
         execution_triggers = ['x-auto-post-runner.timer', 'x-auto-post-runner.path']
         active_execution = [u for u in execution_triggers if states[u].get('ActiveState') == 'active']
         if active_execution:
@@ -333,6 +335,8 @@ def paused(config, manifest):
         # A failed safe rollback must keep claimers paused, not run mixed code.
         if manifest.get('status') != 'recovery_required':
             restore_trigger_states(states)
+            if config.get('allow_existing_pool_scheduler') and manifest.get('pool_state', {}).get('ActiveState') == 'active':
+                run('systemctl', 'start', POOL)
             manifest['triggers_restored'] = True
             save(manifest)
         else:
@@ -544,7 +548,8 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
     manifest['service_states'] = {u: unit_state(u) for u in SERVICES}
     require(all(s.get('ActiveState') == 'active' for s in manifest['service_states'].values()), 'service state drift')
     manifest['pool_state'] = unit_state(POOL)
-    require(manifest['pool_state'].get('ActiveState') != 'active', 'existing personal scheduler active; review separately')
+    require(manifest['pool_state'].get('ActiveState') != 'active' or config.get('allow_existing_pool_scheduler') is True,
+            'existing personal scheduler active; review separately')
     backup = Path(manifest['backup'])
     with paused(config, manifest):
         require(Path(config['paths']['current']).resolve() == Path(manifest['previous_release']),

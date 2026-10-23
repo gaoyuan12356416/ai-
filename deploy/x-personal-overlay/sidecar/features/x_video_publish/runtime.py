@@ -50,6 +50,10 @@ def dispatch(handler, oauth, path):
                     or any(not isinstance(payload[k], dict) for k in ('actor', 'payload', 'query'))):
                 raise PublishingError('invalid_request', '内部请求字段无效', 400)
             result = service.dispatch(payload['method'], payload['path'], payload['actor'], payload['payload'], payload['query'])
+            if payload['method'] == 'POST' and hasattr(oauth, 'safe_record_event'):
+                # Keep the real operator, never the account owner or a synthetic admin.
+                oauth.safe_record_event('x_platform_publish_change', 'completed', payload['actor'],
+                                        error_code=payload['path'][:64])
         handler.send_json(200, result)
     except (PublishingError, XPostError, oauth.ServiceError) as exc:
         handler.close_connection = True

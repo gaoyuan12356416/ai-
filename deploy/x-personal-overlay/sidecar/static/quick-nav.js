@@ -592,11 +592,16 @@
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
       [
-        { key: "xVideoPublish", label: "手动发布", description: "个人账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
+        { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
         { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
       ].forEach(item => {
         if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
-          xPlatform.items.push({ ...item, kind: "page", module: "x_video_publish", adminOnly: false, enabled: true });
+          xPlatform.items.push({ ...item, kind: "page", module: "x_accounts", adminOnly: false, enabled: true });
+        }
+      });
+      xPlatform.items.forEach(item => {
+        if (["xAccountList", "xVideoPublish", "xVideoPublishRecords"].includes(item?.key)) {
+          item.module = "x_accounts"; item.adminOnly = false;
         }
       });
       const xAutoPublishTemplatesExists = xPlatform.items.some(

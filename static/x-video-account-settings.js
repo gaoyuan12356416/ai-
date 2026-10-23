@@ -6,7 +6,7 @@
   P.uid = () => crypto.randomUUID();
   P.auth = null;
   P.accounts = [];
-  P.allowed = auth => !!auth?.authenticated && !!(auth.user?.is_admin || auth.user?.permissions?.x_video_publish);
+  P.allowed = auth => !!auth?.authenticated && !!(auth.user?.is_admin || auth.user?.permissions?.x_accounts);
   P.url = value => { try { const url = new URL(value); return ["https:","http:"].includes(url.protocol) && !url.username && !url.password ? url.href : ""; } catch (_) { return ""; } };
   P.bj = value => value ? new Intl.DateTimeFormat("zh-CN", {timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(new Date(value)) : "立即发布";
   P.parseTime = raw => {
@@ -64,12 +64,12 @@
     P.$("xpQueryPending").onclick=()=>run(false);P.$("xpRetryPending").onclick=()=>run(true);
   };
   P.openSettings = async (id,onSaved) => {
-    const account=P.account(id);if(!account)throw new Error("仅本人账号可管理发布设置。");
+    const account=P.account(id);if(!account)throw new Error("账号配置不可用，请刷新账号列表。");
     const modal=P.dialog("xpSettings",`${account.display_name || account.username} · 发布设置`,`<div id="xpSettingsError" class="xp-error" hidden></div><p class="xp-muted">账号 ID ${P.esc(account.x_user_id)} · 剧语言 ${P.esc(account.language || "未设置")}（在账号列表中修改）</p><label class="xp-field">默认发布文案<textarea id="xpTemplate" rows="7">${P.esc(account.caption_template || "")}</textarea></label>${P.macros("xpTemplate")}<p class="xp-muted">仅影响以后建立的配对和任务，已编辑文案及历史任务保持原样。</p>`,`<button class="xp-button" data-xp-close>取消</button><button id="xpSaveSettings" class="xp-button primary">保存设置</button>`);
     P.$("xpSaveSettings").onclick=event=>P.busy(event.target,async()=>{try{const caption_template=P.$("xpTemplate").value;const error=P.templateError(caption_template);if(error)throw new Error(error);await P.post(`/accounts/${encodeURIComponent(id)}/settings`,{expected_version:account.config_version ?? 0,caption_template});await P.refreshAccounts();modal.close();P.toast("默认文案已保存");onSaved?.();}catch(error){P.error("xpSettingsError",error);}});
   };
   P.openPool = async id => {
-    const account=P.account(id);if(!account)throw new Error("仅本人账号可管理素材池。");
+    const account=P.account(id);if(!account)throw new Error("账号素材池不可用，请刷新账号列表。");
     const endpoint=`/accounts/${encodeURIComponent(id)}/pool`,storage="pool:"+id;
     let data=null,tab="pending",cursor="",next="",stack=[],reading=false,writing=false,failed=false,settingsDirty=false,pending=P.pending(storage),selected=new Set();
     const modal=P.dialog("xpPool",`${account.display_name || account.username} · 素材池`,`<div class="xp-notice">北京时间每个时点取队首一条，空池与错过时点不补发。暂停不会撤销已生成任务；结果待核对时计划暂停。</div><div id="xpPoolError" class="xp-error" hidden></div><p id="xpPoolStatus">正在加载…</p><button class="xp-button small" id="xpPoolRefresh">刷新最新版本</button><div id="xpPoolPending" hidden></div><fieldset id="xpPoolFields" disabled><div class="xp-grid2"><label class="xp-field">每日发布时间（逗号分隔，北京时间）<input id="xpPoolTimes" placeholder="09:00,18:00"></label><label class="xp-field">加工方式<select id="xpPoolMode"><option value="original">原片</option><option value="random_overlay">随机加工</option></select></label></div><div class="xp-actions"><button class="xp-button" id="xpPoolSave">保存设置</button><button class="xp-button primary" id="xpPoolEnable">启用计划</button><button class="xp-button" id="xpPoolPause">暂停计划</button></div><nav class="xp-tabs" id="xpPoolTabs">${Object.entries({pending:"待发布",processing:"处理中",published:"已发布",failed:"异常与历史",slots:"时点记录"}).map(([value,label])=>`<button class="xp-button small" data-pool-tab="${value}">${label}</button>`).join("")}</nav><div id="xpPoolAdmission"><label class="xp-field">按顺序添加素材 ID（每行一个，最多 200 条）<textarea id="xpPoolIds" rows="4"></textarea></label><div class="xp-actions"><button id="xpPoolAdd" class="xp-button primary">校验并入池</button><button id="xpPoolRemove" class="xp-button">移除选中项</button></div><div id="xpPoolAdmissionResult"></div></div><div id="xpPoolList"></div><div class="xp-actions"><button id="xpPoolPrev" class="xp-button small">上一页</button><button id="xpPoolNext" class="xp-button small">下一页</button></div></fieldset>`);

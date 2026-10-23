@@ -42184,6 +42184,15 @@ def x_accounts_actor(session):
     }
 
 
+def x_platform_accounts_actor(session):
+    from features.x_video_publish.identity_broker import resolve_identity
+    from features.x_video_publish.errors import PublishingError
+    try:
+        return resolve_identity(globals(), str(session.get("tenant_key") or ""), str(session.get("user_id") or ""))
+    except PublishingError as exc:
+        raise XAccountsClientError(exc.code, str(exc), exc.status) from None
+
+
 def x_post_drama_verification_actor(session):
     """Use all-account verification only after the drama-page permission gate."""
     actor = x_accounts_actor(session)
@@ -95337,11 +95346,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-accounts":
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             try:
                 session = self._session() or {}
-                accounts = query_x_authorized_accounts(x_accounts_actor(session), scope="all")
+                accounts = query_x_authorized_accounts(x_platform_accounts_actor(session), scope="platform")
                 json_response(
                     self,
                     200,
@@ -100484,7 +100493,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         x_admin_verify_match = re.match(r"^/api/admin/x-accounts/(\d+)/verify$", parsed.path)
         if x_admin_verify_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100492,7 +100501,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             account_id = x_admin_verify_match.group(1)
             append_audit_log(session, "admin_verify_x_account_attempted", "x_account", account_id, {})
             try:
-                result = verify_x_account(account_id, x_accounts_actor(session), scope="all")
+                result = verify_x_account(account_id, x_platform_accounts_actor(session), scope="platform")
                 item = result.get("item", result) if isinstance(result, dict) else {}
                 append_audit_log(
                     session,
@@ -100519,7 +100528,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if x_admin_publish_approval_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100535,7 +100544,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = set_x_account_publish_approval(
                     account_id,
                     approved,
-                    x_accounts_actor(session),
+                    x_platform_accounts_actor(session),
                 )
                 item = result.get("item", result) if isinstance(result, dict) else {}
                 append_audit_log(
@@ -100573,7 +100582,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if x_admin_drama_language_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_module("x_accounts"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -100590,7 +100599,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = set_x_account_drama_language(
                     account_id,
                     payload.get("drama_language"),
-                    x_accounts_actor(session),
+                    x_platform_accounts_actor(session),
                 )
                 item = (
                     result.get("item", result)

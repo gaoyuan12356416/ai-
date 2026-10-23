@@ -52,10 +52,10 @@ class PublishingService:
     def account(self,actor,account_id):
         if not re.fullmatch(r'[1-9][0-9]{0,18}',str(account_id)):
             raise PublishingError('invalid_account','账号 ID 无效',400)
-        return self.oauth.row_to_item(self.oauth.find_scoped_account_row(int(account_id),actor,'mine'))
+        return self.oauth.row_to_item(self.oauth.find_scoped_account_row(int(account_id),actor,'platform' if actor.get('x_platform_access') is True else 'mine'))
 
     def accounts(self,actor):
-        return {str(a['id']):a for a in self.oauth.list_accounts(actor,'mine')['items']}
+        return {str(a['id']):a for a in self.oauth.list_accounts(actor,'platform' if actor.get('x_platform_access') is True else 'mine')['items']}
 
     def account_dto(self,actor,account):
         config=self.store.get_settings(actor,str(account['id']))

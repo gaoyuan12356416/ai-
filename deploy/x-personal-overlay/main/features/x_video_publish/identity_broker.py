@@ -16,13 +16,9 @@ def resolve_identity(app,tenant,user,*,publishing=True):
             raise PublishingError('identity_inactive','发布人账号已停用，请重新确认发布权限',403)
         current=dict(rows[0])
         current['permissions']=app['normalize_user_permissions'](current.pop('permissions_json'),current['role'])
-        if not app['has_module_permission'](current,'x_video_publish'):
-            raise PublishingError('identity_permission_denied','尚未开通 X 个人视频发布权限',403)
-        nav=app['load_navigation_config']()
-        keys=('xVideoPublish',) if publishing else ('xVideoPublish','xVideoPublishRecords')
-        if not any(app['navigation_item_access'](current,k,nav).get('allowed') for k in keys):
-            raise PublishingError('identity_permission_denied','X 发布入口不可用',403)
-        return {k:str(current[k]) for k in ('tenant_key','user_id','name','role')}
+        if not app['has_module_permission'](current,'x_accounts'):
+            raise PublishingError('identity_permission_denied','尚未开通 X 平台推广权限',403)
+        return {**{k:str(current[k]) for k in ('tenant_key','user_id','name','role')}, 'x_platform_access': True}
     except PublishingError:
         raise
     except Exception:

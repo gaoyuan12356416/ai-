@@ -83,10 +83,10 @@ def _timing(value, now, check_future=True):
     return _stamp(parsed)
 
 
-def _account(account, account_id, owner, language=None):
+def _account(account, account_id, owner, language=None, *, platform_access=False):
     if not isinstance(account, dict) or _account_id(account.get("id")) != int(account_id):
         raise XPostError("x_video_account_not_found", "账号不存在或不属于当前用户", 404)
-    if (str(account.get("owner_tenant_key") or ""), str(account.get("owner_user_id") or "")) != owner:
+    if not platform_access and (str(account.get("owner_tenant_key") or ""), str(account.get("owner_user_id") or "")) != owner:
         raise XPostError("x_video_account_not_found", "账号不存在或不属于当前用户", 404)
     if account.get("status") != "active" or account.get("publish_approved") is not True or account.get("publish_eligible") is not True:
         raise XPostError("x_video_account_unavailable", "账号授权或允许发布状态不满足要求", 409)
@@ -244,7 +244,7 @@ def read_personal_task(db_path, run_id):
         return _readonly_personal_task(conn, run_id)
 
 
-def assert_personal_run_publishable(db_path, run_id, account=None):
+def assert_personal_run_publishable(db_path, run_id, account=None, *, platform_access=False):
     """Read-only execution guard; preserves holds and current owner/language checks."""
     if not run_id:
         return None
@@ -255,7 +255,7 @@ def assert_personal_run_publishable(db_path, run_id, account=None):
         if personal_batch_held(conn, task["batch_id"]):
             raise XPostError("x_post_unknown_outcome", "本批次已暂停，请先核对已有发布结果", 409, True)
         if account is not None:
-            _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"])
+            _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
         return task
 
 
@@ -306,7 +306,13 @@ class PersonalStore:
     def get_settings(self, actor, account_id, conn=None):
         owner, account_id = actor_subject(actor), _account_id(account_id)
         with self._connection(conn) as db:
-            row = db.execute("SELECT * FROM x_video_publish_account_config WHERE tenant_key=? AND user_id=? AND account_id=?", owner + (account_id,)).fetchone()
+            if actor.get("x_platform_access") is True:
+                rows = db.execute("SELECT * FROM x_video_publish_account_config WHERE account_id=? LIMIT 2", (account_id,)).fetchall()
+                if len(rows) > 1:
+                    raise XPostError("x_video_config_conflict", "账号存在多份历史配置，请核对后合并", 409)
+                row = rows[0] if rows else None
+            else:
+                row = db.execute("SELECT * FROM x_video_publish_account_config WHERE tenant_key=? AND user_id=? AND account_id=?", owner + (account_id,)).fetchone()
         return dict(row) if row else {"account_id": account_id, "default_copy": DEFAULT_COPY, "drama_language": "", "version": 0, "updated_at": ""}
 
     def settings(self, actor):
@@ -317,16 +323,17 @@ class PersonalStore:
 
     def save_settings(self, actor, account_id, payload, account):
         owner, account_id = actor_subject(actor), _account_id(account_id)
-        language = _account(account, account_id, owner)
+        language = _account(account, account_id, owner, platform_access=actor.get("x_platform_access") is True)
         caption = normalize_caption(payload.get("default_copy", payload.get("default_caption", DEFAULT_COPY)))
         with self._connection(write=True) as conn:
             current = self.get_settings(actor, account_id, conn)
+            storage_owner = (current.get("tenant_key", owner[0]), current.get("user_id", owner[1]))
             if payload.get("version", current["version"] if not current["version"] else None) != current["version"]:
                 raise XPostError("x_video_config_conflict", "账号配置已更新，请刷新后重试", 409)
             conn.execute("""INSERT INTO x_video_publish_account_config VALUES(?,?,?,?,?,?,?)
               ON CONFLICT(tenant_key,user_id,account_id) DO UPDATE SET default_copy=excluded.default_copy,
               drama_language=excluded.drama_language,version=excluded.version,updated_at=excluded.updated_at""",
-              owner + (account_id, caption, language, current["version"] + 1, utc_now()))
+              storage_owner + (account_id, caption, language, current["version"] + 1, utc_now()))
             return self.get_settings(actor, account_id, conn)
 
     def delete_settings(self, actor, account_id):
@@ -411,7 +418,7 @@ class PersonalStore:
                         raise XPostError("x_video_duplicate_row", "同账号与素材重复，已保留首条有效行", 409)
                     account = accounts.get(str(account_id), accounts.get(account_id))
                     material = materials.get(material_id, materials.get(int(material_id)))
-                    language = _account(account, account_id, owner)
+                    language = _account(account, account_id, owner, platform_access=actor.get("x_platform_access") is True)
                     if not isinstance(material, dict) or str(material.get("material_id", material.get("id", ""))) != material_id:
                         raise XPostError("x_video_material_not_found", "素材不存在或未通过来源校验", 404)
                     material_language = canonical_drama_language(material.get("language", material.get("drama_language")))
@@ -492,7 +499,7 @@ class PersonalStore:
                 aid, mid = int(row["account_id"]), row["material_id"]
                 _timing(row["scheduled_at"], current)
                 if accounts is not None:
-                    _account(accounts.get(str(aid), accounts.get(aid)), aid, owner, row["drama_language"])
+                    _account(accounts.get(str(aid), accounts.get(aid)), aid, owner, row["drama_language"], platform_access=actor.get("x_platform_access") is True)
                 if materials is not None:
                     material = materials.get(mid, materials.get(int(mid)))
                     if not isinstance(material, dict) or canonical_drama_language(material.get("language", material.get("drama_language"))) != row["drama_language"]:
@@ -530,7 +537,11 @@ class PersonalStore:
             return dict(self._batch(db, actor, batch_id), created=True)
 
     def _batch(self, conn, actor, batch_id):
-        row = conn.execute("SELECT * FROM x_video_publish_batch WHERE id=? AND tenant_key=? AND user_id=?", (int(batch_id),) + actor_subject(actor)).fetchone()
+        actor_subject(actor)
+        if actor.get("x_platform_access") is True:
+            row = conn.execute("SELECT * FROM x_video_publish_batch WHERE id=?", (int(batch_id),)).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM x_video_publish_batch WHERE id=? AND tenant_key=? AND user_id=?", (int(batch_id),) + actor_subject(actor)).fetchone()
         if not row:
             raise XPostError("x_video_batch_not_found", "发布批次不存在", 404)
         result = {k: row[k] for k in ("id", "source", "created_at", "idempotency_key")}
@@ -593,7 +604,7 @@ class PersonalStore:
             task["source_snapshot"] = json.loads(task["source_snapshot_json"])
         return task
 
-    def assert_run_publishable(self, run_id, account=None):
+    def assert_run_publishable(self, run_id, account=None, *, platform_access=False):
         with self._connection() as conn:
             task = personal_task(conn, run_id)
             if task is None:
@@ -601,5 +612,5 @@ class PersonalStore:
             if personal_batch_held(conn, task["batch_id"]):
                 raise XPostError("x_post_unknown_outcome", "本批次已暂停，请先核对已有发布结果", 409, True)
             if account is not None:
-                _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"])
+                _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
             return task

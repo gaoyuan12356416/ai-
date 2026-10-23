@@ -264,7 +264,7 @@
         "enabled": true,
         "order": 20,
         "module": "x_accounts",
-        "adminOnly": true
+        "adminOnly": false
       },
       {
         "key": "xAutoPublishTemplates",
@@ -324,10 +324,10 @@
       {
         "key": "xVideoPublish",
         "label": "手动发布",
-        "description": "个人账号选材、配对与定时发布",
+        "description": "全部账号选材、配对与定时发布",
         "kind": "page",
         "href": "/x-video-publish.html",
-        "module": "x_video_publish",
+        "module": "x_accounts",
         "adminOnly": false,
         "enabled": true,
         "order": 23
@@ -338,7 +338,7 @@
         "description": "查看手动、素材池和 Excel 发布批次",
         "kind": "page",
         "href": "/x-video-publish.html?view=records",
-        "module": "x_video_publish",
+        "module": "x_accounts",
         "adminOnly": false,
         "enabled": true,
         "order": 24

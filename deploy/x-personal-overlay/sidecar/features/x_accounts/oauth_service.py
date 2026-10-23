@@ -461,6 +461,7 @@ def normalize_actor(actor):
         "name": clean_text(actor.get("name", ""), 255),
         "email": clean_text(actor.get("email", ""), 255),
         "role": clean_text(actor.get("role", "user"), 32),
+        "x_platform_access": actor.get("x_platform_access") is True,
     }
 
 
@@ -1124,8 +1125,10 @@ def row_to_item(row):
 def normalize_account_scope(actor, scope):
     actor = require_actor_subject(actor)
     scope = str(scope or "mine").strip().lower()
-    if scope not in {"mine", "all"}:
+    if scope not in {"mine", "all", "platform"}:
         raise ServiceError("invalid_request", "X账号查询范围无效", 400)
+    if scope == "platform" and actor.get("x_platform_access") is not True:
+        raise ServiceError("x_platform_permission_denied", "需要 X 平台推广权限", 403)
     if scope == "all" and actor.get("role") != "admin":
         raise ServiceError("x_admin_required", "仅管理员可查看全部X账号", 403)
     return actor, scope
@@ -1136,7 +1139,7 @@ def list_accounts(actor, scope="mine"):
     with _DB_LOCK:
         conn = db_connect()
         try:
-            if scope == "all":
+            if scope in {"all", "platform"}:
                 rows = conn.execute("SELECT * FROM x_authorized_account ORDER BY updated_at DESC,id DESC").fetchall()
             else:
                 rows = conn.execute(
@@ -1196,7 +1199,7 @@ def find_scoped_account_row(account_id, actor, scope="mine"):
     with _DB_LOCK:
         conn = db_connect()
         try:
-            if scope == "all":
+            if scope in {"all", "platform"}:
                 row = conn.execute("SELECT * FROM x_authorized_account WHERE id=?", (int(account_id),)).fetchone()
             else:
                 row = conn.execute(
@@ -1226,11 +1229,11 @@ def set_account_publish_approval(account_id, approved, actor):
     if not isinstance(approved, bool):
         raise ServiceError("invalid_request", "approved必须是布尔值", 400)
     account_id = int(account_id)
-    actor, _scope = normalize_account_scope(actor, "all")
-    initial_row = find_scoped_account_row(account_id, actor, "all")
+    actor, _scope = normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    initial_row = find_scoped_account_row(account_id, actor, _scope)
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
-        find_scoped_account_row(account_id, actor, "all")
+        find_scoped_account_row(account_id, actor, _scope)
         timestamp = iso_utc()
         with _DB_LOCK:
             conn = db_connect()
@@ -1269,12 +1272,12 @@ def set_account_drama_language(account_id, drama_language, actor):
             400,
         ) from None
     account_id = int(account_id)
-    actor, _scope = normalize_account_scope(actor, "all")
-    initial_row = find_scoped_account_row(account_id, actor, "all")
+    actor, _scope = normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    initial_row = find_scoped_account_row(account_id, actor, _scope)
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
         current = row_to_item(
-            find_scoped_account_row(account_id, actor, "all")
+            find_scoped_account_row(account_id, actor, _scope)
         )
         if same_drama_language(
             current.get("drama_language"), normalized_language
@@ -3952,7 +3955,7 @@ def _personal_owner_guard(run_id):
         if task is None:
             return None
         owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
-        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'mine'))
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'platform' if owner.get('x_platform_access') is True else 'mine'))
         frozen_account = task['account_snapshot']
         if str(current.get('x_user_id') or '') != str(frozen_account.get('x_user_id') or ''):
             raise ServiceError('x_video_account_changed', '账号身份已改变', 409)
@@ -3976,10 +3979,10 @@ def _personal_run_guard(run_id, account=None):
         if task is None:
             return None
         owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
-        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'mine'))
-        assert_personal_run_publishable(POST_DB_PATH, run_id, current)
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'platform' if owner.get('x_platform_access') is True else 'mine'))
+        assert_personal_run_publishable(POST_DB_PATH, run_id, current, platform_access=owner.get("x_platform_access") is True)
         if account is not None:
-            assert_personal_run_publishable(POST_DB_PATH, run_id, account)
+            assert_personal_run_publishable(POST_DB_PATH, run_id, account, platform_access=owner.get("x_platform_access") is True)
         return task
     except PublishingError as exc:
         raise ServiceError(exc.code, str(exc), exc.status) from None

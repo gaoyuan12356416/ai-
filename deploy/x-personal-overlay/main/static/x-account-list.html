@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>X 账号列表 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/x-video-account-settings.css?v=20261022" />
+  <link rel="stylesheet" href="/x-video-account-settings.css?v=20261023shared" />
   <style>
     :root { color-scheme:light; --ink:#13233a; --muted:#687894; --line:#dce5f1; --blue:#2563eb; --green:#149b67; --amber:#c47a0a; --red:#d13f4d; --panel:#fff; }
     * { box-sizing:border-box; }
@@ -103,7 +103,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>X 账号列表</h1><p>管理员查看全部已接入的 X 账号、公众资料及后台启用状态。</p></div>
+        <div class="title"><h1>X 账号列表</h1><p>查看全部已接入的 X 账号，统一管理发布设置与账号素材池。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -112,7 +112,7 @@
       </header>
 
       <section id="loginGate" class="panel gate hidden"><strong>请先登录 AI 自动后台</strong><span>登录后才能查看 X 账号列表。</span></section>
-      <section id="adminGate" class="panel gate hidden"><strong>仅管理员可以查看 X 账号列表</strong><span>当前页面包含全部用户授权的 X 账号信息。</span></section>
+      <section id="adminGate" class="panel gate hidden"><strong>需要 X 平台推广权限</strong><span>当前页面包含全部用户授权的 X 账号信息。</span></section>
 
       <div id="pageRoot" class="hidden">
         <section class="stats">
@@ -131,7 +131,7 @@
         <section class="panel">
           <div class="section-head">
             <div><h2>全部授权账号</h2><p>勾选“允许发布”且授权有效的账号会进入发布池；短期 Access Token 到期时会在实际执行前自动续期，只有无法续期时才需要重新授权。</p></div>
-            <div class="xp-actions"><a id="xPersonalWorkspace" class="button hidden" href="/x-video-publish.html">个人发布工作台</a><button id="xOpenExcel" class="button hidden" type="button">Excel 发布</button><button id="reloadAccounts" class="button" type="button">刷新列表</button></div>
+            <div class="xp-actions"><a id="xPersonalWorkspace" class="button hidden" href="/x-video-publish.html">X 发布工作台</a><button id="xOpenExcel" class="button hidden" type="button">Excel 发布</button><button id="reloadAccounts" class="button" type="button">刷新列表</button></div>
           </div>
           <div class="filters">
             <input id="searchInput" type="search" autocomplete="off" aria-label="搜索 X 账号" placeholder="搜索名称、@账号、X ID、授权人或地区" />
@@ -162,9 +162,9 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/x-video-account-settings.js?v=20261022"></script>
+  <script src="/x-video-account-settings.js?v=20261023shared"></script>
   <script src="/vendor/xlsx.full.min.js?v=0.20.3"></script>
-  <script src="/x-excel-publish.js?v=20261022"></script>
+  <script src="/x-excel-publish.js?v=20261023shared"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script>
     (() => {
@@ -354,7 +354,7 @@
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
           const own = window.XVideoPublish.account(item.id);
           const enabled = window.XVideoPublish.allowed(state.auth) && !!own;
-          const publishingReason = !window.XVideoPublish.allowed(state.auth) ? "未开通个人发布模块" : !own ? "仅可管理本人账号的发布设置与素材池" : "";
+          const publishingReason = !window.XVideoPublish.allowed(state.auth) ? "未开通 X 平台推广权限" : !own ? "账号信息尚未加载，请刷新列表" : "";
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
             <td>${operatingMetricsHtml(item)}</td>
@@ -424,7 +424,7 @@
             method:"POST",
             body:JSON.stringify({ drama_language:canonicalLanguage(dramaLanguage) }),
           });
-          toast(`剧语言已更新为 ${canonicalLanguage(dramaLanguage)}${result.item?.personal_pool_paused ? "；个人素材池已暂停，请核对素材语言后重新启用" : ""}`);
+          toast(`剧语言已更新为 ${canonicalLanguage(dramaLanguage)}${result.item?.personal_pool_paused ? "；账号素材池已暂停，请核对素材语言后重新启用" : ""}`);
         } catch (error) {
           toast(`保存失败：${error.message}`);
         } finally {
@@ -440,7 +440,7 @@
         el("authButton").addEventListener("click", () => window.UiTopbar.handleAuthAction({ auth:state.auth, api }));
         const user = state.auth && state.auth.user;
         if (!(state.auth && state.auth.authenticated && user)) { el("loginGate").classList.remove("hidden"); return; }
-        if (!user.is_admin) { el("adminGate").classList.remove("hidden"); return; }
+        if (!window.XVideoPublish.allowed(state.auth)) { el("adminGate").classList.remove("hidden"); return; }
         window.XVideoPublish.auth=state.auth;
         if (window.XVideoPublish.allowed(state.auth)) {
           el("xPersonalWorkspace").classList.remove("hidden");
