@@ -18,6 +18,7 @@ import uuid
 
 
 _SQL_LOCK = threading.RLock()
+_ACTIVE_SESSION = None
 _BEIJING = timezone(timedelta(hours=8))
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _ID = re.compile(r"[1-9][0-9]{0,31}\Z")
@@ -254,6 +255,7 @@ class SqlSource:
         self._metrics = {"query_count": 0, "query_failures": 0, "query_seconds": 0.0,
                          "sessions": 0, "violation_pages": 0}
         self._active = None
+        self._active_owner = None
 
     def _process_env(self):
         env = os.environ.copy()
@@ -270,16 +272,48 @@ class SqlSource:
 
     @contextmanager
     def _session(self):
-        # One process/session in this program, including separate SqlSource objects.
+        global _ACTIVE_SESSION
+        # The reentrant lock is held for the entire outer snapshot. Other
+        # threads wait and open a NEW transaction after it has been released.
         with _SQL_LOCK:
+            owner = threading.get_ident()
+            if self._active is not None:
+                if self._active_owner != owner or self._active.closed:
+                    raise SqlSourceError("sql_snapshot_unavailable")
+                try:
+                    yield self._active
+                except BaseException:
+                    # Do not let a caught page/query error silently start a new
+                    # snapshot partway through a multi-method preflight.
+                    self._active.close()
+                    raise
+                return
+            # An RLock permits reentry from a different adapter on the same
+            # thread. Reject that case rather than open a second SQL connection.
+            if _ACTIVE_SESSION is not None:
+                raise SqlSourceError("another_source_snapshot_active")
             session = _Session(self)
-            self._active = session
+            self._active = _ACTIVE_SESSION = session
+            self._active_owner = owner
             self._metrics["sessions"] += 1
             try:
                 yield session.open()
             finally:
-                session.close()
-                self._active = None
+                try:
+                    session.close()
+                finally:
+                    self._active = _ACTIVE_SESSION = None
+                    self._active_owner = None
+
+    @contextmanager
+    def snapshot(self):
+        """Reuse one gated read-only transaction for a short group of reads.
+
+        Nested snapshots on this adapter share the original connection and
+        deadline. No credentials or rows are cached between snapshots.
+        """
+        with self._session():
+            yield self
 
     def close(self):
         if self._active is not None:
@@ -292,10 +326,17 @@ class SqlSource:
         return "SELECT JSON_OBJECT(%s) FROM `%s`.%s %s" % (",".join(pairs), self.schema, table, tail)
 
     def products(self):
+        return self._products("")
+
+    def scope_products(self):
+        """Small current directory for the two allowed roots and their children."""
+        return self._products("WHERE id IN (1479,3302) OR ads_app_id IN (1479,3302)")
+
+    def _products(self, where):
         sql = self._select((("id", "CAST(id AS CHAR)"), ("name", "name"),
                             ("ads_app_id", "CAST(ads_app_id AS CHAR)"), ("app_type", "app_type"),
                             ("default_user", "CAST(default_user AS CHAR)")),
-                           "ads_apps_setting", "ORDER BY id LIMIT 20001")
+                           "ads_apps_setting", where + " ORDER BY id LIMIT 20001")
         with self._session() as session:
             rows = session.query(sql)
         if len(rows) > 20000:

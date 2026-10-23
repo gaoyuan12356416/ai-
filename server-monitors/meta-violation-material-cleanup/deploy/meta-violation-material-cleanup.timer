@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Meta violation material cleanup at 09:00 and 21:00 Beijing time
+
+[Timer]
+OnCalendar=*-*-* 09,21:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=0
+AccuracySec=1s
+Unit=meta-violation-material-cleanup.service
+
+[Install]
+WantedBy=timers.target

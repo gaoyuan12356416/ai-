@@ -1,0 +1,10 @@
+{
+  "runtime_dir": "/mnt/data-disk/meta-violation-material-cleanup",
+  "shared_ledger": "/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3",
+  "env_file": "/root/drama_material_service/.env",
+  "feishu_config": "/root/codex_test/fb_2446289_feishu_config.json",
+  "graph_version": "v25.0",
+  "legacy_lock": "/tmp/fb_2446289_daily_replace_delete.lock",
+  "mysql_binary": "/usr/bin/mysql",
+  "live_enabled": false
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Meta violation material cleanup for DramaWave and HotDrama
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup /mnt/data-disk/fb-ad-asset-delete
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/meta-violation-material-cleanup
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment=PYTHONUNBUFFERED=1
+Environment=SQL_GATE_BYPASS=0
+ExecStart=/usr/bin/env python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/meta-violation-material-cleanup/run.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json run
+RuntimeMaxSec=11h
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=no
+UMask=0077
+StandardOutput=journal
+StandardError=journal

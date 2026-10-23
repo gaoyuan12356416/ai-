@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import re
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -258,6 +259,118 @@ class SqlSourceTests(unittest.TestCase):
             self.assertIn(source._quote("2026-10-22 08:00:00.000000"), sql)
             return []
         self.run_source(lambda db: db.violations("2026-10-22T00:00:00+00:00", "2026-10-22T01:00:00+00:00"), responder)
+
+    def test_nested_snapshot_uses_one_connection_and_original_deadline(self):
+        process = FakeMysql(lambda sql: [])
+        adapter = self.make_source()
+        with patch.object(source.subprocess, "Popen", return_value=process) as popen:
+            with adapter.snapshot() as outer:
+                self.assertIs(outer, adapter)
+                session, started = adapter._active, adapter._active.started
+                adapter.scope_products()
+                with adapter.snapshot() as inner:
+                    self.assertIs(inner, adapter)
+                    adapter.lineages(["123"])
+                    self.assertIs(adapter._active, session)
+                    self.assertEqual(adapter._active.started, started)
+                self.assertFalse(session.closed)
+            self.assertTrue(session.closed)
+            self.assertIsNone(adapter._active)
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(adapter.safe_metrics["sessions"], 1)
+        self.assertEqual(sum("START TRANSACTION" in sql for sql in process.commands), 1)
+
+    def test_scope_products_reads_only_root_ids_and_direct_children(self):
+        def responder(sql):
+            self.assertIn("WHERE id IN (1479,3302) OR ads_app_id IN (1479,3302)", sql)
+            self.assertIn("ads_apps_setting", sql)
+            self.assertNotIn("LIKE", sql)
+            return [{"id": "1479", "name": "DramaWave", "ads_app_id": "0", "default_user": "803"},
+                    {"id": "1723", "name": "W2A", "ads_app_id": "1479", "default_user": "804"}]
+        result, _, _, _ = self.run_source(lambda db: db.scope_products(), responder)
+        self.assertEqual([row["id"] for row in result], ["1479", "1723"])
+        self.assertEqual(result[1]["default_user"], "804")
+
+    def test_nested_query_error_poison_closes_snapshot_until_outer_exit(self):
+        failed = FakeMysql(lambda sql: None)
+        fresh = FakeMysql(lambda sql: [])
+        adapter = self.make_source()
+        with patch.object(source.subprocess, "Popen", side_effect=[failed, fresh]) as popen:
+            with adapter.snapshot():
+                session = adapter._active
+                with self.assertRaisesRegex(source.SqlSourceError, "sql_stream_incomplete"):
+                    adapter.sources(["123"])
+                self.assertTrue(session.closed)
+                with self.assertRaisesRegex(source.SqlSourceError, "sql_snapshot_unavailable"):
+                    adapter.products()
+                self.assertEqual(popen.call_count, 1)
+            self.assertIsNone(adapter._active)
+            self.assertEqual(adapter.products(), [])
+            self.assertEqual(popen.call_count, 2)
+
+    def test_snapshot_closes_on_user_exception_without_opening_another_session(self):
+        process = FakeMysql(lambda sql: [])
+        adapter = self.make_source()
+        with patch.object(source.subprocess, "Popen", return_value=process) as popen:
+            with self.assertRaisesRegex(ValueError, "synthetic_abort"):
+                with adapter.snapshot():
+                    active = adapter._active
+                    adapter.scope_products()
+                    raise ValueError("synthetic_abort")
+        self.assertTrue(active.closed)
+        self.assertIsNone(adapter._active)
+        self.assertEqual(popen.call_count, 1)
+
+    def test_another_thread_waits_then_opens_its_own_session(self):
+        first, second = FakeMysql(lambda sql: []), FakeMysql(lambda sql: [])
+        adapter = self.make_source()
+        started, done = threading.Event(), threading.Event()
+        failures = []
+        def worker():
+            started.set()
+            try:
+                adapter.scope_products()
+            except Exception as exc:
+                failures.append(type(exc).__name__)
+            finally:
+                done.set()
+        with patch.object(source.subprocess, "Popen", side_effect=[first, second]) as popen:
+            with adapter.snapshot():
+                thread = threading.Thread(target=worker)
+                thread.start()
+                self.assertTrue(started.wait(1))
+                self.assertFalse(done.wait(0.05))
+                self.assertEqual(popen.call_count, 1)
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(popen.call_count, 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(sum("START TRANSACTION" in sql for sql in second.commands), 1)
+
+    def test_different_adapter_cannot_open_second_connection_in_same_thread(self):
+        process = FakeMysql(lambda sql: [])
+        first, second = self.make_source(), self.make_source()
+        with patch.object(source.subprocess, "Popen", return_value=process) as popen:
+            with first.snapshot():
+                with self.assertRaisesRegex(source.SqlSourceError, "another_source_snapshot_active"):
+                    second.scope_products()
+                first.scope_products()
+        self.assertEqual(popen.call_count, 1)
+
+    def test_credentials_are_not_cached_across_or_inside_snapshots(self):
+        counter = [0]
+        def responder(sql):
+            counter[0] += 1
+            return [{"id": "10", "user_id": "803", "token": "synthetic-%d" % counter[0]}]
+        adapter = self.make_source()
+        processes = [FakeMysql(responder), FakeMysql(responder)]
+        with patch.object(source.subprocess, "Popen", side_effect=processes) as popen:
+            with adapter.snapshot():
+                self.assertEqual(adapter.credentials()["803"], "synthetic-1")
+                self.assertEqual(adapter.credentials()["803"], "synthetic-2")
+            with adapter.snapshot():
+                self.assertEqual(adapter.credentials()["803"], "synthetic-3")
+        self.assertEqual(popen.call_count, 2)
 
 
 if __name__ == "__main__":
