@@ -14,7 +14,7 @@ Environment=SQL_GATE_BYPASS=0
 ExecStart=/usr/bin/env python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/meta-violation-material-cleanup/run.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json run
 RuntimeMaxSec=11h
 KillSignal=SIGINT
-TimeoutStopSec=90
+TimeoutStopSec=180
 Restart=no
 UMask=0077
 StandardOutput=journal

@@ -235,6 +235,11 @@ class Runner:
         if decision['eligible'] and (decision['root_id']!=candidate['root_id'] or set(decision['material_ids'])!=set(candidate['material_ids'])
                 or set(identity['product_ids'])!=set(candidate['identity']['product_ids'])):
             return {'eligible':False,'reason':'frozen_material_or_product_changed'}
+        if decision['eligible']:
+            # Keep exactly the trigger evidence checked in this group. The Ad
+            # guard must re-evaluate its current review/status after Creative
+            # deletion or a legacy-task wait instead of assuming it stayed clear.
+            decision['checked_evidence']=evidence
         return decision
 
     def attempt(self, job_id, shared_run, kind, identifier, candidate, run_id=None, lease=None):
@@ -292,9 +297,10 @@ class Runner:
     def dependency_guard(self,candidate,decision):
         """Recheck identity and pause eligibility after our Creative mutation.
 
-        Do not reinterpret feedback created by our own Creative deletion as a
-        new content-policy decision. Group preflight owns that review decision.
-        A concurrent Creative/product/material change still cancels the Ad.
+        A Creative result is not proof of the cause of a later Ad issue. Until
+        there is an explicitly verified platform error/field attribution, even
+        WITH_ISSUES after confirmed Creative deletion stays ineligible. Never
+        allow a new content rejection or pending review through this boundary.
         """
         with self.sql_snapshot():
             scope=self.current_scope()
@@ -313,6 +319,8 @@ class Runner:
         statuses=[ad.get('status'),(ad.get('adset') or {}).get('status'),(ad.get('campaign') or {}).get('status')]
         if any(s not in ('ACTIVE','PAUSED') for s in statuses):return 'dependency_status_changed'
         if 'rule2' not in decision['rules'] and 'PAUSED' not in statuses:return 'dependency_ad_resumed'
+        current=evaluate_ad(ad,identity,decision.get('checked_evidence',{}))
+        if not current['eligible']:return 'dependency_'+current['reason']
         return ''
 
     def execute(self, run_id, manifest, max_ads=None, start_phase='start'):

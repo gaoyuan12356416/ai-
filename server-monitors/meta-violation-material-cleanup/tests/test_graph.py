@@ -67,6 +67,16 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_final_identity_read_blocks_new_policy_rejection(self):
+        current=ad()
+        current['effective_status']='DISAPPROVED'
+        current['ad_review_feedback']={'global':{'Spam':'rejected'}}
+        client,session,_=self.client([Response(current)])
+        result=client.delete('ad','10','1','100')
+        self.assertEqual(result['code'],'current_review_changed')
+        self.assertFalse(result['request_sent'])
+        self.assertEqual([call[0] for call in session.calls],['GET'])
+
     def test_stop_cancels_next_page_without_returning_partial_inventory(self):
         client,session,_=self.client([page([ad()], 'cursor')])
         original=session.request

@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
+from .policy import _feedback_empty
 
 
 AD_FIELDS = (
@@ -419,6 +420,17 @@ class GraphClient:
             if record.get("status") == "DELETED":
                 return {"status": "deleted_verified", "code": "already_deleted",
                         "confirmed_deleted": True, "request_sent": False, "object": record}
+            if kind == 'ad':
+                # This is the final identity GET immediately before DELETE.
+                # Never ignore a newly observed rejection after runner preflight.
+                try:
+                    clear = _feedback_empty(record.get('ad_review_feedback'))
+                except (TypeError, ValueError):
+                    clear = False
+                if (not clear or record.get('effective_status') not in
+                        ('ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED', 'WITH_ISSUES')
+                        or record.get('status') not in ('ACTIVE', 'PAUSED')):
+                    return {'status': 'failed', 'code': 'current_review_changed', 'request_sent': False}
         except GraphError as error:
             return {"status": "failed", "request_sent": False, "error": error.as_dict()}
         if self.delete_stop():

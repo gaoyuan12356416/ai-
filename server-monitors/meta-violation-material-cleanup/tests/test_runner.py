@@ -72,10 +72,7 @@ class Graph:
         result=self.results.get((kind,identifier),{'status':'api_accepted','request_sent':True})
         if isinstance(result,BaseException):raise result
         if result['status']=='api_accepted':
-            if kind=='creative':
-                for row in self.ads.values():
-                    if row['creative']['id']==identifier:row['effective_status']='WITH_ISSUES'
-            else:self.ads[identifier]['status']='DELETED'
+            if kind=='ad':self.ads[identifier]['status']='DELETED'
         return copy.deepcopy(result)
     def reconcile(self,kind,identifier,user,account):
         value=self.verifications.get((kind,identifier),{'status':'deleted_verified'})
@@ -273,6 +270,47 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runner.execute('test-run',manifest),'partial')
         self.assertEqual(self.deletes(graph),[('delete','creative','20')])
         self.assertEqual(runtime.data['remaining_ads'],1)
+
+    def test_new_rejection_or_review_after_failed_or_accepted_creative_blocks_ad(self):
+        for creative_status in ('failed','api_accepted','unknown'):
+            for review in ('DISAPPROVED','PENDING_REVIEW','ACTIVE_WITH_NEW_FEEDBACK'):
+                with self.subTest(creative_status=creative_status,review=review):
+                    # Every scenario needs its own frozen run and shared job.
+                    runner,_,graph,runtime=self.fixture()
+                    run_id='review-'+creative_status+'-'+review
+                    runner.store=Store(str(pathlib.Path(self.temp.name)/(run_id+'.sqlite')))
+                    manifest=runner.scan(run_id,START,END)
+                    graph.results[('creative','20')]={'status':creative_status,'request_sent':True}
+                    if creative_status=='unknown':graph.verifications[('creative','20')]={'status':'present'}
+                    def change(kind,identifier):
+                        if kind=='creative':
+                            graph.ads['10']['effective_status']='PAUSED' if review=='ACTIVE_WITH_NEW_FEEDBACK' else review
+                            if review!='PENDING_REVIEW':
+                                graph.ads['10']['ad_review_feedback']={'global':{'Spam':'new review rejection'}}
+                    graph.on_delete=change
+                    self.assertEqual(runner.execute(run_id,manifest),'partial')
+                    self.assertEqual(self.deletes(graph),[('delete','creative','20')])
+                    self.assertEqual(runtime.data['remaining_ads'],1)
+
+    def test_verified_deleted_creative_does_not_prove_with_issues_is_self_induced(self):
+        runner,_,graph,runtime=self.fixture()
+        manifest=self.manifest(runner)
+        def change(kind,identifier):
+            if kind=='creative':
+                graph.ads['10']['effective_status']='WITH_ISSUES'
+                graph.ads['10']['issues_info']=[{'error_code':123,'error_message':'Creative is unavailable'}]
+        graph.on_delete=change
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
+        self.assertEqual(runtime.data['remaining_ads'],1)
+        self.assertEqual(self.store.get_job('policy-cleanup-test-run')['objects'][0]['status'],'deleted')
+
+    def test_failed_creative_still_allows_independently_current_clear_ad(self):
+        runner,_,graph,_=self.fixture()
+        manifest=self.manifest(runner)
+        graph.results[('creative','20')]={'status':'failed','request_sent':True}
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
 
     def test_rule1_resumed_ad_is_not_deleted_after_creative(self):
         runner,source,graph,_=self.fixture()
