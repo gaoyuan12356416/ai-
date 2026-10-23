@@ -121,8 +121,9 @@ class Config:
 
 
 class EditingService:
-    def __init__(self, config, client_factory):
+    def __init__(self, config, client_factory, render_slots=None):
         self.config, self.client_factory = config, client_factory
+        self.render_slots = render_slots
 
     def _client(self):
         if not self.config.bucket or not self.config.region:
@@ -319,15 +320,26 @@ class EditingService:
             atomic_write_record(state / "scratch_epoch.json", epoch)
             return self._epoch_directory(state, epoch)
 
-    def _local_render(self, path, state, identity, command, duration, *, diagnostic_context=None):
+    def _local_render(self, path, state, identity, command, duration, *, diagnostic_context=None, probe=False):
         completed = load_completed(state, path, identity)
         if completed is not None:
             return
         # Durable, allowlisted runner evidence lives outside the removable media
         # directory. The shared runner stores hashes/tags, never raw stderr,
         # transport URLs, command arguments or credentials.
-        run_ffmpeg(command, duration, diagnostic_path=state.with_name(state.name + ".failure.json"),
-                   diagnostic_context=diagnostic_context)
+        # Parallel downloads must not create extra FFmpeg/NVENC render slots.
+        slots = self.render_slots if probe else None
+        if slots is not None:
+            runtime.emit_progress("waiting_media")
+            slots.acquire()
+        try:
+            if probe:
+                runtime.emit_progress("normalizing")
+            run_ffmpeg(command, duration, diagnostic_path=state.with_name(state.name + ".failure.json"),
+                       diagnostic_context=diagnostic_context)
+        finally:
+            if slots is not None:
+                slots.release()
         save_completed(state, path, identity, {})
 
     def execute(self, payload):
@@ -351,6 +363,7 @@ class EditingService:
             path = work / ("source-%03d.media" % index)
             downloaded = verified_source_download(source, path, client=client, bucket=self.config.bucket,
                 allowed_hosts=self.config.allowed_hosts, region=self.config.region)
+            runtime.emit_progress("verifying")
             info = probe_media(path, ffprobe=self.config.ffprobe)
             if value["operation"] == "render" and (abs(info["duration_ms"] - source["duration_ms"]) > 100
                     or info["width"] != source["width"] or info["height"] != source["height"] or info["has_audio"] != source["has_audio"]):
@@ -381,7 +394,7 @@ class EditingService:
             thumb_cmd = [self.config.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(sources[sid]),
                          "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "3", str(thumb)]
             self._local_render(thumb, local_state / "thumbnail.local.json", {"fingerprint": fingerprint, "kind": "thumbnail"}, thumb_cmd, 0.04,
-                diagnostic_context=diagnostic_context)
+                diagnostic_context=diagnostic_context, probe=True)
             result["thumbnail"] = upload("thumbnail.jpg", thumb, content_type="image/jpeg")
             if (info["video_codec"] != "h264" or (info["has_audio"] and info["audio_codec"] != "aac")
                     or "mp4" not in info["format_name"].split(",") or info["container_brand"] == "qt"
@@ -393,7 +406,7 @@ class EditingService:
                 self._local_render(preview, local_state / "preview.local.json", {"fingerprint": fingerprint, "kind": "preview"},
                     build_normalize_command(sources[sid], clip, preview, has_audio=info["has_audio"],
                         ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), info["duration_ms"] / 1000,
-                    diagnostic_context=diagnostic_context)
+                    diagnostic_context=diagnostic_context, probe=True)
                 preview_info = validate_output(probe_media(preview, ffprobe=self.config.ffprobe), clip["end_frame"])
                 result["preview"] = upload("preview.mp4", preview, preview_info)
         else:
@@ -497,7 +510,7 @@ class RuntimeAdapter:
         return self.service.can_resume(payload) if task_kind(payload) == contract.TASK_TYPE else bool(self.legacy_resume and self.legacy_resume(payload))
 
 
-def from_app(app, environ=None):
+def from_app(app, environ=None, render_slots=None):
     env = os.environ if environ is None else environ
     bucket = env.get("VIDEO_EDITING_COS_BUCKET") or getattr(app, "COS_BUCKET", "")
     region = env.get("VIDEO_EDITING_COS_REGION") or getattr(app, "COS_REGION", "")
@@ -514,4 +527,4 @@ def from_app(app, environ=None):
             return CosS3Client(CosConfig(Region=region, SecretId=app.COS_SECRET_ID,
                 SecretKey=app.COS_SECRET_KEY, Scheme="https"), retry=0)
         return app.get_cos_client(retry=0)
-    return EditingService(config, client_factory)
+    return EditingService(config, client_factory, render_slots=render_slots)

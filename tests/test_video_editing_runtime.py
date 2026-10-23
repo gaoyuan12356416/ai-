@@ -455,7 +455,7 @@ class EditingHTTPTests(unittest.TestCase):
 
     def test_types_auth_and_hot_intake_marker(self):
         service = Mock(); service.cached.return_value = None; service.execute.side_effect = result; service.can_resume.return_value = True
-        self.worker.editing_from_app = lambda app: service
+        self.worker.editing_from_app = lambda app, **kwargs: service
         marker = Path(self.directory.name) / "disabled"
         with mock.patch.dict(os.environ, {"VIDEO_EDITING_GPU_ENABLED": "1", "VIDEO_EDITING_DISABLED_FILE": str(marker)}):
             payload = editing()

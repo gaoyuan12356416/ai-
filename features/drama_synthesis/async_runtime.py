@@ -35,7 +35,7 @@ STAGES = frozenset({
     "queued", "starting", "rendering", "downloading", "normalizing",
     "waiting_cover", "rendering_intro", "concatenating", "removing_bgm",
     "rendering_random", "uploading", "verifying", "completed", "failed",
-    "recovery_required", "prefetching", "prefetched",
+    "recovery_required", "prefetching", "prefetched", "waiting_media",
 })
 METRICS = frozenset({
     "bytes_done", "bytes_total", "episodes_done", "episodes_total",
@@ -481,11 +481,18 @@ class AsyncRuntime:
                  fingerprint=render_fingerprint, render_slots=None, queue_limit=8,
                  dispatcher_workers=1, clock=time.time, process_probe=process_state, autostart=True,
                  prefetch=None, prefetch_during_download=False, validate_payload=None,
-                 public_result=None, can_prefetch=None):
+                 public_result=None, can_prefetch=None, parallel_predicate=None, parallel_workers=0):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 64:
             raise ValueError("queue_limit must be an integer in 1..64")
         if type(dispatcher_workers) is not int or not 1 <= dispatcher_workers <= 8:
             raise ValueError("dispatcher_workers must be an integer in 1..8")
+        if type(parallel_workers) is not int or not 0 <= parallel_workers <= 4:
+            raise ValueError("parallel_workers must be an integer in 0..4")
+        if parallel_workers and not callable(parallel_predicate):
+            raise ValueError("parallel workers require an explicit payload predicate")
+        self.parallel_workers = parallel_workers
+        self.parallel_predicate = parallel_predicate or (lambda payload: False)
+        self.parallel_slots = threading.BoundedSemaphore(max(1, parallel_workers))
         self.root = Path(root).absolute() / ".runtime"
         try:
             # The first accepted job is only durable if every newly-created
@@ -957,6 +964,9 @@ class AsyncRuntime:
             )
             for index in range(self.dispatcher_workers)
         ]
+        self._dispatchers += [threading.Thread(target=self._dispatch, args=(True,),
+            name="media-probe-dispatch-%d" % (index + 1), daemon=True)
+            for index in range(self.parallel_workers)]
         self._heartbeat = threading.Thread(target=self._heartbeats, name="drama-gpu-heartbeat", daemon=True)
         for dispatcher in self._dispatchers:
             dispatcher.start()
@@ -1057,14 +1067,16 @@ class AsyncRuntime:
                     lock.release()
                     self._wake.set()
 
-    def _dispatch(self):
+    def _dispatch(self, parallel=False):
+        slots = self.parallel_slots if parallel else self.render_slots
         while not self._stop.is_set():
             self._wake.clear()
             lock = None
             with self._mutex:
-                queued = sorted((row for row in self._records.values() if row["status"] == "queued"),
+                queued = sorted((row for row in self._records.values() if row["status"] == "queued"
+                                and (bool(self.parallel_workers and self.parallel_predicate(row["_payload"])) == parallel)),
                                 key=lambda row: (row["created_at"], row["job_id"]))
-                if queued and self._healthy and not self._resource_blocked() and self.render_slots.acquire(blocking=False):
+                if queued and self._healthy and not self._resource_blocked() and slots.acquire(blocking=False):
                     record = queued[0]
                     if self._prefetch_job == record["job_id"]:
                         # The active render finished. Hand off the partial files
@@ -1073,13 +1085,13 @@ class AsyncRuntime:
                     lock = _FileLock(self.root / "locks" / (record["job_id"] + ".lock"))
                     if not lock.acquire():
                         lock = None
-                        self.render_slots.release()
+                        slots.release()
                     else:
                         try:
                             self._begin(record)
                         except Exception:
                             lock.release()
-                            self.render_slots.release()
+                            slots.release()
                             self._accepting = False
                             return
             if lock is None:
@@ -1092,7 +1104,7 @@ class AsyncRuntime:
                 pass
             finally:
                 lock.release()
-                self.render_slots.release()
+                slots.release()
 
     def _heartbeats(self):
         while not self._stop.wait(5):
