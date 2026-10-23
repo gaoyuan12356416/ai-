@@ -31,5 +31,38 @@ restores the original trigger and scheduler states. Code rollback is:
 python3 scripts/deploy_x_title_language_search.py --rollback /absolute/backup/manifest.json
 ```
 
-Deployment and live acceptance must be recorded below before claiming completion.
 Skill context is unchanged; this repository note carries the behavior contract.
+
+## Production acceptance
+
+- Released GitHub commit: `6958ce850b4210adfc0bf8231336ffc246a101d4`.
+- CPU host: `43.166.187.96`; checked-out source:
+  `/mnt/data-disk/x-personal-publishing/title-language-6958ce8`.
+- Changed only the source module in `/root/drama_material_service` and
+  `/opt/x-post-automation/current`; both installed hashes match the GitHub source.
+- Backup and deployment receipt:
+  `/mnt/data-disk/x-post-automation/backups/20261023T104858Z-source-6958ce85/manifest.json`.
+  Status is `deployed`; `ledger_preserved`, `tokens_preserved` and
+  `triggers_restored` are all true. The deployment waited for the existing Auto
+  task instead of stopping its upload/preparation. The SSH observer timed out
+  during this wait; the original deployment process completed on the server and
+  was reconciled from its durable manifest, without issuing a duplicate deploy.
+- Main API, X sidecar, X Auto service and personal-pool scheduler are active.
+- Windows and Linux both passed 114 personal-publishing backend tests.
+- Public-browser English-title search with all languages rendered 33 real
+  materials, including the three reported IDs. Japanese filtering rendered five
+  materials, including resource 7784520. No material was selected or published.
+- After restart, production HTTP exact-ID lookups returned 7784748 (zh-tw),
+  7784751 (ko), and 7784520 (ja), taking 2.534, 2.587 and 2.781 seconds respectively.
+  The complete candidate title query took 24.561 seconds and the Japanese-filtered
+  query 9.565 seconds, including gate/connection/mapping overhead; these are
+  samples, not latency guarantees.
+- Safe readbacks and screenshots:
+  `D:/codex/artifacts/x-title-language-search-20261023/`.
+
+Exact code-only rollback on the CPU server, retaining current publisher state:
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/title-language-6958ce8
+python3 scripts/deploy_x_title_language_search.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T104858Z-source-6958ce85/manifest.json
+```
