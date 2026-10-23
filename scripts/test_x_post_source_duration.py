@@ -165,6 +165,8 @@ class MP4MetadataTests(unittest.TestCase):
         data = self.box(b"ftyp", b"isom0000") + self.box(b"mdat", bytes(256000)) + self.box(b"moov", self.movie())
         requests = []
         def request(method, url, *, headers, **kwargs):
+            self.assertGreater(kwargs['timeout'], 3)
+            self.assertLessEqual(kwargs['timeout'], 8)
             first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
             last = min(last, len(data)-1)
             requests.append((first, last))
@@ -176,7 +178,7 @@ class MP4MetadataTests(unittest.TestCase):
                 self.assertEqual(headers["If-Match"], '"source1"')
             return response
         with patch.object(service.UrllibHttpClient, "request", side_effect=request):
-            duration = source_duration._mp4_metadata_duration("https://media.example.test/x.mp4", ("media.example.test",))
+            duration = source_duration._mp4_metadata_duration("https://media.example.test/x.mp4", ("media.example.test",), deadline=time.monotonic()+8)
         self.assertAlmostEqual(duration, 843.098)
         self.assertEqual(len(requests), 2)
         self.assertLess(sum(last-first+1 for first,last in requests), 66000)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import http.client
 import json
+import logging
 import os
 import re
 import struct
@@ -88,7 +89,7 @@ def _mp4_metadata_duration(url, allowed, *, deadline=None):
         seconds = deadline - time.monotonic()
         if seconds <= 0:
             raise ValueError("metadata deadline exceeded")
-        return min(3, seconds)
+        return min(8, seconds)
 
     def remote_range(start, length):
         nonlocal total_size, validator, transferred
@@ -185,7 +186,10 @@ def probe_source_metadata_duration(url, *, deadline):
             duration = _mp4_metadata_duration(url, allowed, deadline=deadline)
             if not math.isfinite(duration) or duration <= 0:
                 raise ValueError("invalid measured duration")
-        except (ValueError, OSError, http.client.HTTPException, struct.error, service.XPostError):
+        except (ValueError, OSError, http.client.HTTPException, struct.error, service.XPostError) as exc:
+            logging.getLogger(__name__).warning(
+                "Interactive source metadata failed: kind=%s budget_exhausted=%s",
+                type(exc).__name__, time.monotonic() >= deadline)
             raise service.XPostError("media_probe_failed", "暂未读到视频时长，请稍后按完整素材 ID 重试", 422) from None
         with _CACHE_LOCK:
             _CACHE[key] = (time.monotonic(), duration)
