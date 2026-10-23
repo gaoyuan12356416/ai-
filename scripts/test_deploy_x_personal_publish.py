@@ -5,7 +5,29 @@ import sqlite3
 import tempfile
 import unittest
 
-from scripts.deploy_x_personal_publish import database_facts
+from scripts.deploy_x_personal_publish import database_facts, require_compatible_personal_rollback
+
+
+class ExistingPersonalTaskUpgradeTests(unittest.TestCase):
+    def test_existing_tasks_can_roll_back_but_new_tasks_and_pool_operators_cannot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'posts.sqlite'
+            with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+                conn.executescript("CREATE TABLE x_video_publish_task(id INTEGER PRIMARY KEY);"
+                    "INSERT INTO x_video_publish_task VALUES(1);"
+                    "CREATE TABLE x_video_publish_pool(operator_tenant_key TEXT,operator_user_id TEXT);"
+                    "INSERT INTO x_video_publish_pool VALUES('','');")
+            manifest={'baseline':{'paths':{'post_db':str(path)}},'personal_tasks_before':1}
+            require_compatible_personal_rollback(manifest)
+            with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute('INSERT INTO x_video_publish_task VALUES(2)')
+            with self.assertRaisesRegex(RuntimeError,'new personal tasks'):
+                require_compatible_personal_rollback(manifest)
+            manifest['personal_tasks_before']=2
+            with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("UPDATE x_video_publish_pool SET operator_user_id='operator-b'")
+            with self.assertRaisesRegex(RuntimeError,'shared pool operator'):
+                require_compatible_personal_rollback(manifest)
 
 
 class UserStartupInvariantTests(unittest.TestCase):

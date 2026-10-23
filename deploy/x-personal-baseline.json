@@ -104,5 +104,6 @@
   },
   "drain_timeout_seconds": 7500,
   "hash_mode": "raw",
-  "allow_existing_pool_scheduler": true
+  "allow_existing_pool_scheduler": true,
+  "allow_existing_personal_tasks": true
 }

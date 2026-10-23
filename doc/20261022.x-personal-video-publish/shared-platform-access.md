@@ -42,9 +42,9 @@ preserves the current settings/items, checks all original ledger columns and
 token fingerprints, and restores the original publisher trigger states.
 
 Rollback restores the previous release and backed-up external files, never the
-database or tokens. The existing zero-personal-task rollback guard remains: if
-new shared-account tasks have been created, retain their compatible executor and
-perform a reviewed forward fix instead of restoring an owner-only executor.
+database or tokens. The upgrade snapshots the existing personal task count. Rollback accepts those
+pre-upgrade tasks only; if new tasks or shared pool operator edits exist, retain
+the compatible executor and reconcile instead of restoring an owner-only executor.
 
 Production verification must use reads only. Do not create a real X post,
 change actual account settings, enable plans, add materials or create test tasks.

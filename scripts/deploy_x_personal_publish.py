@@ -270,6 +270,18 @@ def personal_rows(config):
         return conn.execute('SELECT COUNT(*) FROM x_video_publish_task').fetchone()[0]
 
 
+def require_compatible_personal_rollback(manifest):
+    """Old tasks can resume on old code; newly shared writes require reconciliation."""
+    config = manifest['baseline']
+    require(personal_rows(config) == manifest.get('personal_tasks_before', 0),
+            'new personal tasks exist: retain compatible executor and reconcile before rollback')
+    with contextlib.closing(sqlite3.connect(Path(config['paths']['post_db']).resolve().as_uri()+'?mode=ro', uri=True)) as conn:
+        columns = {r[1] for r in conn.execute('PRAGMA table_info(x_video_publish_pool)')}
+        if 'operator_user_id' in columns:
+            require(conn.execute("SELECT COUNT(*) FROM x_video_publish_pool WHERE operator_user_id<>'' OR operator_tenant_key<>''").fetchone()[0] == 0,
+                    'shared pool operator changed: reconcile scheduled ownership before rollback')
+
+
 def restore_trigger_states(states):
     for unit, previous in states.items():
         if previous.get('ActiveState') == 'active':
@@ -524,7 +536,7 @@ def restore_code(manifest):
         run('systemctl', 'disable', POOL, check=False)
     run('systemctl', 'stop', SERVICES[0])
     wait_idle(lambda: inflight(config), 'X / YouTube share before rollback')
-    require(personal_rows(config) == 0, 'personal tasks exist: keep new executor and reconcile; no destructive rollback')
+    require_compatible_personal_rollback(manifest)
     for unit in reversed(SERVICES[1:]):
         run('systemctl', 'stop', unit)
     restore_files(manifest)
@@ -555,7 +567,8 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
         require(Path(config['paths']['current']).resolve() == Path(manifest['previous_release']),
                 'current release changed during drain; restage on the new composite')
         verify_baseline(config)
-        require(personal_rows(config) == 0, 'personal tasks already exist before first rollout')
+        require(personal_rows(config) == 0 or config.get('allow_existing_personal_tasks') is True,
+                'personal tasks already exist before first rollout')
         targets = [Path(config['paths'][g]) / n for g in external_groups(config) for n in config['files'][g]]
         targets += [ENV_FILE, POOL_ENV, POOL_UNIT]
         manifest['external_files'] = {str(p): backup_file(p, backup) for p in targets}
@@ -569,6 +582,7 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
             # Close browser mutation entry first, then recheck the independent worker.
             run('systemctl', 'stop', SERVICES[0])
             stopped = True
+            manifest['personal_tasks_before'] = personal_rows(config)
             wait_idle(lambda: inflight(config), 'final X / YouTube share request')
             for unit in reversed(SERVICES[1:]):
                 run('systemctl', 'stop', unit)
@@ -603,7 +617,7 @@ def activate(manifest, enable_publishing=False, enable_pool=False):
                 require(database_facts(path, before['columns'], user_startup=key == 'main_db') == before,
                         'legacy ledger changed: ' + key)
             require(token_facts(config) == manifest['tokens_before'], 'token fingerprints changed')
-            require(personal_rows(config) == 0, 'unexpected personal tasks created')
+            require(personal_rows(config) == manifest['personal_tasks_before'], 'unexpected personal tasks created')
             reload_nginx(config)
             if enable_publishing:
                 wait_idle(lambda: inflight(config), 'X / YouTube share before feature enable')
@@ -638,7 +652,7 @@ def rollback(manifest):
     config = manifest['baseline']
     preflight_disk(config)
     require(Path(config['paths']['current']).resolve() == Path(manifest['release']), 'rollback release differs')
-    require(personal_rows(config) == 0, 'personal tasks exist: disable new entry and reconcile first')
+    require_compatible_personal_rollback(manifest)
     with paused(config, manifest):
         manifest['status'] = 'rolling_back'
         save(manifest)
