@@ -1,11 +1,14 @@
 """Fixed, bounded X catalog reads using the existing exact-material policy."""
 import os
 import re
+import time
 from collections import defaultdict
 from urllib.parse import urlsplit
 from features.x_accounts.language import canonical_drama_language
 from features.x_posts.selector import (DramawaveCandidateSelector, PoolCandidateRejection,
-                                      previous_source_date)
+                                      previous_source_date, normalize_material_url)
+from features.x_posts.source_duration import probe_source_metadata_duration
+from features.x_posts.service import XPostError
 from .errors import PublishingError
 from .transport import broker
 
@@ -34,20 +37,30 @@ def safe_url(value):
         return ''
 
 class CachedSelector(DramawaveCandidateSelector):
-    def __init__(self, raw, dramas, deploy):
+    def __init__(self, raw, dramas, deploy, *, probe_deadline=None):
         super().__init__(None)
         self.raw, self.dramas, self.deploy = raw, dramas, deploy
+        self.probe_deadline = probe_deadline
 
     def _pool_material_rows(self, material_id, **kwargs):
         row = self.raw.get(material_id)
         if not row:
             return []
-        # Metadata preview must not start an unbounded media download/probe.
+        # Browsing never probes a page of media. Explicit selections may read
+        # bounded MP4 metadata, but never trigger the legacy full-download fallback.
         try:
             if float(row.get('video_duration') or 0) <= 0:
                 raise ValueError()
         except (ValueError, TypeError):
-            raise PoolCandidateRejection('material_duration_missing', '素材时长缺失，请先完善素材信息')
+            if self.probe_deadline is None:
+                raise PoolCandidateRejection('material_duration_missing', '素材未记录时长，请输入完整素材 ID 查询并读取视频时长')
+            try:
+                duration = probe_source_metadata_duration(
+                    normalize_material_url(str(row.get('material_url') or '')),
+                    deadline=self.probe_deadline)
+            except (XPostError, ValueError, OSError):
+                raise PoolCandidateRejection('material_duration_missing', '素材已找到，但暂未读到视频时长，请稍后按完整素材 ID 重试') from None
+            row = {**row, 'video_duration': duration}
         return [row]
 
     def _pool_drama_rows(self, content_id, language=None):
@@ -80,9 +93,9 @@ class SourceRepository:
         marks = ','.join('%s' for _ in material_ids)
         rows = self.mysql.select(f'''SELECT {self._projection()}
             FROM `{self.schema}`.ads_custom_source s WHERE s.id IN ({marks}) LIMIT 200''', material_ids)
-        return self._resolve_rows(material_ids, rows)
+        return self._resolve_rows(material_ids, rows, recover_duration=True)
 
-    def _resolve_rows(self, material_ids, rows):
+    def _resolve_rows(self, material_ids, rows, *, recover_duration=False):
         # Listing already has these exact source rows: reuse its bounded read so
         # resolve/browse use three queries; exact-title search adds one lookup.
         raw = {str(r['material_id']):r for r in rows}
@@ -106,7 +119,8 @@ class SourceRepository:
                 raise PublishingError('source_mapping_too_large','关联投放数据超出校验范围，请缩小素材选择后重试',503)
             for r in deployment_rows:
                 deploy[str(r['content_id'])].append(r)
-        selector = CachedSelector(raw,dramas,deploy)
+        selector = CachedSelector(raw,dramas,deploy,
+                                  probe_deadline=time.monotonic()+8 if recover_duration else None)
         result, errors = {}, {}
         for start in range(0,len(material_ids),50):
             selected, rejected = selector.select_manual(material_ids[start:start+50],previous_source_date(),limit=50)
@@ -183,7 +197,7 @@ class SourceRepository:
         raw = self.mysql.select(f'''SELECT {self._projection()} FROM {source_from}
             WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
-        resolved = self._resolve_rows(selected,raw[:limit]) if selected else {'items':{},'errors':{}}
+        resolved = self._resolve_rows(selected,raw[:limit],recover_duration=exact_id) if selected else {'items':{},'errors':{}}
         items = [resolved['items'][mid] for mid in selected if mid in resolved['items']
                  and (not language or resolved['items'][mid]['language'] == language)]
         return {'items':items,'next_cursor':selected[-1] if len(raw)>limit else '',

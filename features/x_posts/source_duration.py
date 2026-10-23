@@ -68,7 +68,7 @@ def _movie_duration(moov):
     raise ValueError("no finite movie duration")
 
 
-def _mp4_metadata_duration(url, allowed):
+def _mp4_metadata_duration(url, allowed, *, deadline=None):
     """Seek MP4 metadata with bounded HTTP ranges instead of fetching mdat."""
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
@@ -80,13 +80,24 @@ def _mp4_metadata_duration(url, allowed):
     validator = None
     window_start = -1
     window = b""
+    transferred = 0
+
+    def remaining():
+        if deadline is None:
+            return 10
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise ValueError("metadata deadline exceeded")
+        return min(3, seconds)
 
     def remote_range(start, length):
-        nonlocal total_size, validator
+        nonlocal total_size, validator, transferred
+        if transferred + length > 12 * 1024 * 1024:
+            raise ValueError("metadata transfer limit exceeded")
         headers = {"Range": "bytes=%d-%d" % (start, start + length - 1), "Accept-Encoding": "identity"}
         if validator:
             headers["If-Match"] = validator
-        response = client.request("GET", url, headers=headers, timeout=10, stream=True, max_response_bytes=length)
+        response = client.request("GET", url, headers=headers, timeout=remaining(), stream=True, max_response_bytes=length)
         with response:
             match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
             if response.status != 206 or not match:
@@ -102,7 +113,9 @@ def _mp4_metadata_duration(url, allowed):
             total_size, validator = total, etag
             body = bytearray()
             for chunk in response.iter_bytes():
+                remaining()
                 body.extend(chunk)
+                transferred += len(chunk)
                 if len(body) > length:
                     raise ValueError("range too large")
             if len(body) != last - first + 1:
@@ -141,6 +154,49 @@ def _mp4_metadata_duration(url, allowed):
     raise ValueError("MP4 metadata unavailable")
 
 
+def _allowed_hosts():
+    return tuple(item.strip() for item in (
+        os.environ.get("X_POST_SOURCE_DURATION_ALLOWED_HOSTS")
+        or os.environ.get("X_POST_DAILY_MEDIA_ALLOWED_HOSTS")
+        or os.environ.get("X_POST_MEDIA_ALLOWED_HOSTS")
+        or ""
+    ).split(",") if item.strip())
+
+
+def probe_source_metadata_duration(url, *, deadline):
+    """Interactive exact-ID reads never fall back to a full media download.
+
+    The caller shares one deadline across its selected IDs. Successful results
+    share the existing short-lived, exact-URL/allowlist cache with preflight.
+    """
+    allowed = _allowed_hosts()
+    if not allowed:
+        raise service.XPostError("media_allowlist_not_configured", "素材域名允许列表未配置", 503)
+    key = (str(url), allowed)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _CACHE_TTL_SECONDS:
+            _CACHE.move_to_end(key)
+            return cached[1]
+    if not _PROBE_SLOTS.acquire(timeout=max(0, min(1, deadline - time.monotonic()))):
+        raise service.XPostError("media_probe_failed", "视频时长读取繁忙，请稍后重试", 503)
+    try:
+        try:
+            duration = _mp4_metadata_duration(url, allowed, deadline=deadline)
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("invalid measured duration")
+        except (ValueError, OSError, http.client.HTTPException, struct.error, service.XPostError):
+            raise service.XPostError("media_probe_failed", "暂未读到视频时长，请稍后按完整素材 ID 重试", 422) from None
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.monotonic(), duration)
+            _CACHE.move_to_end(key)
+            while len(_CACHE) > _CACHE_LIMIT:
+                _CACHE.popitem(last=False)
+        return duration
+    finally:
+        _PROBE_SLOTS.release()
+
+
 def _probe_raw_video_duration(path, timeout=30):
     """Probe a local fallback file without importing runtime-specific repair code."""
     binary = os.environ.get("X_POST_FFPROBE_BIN", "/usr/bin/ffprobe")
@@ -176,12 +232,7 @@ def probe_source_duration(url):
     Only successful measurements are cached briefly, by exact URL and allowlist.
     Media bytes are temporary and never retained in the source database.
     """
-    allowed = tuple(item.strip() for item in (
-        os.environ.get("X_POST_SOURCE_DURATION_ALLOWED_HOSTS")
-        or os.environ.get("X_POST_DAILY_MEDIA_ALLOWED_HOSTS")
-        or os.environ.get("X_POST_MEDIA_ALLOWED_HOSTS")
-        or ""
-    ).split(",") if item.strip())
+    allowed = _allowed_hosts()
     if not allowed:
         raise service.XPostError("media_allowlist_not_configured", "素材域名允许列表未配置", 503)
     key = (str(url), allowed)

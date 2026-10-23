@@ -5,6 +5,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -114,6 +115,27 @@ class DurationMediaTests(unittest.TestCase):
             source_duration.probe_source_duration("https://127.0.0.1/source.mp4")
         self.assertEqual(raised.exception.code, "media_host_not_allowed")
 
+    def test_interactive_failure_never_falls_back_to_download_and_is_not_cached(self):
+        with patch.object(service, 'download_media', side_effect=AssertionError('No download')), patch.object(
+                source_duration, '_probe_raw_video_duration', side_effect=AssertionError('No ffprobe')):
+            for _ in range(2):
+                with self.assertRaises(service.XPostError):
+                    source_duration.probe_source_metadata_duration('https://media.example.test/a.mp4', deadline=time.monotonic()+8)
+        self.assertEqual(len(source_duration._CACHE),0)
+
+    def test_interactive_success_cache_reused_by_preflight_and_finite_required(self):
+        url='https://media.example.test/a.mp4'
+        with patch.object(source_duration,'_mp4_metadata_duration',return_value=1792.934) as probe, patch.object(
+                service,'download_media',side_effect=AssertionError('No download')):
+            self.assertEqual(source_duration.probe_source_metadata_duration(url,deadline=time.monotonic()+8),1792.934)
+            self.assertEqual(source_duration.probe_source_duration(url),1792.934)
+            self.assertEqual(source_duration.probe_source_metadata_duration(url,deadline=time.monotonic()-1),1792.934)
+            self.assertEqual(probe.call_count,1)
+            for value in (0,math.nan,math.inf):
+                probe.return_value=value
+                with self.assertRaises(service.XPostError):
+                    source_duration.probe_source_metadata_duration(url+'?uncached',deadline=time.monotonic()+8)
+
 
 class MP4MetadataTests(unittest.TestCase):
     @staticmethod
@@ -130,6 +152,13 @@ class MP4MetadataTests(unittest.TestCase):
             self.assertAlmostEqual(source_duration._movie_duration(self.movie(version=version)), 843.098)
         with self.assertRaises(ValueError):
             source_duration._movie_duration(self.movie(video=False))
+
+    def test_expired_deadline_and_untrusted_targets_do_not_make_http_requests(self):
+        with patch.object(service.UrllibHttpClient,'request') as request:
+            for url in ('https://media.example.test/a.mp4','http://media.example.test/a.mp4','https://127.0.0.1/a.mp4'):
+                with self.assertRaises(ValueError):
+                    source_duration._mp4_metadata_duration(url,('media.example.test',),deadline=time.monotonic()-1)
+            request.assert_not_called()
 
     def test_range_seek_skips_media_body_and_checks_etag(self):
         from unittest.mock import MagicMock

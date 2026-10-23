@@ -521,13 +521,41 @@ class SourceBoundaryTests(unittest.TestCase):
         with self.assertRaises(PublishingError):
             source.resolve(["1e3"])
 
-    def test_missing_duration_never_probes_or_downloads_media(self):
+    def test_browsing_missing_duration_never_probes_or_downloads_media(self):
         mysql = FakeMySQL()
         mysql.sources[0]["video_duration"] = 0
-        with patch("features.x_posts.selector.probe_source_duration", side_effect=AssertionError("No media download allowed")):
-            result = SourceRepository(mysql).resolve(["101"])
-        self.assertEqual(result["items"], {})
-        self.assertEqual(result["errors"]["101"]["code"], "material_duration_missing")
+        with patch("features.x_posts.selector.probe_source_duration", side_effect=AssertionError("No media download allowed")), patch(
+                "features.x_video_publish.sources.probe_source_metadata_duration", side_effect=AssertionError("No bulk probing")):
+            result = SourceRepository(mysql).listing({})
+        self.assertNotIn("101", [r['material_id'] for r in result['items']])
+
+    def test_exact_id_and_preflight_recover_real_duration_with_https_and_same_gates(self):
+        mysql = FakeMySQL()
+        mysql.sources[0].update(video_duration=0, material_url='http://media.example.invalid/0.mp4')
+        with patch("features.x_posts.selector.probe_source_duration", side_effect=AssertionError("No full download allowed")), patch(
+                "features.x_video_publish.sources.probe_source_metadata_duration", return_value=1792.934) as probe:
+            source = SourceRepository(mysql)
+            result = source.listing({'q':'101','product':'Dramawave'})
+            self.assertEqual(result['items'][0]['duration_seconds'],1792.934)
+            self.assertEqual(result['items'][0]['preview_url'],'https://media.example.invalid/0.mp4')
+            self.assertEqual(source.resolve(['101'])['items']['101']['duration_seconds'],1792.934)
+            self.assertEqual(probe.call_args.args[0], 'https://media.example.invalid/0.mp4')
+            self.assertIn('deadline',probe.call_args.kwargs)
+            probe.return_value=14401
+            result=source.resolve(['101'])
+            self.assertEqual(result['errors']['101']['code'],'material_duration_exceeds_limit')
+        self.assertEqual(mysql.sources[0]['video_duration'],0)
+
+    def test_exact_probe_failure_is_local_redacted_and_batch_has_one_deadline(self):
+        mysql=FakeMySQL()
+        for row in mysql.sources[:2]:row['video_duration']=0
+        with patch("features.x_posts.selector.probe_source_duration", side_effect=AssertionError("No full download allowed")), patch(
+                "features.x_video_publish.sources.probe_source_metadata_duration", side_effect=ValueError('private signed URL')) as probe:
+            result=SourceRepository(mysql).resolve(['101','102','103'])
+        self.assertEqual(set(result['items']),{'103'})
+        self.assertEqual(result['errors']['101']['code'],'material_duration_missing')
+        self.assertNotIn('private',str(result))
+        self.assertEqual(len({c.kwargs['deadline'] for c in probe.call_args_list}),1)
 
     def test_safe_url_and_sql_binding_reject_unsafe_values(self):
         for url in ("javascript:alert(1)", "http://example.invalid/x", "https://user:pass@example.invalid/x", "https://example.invalid:444/x"):

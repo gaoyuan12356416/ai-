@@ -48,22 +48,38 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
  if(accountPage){const inline=[...read('x-account-list.html').matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];vm.runInContext(inline,context);}else vm.runInContext(read('x-video-publish.js'),context);
  await settle();
  const target=(dataset,checked=true)=>({dataset,checked,disabled:false,value:'',closest:()=>null});
- async function choose(){await nodes.get('xpChooseMaterials').click();await settle();for(const m of materials)nodes.get('xpMaterialChoices').onchange({target:target({pick:m.material_id})});nodes.get('xpUseMaterials').click();}
+ async function choose(){await nodes.get('xpChooseMaterials').click();await settle();nodes.get('xpSearchMaterials').click();await settle();for(const m of materials)nodes.get('xpMaterialChoices').onchange({target:target({pick:m.material_id})});nodes.get('xpUseMaterials').click();}
  function candidate(id){nodes.get('xpCandidateAccounts').onchange({target:target({candidate:id})});}
  function pair(m,a,checked=true){nodes.get('xpPairRows').onchange({target:target({pairMaterial:m,pairAccount:a},checked)});}
  return {context,P:context.XVideoPublish,nodes,calls,posts,storage,choose,candidate,pair,materials,accounts,target,failMaterialRead:()=>materialReadFails=1,setMaterialResult:value=>materialResult=value,failPoolRead:()=>poolReadFails=1,failPoolPreview:()=>poolPreviewFails=1,get batchCount(){return batchCount;},failSubmit:()=>failSubmit=true};
 }
 async function test(name,fn){try{await fn();results.push({name,pass:true});}catch(error){results.push({name,pass:false,error:error.stack});}}
 (async()=>{
+ await test('opening and editing filters issue no queries until explicit search',async()=>{
+  const x=await environment(),reads=()=>x.calls.filter(c=>c.url.startsWith('/api/x-video-publish/materials?'));
+  await x.nodes.get('xpChooseMaterials').click();await settle();
+  assert.equal(reads().length,0);assert.match(x.nodes.get('xpMaterialChoices').innerHTML,/点击.*搜索/);
+  assert.equal(x.nodes.get('xpMaterialPrev').disabled,true);assert.equal(x.nodes.get('xpMaterialNext').disabled,true);
+  x.nodes.get('xpMaterialProduct').value='Dramawave';x.nodes.get('xpMaterialProduct').onchange();
+  x.nodes.get('xpMaterialLanguage').value='en';x.nodes.get('xpMaterialLanguage').onchange();
+  x.nodes.get('xpMaterialSearch').value='7781416';x.nodes.get('xpMaterialSearch').oninput();await settle();
+  assert.equal(reads().length,0);
+  x.nodes.get('xpMaterialSearch').onkeydown({key:'Enter',preventDefault:()=>{}});await settle();
+  assert.equal(reads().length,1);assert.equal(new URL(reads()[0].url,'https://fixture.invalid').searchParams.get('q'),'7781416');
+  x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'101'})});
+  x.nodes.get('xpMaterialLanguage').value='ja';x.nodes.get('xpMaterialLanguage').onchange();await settle();
+  assert.equal(reads().length,1);assert.match(x.nodes.get('xpPickerCount').textContent,/1/);
+  assert.doesNotMatch(x.nodes.get('xpMaterialChoices').innerHTML,/Video A/);assert.equal(x.posts.length,0);
+ });
  await test('product changes reset pagination and preserve selections across products',async()=>{
   const x=await environment();x.setMaterialResult({items:x.materials,next_cursor:'102'});
-  await x.nodes.get('xpChooseMaterials').click();await settle();
+  await x.nodes.get('xpChooseMaterials').click();await settle();x.nodes.get('xpSearchMaterials').click();await settle();
   const query=()=>new URL(x.calls.filter(c=>c.url.startsWith('/api/x-video-publish/materials?')).at(-1).url,'https://fixture.invalid').searchParams;
   assert.equal(query().get('product'),'Drama-社媒专用素材');
   x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'101'})});
   x.nodes.get('xpMaterialNext').click();await settle();assert.equal(query().get('cursor'),'102');
   x.setMaterialResult({items:[x.materials[1]],next_cursor:''});
-  x.nodes.get('xpMaterialProduct').value='Dramawave';x.nodes.get('xpMaterialProduct').onchange();await settle();
+  x.nodes.get('xpMaterialProduct').value='Dramawave';x.nodes.get('xpMaterialProduct').onchange();await settle();x.nodes.get('xpSearchMaterials').click();await settle();
   assert.equal(query().get('product'),'Dramawave');assert.equal(query().get('cursor'),'');
   assert.equal(x.nodes.get('xpMaterialPrev').disabled,true);assert.match(x.nodes.get('xpPickerCount').textContent,/1/);
   x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'102'})});x.nodes.get('xpUseMaterials').click();
@@ -71,7 +87,7 @@ async function test(name,fn){try{await fn();results.push({name,pass:true});}catc
   assert.equal(x.posts.length,0);
  });
  await test('failed and empty material searches remain distinct and exact ID input is preserved',async()=>{
-  const x=await environment();await x.nodes.get('xpChooseMaterials').click();await settle();
+  const x=await environment();await x.nodes.get('xpChooseMaterials').click();await settle();x.nodes.get('xpSearchMaterials').click();await settle();
   x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'101'})});
   x.nodes.get('xpMaterialSearch').value='9000000000000000001';x.failMaterialRead();x.nodes.get('xpSearchMaterials').click();await settle();
   assert.equal(x.nodes.get('xpPickerError').hidden,false);assert.equal(x.nodes.get('xpMaterialNext').disabled,true);
