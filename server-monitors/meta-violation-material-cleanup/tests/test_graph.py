@@ -5,6 +5,7 @@ import sys
 import unittest
 import threading
 import time
+from unittest.mock import patch
 
 import requests
 
@@ -67,6 +68,83 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_next_read_is_refilled_before_consumer_receives_result(self):
+        client=GraphClient({'1':'synthetic-token'})
+        others_release=threading.Event();replacement_started=threading.Event()
+        def work(item):
+            if item in (1,2,3):others_release.wait(2)
+            if item==4:replacement_started.set()
+            return item
+        iterator=client._bounded_reads(work,range(8))
+        try:
+            self.assertEqual(next(iterator),0)
+            # The consumer is paused here, simulating serial SQL work. The
+            # replacement must already run without resuming the generator.
+            self.assertTrue(replacement_started.wait(1))
+        finally:
+            others_release.set();iterator.close();client.close()
+
+    def pooled_sessions(self,fail_account=None):
+        sessions=[]
+        class RoutingSession:
+            def __init__(self):
+                self.closed=False;self.thread_ids=set();self.calls=[]
+                sessions.append(self)
+            def mount(self,*args):pass
+            def close(self):self.closed=True
+            def request(self,method,url,**kwargs):
+                self.thread_ids.add(threading.get_ident());self.calls.append((method,url,kwargs))
+                self_outer.assertFalse(self.closed)
+                self_outer.assertEqual(method,'GET')
+                self_outer.assertNotIn('access_token',url)
+                time.sleep(.005)
+                account=url.split('/act_',1)[1].split('/',1)[0]
+                if account==fail_account:raise RuntimeError('synthetic read failure')
+                return page([ad(identifier=str(int(account)+100000),account=account)])
+        self_outer=self
+        return sessions,RoutingSession
+
+    def test_read_workers_reuse_sessions_without_cross_thread_sharing(self):
+        sessions,factory=self.pooled_sessions()
+        with patch('meta_violation_cleanup.graph.requests.Session',factory):
+            client=GraphClient({'1':'synthetic-token'})
+            try:
+                accounts={str(100+i):{'user_ids':['1']} for i in range(20)}
+                results=list(client.iter_account_ads(accounts))
+                self.assertEqual({r[0] for r in results},set(accounts))
+                self.assertTrue(all(r[1] is not None and r[2]=='1' for r in results))
+                readers=[s for s in sessions if s.calls]
+                self.assertLessEqual(len(readers),4)
+                self.assertGreater(len(readers),1)
+                self.assertTrue(any(len(s.calls)>1 for s in readers))
+                self.assertTrue(all(len(s.thread_ids)==1 and s.closed for s in readers))
+                self.assertFalse(sessions[0].closed)
+            finally:client.close()
+        self.assertTrue(all(s.closed for s in sessions))
+
+    def test_worker_sessions_close_when_consumer_stops_early(self):
+        sessions,factory=self.pooled_sessions();stop=threading.Event()
+        with patch('meta_violation_cleanup.graph.requests.Session',factory):
+            client=GraphClient({'1':'synthetic-token'})
+            iterator=client.iter_account_ads({str(100+i):{'user_ids':['1']} for i in range(100)},stop.is_set)
+            try:
+                next(iterator);stop.set()
+                with self.assertRaises(InterruptedError):next(iterator)
+                self.assertLessEqual(sum(len(s.calls) for s in sessions),5)
+                self.assertTrue(all(s.closed for s in sessions[1:]))
+            finally:iterator.close();client.close()
+
+    def test_worker_sessions_close_on_unexpected_page_failure(self):
+        sessions,factory=self.pooled_sessions(fail_account='100')
+        with patch('meta_violation_cleanup.graph.requests.Session',factory):
+            client=GraphClient({'1':'synthetic-token'})
+            try:
+                with self.assertRaises(RuntimeError):
+                    list(client.iter_account_ads({str(100+i):{'user_ids':['1']} for i in range(20)}))
+                self.assertTrue(all(s.closed for s in sessions[1:]))
+                self.assertLessEqual(sum(len(s.calls) for s in sessions),7)
+            finally:client.close()
+
     def test_final_identity_read_blocks_new_policy_rejection(self):
         current=ad()
         current['effective_status']='DISAPPROVED'
@@ -175,6 +253,21 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(len(result["errors"]), 1)
         self.assertEqual(result["errors"][0]["user_id"], "1")
         self.assertNotIn("secret-token", json.dumps(result))
+
+    def test_discovery_progress_includes_just_completed_identity(self):
+        session = Session([
+            page([{"id": "act_100"}]),
+            Response({"error": {"code": 190, "message": "expired"}}, 400),
+            page([{"id": "act_100"}, {"id": "act_200"}]),
+        ])
+        client = GraphClient({"1": "first", "2": "second", "3": "third"}, session=session)
+        progress = []
+        client.on_discovery_progress = progress.append
+        result = client.list_accounts()
+        self.assertEqual([(p['identities_finished'], p['identities_failed'], p['accounts_discovered'])
+                          for p in progress], [(1, 0, 1), (2, 1, 1), (3, 1, 2)])
+        self.assertEqual(progress[-1]['accounts_discovered'], len(result['accounts']))
+        self.assertEqual(progress[-1]['identities_failed'], len(result['errors']))
 
     def test_ads_complete_shared_creatives_and_current_status_filter(self):
         client, session, _ = self.client([

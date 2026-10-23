@@ -64,14 +64,15 @@ class Runner:
         reader=getattr(self.source,'scope_products',None)
         return product_scope(reader() if callable(reader) else self.source.products())
 
-    def lineage_data(self, ids, violation_rows=()):
+    def lineage_data(self, ids, violation_rows=(), scope=None):
         data={};ids=list(ids)
         if not ids and not violation_rows:return {},{}
         with self.sql_snapshot():
             for part in chunks(ids):
                 self.check_stop()
                 data.update(self.source.lineages(part))
-            keys=set(source_keys(data))
+            material_rows=data if scope is None else {key:[row for row in rows if str(row.get('product','')) in scope] for key,rows in data.items()}
+            keys=set(source_keys(material_rows))
             keys.update(source_keys({'violations':violation_rows}))
             sources=self.source.sources(sorted(keys))
         return data,sources
@@ -89,13 +90,30 @@ class Runner:
                 except Exception as exc:errors.append({'user_id':str(uid),'error':safe_error(exc)})
             yield account,ads,read_user,errors
 
+    def account_batches(self, accounts):
+        """Amortize FIFO setup without holding SQL open across Graph reads.
+
+        Each account still finishes its entire Graph pagination before joining
+        a batch. Individual SQL statements remain capped at 200 Ad IDs. Large
+        accounts occupy a batch alone; small accounts share at most 32 slots.
+        """
+        batch=[];total=0
+        for item in self.account_inventories(accounts):
+            count=len(item[1] or ())
+            if batch and (len(batch)>=32 or total+count>2000):
+                yield batch;batch=[];total=0
+            batch.append(item);total+=count
+            if len(batch)>=32 or total>=2000:
+                yield batch;batch=[];total=0
+        if batch:yield batch
+
     def scan(self, run_id, start, end):
         settings=self.source.products();scope=product_scope(settings)
         known_products={str(row.get('id')) for row in settings
             if re.fullmatch(r'[1-9][0-9]{0,31}',str(row.get('id','')))}
         violations=self.source.violations(start,end)
         policy_rows=[r for r in violations if qualifying_policies(r.get('issues_info'))]
-        lineage,sources=self.lineage_data(sorted({str(r['ad_id']) for r in policy_rows}),policy_rows)
+        lineage,sources=self.lineage_data(sorted({str(r['ad_id']) for r in policy_rows}),policy_rows,scope=scope)
         evidence=build_evidence(policy_rows,lineage,sources,scope,start,end)
         self.runtime.artifact(run_id,'violation-evidence.json',{'rows':policy_rows,'evidence':evidence,'start':start,'end':end})
         self.runtime.update(run_id,stage='account_discovery',vio_rows=len(violations),policy_rows=len(policy_rows),material_count=len(evidence['materials']))
@@ -106,71 +124,88 @@ class Runner:
         errors=list(discovery['errors']);account_results=[];candidates=[];skip=Counter();product_counts=Counter();mapping_gaps=Counter()
         accounts=discovery['accounts']
         seen_accounts=set()
-        for index,(account,ads,read_user,account_errors) in enumerate(self.account_inventories(accounts)):
-            self.check_stop();account=str(account)
-            if account not in accounts or account in seen_accounts:raise ValueError('account_inventory_identity_conflict')
-            seen_accounts.add(account)
-            if ads is None:
-                errors.append({'account_id':account,'stage':'inventory','errors':account_errors})
-                account_results.append({'account_id':account,'status':'failed','errors':account_errors})
-                self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=index+1,coverage_errors=len(errors))
-                continue
+        index=-1
+        for batch in self.account_batches(accounts):
+            self.check_stop()
+            batch_lineages=None;batch_sources={}
             try:
-                identities,account_sources=self.lineage_data([str(a['id']) for a in ads])
-                eligible=[];routed=[];account_skip=Counter();account_products=Counter();account_gaps=Counter()
-                for ad in ads:
-                    rows=identities.get(str(ad['id']),[])
-                    identity=material_identity(rows,account_sources,scope,creative_id=object_id(ad))
-                    decision=evaluate_ad(ad,identity,evidence)
-                    if identity.get('root_id'):account_products[identity['root_id']]+=1
-                    if not decision['eligible']:
-                        account_skip[decision['reason']]+=1
-                        other_product=(identity.get('reason')=='product_out_of_scope' and rows
-                            and all(str(r.get('product','')) in known_products and str(r.get('product','')) not in scope for r in rows))
-                        if (identity.get('reason') and not other_product) or decision['reason']=='review_feedback_unreadable':
-                            account_gaps[decision['reason']]+=1
-                        continue
-                    # Never rotate credentials to force a mutation. Select from
-                    # the exact publishing queue/product lineage before freezing.
-                    matched=[r for r in rows if str(r.get('creative_id',''))==object_id(ad) and str(r.get('product','')) in scope]
-                    routed.append((ad,identity,decision,matched))
-                batch_method=getattr(self.source,'selected_credentials',None)
-                batch_routes=None
-                if callable(batch_method) and routed:
-                    route_rows={str(r['id']):r for _,_,_,matched in routed for r in matched}
-                    batch_routes=batch_method(list(route_rows.values()))
-                for ad,identity,decision,matched in routed:
-                    try:
-                        if batch_routes is None:
-                            users={numeric_id(self.source.selected_credential(r)) for r in matched}
-                        else:
-                            selected=[batch_routes.get(str(r['id']),{}) for r in matched]
-                            if any(r.get('error') or not r.get('user_id') for r in selected):
-                                raise ValueError('credential_lineage_unavailable')
-                            users={numeric_id(r['user_id']) for r in selected}
-                    except Exception as exc:
-                        if ledger_error(exc):raise
-                        account_skip['credential_lineage_unavailable']+=1;account_gaps['credential_lineage_unavailable']+=1
-                        self.runtime.event(run_id,'ad_skipped',{'ad_id':str(ad['id']),'reason':'credential_lineage_unavailable','error':safe_error(exc)})
-                        continue
-                    if len(users)!=1:
-                        account_skip['ambiguous_credential_lineage']+=1;account_gaps['ambiguous_credential_lineage']+=1;continue
-                    user=next(iter(users))
-                    if user not in self.graph.tokens:
-                        account_skip['selected_credential_unavailable']+=1;account_gaps['selected_credential_unavailable']+=1;continue
-                    eligible.append(dict(decision,account_id=str(account),user_id=user,identity=identity,ad_snapshot=ad))
-                # Publish an account only after ALL pagination AND SQL lookups
-                # complete. Failed pages never contribute deletion candidates.
-                self.runtime.inventory(run_id,str(account),ads)
-                skip.update(account_skip);product_counts.update(account_products);mapping_gaps.update(account_gaps)
-                candidates.extend(eligible)
-                if account_gaps:errors.append({'account_id':account,'stage':'mapping_coverage','gap_counts':dict(account_gaps)})
-                account_results.append({'account_id':account,'status':'complete','ads':len(ads),'candidates':len(eligible),'read_user_id':read_user,'mapping_gap_counts':dict(account_gaps)})
+                batch_lineages,batch_sources=self.lineage_data(
+                    [str(ad['id']) for _,ads,_,_ in batch for ad in (ads or ())],scope=scope)
             except Exception as exc:
-                errors.append({'account_id':account,'stage':'lineage','error':safe_error(exc)})
-                account_results.append({'account_id':account,'status':'failed','error':safe_error(exc)})
-            self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=index+1,candidate_ads=len(candidates),coverage_errors=len(errors))
-            self.runtime.event(run_id,'account_scan',account_results[-1])
+                if ledger_error(exc) or isinstance(exc,InterruptedError):raise
+                # Retry read-only lookups per account to isolate a bad account.
+                # No incomplete batch contributes deletion candidates.
+                self.runtime.event(run_id,'lineage_batch_fallback',{'accounts':len(batch),'error':safe_error(exc)})
+            for account,ads,read_user,account_errors in batch:
+                index+=1
+                self.check_stop();account=str(account)
+                if account not in accounts or account in seen_accounts:raise ValueError('account_inventory_identity_conflict')
+                seen_accounts.add(account)
+                if ads is None:
+                    errors.append({'account_id':account,'stage':'inventory','errors':account_errors})
+                    account_results.append({'account_id':account,'status':'failed','errors':account_errors})
+                    self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=index+1,coverage_errors=len(errors))
+                    continue
+                try:
+                    if batch_lineages is None:
+                        identities,account_sources=self.lineage_data([str(a['id']) for a in ads],scope=scope)
+                    else:
+                        identities={str(a['id']):batch_lineages.get(str(a['id']),[]) for a in ads}
+                        account_sources=batch_sources
+                    eligible=[];routed=[];account_skip=Counter();account_products=Counter();account_gaps=Counter()
+                    for ad in ads:
+                        rows=identities.get(str(ad['id']),[])
+                        identity=material_identity(rows,account_sources,scope,creative_id=object_id(ad))
+                        decision=evaluate_ad(ad,identity,evidence)
+                        if identity.get('root_id'):account_products[identity['root_id']]+=1
+                        if not decision['eligible']:
+                            account_skip[decision['reason']]+=1
+                            other_product=(identity.get('reason')=='product_out_of_scope' and rows
+                                and all(str(r.get('product','')) in known_products and str(r.get('product','')) not in scope for r in rows))
+                            if (identity.get('reason') and not other_product) or decision['reason']=='review_feedback_unreadable':
+                                account_gaps[decision['reason']]+=1
+                            continue
+                        # Never rotate credentials to force a mutation. Select from
+                        # the exact publishing queue/product lineage before freezing.
+                        matched=[r for r in rows if str(r.get('creative_id',''))==object_id(ad) and str(r.get('product','')) in scope]
+                        routed.append((ad,identity,decision,matched))
+                    batch_method=getattr(self.source,'selected_credentials',None)
+                    batch_routes=None
+                    if callable(batch_method) and routed:
+                        route_rows={str(r['id']):r for _,_,_,matched in routed for r in matched}
+                        batch_routes=batch_method(list(route_rows.values()))
+                    for ad,identity,decision,matched in routed:
+                        try:
+                            if batch_routes is None:
+                                users={numeric_id(self.source.selected_credential(r)) for r in matched}
+                            else:
+                                selected=[batch_routes.get(str(r['id']),{}) for r in matched]
+                                if any(r.get('error') or not r.get('user_id') for r in selected):
+                                    raise ValueError('credential_lineage_unavailable')
+                                users={numeric_id(r['user_id']) for r in selected}
+                        except Exception as exc:
+                            if ledger_error(exc):raise
+                            account_skip['credential_lineage_unavailable']+=1;account_gaps['credential_lineage_unavailable']+=1
+                            self.runtime.event(run_id,'ad_skipped',{'ad_id':str(ad['id']),'reason':'credential_lineage_unavailable','error':safe_error(exc)})
+                            continue
+                        if len(users)!=1:
+                            account_skip['ambiguous_credential_lineage']+=1;account_gaps['ambiguous_credential_lineage']+=1;continue
+                        user=next(iter(users))
+                        if user not in self.graph.tokens:
+                            account_skip['selected_credential_unavailable']+=1;account_gaps['selected_credential_unavailable']+=1;continue
+                        eligible.append(dict(decision,account_id=str(account),user_id=user,identity=identity,ad_snapshot=ad))
+                    # Publish an account only after ALL pagination AND SQL lookups
+                    # complete. Failed pages never contribute deletion candidates.
+                    self.runtime.inventory(run_id,str(account),ads)
+                    skip.update(account_skip);product_counts.update(account_products);mapping_gaps.update(account_gaps)
+                    candidates.extend(eligible)
+                    if account_gaps:errors.append({'account_id':account,'stage':'mapping_coverage','gap_counts':dict(account_gaps)})
+                    account_results.append({'account_id':account,'status':'complete','ads':len(ads),'candidates':len(eligible),'read_user_id':read_user,'mapping_gap_counts':dict(account_gaps)})
+                except Exception as exc:
+                    errors.append({'account_id':account,'stage':'lineage','error':safe_error(exc)})
+                    account_results.append({'account_id':account,'status':'failed','error':safe_error(exc)})
+                self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=index+1,candidate_ads=len(candidates),coverage_errors=len(errors))
+                self.runtime.event(run_id,'account_scan',account_results[-1])
         if seen_accounts!=set(accounts):raise ValueError('account_inventory_incomplete')
         # Include even out-of-product shared Ad references as impact evidence;
         # those IDs are NOT inserted into the deletion objects list.

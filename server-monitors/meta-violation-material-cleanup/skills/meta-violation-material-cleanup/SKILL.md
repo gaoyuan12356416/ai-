@@ -97,12 +97,22 @@ then `start-2`/`end-2`, and so on. Read `execution_attempt` and `notifications` 
 Use the exact saved phase and body. Failed notices may retry with the original
 provider UUID; sending/unknown notices must not automatically replay.
 
+Large broadcasts are one logical notice with durable child phases such as
+`end-2-part-001`. Each complete serialized UTF-8 JSON request is at most 100,000
+bytes; all reference information is retained across parts. Every child has a
+stable UUID/body/receipt, and the parent becomes sent only after every child is
+sent. Retry a known-failed parent phase to reuse its frozen plan and skip sent
+children. Any sending/unknown child or parent requires receipt reconciliation,
+never blind replay. Explicit HTTP 4xx rejections retain only numeric code/status;
+ambiguous errors remain unknown.
+
 `status` does not recover workers. Recovery requires the task process lock and
 proof that the stored PID/start identity is dead. Scope shared-ledger recovery
 to this task's `policy-cleanup-<run_id>` job, automatic actor, and matching shared
 run; never invoke global Store recovery. A systemd start uses no run ID and
 creates a new scan; it does not continue the previous manifest. The service has
-no automatic restart. Preserve interrupted results and check the manifest's
+an 11-hour runtime limit, SIGINT with a 180-second stop grace period, and no
+automatic restart. Preserve interrupted results and check the manifest's
 expiry before any explicit continuation. The old 10:00 cleanup has priority:
 09:55–10:05 admits no new DELETE, releases the legacy lock, and waits to resume
 the remaining work without repeating completed objects.

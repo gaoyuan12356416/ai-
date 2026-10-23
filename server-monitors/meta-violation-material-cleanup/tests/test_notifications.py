@@ -1,9 +1,11 @@
 import json
+import io
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from meta_violation_cleanup import notifications, feishu_transport
@@ -155,6 +157,129 @@ class NotificationTests(unittest.TestCase):
             second = self.notifier.send('run-1', 'start-2', 'second')
         self.assertNotEqual(first['uuid'], second['uuid'])
         self.assertEqual(len(self.messages), 2)
+
+    def test_multipart_preserves_all_text_and_caps_actual_utf8_json_size(self):
+        body = ('Ad 120250000000000001 | 产品中文😀 | 引号"与反斜杠\\\n' * 7000)
+        with patch.object(feishu_transport, 'post_json', side_effect=self.transport):
+            receipt = self.notifier.send('run-1', 'end-2', body)
+        self.assertGreater(receipt['part_count'], 2)
+        self.assertEqual(self.runtime.notice('run-1', 'end-2')['body'], body)
+        restored = []
+        for index, payload in enumerate(self.messages, 1):
+            self.assertLessEqual(len(feishu_transport.encode_payload(payload)), 100000)
+            text = json.loads(payload['content'])['text']
+            restored.append(text.split('\n', 1)[1])
+            phase = 'end-2-part-' + str(index).zfill(3)
+            child = self.runtime.notice('run-1', phase)
+            self.assertEqual(child['status'], 'sent')
+            self.assertEqual(child['uuid'], payload['uuid'])
+        self.assertEqual(''.join(restored), body)
+        self.assertEqual(len({payload['uuid'] for payload in self.messages}), len(self.messages))
+        self.assertEqual(self.runtime.notice('run-1', 'end-2')['status'], 'sent')
+        with patch.object(feishu_transport, 'post_json') as post:
+            self.assertEqual(self.notifier.send('run-1', 'end-2', 'changed'), receipt)
+        post.assert_not_called()
+
+    def test_multipart_long_single_line_preserves_unicode_boundaries(self):
+        body = '汉😀"\\' * 40000
+        parts = notifications._split_body(body)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(''.join(part.split('\n', 1)[1] for part in parts), body)
+        self.assertTrue(all(notifications._payload_size(part) <= 100000 for part in parts))
+
+    def test_multipart_known_failure_retries_only_unsent_parts_after_reopen(self):
+        body = '素材及其他引用Ad 120250000000000000\n' * 7000
+        calls = []
+        def reject_second(url, payload, token=None):
+            if '/auth/' in url:
+                return {'code': 0, 'tenant_access_token': 'test-token'}
+            calls.append(dict(payload))
+            if len(calls) == 2:
+                raise feishu_transport.FeishuRejected(230025, 400)
+            return {'code': 0, 'data': {'message_id': 'msg-first'}}
+        with patch.object(feishu_transport, 'post_json', side_effect=reject_second):
+            with self.assertRaises(RuntimeError):
+                self.notifier.send('run-1', 'end', body)
+        self.assertEqual(self.runtime.notice('run-1', 'end')['status'], 'failed')
+        self.assertEqual(self.runtime.notice('run-1', 'end-part-001')['status'], 'sent')
+        failed = self.runtime.notice('run-1', 'end-part-002')
+        self.assertEqual(json.loads(failed['receipt']), {'code': 230025, 'http_status': 400})
+        self.runtime.close()
+        self.runtime = Runtime(self.tmp.name)
+        notifier = notifications.Notifier(self.runtime, self.config)
+        with patch.object(notifications, '_split_body', side_effect=AssertionError('must reuse frozen plan')):
+            with patch.object(feishu_transport, 'post_json', side_effect=self.transport):
+                receipt = notifier.send('run-1', 'end', 'replacement ignored')
+        self.assertEqual(self.messages[0]['uuid'], failed['uuid'])
+        self.assertNotIn(calls[0]['uuid'], [payload['uuid'] for payload in self.messages])
+        self.assertEqual(len(self.messages), receipt['part_count'] - 1)
+        self.assertEqual(self.runtime.notice('run-1', 'end')['status'], 'sent')
+
+    def test_multipart_unknown_part_fences_parent_and_never_replays(self):
+        calls = []
+        def uncertain_second(url, payload, token=None):
+            if '/auth/' in url:
+                return {'code': 0, 'tenant_access_token': 'test-token'}
+            calls.append(payload)
+            if len(calls) == 2:
+                raise TimeoutError('accepted outcome unknown')
+            return {'code': 0, 'data': {'message_id': 'msg-first'}}
+        with patch.object(feishu_transport, 'post_json', side_effect=uncertain_second):
+            with self.assertRaises(RuntimeError):
+                self.notifier.send('run-1', 'end', '广告引用\n' * 30000)
+        self.assertEqual(self.runtime.notice('run-1', 'end')['status'], 'unknown')
+        self.assertEqual(self.runtime.notice('run-1', 'end-part-001')['status'], 'sent')
+        self.assertEqual(self.runtime.notice('run-1', 'end-part-002')['status'], 'unknown')
+        self.assertEqual(self.runtime.notice('run-1', 'end-part-003')['status'], 'pending')
+        with patch.object(feishu_transport, 'post_json') as post:
+            with self.assertRaisesRegex(RuntimeError, 'unknown_requires_reconciliation'):
+                self.notifier.send('run-1', 'end', 'ignored')
+        post.assert_not_called()
+
+    def test_multipart_payload_refusal_before_network_is_not_unknown(self):
+        self.runtime.claim_notice('run-1', 'end-part-001', '大' * 100000)
+        with patch.object(feishu_transport, 'post_json', side_effect=self.transport):
+            with self.assertRaises(RuntimeError):
+                self.notifier._send_single('run-1', 'end-part-001', 'ignored')
+        self.assertEqual(self.messages, [])
+        self.assertEqual(self.runtime.notice('run-1', 'end-part-001')['status'], 'failed')
+
+    def test_explicit_http_rejection_is_failed_not_unknown(self):
+        def rejected(url, payload, token=None):
+            if '/auth/' in url:
+                return {'code': 0, 'tenant_access_token': 'test-token'}
+            raise feishu_transport.FeishuRejected(230025, 400)
+        with patch.object(feishu_transport, 'post_json', side_effect=rejected):
+            with self.assertRaisesRegex(RuntimeError, 'notification_not_confirmed'):
+                self.notifier.send('run-1', 'end', 'body')
+        row = self.runtime.notice('run-1', 'end')
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(json.loads(row['receipt']), {'code': 230025, 'http_status': 400})
+
+
+class TransportTests(unittest.TestCase):
+    def error(self, status, body):
+        return HTTPError('https://example.invalid/messages', status, 'sensitive detail', {}, io.BytesIO(body))
+
+    def test_http_explicit_rejection_retains_only_numeric_whitelist_fields(self):
+        payload = json.dumps({'code': 230025, 'msg': 'token=do-not-log', 'data': {'secret': 'private'}}).encode()
+        with patch.object(feishu_transport.request, 'urlopen', side_effect=self.error(400, payload)):
+            with self.assertRaises(feishu_transport.FeishuRejected) as caught:
+                feishu_transport.post_json('https://example.invalid/messages', {'text': 'body'})
+        self.assertEqual(caught.exception.code, 230025)
+        self.assertEqual(caught.exception.http_status, 400)
+        self.assertEqual(str(caught.exception), 'feishu_request_rejected')
+        self.assertEqual(vars(caught.exception), {'code': 230025, 'http_status': 400})
+
+    def test_http_unknown_responses_do_not_become_known_rejections(self):
+        for status, data in ((500, b'{"code":1500}'), (400, b'{"code":0}'),
+                             (400, b'{"code":true}'), (400, b'{"code":"230025"}'),
+                             (400, b'not-json'), (400, b'x' * 16385)):
+            with self.subTest(status=status, data=data[:30]):
+                with patch.object(feishu_transport.request, 'urlopen', side_effect=self.error(status, data)):
+                    with self.assertRaisesRegex(RuntimeError, '^feishu_transport_unavailable$') as caught:
+                        feishu_transport.post_json('https://example.invalid/messages', {})
+                self.assertNotIsInstance(caught.exception, feishu_transport.FeishuRejected)
 
 
 if __name__ == '__main__':

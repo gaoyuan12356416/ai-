@@ -520,4 +520,50 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(self.deletes(graph),[])
 
 
+    def test_small_accounts_share_bounded_lineage_batches(self):
+        ads=[ad(str(1000+i),str(2000+i),str(3000+i)) for i in range(70)]
+        runner,source,_,_=self.fixture(ads)
+        seen=[];original=source.lineages
+        def tracked(ids):
+            seen.append(list(ids));return original(ids)
+        source.lineages=tracked
+        manifest=self.manifest(runner)
+        inventory_batches=[part for part in seen if any(int(i)>=1000 for i in part)]
+        self.assertEqual([len(part) for part in inventory_batches],[32,32,6])
+        self.assertEqual(len(manifest['candidates']),70)
+        self.assertEqual(len(manifest['coverage']['accounts']),70)
+
+    def test_account_batches_do_not_split_large_account(self):
+        runner,_,_,_=self.fixture()
+        items=[('1',[{}]*1000,'1',[]),('2',[{}]*1001,'1',[]),
+               ('3',[{}]*2500,'1',[]),('4',[],'1',[])]
+        runner.account_inventories=lambda accounts:iter(items)
+        batches=list(runner.account_batches({}))
+        self.assertEqual([[x[0] for x in b] for b in batches],[['1'],['2'],['3'],['4']])
+
+    def test_batch_lookup_failure_isolated_by_account_without_partial_candidates(self):
+        runner,source,_,runtime=self.fixture([ad(),ad('11','21','101')])
+        original=source.lineages
+        def broken(ids):
+            if '10' in ids:raise ValueError('non-sensitive failure')
+            return original(ids)
+        source.lineages=broken
+        manifest=self.manifest(runner)
+        self.assertEqual([c['ad_id'] for c in manifest['candidates']],['11'])
+        accounts={a['account_id']:a['status'] for a in manifest['coverage']['accounts']}
+        self.assertEqual(accounts,{'100':'failed','101':'complete'})
+        self.assertTrue(any(kind=='lineage_batch_fallback' for kind,_ in runtime.events))
+
+    def test_out_of_scope_sources_do_not_consume_lookup_queries(self):
+        runner,source,_,_=self.fixture([ad(),ad('11','21','101')])
+        source.rows['11'][0].update(product='9999',source_id='7654321')
+        source.rows['10'][0]['source_id']='8888'
+        source.source_rows['8888']={'id':'8888','source_type':3,'source_id':'501'}
+        manifest=self.manifest(runner)
+        self.assertIn('8888',source.queried_sources)
+        self.assertNotIn('7654321',source.queried_sources)
+        self.assertEqual([c['ad_id'] for c in manifest['candidates']],['10'])
+        self.assertEqual(manifest['skip_counts']['product_out_of_scope'],1)
+
+
 if __name__=='__main__':unittest.main()

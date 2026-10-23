@@ -1,4 +1,5 @@
 """No database connection: protocol, pagination and credential routing tests."""
+import ast
 import json
 import os
 from pathlib import Path
@@ -86,6 +87,31 @@ def violation(identifier, status=0, date="2026-10-22 08:00:00.000000"):
 
 
 class SqlSourceTests(unittest.TestCase):
+    def test_error_codes_only_expose_fixed_internal_literals(self):
+        from meta_violation_cleanup.runner import safe_error
+        for code in source.SqlSourceError._CODES:
+            error = source.SqlSourceError(code)
+            self.assertEqual(error.code, code)
+            self.assertEqual(str(error), code)
+            self.assertEqual(safe_error(error), {"type": "SqlSourceError", "code": code})
+        for unsafe in ("access_token_synthetic_secret", "SELECT token FROM secrets",
+                       "synthetic-secret", None, {"password": "synthetic-secret"}):
+            error = source.SqlSourceError(unsafe)
+            self.assertEqual(error.code, "sql_source_error")
+            self.assertEqual(str(error), "sql_source_error")
+            self.assertNotIn("synthetic", repr(error))
+            self.assertEqual(safe_error(error), {"type": "SqlSourceError", "code": "sql_source_error"})
+
+    def test_all_adapter_error_sites_use_allowlisted_literals(self):
+        tree = ast.parse(Path(source.__file__).read_text(encoding="utf-8"))
+        sites = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "SqlSourceError"]
+        self.assertTrue(sites)
+        for node in sites:
+            self.assertEqual(len(node.args), 1)
+            self.assertIsInstance(node.args[0], ast.Constant)
+            self.assertIn(node.args[0].value, source.SqlSourceError._CODES)
+
     def setUp(self):
         self.env = patch.dict(os.environ, {"DRAMA_DB_HOST": "101.32.56.53", "DRAMA_DB_PORT": "63350",
                                           "DRAMA_DB_USER": "synthetic-user", "DRAMA_DB_PASSWORD": "synthetic-secret",
@@ -340,7 +366,7 @@ class SqlSourceTests(unittest.TestCase):
 
     def test_batch_availability_missing_duplicate_or_malformed_fails_whole_call(self):
         route = self.credential_route()
-        for values in ([], [{'user_id': '804', 'available': True}],
+        for values in ([],
                        [{'user_id': '804', 'available': 1}, {'user_id': '804', 'available': 1}],
                        [{'user_id': '999', 'available': 1}],
                        [{'user_id': '804', 'available': 1, 'token': 'must-not-return'}]):
@@ -350,6 +376,25 @@ class SqlSourceTests(unittest.TestCase):
                 with self.assertRaises(source.SqlSourceError) as error:
                     self.run_source(lambda db: db.selected_credentials([route]), responder)
                 self.assertNotIn('must-not-return', str(error.exception))
+
+    def test_batch_availability_accepts_live_mysql_json_boolean_and_integer_only(self):
+        route = self.credential_route()
+        for available in (True, False, 1, 0):
+            with self.subTest(available=available):
+                def responder(sql):
+                    return [route] if 'ads_template_make_queue' in sql else [
+                        {'user_id': '804', 'available': available}]
+                result, _, _, _ = self.run_source(lambda db: db.selected_credentials([route]), responder)
+                expected = ({'user_id': '804', 'error': ''} if available else
+                            {'user_id': '', 'error': 'publishing_credential_unavailable'})
+                self.assertEqual(result['10'], expected)
+        for available in ('true', 'false', '1', '0', '', None, 1.0, 0.0, -1, 2, [], {}):
+            with self.subTest(available=available):
+                def responder(sql):
+                    return [route] if 'ads_template_make_queue' in sql else [
+                        {'user_id': '804', 'available': available}]
+                with self.assertRaisesRegex(source.SqlSourceError, 'invalid_credential_availability'):
+                    self.run_source(lambda db: db.selected_credentials([route]), responder)
 
     def test_batch_unknown_rule_does_not_fetch_any_credential(self):
         route = self.credential_route(default_token='0')

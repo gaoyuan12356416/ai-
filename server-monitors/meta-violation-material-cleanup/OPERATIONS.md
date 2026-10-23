@@ -89,6 +89,15 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
 完成播报必须指定 `notify --run-id RUN_ID --phase end-2`。已成功发送的 phase 直接返回
 保存的回执；failed 可用原 UUID 和冻结正文重试；sending / unknown 拒绝自动重发。
 
+完成播报超过单条上限时按实际外层 JSON 与内层 `content` 的 UTF-8 编码大小分片，
+每片最多 **100,000 字节**，全部关联 Ad 信息保留。它仍算一次逻辑完成播报；父 phase
+例如 `end-2` 保存完整正文，子 phase 为 `end-2-part-001`、`end-2-part-002` 等，每片
+各自保存稳定 UUID、冻结正文和回执，只有全部子片 sent 才把父 phase 标为 sent。
+补发仍使用父 phase；failed 父播报重试跳过已 sent 的子片，沿用原分片计划。
+任一子片或父发送状态为 unknown/sending 时先核对回执，不自动重发，也不重新执行删除。
+明确 HTTP 4xx 且有合法非零整数错误码的拒绝记 failed，只保存 code/http_status；
+5xx、无明确拒绝码、超时和缺少 message_id 均不能当成确定未发送。
+
 ## 部署与验收
 
 1. 在独立分支测试并提交/push GitHub，CPU fetch 精确 SHA 到
@@ -132,7 +141,7 @@ systemctl enable --now meta-violation-material-cleanup.timer
   不自动换 Token 重放。已经成功的对象不能因新一轮而再次写入。
 - 通知失败与清理结果分开报告。仅通知失败时不重新执行清理；查看回执后使用
   `notify --phase end` 恢复。
-- service 最长运行 11 小时、无自动重启，收到 SIGINT 后有 90 秒收尾。停止前后
+- service 最长运行 11 小时、无自动重启，收到 SIGINT 后有 180 秒收尾。停止前后
   比较共享账本和 run 状态，不能把被中断工作改成全部成功。
 - `status` 只查看状态，不运行 owner 恢复。恢复必须先取得本任务 `process.lock`，
   仅确认原进程 PID 与启动身份已终止后，标记本运行为 interrupted；未知存活状态保留

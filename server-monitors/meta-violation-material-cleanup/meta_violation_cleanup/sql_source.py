@@ -28,6 +28,31 @@ _EOF = object()
 class SqlSourceError(RuntimeError):
     """A deliberately non-sensitive adapter error."""
 
+    _CODES = frozenset({
+        "invalid_source_identifier", "source_environment_unavailable",
+        "invalid_window_timestamp", "gated_mysql_unavailable",
+        "read_only_proof_missing", "sql_session_closed", "sql_query_timeout",
+        "sql_stream_incomplete", "invalid_sql_stream", "invalid_sql_frame",
+        "sql_query_failed", "unexpected_sql_frame", "read_only_endpoint_required",
+        "fifo_mysql_required", "source_credentials_unavailable",
+        "source_schema_not_allowed", "unsafe_sql_limits", "sql_snapshot_unavailable",
+        "another_source_snapshot_active", "product_directory_incomplete",
+        "invalid_violation_window", "invalid_violation_statuses",
+        "violation_page_overflow", "invalid_violation_row", "duplicate_violation_identity",
+        "invalid_violation_order", "invalid_violation_evidence", "ad_lineage_incomplete",
+        "unexpected_ad_lineage", "invalid_source_mapping", "credential_directory_incomplete",
+        "invalid_credential_lineage", "credential_lineage_changed", "credential_queue_mismatch",
+        "product_default_credential_missing", "credential_rule_unknown", "invalid_credential_row_id",
+        "invalid_credential_route_result", "invalid_credential_availability",
+        "credential_availability_incomplete", "publishing_credential_unavailable",
+    })
+
+    def __init__(self, code):
+        # Callers may accidentally pass SQL, credentials or another exception.
+        # Only this fixed vocabulary is safe for structured runtime events.
+        self.code = code if type(code) is str and code in self._CODES else "sql_source_error"
+        super().__init__(self.code)
+
 
 def _quote(value):
     value = str(value)
@@ -573,8 +598,11 @@ class SqlSource:
                 for row in session.query(sql):
                     user = str(row.get("user_id") or "")
                     value = row.get("available")
+                    # MySQL JSON_OBJECT(..., EXISTS(...)) emits JSON booleans
+                    # on the live reader. Some compatible servers return 0/1.
+                    # Accept only these exact JSON types, never truthy strings.
                     if (set(row) != {"user_id", "available"} or user not in users or user in seen
-                            or type(value) is not int or value not in (0, 1)):
+                            or type(value) not in (bool, int) or value not in (0, 1)):
                         raise SqlSourceError("invalid_credential_availability")
                     seen.add(user)
                     if value == 1:

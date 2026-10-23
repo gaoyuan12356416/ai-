@@ -183,11 +183,46 @@ class RuntimeTests(unittest.TestCase):
             self.runtime.finish_notice('run-1', 'end', 'failed', {})
 
     def test_continuation_notice_phases(self):
-        for phase in ('start', 'end', 'start-2', 'end-10'):
+        for phase in ('start', 'end', 'start-2', 'end-10', 'end-part-001', 'end-2-part-010', 'end-part-1000'):
             self.runtime.claim_notice('run-1', phase, 'body')
-        for phase in ('start-1', 'end-0', 'start-02', 'end-x', '../end'):
+        for phase in ('start-1', 'end-0', 'start-02', 'end-x', '../end', 'end-part-000',
+                      'end-part-01', 'end-part-0001', 'end-1-part-001', 'end-2-part-001-part-001'):
             with self.assertRaises(ValueError):
                 self.runtime.claim_notice('run-1', phase, 'body')
+
+    def test_multipart_parent_cannot_be_sent_before_all_parts_are_sent(self):
+        self.runtime.claim_notice('run-1', 'end', 'entire body')
+        plan = {'delivery': 'multipart', 'parts': []}
+        for index in (1, 2):
+            phase, body = 'end-part-00' + str(index), 'body-' + str(index)
+            self.runtime.claim_notice('run-1', phase, body)
+            plan['parts'].append({'phase': phase, 'body_sha256': module.digest(body)})
+        self.runtime.start_notice('run-1', 'end', receipt=plan)
+        with self.assertRaisesRegex(ValueError, 'plan_changed'):
+            self.runtime.finish_notice('run-1', 'end', 'sent', {})
+        with self.assertRaisesRegex(ValueError, 'not_all_sent'):
+            self.runtime.finish_notice('run-1', 'end', 'sent', plan)
+        for part in plan['parts']:
+            self.runtime.start_notice('run-1', part['phase'])
+            receipt = {'code': 0, 'message_id': part['phase']}
+            self.runtime.finish_notice('run-1', part['phase'], 'sent', receipt)
+            part['receipt'] = receipt
+        self.runtime.finish_notice('run-1', 'end', 'sent', plan)
+        self.assertEqual(self.runtime.notice('run-1', 'end')['status'], 'sent')
+
+    def test_multipart_plan_survives_dead_owner_recovery(self):
+        self.runtime.claim_notice('run-1', 'end', 'entire body')
+        parts = []
+        for index in (1, 2):
+            phase = 'end-part-00' + str(index)
+            self.runtime.claim_notice('run-1', phase, phase)
+            parts.append({'phase': phase, 'body_sha256': module.digest(phase)})
+        self.runtime.start_notice('run-1', 'end', receipt={'delivery': 'multipart', 'parts': parts})
+        with patch.object(module, '_owner_alive', return_value=False):
+            self.runtime.recover_interrupted()
+        row = self.runtime.notice('run-1', 'end')
+        self.assertEqual(row['status'], 'unknown')
+        self.assertEqual(json.loads(row['receipt'])['parts'], parts)
 
     def test_owner_pid_reuse_does_not_block_recovery(self):
         with patch.object(module, '_process_start', return_value='new-start'):

@@ -8,6 +8,7 @@ import email.utils
 import json
 import math
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.parse import parse_qs, urlsplit
@@ -91,6 +92,7 @@ class GraphClient:
         self.read_workers = 1 if session is not None else 4
         self.stop = lambda: False
         self.delete_stop = lambda: False
+        self._read_local = threading.local()
         self.http = session if session is not None else requests.Session()
         # No transport retries, especially not for DELETE. GET retry policy is
         # implemented explicitly below and never follows a redirect.
@@ -208,6 +210,8 @@ class GraphClient:
             # or blocking the worker for an unbounded time.
             if not transient or attempt >= self.get_retries or delay > 60:
                 raise error
+            if self.stop():
+                raise InterruptedError('stop_requested')
             self.sleep(delay)
         raise GraphError("read_unavailable", "Meta read did not finish")
 
@@ -273,31 +277,73 @@ class GraphClient:
         """Each production read worker owns its HTTP session and connection pool."""
         if self.read_workers == 1:
             return self
+        registry = getattr(self._read_local, 'registry', None)
+        reader = getattr(self._read_local, 'reader', None)
+        if registry is not None and getattr(self._read_local, 'reader_registry', None) is registry:
+            return reader
         reader = GraphClient(self.tokens, self.version, self.timeout,
                            get_retries=self.get_retries, max_pages=self.max_pages,
                            max_objects=self.max_objects)
-        reader.stop = self.stop
+        reader.stop = getattr(self._read_local, 'stop', self.stop)
+        if registry is not None:
+            # Reuse this thread's pool for subsequent identities/accounts.
+            # The owning executor closes every reader after its workers exit.
+            with self._read_local.registry_lock:
+                registry.append(reader)
+            self._read_local.reader = reader
+            self._read_local.reader_registry = registry
         return reader
+
+    def _release_reader(self, reader):
+        if reader is not self and reader is not getattr(self._read_local, 'reader', None):
+            reader.close()
 
     def _bounded_reads(self, function, items, stop=lambda: False):
         items = iter(items)
-        with ThreadPoolExecutor(max_workers=self.read_workers) as pool:
-            pending = set()
-            exhausted = False
-            while pending or not exhausted:
-                while not exhausted and len(pending) < self.read_workers:
-                    if stop():
+        readers = []
+        registry_lock = threading.Lock()
+        cancelled = threading.Event()
+        should_stop = lambda: cancelled.is_set() or stop() or self.stop()
+        def invoke(item):
+            if should_stop():
+                raise InterruptedError('stop_requested')
+            self._read_local.registry = readers
+            self._read_local.registry_lock = registry_lock
+            self._read_local.stop = should_stop
+            return function(item)
+        pool = ThreadPoolExecutor(max_workers=self.read_workers)
+        pending = set()
+        try:
+            for _ in range(self.read_workers):
+                if should_stop():
+                    raise InterruptedError('stop_requested')
+                try:
+                    pending.add(pool.submit(invoke, next(items)))
+                except StopIteration:
+                    break
+            while pending:
+                if should_stop():
+                    raise InterruptedError('stop_requested')
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    if should_stop():
                         raise InterruptedError('stop_requested')
+                    value = future.result()
+                    # Schedule one replacement BEFORE yielding to serial SQL
+                    # consumption. Active+ready work stays bounded by workers;
+                    # HTTP latency overlaps processing of this account.
                     try:
-                        item = next(items)
+                        pending.add(pool.submit(invoke, next(items)))
                     except StopIteration:
-                        exhausted = True
-                        break
-                    pending.add(pool.submit(function, item))
-                if pending:
-                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in finished:
-                        yield future.result()
+                        pass
+                    yield value
+        finally:
+            cancelled.set()
+            for future in pending:
+                future.cancel()
+            pool.shutdown(wait=True)
+            for reader in readers:
+                reader.close()
 
     def _user_accounts(self, user_id):
         reader = self._reader()
@@ -315,24 +361,23 @@ class GraphClient:
                 return user_id, set(), dict(user_id=user_id, **error.as_dict())
             return user_id, per_user, None
         finally:
-            if reader is not self:
-                reader.close()
+            self._release_reader(reader)
 
     def list_accounts(self):
         accounts, errors = {}, []
         finished = 0
         for user_id, per_user, error in self._bounded_reads(self._user_accounts, sorted(self.tokens), self.stop):
             finished += 1
+            if error:
+                errors.append(error)
+            else:
+                # Publish an identity's accounts only after all of its pages finish.
+                for aid in sorted(per_user):
+                    accounts.setdefault(aid, {"user_ids": []})["user_ids"].append(user_id)
             progress = getattr(self, 'on_discovery_progress', None)
             if callable(progress):
                 progress({'identities_total': len(self.tokens), 'identities_finished': finished,
-                          'identities_failed': len(errors) + bool(error), 'accounts_discovered': len(accounts)})
-            if error:
-                errors.append(error)
-                continue
-            # Publish an identity's accounts only after all of its pages finish.
-            for aid in sorted(per_user):
-                accounts.setdefault(aid, {"user_ids": []})["user_ids"].append(user_id)
+                          'identities_failed': len(errors), 'accounts_discovered': len(accounts)})
         for info in accounts.values():
             info['user_ids'].sort()
         errors.sort(key=lambda item: item['user_id'])
@@ -350,8 +395,7 @@ class GraphClient:
                     errors.append({'user_id': str(uid), 'error': exc.as_dict()})
             return account, None, None, errors
         finally:
-            if reader is not self:
-                reader.close()
+            self._release_reader(reader)
 
     def iter_account_ads(self, accounts, stop=lambda: False):
         """At most four read-only account scans; never parallelize DELETE or SQL."""

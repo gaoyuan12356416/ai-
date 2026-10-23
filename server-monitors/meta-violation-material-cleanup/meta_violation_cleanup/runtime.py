@@ -41,9 +41,13 @@ def validate_run_id(run_id):
 
 
 def _phase(phase):
-    if not isinstance(phase, str) or not re.fullmatch(r'(start|end)(?:-([1-9][0-9]*))?', phase):
+    match = re.fullmatch(r'(start|end)(?:-([1-9][0-9]{0,8}))?(?:-part-([0-9]{3,6}))?', phase) if isinstance(phase, str) else None
+    if not match:
         raise ValueError('invalid_notice_phase')
-    if '-' in phase and int(phase.rsplit('-', 1)[1]) < 2:
+    attempt, part = match.group(2), match.group(3)
+    if attempt is not None and int(attempt) < 2:
+        raise ValueError('invalid_notice_phase')
+    if part is not None and (int(part) < 1 or str(int(part)).zfill(3) != part):
         raise ValueError('invalid_notice_phase')
 
 
@@ -341,16 +345,33 @@ class Runtime:
                                 (run_id, phase, uid, 'pending', body, '{}', now()))
         return self.notice(run_id, phase)
 
-    def start_notice(self, run_id, phase):
+    def _check_notice_parts(self, run_id, phase, receipt, require_sent=False):
+        if not isinstance(receipt, dict) or receipt.get('delivery') != 'multipart':
+            return
+        parts = receipt.get('parts')
+        if '-part-' in phase or not isinstance(parts, list) or not 2 <= len(parts) <= 999999:
+            raise ValueError('invalid_multipart_notice')
+        for index, part in enumerate(parts, 1):
+            expected = phase + '-part-' + str(index).zfill(3)
+            if not isinstance(part, dict) or part.get('phase') != expected:
+                raise ValueError('invalid_multipart_notice')
+            row = self.notice(run_id, expected)
+            if not row or digest(row['body']) != part.get('body_sha256'):
+                raise ValueError('multipart_notice_body_mismatch')
+            if require_sent and (row['status'] != 'sent' or json.loads(row['receipt']) != part.get('receipt')):
+                raise ValueError('multipart_notice_not_all_sent')
+
+    def start_notice(self, run_id, phase, receipt=None):
         with self._transaction():
             notice = self.notice(run_id, phase)
             if not notice:
                 raise ValueError('notice_not_found')
             if notice['status'] not in ('pending', 'failed'):
                 return dict(notice, claimed=False)
+            self._check_notice_parts(run_id, phase, receipt)
             owner = _owner()
             self.db.execute('UPDATE notices SET status=?,receipt=?,updated=?,owner_pid=?,owner_start=? WHERE run_id=? AND phase=?',
-                            ('sending', '{}', now(), owner['pid'], owner['start'], run_id, phase))
+                            ('sending', canonical(receipt or {}), now(), owner['pid'], owner['start'], run_id, phase))
         return dict(self.notice(run_id, phase), claimed=True)
 
     def finish_notice(self, run_id, phase, status, receipt):
@@ -370,6 +391,15 @@ class Runtime:
                     raise ValueError('notice_owner_mismatch')
             elif status != 'failed':
                 raise ValueError('notice_not_sending')
+            previous = json.loads(old['receipt'])
+            if previous.get('delivery') == 'multipart':
+                if not isinstance(receipt, dict) or receipt.get('delivery') != 'multipart':
+                    raise ValueError('multipart_notice_plan_changed')
+                before = [(p.get('phase'), p.get('body_sha256')) for p in previous['parts']]
+                after = [(p.get('phase'), p.get('body_sha256')) for p in receipt.get('parts', [])]
+                if before != after:
+                    raise ValueError('multipart_notice_plan_changed')
+            self._check_notice_parts(run_id, phase, receipt, require_sent=status == 'sent')
             self.db.execute('UPDATE notices SET status=?,receipt=?,updated=? WHERE run_id=? AND phase=?',
                             (status, canonical(receipt), now(), run_id, phase))
 
@@ -410,8 +440,10 @@ class Runtime:
                 dead = _owner_alive(row['owner_pid'], row['owner_start']) is False
                 if not dead and row['run_id'] not in recovered:
                     continue
+                receipt = json.loads(row['receipt'])
+                receipt['reason'] = 'sender_terminated'
                 self.db.execute('UPDATE notices SET status=?,receipt=?,updated=? WHERE run_id=? AND phase=?',
-                                ('unknown', canonical({'reason': 'sender_terminated'}), now(),
+                                ('unknown', canonical(receipt), now(),
                                  row['run_id'], row['phase']))
                 notices_unknown += 1
         return {'run_ids': recovered, 'notices_unknown': notices_unknown, 'live_runs': live}
