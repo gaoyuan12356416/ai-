@@ -39,6 +39,18 @@ _AD_KEYS = (
 )
 _ID = re.compile(r"[1-9][0-9]{0,31}\Z")
 _SECRET_KEYS = {"access_token", "authorization", "appsecret_proof", "client_secret"}
+_RATE_LIMIT_CODES = (4, 17, 32, 613, 80004)
+GRAPH_METRIC_FIELDS = (
+    "read_workers", "get_requests", "get_retries", "rate_limit_responses", "rate_limit_retries",
+    "usage_app_max_percent", "usage_ad_account_max_percent", "usage_business_max_percent",
+    "usage_app_observations", "usage_ad_account_observations", "usage_business_observations",
+)
+_USAGE_HEADERS = {
+    "x-app-usage": "usage_app_max_percent",
+    "x-ad-account-usage": "usage_ad_account_max_percent",
+    "x-business-use-case-usage": "usage_business_max_percent",
+}
+_USAGE_PERCENT_KEYS = {"call_count", "total_cputime", "total_time", "acc_id_util_pct"}
 
 
 def _object_id(value, account=False):
@@ -68,7 +80,7 @@ class GraphError(Exception):
 class GraphClient:
     def __init__(self, tokens, version="v25.0", timeout=20, *, session=None,
                  get_retries=2, max_pages=10000, max_objects=1000000,
-                 sleeper=None):
+                 sleeper=None, read_workers=4):
         if not re.fullmatch(r"v[0-9]+\.[0-9]+", version):
             raise ValueError("Invalid Graph version")
         if not isinstance(tokens, dict):
@@ -81,6 +93,8 @@ class GraphClient:
             raise ValueError("max_pages must be positive")
         if not isinstance(max_objects, int) or max_objects < 1:
             raise ValueError("max_objects must be positive")
+        if isinstance(read_workers, bool) or not isinstance(read_workers, int) or not 1 <= read_workers <= 16:
+            raise ValueError("Read workers must be an integer between 1 and 16")
         self.tokens = {str(uid): value for uid, value in tokens.items()}
         self.version = version
         self.base = "https://graph.facebook.com/" + version + "/"
@@ -89,7 +103,9 @@ class GraphClient:
         self.max_pages = max_pages
         self.max_objects = max_objects
         self.sleep = sleeper or time.sleep
-        self.read_workers = 1 if session is not None else 4
+        self.read_workers = 1 if session is not None else read_workers
+        self._metrics = {key: 0 for key in GRAPH_METRIC_FIELDS if key != "read_workers"}
+        self._metrics_lock = threading.Lock()
         self.stop = lambda: False
         self.delete_stop = lambda: False
         self._read_local = threading.local()
@@ -103,6 +119,52 @@ class GraphClient:
     def close(self):
         if hasattr(self.http, "close"):
             self.http.close()
+
+    @property
+    def safe_metrics(self):
+        with self._metrics_lock:
+            return dict(self._metrics, read_workers=self.read_workers)
+
+    def share_read_metrics(self, parent):
+        """Use one numeric counter for inventory and serial execution readers."""
+        self._metrics, self._metrics_lock = parent._metrics, parent._metrics_lock
+
+    def _count_read(self, retry=False, rate_limit_retry=False):
+        with self._metrics_lock:
+            self._metrics['get_requests'] += 1
+            self._metrics['get_retries'] += int(retry)
+            self._metrics['rate_limit_retries'] += int(rate_limit_retry)
+
+    def _observe_usage(self, response):
+        # Keep only finite numeric percentages. Do not retain header payloads,
+        # business/account identifiers, URLs, credentials, or arbitrary keys.
+        observed = {}
+        for name, raw in (getattr(response, 'headers', {}) or {}).items():
+            metric = _USAGE_HEADERS.get(str(name).lower())
+            if metric is None or not isinstance(raw, str) or len(raw) > 65536:
+                continue
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError, RecursionError):
+                continue
+            nodes = [(value, 0)]
+            for _ in range(2048):
+                if not nodes:
+                    break
+                node, depth = nodes.pop()
+                if isinstance(node, dict):
+                    for key, item in node.items():
+                        if (key in _USAGE_PERCENT_KEYS and isinstance(item, (int, float))
+                                and not isinstance(item, bool) and 0 <= item <= 1000000):
+                            observed[metric] = max(observed.get(metric, 0), item)
+                        elif isinstance(item, (dict, list)) and depth < 8:
+                            nodes.append((item, depth + 1))
+                elif isinstance(node, list) and depth < 8:
+                    nodes.extend((item, depth + 1) for item in node if isinstance(item, (dict, list)))
+        with self._metrics_lock:
+            for metric, value in observed.items():
+                self._metrics[metric] = max(self._metrics[metric], value)
+                self._metrics[metric.replace('_max_percent', '_observations')] += 1
 
     def _redact(self, value, limit=2048):
         text = str(value)
@@ -173,11 +235,14 @@ class GraphClient:
 
     def _get(self, path, user_id, params=None):
         token = self._token(user_id)
+        rate_limited = False
         for attempt in range(self.get_retries + 1):
             if self.stop():
                 raise InterruptedError('stop_requested')
             transient = False
             delay = float(2 ** attempt)
+            self._count_read(retry=attempt > 0, rate_limit_retry=attempt > 0 and rate_limited)
+            rate_limited = False
             try:
                 response = self.http.request(
                     "GET", self.base + path, params=params or {},
@@ -190,11 +255,16 @@ class GraphClient:
             except requests.RequestException:
                 raise GraphError("read_unavailable", "Meta read failed") from None
             else:
+                self._observe_usage(response)
                 try:
                     data = response.json()
                 except (TypeError, ValueError):
                     data = None
                 detail = self._detail(data, response)
+                rate_limited = response.status_code == 429 or detail.get("code") in _RATE_LIMIT_CODES
+                if rate_limited:
+                    with self._metrics_lock:
+                        self._metrics['rate_limit_responses'] += 1
                 has_error = isinstance(data, dict) and data.get("error") is not None
                 if 200 <= response.status_code < 300 and not has_error and data is not None:
                     return data
@@ -284,6 +354,7 @@ class GraphClient:
         reader = GraphClient(self.tokens, self.version, self.timeout,
                            get_retries=self.get_retries, max_pages=self.max_pages,
                            max_objects=self.max_objects)
+        reader.share_read_metrics(self)
         reader.stop = getattr(self._read_local, 'stop', self.stop)
         if registry is not None:
             # Reuse this thread's pool for subsequent identities/accounts.
@@ -398,7 +469,7 @@ class GraphClient:
             self._release_reader(reader)
 
     def iter_account_ads(self, accounts, stop=lambda: False):
-        """At most four read-only account scans; never parallelize DELETE or SQL."""
+        """Bounded read-only account scans; never parallelize DELETE or SQL."""
         yield from self._bounded_reads(self._account_ads, sorted(accounts.items()), stop)
 
     def _record(self, data, object_id=None, account_id=None, kind="ad"):

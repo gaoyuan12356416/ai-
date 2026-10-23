@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timedelta
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,7 +19,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 
 from features.fb_ad_asset_delete import store as shared_store
 from features.fb_ad_asset_delete.store import Store, StoreError
-from meta_violation_cleanup.graph import GraphClient
+from meta_violation_cleanup.graph import GRAPH_METRIC_FIELDS, GraphClient
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import ACTOR, Runner
 from meta_violation_cleanup.runtime import Runtime, CST, digest, process_lock, verify_mount
@@ -72,6 +73,14 @@ def _safe_counts(value):
             if re.fullmatch(r"[A-Za-z0-9_]{1,80}", str(k)) and isinstance(v, int) and not isinstance(v, bool)}
 
 
+def _safe_graph_metrics(value):
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in GRAPH_METRIC_FIELDS
+            if isinstance(value.get(key), (int, float)) and not isinstance(value[key], bool)
+            and 0 <= value[key] <= 10 ** 15 and math.isfinite(value[key])}
+
+
 def summary(runtime, run_id):
     run = runtime.get(run_id)
     data = run["data"]
@@ -90,6 +99,8 @@ def summary(runtime, run_id):
     for key in ("result_counts", "product_candidate_ads", "skip_counts", "reconciliation_counts"):
         if key in data:
             result[key] = _safe_counts(data[key])
+    if "graph_metrics" in data:
+        result["graph_metrics"] = _safe_graph_metrics(data["graph_metrics"])
     attempt = data.get("execution_attempt", 1)
     attempt = attempt if isinstance(attempt, int) and attempt > 0 else 1
     result["notifications"] = {}
@@ -177,12 +188,15 @@ def recover_owned(runtime, config, send_notifications=False):
 
 
 def open_graph(config, source):
+    workers = config.get("graph_read_workers", 4)
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 16:
+        raise CliError("invalid_graph_read_workers")
     tokens = source.credentials()
     if (not isinstance(tokens, dict) or not tokens or
             any(not _USER_ID.fullmatch(str(uid)) or not isinstance(token, str) or not token.strip()
                 for uid, token in tokens.items())):
         raise CliError("invalid_credential_directory")
-    return GraphClient(tokens, version=config.get("graph_version", "v25.0"))
+    return GraphClient(tokens, version=config.get("graph_version", "v25.0"), read_workers=workers)
 
 
 def load_manifest(runtime, run_id):
@@ -259,7 +273,8 @@ def scan_or_run(args, config, runtime, stop):
     finally:
         try:
             runtime.update(run_id, status=status, stage="finished", error_type=error,
-                           sql_metrics=source.safe_metrics if source is not None else {})
+                           sql_metrics=source.safe_metrics if source is not None else {},
+                           graph_metrics=_safe_graph_metrics(getattr(graph, 'safe_metrics', {})))
         except Exception:
             status, error = "failed", "RuntimeLedgerError"
         if live:

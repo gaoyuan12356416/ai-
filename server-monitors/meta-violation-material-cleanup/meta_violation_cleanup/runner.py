@@ -32,7 +32,7 @@ def numeric_id(value):
         raise ValueError('invalid_numeric_identity')
     return str(value)
 
-def chunks(values,size=200):
+def chunks(values,size=1000):
     for i in range(0,len(values),size):
         yield values[i:i+size]
 
@@ -94,7 +94,7 @@ class Runner:
         """Amortize FIFO setup without holding SQL open across Graph reads.
 
         Each account still finishes its entire Graph pagination before joining
-        a batch. Individual SQL statements remain capped at 200 Ad IDs. Large
+        a batch. Individual SQL statements remain capped at 1000 Ad IDs. Large
         accounts occupy a batch alone; small accounts share at most 32 slots.
         """
         batch=[];total=0
@@ -124,14 +124,31 @@ class Runner:
         errors=list(discovery['errors']);account_results=[];candidates=[];skip=Counter();product_counts=Counter();mapping_gaps=Counter()
         accounts=discovery['accounts']
         seen_accounts=set()
+        self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=0,
+            graph_metrics=getattr(self.graph,'safe_metrics',{}),sql_metrics=getattr(self.source,'safe_metrics',{}))
         index=-1
         for batch in self.account_batches(accounts):
             self.check_stop()
-            batch_lineages=None;batch_sources={}
+            batch_lineages=None;batch_sources={};cached_routes=None
             try:
-                batch_lineages,batch_sources=self.lineage_data(
-                    [str(ad['id']) for _,ads,_,_ in batch for ad in (ads or ())],scope=scope)
+                ids=[str(ad['id']) for _,ads,_,_ in batch for ad in (ads or ())]
+                batch_method=getattr(self.source,'selected_credentials',None)
+                # Keep only local parsing inside this FIFO lease. All Graph
+                # pagination above has finished; no network wait holds SQL.
+                with self.sql_snapshot() if ids else nullcontext():
+                    batch_lineages,batch_sources=self.lineage_data(ids,scope=scope)
+                    if callable(batch_method):
+                        route_rows={}
+                        for _,ads,_,_ in batch:
+                            for ad in ads or ():
+                                rows=batch_lineages.get(str(ad['id']),[])
+                                identity=material_identity(rows,batch_sources,scope,creative_id=object_id(ad))
+                                if evaluate_ad(ad,identity,evidence)['eligible']:
+                                    route_rows.update({str(r['id']):r for r in rows
+                                        if str(r.get('creative_id',''))==object_id(ad) and str(r.get('product','')) in scope})
+                        cached_routes=batch_method(list(route_rows.values())) if route_rows else {}
             except Exception as exc:
+                batch_lineages=None;batch_sources={};cached_routes=None
                 if ledger_error(exc) or isinstance(exc,InterruptedError):raise
                 # Retry read-only lookups per account to isolate a bad account.
                 # No incomplete batch contributes deletion candidates.
@@ -170,8 +187,8 @@ class Runner:
                         matched=[r for r in rows if str(r.get('creative_id',''))==object_id(ad) and str(r.get('product','')) in scope]
                         routed.append((ad,identity,decision,matched))
                     batch_method=getattr(self.source,'selected_credentials',None)
-                    batch_routes=None
-                    if callable(batch_method) and routed:
+                    batch_routes=cached_routes
+                    if cached_routes is None and callable(batch_method) and routed:
                         route_rows={str(r['id']):r for _,_,_,matched in routed for r in matched}
                         batch_routes=batch_method(list(route_rows.values()))
                     for ad,identity,decision,matched in routed:
@@ -206,22 +223,30 @@ class Runner:
                     account_results.append({'account_id':account,'status':'failed','error':safe_error(exc)})
                 self.runtime.update(run_id,stage='inventory',accounts_total=len(accounts),accounts_finished=index+1,candidate_ads=len(candidates),coverage_errors=len(errors))
                 self.runtime.event(run_id,'account_scan',account_results[-1])
+            self.runtime.update(run_id,graph_metrics=getattr(self.graph,'safe_metrics',{}),
+                sql_metrics=getattr(self.source,'safe_metrics',{}))
         if seen_accounts!=set(accounts):raise ValueError('account_inventory_incomplete')
         # Include even out-of-product shared Ad references as impact evidence;
         # those IDs are NOT inserted into the deletion objects list.
         candidates.sort(key=lambda c:(int(c['account_id']),int(c['ad_id'])))
         by_creative=defaultdict(list)
         for candidate in candidates:by_creative[candidate['creative_id']].append(candidate['ad_id'])
-        shared={}
+        shared={};references={};reference_ids=set();ref_lineage={}
         for cid,targets in by_creative.items():
             refs=self.runtime.references(run_id,cid)
             extra=[r for r in refs if str(r['id']) not in targets]
             if extra:
-                ref_lineage={}
-                for part in chunks([str(r['id']) for r in extra]):ref_lineage.update(self.source.lineages(part))
-                shared[cid]=[{'ad_id':str(r['id']),'account_id':str(r.get('account_id','')),
-                    'product_ids':sorted({str(a.get('product')) for a in ref_lineage.get(str(r['id']),[])
-                        if str(a.get('creative_id',''))==cid and str(a.get('product','')).isdigit()})} for r in extra]
+                references[cid]=extra;reference_ids.update(str(r['id']) for r in extra)
+        # Shared-impact reporting is one bounded lookup, not one FIFO session
+        # per Creative. It never adds these references to deletion candidates.
+        if reference_ids:
+            with self.sql_snapshot():
+                for part in chunks(sorted(reference_ids)):
+                    self.check_stop();ref_lineage.update(self.source.lineages(part))
+        for cid,extra in references.items():
+            shared[cid]=[{'ad_id':str(r['id']),'account_id':str(r.get('account_id','')),
+                'product_ids':sorted({str(a.get('product')) for a in ref_lineage.get(str(r['id']),[])
+                    if str(a.get('creative_id',''))==cid and str(a.get('product','')).isdigit()})} for r in extra]
         violation_ids=defaultdict(list)
         for row in policy_rows:violation_ids[str(row['ad_id'])].append(str(row['id']))
         manifest={'version':1,'policy_version':'20261023-v1','run_id':run_id,'window_start':start,'window_end':end,'frozen_at':now(),
@@ -417,6 +442,7 @@ class Runner:
                 # bounds lock-held mutation/preflight work near 10:00.
                 isolated_graph=GraphClient(self.graph.tokens,version=self.graph.version,
                     timeout=min(self.graph.timeout,20),get_retries=0)
+                isolated_graph.share_read_metrics(self.graph)
                 isolated_graph.delete_stop=self.stop
                 self.execution_graph=isolated_graph
             self.runtime.update(run_id,stage='executing',shared_job_id=job_id,shared_run_id=shared_run,canary_deferred_ads=limited)

@@ -68,6 +68,80 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_read_worker_configuration_bounds_and_injected_session_serial(self):
+        for value in (0, 17, True, '16', 2.5, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                GraphClient({'1': 'synthetic-token'}, read_workers=value)
+        for value in (1, 4, 16):
+            client = GraphClient({'1': 'synthetic-token'}, read_workers=value)
+            self.assertEqual(client.read_workers, value)
+            client.close()
+        client = GraphClient({'1': 'synthetic-token'}, read_workers=16, session=Session([]))
+        self.assertEqual(client.read_workers, 1)
+
+    def test_sixteen_read_workers_are_bounded_and_stop_before_more_work(self):
+        client = GraphClient({'1': 'synthetic-token'}, read_workers=16)
+        barrier = threading.Barrier(16)
+        lock = threading.Lock(); stop = threading.Event()
+        state = {'active': 0, 'peak': 0, 'started': 0}
+        def work(item):
+            with lock:
+                state['active'] += 1; state['started'] += 1
+                state['peak'] = max(state['peak'], state['active'])
+            try:
+                if item < 16:
+                    barrier.wait(3)
+                return item
+            finally:
+                with lock: state['active'] -= 1
+        iterator = client._bounded_reads(work, range(100), stop.is_set)
+        try:
+            next(iterator); stop.set()
+            with self.assertRaises(InterruptedError): next(iterator)
+            self.assertEqual(state['peak'], 16)
+            self.assertLessEqual(state['started'], 17)
+        finally:
+            iterator.close(); client.close()
+
+    def test_get_metrics_keep_only_numeric_usage_and_rate_limit_counts(self):
+        client, _, sleeps = self.client([
+            Response({'error': {'code': 4, 'message': 'limited'}}, 429, {
+                'Retry-After': '3',
+                'X-App-Usage': json.dumps({'call_count': 42, 'total_time': 12, 'secret': 'secret-token'}),
+                'x-ad-account-usage': json.dumps({'acc_id_util_pct': 3.5}),
+                'x-business-use-case-usage': json.dumps({'private-business-id': [
+                    {'call_count': 22, 'total_time': 30, 'estimated_time_to_regain_access': 9999}]}),
+            }),
+            Response(ad(), headers={
+                'X-App-Usage': json.dumps({'call_count': 11, 'total_cputime': 49}),
+                'x-ad-account-usage': '{not-json',
+                'x-business-use-case-usage': json.dumps({'unsafe': {'call_count': True,
+                    'total_time': float('inf'), 'total_cputime': 10 ** 400}}),
+            }),
+        ])
+        client.get_ad('10', '1')
+        metrics = client.safe_metrics
+        self.assertEqual((metrics['get_requests'], metrics['get_retries'],
+                          metrics['rate_limit_responses'], metrics['rate_limit_retries']), (2, 1, 1, 1))
+        self.assertEqual((metrics['usage_app_max_percent'], metrics['usage_ad_account_max_percent'],
+                          metrics['usage_business_max_percent']), (49, 3.5, 30))
+        self.assertEqual((metrics['usage_app_observations'], metrics['usage_ad_account_observations'],
+                          metrics['usage_business_observations']), (2, 1, 1))
+        self.assertEqual(sleeps, [3])
+        self.assertTrue(all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                            for value in metrics.values()))
+        self.assertNotIn('secret-token', json.dumps(metrics))
+        self.assertNotIn('private-business-id', json.dumps(metrics))
+
+    def test_timeout_retries_are_counted_without_claiming_rate_limit(self):
+        client, _, _ = self.client([requests.Timeout(), Response(ad())])
+        client.get_ad('10', '1')
+        self.assertEqual(client.safe_metrics['get_requests'], 2)
+        self.assertEqual(client.safe_metrics['get_retries'], 1)
+        self.assertEqual(client.safe_metrics['rate_limit_responses'], 0)
+        self.assertEqual(client.safe_metrics['rate_limit_retries'], 0)
+        self.assertEqual(client.safe_metrics['usage_app_observations'], 0)
+
     def test_next_read_is_refilled_before_consumer_receives_result(self):
         client=GraphClient({'1':'synthetic-token'})
         others_release=threading.Event();replacement_started=threading.Event()
@@ -119,6 +193,7 @@ class GraphTests(unittest.TestCase):
                 self.assertTrue(any(len(s.calls)>1 for s in readers))
                 self.assertTrue(all(len(s.thread_ids)==1 and s.closed for s in readers))
                 self.assertFalse(sessions[0].closed)
+                self.assertEqual(client.safe_metrics['get_requests'], 20)
             finally:client.close()
         self.assertTrue(all(s.closed for s in sessions))
 

@@ -6,5 +6,7 @@
   "graph_version": "v25.0",
   "legacy_lock": "/tmp/fb_2446289_daily_replace_delete.lock",
   "mysql_binary": "/usr/bin/mysql",
-  "live_enabled": false
+  "live_enabled": false,
+  "graph_read_workers": 4,
+  "mysql_compress": true
 }

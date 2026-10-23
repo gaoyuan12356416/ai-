@@ -566,4 +566,62 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest['skip_counts']['product_out_of_scope'],1)
 
 
+    def test_inventory_and_credential_batches_share_one_snapshot(self):
+        ads=[ad(str(1000+i),str(2000+i),str(3000+i)) for i in range(30)]
+        runner,source,graph,_=self.fixture(ads)
+        active=[0];calls=[];snapshots=[]
+        for aid,rows in source.rows.items():
+            for row in rows:row['id']=aid
+        @contextmanager
+        def snapshot():
+            active[0]+=1
+            snapshots.append(active[0])
+            try:yield
+            finally:active[0]-=1
+        source.snapshot=snapshot
+        def routes(rows):
+            self.assertGreater(active[0],0)
+            calls.append([r['ad_id'] for r in rows])
+            return {r['id']:{'user_id':'1','error':''} for r in rows}
+        source.selected_credentials=routes
+        original=graph.list_ads
+        def fetch(*args):
+            self.assertEqual(active[0],0)
+            return original(*args)
+        graph.list_ads=fetch
+        manifest=self.manifest(runner)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(len(calls[0]),30)
+        self.assertEqual(len(manifest['candidates']),30)
+        self.assertEqual(active[0],0)
+
+    def test_failed_global_credential_batch_falls_back_without_cross_account_loss(self):
+        runner,source,_,runtime=self.fixture([ad(),ad('11','21','101')])
+        for aid,rows in source.rows.items():
+            for row in rows:row['id']=aid
+        def routes(rows):
+            if any(r['ad_id']=='10' for r in rows):raise ValueError('incomplete credential protocol')
+            return {r['id']:{'user_id':'1','error':''} for r in rows}
+        source.selected_credentials=routes
+        manifest=self.manifest(runner)
+        self.assertEqual([c['ad_id'] for c in manifest['candidates']],['11'])
+        self.assertEqual({r['account_id']:r['status'] for r in manifest['coverage']['accounts']},
+                         {'100':'failed','101':'complete'})
+        self.assertTrue(any(kind=='lineage_batch_fallback' for kind,_ in runtime.events))
+
+
+    def test_shared_reference_product_lookup_is_batched_and_does_not_expand_targets(self):
+        runner,source,_,_=self.fixture([ad(),ad('11','21'),ad('90','20'),ad('91','21')])
+        for aid in ('90','91'):source.rows[aid][0]['product']='9999'
+        calls=[];original=source.lineages
+        def tracked(ids):
+            calls.append(list(ids));return original(ids)
+        source.lineages=tracked
+        manifest=self.manifest(runner)
+        self.assertEqual(calls[-1],['90','91'])
+        self.assertEqual([c['ad_id'] for c in manifest['candidates']],['10','11'])
+        self.assertEqual(manifest['shared_creative_impacts']['20'][0]['product_ids'],['9999'])
+        self.assertEqual(manifest['shared_creative_impacts']['21'][0]['product_ids'],['9999'])
+
+
 if __name__=='__main__':unittest.main()

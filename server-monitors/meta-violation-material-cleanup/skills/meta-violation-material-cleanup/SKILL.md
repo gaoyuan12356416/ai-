@@ -63,6 +63,16 @@ artifacts. All scheduled source reads use `63350` through `/usr/bin/mysql` FIFO
 Gate with `SQL_GATE_BYPASS=0` and confirmed `@@read_only=1`. Never bypass the Gate
 with a direct driver, `mysql.real`, or a write endpoint.
 
+`graph_read_workers` controls only GET concurrency: integer 1–16, default 4.
+DELETE and SQL remain serial. Inspect `graph_metrics` for requests, retries,
+rate-limit responses and usage header maxima; zero header observations means
+the platform supplied no usable measurement, not zero usage. Tune read workers
+only against a complete read-only throughput run and current rate-limit evidence.
+MySQL protocol compression is requested by default (`mysql_compress=true`),
+with identical full-row hashes verified against the FIFO read endpoint. Keep
+all pages at or below 2,000 rows and indexed ID batches at or below 1,000;
+product/credential/lineage directories use keyset pagination, never truncation.
+
 ## Execution and recovery
 
 The saved schedule operates within the user's authorized rules. Maintenance or

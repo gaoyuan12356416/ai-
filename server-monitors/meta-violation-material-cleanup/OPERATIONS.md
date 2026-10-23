@@ -30,6 +30,14 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 按状态分开 keyset 读取。不能只按新增 ID 或 `updated_at` 增量，旧违规记录会更新。
 所有定时 SQL 走 `63350` 只读端点和 `/usr/bin/mysql` FIFO Gate。
 
+`graph_read_workers` 仅控制 Meta GET，支持整数 1–16，默认 4；不会并发删除或 SQL。
+生产可在只读吞吐验证后提高该值。`status` 的 `graph_metrics` 保存 GET、重试、限流
+及 usage header 数字统计；某类 header 的 observation 为 0 表示未取得该统计，不能视为零占用。
+每批账户的素材与凭据查询共用一个 SQL 快照，完成分页后再持有 SQL 会话，避免等待 Meta 时占用 FIFO。
+`mysql_compress=true` 默认请求 MySQL 协议压缩，已在 FIFO 只读端点以完整行哈希验证等价；
+不改变 SQL 门禁、端口或查询条件。广告/素材/凭据关系按最多 1,000 个 ID 批量查询，
+产品、授权和广告关系采用 keyset 分页，每页最多 2,000 行；共享 Creative 引用也合批读取。
+
 ## 常用命令
 
 所有 CLI 参数中的 `--config` 都位于子命令之前。以下 `RUN_ID` 替换为真实保存的运行 ID。

@@ -183,6 +183,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.events, ["scan"])
         self.assertEqual(self.store.reconciled + self.store.finished, [])
 
+    def test_open_graph_validates_and_forwards_read_workers(self):
+        for workers in (0, 17, True, '16', 2.5, None):
+            with self.subTest(workers=workers), self.assertRaises(cli.CliError) as caught:
+                cli.open_graph(dict(self.config, graph_read_workers=workers), FakeSource(self.config))
+            self.assertEqual(caught.exception.code, 'invalid_graph_read_workers')
+        for workers in (1, 4, 16):
+            with patch.object(cli, 'GraphClient') as constructor:
+                cli.open_graph(dict(self.config, graph_read_workers=workers), FakeSource(self.config))
+                self.assertEqual(constructor.call_args.kwargs['read_workers'], workers)
+        with patch.object(cli, 'GraphClient') as constructor:
+            cli.open_graph(self.config, FakeSource(self.config))
+            self.assertEqual(constructor.call_args.kwargs['read_workers'], 4)
+
+    def test_final_graph_metrics_and_status_are_numeric_whitelist_only(self):
+        metrics = {'get_requests': 45, 'get_retries': 2, 'rate_limit_responses': 1,
+                   'rate_limit_retries': 1, 'usage_app_max_percent': 12.5,
+                   'usage_business_max_percent': float('inf'), 'read_workers': True,
+                   'usage_ad_account_max_percent': 'synthetic-token-never-print',
+                   'url': 'https://secret.example/secret'}
+        with patch.object(FakeGraph, 'safe_metrics', metrics, create=True):
+            code, result = self.invoke('preview', '--run-id', 'metrics-preview')
+        self.assertEqual(code, 0)
+        self.assertEqual(result['graph_metrics'], {'get_requests': 45, 'get_retries': 2,
+            'rate_limit_responses': 1, 'rate_limit_retries': 1, 'usage_app_max_percent': 12.5})
+        self.assertEqual(self.runtime.rows['metrics-preview']['data']['graph_metrics'], result['graph_metrics'])
+        _, status = self.invoke('status', '--run-id', 'metrics-preview')
+        self.assertEqual(status['graph_metrics'], result['graph_metrics'])
+
     def test_live_start_receipt_precedes_scan_and_execute_final_notice(self):
         code, result = self.invoke("run", "--run-id", "r1")
         self.assertEqual(code, 0)

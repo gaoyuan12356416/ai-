@@ -268,9 +268,12 @@ class SqlSource:
         self.query_timeout = int(get("query_timeout_seconds", 30))
         self.session_timeout = int(get("session_timeout_seconds", 1800))
         self.page_size = int(get("page_size", 2000))
-        self.lineage_batch_size = int(get("lineage_batch_size", 200))
+        self.lineage_batch_size = int(get("lineage_batch_size", 1000))
+        self.mysql_compress = get("mysql_compress", True)
+        if not isinstance(self.mysql_compress, bool):
+            raise SqlSourceError("unsafe_sql_limits")
         if not (1 <= self.query_timeout <= 120 and 60 <= self.session_timeout <= 3600 and
-                1 <= self.page_size <= 2000 and 1 <= self.lineage_batch_size <= 200):
+                1 <= self.page_size <= 2000 and 1 <= self.lineage_batch_size <= 1000):
             raise SqlSourceError("unsafe_sql_limits")
         # The installed FIFO wrapper prepends its own mysql options. MySQL only
         # accepts --no-defaults as the first option, so it cannot be used here.
@@ -279,6 +282,10 @@ class SqlSource:
                          "--port=63350", "--user=" + user, "--connect-timeout=5",
                          "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names",
                          "--unbuffered", "--quick", "--skip-reconnect"]
+        if self.mysql_compress:
+            # Verified on the FIFO reader: identical complete row hashes with
+            # protocol compression ON; no endpoint or query semantics change.
+            self._command.append("--compress")
         self._metrics = {"query_count": 0, "query_failures": 0, "query_seconds": 0.0,
                          "sessions": 0, "violation_pages": 0}
         self._active = None
@@ -357,17 +364,30 @@ class SqlSource:
 
     def scope_products(self):
         """Small current directory for the two allowed roots and their children."""
-        return self._products("WHERE id IN (1479,3302) OR ads_app_id IN (1479,3302)")
+        return self._products("id IN (1479,3302) OR ads_app_id IN (1479,3302)")
 
-    def _products(self, where):
-        sql = self._select((("id", "CAST(id AS CHAR)"), ("name", "name"),
-                            ("ads_app_id", "CAST(ads_app_id AS CHAR)"), ("app_type", "app_type"),
-                            ("default_user", "CAST(default_user AS CHAR)")),
-                           "ads_apps_setting", where + " ORDER BY id LIMIT 20001")
+    def _products(self, predicate):
+        expressions = (("id", "CAST(id AS CHAR)"), ("name", "name"),
+                       ("ads_app_id", "CAST(ads_app_id AS CHAR)"), ("app_type", "app_type"),
+                       ("default_user", "CAST(default_user AS CHAR)"))
+        rows, cursor = [], 0
         with self._session() as session:
-            rows = session.query(sql)
-        if len(rows) > 20000:
-            raise SqlSourceError("product_directory_incomplete")
+            while True:
+                where = "WHERE id>%d" % cursor
+                if predicate:
+                    where += " AND (" + predicate + ")"
+                page = session.query(self._select(expressions, "ads_apps_setting FORCE INDEX(PRIMARY)",
+                                     where + " ORDER BY id LIMIT %d" % self.page_size))
+                if len(page) > self.page_size or len(rows) + len(page) > 20000:
+                    raise SqlSourceError("product_directory_incomplete")
+                for row in page:
+                    identifier = str(row.get("id") or "")
+                    if not _ID.fullmatch(identifier) or int(identifier) <= cursor:
+                        raise SqlSourceError("product_directory_incomplete")
+                    cursor = int(identifier)
+                    rows.append(row)
+                if len(page) < self.page_size:
+                    break
         return rows
 
     def violations(self, start, end):
@@ -446,19 +466,39 @@ class SqlSource:
                             ("id", "ad_id", "product", "source_id", "original_source_id", "creative_id",
                              "ad_account_id", "user_id", "publish_queue_id", "video_id", "image_ids")) + (
             ("created_at", "DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f')"),)
+        seen = set()
         with self._session() as session:
             for part in _chunks(ad_ids, self.lineage_batch_size):
-                sql = self._select(expressions, "ads_facebook_auto_created_data",
-                                   "WHERE ad_id IN %s ORDER BY ad_id,id LIMIT 20001" % _inside(part))
-                rows = session.query(sql)
-                if len(rows) > 20000:
-                    raise SqlSourceError("ad_lineage_incomplete")
-                for row in rows:
-                    ad_id = str(row.get("ad_id"))
-                    if ad_id not in part:
-                        raise SqlSourceError("unexpected_ad_lineage")
-                    row["row_id"] = str(row["id"])
-                    result[ad_id].append(row)
+                cursor, closed_ads = None, set()
+                while True:
+                    where = "WHERE ad_id IN " + _inside(part)
+                    if cursor is not None:
+                        where += " AND (ad_id>%s OR (ad_id=%s AND id>%d))" % (
+                            _quote(cursor[0]), _quote(cursor[0]), cursor[1])
+                    sql = self._select(expressions, "ads_facebook_auto_created_data FORCE INDEX(ad_id)",
+                                       where + " ORDER BY ad_id,id LIMIT %d" % self.page_size)
+                    rows = session.query(sql)
+                    if len(rows) > self.page_size:
+                        raise SqlSourceError("ad_lineage_incomplete")
+                    for row in rows:
+                        ad_id, identifier = str(row.get("ad_id")), str(row.get("id") or "")
+                        if ad_id not in part:
+                            raise SqlSourceError("unexpected_ad_lineage")
+                        if not _ID.fullmatch(identifier) or identifier in seen:
+                            raise SqlSourceError("ad_lineage_incomplete")
+                        if cursor is not None:
+                            if ad_id == cursor[0] and int(identifier) <= cursor[1]:
+                                raise SqlSourceError("ad_lineage_incomplete")
+                            if ad_id != cursor[0]:
+                                closed_ads.add(cursor[0])
+                                if ad_id in closed_ads:
+                                    raise SqlSourceError("ad_lineage_incomplete")
+                        cursor = (ad_id, int(identifier))
+                        seen.add(identifier)
+                        row["row_id"] = identifier
+                        result[ad_id].append(row)
+                    if len(rows) < self.page_size:
+                        break
         return result
 
     def sources(self, source_ids):
@@ -467,10 +507,11 @@ class SqlSource:
         if not source_ids:
             return result
         with self._session() as session:
-            for part in _chunks(source_ids, 200):
+            for part in _chunks(source_ids, 1000):
                 sql = self._select((("id", "CAST(id AS CHAR)"), ("source_type", "source_type"),
                                     ("source_id", "CAST(source_id AS CHAR)")),
-                                   "ads_source FORCE INDEX(PRIMARY)", "WHERE id IN " + _inside(part))
+                                   "ads_source FORCE INDEX(PRIMARY)", "WHERE id IN " + _inside(part) +
+                                   " ORDER BY id LIMIT %d" % (len(part) + 1))
                 for row in session.query(sql):
                     identifier = str(row.get("id"))
                     if identifier not in part or identifier in result:
@@ -481,18 +522,30 @@ class SqlSource:
     def credentials(self):
         # The live schema has no validity/status field.  Newest nonempty source
         # credential per user is only a candidate; caller verifies via Meta GET.
-        sql = self._select((("id", "CAST(id AS CHAR)"), ("user_id", "CAST(user_id AS CHAR)"),
-                            ("token", "accessToken")), "ads_facebook_info",
-                           "WHERE TRIM(accessToken)<>'' ORDER BY user_id,id DESC LIMIT 10001")
+        expressions = (("id", "CAST(id AS CHAR)"), ("user_id", "CAST(user_id AS CHAR)"),
+                       ("token", "accessToken"))
+        result, cursor, count = {}, None, 0
         with self._session() as session:
-            rows = session.query(sql)
-        if len(rows) > 10000:
-            raise SqlSourceError("credential_directory_incomplete")
-        result = {}
-        for row in rows:
-            user = str(row.get("user_id"))
-            if _ID.fullmatch(user) and str(row.get("token") or "").strip():
-                result.setdefault(user, str(row["token"]).strip())
+            while True:
+                where = "WHERE TRIM(accessToken)<>''"
+                if cursor is not None:
+                    where += " AND id<%d" % cursor
+                rows = session.query(self._select(expressions, "ads_facebook_info FORCE INDEX(PRIMARY)",
+                                     where + " ORDER BY id DESC LIMIT %d" % self.page_size))
+                count += len(rows)
+                if len(rows) > self.page_size or count > 10000:
+                    raise SqlSourceError("credential_directory_incomplete")
+                for row in rows:
+                    identifier = str(row.get("id") or "")
+                    if (not _ID.fullmatch(identifier) or
+                            cursor is not None and int(identifier) >= cursor):
+                        raise SqlSourceError("credential_directory_incomplete")
+                    cursor = int(identifier)
+                    user = str(row.get("user_id"))
+                    if _ID.fullmatch(user) and str(row.get("token") or "").strip():
+                        result.setdefault(user, str(row["token"]).strip())
+                if len(rows) < self.page_size:
+                    break
         return result
 
     @staticmethod
@@ -542,7 +595,7 @@ class SqlSource:
 
         Each row has exactly one explicit outcome. Invalid/missing routes are
         per-row errors; an incomplete or contradictory SQL result fails the
-        whole call. At most 200 primary IDs are joined per query, in one gated
+        whole call. At most 1000 primary IDs are joined per query, in one gated
         snapshot. Token availability is checked in batches and no Token is read
         into this method. No result survives this call as an adapter cache.
         """
@@ -570,7 +623,7 @@ class SqlSource:
             return result
         selected = {}
         with self._session() as session:
-            for part in _chunks(list(identities), 200):
+            for part in _chunks(list(identities), 1000):
                 rows = session.query(self._credential_query(
                     "WHERE a.id IN %s ORDER BY a.id LIMIT %d" % (_inside(part), len(part) + 1)))
                 found = {}

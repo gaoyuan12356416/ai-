@@ -129,6 +129,16 @@ class SqlSourceTests(unittest.TestCase):
             result = method(adapter)
         return result, adapter, process, popen
 
+    def test_protocol_compression_is_requested_without_changing_gate_or_endpoint(self):
+        enabled=self.make_source()
+        disabled=self.make_source(mysql_compress=False)
+        self.assertIn('--compress',enabled._command)
+        self.assertNotIn('--compress',disabled._command)
+        self.assertEqual([part for part in enabled._command if part!='--compress'],disabled._command)
+        for invalid in ('true',1,None):
+            with self.subTest(invalid=invalid),self.assertRaises(source.SqlSourceError):
+                self.make_source(mysql_compress=invalid)
+
     def test_gated_readonly_command_no_password_and_bypass_disabled(self):
         result, adapter, process, popen = self.run_source(lambda db: db.products(), lambda sql: [])
         self.assertEqual(result, [])
@@ -206,7 +216,7 @@ class SqlSourceTests(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertNotIn("secret_value", str(error.exception))
 
-    def test_lineage_batches_maximum_200_and_preserves_duplicate_ad_rows(self):
+    def test_lineage_batches_maximum_1000_and_preserves_duplicate_ad_rows(self):
         calls = []
         def responder(sql):
             calls.append(sql)
@@ -214,11 +224,14 @@ class SqlSourceTests(unittest.TestCase):
                 return [{"id": "1", "ad_id": "1", "product": "1479"},
                         {"id": "2", "ad_id": "1", "product": "3302"}]
             return []
-        result, _, _, _ = self.run_source(lambda db: db.lineages(map(str, range(1, 402))), responder)
+        result, _, _, _ = self.run_source(lambda db: db.lineages(map(str, range(1, 2002))), responder)
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(result["1"]), 2)
         self.assertEqual(result["1"][1]["row_id"], "2")
         self.assertTrue(all("WHERE ad_id IN" in sql and "LIKE" not in sql for sql in calls))
+        self.assertTrue(all("FORCE INDEX(ad_id)" in sql and "LIMIT 2000" in sql for sql in calls))
+        self.assertEqual([len(re.findall(r'0x[0-9a-f]+', re.search(r'ad_id IN \(([^)]+)\)', sql).group(1)))
+                          for sql in calls], [1000, 1000, 1])
 
     def test_sources_and_write_time_violation_evidence_use_primary_batches(self):
         def responder(sql):
@@ -232,7 +245,7 @@ class SqlSourceTests(unittest.TestCase):
 
     def test_newest_nonempty_credential_is_kept_only_in_memory(self):
         def responder(sql):
-            self.assertIn("ORDER BY user_id,id DESC", sql)
+            self.assertIn("ORDER BY id DESC LIMIT 2000", sql)
             return [{"id": "3", "user_id": "803", "token": "current-synthetic"},
                     {"id": "2", "user_id": "803", "token": "old-synthetic"}]
         result, adapter, _, _ = self.run_source(lambda db: db.credentials(), responder)
@@ -269,8 +282,8 @@ class SqlSourceTests(unittest.TestCase):
             with self.assertRaises(source.SqlSourceError):
                 self.run_source(lambda db: db.selected_credential(route), responder)
 
-    def test_batch_credentials_use_one_session_and_at_most_200_primary_ids(self):
-        routes = [self.credential_route(id=str(n), ad_id=str(10000 + n)) for n in range(1, 402)]
+    def test_batch_credentials_use_one_session_and_at_most_1000_primary_ids(self):
+        routes = [self.credential_route(id=str(n), ad_id=str(10000 + n)) for n in range(1, 2002)]
         by_id = {row['id']: row for row in routes}
         batches = []
         def responder(sql):
@@ -279,16 +292,16 @@ class SqlSourceTests(unittest.TestCase):
                 clause = re.search(r'WHERE a.id IN \(([^)]+)\)', sql).group(1)
                 ids = [bytes.fromhex(value).decode() for value in re.findall(r'0x([0-9a-f]+)', clause)]
                 batches.append(ids)
-                self.assertLessEqual(len(ids), 200)
+                self.assertLessEqual(len(ids), 1000)
                 return [by_id[value] for value in ids]
             self.assertIn('EXISTS(SELECT 1', sql)
             self.assertNotIn(source._quote('token'), sql)
             return [{'user_id': '804', 'available': 1}]
         result, adapter, process, popen = self.run_source(
             lambda db: db.selected_credentials(routes), responder)
-        self.assertEqual(len(result), 401)
+        self.assertEqual(len(result), 2001)
         self.assertTrue(all(value == {'user_id': '804', 'error': ''} for value in result.values()))
-        self.assertEqual([len(values) for values in batches], [200, 200, 1])
+        self.assertEqual([len(values) for values in batches], [1000, 1000, 1])
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(adapter.safe_metrics['sessions'], 1)
         self.assertEqual(len(process.commands), 6)  # read-only, transaction, 3 routes, 1 existence
@@ -468,7 +481,7 @@ class SqlSourceTests(unittest.TestCase):
 
     def test_scope_products_reads_only_root_ids_and_direct_children(self):
         def responder(sql):
-            self.assertIn("WHERE id IN (1479,3302) OR ads_app_id IN (1479,3302)", sql)
+            self.assertIn("WHERE id>0 AND (id IN (1479,3302) OR ads_app_id IN (1479,3302))", sql)
             self.assertIn("ads_apps_setting", sql)
             self.assertNotIn("LIKE", sql)
             return [{"id": "1479", "name": "DramaWave", "ads_app_id": "0", "default_user": "803"},
@@ -476,6 +489,134 @@ class SqlSourceTests(unittest.TestCase):
         result, _, _, _ = self.run_source(lambda db: db.scope_products(), responder)
         self.assertEqual([row["id"] for row in result], ["1479", "1723"])
         self.assertEqual(result[1]["default_user"], "804")
+
+    def test_product_directory_pages_3550_rows_by_primary_id(self):
+        calls = []
+        def responder(sql):
+            self.assertIn('FORCE INDEX(PRIMARY)', sql)
+            self.assertIn('ORDER BY id LIMIT 2000', sql)
+            cursor = int(re.search(r'WHERE id>(\d+)', sql).group(1))
+            calls.append(cursor)
+            return [{'id': str(n)} for n in range(cursor + 1, min(cursor + 2001, 3551))]
+        result, _, _, popen = self.run_source(lambda db: db.products(), responder)
+        self.assertEqual(len(result), 3550)
+        self.assertEqual(calls, [0, 2000])
+        self.assertEqual(popen.call_count, 1)
+
+    def test_product_scope_keeps_or_predicate_grouped_after_page_boundary(self):
+        pages = iter([[{'id': '1479'}, {'id': '1723'}], [{'id': '3302'}]])
+        calls = []
+        def responder(sql):
+            calls.append(sql)
+            self.assertIn('AND (id IN (1479,3302) OR ads_app_id IN (1479,3302))', sql)
+            return next(pages)
+        result, _, _, _ = self.run_source(lambda db: db.scope_products(), responder, page_size=2)
+        self.assertEqual([r['id'] for r in result], ['1479', '1723', '3302'])
+        self.assertIn('WHERE id>1723 AND (', calls[1])
+
+    def test_lineage_page_boundary_keeps_all_rows_for_one_ad(self):
+        calls = []
+        def responder(sql):
+            self.assertIn('FORCE INDEX(ad_id)', sql)
+            self.assertIn('ORDER BY ad_id,id LIMIT 2000', sql)
+            match = re.search(r'AND id>(\d+)', sql)
+            cursor = int(match.group(1)) if match else 0
+            calls.append(cursor)
+            return [{'id': str(n), 'ad_id': '10'}
+                    for n in range(cursor + 1, min(cursor + 2001, 21002))]
+        result, _, _, popen = self.run_source(lambda db: db.lineages(['10']), responder)
+        self.assertEqual(len(result['10']), 21001)
+        self.assertEqual(len(calls), 11)
+        self.assertEqual(calls[1], 2000)
+        self.assertEqual(result['10'][-1]['row_id'], '21001')
+        self.assertEqual(popen.call_count, 1)
+
+    def test_lineage_keyset_accepts_database_ad_order_and_rejects_repeated_pages(self):
+        pages = iter([[{'id': '1', 'ad_id': '10'}, {'id': '2', 'ad_id': '10'}],
+                      [{'id': '3', 'ad_id': '2'}]])
+        calls = []
+        def responder(sql):
+            calls.append(sql)
+            return next(pages)
+        result, _, _, _ = self.run_source(lambda db: db.lineages(['2', '10']), responder, page_size=2)
+        self.assertEqual(len(result['10']), 2)
+        self.assertEqual(len(result['2']), 1)
+        self.assertIn('ad_id>' + source._quote('10'), calls[1])
+        self.assertIn('AND id>2', calls[1])
+        for pages in (
+                [[{'id': '1', 'ad_id': '10'}, {'id': '2', 'ad_id': '10'}], [{'id': '2', 'ad_id': '10'}]],
+                [[{'id': '1', 'ad_id': '10'}, {'id': '2', 'ad_id': '2'}], [{'id': '3', 'ad_id': '10'}]],
+                [[{'id': '2', 'ad_id': '10'}, {'id': '1', 'ad_id': '10'}]]):
+            iterator = iter(pages)
+            with self.assertRaisesRegex(source.SqlSourceError, 'ad_lineage_incomplete'):
+                self.run_source(lambda db: db.lineages(['2', '10']), lambda sql: next(iterator), page_size=2)
+
+    def test_directory_and_lineage_page_overflow_fail_without_partial_result(self):
+        cases = ((lambda db: db.products(), [{'id': '1'}, {'id': '2'}, {'id': '3'}]),
+                 (lambda db: db.credentials(), [{'id': str(n), 'user_id': '803', 'token': 'synthetic'}
+                                               for n in (3, 2, 1)]),
+                 (lambda db: db.lineages(['10']), [{'id': str(n), 'ad_id': '10'} for n in (1, 2, 3)]))
+        for method, rows in cases:
+            with self.assertRaises(source.SqlSourceError):
+                self.run_source(method, lambda sql: rows, page_size=2)
+
+    def test_credential_directory_pages_descending_and_keeps_latest_user_token(self):
+        calls = []
+        def responder(sql):
+            self.assertIn('FORCE INDEX(PRIMARY)', sql)
+            self.assertIn('ORDER BY id DESC LIMIT 2000', sql)
+            match = re.search(r'AND id<(\d+)', sql)
+            cursor = int(match.group(1)) if match else 2002
+            calls.append(cursor)
+            return [{'id': str(n), 'user_id': '803' if n in (2001, 1) else '804',
+                     'token': 'synthetic-%d' % n}
+                    for n in range(cursor - 1, max(cursor - 2001, 0), -1)]
+        result, adapter, _, popen = self.run_source(lambda db: db.credentials(), responder)
+        self.assertEqual(calls, [2002, 2])
+        self.assertEqual(result, {'803': 'synthetic-2001', '804': 'synthetic-2000'})
+        self.assertNotIn('synthetic', str(adapter.safe_metrics))
+        self.assertEqual(popen.call_count, 1)
+
+    def test_credential_directory_repeated_or_out_of_order_page_fails_closed(self):
+        for ids in ((1, 2), (2, 2)):
+            with self.assertRaisesRegex(source.SqlSourceError, 'credential_directory_incomplete'):
+                self.run_source(lambda db: db.credentials(), lambda sql: [
+                    {'id': str(n), 'user_id': '803', 'token': 'synthetic'} for n in ids])
+
+    def test_directory_global_caps_still_fail_instead_of_truncating(self):
+        def products(sql):
+            cursor = int(re.search(r'WHERE id>(\d+)', sql).group(1))
+            return [{'id': str(n)} for n in range(cursor + 1, cursor + 2001)]
+        with self.assertRaisesRegex(source.SqlSourceError, 'product_directory_incomplete'):
+            self.run_source(lambda db: db.products(), products)
+        def credentials(sql):
+            match = re.search(r'AND id<(\d+)', sql)
+            cursor = int(match.group(1)) if match else 12001
+            return [{'id': str(n), 'user_id': '803', 'token': 'synthetic'}
+                    for n in range(cursor - 1, max(cursor - 2001, 0), -1)]
+        with self.assertRaisesRegex(source.SqlSourceError, 'credential_directory_incomplete'):
+            self.run_source(lambda db: db.credentials(), credentials)
+
+    def test_sources_use_at_most_1000_primary_ids_and_preserve_all_membership(self):
+        sizes = []
+        def responder(sql):
+            self.assertIn('FORCE INDEX(PRIMARY)', sql)
+            clause = re.search(r'WHERE id IN \(([^)]+)\)', sql).group(1)
+            ids = [bytes.fromhex(value).decode() for value in re.findall(r'0x([0-9a-f]+)', clause)]
+            sizes.append(len(ids))
+            self.assertLessEqual(int(re.search(r'LIMIT (\d+)', sql).group(1)), 2000)
+            return [{'id': identifier, 'source_type': 3, 'source_id': identifier} for identifier in ids]
+        result, _, _, popen = self.run_source(lambda db: db.sources(map(str, range(1, 1002))), responder)
+        self.assertEqual(len(result), 1001)
+        self.assertEqual(sizes, [1000, 1])
+        self.assertEqual(popen.call_count, 1)
+
+    def test_config_accepts_1000_ids_but_never_over_2000_rows_per_page(self):
+        self.assertEqual(self.make_source().lineage_batch_size, 1000)
+        self.assertEqual(self.make_source(lineage_batch_size=200).lineage_batch_size, 200)
+        for config in ({'lineage_batch_size': 1001}, {'page_size': 2001}):
+            with self.assertRaisesRegex(source.SqlSourceError, 'unsafe_sql_limits'):
+                self.make_source(**config)
 
     def test_nested_query_error_poison_closes_snapshot_until_outer_exit(self):
         failed = FakeMysql(lambda sql: None)
