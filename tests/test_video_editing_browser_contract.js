@@ -595,3 +595,17 @@ test('multipart resume reconciles COS, renews an expired signature and never sto
   assert.equal(writes.some(value=>value.includes('temporary-secret')||value.includes('https://')),false);
   assert.deepEqual(JSON.parse(storage.get('ve-upload-sessions-v1')),{});
 });
+test('selected episodes show independent download and queue progress without losing checks or scroll',async()=>{
+  const app=await catalogFixture();await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2']);
+  await app.field('addEpisodes').click();
+  app.sources.get('vep_async_1').probe_progress={status:'running',stage:'downloading',download_bytes:10485760,total_bytes:41943040};
+  app.sources.get('vep_async_2').probe_progress={status:'queued',stage:'queued'};
+  app.field('catalogEpisodes').scrollTop=240;await app.poll();
+  assert.match(app.field('catalogEpisodes').innerHTML,/下载中 25%/);
+  assert.match(app.field('catalogEpisodes').innerHTML,/排队中/);
+  assert.match(app.field('catalogEpisodes').innerHTML,/<progress/);
+  assert.equal(app.field('catalogEpisodes').scrollTop,240);
+  assert.equal(app.field('addEpisodes').disabled,true);
+  app.ready(1,2);await app.poll();assert.equal(app.field('dramaDialog').open,false);
+  assert.equal(app.probes.length,1);
+});

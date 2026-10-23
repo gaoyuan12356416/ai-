@@ -52,6 +52,9 @@ def render_concurrency(environ=None):
 
 
 RENDER_CONCURRENCY = render_concurrency()
+PROBE_CONCURRENCY = int(os.environ.get("VIDEO_EDITING_PROBE_CONCURRENCY", "3"))
+if not 1 <= PROBE_CONCURRENCY <= 4:
+    raise ValueError("VIDEO_EDITING_PROBE_CONCURRENCY must be in 1..4")
 COMPOSITOR_BACKEND = os.environ.get("DRAMA_GPU_COMPOSITOR_BACKEND", "legacy_cpu")
 COMPOSITOR_CHUNK_SECONDS = int(os.environ.get("DRAMA_GPU_CHUNK_SECONDS", "120"))
 COMPOSITOR_LANES = compositor_lanes()
@@ -98,7 +101,7 @@ def get_runtime():
             except ValueError:
                 raise runtime_error("gpu_runtime_unavailable") from None
             prefetch_enabled, prefetch_overlap = prefetch_configuration()
-            EDITING_SERVICE = editing_from_app(drama_app)
+            EDITING_SERVICE = editing_from_app(drama_app, render_slots=RENDER_SLOTS)
             adapter = RuntimeAdapter(EDITING_SERVICE, legacy_execute=drama_app.handle_gpu_video_render,
                 legacy_cached=cache, legacy_sync_cached=sync_cache,
                 legacy_resume=getattr(drama_app, "gpu_video_resume_ready", None))
@@ -109,6 +112,8 @@ def get_runtime():
                 can_prefetch=lambda payload: task_kind(payload) == "drama",
                 render_slots=RENDER_SLOTS, queue_limit=limit,
                 dispatcher_workers=RENDER_CONCURRENCY,
+                parallel_workers=PROBE_CONCURRENCY,
+                parallel_predicate=lambda payload: task_kind(payload) == EDITING_TASK_TYPE and payload.get("operation") == "probe",
                 prefetch=(lambda payload, **kwargs: prefetch_episodes(payload, root, **kwargs))
                 if prefetch_enabled else None,
                 prefetch_during_download=prefetch_overlap,
@@ -182,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "role": "media-only",
                 "render_concurrency": RENDER_CONCURRENCY,
+                "video_editing_probe_concurrency": PROBE_CONCURRENCY,
                 "compositor_backend": COMPOSITOR_BACKEND,
                 "compositor_chunk_seconds": COMPOSITOR_CHUNK_SECONDS,
                 "compositor_lanes": COMPOSITOR_LANES,

@@ -4,6 +4,8 @@ import logging
 import json
 import re
 import requests
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from . import VideoEditingError, require
 from .store import identifier, now
@@ -12,9 +14,12 @@ ACTIVE={'submitting','queued_gpu','running','unknown','recovery_required'}
 
 
 class Dispatcher:
-    def __init__(self,service,transport=None):
+    def __init__(self,service,transport=None,probe_concurrency=None):
         self.service=service;self.store=service.store;self.holder=identifier('worker_')
         self.transport=transport
+        self.probe_concurrency=int(probe_concurrency if probe_concurrency is not None else os.environ.get('VIDEO_EDITING_PROBE_CONCURRENCY','3'))
+        if not 1 <= self.probe_concurrency <= 4:
+            raise ValueError('VIDEO_EDITING_PROBE_CONCURRENCY must be in 1..4')
 
     def request(self,method,path,payload=None):
         if self.transport:
@@ -50,15 +55,29 @@ class Dispatcher:
             rows=db.execute("SELECT * FROM ve_task WHERE status NOT IN ('completed','failed','cancelled') ORDER BY created_at,rowid").fetchall()
             rows=[self.store.row(r) for r in rows]
             active=[r for r in rows if r['status'] in ACTIVE]
-            # Do not submit a second job while an accepted/unknown one remains.
-            row=active[0] if active else next((r for r in rows if r['status'] in {'queued','resume_queued'}),None)
-            if not row: return False
-            if row['status'] in {'queued','resume_queued'} and row['data'].get('next_attempt_at',0)>now():return False
-            fresh=row['status']=='queued'
-            resume=row['status']=='resume_queued'
-            if fresh or resume:
-                row['data']['dispatch_started_at']=now()
-                self.store.update('task',row['id'],{'status':'submitting','data':row['data']},db)
+            selected=list(active)
+            counts={kind:sum(r['kind']==kind for r in active) for kind in ('probe','render')}
+            # Uncertain outcomes retain their original task and block fresh work.
+            held=any(r['status'] in {'unknown','recovery_required'} for r in active)
+            if not held:
+                for row in rows:
+                    if row['status'] not in {'queued','resume_queued'} or row['data'].get('next_attempt_at',0)>now():continue
+                    limit=self.probe_concurrency if row['kind']=='probe' else 1
+                    if counts[row['kind']]>=limit:continue
+                    counts[row['kind']]+=1
+                    row['data']['dispatch_started_at']=now()
+                    self.store.update('task',row['id'],{'status':'submitting','data':row['data']},db)
+                    selected.append(row)
+        if not selected:return False
+        # Each request has a bounded timeout; poll all admitted jobs every tick.
+        # Separate SQLite connections preserve the existing atomic receipts.
+        with ThreadPoolExecutor(max_workers=self.probe_concurrency+1) as pool:
+            list(pool.map(self.dispatch_one,selected))
+        return True
+
+    def dispatch_one(self,row):
+        fresh=row['status']=='queued'
+        resume=row['status']=='resume_queued'
         path='/api/gpu-video/video-editing/jobs/'+row['id']
         try:
             if fresh:

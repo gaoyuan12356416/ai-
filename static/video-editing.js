@@ -5,6 +5,19 @@
   const clone = value => JSON.parse(JSON.stringify(value));
   const uid = () => global.crypto && global.crypto.randomUUID ? global.crypto.randomUUID() : `ve-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const durationOf = source => Number(source && source.metadata && source.metadata.duration_ms || 0);
+  function probeDisplay(source) {
+    if(source.status==='ready')return {text:`${(durationOf(source)/1000).toFixed(3).replace(/\.?0+$/,'')} 秒 · 已就绪`,percent:null};
+    const p=source.probe_progress||{},status=p.status||source.status,stage=p.stage;
+    if(['failed','unknown','recovery_required','cancelled'].includes(status))return {text:({failed:'校验失败',unknown:'连接中断，正在核实',recovery_required:'等待恢复',cancelled:'已取消'})[status],percent:null};
+    if(status==='queued'||status==='queued_gpu'||stage==='queued'||stage==='waiting_gpu_capacity')return {text:'排队中 · 等待校验资源',percent:null};
+    if(stage==='downloading'){
+      const done=Math.max(0,Number(p.download_bytes)||0),total=Math.max(0,Number(p.total_bytes)||0);
+      const percent=total?Math.min(100,Math.floor(done/total*100)):null;
+      const mb=n=>(n/1048576).toFixed(1);
+      return {text:`下载中${percent===null?'':` ${percent}%`} · ${mb(done)}${total?` / ${mb(total)}`:''} MB`,percent};
+    }
+    return {text:({waiting_media:'排队中 · 等待预览处理',verifying:'校验视频信息',normalizing:'生成预览',uploading:'保存校验结果',starting:'准备下载'})[stage]||(source.status==='unprobed'?'待校验':'正在准备校验'),percent:null};
+  }
   function layout(clips) {
     let cursor = 0;
     return (clips || []).map((clip, index) => {
@@ -96,7 +109,7 @@
     }
     return encoded;
   }
-  const model = { FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64 };
+  const model = { FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64, probeDisplay };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   if (!global.document) return;
   global.VideoEditingModel = model;
@@ -336,7 +349,7 @@
     const request=(async()=>{const response=await api(`${ROOT}/assets?q=${encodeURIComponent(query)}&status=all&limit=60&offset=${offset}`);if(sequence!==state.assetsLoadSeq||query!==$('assetSearch').value)return;state.assets=append?state.assets.concat(response.items||[]):response.items||[];state.assetsTotal=response.total||state.assets.length;rememberSources(state.assets);renderAssets();})();assetLoads.set(key,request);
     try{return await request;}finally{if(assetLoads.get(key)===request)assetLoads.delete(key);}
   }
-  const statusLabel=status=>({uploading:'上传中',uploaded:'待校验',probing:'媒体校验中',ready:'可剪辑',failed:'失败',deleted:'已删除',unprobed:'待校验',queued:'排队中',queued_gpu:'GPU 排队中',submitting:'正在提交',running:'处理中',recovery_required:'等待恢复',resume_queued:'等待核实恢复',preparing:'准备素材',starting:'准备制作',connecting:'连接制作服务',waiting_gpu_capacity:'等待制作资源',downloading:'下载素材',normalizing:'处理片段',concatenating:'拼接制作',rendering:'制作中',rendering_random:'制作中',rendering_intro:'制作片头',waiting_cover:'等待封面',removing_bgm:'处理背景音乐',uploading_output:'上传成片',verifying:'校验成片',verification:'校验成片',prefetching:'预下载素材',prefetched:'素材已就绪',completed:'制作完成',succeeded:'制作完成',unknown:'正在核实结果',cancelled:'已取消'}[status]||(typeof status==='string'&&/[\u3400-\u9fff]/.test(status)?status:status?'处理中':'等待状态'));
+  const statusLabel=status=>({uploading:'上传中',uploaded:'待校验',probing:'媒体校验中',ready:'可剪辑',failed:'失败',deleted:'已删除',unprobed:'待校验',queued:'排队中',queued_gpu:'GPU 排队中',submitting:'正在提交',running:'处理中',recovery_required:'等待恢复',resume_queued:'等待核实恢复',preparing:'准备素材',starting:'准备制作',connecting:'连接制作服务',waiting_gpu_capacity:'等待制作资源',waiting_media:'等待预览处理',downloading:'下载素材',normalizing:'处理片段',concatenating:'拼接制作',rendering:'制作中',rendering_random:'制作中',rendering_intro:'制作片头',waiting_cover:'等待封面',removing_bgm:'处理背景音乐',uploading_output:'上传成片',verifying:'校验成片',verification:'校验成片',prefetching:'预下载素材',prefetched:'素材已就绪',completed:'制作完成',succeeded:'制作完成',unknown:'正在核实结果',cancelled:'已取消'}[status]||(typeof status==='string'&&/[\u3400-\u9fff]/.test(status)?status:status?'处理中':'等待状态'));
   function taskProgressText(task){
     const stage=task.stage||task.status,label=statusLabel(stage),progress=task.progress;
     if(Number.isFinite(progress)&&progress>=0)return `${label} · ${Math.round(Math.min(100,progress<=1?progress*100:progress))}%`;
@@ -447,7 +460,9 @@
   function renderEpisodes() {
     const pending=state.pendingAdd,waiting=pendingCurrent(pending);
     const selected=new Set(waiting?pending.ids:Array.from(document.querySelectorAll('.episode-select:checked')).map(input=>input.value));
-    $('catalogEpisodes').innerHTML=state.episodes.map(source=>`<label class="episode-option"><input class="episode-select" type="checkbox" value="${esc(source.source_id||source.id)}" ${selected.has(source.source_id||source.id)?'checked':''} ${waiting?'disabled':''}><span>${esc(sourceTitle(source))}<small> · ${durationOf(source)?seconds(durationOf(source))+' 秒':esc(statusLabel(source.status))}</small></span></label>`).join('')||'<div class="empty">暂无可用剧集</div>';
+    const scrollTop=$('catalogEpisodes').scrollTop;
+    $('catalogEpisodes').innerHTML=state.episodes.map(source=>{const progress=probeDisplay(source);return `<label class="episode-option"><input class="episode-select" type="checkbox" value="${esc(source.source_id||source.id)}" ${selected.has(source.source_id||source.id)?'checked':''} ${waiting?'disabled':''}><span>${esc(sourceTitle(source))}<small class="episode-status">${esc(progress.text)}</small>${progress.percent===null?'':`<progress class="episode-download-progress" max="100" value="${progress.percent}" aria-label="${esc(sourceTitle(source))} 下载进度 ${progress.percent}%"></progress>`}</span></label>`;}).join('')||'<div class="empty">暂无可用剧集</div>';
+    $('catalogEpisodes').scrollTop=scrollTop;
     $('addEpisodes').disabled=waiting||!state.episodes.length;$('addEpisodes').setAttribute('aria-busy',String(waiting));
     $('cancelAddEpisodes').classList.toggle('hidden',!waiting);
     if(!waiting)$('addEpisodes').textContent='添加所选剧集';
@@ -458,7 +473,10 @@
     const ready=intent.ids.filter(sourceReady).length;
     $('addEpisodes').disabled=true;$('addEpisodes').setAttribute('aria-busy','true');
     $('addEpisodes').textContent=intent.phase==='preparing'?'正在准备校验…':`校验中 ${ready}/${intent.ids.length}`;
-    setCatalogStatus(`媒体校验${intent.recovering?'恢复':''}：已就绪 ${ready}/${intent.ids.length}，${intent.phase==='preparing'?'正在准备所选剧集，':''}完成后自动添加。可取消等待。`,false,true);
+    const pending=intent.ids.map(id=>state.sources[id]||{}).filter(source=>source.status!=='ready');
+    const downloading=pending.filter(source=>source.probe_progress?.stage==='downloading').length;
+    const queued=pending.filter(source=>['queued','queued_gpu'].includes(source.probe_progress?.status)||['queued','waiting_gpu_capacity','waiting_media'].includes(source.probe_progress?.stage)).length;
+    setCatalogStatus(`媒体校验${intent.recovering?'恢复':''}：已就绪 ${ready}/${intent.ids.length}${downloading?`，下载中 ${downloading} 集`:''}${queued?`，排队 ${queued} 集`:''}。${intent.phase==='preparing'?'正在准备所选剧集。':''}完成后自动添加，可取消等待。`,false,true);
   }
   function failPendingAdd(intent,message) {
     if(!pendingCurrent(intent))return;state.pendingAdd=null;renderEpisodes();setCatalogStatus(`${message}。可点击“添加所选剧集”核实并重试。`,true);
@@ -694,7 +712,7 @@
     if(demo){$('pageRoot').classList.remove('hidden');seedDemo();state.ready=true;return;}
     try{state.config={...state.config,...item(await api(`${ROOT}/config`))};const notices=[];if(state.config.intake_enabled===false||state.config.enabled===false)notices.push('新上传、媒体校验和制作提交已暂停；已有上传可续传，历史项目和成片仍可查看。');if(state.config.worker_configured===false)notices.push('制作服务尚未配置，暂不能提交 GPU 制作。');if(state.config.cos_configured===false)notices.push('COS 尚未配置，暂不能上传新素材。');$('configNotice').textContent=notices.join(' ');$('configNotice').classList.toggle('hidden',!notices.length);$('uploadLimits').textContent=`单个文件最大 ${bytes(state.config.max_file_bytes)} · 支持分片续传 · 视频直接进入 COS`;$('catalogStatus').textContent=`最多 ${state.config.max_dramas} 部短剧`;$('pageRoot').classList.remove('hidden');await Promise.all([loadAssets(),loadProjects(),loadTasks()]);renderEditor();state.ready=true;}
     catch(error){$('loginGate').innerHTML=`<strong>暂时无法打开视频剪辑</strong><p>${esc(error.message)}</p>`;$('loginGate').classList.remove('hidden');$('pageRoot').classList.add('hidden');}
-    setInterval(pollUpdates,6000);
+    setInterval(pollUpdates,3000);
   }
   init().catch(error=>toast(error.message,true));
 })(typeof window!=='undefined'?window:globalThis);

@@ -6,7 +6,7 @@
   <meta name="referrer" content="same-origin">
   <title>视频剪辑 · AI 后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/video-editing.css?v=20261022-responsive-actions-2">
+  <link rel="stylesheet" href="/video-editing.css?v=20261023-probe-progress-1">
 </head>
 <body>
   <div class="app">
@@ -43,6 +43,6 @@
   <dialog id="insertDialog"><div class="dialog-head"><h2>插入素材</h2><button data-close="insertDialog" class="icon-button" aria-label="关闭">×</button></div><p id="insertName"></p><div class="range-pair"><label>入点 / 秒<input id="insertStart" type="number" min="0" step="0.001" value="0"></label><label>出点 / 秒<input id="insertEnd" type="number" min="0" step="0.001"></label></div><label class="field-label">插入位置<select id="insertPosition"><option value="before">选中片段之前</option><option value="after">选中片段之后</option><option value="start">片头</option><option value="end">片尾</option></select></label><div class="dialog-foot"><button id="confirmInsert" class="button primary">插入时间线</button></div></dialog>
   <dialog id="mediaDialog"><div class="dialog-head"><h2 id="mediaTitle">视频预览</h2><button data-close="mediaDialog" class="icon-button" aria-label="关闭">×</button></div><video id="mediaPlayer" controls playsinline></video><p id="mediaExpiry" class="micro"></p></dialog>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261022-responsive-actions-2"></script>
+  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261023-probe-progress-1"></script>
 </body>
 </html>

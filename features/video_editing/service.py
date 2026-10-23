@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import threading
+import math
 from pathlib import Path
 
 from . import VideoEditingError, require
@@ -75,6 +76,16 @@ class Service:
                 'error_code':d.get('error_code',''),'error_message':d.get('error_message','')}
         for k in ('app_id','content_id','episode_number','title'):
             if k in d: result[k]=d[k]
+        # Shared sources expose media progress, never another owner's task payload.
+        task=self.store.get('task',d['probe_task_id']) if d.get('probe_task_id') and row['status']!='ready' else None
+        if task and task['kind']=='probe' and task['data'].get('source_id')==row['id']:
+            td=task['data'];metrics=td.get('progress',{})
+            metrics=metrics if isinstance(metrics,dict) else {}
+            result['probe_progress']={'status':task['status'],
+                'stage':td.get('stage','queued') if td.get('stage') in {'queued','starting','downloading','verifying','waiting_media','normalizing','uploading','completed','waiting_gpu_capacity'} else task['status'],
+                'updated_at':task['updated_at'],
+                **{key:metrics[key] for key in ('download_bytes','total_bytes','download_bps')
+                   if type(metrics.get(key)) in (int,float) and math.isfinite(metrics[key]) and 0<=metrics[key]<=1e18}}
         if row['kind']=='episode' and not result['preview_url'] and row['status']=='ready': result['preview_url']=d.get('url','')
         return result
 

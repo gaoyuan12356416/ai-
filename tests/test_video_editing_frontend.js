@@ -82,3 +82,11 @@ test('reorder preserves media boundaries and strips an impossible last transitio
   assert.deepEqual(reordered.map(c=>[c.id,c.start_ms,c.end_ms,c.transition]),[['b',2000,7000,'cut'],['a',1000,5000,'cut']]);
   assert.equal(clips[0].transition,'fade');
 });
+test('episode progress distinguishes queue, bytes, processing and ready state',()=>{
+  assert.match(model.probeDisplay({status:'probing',probe_progress:{status:'queued',stage:'queued'}}).text,/排队中/);
+  const p=model.probeDisplay({status:'probing',probe_progress:{status:'running',stage:'downloading',download_bytes:12582912,total_bytes:41943040}});
+  assert.equal(p.percent,30);assert.match(p.text,/12.0 \/ 40.0 MB/);
+  assert.equal(model.probeDisplay({status:'probing',probe_progress:{stage:'downloading',download_bytes:10,total_bytes:0}}).percent,null);
+  assert.match(model.probeDisplay({status:'probing',probe_progress:{status:'unknown',stage:'downloading'}}).text,/核实/);
+  assert.match(model.probeDisplay({status:'ready',metadata:{duration_ms:103733},probe_progress:{stage:'downloading'}}).text,/103.733 秒 · 已就绪/);
+});
