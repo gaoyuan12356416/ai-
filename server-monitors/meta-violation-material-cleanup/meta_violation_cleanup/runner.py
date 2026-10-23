@@ -1,5 +1,6 @@
 """Frozen-scope scanner and serial Creative -> Ad executor."""
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 import json
 import re
@@ -8,6 +9,7 @@ import time
 import uuid
 from .policy import product_scope, parse_ids, material_identity, qualifying_policies, build_evidence, evaluate_ad
 from .runtime import CST, digest, legacy_delete_lock, now
+from .graph import GraphClient
 
 ACTOR='automation:meta-violation-material-cleanup'
 
@@ -49,9 +51,18 @@ class Runner:
     def __init__(self, config, source, graph, runtime, shared_store, notifier, stop=lambda:False):
         self.config=config;self.source=source;self.graph=graph;self.runtime=runtime
         self.store=shared_store;self.notifier=notifier;self.stop=stop
+        self.execution_graph=graph
 
     def check_stop(self):
         if self.stop():raise InterruptedError('stop_requested')
+
+    def sql_snapshot(self):
+        factory=getattr(self.source,'snapshot',None)
+        return factory() if callable(factory) else nullcontext()
+
+    def current_scope(self):
+        reader=getattr(self.source,'scope_products',None)
+        return product_scope(reader() if callable(reader) else self.source.products())
 
     def lineage_data(self, ids, violation_rows=()):
         data={}
@@ -85,6 +96,8 @@ class Runner:
         evidence=build_evidence(policy_rows,lineage,sources,scope,start,end)
         self.runtime.artifact(run_id,'violation-evidence.json',{'rows':policy_rows,'evidence':evidence,'start':start,'end':end})
         self.runtime.update(run_id,stage='account_discovery',vio_rows=len(violations),policy_rows=len(policy_rows),material_count=len(evidence['materials']))
+        if isinstance(self.graph,GraphClient):
+            self.graph.on_discovery_progress=lambda data:self.runtime.update(run_id,**data)
         discovery=self.graph.list_accounts()
         errors=list(discovery['errors']);account_results=[];candidates=[];skip=Counter();product_counts=Counter();mapping_gaps=Counter()
         accounts=discovery['accounts']
@@ -100,7 +113,7 @@ class Runner:
                 continue
             try:
                 identities,account_sources=self.lineage_data([str(a['id']) for a in ads])
-                eligible=[];account_skip=Counter();account_products=Counter();account_gaps=Counter()
+                eligible=[];routed=[];account_skip=Counter();account_products=Counter();account_gaps=Counter()
                 for ad in ads:
                     rows=identities.get(str(ad['id']),[])
                     identity=material_identity(rows,account_sources,scope,creative_id=object_id(ad))
@@ -116,8 +129,21 @@ class Runner:
                     # Never rotate credentials to force a mutation. Select from
                     # the exact publishing queue/product lineage before freezing.
                     matched=[r for r in rows if str(r.get('creative_id',''))==object_id(ad) and str(r.get('product','')) in scope]
+                    routed.append((ad,identity,decision,matched))
+                batch_method=getattr(self.source,'selected_credentials',None)
+                batch_routes=None
+                if callable(batch_method) and routed:
+                    route_rows={str(r['id']):r for _,_,_,matched in routed for r in matched}
+                    batch_routes=batch_method(list(route_rows.values()))
+                for ad,identity,decision,matched in routed:
                     try:
-                        users={numeric_id(self.source.selected_credential(r)) for r in matched}
+                        if batch_routes is None:
+                            users={numeric_id(self.source.selected_credential(r)) for r in matched}
+                        else:
+                            selected=[batch_routes.get(str(r['id']),{}) for r in matched]
+                            if any(r.get('error') or not r.get('user_id') for r in selected):
+                                raise ValueError('credential_lineage_unavailable')
+                            users={numeric_id(r['user_id']) for r in selected}
                     except Exception as exc:
                         if ledger_error(exc):raise
                         account_skip['credential_lineage_unavailable']+=1;account_gaps['credential_lineage_unavailable']+=1
@@ -155,7 +181,8 @@ class Runner:
                 ref_lineage={}
                 for part in chunks([str(r['id']) for r in extra]):ref_lineage.update(self.source.lineages(part))
                 shared[cid]=[{'ad_id':str(r['id']),'account_id':str(r.get('account_id','')),
-                    'product_ids':sorted({str(a.get('product')) for a in ref_lineage.get(str(r['id']),[])})} for r in extra]
+                    'product_ids':sorted({str(a.get('product')) for a in ref_lineage.get(str(r['id']),[])
+                        if str(a.get('creative_id',''))==cid and str(a.get('product','')).isdigit()})} for r in extra]
         violation_ids=defaultdict(list)
         for row in policy_rows:violation_ids[str(row['ad_id'])].append(str(row['id']))
         manifest={'version':1,'policy_version':'20261023-v1','run_id':run_id,'window_start':start,'window_end':end,'frozen_at':now(),
@@ -176,7 +203,6 @@ class Runner:
         return manifest
 
     def preflight(self, candidate, manifest):
-        scope=product_scope(self.source.products())
         # Re-read a sufficient set of trigger evidence; never authorize from
         # stale counters alone. Four distinct Ads suffice for rule 2.
         proof_ids=set()
@@ -186,15 +212,18 @@ class Runner:
                 vids=manifest['violation_ids_by_ad'].get(str(adid),[])
                 if isinstance(vids,str):vids=[vids]
                 proof_ids.update(vids)
-        proofs=self.source.violations_by_ids(sorted(proof_ids))
-        proof_lineages,proof_sources=self.lineage_data([str(r['ad_id']) for r in proofs],proofs)
-        evidence=build_evidence(proofs,proof_lineages,proof_sources,scope,manifest['window_start'],manifest['window_end'])
-        rows,sources=self.lineage_data([candidate['ad_id']])
-        matching=[r for r in rows.get(candidate['ad_id'],[]) if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
-        users={numeric_id(self.source.selected_credential(r)) for r in matching}
+        # All SQL reads share one FIFO snapshot; release it before Graph I/O.
+        with self.sql_snapshot():
+            scope=self.current_scope()
+            proofs=self.source.violations_by_ids(sorted(proof_ids))
+            proof_lineages,proof_sources=self.lineage_data([str(r['ad_id']) for r in proofs],proofs)
+            evidence=build_evidence(proofs,proof_lineages,proof_sources,scope,manifest['window_start'],manifest['window_end'])
+            rows,sources=self.lineage_data([candidate['ad_id']])
+            matching=[r for r in rows.get(candidate['ad_id'],[]) if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
+            users={numeric_id(self.source.selected_credential(r)) for r in matching}
         if users!={candidate['user_id']}:
             return {'eligible':False,'reason':'credential_lineage_changed'}
-        ad=self.graph.get_ad(candidate['ad_id'],candidate['user_id'])
+        ad=self.execution_graph.get_ad(candidate['ad_id'],candidate['user_id'])
         if str(ad.get('account_id','')).removeprefix('act_') != candidate['account_id'].removeprefix('act_') or object_id(ad)!=candidate['creative_id']:
             return {'eligible':False,'reason':'account_or_creative_changed'}
         identity=material_identity(rows[candidate['ad_id']],sources,scope,creative_id=candidate['creative_id'])
@@ -225,13 +254,13 @@ class Runner:
             self.runtime.write_barrier(run_id)
             self.check_stop()
             request_started=True
-            result=self.graph.delete(kind,identifier,uid,account)
+            result=self.execution_graph.delete(kind,identifier,uid,account)
             result=dict(result,**context,account_id=account)
             status=result['status']
             result['delete_status']=status
             result['api_accepted']=status=='api_accepted'
             if status in ('api_accepted','unknown'):
-                verification=self.graph.reconcile(kind,identifier,uid,account)
+                verification=self.execution_graph.reconcile(kind,identifier,uid,account)
                 result=dict(result,verification=verification)
                 if verification.get('status')=='deleted_verified':
                     result.update(status='deleted_verified',confirmed_deleted=True)
@@ -263,16 +292,18 @@ class Runner:
         new content-policy decision. Group preflight owns that review decision.
         A concurrent Creative/product/material change still cancels the Ad.
         """
-        scope=product_scope(self.source.products())
-        rows,sources=self.lineage_data([candidate['ad_id']])
-        current=rows.get(candidate['ad_id'],[])
-        identity=material_identity(current,sources,scope,creative_id=candidate['creative_id'])
+        with self.sql_snapshot():
+            scope=self.current_scope()
+            rows,sources=self.lineage_data([candidate['ad_id']])
+            current=rows.get(candidate['ad_id'],[])
+            identity=material_identity(current,sources,scope,creative_id=candidate['creative_id'])
+            matched=[r for r in current if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
+            users={numeric_id(self.source.selected_credential(r)) for r in matched}
         if identity.get('reason') or identity['root_id']!=candidate['root_id'] or set(identity['material_ids'])!=set(candidate['material_ids']) or set(identity['product_ids'])!=set(candidate['identity']['product_ids']):
             return 'dependency_identity_changed'
-        matched=[r for r in current if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
-        if {numeric_id(self.source.selected_credential(r)) for r in matched}!={candidate['user_id']}:
+        if users!={candidate['user_id']}:
             return 'dependency_credential_changed'
-        ad=self.graph.get_ad(candidate['ad_id'],candidate['user_id'])
+        ad=self.execution_graph.get_ad(candidate['ad_id'],candidate['user_id'])
         if str(ad.get('id'))!=candidate['ad_id'] or str(ad.get('account_id','')).removeprefix('act_')!=candidate['account_id'] or object_id(ad)!=candidate['creative_id']:
             return 'dependency_ad_or_creative_changed'
         statuses=[ad.get('status'),(ad.get('adset') or {}).get('status'),(ad.get('campaign') or {}).get('status')]
@@ -331,7 +362,15 @@ class Runner:
         run=self.store.claim_run(job_id,manifest['sha256'],ACTOR,['creative','ad'],job_id+'-'+uuid.uuid4().hex)
         shared_run=run['run_id']
         counts=Counter();results=[];final='completed'
+        isolated_graph=None
         try:
+            if isinstance(self.graph,GraphClient):
+                # Do not alter the scan client's retries or any inventory
+                # worker's session. A separate short, non-retrying read client
+                # bounds lock-held mutation/preflight work near 10:00.
+                isolated_graph=GraphClient(self.graph.tokens,version=self.graph.version,
+                    timeout=min(self.graph.timeout,20),get_retries=0)
+                self.execution_graph=isolated_graph
             self.runtime.update(run_id,stage='executing',shared_job_id=job_id,shared_run_id=shared_run,canary_deferred_ads=limited)
             for cid,items in groups.items():
                 self.check_stop()
@@ -400,6 +439,8 @@ class Runner:
             final='interrupted'
             raise
         finally:
+            self.execution_graph=self.graph
+            if isolated_graph is not None:isolated_graph.close()
             # Fence in-flight claims before writing optional reporting files.
             # If this commit fails, propagate and let startup recovery fence
             # the durable in-progress records; never proceed to another write.
@@ -414,15 +455,48 @@ class Runner:
         return final
 
     def start_text(self, run_id, start, end):
-        return ('Meta违规素材清理｜开始\n运行：%s\n产品：DramaWave、HotDrama（含W2A）\n窗口：%s 至 %s（北京时间）\n'
+        return ('Meta违规素材清理｜开始\n运行：%s\n启动：%s\n产品：DramaWave、HotDrama（含W2A）\n窗口：%s 至 %s（北京时间）\n'
                 '规则1：指定原因≥1次，清理当前未违规的已关闭广告（含上层暂停）。\n'
-                '规则2：同素材≥4个不同违规广告，清理其全部当前未违规广告。\n先删Creative再删Ad；共享Creative亦删除。')%(run_id,start,end)
+                '规则2：同素材≥4个不同违规广告，清理其全部当前未违规广告。\n'
+                '原因：成人裸露及性行为、成人性招揽及露骨性语言、成人性剥削、人口剥削、垃圾内容、暴力与血腥内容、毒品与药品。\n'
+                '先删Creative再删Ad；共享Creative亦删除。')%(run_id,now(),start,end)
 
     def end_text(self, run_id):
         run=self.runtime.get(run_id);d=run['data']
-        return ('Meta违规素材清理｜结束\n运行：%s\n状态：%s\n窗口：%s 至 %s（北京时间）\n'
-                '账户：%s/%s；覆盖异常：%s\n命中素材：%s\n候选广告：%s；规则1：%s；规则2：%s（两规则去重合并）\n'
-                '产品候选：%s\n共享Creative：%s\n结果：%s\n跳过：%s\n待后续处理：%s；未解决（含失败及未知）：%s\n开始：%s\n结束：%s\n清单及明细保存在CPU运行账本。')%(
-                    run_id,run['status'],d.get('window_start',''),d.get('window_end',''),d.get('accounts_finished',0),d.get('accounts_total',0),d.get('coverage_errors',0),
-                    d.get('material_count',0),d.get('candidate_ads',0),d.get('rule1_ads',0),d.get('rule2_ads',0),json.dumps(d.get('product_candidate_ads',{}),ensure_ascii=False),
-                    d.get('shared_creatives',0),json.dumps(d.get('result_counts',{}),ensure_ascii=False),json.dumps(d.get('skip_counts',{}),ensure_ascii=False),d.get('remaining_ads',0),d.get('unresolved_ads',0),run['started'],run['ended'])
+        try:manifest=self.runtime.load_artifact(run_id,'manifest.json')
+        except ValueError:manifest={}
+        labels={'completed':'完成','partial':'部分完成','interrupted':'中断','failed':'失败','previewed':'预演完成','running':'执行中'}
+        started=d.get('execution_started_at') or run['started']
+        ended=run['ended'] or now()
+        try:seconds=max(0,int((datetime.fromisoformat(ended)-datetime.fromisoformat(started)).total_seconds()))
+        except (TypeError,ValueError):seconds=0
+        lines=['Meta违规素材清理｜结束','运行：'+run_id,'状态：'+labels.get(run['status'],run['status']),
+            '窗口：%s 至 %s（北京时间）'%(d.get('window_start',''),d.get('window_end','')),
+            '账户：%s/%s；覆盖异常：%s'%(d.get('accounts_finished',0),d.get('accounts_total',0),d.get('coverage_errors',0)),
+            '30天命中素材：%s；候选广告去重：%s'%(d.get('material_count',0),d.get('candidate_ads',0)),
+            '规则1：%s；规则2：%s（可重叠）'%(d.get('rule1_ads',0),d.get('rule2_ads',0))]
+        candidates=manifest.get('candidates',[])
+        for root,name in [('1479','DramaWave'),('3302','HotDrama')]:
+            selected=[c for c in candidates if c['root_id']==root]
+            lines.append('%s：已识别广告%s，候选%s（规则1=%s，规则2=%s）'%(name,
+                d.get('product_scanned_ads',{}).get(root,0),len(selected),
+                sum('rule1' in c['rules'] for c in selected),sum('rule2' in c['rules'] for c in selected)))
+        counts=d.get('result_counts',{})
+        for kind,label in [('creative','Creative'),('ad','Ad')]:
+            lines.append('本次%s：API接受%s，回读确认删除%s，明确失败%s，未知%s，既有成功回执%s'%(label,
+                counts.get(kind+'_api_accepted',0),counts.get(kind+'_deleted_verified',0),counts.get(kind+'_failed',0),
+                counts.get(kind+'_unknown',0),counts.get(kind+'_already_deleted',0)+counts.get(kind+'_deleted',0)))
+        impacts=manifest.get('shared_creative_impacts',{})
+        lines.append('共享Creative：%s；引用覆盖：%s'%(len(impacts),manifest.get('shared_reference_coverage','未完成')))
+        for cid,refs in impacts.items():
+            lines.append('Creative '+cid+' 的其他引用（这些Ad不因共享关系删除）：')
+            for ref in refs:
+                products=ref.get('product_ids') or []
+                outside=any(pid not in manifest.get('scope',{}) for pid in products)
+                lines.append('Ad %s｜产品 %s%s'%(ref['ad_id'],','.join(products) or '未识别','（包含范围外产品）' if outside else ''))
+        lines.extend(['跳过原因：'+json.dumps(d.get('skip_counts',{}),ensure_ascii=False),
+            '执行时资格变化/跳过：%s'%counts.get('skipped_ads',0),
+            '剩余待处理：%s；未解决（含失败及未知）：%s'%(d.get('remaining_ads',0),d.get('unresolved_ads',0)),
+            '本次启动：%s；结束：%s；耗时：%s分%s秒'%(started,ended,seconds//60,seconds%60),
+            '完整证据：/mnt/data-disk/meta-violation-material-cleanup/runs/'+run_id+'/'])
+        return '\n'.join(lines)

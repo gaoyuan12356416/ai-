@@ -111,10 +111,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['run_ids'], ['run-1'])
         self.assertEqual(result['notices_unknown'], 1)
         self.assertEqual(self.runtime.get('run-1')['status'], 'interrupted')
+        self.assertTrue(self.runtime.get('run-1')['data']['recovery_pending'])
         self.assertEqual(self.runtime.get('finished')['status'], 'completed')
         self.assertEqual(self.runtime.notice('run-1', 'start')['status'], 'unknown')
         with patch.object(module, '_owner_alive', return_value=False):
+            self.assertEqual(self.runtime.recover_interrupted()['run_ids'], ['run-1'])
+        self.runtime.update('run-1', recovery_pending=False)
+        with patch.object(module, '_owner_alive', return_value=False):
             self.assertEqual(self.runtime.recover_interrupted()['run_ids'], [])
+
+    def test_pending_recovery_survives_reopen_and_preserves_shared_identity(self):
+        self.runtime.update('run-1', shared_job_id='policy-cleanup-run-1', shared_run_id='shared-1')
+        with patch.object(module, '_owner_alive', return_value=False):
+            self.runtime.recover_interrupted()
+        self.runtime.close()
+        self.runtime = Runtime(self.tmp.name)
+        with patch.object(module, '_owner_alive', return_value=False):
+            result = self.runtime.recover_interrupted()
+        self.assertEqual(result['run_ids'], ['run-1'])
+        self.assertEqual(self.runtime.get('run-1')['data']['shared_run_id'], 'shared-1')
+        count = self.runtime.db.execute("SELECT count(*) FROM events WHERE kind='run_recovered'").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_pending_recovery_does_not_return_alive_or_unknown_owners(self):
+        self.runtime.update('run-1', status='interrupted', recovery_pending=True)
+        for state in (True, None):
+            with patch.object(module, '_owner_alive', return_value=state):
+                self.assertEqual(self.runtime.recover_interrupted()['run_ids'], [])
+        self.assertTrue(self.runtime.get('run-1')['data']['recovery_pending'])
 
     def test_alive_and_indeterminate_owners_remain_fenced(self):
         for state in (True, None):

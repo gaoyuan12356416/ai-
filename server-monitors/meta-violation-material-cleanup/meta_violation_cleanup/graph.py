@@ -313,7 +313,13 @@ class GraphClient:
 
     def list_accounts(self):
         accounts, errors = {}, []
+        finished = 0
         for user_id, per_user, error in self._bounded_reads(self._user_accounts, sorted(self.tokens)):
+            finished += 1
+            progress = getattr(self, 'on_discovery_progress', None)
+            if callable(progress):
+                progress({'identities_total': len(self.tokens), 'identities_finished': finished,
+                          'identities_failed': len(errors) + bool(error), 'accounts_discovered': len(accounts)})
             if error:
                 errors.append(error)
                 continue
@@ -403,7 +409,8 @@ class GraphClient:
             token = self._token(user_id)
             record = self._object(kind, identifier, user_id, aid)
             if record.get("status") == "DELETED":
-                return {"status": "failed", "code": "already_deleted", "request_sent": False}
+                return {"status": "deleted_verified", "code": "already_deleted",
+                        "confirmed_deleted": True, "request_sent": False, "object": record}
         except GraphError as error:
             return {"status": "failed", "request_sent": False, "error": error.as_dict()}
         try:

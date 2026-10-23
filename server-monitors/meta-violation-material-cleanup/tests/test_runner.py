@@ -13,6 +13,7 @@ sys.path.insert(0,str(HERE.parents[3]))
 from features.fb_ad_asset_delete.store import Store, StoreError
 from meta_violation_cleanup.runner import Runner
 from meta_violation_cleanup.runtime import digest
+from meta_violation_cleanup.graph import GraphClient
 
 
 START='2026-09-23T12:00:00+08:00'
@@ -139,6 +140,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest['mapping_gap_counts']['credential_lineage_unavailable'],1)
         self.assertNotIn('DO-NOT-LOG-SECRET',str(runtime.events)+str(manifest))
 
+    def test_scan_uses_batch_credentials_with_per_ad_errors(self):
+        runner,source,graph,runtime=self.fixture([ad(),ad('11','21')])
+        for aid in ('10','11'):
+            source.rows[aid][0]['id']='9'+aid
+        calls=[]
+        def batch(rows):
+            calls.append(rows)
+            return {'910':{'user_id':'','error':'credential_queue_mismatch'},
+                    '911':{'user_id':'1','error':''}}
+        source.selected_credentials=batch
+        source.selected_credential=lambda _:self.fail('scan must use batch credentials')
+        manifest=self.manifest(runner)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(len(calls[0]),2)
+        self.assertEqual([c['ad_id'] for c in manifest['candidates']],['11'])
+        self.assertEqual(manifest['mapping_gap_counts']['credential_lineage_unavailable'],1)
+
     def test_secret_returned_as_credential_is_rejected_without_serializing(self):
         runner,source,graph,runtime=self.fixture()
         source.credential_values['10']='DO-NOT-LOG-SECRET'
@@ -155,6 +173,62 @@ class RunnerTests(unittest.TestCase):
         source.queried_sources=[]
         self.assertTrue(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
         self.assertIn('900',source.queried_sources)
+
+    def test_sql_snapshot_released_before_graph_and_scope_reader_used(self):
+        runner,source,graph,_=self.fixture()
+        manifest=self.manifest(runner);state={'active':False,'snapshots':0,'scopes':0}
+        @contextmanager
+        def snapshot():
+            state['active']=True;state['snapshots']+=1
+            try:yield
+            finally:state['active']=False
+        source.snapshot=snapshot
+        def scope_products():
+            self.assertTrue(state['active']);state['scopes']+=1
+            return source.products()
+        source.scope_products=scope_products
+        original=graph.get_ad
+        def get_ad(identifier,user):
+            self.assertFalse(state['active'],'Graph read must not hold the SQL FIFO snapshot')
+            return original(identifier,user)
+        graph.get_ad=get_ad
+        candidate=manifest['candidates'][0]
+        decision=runner.preflight(candidate,manifest)
+        self.assertTrue(decision['eligible'])
+        self.assertEqual(runner.dependency_guard(candidate,decision),'')
+        self.assertEqual(state,{'active':False,'snapshots':2,'scopes':2})
+
+    def test_mutation_graph_uses_separate_session_with_zero_get_retries(self):
+        runner,_,_,_=self.fixture()
+        manifest=self.manifest(runner)
+        class Response:
+            status_code=200;headers={}
+            def __init__(self,payload):self.payload=payload
+            def json(self):return copy.deepcopy(self.payload)
+        class Session:
+            def __init__(self,values):self.values=list(values);self.calls=[];self.closed=False
+            def mount(self,*args):pass
+            def request(self,method,url,**kwargs):
+                self.calls.append((method,url,kwargs));return Response(self.values.pop(0))
+            def close(self):self.closed=True
+        scan_session=Session([])
+        scan_graph=GraphClient({'1':'secret'},session=scan_session,get_retries=2,timeout=60)
+        runner.graph=scan_graph
+        values=[ad(),{'id':'20','account_id':'100','status':'ACTIVE'},True,
+            {'id':'20','account_id':'100','status':'DELETED'},ad(),ad(),True,ad(status='DELETED')]
+        mutation_session=Session(values);constructor=[];original_init=GraphClient.__init__
+        def initialize(client,*args,**kwargs):
+            constructor.append(copy.deepcopy(kwargs));kwargs['session']=mutation_session
+            original_init(client,*args,**kwargs)
+        with patch.object(GraphClient,'__init__',initialize):
+            self.assertEqual(runner.execute('test-run',manifest),'completed')
+        self.assertEqual(constructor[0]['get_retries'],0)
+        self.assertEqual(constructor[0]['timeout'],20)
+        self.assertEqual(scan_graph.get_retries,2)
+        self.assertEqual(scan_session.calls,[])
+        self.assertFalse(scan_session.closed)
+        self.assertTrue(mutation_session.closed)
+        self.assertEqual(len([c for c in mutation_session.calls if c[0]=='DELETE']),2)
 
     def test_multiple_violation_rows_for_one_ad_retained_for_preflight(self):
         runner,source,_,_=self.fixture()

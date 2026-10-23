@@ -157,6 +157,8 @@ class _Session:
         rows = []
         self.source._metrics["query_count"] += 1
         try:
+            if deadline <= time.monotonic():
+                raise SqlSourceError("sql_query_timeout")
             self.proc.stdin.write(sql.rstrip("; \n") + ";\nSELECT JSON_ARRAY(" + _quote(marker) + ");\n")
             self.proc.stdin.flush()
             while True:
@@ -468,41 +470,131 @@ class SqlSource:
                 result.setdefault(user, str(row["token"]).strip())
         return result
 
-    def selected_credential(self, lineage):
-        """Return a non-secret internal user ID, never the selected raw Token."""
+    @staticmethod
+    def _credential_identity(lineage):
+        if not isinstance(lineage, dict):
+            raise SqlSourceError("invalid_credential_lineage")
         keys = ("id", "ad_id", "product", "user_id", "publish_queue_id")
         identity = {key: str(lineage.get(key) or "") for key in keys}
         if not identity["id"]:
             identity["id"] = str(lineage.get("row_id") or "")
+        if lineage.get("row_id") and str(lineage["row_id"]) != identity["id"]:
+            raise SqlSourceError("credential_lineage_changed")
         _ids(identity.values())
+        return identity
+
+    def _credential_query(self, tail):
         expressions = (("id", "CAST(a.id AS CHAR)"), ("ad_id", "a.ad_id"), ("product", "a.product"),
                        ("user_id", "CAST(a.user_id AS CHAR)"), ("publish_queue_id", "CAST(a.publish_queue_id AS CHAR)"),
                        ("queue_id", "CAST(pq.id AS CHAR)"), ("queue_product", "pq.product"),
                        ("queue_user_id", "CAST(pq.user_id AS CHAR)"), ("default_token", "CAST(pq.default_token AS CHAR)"),
                        ("setting_id", "CAST(p.id AS CHAR)"), ("default_user", "CAST(p.default_user AS CHAR)"))
-        joins = ("ads_facebook_auto_created_data a "
+        joins = ("ads_facebook_auto_created_data a FORCE INDEX(PRIMARY) "
                  "LEFT JOIN `{s}`.ads_template_make_queue pq ON pq.id=a.publish_queue_id "
                  "LEFT JOIN `{s}`.ads_apps_setting p ON p.id=a.product").format(s=self.schema)
-        where = " AND ".join("a.%s=%s" % (key, _quote(identity[key])) for key in keys)
+        return self._select(expressions, joins, tail)
+
+    @staticmethod
+    def _credential_user(identity, row):
+        if (any(str(row.get(key)) != value for key, value in identity.items()) or
+                str(row.get("queue_id")) != identity["publish_queue_id"] or
+                str(row.get("queue_product")) != identity["product"] or
+                str(row.get("queue_user_id")) != identity["user_id"]):
+            raise SqlSourceError("credential_queue_mismatch")
+        flag = str(row.get("default_token"))
+        if flag == "1":
+            user = str(row.get("default_user") or "")
+            if str(row.get("setting_id")) != identity["product"] or not _ID.fullmatch(user):
+                raise SqlSourceError("product_default_credential_missing")
+        elif flag == "-1":
+            user = identity["user_id"]
+        else:
+            raise SqlSourceError("credential_rule_unknown")
+        return user
+
+    def selected_credentials(self, lineages):
+        """Batch scan-time routes, returning row ID -> {user_id, error}.
+
+        Each row has exactly one explicit outcome. Invalid/missing routes are
+        per-row errors; an incomplete or contradictory SQL result fails the
+        whole call. At most 200 primary IDs are joined per query, in one gated
+        snapshot. Token availability is checked in batches and no Token is read
+        into this method. No result survives this call as an adapter cache.
+        """
+        identities, result = {}, {}
+        for lineage in lineages:
+            if not isinstance(lineage, dict):
+                raise SqlSourceError("invalid_credential_lineage")
+            row_id = str(lineage.get("id") or lineage.get("row_id") or "")
+            if not _ID.fullmatch(row_id):
+                raise SqlSourceError("invalid_credential_row_id")
+            try:
+                identity = self._credential_identity(lineage)
+            except SqlSourceError as exc:
+                identities.pop(row_id, None)
+                result[row_id] = {"user_id": "", "error": str(exc)}
+                continue
+            if row_id in result:
+                continue
+            if row_id in identities and identities[row_id] != identity:
+                identities.pop(row_id)
+                result[row_id] = {"user_id": "", "error": "ambiguous_credential_lineage"}
+            else:
+                identities[row_id] = identity
+        if not identities:
+            return result
+        selected = {}
         with self._session() as session:
-            rows = session.query(self._select(expressions, joins, "WHERE " + where + " LIMIT 2"))
+            for part in _chunks(list(identities), 200):
+                rows = session.query(self._credential_query(
+                    "WHERE a.id IN %s ORDER BY a.id LIMIT %d" % (_inside(part), len(part) + 1)))
+                found = {}
+                for row in rows:
+                    row_id = str(row.get("id") or "")
+                    if row_id not in part or row_id in found:
+                        raise SqlSourceError("invalid_credential_route_result")
+                    found[row_id] = row
+                for row_id in part:
+                    if row_id not in found:
+                        result[row_id] = {"user_id": "", "error": "credential_lineage_changed"}
+                        continue
+                    try:
+                        selected[row_id] = self._credential_user(identities[row_id], found[row_id])
+                    except SqlSourceError as exc:
+                        result[row_id] = {"user_id": "", "error": str(exc)}
+            available = set()
+            for users in _chunks(sorted(set(selected.values()), key=int), 200):
+                directory = " UNION ALL ".join("SELECT %s AS user_id" % _quote(user) for user in users)
+                sql = ("SELECT JSON_OBJECT(%s,selected.user_id,%s,EXISTS(SELECT 1 FROM "
+                       "`%s`.ads_facebook_info i WHERE i.user_id=selected.user_id "
+                       "AND TRIM(i.accessToken)<>'' LIMIT 1)) FROM (%s) selected ORDER BY selected.user_id") % (
+                           _quote("user_id"), _quote("available"), self.schema, directory)
+                seen = set()
+                for row in session.query(sql):
+                    user = str(row.get("user_id") or "")
+                    value = row.get("available")
+                    if (set(row) != {"user_id", "available"} or user not in users or user in seen
+                            or type(value) is not int or value not in (0, 1)):
+                        raise SqlSourceError("invalid_credential_availability")
+                    seen.add(user)
+                    if value == 1:
+                        available.add(user)
+                if seen != set(users):
+                    raise SqlSourceError("credential_availability_incomplete")
+            for row_id, user in selected.items():
+                result[row_id] = ({"user_id": user, "error": ""} if user in available else
+                                  {"user_id": "", "error": "publishing_credential_unavailable"})
+        return result
+
+    def selected_credential(self, lineage):
+        """Fresh write-time route and non-secret internal user ID, never a cache."""
+        identity = self._credential_identity(lineage)
+        where = " AND ".join("a.%s=%s" % (key, _quote(value)) for key, value in identity.items())
+        with self._session() as session:
+            rows = session.query(self._credential_query("WHERE " + where + " LIMIT 2"))
             if len(rows) != 1:
                 raise SqlSourceError("credential_lineage_changed")
-            row = rows[0]
-            if (any(str(row.get(key)) != identity[key] for key in keys) or
-                    str(row.get("queue_id")) != identity["publish_queue_id"] or
-                    str(row.get("queue_product")) != identity["product"] or
-                    str(row.get("queue_user_id")) != identity["user_id"]):
-                raise SqlSourceError("credential_queue_mismatch")
-            flag = str(row.get("default_token"))
-            if flag == "1":
-                user = str(row.get("default_user") or "")
-                if str(row.get("setting_id")) != identity["product"] or not _ID.fullmatch(user):
-                    raise SqlSourceError("product_default_credential_missing")
-            elif flag == "-1":
-                user = identity["user_id"]
-            else:
-                raise SqlSourceError("credential_rule_unknown")
+            user = self._credential_user(identity, rows[0])
             tokens = session.query(self._select((("token", "accessToken"),), "ads_facebook_info",
                                    "WHERE user_id=%s AND TRIM(accessToken)<>'' ORDER BY id DESC LIMIT 1" % _quote(user)))
             if len(tokens) != 1 or not str(tokens[0].get("token") or "").strip():

@@ -71,6 +71,14 @@ already requested/authorized, use the existing frozen run and its durable
 claims; do not request duplicate permission or create a replacement run to
 evade locks.
 
+Converting a preview or continuing a partial/interrupted run uses the original
+manifest only when its hash is valid and its `frozen_at` is no more than 3600
+seconds old. This is the scan-completion freeze time, not the initial run time.
+An expired manifest requires a new complete scan and new run ID, preserving all
+old receipts and unknown fences; never edit the timestamp/hash to extend it.
+`--max-ads` selects complete Creative groups and may select zero ads when the
+limit is smaller than every group. Continuation executes pending objects only.
+
 Every platform write follows a committed shared-Store claim. Report API-accepted
 deletions separately from exact-ID/account `DELETED` readback verification.
 Timeout, interrupted submission and inconclusive readback stay unknown; never
@@ -82,6 +90,26 @@ Start and completion broadcasts go to 郜远 through the configured Feishu App.
 If only the completion broadcast failed, use `notify --run-id ... --phase end`;
 this must not trigger scanning or deletion. Inspect saved send receipts before
 recovering an uncertain notification to avoid duplicate broadcasts.
+
+Each live continuation has a separate notification phase: first `start`/`end`,
+then `start-2`/`end-2`, and so on. Read `execution_attempt` and `notifications` in
+`status` before recovery; `--phase end` does not select the latest attempt.
+Use the exact saved phase and body. Failed notices may retry with the original
+provider UUID; sending/unknown notices must not automatically replay.
+
+`status` does not recover workers. Recovery requires the task process lock and
+proof that the stored PID/start identity is dead. Scope shared-ledger recovery
+to this task's `policy-cleanup-<run_id>` job, automatic actor, and matching shared
+run; never invoke global Store recovery. A systemd start uses no run ID and
+creates a new scan; it does not continue the previous manifest. The service has
+no automatic restart. Preserve interrupted results and check the manifest's
+expiry before any explicit continuation. The old 10:00 cleanup has priority:
+09:55–10:05 admits no new DELETE, releases the legacy lock, and waits to resume
+the remaining work without repeating completed objects.
+
+An interrupted run with `recovery_pending=true` still needs its scoped shared
+fence confirmed. Keep it discoverable across restart until that acknowledgement;
+the local interrupted status alone does not prove both ledgers were recovered.
 
 Code changes are GitHub-first: test, commit/push, fetch the exact SHA on CPU,
 deploy an immutable release, verify its hashes and run output. Restart only this

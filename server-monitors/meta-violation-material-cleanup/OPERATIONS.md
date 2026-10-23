@@ -58,7 +58,19 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
 ```
 
 同轮继续必须保留原始窗口、清单、成功 receipts 和 unknown fences。
-如果实现回读提示该轮不可继续，先检查实际状态，不能更换 ID 绕开限制。
+只允许从 `previewed`、`partial`、`interrupted` 状态继续；`completed` 返回既有结果，
+其他状态报 `existing_run_requires_recovery`。清单中的 `frozen_at` 是完整扫描结束并冻结
+清单的时间；转 live 或再次继续时要求该时间距当前不超过 **3600 秒**，不能使用扫描
+开始时间代替。未来时间、缺失时间或 hash 不一致均拒绝执行。
+
+遇到 `manifest_expired_start_new_scan` 时，在原账本和 receipts/fences 完整保留的前提下
+以新运行 ID 完整重新扫描、生成新的窗口和清单；不得编辑 `frozen_at`、hash 或复用旧清单
+绕过期限。新扫描不会解除旧对象的 unknown fence。其他不可继续状态应先查实际状态，
+不能更换 ID 绕开限制。
+
+`--max-ads` 按同一 Creative 下的完整候选 Ad 组选择，不拆组；如果没有组能装入限制，
+可以删除 0 条而返回 `partial`。继续时仅选择仍为 pending 的对象，不重做成功、failed
+或 unknown 对象。
 不得把 `--max-ads` 当成每轮永久截断，也不能把受限验证称为全量执行完成。
 
 仅核对未知删除结果，或仅恢复完成播报：
@@ -70,6 +82,12 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
 
 `reconcile` 只做 Meta GET；`notify` 只恢复该轮通知，不重新扫描或触发删除。
 通知请求结果不明确时先核对发送记录/回执；不得用重新 `run` 来补播报。
+
+同一运行 ID 的第 1 次 live 使用通知 phase `start` / `end`；第 2 次使用
+`start-2` / `end-2`，后续依此类推。`status --run-id` 返回 `execution_attempt`
+和当前这次的通知 phase。`notify --phase end` **不会自动选择最近一次**；例如补第 2 次
+完成播报必须指定 `notify --run-id RUN_ID --phase end-2`。已成功发送的 phase 直接返回
+保存的回执；failed 可用原 UUID 和冻结正文重试；sending / unknown 拒绝自动重发。
 
 ## 部署与验收
 
@@ -116,6 +134,19 @@ systemctl enable --now meta-violation-material-cleanup.timer
   `notify --phase end` 恢复。
 - service 最长运行 11 小时、无自动重启，收到 SIGINT 后有 90 秒收尾。停止前后
   比较共享账本和 run 状态，不能把被中断工作改成全部成功。
+- `status` 只查看状态，不运行 owner 恢复。恢复必须先取得本任务 `process.lock`，
+  仅确认原进程 PID 与启动身份已终止后，标记本运行为 interrupted；未知存活状态保留
+  fence。共享恢复须严格限定 `policy-cleanup-<RUN_ID>`、自动 actor 和属于该 job 的
+  shared run，不能调用全局 `Store.recover_interrupted()` 影响其他任务。
+  本地 `recovery_pending=true` 表示共享恢复尚未确认完成，跨进程重启继续保留并重查；
+  只有成功核对并完成该 job 的共享 fence 后才能清除。不可单因本地已 interrupted
+  就认定两个账本均已完成恢复。
+- 服务重启不会自动续跑旧清单：unit 的 `run` 没有 `--run-id`，启动的是新扫描。
+  需要继续旧清单时先查看其状态、通知及未知对象，核对 3600 秒有效期后使用上面的
+  显式同轮命令。停止/回退不能通过恢复旧 SQLite 来撤销已发生的请求。
+- 旧 10 点清理使用原有锁。此任务在北京时间 09:55–10:05 不开始新 DELETE；若正在
+  组内预核，释放锁后等待重新获取并重核。已经完成的 Creative 不重发，余下 Ad 按
+  当前依赖和状态继续。锁等待属于本轮耗时，不能把等待视为已完成。
 
 ## 回退
 

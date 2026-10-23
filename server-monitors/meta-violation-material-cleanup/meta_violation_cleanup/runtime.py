@@ -377,7 +377,9 @@ class Runtime:
         """Under process_lock, fence only provably dead owners of this runtime.
 
         The caller may finish the matching shared_run_id as interrupted after
-        verifying the shared job identity. Never recover the whole shared Store.
+        verifying the shared job identity, then clear recovery_pending. Until
+        that acknowledgement this method returns the dead run again, including
+        after restart. Never recover the whole shared Store.
         """
         recovered = []
         live = 0
@@ -389,12 +391,21 @@ class Runtime:
                 if _owner_alive(owner.get('pid'), owner.get('start')) is not False:
                     live += 1
                     continue
-                data.update(recovery_reason='owner_terminated', recovered_at=now())
+                # Keep this local commit discoverable until the CLI confirms
+                # the matching shared-Store fence has committed as well.
+                data.update(recovery_reason='owner_terminated', recovered_at=now(),
+                            recovery_pending=True)
                 self.db.execute('UPDATE runs SET status=?,ended=?,data=? WHERE id=?',
                                 ('interrupted', now(), canonical(data), row['id']))
                 self.db.execute('INSERT INTO events(run_id,at,kind,data) VALUES(?,?,?,?)',
                                 (row['id'], now(), 'run_recovered', '{}'))
                 recovered.append(row['id'])
+            for row in self.db.execute("SELECT * FROM runs WHERE status='interrupted'").fetchall():
+                data = json.loads(row['data'])
+                owner = data.get('_owner') or {}
+                if (data.get('recovery_pending') is True and row['id'] not in recovered
+                        and _owner_alive(owner.get('pid'), owner.get('start')) is False):
+                    recovered.append(row['id'])
             for row in self.db.execute("SELECT * FROM notices WHERE status='sending'").fetchall():
                 dead = _owner_alive(row['owner_pid'], row['owner_start']) is False
                 if not dead and row['run_id'] not in recovered:

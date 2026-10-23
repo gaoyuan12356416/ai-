@@ -16,6 +16,7 @@ spec = importlib.util.spec_from_file_location("cleanup_cli", HERE / "run.py")
 cli = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cli)
 from meta_violation_cleanup.runtime import Runtime as RealRuntime
+from meta_violation_cleanup import runtime as runtime_module
 
 
 class FakeDb:
@@ -28,6 +29,8 @@ class FakeRuntime:
         self.rows, self.notices, self.artifacts = {}, {}, {}
         self.db = FakeDb()
         self.recoveries = []
+        self.recovery_calls = 0
+        self.logged = []
 
     def begin(self, run_id, mode, data):
         if run_id in self.rows:
@@ -50,7 +53,12 @@ class FakeRuntime:
                 run["ended"] = "finished"
 
     def recover_interrupted(self):
-        return {"run_ids": self.recoveries}
+        self.recovery_calls += 1
+        return {"run_ids": [run_id for run_id in self.recoveries
+                            if self.rows[run_id]["data"].get("recovery_pending") is not False]}
+
+    def event(self, run_id, kind, data):
+        self.logged.append((run_id, kind, data))
 
     def notice(self, run_id, phase):
         return self.notices.get((run_id, phase))
@@ -95,6 +103,9 @@ class FakeStore:
         self.reconciled.append(args)
     def finish_run(self, *args):
         self.finished.append(args)
+        for run in self.job["runs"]:
+            if run["run_id"] == args[0]:
+                run["status"] = args[1]
 
 
 class CliTests(unittest.TestCase):
@@ -143,6 +154,8 @@ class CliTests(unittest.TestCase):
                 test.assertEqual(self.runtime.notice(run_id, start_phase)["status"], "sent")
                 self.runtime.update(run_id, shared_job_id="policy-cleanup-" + run_id,
                                     result_counts={"ad_deleted_verified": 1})
+                self.store.job.update(job_id="policy-cleanup-" + run_id, preview_id=manifest["sha256"],
+                                      manifest_sha256=manifest["sha256"])
                 return "partial" if max_ads else "completed"
 
         replacements = dict(load_config=lambda path: dict(self.config), validate_paths=lambda config: None,
@@ -289,15 +302,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
     def test_only_owned_recovered_shared_run_is_finished(self):
-        self.invoke("run", "--run-id", "r1")
-        self.runtime.update("r1", shared_run_id="shared-run-1")
-        self.runtime.recoveries = ["r1"]
-        self.store.job["runs"] = [{"run_id": "shared-run-1"}]
-        self.events.clear()
-        code, _ = self.invoke("notify", "--run-id", "r1")
-        self.assertEqual(code, 0)
+        self.prepare_recovery()
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            cli.recover_owned(self.runtime, self.config, send_notifications=True)
         self.assertEqual(self.store.finished[0][0:2], ("shared-run-1", "interrupted"))
-        self.assertEqual(self.events, ["end"])
+        self.assertEqual(self.events, [])  # Existing sent end receipt is retained.
 
     def test_long_scan_window_is_allowed_when_manifest_was_just_frozen(self):
         self.invoke("preview", "--run-id", "r1")
@@ -310,15 +319,133 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
 
     def test_recovery_sends_missing_end_without_replaying_deletion(self):
-        self.invoke('run', '--run-id', 'r1')
+        self.prepare_recovery()
         self.runtime.notices.pop(('r1', 'end'))
-        self.runtime.update('r1', status='interrupted', shared_run_id='shared-run-1')
-        self.runtime.recoveries = ['r1']
-        self.store.job['runs'] = [{'run_id': 'shared-run-1'}]
-        self.events.clear()
-        cli.recover_owned(self.runtime, self.config)
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            cli.recover_owned(self.runtime, self.config, send_notifications=True)
         self.assertEqual(self.events, ['end'])
         self.assertEqual(self.runtime.notice('r1', 'end')['status'], 'sent')
+
+    def prepare_recovery(self):
+        self.invoke("run", "--run-id", "r1")
+        self.runtime.update("r1", status="interrupted", shared_run_id="shared-run-1", recovery_pending=True)
+        self.runtime.recoveries = ["r1"]
+        self.store.job["runs"] = [dict(run_id="shared-run-1", job_id="policy-cleanup-r1", actor=cli.ACTOR,
+                                       preview_id=self.store.job["preview_id"], status="running",
+                                       owner_pid=999999, owner_start="dead-synthetic-owner")]
+        self.events.clear()
+
+    def test_shared_fencing_failure_remains_pending_and_retries_next_start(self):
+        self.prepare_recovery()
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            with patch.object(self.store, "finish_run", side_effect=OSError("synthetic-ledger-failure")):
+                with self.assertRaises(OSError):
+                    cli.recover_owned(self.runtime, self.config)
+            self.assertTrue(self.runtime.get("r1")["data"]["recovery_pending"])
+            cli.recover_owned(self.runtime, self.config)
+            self.assertFalse(self.runtime.get("r1")["data"]["recovery_pending"])
+            cli.recover_owned(self.runtime, self.config)
+        self.assertEqual(len(self.store.finished), 1)
+        self.assertEqual(self.events, [])
+
+    def test_claimed_shared_run_is_recovered_when_runtime_ids_were_not_saved(self):
+        self.prepare_recovery()
+        data = self.runtime.get("r1")["data"]
+        data.pop("shared_job_id")
+        data.pop("shared_run_id")
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            cli.recover_owned(self.runtime, self.config)
+        self.assertEqual(self.store.finished[0][0], "shared-run-1")
+        self.assertFalse(data["recovery_pending"])
+
+    def test_recovery_rejects_foreign_actor_or_hash_without_clearing_pending(self):
+        self.prepare_recovery()
+        for changes in ({"actor": "another-automation"}, {"manifest_sha256": "0" * 64}):
+            with self.subTest(changes=changes):
+                original = dict(self.store.job)
+                self.store.job.update(changes)
+                with self.assertRaisesRegex(cli.CliError, "recovery_job_scope_mismatch"):
+                    cli.recover_owned(self.runtime, self.config)
+                self.assertTrue(self.runtime.get("r1")["data"]["recovery_pending"])
+                self.assertEqual(self.store.finished, [])
+                self.store.job = original
+
+    def test_live_or_indeterminate_shared_owner_is_never_fenced(self):
+        self.prepare_recovery()
+        for alive in (True, None):
+            with patch.object(cli.shared_store, "_owner_alive", return_value=alive):
+                with self.assertRaisesRegex(cli.CliError, "recovery_owner_unresolved"):
+                    cli.recover_owned(self.runtime, self.config)
+        self.assertEqual(self.store.finished, [])
+        self.assertTrue(self.runtime.get("r1")["data"]["recovery_pending"])
+
+    def test_confirmed_absent_owned_job_clears_pending_without_shared_writes(self):
+        self.prepare_recovery()
+        with patch.object(self.store, "get_job", side_effect=cli.StoreError("missing", "not_found")):
+            cli.recover_owned(self.runtime, self.config)
+        self.assertEqual(self.store.finished, [])
+        self.assertFalse(self.runtime.get("r1")["data"]["recovery_pending"])
+
+    def test_unknown_recovery_notice_is_not_replayed(self):
+        self.prepare_recovery()
+        self.runtime.notices[("r1", "end")]["status"] = "unknown"
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            cli.recover_owned(self.runtime, self.config, send_notifications=True)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.runtime.notice("r1", "end")["status"], "unknown")
+
+    def test_preview_and_notify_do_not_auto_recover_other_runs(self):
+        self.prepare_recovery()
+        before = self.runtime.recovery_calls
+        self.invoke("preview", "--run-id", "p2")
+        self.invoke("notify", "--run-id", "r1")
+        self.assertEqual(self.runtime.recovery_calls, before)
+        self.assertEqual(self.store.finished, [])
+
+    def test_reconcile_recovers_fences_but_sends_no_other_run_notices(self):
+        self.prepare_recovery()
+        self.runtime.notices.pop(("r1", "end"))
+        with patch.object(cli.shared_store, "_owner_alive", return_value=False):
+            code, _ = self.invoke("reconcile", "--run-id", "r1")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.events, [])
+        self.assertEqual(len(self.store.finished), 1)
+
+    def test_real_ledgers_retry_crash_gap_and_preserve_unknown_fence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_path = str(Path(directory) / "runtime")
+            durable = RealRuntime(runtime_path)
+            shared = cli.Store(str(Path(directory) / "shared.sqlite3"))
+            run_id, checksum = "durable-recovery", "a" * 64
+            job_id = "policy-cleanup-" + run_id
+            durable.begin(run_id, "run", {"execution_mode": "run", "manifest_sha256": checksum})
+            shared.create_job(dict(job_id=job_id, preview_id=checksum, actor=cli.ACTOR,
+                                   status="ready", manifest_sha256=checksum,
+                                   objects=[dict(kind="ad", object_id="123", account_ids=["456"], user_ids=["803"])]))
+            claimed = shared.claim_run(job_id, checksum, cli.ACTOR, ["ad"], "synthetic-request")
+            shared.claim_object(job_id, "ad:123", claimed["run_id"])
+            # Simulate SIGKILL after shared claim but BEFORE shared IDs were
+            # persisted in Runtime. The deterministic job/hash is sufficient.
+            with patch.object(cli, "open_store", return_value=shared), \
+                    patch.object(runtime_module, "_owner_alive", return_value=False), \
+                    patch.object(cli.shared_store, "_owner_alive", return_value=False):
+                with patch.object(shared, "finish_run", side_effect=OSError("synthetic-write-failure")):
+                    with self.assertRaises(OSError):
+                        cli.recover_owned(durable, self.config)
+                self.assertEqual(durable.get(run_id)["status"], "interrupted")
+                self.assertTrue(durable.get(run_id)["data"]["recovery_pending"])
+                durable.close()
+                durable = RealRuntime(runtime_path)
+                try:
+                    cli.recover_owned(durable, self.config)
+                    job = shared.get_job(job_id)
+                    self.assertEqual(job["runs"][0]["status"], "interrupted")
+                    self.assertEqual(job["objects"][0]["status"], "unknown")
+                    self.assertFalse(durable.get(run_id)["data"]["recovery_pending"])
+                    cli.recover_owned(durable, self.config)
+                    self.assertEqual(shared.get_job(job_id)["objects"][0]["status"], "unknown")
+                finally:
+                    durable.close()
 
     def test_real_runtime_preview_to_live_and_saved_receipts(self):
         class DurableNotifier:

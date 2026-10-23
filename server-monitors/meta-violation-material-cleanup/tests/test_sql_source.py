@@ -243,6 +243,147 @@ class SqlSourceTests(unittest.TestCase):
             with self.assertRaises(source.SqlSourceError):
                 self.run_source(lambda db: db.selected_credential(route), responder)
 
+    def test_batch_credentials_use_one_session_and_at_most_200_primary_ids(self):
+        routes = [self.credential_route(id=str(n), ad_id=str(10000 + n)) for n in range(1, 402)]
+        by_id = {row['id']: row for row in routes}
+        batches = []
+        def responder(sql):
+            if 'ads_template_make_queue' in sql:
+                self.assertIn('a FORCE INDEX(PRIMARY)', sql)
+                clause = re.search(r'WHERE a.id IN \(([^)]+)\)', sql).group(1)
+                ids = [bytes.fromhex(value).decode() for value in re.findall(r'0x([0-9a-f]+)', clause)]
+                batches.append(ids)
+                self.assertLessEqual(len(ids), 200)
+                return [by_id[value] for value in ids]
+            self.assertIn('EXISTS(SELECT 1', sql)
+            self.assertNotIn(source._quote('token'), sql)
+            return [{'user_id': '804', 'available': 1}]
+        result, adapter, process, popen = self.run_source(
+            lambda db: db.selected_credentials(routes), responder)
+        self.assertEqual(len(result), 401)
+        self.assertTrue(all(value == {'user_id': '804', 'error': ''} for value in result.values()))
+        self.assertEqual([len(values) for values in batches], [200, 200, 1])
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(adapter.safe_metrics['sessions'], 1)
+        self.assertEqual(len(process.commands), 6)  # read-only, transaction, 3 routes, 1 existence
+
+    def test_batch_credentials_isolate_route_errors_without_partial_success_for_bad_rows(self):
+        first = self.credential_route(id='10')
+        queue_user = self.credential_route('-1', id='11')
+        mismatched = self.credential_route(id='12')
+        unavailable = self.credential_route(id='13')
+        missing = self.credential_route(id='14')
+        def responder(sql):
+            if 'ads_template_make_queue' in sql:
+                return [first, queue_user, dict(mismatched, queue_product='3302'),
+                        dict(unavailable, default_user='805')]
+            return [{'user_id': '803', 'available': 1}, {'user_id': '804', 'available': 1},
+                    {'user_id': '805', 'available': 0}]
+        result, _, _, _ = self.run_source(
+            lambda db: db.selected_credentials([first, queue_user, mismatched, unavailable, missing]), responder)
+        self.assertEqual(result['10'], {'user_id': '804', 'error': ''})
+        self.assertEqual(result['11'], {'user_id': '803', 'error': ''})
+        self.assertEqual(result['12']['error'], 'credential_queue_mismatch')
+        self.assertEqual(result['13'], {'user_id': '', 'error': 'publishing_credential_unavailable'})
+        self.assertEqual(result['14']['error'], 'credential_lineage_changed')
+
+    def test_batch_token_existence_queries_are_also_bounded_to_200_identities(self):
+        routes = [self.credential_route(id=str(n), default_user=str(1000 + n)) for n in range(1, 202)]
+        by_id = {row['id']: row for row in routes}
+        sizes = []
+        def responder(sql):
+            if 'ads_template_make_queue' in sql:
+                clause = re.search(r'WHERE a.id IN \(([^)]+)\)', sql).group(1)
+                ids = [bytes.fromhex(value).decode() for value in re.findall(r'0x([0-9a-f]+)', clause)]
+                return [by_id[value] for value in ids]
+            users = [bytes.fromhex(value).decode() for value in re.findall(
+                r'SELECT _utf8mb4 0x([0-9a-f]+) AS user_id', sql)]
+            sizes.append(len(users))
+            self.assertLessEqual(len(users), 200)
+            return [{'user_id': user, 'available': 1} for user in users]
+        result, _, _, popen = self.run_source(lambda db: db.selected_credentials(routes), responder)
+        self.assertEqual(len(result), 201)
+        self.assertEqual(result['201']['user_id'], '1201')
+        self.assertEqual(sizes, [200, 1])
+        self.assertEqual(popen.call_count, 1)
+
+    def test_batch_duplicate_input_conflict_and_bad_identity_fail_closed_per_row(self):
+        first = self.credential_route(id='10')
+        conflict = dict(first, product='3302')
+        invalid = self.credential_route(id='11', user_id='0')
+        changed_row = self.credential_route(id='12', row_id='99')
+        result, _, _, popen = self.run_source(
+            lambda db: db.selected_credentials([first, conflict, first, invalid, changed_row]),
+            lambda sql: self.fail('no valid route should query'))
+        self.assertEqual(result['10']['error'], 'ambiguous_credential_lineage')
+        self.assertEqual(result['11']['error'], 'invalid_source_identifier')
+        self.assertEqual(result['12']['error'], 'credential_lineage_changed')
+        popen.assert_not_called()
+
+    def test_batch_duplicate_identical_input_deduplicates_and_accepts_row_id_alias(self):
+        row = self.credential_route()
+        alias = dict(row, row_id=row['id'])
+        del alias['id']
+        def responder(sql):
+            if 'ads_template_make_queue' in sql:
+                return [row]
+            return [{'user_id': '804', 'available': 1}]
+        result, _, _, _ = self.run_source(lambda db: db.selected_credentials([row, alias]), responder)
+        self.assertEqual(result, {'10': {'user_id': '804', 'error': ''}})
+
+    def test_batch_duplicate_or_unrequested_sql_route_rejects_whole_call(self):
+        route = self.credential_route()
+        for rows in ([route, route], [dict(route, id='99')]):
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(source.SqlSourceError, 'invalid_credential_route_result'):
+                    self.run_source(lambda db: db.selected_credentials([route]), lambda sql: rows)
+
+    def test_batch_availability_missing_duplicate_or_malformed_fails_whole_call(self):
+        route = self.credential_route()
+        for values in ([], [{'user_id': '804', 'available': True}],
+                       [{'user_id': '804', 'available': 1}, {'user_id': '804', 'available': 1}],
+                       [{'user_id': '999', 'available': 1}],
+                       [{'user_id': '804', 'available': 1, 'token': 'must-not-return'}]):
+            with self.subTest(values=values):
+                def responder(sql):
+                    return [route] if 'ads_template_make_queue' in sql else values
+                with self.assertRaises(source.SqlSourceError) as error:
+                    self.run_source(lambda db: db.selected_credentials([route]), responder)
+                self.assertNotIn('must-not-return', str(error.exception))
+
+    def test_batch_unknown_rule_does_not_fetch_any_credential(self):
+        route = self.credential_route(default_token='0')
+        def responder(sql):
+            self.assertIn('ads_template_make_queue', sql)
+            return [route]
+        result, _, _, _ = self.run_source(lambda db: db.selected_credentials([route]), responder)
+        self.assertEqual(result['10'], {'user_id': '', 'error': 'credential_rule_unknown'})
+
+    def test_batch_empty_and_unkeyable_input_do_not_launch_mysql(self):
+        adapter = self.make_source()
+        with patch.object(source.subprocess, 'Popen') as popen:
+            self.assertEqual(adapter.selected_credentials([]), {})
+            with self.assertRaisesRegex(source.SqlSourceError, 'invalid_credential_row_id'):
+                adapter.selected_credentials([{}])
+            with self.assertRaisesRegex(source.SqlSourceError, 'invalid_credential_lineage'):
+                adapter.selected_credentials([None])
+        popen.assert_not_called()
+
+    def test_batch_result_is_not_cached_and_single_preflight_remains_fresh(self):
+        routes = [self.credential_route(default_user='804'), self.credential_route(default_user='805')]
+        def responder(sql):
+            if 'ads_template_make_queue' in sql:
+                return [routes.pop(0)]
+            if 'EXISTS(SELECT 1' in sql:
+                return [{'user_id': '804', 'available': 1}]
+            self.assertIn('user_id=' + source._quote('805'), sql)
+            return [{'token': 'new-synthetic'}]
+        adapter = self.make_source()
+        with patch.object(source.subprocess, 'Popen', side_effect=[FakeMysql(responder), FakeMysql(responder)]) as popen:
+            self.assertEqual(adapter.selected_credentials([self.credential_route()])['10']['user_id'], '804')
+            self.assertEqual(adapter.selected_credential(self.credential_route()), '805')
+        self.assertEqual(popen.call_count, 2)
+
     def test_invalid_ids_limits_and_oversized_window_rejected(self):
         with self.assertRaises(source.SqlSourceError):
             self.make_source(page_size=2001)
@@ -371,6 +512,18 @@ class SqlSourceTests(unittest.TestCase):
             with adapter.snapshot():
                 self.assertEqual(adapter.credentials()["803"], "synthetic-3")
         self.assertEqual(popen.call_count, 2)
+
+    def test_expired_outer_snapshot_does_not_send_another_query(self):
+        process = FakeMysql(lambda sql: [])
+        adapter = self.make_source(session_timeout_seconds=60)
+        with patch.object(source.subprocess, "Popen", return_value=process):
+            with adapter.snapshot():
+                before = len(process.commands)
+                adapter._active.started -= 61
+                with self.assertRaisesRegex(source.SqlSourceError, "sql_query_timeout"):
+                    adapter.scope_products()
+                self.assertEqual(len(process.commands), before)
+                self.assertTrue(adapter._active.closed)
 
 
 if __name__ == "__main__":

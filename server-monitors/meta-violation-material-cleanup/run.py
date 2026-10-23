@@ -16,7 +16,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1]))
 
-from features.fb_ad_asset_delete.store import Store
+from features.fb_ad_asset_delete import store as shared_store
+from features.fb_ad_asset_delete.store import Store, StoreError
 from meta_violation_cleanup.graph import GraphClient
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import ACTOR, Runner
@@ -112,27 +113,58 @@ def open_store(config):
     return Store(config["shared_ledger"])
 
 
-def recover_owned(runtime, config):
+def recover_owned(runtime, config, send_notifications=False):
     recovery = runtime.recover_interrupted()
     store = None
     for run_id in recovery.get("run_ids", []):
         run = runtime.get(run_id)
-        shared_run = run["data"].get("shared_run_id")
-        if shared_run:
-            expected = "policy-cleanup-" + validate_run_id(run_id)
-            if run["data"].get("shared_job_id") != expected:
-                raise CliError("recovery_job_scope_mismatch")
-            if store is None:
-                store = open_store(config)
+        expected = "policy-cleanup-" + validate_run_id(run_id)
+        recorded_job = run["data"].get("shared_job_id")
+        if recorded_job and recorded_job != expected:
+            raise CliError("recovery_job_scope_mismatch")
+        if store is None:
+            store = open_store(config)
+        try:
             job = store.get_job(expected)
-            if job.get("actor") != ACTOR or not any(r.get("run_id") == shared_run for r in job.get("runs", [])):
-                raise CliError("recovery_run_scope_mismatch")
-            store.finish_run(shared_run, "interrupted", {"recovered_by_cleanup_cli": True})
-        if run['data'].get('execution_mode') == 'run':
+        except StoreError as exc:
+            if exc.code != "not_found":
+                raise
+            job = None
+        if job is not None:
+            # The job can exist even when SIGKILL occurred immediately after
+            # shared claim_run and before its IDs reached the runtime ledger.
+            manifest_hash = run["data"].get("manifest_sha256")
+            if not isinstance(manifest_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_hash):
+                frozen = runtime.load_artifact(run_id, "manifest.json")
+                manifest_hash = digest({k: v for k, v in frozen.items() if k != "sha256"})
+                if frozen.get("run_id") != run_id or frozen.get("sha256") != manifest_hash:
+                    raise CliError("recovery_manifest_invalid")
+            if (job.get("job_id") != expected or job.get("actor") != ACTOR or
+                    job.get("preview_id") != manifest_hash or job.get("manifest_sha256") != manifest_hash):
+                raise CliError("recovery_job_scope_mismatch")
+            for shared_run in job.get("runs", []):
+                if shared_run.get("status") != "running":
+                    continue
+                if shared_run.get("job_id") != expected or shared_run.get("actor") != ACTOR or shared_run.get("preview_id") != manifest_hash:
+                    raise CliError("recovery_run_scope_mismatch")
+                pid, identity = shared_run.get("owner_pid"), shared_run.get("owner_start")
+                if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or
+                        not isinstance(identity, str) or not identity or
+                        shared_store._owner_alive(pid, identity) is not False):
+                    raise CliError("recovery_owner_unresolved")
+                store.finish_run(shared_run["run_id"], "interrupted", {"recovered_by_cleanup_cli": True})
+        # Runtime atomically sets recovery_pending before exposing recovered IDs.
+        # Clear it only after every owned dead shared run is fenced (or the exact
+        # deterministic job is confirmed absent); failures remain retryable.
+        runtime.update(run_id, recovery_pending=False)
+        if send_notifications and run['data'].get('execution_mode', run.get('mode')) == 'run':
             attempt = int(run['data'].get('execution_attempt', 1))
             phase = 'end' if attempt == 1 else 'end-%d' % attempt
             notice = runtime.notice(run_id, phase)
             if notice and notice['status'] == 'sent':
+                continue
+            if notice and notice['status'] in ('sending', 'unknown'):
+                runtime.event(run_id, 'recovery_notice_pending', {'phase': phase, 'reason': 'notice_requires_reconciliation'})
                 continue
             try:
                 body = Runner(config, None, None, runtime, None, None).end_text(run_id)
@@ -199,7 +231,8 @@ def scan_or_run(args, config, runtime, stop):
     end_phase = "end" if attempt == 1 else "end-%d" % attempt
     try:
         runtime.update(run_id, status="running", execution_mode=args.command,
-                       execution_attempt=attempt, stage="starting")
+                       execution_attempt=attempt, stage="starting",
+                       execution_started_at=datetime.now(CST).isoformat(timespec="seconds"))
         runner.check_stop()
         if live:
             notifier.send(run_id, start_phase, runner.start_text(run_id, start, end))
@@ -353,7 +386,10 @@ def main(argv=None):
             code = 0
         else:
             with process_lock(Path(config["runtime_dir"]) / "process.lock"):
-                recover_owned(runtime, config)
+                if args.command == "run":
+                    recover_owned(runtime, config, send_notifications=True)
+                elif args.command == "reconcile":
+                    recover_owned(runtime, config, send_notifications=False)
                 if args.command in ("preview", "run"):
                     output, code = scan_or_run(args, config, runtime, stop)
                 elif args.command == "reconcile":

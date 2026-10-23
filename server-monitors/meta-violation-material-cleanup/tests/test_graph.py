@@ -67,6 +67,14 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_already_deleted_identity_is_verified_without_delete_request(self):
+        client, session, _ = self.client([Response(creative(status='DELETED'))])
+        result = client.delete('creative', '20', '1', '100')
+        self.assertEqual(result['status'], 'deleted_verified')
+        self.assertTrue(result['confirmed_deleted'])
+        self.assertFalse(result['request_sent'])
+        self.assertEqual([call[0] for call in session.calls], ['GET'])
+
     def test_bounded_read_workers_do_not_submit_unbounded_inventory(self):
         client = GraphClient({'1': 'synthetic-token'})
         lock = threading.Lock()
