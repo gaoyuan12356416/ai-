@@ -44,3 +44,43 @@ It refuses pending or unknown manual tasks before and after draining. Reconcile 
 before rollback. Keep the live DB, additive title column, frozen snapshots and short links;
 never restore the old DB over accepted publication facts. Backup and verified release
 identifiers are appended after deployment.
+
+## Verified deployment
+
+Production code: 87e5b1c5ba8dcd28bb1ce5cf6ad823b89548a27c, deployed 2026-10-23
+02:38 UTC on 43.166.187.96. GitHub checkout:
+`/mnt/data-disk/fb-video-publish/releases/87e5b1c`.
+Runtime: `/opt/fb-auto-post/current`; main client `/root/drama_material_service`;
+public static `/usr/share/nginx/html`. All 33 installed hashes matched.
+Main API and FB sidecar restarted successfully, Nginx validated/reloaded; all saved
+service/timer active/enabled states matched after deployment.
+
+Backup manifest:
+`/mnt/data-disk/fb-video-publish/backups/manual-gates-20261023T023806Z-87e5b1c5/manifest.json`.
+Copy rehearsal and live additive migration preserved 142118 existing rows across 29
+business tables. Readback preserved 110 existing task snapshots and 110 link rows;
+SQLite quick_check returned ok. No historical retry, test Post or live config edit.
+
+Production read-only checks: all six supplied formerly blacklisted materials resolve;
+manual preflight accepts six pairs on an authorized Page without settings; blank
+caption/title stay empty when that Page has no defaults. A 4199610-byte XLSX returned
+6 valid / 0 skipped. The publishing picker includes the virtual configuration. All
+verification operation IDs have zero created batches. Evidence files under
+`/mnt/data-disk/fb-video-publish/evidence/`: `manual-gates-catalog-20261023.json`,
+`manual-gates-deployed-20261023.json`, `manual-gates-readback-20261023.json`.
+Verifier correction 268a69f supplies required null per-material schedules and changes
+no production runtime. Five public assets returned 200 with exact hashes; unauthenticated
+Page API returned 401 and private identity broker 404.
+
+Local validation passed: core 49, Excel 26, manual-gates 49, manual-blacklist 45,
+Page-pool 44, pool-extension 19, pool-ID 12, source/link 37, gateway 12, broker 18 tests
+(some fixtures are inherited, so these counts are not unique cases). Browser fixture:
+10 checks passed, no JavaScript errors in the mocked authenticated flow. JS syntax and
+git diff whitespace checks passed. Skill context updated for the scoped policy.
+
+Exact rollback, only after pending/unknown manual work is reconciled:
+
+```bash
+cd /mnt/data-disk/fb-video-publish/releases/87e5b1c
+python3 scripts/deploy_fb_manual_gates.py --rollback /mnt/data-disk/fb-video-publish/backups/manual-gates-20261023T023806Z-87e5b1c5/manifest.json
+```
