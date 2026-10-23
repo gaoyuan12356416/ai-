@@ -13,6 +13,8 @@ LANGUAGES = [('en','English'),('es','Español'),('pt-br','Português (Brasil)'),
              ('de','Deutsch'),('ru','Русский'),('ja','日本語'),('ko','한국어'),('ar','العربية'),
              ('th','ไทย'),('id','Bahasa Indonesia'),('vi','Tiếng Việt'),('zh','中文'),
              ('tr','Türkçe'),('it','Italiano'),('ms','Bahasa Melayu'),('fil','Filipino')]
+DEFAULT_PRODUCT = 'Drama-社媒专用素材'
+CATALOG_PRODUCTS = (DEFAULT_PRODUCT, 'Dramawave')
 
 def ids(values):
     if (not isinstance(values, list) or not 1 <= len(values) <= 200
@@ -127,6 +129,9 @@ class SourceRepository:
         q = str(query.get('q') or '').strip()
         if len(q)>80:
             raise PublishingError('invalid_query','搜索内容最多 80 字',400)
+        product = str(query.get('product') or DEFAULT_PRODUCT).strip()
+        if product not in CATALOG_PRODUCTS:
+            raise PublishingError('invalid_query','请选择 Dramawave 或 Drama-社媒专用素材',400)
         try:
             limit = min(50,max(1,int(query.get('limit') or 30)))
             cursor = str(query.get('cursor') or '')
@@ -136,9 +141,14 @@ class SourceRepository:
         except (ValueError,TypeError):
             raise PublishingError('invalid_query','分页或语言筛选无效',400) from None
         clauses, params = ['s.type=2'], []
+        exact_id = re.fullmatch(r'[0-9]+',q) is not None
+        # Browse/name searches stay in one indexed product. Exact IDs retain
+        # the existing cross-product manual publishing policy.
+        if not exact_id:
+            clauses.append('s.product=%s');params.append(product)
         if cursor:
             clauses.append('s.id<%s');params.append(cursor)
-        if re.fullmatch(r'[0-9]+',q):
+        if exact_id:
             clauses.append('s.id=%s');params.append(q)
         elif q:
             clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
@@ -151,7 +161,7 @@ class SourceRepository:
             clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
                 WHERE i.content_id=s.data_source_id AND i.app_id=1479 AND LOWER(REPLACE(TRIM(i.language),'_','-'))
                 IN ({','.join('%s' for _ in aliases)}))''');params.extend(aliases)
-        raw = self.mysql.select(f'''SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+        raw = self.mysql.select(f'''SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s
             WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
         resolved = self._resolve_rows(selected,raw[:limit]) if selected else {'items':{},'errors':{}}

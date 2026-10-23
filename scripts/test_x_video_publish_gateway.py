@@ -24,7 +24,7 @@ from features.x_video_publish.errors import PublishingError
 from features.x_video_publish import gateway, identity_broker, transport
 from features.x_video_publish.runtime_source import GatedReadOnlyMySQL
 from features.x_video_publish.service import PublishingService, batch_dto
-from features.x_video_publish.sources import SourceRepository, safe_url
+from features.x_video_publish.sources import DEFAULT_PRODUCT, SourceRepository, safe_url
 from features.x_video_publish.scheduler import PoolScheduler
 
 
@@ -210,6 +210,9 @@ class GatewayServiceTests(unittest.TestCase):
                 gateway.route(method, gateway.PREFIX + path)
         for path in ("/materials?q=a&q=b", "/materials?sql=SELECT", "/accounts?owner_user_id=other"):
             self.assertEqual(self.dispatch("GET", path)[0][0], 400)
+        self.assertEqual(self.dispatch("GET", "/materials?product=Dramawave")[0][0], 200)
+        self.assertEqual(self.dispatch("GET", "/materials?product=Dramawave&product=Other")[0][0], 400)
+        self.assertEqual(self.dispatch("GET", "/accounts?product=Dramawave")[0][0], 400)
 
     def test_manual_three_pairs_commit_idempotently_with_no_platform_write(self):
         response, _ = self.dispatch("POST", "/preflight", self.manual())
@@ -367,7 +370,7 @@ class FakeMySQL:
     schema = "fixture_schema"
     def __init__(self, count=3):
         self.calls, self.resource_count, self.deploy_count = [], 1, 1
-        self.sources = [{"material_id": str(101 + i), "product": "Fixture", "material_type": 2,
+        self.sources = [{"material_id": str(101 + i), "product": DEFAULT_PRODUCT, "material_type": 2,
             "material_is_deleted": 0, "material_url": "https://media.example.invalid/" + str(i) + ".mp4",
             "material_name": "Fixture video", "material_language": "en", "content_id": "fixture-content",
             "source_tag_name": "fixture", "video_duration": 45, "thumbnail_url": "https://images.example.invalid/1.png"} for i in range(count)]
@@ -377,7 +380,14 @@ class FakeMySQL:
         if "FROM `fixture_schema`.ads_custom_source" in sql:
             if "WHERE s.id IN" in sql:
                 return [dict(r) for r in self.sources if r["material_id"] in params]
-            return copy.deepcopy(self.sources)
+            rows = copy.deepcopy(self.sources)
+            if 's.product=%s' in sql:
+                product = params[sql.split('s.product=%s')[0].count('%s')]
+                rows = [r for r in rows if r['product'] == product]
+            if 's.id=%s' in sql:
+                mid = params[sql.split('s.id=%s')[0].count('%s')]
+                rows = [r for r in rows if r['material_id'] == mid]
+            return rows
         if "FROM `fixture_schema`.ads_drama_resource" in sql:
             return [{"content_id": "fixture-content", "series_code": "fixture-series", "language": "en",
                      "drama_name": "Fixture drama", "drama_labels": "Romance", "drama_description": "Fixture description"} for _ in range(self.resource_count)]
@@ -387,6 +397,63 @@ class FakeMySQL:
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_catalog_products_and_cross_product_exact_ids(self):
+        mysql = FakeMySQL()
+        mysql.sources[1]['product'] = 'Dramawave'
+        mysql.sources[2]['product'] = 'Other'
+        source = SourceRepository(mysql)
+        self.assertEqual([r['material_id'] for r in source.listing({})['items']], ['101'])
+        self.assertEqual([r['material_id'] for r in source.listing({'product': 'Dramawave', 'q': 'Fixture'})['items']], ['102'])
+        self.assertEqual([r['material_id'] for r in source.listing({'product': 'Dramawave', 'q': '103'})['items']], ['103'])
+        self.assertEqual([r['material_id'] for r in source.listing({'q': '102'})['items']], ['102'])
+        self.assertEqual(set(source.resolve(['101', '102', '103'])['items']), {'101', '102', '103'})
+        for sql, params in mysql.calls:
+            if 'ads_custom_source s' in sql:
+                self.assertNotIn('FORCE INDEX(PRIMARY)', sql)
+                if 's.id=%s' in sql or 's.id IN' in sql:
+                    self.assertNotIn('s.product=%s', sql)
+        with self.assertRaises(PublishingError) as caught:
+            source.listing({'product': 'Other'})
+        self.assertEqual(caught.exception.code, 'invalid_query')
+
+    def test_product_scope_ignores_foreign_description_but_rejects_real_conflicts(self):
+        class MixedProducts(FakeMySQL):
+            conflict = False
+            def select(self, sql, params):
+                rows = super().select(sql, params)
+                if "FROM `fixture_schema`.ads_drama_resource" in sql:
+                    foreign = {**rows[0], "drama_description": "Other product copy"}
+                    # Simulate SQL scope, not a permissive fallback to the first row.
+                    if self.conflict or "r.app_id=1479" not in sql:
+                        rows.append(foreign)
+                return rows
+        mysql = MixedProducts()
+        result = SourceRepository(mysql).resolve(["101"])
+        self.assertIn("101", result["items"])
+        mysql.conflict = True
+        result = SourceRepository(mysql).resolve(["101"])
+        self.assertEqual(result["items"], {})
+        self.assertEqual(result["errors"]["101"]["code"], "drama_mapping_ambiguous")
+        self.assertIn("Dramawave", result["errors"]["101"]["message"])
+
+    def test_language_prefilter_still_requires_resolved_drama_language(self):
+        mysql = FakeMySQL()
+        result = SourceRepository(mysql).listing({"language": "ja", "limit": 2})
+        self.assertEqual(result["items"], [])  # authoritative fixture language is en
+        self.assertEqual(result["next_cursor"], "102")
+        sql, _ = mysql.calls[0]
+        self.assertIn("ads_drama_info i FORCE INDEX(ac)", sql)
+        self.assertIn("i.app_id=1479", sql)
+        resource_sql = mysql.calls[1][0]
+        self.assertIn("r.app_id=1479", resource_sql)
+        self.assertIn("FORCE INDEX(content_id)", resource_sql)
+
+    def test_executor_uses_the_same_product_scope(self):
+        from features.x_posts.selector import DramawaveCandidateSelector
+        with patch("features.x_posts.selector._cursor_rows", return_value=[]) as query:
+            DramawaveCandidateSelector(None)._pool_drama_rows("content-1")
+        self.assertIn("AND r.app_id = 1479", query.call_args.args[1])
+
     def test_resolve_and_listing_each_use_at_most_three_bounded_queries(self):
         mysql = FakeMySQL()
         source = SourceRepository(mysql)

@@ -28,7 +28,7 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
  const accounts=[{account_id:'1',x_user_id:'1900000000000000001',display_name:'Account A',username:'a',language:'en',eligible:true,status:'active',publish_approved:true,caption_template:'default A {name} {url}',config_version:1},{account_id:'2',x_user_id:'1900000000000000002',display_name:'Account B',username:'b',language:'en',eligible:true,status:'active',publish_approved:true,caption_template:'default B {name} {url}',config_version:2}];
  if(accountPage)accounts.push({...accounts[0],account_id:'99',x_user_id:'1999999999999999999',display_name:'Other owner',username:'other'});
  const materials=[{material_id:'101',material_name:'Video A',drama_name:'Drama A',language:'en',duration_seconds:20},{material_id:'102',material_name:'Video B',drama_name:'Drama B',language:'en',duration_seconds:25}];
- const response=(data,status=200)=>({ok:status<400,status,json:async()=>data,text:async()=>JSON.stringify(data)});let batchCount=0,failSubmit=false;
+ const response=(data,status=200)=>({ok:status<400,status,json:async()=>data,text:async()=>JSON.stringify(data)});let batchCount=0,failSubmit=false,poolReadFails=0,poolPreviewFails=0,materialReadFails=0,materialResult={items:materials,next_cursor:""};
  const context={console,URL,URLSearchParams,Intl,Date,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,DataView,crypto:webcrypto,structuredClone:clone,Event:class{constructor(type){this.type=type;}},setTimeout:()=>1,clearTimeout:()=>{},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},location:{search:'',href:'',assign:v=>context.location.href=v},history:{replaceState:()=>{}},document:{body,createElement:tag=>node(tag),getElementById:id=>nodes.get(id)||null,querySelectorAll:()=>[]},addEventListener:(t,fn)=>events.set(t,fn),QuickNav:{render:async()=>{}},UiTopbar:{render:()=>{},handleAuthAction:()=>{}},fetch:async(url,options={})=>{
    calls.push({url,options:clone(options)});const data=options.body?JSON.parse(options.body):null;if(data)posts.push({url,data});
    if(url==='/api/ui/topbar')return response(auth);
@@ -36,7 +36,7 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
    if(url==='/api/x-video-publish/accounts')return response({items:accounts});
    if(url==='/api/x-video-publish/languages')return response({items:[{value:'en',label:'English'}]});
    if(url==='/api/x-video-publish/draft')return response({draft});
-   if(url.startsWith('/api/x-video-publish/materials?'))return response({items:materials,next_cursor:''});
+   if(url.startsWith('/api/x-video-publish/materials?')){if(materialReadFails-->0)return response({message:'fixture material query failed'},503);return response(materialResult);}
    if(url==='/api/x-video-publish/preflight')return response({preview_id:'preview-1',expires_at_utc:new Date(Date.now()+300000).toISOString(),items:data.pairs.map(p=>({...p,caption:p.caption_template,planned_at_utc:null,schedule_kind:'immediate'}))});
    if(url==='/api/x-video-publish/batches'&&data){batchCount++;if(failSubmit)throw new Error('network interrupted');return response({batch_id:'batch-1'});}
    if(url.startsWith('/api/x-video-publish/batches?'))return response({items:[]});
@@ -51,10 +51,35 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
  async function choose(){await nodes.get('xpChooseMaterials').click();await settle();for(const m of materials)nodes.get('xpMaterialChoices').onchange({target:target({pick:m.material_id})});nodes.get('xpUseMaterials').click();}
  function candidate(id){nodes.get('xpCandidateAccounts').onchange({target:target({candidate:id})});}
  function pair(m,a,checked=true){nodes.get('xpPairRows').onchange({target:target({pairMaterial:m,pairAccount:a},checked)});}
- return {context,P:context.XVideoPublish,nodes,calls,posts,storage,choose,candidate,pair,materials,accounts,target,get batchCount(){return batchCount;},failSubmit:()=>failSubmit=true};
+ return {context,P:context.XVideoPublish,nodes,calls,posts,storage,choose,candidate,pair,materials,accounts,target,failMaterialRead:()=>materialReadFails=1,setMaterialResult:value=>materialResult=value,failPoolRead:()=>poolReadFails=1,failPoolPreview:()=>poolPreviewFails=1,get batchCount(){return batchCount;},failSubmit:()=>failSubmit=true};
 }
 async function test(name,fn){try{await fn();results.push({name,pass:true});}catch(error){results.push({name,pass:false,error:error.stack});}}
 (async()=>{
+ await test('product changes reset pagination and preserve selections across products',async()=>{
+  const x=await environment();x.setMaterialResult({items:x.materials,next_cursor:'102'});
+  await x.nodes.get('xpChooseMaterials').click();await settle();
+  const query=()=>new URL(x.calls.filter(c=>c.url.startsWith('/api/x-video-publish/materials?')).at(-1).url,'https://fixture.invalid').searchParams;
+  assert.equal(query().get('product'),'Drama-社媒专用素材');
+  x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'101'})});
+  x.nodes.get('xpMaterialNext').click();await settle();assert.equal(query().get('cursor'),'102');
+  x.setMaterialResult({items:[x.materials[1]],next_cursor:''});
+  x.nodes.get('xpMaterialProduct').value='Dramawave';x.nodes.get('xpMaterialProduct').onchange();await settle();
+  assert.equal(query().get('product'),'Dramawave');assert.equal(query().get('cursor'),'');
+  assert.equal(x.nodes.get('xpMaterialPrev').disabled,true);assert.match(x.nodes.get('xpPickerCount').textContent,/1/);
+  x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'102'})});x.nodes.get('xpUseMaterials').click();
+  assert.match(x.nodes.get('xpSelectedMaterials').innerHTML,/Video A/);assert.match(x.nodes.get('xpSelectedMaterials').innerHTML,/Video B/);
+  assert.equal(x.posts.length,0);
+ });
+ await test('failed and empty material searches remain distinct and exact ID input is preserved',async()=>{
+  const x=await environment();await x.nodes.get('xpChooseMaterials').click();await settle();
+  x.nodes.get('xpMaterialChoices').onchange({target:x.target({pick:'101'})});
+  x.nodes.get('xpMaterialSearch').value='9000000000000000001';x.failMaterialRead();x.nodes.get('xpSearchMaterials').click();await settle();
+  assert.equal(x.nodes.get('xpPickerError').hidden,false);assert.equal(x.nodes.get('xpMaterialNext').disabled,true);
+  assert.match(x.nodes.get('xpMaterialChoices').innerHTML,/查询未完成/);assert.match(x.nodes.get('xpPickerCount').textContent,/1/);
+  x.setMaterialResult({items:[],next_cursor:'',empty_reason:'没有符合条件的视频'});x.nodes.get('xpSearchMaterials').click();await settle();
+  assert.equal(x.nodes.get('xpPickerError').hidden,true);assert.equal(x.nodes.get('xpMaterialSearch').value,'9000000000000000001');
+  assert.equal(x.nodes.get('xpMaterialChoices').textContent,'没有符合条件的视频');assert.equal(x.posts.length,0);
+ });
  await test('empty selection is blocked before preflight',async()=>{const x=await environment();await x.nodes.get('xpReviewPublish').click();assert.match(x.nodes.get('xpManualError').textContent,/至少选择/);assert.equal(x.posts.length,0);});
  await test('candidate selection never creates pairs and unassigned blocks submission',async()=>{const x=await environment();await x.choose();x.candidate('1');assert.match(x.nodes.get('xpFooterSummary').innerHTML,/帖子 <strong>0/);await x.nodes.get('xpReviewPublish').click();assert.match(x.nodes.get('xpManualError').textContent,/未分配/);});
  await test('A to two accounts plus B to one freezes exactly three independent captions',async()=>{const x=await environment();await x.choose();x.candidate('1');x.candidate('2');x.pair('101','1');x.pair('101','2');x.pair('102','1');x.nodes.get('xpCaption').oninput({target:{value:'Edited first'}});x.nodes.get('xpCaptionPair').onchange({target:{value:'101::2'}});x.nodes.get('xpCaption').oninput({target:{value:'Edited second'}});x.nodes.get('xpCaptionPair').onchange({target:{value:'101::1'}});assert.equal(x.nodes.get('xpCaption').value,'Edited first');await x.nodes.get('xpReviewPublish').click();const req=x.posts.find(x=>x.url.endsWith('/preflight')).data;assert.equal(req.pairs.length,3);assert.deepEqual(req.pairs.map(p=>p.caption_template),['Edited first','Edited second','default A {name} {url}']);assert.equal(new Set(req.pairs.map(p=>p.account_id)).size,2);});
