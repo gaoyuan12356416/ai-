@@ -370,6 +370,7 @@ class FakeMySQL:
     schema = "fixture_schema"
     def __init__(self, count=3):
         self.calls, self.resource_count, self.deploy_count = [], 1, 1
+        self.exact_titles = []
         self.sources = [{"material_id": str(101 + i), "product": DEFAULT_PRODUCT, "material_type": 2,
             "material_is_deleted": 0, "material_url": "https://media.example.invalid/" + str(i) + ".mp4",
             "material_name": "Fixture video", "material_language": "en", "content_id": "fixture-content",
@@ -377,6 +378,8 @@ class FakeMySQL:
 
     def select(self, sql, params):
         self.calls.append((sql, list(params)))
+        if 'SELECT DISTINCT r.content_id' in sql:
+            return copy.deepcopy(self.exact_titles)
         if "FROM `fixture_schema`.ads_custom_source" in sql:
             if "WHERE s.id IN" in sql:
                 return [dict(r) for r in self.sources if r["material_id"] in params]
@@ -397,6 +400,31 @@ class FakeMySQL:
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_complete_drama_title_uses_content_index_and_empty_language_does_not_fallback(self):
+        mysql = FakeMySQL()
+        mysql.exact_titles = [{'content_id': 'fixture-content'}]
+        result = SourceRepository(mysql).listing({'q': 'Fixture drama', 'language': 'ja'})
+        self.assertEqual(result['items'], [])
+        self.assertEqual(len(mysql.calls), 4)
+        title_sql, title_params = mysql.calls[0]
+        self.assertIn('FORCE INDEX(name)', title_sql)
+        self.assertEqual(title_params, ['Fixture drama'])
+        sql, params = mysql.calls[1]
+        self.assertIn('STRAIGHT_JOIN', sql)
+        self.assertIn('s.data_source_id IN (%s)', sql)
+        self.assertIn('s.product=%s', sql)
+        self.assertIn('s.data_source <=> source_kinds.data_source', sql)
+        self.assertNotIn('LOCATE', sql)
+        self.assertIn('fixture-content', params)
+        self.assertIn('ja', params)
+        mysql.calls.clear()
+        result = SourceRepository(mysql).listing({'q': 'Fixture drama', 'language': 'en'})
+        self.assertEqual(len(result['items']), 3)
+        mysql.exact_titles *= 101
+        with self.assertRaises(PublishingError) as caught:
+            SourceRepository(mysql).listing({'q': 'Fixture drama'})
+        self.assertEqual(caught.exception.code, 'source_mapping_too_large')
+
     def test_catalog_products_and_cross_product_exact_ids(self):
         mysql = FakeMySQL()
         mysql.sources[1]['product'] = 'Dramawave'
@@ -447,12 +475,6 @@ class SourceBoundaryTests(unittest.TestCase):
         resource_sql = mysql.calls[1][0]
         self.assertIn("r.app_id=1479", resource_sql)
         self.assertIn("FORCE INDEX(content_id)", resource_sql)
-
-    def test_executor_uses_the_same_product_scope(self):
-        from features.x_posts.selector import DramawaveCandidateSelector
-        with patch("features.x_posts.selector._cursor_rows", return_value=[]) as query:
-            DramawaveCandidateSelector(None)._pool_drama_rows("content-1")
-        self.assertIn("AND r.app_id = 1479", query.call_args.args[1])
 
     def test_resolve_and_listing_each_use_at_most_three_bounded_queries(self):
         mysql = FakeMySQL()

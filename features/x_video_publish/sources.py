@@ -84,7 +84,7 @@ class SourceRepository:
 
     def _resolve_rows(self, material_ids, rows):
         # Listing already has these exact source rows: reuse its bounded read so
-        # both resolve and search perform no more than three repository queries.
+        # resolve/browse use three queries; exact-title search adds one lookup.
         raw = {str(r['material_id']):r for r in rows}
         contents = list(dict.fromkeys(str(r.get('content_id') or '') for r in rows if r.get('content_id')))
         dramas, deploy = defaultdict(list), defaultdict(list)
@@ -148,11 +148,30 @@ class SourceRepository:
             clauses.append('s.product=%s');params.append(product)
         if cursor:
             clauses.append('s.id<%s');params.append(cursor)
+        source_from = f'`{self.schema}`.ads_custom_source s'
         if exact_id:
             clauses.append('s.id=%s');params.append(q)
         elif q:
-            clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
-                WHERE r.content_id=s.data_source_id AND r.app_id=1479 AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
+            # A complete drama title identifies that drama, even when the
+            # selected language has no video. Do not fall back to a full source
+            # scan in that case. Fetch through the existing (source,content)
+            # index, enumerating all source kinds rather than restricting them.
+            titles = self.mysql.select(f'''SELECT DISTINCT r.content_id
+                FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
+                WHERE r.app_id=1479 AND r.name=%s LIMIT 101''', [q])
+            if len(titles) > 100:
+                raise PublishingError('source_mapping_too_large','同名剧目过多，请使用完整素材 ID 查询',503)
+            if titles:
+                content_ids = list(dict.fromkeys(str(r['content_id']) for r in titles))
+                source_from = f'''(SELECT DISTINCT data_source FROM `{self.schema}`.ads_custom_source
+                    FORCE INDEX(idx_source_type_source_id)) source_kinds
+                    STRAIGHT_JOIN `{self.schema}`.ads_custom_source s FORCE INDEX(idx_source_type_source_id)
+                    ON s.data_source <=> source_kinds.data_source'''
+                clauses.append(f"s.data_source_id IN ({','.join('%s' for _ in content_ids)})")
+                params.extend(content_ids)
+            else:
+                clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
+                    WHERE r.content_id=s.data_source_id AND r.app_id=1479 AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
         if language:
             aliases = [language,'jp'] if language=='ja' else [language]
             # Every eligible result also needs a same-language deployment row.
@@ -161,7 +180,7 @@ class SourceRepository:
             clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
                 WHERE i.content_id=s.data_source_id AND i.app_id=1479 AND LOWER(REPLACE(TRIM(i.language),'_','-'))
                 IN ({','.join('%s' for _ in aliases)}))''');params.extend(aliases)
-        raw = self.mysql.select(f'''SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s
+        raw = self.mysql.select(f'''SELECT {self._projection()} FROM {source_from}
             WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
         resolved = self._resolve_rows(selected,raw[:limit]) if selected else {'items':{},'errors':{}}

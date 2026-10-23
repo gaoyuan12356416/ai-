@@ -53,11 +53,13 @@ def window(config):
 
 def change(config, manifest, rollback=False):
     window(config)
+    # The shared-access pause context may stop this scheduler before yielding.
+    # Capture its original state first so its finally block can restore it.
+    pool_state = base.unit_state(base.POOL)
+    manifest['pool_state'] = pool_state
+    base.save(manifest)
     with base.paused(config, manifest):
         window(config)
-        pool_state = base.unit_state(base.POOL)
-        manifest['pool_state'] = pool_state
-        base.save(manifest)
         if pool_state['ActiveState']=='active':
             base.run('systemctl','stop',base.POOL)
         modified = False
@@ -108,7 +110,8 @@ def change(config, manifest, rollback=False):
             base.save(manifest)
             raise
         finally:
-            if manifest.get('status')!='recovery_required' and pool_state['ActiveState']=='active':
+            if (not config.get('allow_existing_pool_scheduler')
+                    and manifest.get('status')!='recovery_required' and pool_state['ActiveState']=='active'):
                 base.run('systemctl','start',base.POOL)
 
 
