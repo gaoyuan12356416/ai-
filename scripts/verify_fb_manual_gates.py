@@ -63,7 +63,7 @@ def main():
                     raise RuntimeError('Preview failed: '+str(data.get('code')))
                 return data
             body=dict(schema_version=2,operation_id=uuid.uuid4().hex,material_ids=args.material_ids,page_ids=[target],
-                      processing_mode='original',material_schedules={},pairs=[dict(material_id=m,page_id=target,
+                      processing_mode='original',material_schedules={m:None for m in args.material_ids},pairs=[dict(material_id=m,page_id=target,
                       config_instance_id='',config_version=0,caption_template='',title='') for m in args.material_ids])
             result=post('preflight',body)
             evidence['manual_preview_items']=len(result['items'])
