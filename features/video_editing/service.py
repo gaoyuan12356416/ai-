@@ -27,6 +27,8 @@ class Service:
     def __init__(self,store,uploads,app=None,gpu_url='',gpu_token='',intake_enabled=True):
         self.store,self.uploads,self.app=store,uploads,app
         self.catalog=Catalog(store,app) if app is not None else None
+        from .material_source import MaterialSource
+        self.material_source=MaterialSource(self)
         self.gpu_url,self.gpu_token=gpu_url.rstrip('/'),gpu_token
         self._intake_enabled=bool(intake_enabled)
 
@@ -328,7 +330,9 @@ class Service:
         return {'id':row['id'],'project_id':row['project_id'],'kind':row['kind'],'status':row['status'],'drama_title':d.get('drama_title',''),
                 'batch_id':d.get('batch_id',''),'project_version_id':d.get('project_version_id',''),'output_id':d.get('output_id',''),
                 'stage':d.get('stage',row['status']),'progress':d.get('progress',0),'error_code':d.get('error_code',''),
-                'error_message':d.get('error_message',''),'output':output,'created_at':row['created_at'],'updated_at':row['updated_at']}
+                'error_message':d.get('error_message',''),'output':output,
+                'material_upload':self.material_source.for_task(row),
+                'created_at':row['created_at'],'updated_at':row['updated_at']}
 
     def resume(self,tid,actor):
         with self.store.transaction() as db:

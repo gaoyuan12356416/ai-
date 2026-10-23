@@ -252,6 +252,9 @@ input[type="checkbox"] { min-height: auto; accent-color: var(--blue); }
 .task-info { flex: 1; min-width: 180px; }
 .task-info strong { display: block; overflow-wrap: anywhere; font-size: 16px; }
 .task-info p { margin-top: 7px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.task-info .material-upload { color: var(--blue); line-height: 1.5; }
+.task-info .material-upload.succeeded { color: var(--green); }
+.task-info .material-upload.failed, .task-info .material-upload.unknown_outcome { color: var(--red); }
 .task-status { color: var(--blue); font-size: 13px; }
 .task-status.completed, .task-status.ready { color: var(--green); }
 .task-status.failed { color: var(--red); }

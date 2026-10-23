@@ -18,7 +18,8 @@ def handle(handler,method,app_module):
     if method!='GET' and not handler._require_same_origin_json():return True
     session=handler._session() or {}
     actor={'user_id':str(session.get('user_id','')),'tenant_key':str(session.get('tenant_key','')),
-           'name':str(session.get('name','')),'is_admin':session.get('role')=='admin'}
+           'name':str(session.get('name','')),'email':str(session.get('email','')),
+           'is_admin':session.get('role')=='admin'}
     try:
         owner(actor)
         require(0<=int(handler.headers.get('Content-Length','0') or 0)<=2*1024*1024,'request_too_large','剪辑配置大小无效',413)
@@ -62,10 +63,11 @@ def handle(handler,method,app_module):
             where,args=("kind='render'",()) if actor['is_admin'] else ("kind='render' AND owner=?",(owner(actor),))
             rows,total=service.store.list('task',where,args,100)
             answer={'items':[service.task_dto(r) for r in rows],'total':total}
-        elif re.fullmatch(r'/tasks/ve_[0-9a-f]{32}(?:/resume)?',path):
+        elif re.fullmatch(r'/tasks/ve_[0-9a-f]{32}(?:/(?:resume|material-source))?',path):
             tid=path.split('/')[2]
-            if method=='GET' and not path.endswith('/resume'):answer={'item':service.task_dto(service.task(tid,actor))}
+            if method=='GET' and len(path.split('/'))==3:answer={'item':service.task_dto(service.task(tid,actor))}
             elif method=='POST' and path.endswith('/resume'):answer={'item':service.resume(tid,actor)}
+            elif method=='POST' and path.endswith('/material-source'):answer={'item':service.material_source.enqueue(tid,actor)}
         require(answer is not None,'not_found','接口不存在',404)
         app_module.json_response(handler,200,answer,no_store=True)
     except VideoEditingError as exc:

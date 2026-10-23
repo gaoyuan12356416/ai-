@@ -6,7 +6,7 @@
   <meta name="referrer" content="same-origin">
   <title>视频剪辑 · AI 后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/video-editing.css?v=20261023-probe-progress-1">
+  <link rel="stylesheet" href="/video-editing.css?v=20261023-material-source-1">
 </head>
 <body>
   <div class="app">
@@ -34,7 +34,7 @@
           </div>
         </section>
         <section id="libraryView" class="view hidden"><div class="section-toolbar"><div><h2>共享素材库</h2><p>原素材直接上传 COS，有权限的同事均可使用。</p></div><div class="toolbar-actions"><input id="assetSearch" type="search" placeholder="搜索素材名称"><button id="uploadButton" class="button primary">↑ 上传本地素材</button></div></div><input id="fileInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi" multiple hidden><div id="uploadDrop" class="upload-drop" tabindex="0" role="button" aria-label="拖入或选择本地视频"><span>＋</span><strong>拖入视频，开始上传</strong><p id="uploadLimits">单个文件最大 8 GiB · 支持分片续传 · 视频直接进入 COS</p></div><div id="uploadList" class="upload-list"></div><div class="library-note">刷新页面后，可重新选择同一原文件继续未完成上传。通过媒体校验后即可剪辑。</div><div id="assetGrid" class="asset-grid"></div><button id="loadMoreAssets" class="button hidden">加载更多素材</button></section>
-        <section id="tasksView" class="view hidden"><div class="section-toolbar"><div><h2>制作任务</h2><p>每部短剧独立制作，已完成的成片会保留。</p></div><button id="refreshTasks" class="button">刷新任务</button></div><div class="delivery-banner"><span class="delivery-icon">↗</span><div><strong>外部制作接口</strong><p>外部制作及盈量自定义素材库推送接口待接入。本期支持预览和下载剪辑成片。</p></div><span class="small-tag">待接入</span></div><div id="taskList" class="task-list"></div></section>
+        <section id="tasksView" class="view hidden"><div class="section-toolbar"><div><h2>制作任务</h2><p>每部短剧独立制作，已完成的成片会保留。</p></div><button id="refreshTasks" class="button">刷新任务</button></div><div class="delivery-banner"><span class="delivery-icon">↗</span><div><strong>成片使用</strong><p>已完成的成片可预览、下载，也可逐条上传至【Drama-社媒专用素材】。外部制作接口待接入。</p></div><span class="small-tag">逐条上传</span></div><div id="taskList" class="task-list"></div></section>
       </div>
     </main>
   </div>
@@ -43,6 +43,6 @@
   <dialog id="insertDialog"><div class="dialog-head"><h2>插入素材</h2><button data-close="insertDialog" class="icon-button" aria-label="关闭">×</button></div><p id="insertName"></p><div class="range-pair"><label>入点 / 秒<input id="insertStart" type="number" min="0" step="0.001" value="0"></label><label>出点 / 秒<input id="insertEnd" type="number" min="0" step="0.001"></label></div><label class="field-label">插入位置<select id="insertPosition"><option value="before">选中片段之前</option><option value="after">选中片段之后</option><option value="start">片头</option><option value="end">片尾</option></select></label><div class="dialog-foot"><button id="confirmInsert" class="button primary">插入时间线</button></div></dialog>
   <dialog id="mediaDialog"><div class="dialog-head"><h2 id="mediaTitle">视频预览</h2><button data-close="mediaDialog" class="icon-button" aria-label="关闭">×</button></div><video id="mediaPlayer" controls playsinline></video><p id="mediaExpiry" class="micro"></p></dialog>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261023-probe-progress-1"></script>
+  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261023-material-source-1"></script>
 </body>
 </html>

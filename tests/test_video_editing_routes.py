@@ -39,6 +39,20 @@ class RouteTests(unittest.TestCase):
         h=Handler();service=SimpleNamespace(config=lambda:{'enabled':False})
         with patch('features.video_editing.routes.get_service',return_value=service):handle(h,'GET',self.app)
         self.assertEqual(self.replies,[(200,{'item':{'enabled':False}})])
+    def test_material_source_uses_cookie_origin_and_server_actor(self):
+        h=Handler('/api/video-editing/tasks/ve_'+'a'*32+'/material-source')
+        h.session['email']='editor@example.test'
+        upload=Mock(return_value={'status':'queued','error':''})
+        service=SimpleNamespace(material_source=SimpleNamespace(enqueue=upload))
+        with patch('features.video_editing.routes.get_service',return_value=service):
+            self.assertTrue(handle(h,'POST',self.app))
+        self.assertEqual(self.replies,[(200,{'item':{'status':'queued','error':''}})])
+        self.assertEqual(upload.call_args.args[0],'ve_'+'a'*32)
+        self.assertEqual(upload.call_args.args[1]['email'],'editor@example.test')
+        h=Handler('/api/video-editing/tasks/ve_'+'a'*32+'/material-source')
+        h._require_same_origin_json.return_value=False
+        with patch('features.video_editing.routes.get_service') as factory:
+            self.assertTrue(handle(h,'POST',self.app));factory.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

@@ -609,3 +609,60 @@ test('selected episodes show independent download and queue progress without los
   app.ready(1,2);await app.poll();assert.equal(app.field('dramaDialog').open,false);
   assert.equal(app.probes.length,1);
 });
+
+test('completed task submits one material-source request and shows the confirmed material ID after refresh',async()=>{
+  const gate=deferred(),task={id:'ve_completed',drama_title:'风起时，遇见你',status:'completed',output:{metadata:{duration_ms:43800}}};let posts=0;
+  const app=await browser(async(url,options)=>{
+    if(url.endsWith('/tasks'))return response({items:[task]});
+    if(url.endsWith('/tasks/ve_completed/material-source')){posts++;assert.equal(options.method,'POST');assert.equal(options.body,'{}');return gate.promise;}
+  });
+  assert.match(app.field('taskList').innerHTML,/上传至素材库/);
+  const button=app.dataElement({uploadMaterialTask:'ve_completed'});
+  const first=app.clickData({uploadMaterialTask:'ve_completed'});await settle();
+  assert.equal(posts,1);assert.equal(button.disabled,true);
+  assert.match(app.field('taskList').innerHTML,/等待上传/);
+  assert.doesNotMatch(app.field('taskList').innerHTML,/data-upload-material-task/);
+  await button.click();assert.equal(posts,1);
+  gate.resolve(response({item:{status:'queued'}}));await first;
+  assert.match(app.field('taskList').innerHTML,/等待上传/);
+  task.material_upload={status:'succeeded',material_id:56789};await app.field('refreshTasks').click();
+  assert.match(app.field('taskList').innerHTML,/素材 ID：56789/);
+  assert.doesNotMatch(app.field('taskList').innerHTML,/data-upload-material-task/);
+});
+
+test('unknown material outcome offers read-only refresh and never submits a second upload',async()=>{
+  const task={id:'ve_unknown',drama_title:'待核实',status:'completed',output:{metadata:{duration_ms:1000}},material_upload:{status:'unknown_outcome',error:'等待素材库回读'}};let posts=0,reads=0;
+  const app=await browser(async(url,options)=>{
+    if(url.endsWith('/tasks')){reads++;return response({items:[task]});}
+    if(url.includes('/material-source')&&options.method==='POST'){posts++;return response({item:{status:'unknown_outcome'}});}
+  });
+  assert.match(app.field('taskList').innerHTML,/结果待核实/);
+  assert.match(app.field('taskList').innerHTML,/等待素材库回读/);
+  await app.clickData({refreshMaterialTask:'ve_unknown'});
+  assert.equal(posts,0);assert.ok(reads>=2);
+  assert.doesNotMatch(app.field('taskList').innerHTML,/data-upload-material-task/);
+});
+
+test('lost material-source response stays in reconciliation state after the server records it',async()=>{
+  const task={id:'ve_lost',status:'completed',output:{metadata:{duration_ms:1000}}};let posts=0;
+  const app=await browser(async(url,options)=>{
+    if(url.endsWith('/tasks'))return response({items:[task]});
+    if(url.endsWith('/tasks/ve_lost/material-source')&&options.method==='POST'){
+      posts++;task.material_upload={status:'unknown_outcome',error:'等待回读'};
+      return response({error:'提交回执丢失'},502);
+    }
+  });
+  await app.clickData({uploadMaterialTask:'ve_lost'});
+  assert.equal(posts,1);assert.match(app.field('taskList').innerHTML,/结果待核实/);
+  assert.doesNotMatch(app.field('taskList').innerHTML,/data-upload-material-task/);
+  await app.clickData({refreshMaterialTask:'ve_lost'});
+  assert.equal(posts,1);assert.match(app.field('taskList').innerHTML,/等待回读/);
+});
+
+test('demo completed task shows upload action but cannot call the business API',async()=>{
+  const app=await browser(async()=>{throw new Error('demo must not call the business API');},{location:{search:'?demo=1',pathname:'/video-editing.html'}});
+  assert.match(app.field('taskList').innerHTML,/data-upload-material-task="demo-completed-task"/);
+  await app.clickData({uploadMaterialTask:'demo-completed-task'});
+  assert.match(app.field('toast').textContent,/模拟预览不会上传至素材库/);
+  assert.equal(app.calls.some(call=>call.url.includes('/material-source')),false);
+});

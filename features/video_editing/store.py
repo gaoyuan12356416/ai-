@@ -61,6 +61,9 @@ class Store:
               PRIMARY KEY(owner,operation_id));
             CREATE TABLE IF NOT EXISTS ve_output(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL UNIQUE,
               batch_id TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS ve_material_upload(id TEXT PRIMARY KEY,output_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL UNIQUE,
+              owner TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS ve_material_upload_status ON ve_material_upload(status,updated_at,output_id);
             CREATE INDEX IF NOT EXISTS ve_source_kind_status ON ve_source(kind,status,updated_at);
             CREATE INDEX IF NOT EXISTS ve_task_status ON ve_task(status,created_at,id);
             CREATE INDEX IF NOT EXISTS ve_batch_project_created ON ve_batch(project_id,created_at);
@@ -97,7 +100,7 @@ class Store:
 
     @staticmethod
     def table(kind):
-        require(kind in {'source', 'upload', 'project', 'task', 'project_version', 'batch', 'output'}, 'invalid_record', '记录类型无效')
+        require(kind in {'source', 'upload', 'project', 'task', 'project_version', 'batch', 'output', 'material_upload'}, 'invalid_record', '记录类型无效')
         return 've_' + kind
 
     def get(self, kind, record_id, db=None):
@@ -126,10 +129,10 @@ class Store:
             rows = db.execute('SELECT * FROM '+self.table(kind)+' WHERE '+where+' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?', (*args, limit, offset)).fetchall()
         return [self.row(r) for r in rows], total
 
-    def lease(self, holder, ttl=120):
+    def lease(self, holder, ttl=120, name='dispatcher'):
         with self.transaction() as db:
-            row = db.execute("SELECT holder,expires_at FROM ve_lease WHERE name='dispatcher'").fetchone()
+            row = db.execute('SELECT holder,expires_at FROM ve_lease WHERE name=?',(name,)).fetchone()
             if row and row['holder'] != holder and row['expires_at'] > now():
                 return False
-            db.execute("INSERT INTO ve_lease(name,holder,expires_at) VALUES('dispatcher',?,?) ON CONFLICT(name) DO UPDATE SET holder=excluded.holder,expires_at=excluded.expires_at", (holder, now()+ttl))
+            db.execute("INSERT INTO ve_lease(name,holder,expires_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET holder=excluded.holder,expires_at=excluded.expires_at", (name,holder,now()+ttl))
         return True

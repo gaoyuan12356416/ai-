@@ -119,7 +119,7 @@
   const ROOT = '/api/video-editing';
   const state = { auth:null, config:{ max_file_bytes:8*1024**3, part_size:16*1024**2, max_dramas:20 }, assets:[], assetsTotal:0, sources:{}, projects:[], project:{ name:'未命名剪辑项目', asset_id:'', dramas:[] }, activeDrama:0, selectedClip:null, undo:[], dirty:false, saving:null, saveTimer:null, revision:0, projectLoadSeq:0, tasks:[], uploads:new Map(), probeRecoveries:new Map(), playMs:0, playing:false, playTick:0, playOrigin:0, activeView:'editor', catalog:[], episodes:[], selectedCatalog:null, catalogLoadSeq:0, operationId:null, renderOperation:null, ready:false };
   const readRequests = new Map(), actions = new Map(), busyButtons = new WeakMap();
-  Object.assign(state, { catalogSessionSeq:0, catalogProducts:null, pendingAdd:null, polling:null, assetsLoadSeq:0, projectsLoading:null, tasksLoading:null, projectOpening:0, sourceLoading:false, sourceLoadFailed:false, renderSubmitting:false });
+  Object.assign(state, { catalogSessionSeq:0, catalogProducts:null, pendingAdd:null, polling:null, assetsLoadSeq:0, projectsLoading:null, tasksLoading:null, projectOpening:0, sourceLoading:false, sourceLoadFailed:false, renderSubmitting:false, materialUploadSubmitting:new Set() });
   let toastTimer;
   function toast(message, error) { $('toast').textContent = message; $('toast').classList.toggle('error', !!error); $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), error ? 7500 : 4200); }
   async function api(path, options = {}) {
@@ -393,9 +393,42 @@
     const request=(async()=>{const response=await api(`${ROOT}/tasks`);state.tasks=response.items||[];renderTasks();})();state.tasksLoading=request;
     try{return await request;}finally{if(state.tasksLoading===request)state.tasksLoading=null;}
   }
+  const materialUploadLabels={queued:'等待上传',copying:'正在准备 COS 成片',submitting:'正在提交素材库',verifying:'正在核实素材 ID',succeeded:'已上传',failed:'上传失败',unknown_outcome:'结果待核实'};
+  function materialUploadView(task){
+    if(!task.output||!['completed','succeeded'].includes(task.status))return {detail:'',action:''};
+    const pending=state.materialUploadSubmitting.has(String(task.id));
+    const upload=task.material_upload;
+    if(!upload && !pending)return {detail:'',action:`<button class="button small" data-upload-material-task="${esc(task.id)}">上传至素材库</button>`};
+    const status=pending&&!upload?'queued':upload&&upload.status;
+    const label=materialUploadLabels[status]||'状态待核实';
+    const confirmed=status==='succeeded'&&upload&&upload.material_id;
+    const message=confirmed?` · 素材 ID：${esc(upload.material_id)}`:'';
+    const error=upload&&(upload.error||upload.error_message);
+    const detail=`<p class="material-upload ${esc(status||'unknown_outcome')}" role="status">素材库：${esc(label)}${message}${error?` · ${esc(error)}`:''}</p>`;
+    const action=!pending&&['failed','unknown_outcome'].includes(status)?`<button class="button small" data-refresh-material-task="${esc(task.id)}">刷新状态</button>`:'';
+    return {detail,action};
+  }
   function renderTasks(){
     $('taskCount').textContent=state.tasks.length;
-    $('taskList').innerHTML=state.tasks.map(task=>`<article class="task-card"><div class="task-icon">▷</div><div class="task-info"><strong>${esc(task.drama_title||task.title||task.id)}</strong><p>${esc(task.id)} · ${task.created_at?new Date(expiryTime(task.created_at)).toLocaleString('zh-CN'):''}</p>${task.error_message?`<p class="danger">${esc(task.error_message)}</p>`:''}${task.output&&task.output.metadata?`<p>720 × 1280 · ${seconds(task.output.metadata.duration_ms)} 秒 · MP4</p>`:''}</div><div><div class="task-status ${esc(task.status)}">${esc(statusLabel(task.status))}</div><p class="micro">${esc(taskProgressText(task))}</p></div><div class="task-actions">${task.output?`<button class="button small" data-preview-task="${esc(task.id)}">预览</button><button class="button small" data-download-task="${esc(task.id)}">下载</button>`:''}${['failed','unknown','recovery_required'].includes(task.status)?`<button class="button small" data-resume-task="${esc(task.id)}">核实并重试</button>`:''}</div></article>`).join('')||'<div class="empty">还没有制作任务。完成剪辑后，点击“制作成片”。</div>';
+    $('taskList').innerHTML=state.tasks.map(task=>{const material=materialUploadView(task);return `<article class="task-card"><div class="task-icon">▷</div><div class="task-info"><strong>${esc(task.drama_title||task.title||task.id)}</strong><p>${esc(task.id)} · ${task.created_at?new Date(expiryTime(task.created_at)).toLocaleString('zh-CN'):''}</p>${task.error_message?`<p class="danger">${esc(task.error_message)}</p>`:''}${task.output&&task.output.metadata?`<p>720 × 1280 · ${seconds(task.output.metadata.duration_ms)} 秒 · MP4</p>`:''}${material.detail}</div><div><div class="task-status ${esc(task.status)}">${esc(statusLabel(task.status))}</div><p class="micro">${esc(taskProgressText(task))}</p></div><div class="task-actions">${material.action}${task.output?`<button class="button small" data-preview-task="${esc(task.id)}">预览</button><button class="button small" data-download-task="${esc(task.id)}">下载</button>`:''}${['failed','unknown','recovery_required'].includes(task.status)?`<button class="button small" data-resume-task="${esc(task.id)}">核实并重试</button>`:''}</div></article>`;}).join('')||'<div class="empty">还没有制作任务。完成剪辑后，点击“制作成片”。</div>';
+  }
+  async function uploadMaterialTask(id){
+    if(demo)return toast('模拟预览不会上传至素材库');
+    const task=state.tasks.find(entry=>String(entry.id)===String(id));
+    if(!task||!task.output||!['completed','succeeded'].includes(task.status)||task.material_upload||state.materialUploadSubmitting.has(String(id)))return;
+    state.materialUploadSubmitting.add(String(id));renderTasks();
+    try{
+      const upload=item(await api(`${ROOT}/tasks/${encodeURIComponent(id)}/material-source`,{method:'POST',body:{}}));
+      if(!upload||!upload.status)throw new Error('提交回执无效，结果需要核实');
+      const current=state.tasks.find(entry=>String(entry.id)===String(id));if(current)current.material_upload=upload;
+      if(upload.status==='succeeded'&&upload.material_id)toast(`素材已入库，素材 ID：${upload.material_id}`);
+      else if(upload.status==='failed'||upload.status==='unknown_outcome')toast(upload.error||'入库结果需要核实，请刷新任务查看状态',true);
+      else toast('已提交素材库，正在处理');
+    }catch(error){
+      const current=state.tasks.find(entry=>String(entry.id)===String(id));
+      if(current&&(!error.status||error.status>=500))current.material_upload={status:'unknown_outcome',error:'提交回执未确认，请刷新任务核实'};
+      toast(error.message,true);
+    }finally{state.materialUploadSubmitting.delete(String(id));renderTasks();}
   }
   async function taskOutput(id,download){if(demo)return toast('模拟任务不会生成真实成片');const task=item(await api(`${ROOT}/tasks/${encodeURIComponent(id)}`));if(!task.output)return toast('成片尚未就绪');if(download){const url=task.output.download_url;if(!url)return toast('下载链接暂不可用',true);const link=document.createElement('a');link.href=url;link.rel='noopener noreferrer';link.target='_blank';link.download='';link.click();toast(task.output.expires_at?`下载链接有效至 ${new Date(expiryTime(task.output.expires_at)).toLocaleString('zh-CN')}`:'已打开临时下载链接');}else openMedia(task.drama_title,task.output.preview_url,task.output.expires_at||task.output.preview_expires_at);}
   function setCatalogStatus(message, error=false, busy=false) {
@@ -650,7 +683,7 @@
     for(const title of ['demo-101','demo-102'])for(let n=1;n<=3;n++)sources.push({id:`${title}-ep-${n}`,source_id:`${title}-ep-${n}`,kind:'episode',name:`第 ${n} 集`,episode_number:n,status:'ready',metadata:{duration_ms:60000,width:720,height:1280,has_audio:true}});
     state.assets=sources.filter(source=>source.kind==='asset');state.assetsTotal=2;rememberSources(sources);
     state.project={id:'demo-project',name:'悬念开场 · 批量剪辑 01',asset_id:asset.id,version:1,dramas:[{app_id:'demo-product',content_id:'demo-101',title:'风起时，遇见你',clips:[newClip(asset,{end_ms:5000,transition:'fade'}),newClip(state.sources['demo-101-ep-1'],{start_ms:2500,end_ms:14800}),newClip(state.sources['demo-101-ep-1'],{start_ms:26000,end_ms:41000,transition:'fade'}),newClip(state.sources['demo-101-ep-2'],{start_ms:4000,end_ms:22300})]},{app_id:'demo-product',content_id:'demo-102',title:'她的第二人生',clips:[newClip(asset,{end_ms:5000}),newClip(state.sources['demo-102-ep-1'],{end_ms:24000}),newClip(state.sources['demo-102-ep-2'],{start_ms:15000,end_ms:38000})]}]};
-    state.projects=[clone(state.project)];state.selectedClip=state.project.dramas[0].clips[1].id;$('saveStatus').textContent='模拟草稿 · 仅本页';$('previewMessage').textContent='演示画面，正式素材校验后可播放';renderProjectPicker();renderAssets();renderTasks();renderEditor();
+    state.projects=[clone(state.project)];state.selectedClip=state.project.dramas[0].clips[1].id;state.tasks=[{id:'demo-completed-task',drama_title:'风起时，遇见你',status:'completed',stage:'completed',progress:1,created_at:new Date().toISOString(),output:{metadata:{duration_ms:43800}}}];$('saveStatus').textContent='模拟草稿 · 仅本页';$('previewMessage').textContent='演示画面，正式素材校验后可播放';renderProjectPicker();renderAssets();renderTasks();renderEditor();
   }
   function bind(){
     const run=fn=>event=>{try{return Promise.resolve(fn(event)).catch(error=>toast(error.message,true));}catch(error){toast(error.message,true);return Promise.resolve();}};
@@ -690,11 +723,11 @@
     $('uploadButton').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('fileInput').click();}});$('fileInput').addEventListener('change',()=>{Array.from($('fileInput').files).reduce((promise,file)=>promise.then(()=>uploadFile(file)),Promise.resolve());$('fileInput').value='';});
     for(const eventName of ['dragenter','dragover'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.add('drag-over');});for(const eventName of ['dragleave','drop'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.remove('drag-over');if(eventName==='drop')Array.from(event.dataTransfer.files).reduce((promise,file)=>promise.then(()=>uploadFile(file)),Promise.resolve());});
     document.addEventListener('click',run(async event=>{
-      const button=event.target.closest('[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-cancel-upload]');if(!button)return;
-      const action=Object.keys(button.dataset).find(key=>['pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','cancelUpload'].includes(key));
-      const label={previewAsset:'正在加载…',previewTask:'正在加载…',downloadTask:'获取链接…',probeAsset:'正在核实…',resumeTask:'正在核实恢复…',renameAsset:'正在保存…',deleteAsset:'正在移除…',cancelUpload:'正在取消…'}[action];
+      const button=event.target.closest('[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-upload-material-task],[data-refresh-material-task],[data-cancel-upload]');if(!button)return;
+      const action=Object.keys(button.dataset).find(key=>['pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','uploadMaterialTask','refreshMaterialTask','cancelUpload'].includes(key));
+      const label={previewAsset:'正在加载…',previewTask:'正在加载…',downloadTask:'获取链接…',probeAsset:'正在核实…',resumeTask:'正在核实恢复…',uploadMaterialTask:'正在提交…',refreshMaterialTask:'正在刷新…',renameAsset:'正在保存…',deleteAsset:'正在移除…',cancelUpload:'正在取消…'}[action];
       return withBusy(`${action}:${button.dataset[action]}`,button,label,async()=>{
-      if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
+      if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.uploadMaterialTask)return uploadMaterialTask(button.dataset.uploadMaterialTask);if(button.dataset.refreshMaterialTask)return loadTasks();if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
       if(button.dataset.resumeTask){if(demo)return toast('模拟模式不会提交重试');await resumeTaskRequest(button.dataset.resumeTask);await loadTasks();return;}
       const id=button.dataset.renameAsset||button.dataset.deleteAsset;const asset=state.assets.find(entry=>entry.id===id);if(!asset)return;
       if(button.dataset.renameAsset){const name=prompt('素材名称',asset.name);if(!name||!name.trim())return;if(demo)asset.name=name.trim();else await api(`${ROOT}/assets/${encodeURIComponent(id)}`,{method:'PATCH',body:{name:name.trim()}});}
