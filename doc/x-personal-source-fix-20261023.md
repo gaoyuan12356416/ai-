@@ -66,3 +66,36 @@ all eight trigger states and the personal pool scheduler were read back restored
 The deployment helper now restores the existing three-service dependency group.
 Initial attempt manifest: `/mnt/data-disk/x-post-automation/backups/20261023T024619Z-source-dab9bf01/manifest.json`
 (`failed_restored`). No historical task was retried or database restored.
+
+## Successful production receipt
+
+- Host: `43.166.187.96`; main files under `/root/drama_material_service`, X files
+  under `/opt/x-post-automation/current`, public files under `/usr/share/nginx/html`.
+- Deployed commit: `7af5d7cf6934d0ad67f6c7fac142ae596ddb111a`.
+- Source checkout: `/mnt/data-disk/x-personal-publishing/source-fix-release-dab9bf0`
+  (directory name retained; Git HEAD is the commit above).
+- Backup manifest: `/mnt/data-disk/x-post-automation/backups/20261023T025302Z-source-7af5d7cf/manifest.json`.
+- Manifest status `deployed`; all 13 installed hashes, eight original trigger
+  states, publisher ledger hashes and token fingerprints verified. Personal
+  pool scheduler is active. Main API, X sidecar and its X Auto dependency healthy.
+- Live broker resolve returns all three existing IDs without error (7.21 s).
+  Japanese list at UI limit 50 returned 21 valid Japanese items in 9.09 s.
+  The current catalog keeps changing; counts are a timestamped sample.
+- All three public assets match installed SHA256. The authenticated browser
+  reproduced the old source error before deployment; after reload the same
+  Japanese filter rendered normal selectable materials with no error.
+- The existing 10:45 task, queue 4210/material 7690269, published normally before
+  maintenance. Materials 7621074 and 7609526 remain pending. No repair test Post,
+  new admission or historical retry was performed.
+- Safe acceptance JSON: the successful backup directory's `acceptance.json`.
+  Screenshot: `D:/codex/artifacts/x-personal-source-fix-20261023/browser-acceptance.png`.
+
+Exact rollback (current DB, tokens, Post receipts and pool items are preserved):
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/source-fix-release-dab9bf0
+python3 scripts/deploy_x_personal_source_fix.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T025302Z-source-7af5d7cf/manifest.json
+```
+
+The exact screenshot rows 3/4 remain unverified because their IDs are unavailable;
+their absence must not be described as confirmed successful admission.
