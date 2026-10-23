@@ -16,6 +16,23 @@ release.STATIC_FILES = set()
 release.ALLOWED = release.BACKEND_FILES
 base, pool = release.base, release.pool_release
 _rollback = release.rollback
+_stage_targets = release.stage_targets
+# Effects reads Meta/MySQL and writes only fb_auto_post_effect* directly. It
+# neither imports the changed modules nor calls the sidecar being restarted.
+# Keep it running; all publishing/preparing and new-worker leases still drain.
+base.OLD_NAMES = tuple(name for name in base.OLD_NAMES if name != 'effects')
+
+
+def verify_independent_effects():
+    for relative in ('scripts/fb_auto_post_effect_runner.py', 'scripts/fb_auto_post_metric_runner.py',
+                     'features/fb_auto_posts/effect_collector.py', 'features/fb_auto_posts/effects.py'):
+        base.require(base.sha(base.FB / relative) == base.sha(release.ROOT / relative),
+                     'Independent effects source drift; review before skipping its drain: ' + relative)
+
+
+def stage_targets():
+    verify_independent_effects()
+    return _stage_targets()
 
 
 def require_no_pending_pool():
@@ -29,6 +46,7 @@ def require_no_pending_pool():
 
 
 def rollback(manifest_path):
+    verify_independent_effects()
     require_no_pending_pool()
     original = pool.quiesce
     def guarded(saved):
@@ -96,5 +114,6 @@ def apply_release(targets, commit):
 
 release.apply_release = apply_release
 release.rollback = rollback
+release.stage_targets = stage_targets
 if __name__ == '__main__':
     release.main()

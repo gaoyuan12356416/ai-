@@ -19,6 +19,12 @@ service/timer states. Only the FB sidecar restarts; the main API stays running.
 If services fail after new code may have accepted items, retain new code and
 reconcile service state before further action.
 
+The unchanged effects collector runs independently of this sidecar and writes
+only old effect tables. Its four entry/dependency files must match reviewed
+release hashes; then its active process is excluded from the drain check. All
+actual publisher/preparer units and task leases still drain. The first attempt
+under the generic drain safely restored states without changing runtime code.
+
 Rollback: run the same script with --rollback <manifest.json>. It refuses while
 pending/processing pool items or active/unknown pool tasks remain, both before
 and after draining. Preserve current SQLite, task snapshots and all short links.
