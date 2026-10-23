@@ -1,5 +1,6 @@
 """Cookie-authenticated API and reusable collector, with independent channel quality."""
 import json
+import hashlib
 import os
 import subprocess
 import threading
@@ -109,11 +110,34 @@ def source(app, start, end, platform, site_id=None):
     return result, fetched
 
 
+def scoped_facebook_source(app, start, end, site, catalog=None):
+    """Cache provenance-preserving reads separately from campaign-only reads."""
+    from .backend_scope import eligible, facebook_source
+    allowed = None if catalog is None else sorted({
+        (str(row["key"][0]), row["effect_source"]["adset_id"], row["effect_source"]["ad_id"])
+        for row in catalog if row["platform"] == "facebook" and row["site_id"] == site
+        and row.get("effect_source") and eligible(row, end) and not row.get("excluded")})
+    fingerprint = hashlib.sha256(json.dumps(allowed, separators=(",", ":")).encode()).hexdigest()
+    key = (start, end, "facebook_source_ids_v2", source_site("facebook", site), fingerprint)
+    with _lock:
+        cached = _cache.get(key)
+        if cached and time.monotonic() - cached[0] < TTL:
+            _cache.move_to_end(key)
+            return cached[1], cached[2]
+    result, fetched = facebook_source(app, start, end, site, allowed_sources=allowed)
+    with _lock:
+        _cache[key] = (time.monotonic(), result, fetched)
+        _cache.move_to_end(key)
+        while len(_cache) > 16:
+            _cache.popitem(last=False)
+    return result, fetched
+
+
 def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
-    if ai_backend_only and actor.get("_system_report") is not True:
-        raise ReportError("AI 后台日报范围仅供内部采集", 400)
+    # Content provenance is independent of permission scope. HTTP keeps the
+    # authenticated tenant/owner actor; only scheduled collection is global.
     catalog, catalog_errors = read_catalogs(app, params["platforms"])
     metrics, errors, fetched = [], {}, []
     for platform in params["platforms"]:
@@ -123,8 +147,9 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
                 # Retain the single-site call contract used by existing collectors.
                 args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
                 if ai_backend_only and platform == "facebook":
-                    from .backend_scope import facebook_source
-                    channel_rows, channel_fetched = facebook_source(app, params["start"], params["end"], spec["site_id"])
+                    candidates = None if actor.get("_system_report") is True else catalog
+                    channel_rows, channel_fetched = scoped_facebook_source(
+                        app, params["start"], params["end"], spec["site_id"], candidates)
                 else:
                     channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
                 metrics.extend(channel_rows)
@@ -147,7 +172,12 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
                        metric_coverage=coverage)
     if scope_audit is not None:
         report["meta"]["content_scope"] = scope_audit["scope"]
-        report["scope_audit"] = scope_audit
+        report["warnings"][:2] = [
+            "仅统计 AI 后台已确认成功发布的内容及 YouTube 手动短链；包含历史内容在所选 UTC 日期产生的效果。发布量为所选日期确认成功的数量。",
+            "按冻结 campaign ID 归属人员；Facebook 同时核对冻结 Page 和素材 ID，排除其他系统同号来源及未成功发布记录。",
+        ]
+        if actor.get("_system_report") is True:
+            report["scope_audit"] = scope_audit
     if include_titles:
         enrich(report, lambda statement: query_rows(app, statement), export=export)
     return report
@@ -204,7 +234,7 @@ def dispatch(handler, parsed, app, *, legacy=False):
             query["channel"] = [value if value.startswith("youtube:") else "youtube:" + value
                                 for value in query.get("channel", [])]
         export = parsed.path.endswith("/export.csv")
-        report = build_report(app, actor, query, include_titles=True, export=export)
+        report = build_report(app, actor, query, include_titles=True, export=export, ai_backend_only=True)
         if legacy:
             for row in report["all_rows"]:
                 if "channel" in row:

@@ -71,7 +71,7 @@
     allowed = false; busy = false; exporting = false; applied = null; options = {};
     clearReport(); $('#dimension-filters').replaceChildren(); $('#filter-fields').disabled = true;
     $('#scope-label').textContent = '数据权限不可用';
-    message(error.message || (error.status === 401 ? '登录已失效，请重新使用飞书登录。' : '暂无社媒数据报表权限，请联系管理员。'),'error');
+    message(error.message || (error.status === 401 ? '登录已失效，请重新使用飞书登录。' : '暂无数据报表权限，请联系管理员。'),'error');
     if (error.status === 401) { auth = {...auth,authenticated:false}; UiTopbar.render({auth,userCard:'#userCard',authButton:'#authButton'}); }
   }
   async function request(path,{signal,raw = false,...init} = {}) {
@@ -83,7 +83,7 @@
       const response = await fetch(path,{credentials:'same-origin',cache:'no-store',...init,signal:controller.signal,headers:{Accept:raw ? 'text/csv' : 'application/json',...(init.body ? {'Content-Type':'application/json'} : {})}});
       if (!response.ok) {
         let payload; try { payload = await response.json(); } catch (_) { payload = {}; }
-        const error = new Error(payload.message || (response.status === 401 ? '登录已失效，请重新使用飞书登录。' : response.status === 403 ? '暂无社媒数据报表权限，请联系管理员。' : '数据读取失败，请稍后重试（' + response.status + '）。'));
+        const error = new Error(payload.message || (response.status === 401 ? '登录已失效，请重新使用飞书登录。' : response.status === 403 ? '暂无数据报表权限，请联系管理员。' : '数据读取失败，请稍后重试（' + response.status + '）。'));
         error.status = response.status; throw error;
       }
       if (raw) {
@@ -324,7 +324,7 @@
       UiTopbar.render({auth,userCard:'#userCard',authButton:'#authButton'});
       await Promise.resolve(QuickNav.render({container:'#quickNav',auth,activeKey:'socialAnalytics'})).catch(() => {});
       if (generation !== epoch) return;
-      if (!auth.authenticated) { denied({status:401,message:'请先使用飞书登录后台，再查看社媒数据报表。'}); return; }
+      if (!auth.authenticated) { denied({status:401,message:'请先使用飞书登录后台，再查看数据报表。'}); return; }
       const result = await request(API + '/options'); if (generation !== epoch) return;
       if (!result.options || filterKeys.some(key => !Array.isArray(result.options[key]))) throw new Error('筛选数据不完整，请点击「刷新数据」重试。');
       options = result.options; platformMetadata = result.platform_metadata || {}; metricApplicability = result.metric_applicability || {};

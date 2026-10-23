@@ -15,7 +15,7 @@ def eligible(row, day):
     return any(fact["date"] <= day for fact in row.get("publications", []))
 
 
-def facebook_source(app, start, end, site):
+def facebook_source(app, start, end, site, allowed_sources=None):
     from .routes import MAX_ROWS, metric_sql, query_source_rows
     # Filtering after a campaign-only SUM is too late: legacy FB and AI tasks
     # share short numeric campaign IDs. Retain the frozen URL's source IDs.
@@ -24,7 +24,28 @@ def facebook_source(app, start, end, site):
         "'adset_id',MIN(adset_id),'ad_id',MIN(ad_id),'campaign_id',MIN(campaign_id)")
     sql = sql.replace("GROUP BY dt,BINARY campaign_id",
                       "GROUP BY dt,BINARY campaign_id,BINARY adset_id,BINARY ad_id")
-    rows = query_source_rows(app, sql, MAX_ROWS)
+    if allowed_sources is not None:
+        # Web ranges can contain many unrelated legacy Page/material rows.
+        # Reduce the read using globally frozen candidates, never viewer filters;
+        # restrict() still resolves ownership and confirms the publication date.
+        literal = lambda value: "0x" + str(value).encode("utf-8").hex()
+        tuples = ["(" + ",".join(literal(value) for value in triple) + ")" for triple in allowed_sources]
+        predicate = ("(BINARY campaign_id,BINARY adset_id,BINARY ad_id) IN (" + ",".join(tuples) + ")"
+                     if tuples else "1=0")
+        sql = sql.replace("GROUP BY dt,BINARY campaign_id", "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
+        # Source-day existence must survive even if no backend content had any
+        # traffic. A zero-valued sentinel is removed by restrict, retaining only
+        # coverage. It carries no other system's financial data.
+        coverage = """SELECT HEX(JSON_OBJECT('date',CAST(dt AS CHAR),'site_id','%s',
+            'campaign_id','','campaign','','adset_id','','ad_id','',
+            'clicks',0,'views',0,'installs',0,'conversions',0,
+            'revenue_cents',0,'refund_cents',0,'updated_at','','_coverage_only',1))
+            FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
+            WHERE site_id='%s' AND dt BETWEEN '%s' AND '%s' GROUP BY dt LIMIT 93""" % (site, site, start, end)
+        sql = "(" + sql + ") UNION ALL (" + coverage + ")"
+    rows = query_source_rows(app, sql, MAX_ROWS + (93 if allowed_sources is not None else 0))
+    if sum(not row.get("_coverage_only") for row in rows) > MAX_ROWS:
+        raise ReportError("数据量超过在线查询上限，请缩小日期范围", 400)
     seen = set()
     for row in rows:
         key = (row["date"], str(row.get("campaign_id") or ""),
