@@ -27,7 +27,8 @@ retry is part of acceptance.
 
 Deploy with scripts/deploy_x_picker_on_demand.py from the exact pushed branch
 codex/x-material-picker-on-demand-20261023. The installer checks the previous
-9695b734 runtime baseline; installs source_duration.py, sources.py, picker JS/HTML
+aa252f2 runtime baseline for the final metadata-budget adjustment (the first
+installation used 9695b734); installs source_duration.py, sources.py, picker JS/HTML
 to the main API/X runtime/public static as appropriate; snapshots code, SQLite
 and token state; drains publishers; restores the original service/trigger states;
 and compares ledger/token fingerprints during cutover. It does not restore data
@@ -35,11 +36,11 @@ on rollback. Use the same checkout and script with --rollback <manifest.json>.
 
 ## Production receipt
 
-- Code: aa252f2e206e0c5893f7e813ab1aea84e98d099a, fetched from GitHub.
+- Final code: 37de345e74afd9881ca14d86f23652c246570f28, fetched from GitHub.
 - CPU: 43.166.187.96; main runtime /root/drama_material_service;
   X runtime /opt/x-post-automation/current; public static /usr/share/nginx/html.
-- Source checkout: /mnt/data-disk/x-personal-publishing/picker-on-demand-aa252f2.
-- Backup manifest: /mnt/data-disk/x-post-automation/backups/20261023T070346Z-source-aa252f2e/manifest.json.
+- Source checkout: /mnt/data-disk/x-personal-publishing/picker-on-demand-37de345.
+- Backup manifest: /mnt/data-disk/x-post-automation/backups/20261023T070945Z-source-37de345e/manifest.json.
 - Guarded deployment reported deployed. All 10 installed hashes match. Ledger
   and token fingerprints were preserved. All eight trigger states were restored;
   main API, X sidecar, X Auto dependency and personal pool scheduler are active.
@@ -51,12 +52,20 @@ on rollback. Use the same checkout and script with --rollback <manifest.json>.
 - The deployed browser picker opens with the instruction to click Search, and
   remains idle after typing 7781416. The browser client's Nginx material-read
   entry remained at the prior 14:51:27 request until Search was clicked.
+- A cold browser read exposed an unnecessarily short 3-second per-request
+  metadata cutoff. The final version uses the remaining 8-second shared budget,
+  retaining all byte/host/range checks. Three uncached production-file metadata
+  reads then passed in 3.005, 3.020 and 3.213 seconds. The final restarted API's
+  cold browser query returned 7781416 with the English title and 1792.934 seconds.
+  The picker remained at zero selections; no test publication was created.
+- Browser screenshots and sanitized deployment receipt are saved locally in
+  D:/codex/artifacts/x-picker-on-demand-20261023/.
 
 Rollback from the checked-out deployment on the CPU server:
 
 ```sh
-cd /mnt/data-disk/x-personal-publishing/picker-on-demand-aa252f2
-python3 scripts/deploy_x_picker_on_demand.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T070346Z-source-aa252f2e/manifest.json
+cd /mnt/data-disk/x-personal-publishing/picker-on-demand-37de345
+python3 scripts/deploy_x_picker_on_demand.py --rollback /mnt/data-disk/x-post-automation/backups/20261023T070945Z-source-37de345e/manifest.json
 ```
 
 This restores only the preceding four code files, retaining current publisher
