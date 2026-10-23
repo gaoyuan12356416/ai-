@@ -190,3 +190,37 @@ unit，并执行 `daemon-reload`。先保持 live 关闭，核对健康与账本
 **回退只回代码、配置和 unit；绝不覆盖共享 SQLite、运行证据、发送回执或成功 receipts。**
 删除已发生的 Meta 对象不能通过代码回退恢复。保留 unknown fence，使用 GET-only 核对。
 如果旧版本不兼容当前账本，保持停用并修复兼容性，不能降级数据库。
+
+## 首次上线的持久验收任务
+
+`bootstrap.py` 只编排已运行的完整预演、少量真实验证、继续执行和 timer 启用；实际删除
+始终经过同一 `run.py`、开始消息回执、共享对象锁及未知结果隔离。它不新增公共接口。
+必须使用 GitHub 已提交的精确 release 路径启动，传入该 release 的完整 commit SHA：
+
+```bash
+python3 /mnt/data-disk/meta-violation-material-cleanup/releases/RELEASE/server-monitors/meta-violation-material-cleanup/bootstrap.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json --run-id PREVIEW_RUN_ID --release-sha FULL_COMMIT_SHA
+```
+
+生产由独立一次性 systemd unit 托管，`Restart=no`，SIGINT 正常停止；退出聊天不会结束它。
+开始时要求 live 关闭、timer disabled/inactive。等待期间不发送 DELETE；只有完整预演
+结束后，核对清单 SHA、30 天窗口、全部账户的成功/失败覆盖、候选规则及产品范围，才
+开启 live。若预演耗时达到 10 小时，则停止上线并报告容量问题，不能启用已无足够执行
+时间的 11 小时定时服务。该门禁不能被当作全量耗时已达标的证明。
+
+少量验证按完整 Creative 组选择，最多 3 条 Ad；对有对象的验证，要求 API 接受且每个
+Creative/Ad 都精确回读到 DELETED，并核对真实首尾飞书回执。零候选则核验真实零结果
+及消息回执，并明确记录未验证实际删除。只有验证通过，才继续处理冻结清单中的待处理
+对象。首次存量清理可能持续较长时间，正式 timer 在继续执行完成并通过账本验收后启用。
+明确失败或持久隔离的未知对象保留为部分完成，不恢复或重发已发生的请求。
+
+验收状态在数据盘 `bootstrap-PREVIEW_RUN_ID.json`，完整预演验收摘要在
+`rehearsal-acceptance-PREVIEW_RUN_ID.json`。失败进入 `stopped_for_review`，关闭本任务
+live/timer，保留所有证据，并通过独立 `PREVIEW_RUN_ID-bootstrap` 通知账本给郜远发送
+上线异常播报；该通知不会占用正式运行的 start/end。通知不确定时不自动重发。
+重启 bootstrap 不会自动重放已启动的流程；先查看状态、通知和对象账本，再按已授权
+范围人工核对、使用正式 CLI 继续或重新完整预演。不得删除状态文件绕过这一限制。
+
+停用首次验收时，应同时正常停止对应的 bootstrap unit 和尚在运行的 preview unit；
+只停 timer 不会停止首次验收。若 bootstrap 正在等待预演，停止后要保留预演及通知证据。
+回退代码前先停止这两个本任务 unit，保留共享账本和本地 SQLite，不能让旧验收任务
+在回退后继续自动启用 timer。

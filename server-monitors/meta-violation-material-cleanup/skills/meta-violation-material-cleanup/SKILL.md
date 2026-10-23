@@ -106,6 +106,22 @@ freshly check any earlier fallback. A legacy-lock wait repeats qualification.
 
 Every platform write follows a committed shared-Store claim. Report API-accepted
 deletions separately from exact-ID/account `DELETED` readback verification.
+
+For the initial durable rollout, `bootstrap.py` waits for a complete existing
+preview, independently checks its hash/coverage/policy, validates at most three
+Ads in a whole Creative group with real API acceptance, exact DELETED readbacks
+and start/end receipts, then continues the frozen run and enables the timer only
+after ledger verification. Zero candidates require real zero-result messages
+and must be labeled as no actual deletion validation. A preview lasting ten
+hours or more blocks activation of the eleven-hour scheduled service. See
+`../../OPERATIONS.md` for the exact release/SHA invocation and acceptance files.
+Do not describe a waiting bootstrap as an active production timer. Its saved
+state is `bootstrap-RUN_ID.json`; an interrupted/failed bootstrap is not replayed
+automatically. Failures notify Gao Yuan under the separate `RUN_ID-bootstrap`
+notification ledger without consuming the cleanup run's start/end phases.
+Before rollback/disable, stop this task's bootstrap and preview units as well
+as its timer; keep all state, receipts and unknown fences. Never remove a saved
+bootstrap state to force re-execution.
 Timeout, interrupted submission and inconclusive readback stay unknown; never
 rotate Tokens or replay an uncertain DELETE. `reconcile --run-id` is GET-only.
 Missing objects or permission failures alone do not prove deletion. Preserve
