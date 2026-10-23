@@ -387,6 +387,44 @@ class FakeMySQL:
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_product_scope_ignores_foreign_description_but_rejects_real_conflicts(self):
+        class MixedProducts(FakeMySQL):
+            conflict = False
+            def select(self, sql, params):
+                rows = super().select(sql, params)
+                if "FROM `fixture_schema`.ads_drama_resource" in sql:
+                    foreign = {**rows[0], "drama_description": "Other product copy"}
+                    # Simulate SQL scope, not a permissive fallback to the first row.
+                    if self.conflict or "r.app_id=1479" not in sql:
+                        rows.append(foreign)
+                return rows
+        mysql = MixedProducts()
+        result = SourceRepository(mysql).resolve(["101"])
+        self.assertIn("101", result["items"])
+        mysql.conflict = True
+        result = SourceRepository(mysql).resolve(["101"])
+        self.assertEqual(result["items"], {})
+        self.assertEqual(result["errors"]["101"]["code"], "drama_mapping_ambiguous")
+        self.assertIn("Dramawave", result["errors"]["101"]["message"])
+
+    def test_language_prefilter_still_requires_resolved_drama_language(self):
+        mysql = FakeMySQL()
+        result = SourceRepository(mysql).listing({"language": "ja", "limit": 2})
+        self.assertEqual(result["items"], [])  # authoritative fixture language is en
+        self.assertEqual(result["next_cursor"], "102")
+        sql, _ = mysql.calls[0]
+        self.assertIn("ads_drama_info i FORCE INDEX(ac)", sql)
+        self.assertIn("i.app_id=1479", sql)
+        resource_sql = mysql.calls[1][0]
+        self.assertIn("r.app_id=1479", resource_sql)
+        self.assertIn("FORCE INDEX(content_id)", resource_sql)
+
+    def test_executor_uses_the_same_product_scope(self):
+        from features.x_posts.selector import DramawaveCandidateSelector
+        with patch("features.x_posts.selector._cursor_rows", return_value=[]) as query:
+            DramawaveCandidateSelector(None)._pool_drama_rows("content-1")
+        self.assertIn("AND r.app_id = 1479", query.call_args.args[1])
+
     def test_resolve_and_listing_each_use_at_most_three_bounded_queries(self):
         mysql = FakeMySQL()
         source = SourceRepository(mysql)

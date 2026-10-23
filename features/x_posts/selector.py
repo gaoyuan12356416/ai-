@@ -422,6 +422,7 @@ class DramawaveCandidateSelector:
                 r.labels AS drama_labels, r.desc AS drama_description
               FROM `{schema}`.ads_drama_resource r FORCE INDEX (content_id)
              WHERE r.content_id = %s
+               AND r.app_id = 1479
                {language_clause}
              ORDER BY r.id ASC
         """.format(schema=self.schema, language_clause=language_clause)
