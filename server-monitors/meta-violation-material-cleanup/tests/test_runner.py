@@ -11,7 +11,8 @@ HERE=pathlib.Path(__file__).resolve()
 sys.path.insert(0,str(HERE.parents[1]))
 sys.path.insert(0,str(HERE.parents[3]))
 from features.fb_ad_asset_delete.store import Store, StoreError
-from meta_violation_cleanup.runner import Runner
+from meta_violation_cleanup.runner import Runner, chunks, source_keys
+from meta_violation_cleanup.policy import product_scope
 from meta_violation_cleanup.runtime import digest
 from meta_violation_cleanup.graph import GraphClient
 
@@ -35,13 +36,16 @@ class Source:
     def __init__(self,ads):
         self.rows={a['id']:[lineage(a['id'],a['creative']['id'])] for a in ads}
         self.vios=[];self.source_rows={};self.credential_fail=set();self.credential_values={};self.queried_sources=[]
+        self.settings=[{'id':'1479','ads_app_id':'0'},{'id':'3302','ads_app_id':'0'},
+            {'id':'14790','ads_app_id':'1479'},{'id':'9999','ads_app_id':'0'}]
+        self.context_calls=[]
         for i in range(4):
             aid=str(101+i)
             self.rows[aid]=[lineage(aid,str(201+i))]
             self.vios.append({'id':str(i+1),'ad_id':aid,'created_at':'2026-10-22T10:00:00+08:00',
                 'issues_info':{'global':{'Spam':'review explanation'}}})
 
-    def products(self):return [{'id':'1479','ads_app_id':'0'},{'id':'3302','ads_app_id':'0'},{'id':'14790','ads_app_id':'1479'},{'id':'9999','ads_app_id':'0'}]
+    def products(self):return copy.deepcopy(self.settings)
     def violations(self,start,end):return copy.deepcopy(self.vios)
     def violations_by_ids(self,ids):return copy.deepcopy([v for v in self.vios if v['id'] in ids])
     def lineages(self,ids):return copy.deepcopy({aid:self.rows[aid] for aid in ids if aid in self.rows})
@@ -51,6 +55,15 @@ class Source:
     def selected_credential(self,row):
         if row['ad_id'] in self.credential_fail:raise ValueError('DO-NOT-LOG-SECRET')
         return self.credential_values.get(row['ad_id'],'1')
+    def current_ad_context(self,ad_id,creative_id):
+        self.context_calls.append((ad_id,creative_id))
+        rows=copy.deepcopy(self.rows.get(ad_id,[]))
+        matching=[row for row in rows if row['creative_id']==creative_id]
+        current_products={row['product'] for row in matching}
+        scope={pid:root for pid,root in product_scope(self.settings).items() if pid in current_products}
+        return {'rows':rows,'sources':self.sources(source_keys({'current':matching})),
+            'scope':scope,'credential_users':sorted({self.selected_credential(row)
+                for row in matching if row['product'] in scope})}
 
 
 class Graph:
@@ -161,7 +174,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest['candidates'],[])
         self.assertNotIn('DO-NOT-LOG-SECRET',str(runtime.events)+str(manifest))
 
-    def test_explicit_violation_source_loaded_in_scan_and_preflight(self):
+    def test_explicit_violation_source_frozen_in_scan_not_reread_in_preflight(self):
         runner,source,_,_=self.fixture()
         source.vios[0]['source_id']='900'
         source.source_rows['900']={'id':'900','source_type':'3','source_id':'501'}
@@ -169,11 +182,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest['evidence']['materials']['501']['count'],4)
         source.queried_sources=[]
         self.assertTrue(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
-        self.assertIn('900',source.queried_sources)
+        self.assertNotIn('900',source.queried_sources)
 
-    def test_sql_snapshot_released_before_graph_and_scope_reader_used(self):
+    def test_sql_snapshot_released_before_graph_and_exact_context_used(self):
         runner,source,graph,_=self.fixture()
-        manifest=self.manifest(runner);state={'active':False,'snapshots':0,'scopes':0}
+        manifest=self.manifest(runner);state={'active':False,'snapshots':0,'contexts':0}
         @contextmanager
         def snapshot():
             was_active=state['active']
@@ -182,10 +195,14 @@ class RunnerTests(unittest.TestCase):
             try:yield
             finally:state['active']=was_active
         source.snapshot=snapshot
-        def scope_products():
-            self.assertTrue(state['active']);state['scopes']+=1
-            return source.products()
-        source.scope_products=scope_products
+        context_reader=source.current_ad_context
+        def current_context(*args):
+            self.assertTrue(state['active']);state['contexts']+=1
+            return context_reader(*args)
+        source.current_ad_context=current_context
+        source.scope_products=lambda:self.fail('execution must not read the scope directory')
+        source.products=lambda:self.fail('execution must not read the product directory')
+        source.violations_by_ids=lambda _:self.fail('execution must not reread frozen violations')
         original=graph.get_ad
         def get_ad(identifier,user):
             self.assertFalse(state['active'],'Graph read must not hold the SQL FIFO snapshot')
@@ -195,7 +212,7 @@ class RunnerTests(unittest.TestCase):
         decision=runner.preflight(candidate,manifest)
         self.assertTrue(decision['eligible'])
         self.assertEqual(runner.dependency_guard(candidate,decision),'')
-        self.assertEqual(state,{'active':False,'snapshots':2,'scopes':2})
+        self.assertEqual(state,{'active':False,'snapshots':2,'contexts':2})
 
     def test_mutation_graph_uses_separate_session_with_zero_get_retries(self):
         runner,_,_,_=self.fixture()
@@ -229,7 +246,7 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(mutation_session.closed)
         self.assertEqual(len([c for c in mutation_session.calls if c[0]=='DELETE']),2)
 
-    def test_multiple_violation_rows_for_one_ad_retained_for_preflight(self):
+    def test_multiple_violation_rows_for_one_ad_retained_in_frozen_proof(self):
         runner,source,_,_=self.fixture()
         source.vios.append(dict(source.vios[0],id='88'))
         manifest=self.manifest(runner)
@@ -238,7 +255,7 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
 
     def test_material_product_and_ad_state_changes_cancel_preflight(self):
-        for change in ('material','product','review','creative','proof'):
+        for change in ('material','product','review','creative','credential'):
             with self.subTest(change=change):
                 runner,source,graph,_=self.fixture()
                 manifest=self.manifest(runner)
@@ -246,8 +263,53 @@ class RunnerTests(unittest.TestCase):
                 if change=='product':source.rows['10'][0]['product']='3302'
                 if change=='review':graph.ads['10']['effective_status']='PENDING_REVIEW'
                 if change=='creative':graph.ads['10']['creative']['id']='999'
-                if change=='proof':source.vios=[]
+                if change=='credential':source.credential_values['10']='2'
                 self.assertFalse(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
+
+    def test_complete_window_evidence_remains_fixed_after_scan(self):
+        runner,source,_,_=self.fixture([ad(status='ACTIVE')])
+        manifest=self.manifest(runner)
+        source.vios=[]
+        for aid in ('101','102','103','104'):del source.rows[aid]
+        source.violations_by_ids=lambda _:self.fail('historical evidence must stay frozen')
+        decision=runner.preflight(manifest['candidates'][0],manifest)
+        self.assertTrue(decision['eligible'])
+        self.assertEqual(decision['rules'],['rule2'])
+        self.assertEqual(decision['checked_evidence']['materials']['501']['count'],4)
+        self.assertEqual(runner.dependency_guard(manifest['candidates'][0],decision),'')
+        self.assertEqual(source.context_calls,[('10','20'),('10','20')])
+
+    def test_candidate_audit_keeps_only_its_frozen_material_evidence(self):
+        runner,_,_,_=self.fixture()
+        manifest=self.manifest(runner)
+        manifest['evidence']['materials']['999']=copy.deepcopy(manifest['evidence']['materials']['501'])
+        decision=runner.preflight(manifest['candidates'][0],manifest)
+        self.assertEqual(set(decision['checked_evidence']['materials']),{'501'})
+
+    def test_current_product_parent_change_rejected_at_both_boundaries(self):
+        for boundary in ('preflight','guard'):
+            with self.subTest(boundary=boundary):
+                runner,source,_,_=self.fixture()
+                source.rows['10'][0]['product']='14790'
+                manifest=self.manifest(runner);candidate=manifest['candidates'][0]
+                decision=runner.preflight(candidate,manifest)
+                self.assertTrue(decision['eligible'])
+                next(row for row in source.settings if row['id']=='14790')['ads_app_id']='3302'
+                if boundary=='preflight':
+                    self.assertFalse(runner.preflight(candidate,manifest)['eligible'])
+                else:self.assertEqual(runner.dependency_guard(candidate,decision),'dependency_identity_changed')
+
+    def test_current_material_or_credential_change_rejected_by_guard(self):
+        for change in ('material','credential','added_product_lineage'):
+            with self.subTest(change=change):
+                runner,source,_,_=self.fixture()
+                manifest=self.manifest(runner);candidate=manifest['candidates'][0]
+                decision=runner.preflight(candidate,manifest)
+                if change=='material':source.rows['10'][0]['original_source_id']='502'
+                if change=='credential':source.credential_values['10']='2'
+                if change=='added_product_lineage':source.rows['10'].append(lineage('10','20','3302'))
+                expected='dependency_credential_changed' if change=='credential' else 'dependency_identity_changed'
+                self.assertEqual(runner.dependency_guard(candidate,decision),expected)
 
     def test_shared_creative_all_targets_preflight_before_mutation_other_product_not_deleted(self):
         runner,source,graph,runtime=self.fixture([ad(),ad('11','20'),ad('99','20')])
@@ -260,6 +322,64 @@ class RunnerTests(unittest.TestCase):
         self.assertIn(('get','10'),graph.calls[:first_delete])
         self.assertIn(('get','11'),graph.calls[:first_delete])
         self.assertEqual(runtime.barriers,3)
+
+    def test_creative_uses_last_successful_preflight_without_redundant_refresh(self):
+        runner,_,graph,_=self.fixture([ad(),ad('11','20')])
+        manifest=self.manifest(runner);basis=[];original=runner.attempt
+        def attempt(job,shared,kind,identifier,candidate,*args):
+            if kind=='creative':basis.append(candidate['ad_id'])
+            return original(job,shared,kind,identifier,candidate,*args)
+        runner.attempt=attempt
+        self.assertEqual(runner.execute('test-run',manifest),'completed')
+        self.assertEqual(basis,['11'])
+        first_delete=graph.calls.index(('delete','creative','20'))
+        self.assertEqual(graph.calls[:first_delete],[('get','10'),('get','11')])
+
+    def test_later_failed_checks_refresh_last_eligible_creative_basis(self):
+        runner,_,graph,runtime=self.fixture([ad(),ad('11','20')])
+        manifest=self.manifest(runner)
+        graph.ads['11']['effective_status']='PENDING_REVIEW'
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        first_delete=graph.calls.index(('delete','creative','20'))
+        self.assertEqual(graph.calls[:first_delete],[('get','10'),('get','11'),('get','10')])
+        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
+        refreshed=[data['ad_id'] for kind,data in runtime.events
+            if kind=='preflight' and data['stage']=='creative_basis']
+        self.assertEqual(refreshed,['10'])
+
+    def test_changed_creative_basis_is_removed_and_previous_success_rechecked(self):
+        runner,_,graph,runtime=self.fixture([ad(),ad('11','20'),ad('12','20')])
+        manifest=self.manifest(runner);basis=[]
+        original_get=graph.get_ad;original_attempt=runner.attempt
+        def get_ad(identifier,user):
+            if identifier=='12':
+                graph.ads['12']['effective_status']='PENDING_REVIEW'
+                graph.ads['11']['effective_status']='PENDING_REVIEW'
+            return original_get(identifier,user)
+        def attempt(job,shared,kind,identifier,candidate,*args):
+            if kind=='creative':basis.append(candidate['ad_id'])
+            return original_attempt(job,shared,kind,identifier,candidate,*args)
+        graph.get_ad=get_ad;runner.attempt=attempt
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        first_delete=graph.calls.index(('delete','creative','20'))
+        self.assertEqual(graph.calls[:first_delete],
+            [('get','10'),('get','11'),('get','12'),('get','11'),('get','10')])
+        self.assertEqual(basis,['10'])
+        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
+        self.assertEqual(runtime.data['remaining_ads'],2)
+
+    def test_no_creative_write_when_last_eligible_basis_fails_refresh(self):
+        runner,_,graph,_=self.fixture([ad(),ad('11','20')])
+        manifest=self.manifest(runner);original=graph.get_ad
+        def get_ad(identifier,user):
+            if identifier=='11':
+                graph.ads['10']['effective_status']='PENDING_REVIEW'
+                graph.ads['11']['effective_status']='PENDING_REVIEW'
+            return original(identifier,user)
+        graph.get_ad=get_ad
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        self.assertEqual(graph.calls,[('get','10'),('get','11'),('get','10')])
+        self.assertEqual(self.deletes(graph),[])
 
     def test_external_creative_change_after_group_preflight_cancels_ad(self):
         runner,_,graph,runtime=self.fixture()
@@ -428,6 +548,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
         self.assertEqual(acquisitions,[1,2,3])
 
+    def test_legacy_wait_after_complete_preflight_rechecks_whole_group(self):
+        runner,_,graph,_=self.fixture([ad(),ad('11','20')])
+        manifest=self.manifest(runner);acquisitions=[]
+        class WindowAfterPreflight:
+            def __init__(self):self.checks=0
+            def check(self):
+                self.checks+=1
+                if self.checks==5:
+                    graph.ads['10']['effective_status']='PENDING_REVIEW'
+                    raise InterruptedError('legacy_priority_window')
+        @contextmanager
+        def lock(path,stop):
+            acquisitions.append(len(acquisitions)+1)
+            yield WindowAfterPreflight() if len(acquisitions)==1 else Lease()
+        with patch('meta_violation_cleanup.runner.legacy_delete_lock',lock):
+            self.assertEqual(runner.execute('test-run',manifest),'partial')
+        first_delete=graph.calls.index(('delete','creative','20'))
+        self.assertEqual(graph.calls[:first_delete],
+            [('get','10'),('get','11'),('get','10'),('get','11')])
+        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','11')])
+        self.assertEqual(acquisitions,[1,2,3])
+
     def test_stop_after_claim_before_graph_call_records_known_not_sent(self):
         runner,_,graph,runtime=self.fixture()
         manifest=self.manifest(runner)
@@ -535,11 +677,45 @@ class RunnerTests(unittest.TestCase):
 
     def test_account_batches_do_not_split_large_account(self):
         runner,_,_,_=self.fixture()
-        items=[('1',[{}]*1000,'1',[]),('2',[{}]*1001,'1',[]),
-               ('3',[{}]*2500,'1',[]),('4',[],'1',[])]
+        items=[('1',[{}]*19000,'1',[]),('2',[{}]*1001,'1',[]),
+               ('3',[{}]*20001,'1',[]),('4',[],'1',[])]
         runner.account_inventories=lambda accounts:iter(items)
         batches=list(runner.account_batches({}))
         self.assertEqual([[x[0] for x in b] for b in batches],[['1'],['2'],['3'],['4']])
+        self.assertEqual([len(item[1]) for batch in batches for item in batch],[19000,1001,20001,0])
+
+    def test_account_batch_exact_20000_boundary_flushes_without_waiting_for_next(self):
+        runner,_,_,_=self.fixture();consumed=[]
+        items=[('1',[{}]*9500,'1',[]),('2',[{}]*10500,'1',[]),('3',[{}],'1',[])]
+        def inventories(accounts):
+            for item in items:
+                consumed.append(item[0]);yield item
+        runner.account_inventories=inventories
+        batches=runner.account_batches({})
+        first=next(batches)
+        self.assertEqual([item[0] for item in first],['1','2'])
+        self.assertEqual(consumed,['1','2'])
+        self.assertEqual([[item[0] for item in batch] for batch in batches],[['3']])
+
+    def test_lineage_chunks_cover_exact_boundary_and_tail_without_loss(self):
+        for size,expected in ((1900,[1900]),(1901,[1900,1]),(3800,[1900,1900]),(3801,[1900,1900,1])):
+            with self.subTest(size=size):
+                values=[str(i+1000) for i in range(size)]
+                parts=list(chunks(values))
+                self.assertEqual([len(part) for part in parts],expected)
+                self.assertEqual([item for part in parts for item in part],values)
+        runner,source,_,_=self.fixture();calls=[]
+        source.lineages=lambda ids:calls.append(list(ids)) or {}
+        runner.lineage_data([str(i+1000) for i in range(3801)])
+        self.assertEqual([len(part) for part in calls],[1900,1900,1])
+
+    def test_empty_and_failed_accounts_still_obey_32_account_batch_limit(self):
+        runner,_,_,_=self.fixture()
+        items=[(str(i),None if i%2 else [],'1',[]) for i in range(65)]
+        runner.account_inventories=lambda accounts:iter(items)
+        batches=list(runner.account_batches({}))
+        self.assertEqual([len(batch) for batch in batches],[32,32,1])
+        self.assertEqual([item for batch in batches for item in batch],items)
 
     def test_batch_lookup_failure_isolated_by_account_without_partial_candidates(self):
         runner,source,_,runtime=self.fixture([ad(),ad('11','21','101')])
@@ -568,8 +744,8 @@ class RunnerTests(unittest.TestCase):
 
     def test_inventory_and_credential_batches_share_one_snapshot(self):
         ads=[ad(str(1000+i),str(2000+i),str(3000+i)) for i in range(30)]
-        runner,source,graph,_=self.fixture(ads)
-        active=[0];calls=[];snapshots=[]
+        runner,source,graph,runtime=self.fixture(ads)
+        active=[0];calls=[];snapshots=[];inventory_calls=[]
         for aid,rows in source.rows.items():
             for row in rows:row['id']=aid
         @contextmanager
@@ -589,11 +765,20 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(active[0],0)
             return original(*args)
         graph.list_ads=fetch
+        original_inventory=runtime.inventory
+        def inventory(run,account,rows):
+            self.assertEqual(active[0],0,'account inventory must commit outside the SQL snapshot')
+            inventory_calls.append((account,[row['id'] for row in rows]))
+            return original_inventory(run,account,rows)
+        runtime.inventory=inventory
         manifest=self.manifest(runner)
         self.assertEqual(len(calls),1)
         self.assertEqual(len(calls[0]),30)
         self.assertEqual(len(manifest['candidates']),30)
         self.assertEqual(active[0],0)
+        self.assertEqual(len(inventory_calls),30)
+        self.assertEqual({account for account,_ in inventory_calls},{a['account_id'] for a in ads})
+        self.assertTrue(all(len(ids)==1 for _,ids in inventory_calls))
 
     def test_failed_global_credential_batch_falls_back_without_cross_account_loss(self):
         runner,source,_,runtime=self.fixture([ad(),ad('11','21','101')])

@@ -26,7 +26,7 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 `/usr/local/bin:/usr/bin:/bin`；部署前核实此 PATH 实际解析到已验证的 CPU Python。
 
 窗口是每轮截止时间向前 `30 * 24` 小时，按 vio `created_at` 的半开区间统计。
-每轮完整读取窗口内 `delete_status=0/1` 的记录；索引为 `dc(delete_status,created_at)`，
+每轮按实际存在的各 `delete_status` 状态完整读取窗口内记录；索引为 `dc(delete_status,created_at)`，
 按状态分开 keyset 读取。不能只按新增 ID 或 `updated_at` 增量，旧违规记录会更新。
 所有定时 SQL 走 `63350` 只读端点和 `/usr/bin/mysql` FIFO Gate。
 
@@ -34,9 +34,25 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 生产可在只读吞吐验证后提高该值。`status` 的 `graph_metrics` 保存 GET、重试、限流
 及 usage header 数字统计；某类 header 的 observation 为 0 表示未取得该统计，不能视为零占用。
 每批账户的素材与凭据查询共用一个 SQL 快照，完成分页后再持有 SQL 会话，避免等待 Meta 时占用 FIFO。
+最多聚合 32 个完整账户，目标不超过 20,000 条库存广告；超过此目标的单个大账户独占
+一批并完整处理，不能截断。查询结束后每个账户仍分别提交库存与扫描结果，不能把
+合批查询视为合并账户的完成状态。
 `mysql_compress=true` 默认请求 MySQL 协议压缩，已在 FIFO 只读端点以完整行哈希验证等价；
-不改变 SQL 门禁、端口或查询条件。广告/素材/凭据关系按最多 1,000 个 ID 批量查询，
+不改变 SQL 门禁、端口或查询条件。广告关联按最多 1,900 个 Ad ID 查询，素材/凭据关系
+仍按最多 1,000 个 ID 批量查询，
 产品、授权和广告关系采用 keyset 分页，每页最多 2,000 行；共享 Creative 引用也合批读取。
+
+执行先核验完整 manifest 的 SHA，再复用该轮完整窗口冻结的违规证据；不会为每条候选
+重读历史 vio、历史违规 Ad 或重新计算阈值。扫描后的历史记录修改留到下一轮完整扫描。
+每次 Creative 组预核和每条 Ad 临删核验，仍重新查询该 Ad 的全部当前关联记录，按当前
+Creative 精确核对产品及直属根产品、素材、发布队列和凭据；不缓存这些当前关系，也不
+重读整个产品目录。查询共用一条 FIFO 只读快照，在读取 Meta 当前审核、广告和父级状态前释放。
+当前产品、素材、Creative 或凭据与冻结清单不一致即拒绝该对象。
+
+Creative 组全部候选预核完成后，以最后通过者作为删除依据。如果该候选之后还有其他
+检查，临删前单独重核该候选；若已变化则移除，并重新核验前一通过者，直到取得当前
+合格依据或跳过整组。等待旧任务释放锁后仍重新预核。每条 Ad 删除前再次核验，不复用
+Creative 删除前的当前状态。此优化不提高 DELETE 并发，也不改变 unknown 隔离。
 
 ## 常用命令
 

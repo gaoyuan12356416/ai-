@@ -216,7 +216,7 @@ class SqlSourceTests(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertNotIn("secret_value", str(error.exception))
 
-    def test_lineage_batches_maximum_1000_and_preserves_duplicate_ad_rows(self):
+    def test_lineage_batches_maximum_1900_and_preserves_duplicate_ad_rows(self):
         calls = []
         def responder(sql):
             calls.append(sql)
@@ -224,14 +224,14 @@ class SqlSourceTests(unittest.TestCase):
                 return [{"id": "1", "ad_id": "1", "product": "1479"},
                         {"id": "2", "ad_id": "1", "product": "3302"}]
             return []
-        result, _, _, _ = self.run_source(lambda db: db.lineages(map(str, range(1, 2002))), responder)
+        result, _, _, _ = self.run_source(lambda db: db.lineages(map(str, range(1, 3802))), responder)
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(result["1"]), 2)
         self.assertEqual(result["1"][1]["row_id"], "2")
         self.assertTrue(all("WHERE ad_id IN" in sql and "LIKE" not in sql for sql in calls))
         self.assertTrue(all("FORCE INDEX(ad_id)" in sql and "LIMIT 2000" in sql for sql in calls))
         self.assertEqual([len(re.findall(r'0x[0-9a-f]+', re.search(r'ad_id IN \(([^)]+)\)', sql).group(1)))
-                          for sql in calls], [1000, 1000, 1])
+                          for sql in calls], [1900, 1900, 1])
 
     def test_sources_and_write_time_violation_evidence_use_primary_batches(self):
         def responder(sql):
@@ -611,12 +611,154 @@ class SqlSourceTests(unittest.TestCase):
         self.assertEqual(sizes, [1000, 1])
         self.assertEqual(popen.call_count, 1)
 
-    def test_config_accepts_1000_ids_but_never_over_2000_rows_per_page(self):
-        self.assertEqual(self.make_source().lineage_batch_size, 1000)
+    def test_config_accepts_1900_ids_but_never_over_2000_rows_per_page(self):
+        self.assertEqual(self.make_source().lineage_batch_size, 1900)
+        self.assertEqual(self.make_source(lineage_batch_size=1000).lineage_batch_size, 1000)
         self.assertEqual(self.make_source(lineage_batch_size=200).lineage_batch_size, 200)
-        for config in ({'lineage_batch_size': 1001}, {'page_size': 2001}):
+        for config in ({'lineage_batch_size': 1901}, {'page_size': 2001}):
             with self.assertRaisesRegex(source.SqlSourceError, 'unsafe_sql_limits'):
                 self.make_source(**config)
+
+    def context_row(self, **changes):
+        row = self.credential_route(id='10', ad_id='100', product='1723', queue_product='1723',
+                                   setting_id='1723', setting_parent='1479', parent_setting_id='1479',
+                                   creative_id='5000', source_id='900', original_source_id='9010',
+                                   ad_account_id='7000', available=True)
+        row.update(changes)
+        return row
+
+    def context_responder(self, rows, source_rows=None):
+        if source_rows is None:
+            source_rows = [{'id': '900', 'source_type': 3, 'source_id': '9010'}]
+        def responder(sql):
+            if 'ads_source FORCE INDEX(PRIMARY)' in sql:
+                return source_rows
+            self.assertIn('a FORCE INDEX(ad_id)', sql)
+            self.assertIn('LEFT JOIN', sql)
+            self.assertNotIn('INNER JOIN', sql)
+            self.assertIn('parent.id=p.ads_app_id', sql)
+            self.assertIn('EXISTS(SELECT 1', sql)
+            self.assertNotIn(source._quote('token'), sql)
+            self.assertNotIn('ads_facebook_violations', sql)
+            return rows
+        return responder
+
+    def test_current_context_uses_two_business_reads_in_one_fresh_snapshot(self):
+        result, adapter, process, popen = self.run_source(
+            lambda db: db.current_ad_context('100', '5000'), self.context_responder([self.context_row()]))
+        self.assertEqual(result['scope'], {'1723': '1479'})
+        self.assertEqual(result['credential_users'], ['804'])
+        self.assertEqual(result['sources']['900']['source_id'], '9010')
+        self.assertEqual(result['rows'][0]['row_id'], '10')
+        self.assertEqual(len(process.commands), 4)  # proof, transaction, joined lineage, source PK
+        self.assertEqual(adapter.safe_metrics['sessions'], 1)
+        self.assertEqual(popen.call_count, 1)
+
+    def test_current_context_preserves_other_creatives_without_validating_old_route(self):
+        old = self.context_row(id='11', creative_id='6000', product='669', setting_id=None,
+                               queue_id=None, source_id='unusable-history', available=False)
+        result, _, _, _ = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                          self.context_responder([self.context_row(), old]))
+        self.assertEqual(len(result['rows']), 2)
+        self.assertIsNone(result['rows'][1]['setting_id'])
+        self.assertEqual(result['scope'], {'1723': '1479'})
+        self.assertEqual(set(result['sources']), {'900'})
+
+    def test_current_context_no_matching_creative_returns_no_identity_evidence(self):
+        result, _, process, _ = self.run_source(lambda db: db.current_ad_context('100', '6000'),
+                                               self.context_responder([self.context_row()]))
+        self.assertEqual(len(result['rows']), 1)
+        self.assertEqual(result['sources'], {})
+        self.assertEqual(result['scope'], {})
+        self.assertEqual(result['credential_users'], [])
+        self.assertEqual(len(process.commands), 3)
+
+    def test_current_context_does_not_filter_new_product_lineage_to_frozen_product(self):
+        changed = self.context_row(id='11', product='3303', queue_product='3303', setting_id='3303',
+                                   setting_parent='3302', parent_setting_id='3302')
+        result, _, _, _ = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                          self.context_responder([self.context_row(), changed]))
+        self.assertEqual(len(result['rows']), 2)
+        self.assertEqual(result['scope'], {'1723': '1479', '3303': '3302'})
+
+    def test_current_context_root_product_requires_existing_exact_setting(self):
+        for root in ('1479', '3302'):
+            row = self.context_row(product=root, queue_product=root, setting_id=root,
+                                   setting_parent='0', parent_setting_id=None)
+            result, _, _, _ = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                              self.context_responder([row]))
+            self.assertEqual(result['scope'], {root: root})
+            with self.assertRaisesRegex(source.SqlSourceError, 'current_product_unavailable'):
+                self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                self.context_responder([dict(row, setting_id=None)]))
+
+    def test_current_context_missing_child_parent_queue_or_token_fail_closed(self):
+        cases = (({'parent_setting_id': None}, 'current_product_unavailable'),
+                 ({'setting_id': '3302'}, 'current_product_unavailable'),
+                 ({'queue_id': None}, 'credential_queue_mismatch'),
+                 ({'queue_product': '3302'}, 'credential_queue_mismatch'),
+                 ({'queue_user_id': '805'}, 'credential_queue_mismatch'),
+                 ({'default_token': '0'}, 'credential_rule_unknown'),
+                 ({'available': False}, 'publishing_credential_unavailable'),
+                 ({'available': 'true'}, 'invalid_credential_availability'))
+        for changes, code in cases:
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(source.SqlSourceError, code):
+                    self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                    self.context_responder([self.context_row(**changes)]))
+
+    def test_current_context_queue_user_and_conflicting_current_users_are_preserved(self):
+        row = self.context_row(default_token='-1')
+        second = self.context_row(id='11')
+        result, _, _, _ = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                          self.context_responder([row, second]))
+        self.assertEqual(result['credential_users'], ['803', '804'])
+
+    def test_current_context_missing_or_malformed_current_sources_fail_closed(self):
+        for rows, sources in (([self.context_row()], []),
+                              ([self.context_row(source_id='not-an-id')], [])):
+            with self.assertRaisesRegex(source.SqlSourceError, 'invalid_source_mapping'):
+                self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                self.context_responder(rows, sources))
+        result, _, process, _ = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                               self.context_responder([self.context_row(source_id='0')], []))
+        self.assertEqual(result['sources'], {})
+        self.assertEqual(len(process.commands), 3)
+
+    def test_current_context_reads_all_lineage_pages_and_never_truncates(self):
+        pages = iter([[self.context_row(id='1'), self.context_row(id='2')], [self.context_row(id='3')]])
+        queries = []
+        def responder(sql):
+            if 'ads_source FORCE INDEX(PRIMARY)' in sql:
+                return [{'id': '900', 'source_type': 3, 'source_id': '9010'}]
+            queries.append(sql)
+            return next(pages)
+        result, _, _, popen = self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                              responder, page_size=2)
+        self.assertEqual(len(result['rows']), 3)
+        self.assertIn('AND a.id>2 ORDER BY a.id LIMIT 2', queries[1])
+        self.assertEqual(popen.call_count, 1)
+        for rows in ([self.context_row(id='2'), self.context_row(id='1')],
+                     [self.context_row(id='1'), self.context_row(id='1')],
+                     [self.context_row(ad_id='101')]):
+            with self.assertRaises(source.SqlSourceError):
+                self.run_source(lambda db: db.current_ad_context('100', '5000'),
+                                self.context_responder(rows))
+
+    def test_current_context_reuses_outer_snapshot_but_never_caches_current_values(self):
+        counter = [0]
+        def responder(sql):
+            if 'ads_source FORCE INDEX(PRIMARY)' in sql:
+                return [{'id': '900', 'source_type': 3, 'source_id': '9010'}]
+            counter[0] += 1
+            return [self.context_row(default_user=str(803 + counter[0]))]
+        adapter = self.make_source()
+        process = FakeMysql(responder)
+        with patch.object(source.subprocess, 'Popen', return_value=process) as popen:
+            with adapter.snapshot():
+                self.assertEqual(adapter.current_ad_context('100', '5000')['credential_users'], ['804'])
+                self.assertEqual(adapter.current_ad_context('100', '5000')['credential_users'], ['805'])
+        self.assertEqual(popen.call_count, 1)
 
     def test_nested_query_error_poison_closes_snapshot_until_outer_exit(self):
         failed = FakeMysql(lambda sql: None)

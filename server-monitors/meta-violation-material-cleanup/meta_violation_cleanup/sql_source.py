@@ -45,6 +45,7 @@ class SqlSourceError(RuntimeError):
         "product_default_credential_missing", "credential_rule_unknown", "invalid_credential_row_id",
         "invalid_credential_route_result", "invalid_credential_availability",
         "credential_availability_incomplete", "publishing_credential_unavailable",
+        "current_product_unavailable",
     })
 
     def __init__(self, code):
@@ -268,12 +269,12 @@ class SqlSource:
         self.query_timeout = int(get("query_timeout_seconds", 30))
         self.session_timeout = int(get("session_timeout_seconds", 1800))
         self.page_size = int(get("page_size", 2000))
-        self.lineage_batch_size = int(get("lineage_batch_size", 1000))
+        self.lineage_batch_size = int(get("lineage_batch_size", 1900))
         self.mysql_compress = get("mysql_compress", True)
         if not isinstance(self.mysql_compress, bool):
             raise SqlSourceError("unsafe_sql_limits")
         if not (1 <= self.query_timeout <= 120 and 60 <= self.session_timeout <= 3600 and
-                1 <= self.page_size <= 2000 and 1 <= self.lineage_batch_size <= 1000):
+                1 <= self.page_size <= 2000 and 1 <= self.lineage_batch_size <= 1900):
             raise SqlSourceError("unsafe_sql_limits")
         # The installed FIFO wrapper prepends its own mysql options. MySQL only
         # accepts --no-defaults as the first option, so it cannot be used here.
@@ -681,3 +682,83 @@ class SqlSource:
             if len(tokens) != 1 or not str(tokens[0].get("token") or "").strip():
                 raise SqlSourceError("publishing_credential_unavailable")
             return user
+
+    def current_ad_context(self, ad_id, creative_id):
+        """Fresh current identity in one short FIFO snapshot, without history.
+
+        Every Ad lineage is retained, including missing LEFT JOIN relations.
+        Only rows for the requested current Creative contribute product/source
+        and credential evidence. The caller still checks the Meta object and
+        compares product/material identities with its frozen candidate.
+        """
+        from .policy import parse_ids
+
+        ad_id, creative_id = _ids([ad_id])[0], _ids([creative_id])[0]
+        expressions = tuple((key, "CAST(a.%s AS CHAR)" % key) for key in
+                            ("id", "ad_id", "product", "source_id", "original_source_id", "creative_id",
+                             "ad_account_id", "user_id", "publish_queue_id", "video_id", "image_ids")) + (
+            ("created_at", "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f')"),
+            ("queue_id", "CAST(pq.id AS CHAR)"), ("queue_product", "CAST(pq.product AS CHAR)"),
+            ("queue_user_id", "CAST(pq.user_id AS CHAR)"), ("default_token", "CAST(pq.default_token AS CHAR)"),
+            ("setting_id", "CAST(p.id AS CHAR)"), ("setting_parent", "CAST(p.ads_app_id AS CHAR)"),
+            ("parent_setting_id", "CAST(parent.id AS CHAR)"), ("default_user", "CAST(p.default_user AS CHAR)"),
+            ("available", "EXISTS(SELECT 1 FROM `{s}`.ads_facebook_info i "
+             "WHERE i.user_id=CASE WHEN pq.default_token=1 THEN p.default_user "
+             "WHEN pq.default_token=-1 THEN a.user_id ELSE NULL END "
+             "AND TRIM(i.accessToken)<>'' LIMIT 1)".format(s=self.schema)))
+        joins = ("ads_facebook_auto_created_data a FORCE INDEX(ad_id) "
+                 "LEFT JOIN `{s}`.ads_template_make_queue pq ON pq.id=a.publish_queue_id "
+                 "LEFT JOIN `{s}`.ads_apps_setting p ON p.id=a.product "
+                 "LEFT JOIN `{s}`.ads_apps_setting parent ON parent.id=p.ads_app_id").format(s=self.schema)
+        rows, cursor = [], 0
+        scope, users, source_ids = {}, set(), set()
+        with self._session() as session:
+            while True:
+                page = session.query(self._select(expressions, joins,
+                                     "WHERE a.ad_id=%s AND a.id>%d ORDER BY a.id LIMIT %d" %
+                                     (_quote(ad_id), cursor, self.page_size)))
+                if len(page) > self.page_size:
+                    raise SqlSourceError("ad_lineage_incomplete")
+                for row in page:
+                    identifier = str(row.get("id") or "")
+                    if str(row.get("ad_id")) != ad_id:
+                        raise SqlSourceError("unexpected_ad_lineage")
+                    if not _ID.fullmatch(identifier) or int(identifier) <= cursor:
+                        raise SqlSourceError("ad_lineage_incomplete")
+                    cursor = int(identifier)
+                    row["row_id"] = identifier
+                    rows.append(row)
+                if len(page) < self.page_size:
+                    break
+            for row in rows:
+                if str(row.get("creative_id")) != creative_id:
+                    continue
+                product = str(row.get("product") or "")
+                parent = str(row.get("setting_parent") or "")
+                if not _ID.fullmatch(product) or str(row.get("setting_id")) != product:
+                    raise SqlSourceError("current_product_unavailable")
+                if product in ("1479", "3302"):
+                    scope[product] = product
+                elif parent in ("1479", "3302"):
+                    if str(row.get("parent_setting_id")) != parent:
+                        raise SqlSourceError("current_product_unavailable")
+                    scope[product] = parent
+                user = self._credential_user(self._credential_identity(row), row)
+                available = row.get("available")
+                if type(available) not in (bool, int) or available not in (0, 1):
+                    raise SqlSourceError("invalid_credential_availability")
+                if not available:
+                    raise SqlSourceError("publishing_credential_unavailable")
+                users.add(user)
+                value = row.get("source_id")
+                if value is None or value == 0 or isinstance(value, str) and value.strip() in ("", "0"):
+                    continue
+                try:
+                    source_ids.update(parse_ids(value))
+                except (TypeError, ValueError):
+                    raise SqlSourceError("invalid_source_mapping") from None
+            sources = self.sources(sorted(source_ids, key=int))
+            if set(sources) != source_ids:
+                raise SqlSourceError("invalid_source_mapping")
+        return {"rows": rows, "sources": sources, "scope": scope,
+                "credential_users": sorted(users, key=int)}

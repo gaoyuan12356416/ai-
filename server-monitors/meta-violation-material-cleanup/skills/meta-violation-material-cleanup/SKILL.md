@@ -70,8 +70,12 @@ the platform supplied no usable measurement, not zero usage. Tune read workers
 only against a complete read-only throughput run and current rate-limit evidence.
 MySQL protocol compression is requested by default (`mysql_compress=true`),
 with identical full-row hashes verified against the FIFO read endpoint. Keep
-all pages at or below 2,000 rows and indexed ID batches at or below 1,000;
-product/credential/lineage directories use keyset pagination, never truncation.
+all pages at or below 2,000 rows, lineage batches at or below 1,900 Ad IDs, and
+source/credential batches at or below 1,000 IDs. Account aggregation targets
+20,000 inventory Ads across at most 32 fully paginated accounts; an oversized
+account stays complete in its own batch. Release SQL before any further Graph
+wait and commit each account's inventory/result separately. Product/credential/
+lineage directories use keyset pagination, never truncation.
 
 ## Execution and recovery
 
@@ -88,6 +92,17 @@ An expired manifest requires a new complete scan and new run ID, preserving all
 old receipts and unknown fences; never edit the timestamp/hash to extend it.
 `--max-ads` selects complete Creative groups and may select zero ads when the
 limit is smaller than every group. Continuation executes pending objects only.
+
+After manifest SHA verification, use its complete frozen-window violation proof
+throughout that run. Do not reread historical vio/Ad rows for each candidate or
+silently change the threshold evidence; later historical edits enter the next
+complete scan. Both the Creative-group preflight and each Ad's immediate delete
+guard must freshly read the current Ad lineage, exact product/root relationship,
+materials, publish-queue credentials and Meta review/parent status. Release the
+single FIFO snapshot before Graph reads; do not cache these current relationships.
+Use the last eligible group preflight as the Creative basis. If other checks
+followed it, recheck that candidate immediately; discard changed candidates and
+freshly check any earlier fallback. A legacy-lock wait repeats qualification.
 
 Every platform write follows a committed shared-Store claim. Report API-accepted
 deletions separately from exact-ID/account `DELETED` readback verification.

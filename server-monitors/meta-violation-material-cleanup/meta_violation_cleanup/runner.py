@@ -32,7 +32,7 @@ def numeric_id(value):
         raise ValueError('invalid_numeric_identity')
     return str(value)
 
-def chunks(values,size=1000):
+def chunks(values,size=1900):
     for i in range(0,len(values),size):
         yield values[i:i+size]
 
@@ -59,10 +59,6 @@ class Runner:
     def sql_snapshot(self):
         factory=getattr(self.source,'snapshot',None)
         return factory() if callable(factory) else nullcontext()
-
-    def current_scope(self):
-        reader=getattr(self.source,'scope_products',None)
-        return product_scope(reader() if callable(reader) else self.source.products())
 
     def lineage_data(self, ids, violation_rows=(), scope=None):
         data={};ids=list(ids)
@@ -94,16 +90,17 @@ class Runner:
         """Amortize FIFO setup without holding SQL open across Graph reads.
 
         Each account still finishes its entire Graph pagination before joining
-        a batch. Individual SQL statements remain capped at 1000 Ad IDs. Large
-        accounts occupy a batch alone; small accounts share at most 32 slots.
+        a batch. Individual lineage lookups remain capped at 1900 Ad IDs and
+        every SQL page at 2000 rows. Batches target at most 20,000 inventory Ads
+        across 32 accounts; an oversized complete account occupies one batch.
         """
         batch=[];total=0
         for item in self.account_inventories(accounts):
             count=len(item[1] or ())
-            if batch and (len(batch)>=32 or total+count>2000):
+            if batch and (len(batch)>=32 or total+count>20000):
                 yield batch;batch=[];total=0
             batch.append(item);total+=count
-            if len(batch)>=32 or total>=2000:
+            if len(batch)>=32 or total>=20000:
                 yield batch;batch=[];total=0
         if batch:yield batch
 
@@ -267,36 +264,30 @@ class Runner:
         return manifest
 
     def preflight(self, candidate, manifest):
-        # Re-read a sufficient set of trigger evidence; never authorize from
-        # stale counters alone. Four distinct Ads suffice for rule 2.
-        proof_ids=set()
-        for mid in candidate['material_ids']:
-            ev=manifest['evidence']['materials'].get(mid,{})
-            for adid in ev.get('violating_ad_ids',[])[:4]:
-                vids=manifest['violation_ids_by_ad'].get(str(adid),[])
-                if isinstance(vids,str):vids=[vids]
-                proof_ids.update(vids)
-        # All SQL reads share one FIFO snapshot; release it before Graph I/O.
+        # execute() verifies the whole manifest SHA before any preflight. The
+        # complete fixed-window proof is immutable for this run; refreshing
+        # historical rows here would silently change its authorization basis.
+        # Keep only this candidate's materials in per-Ad audit events.
+        evidence={'materials':{mid:manifest['evidence']['materials'][mid]
+            for mid in candidate['material_ids'] if mid in manifest['evidence']['materials']}}
+        # Refresh current identity and credentials in one short FIFO snapshot,
+        # then release it before Graph I/O. No historical proof/directory scan.
         with self.sql_snapshot():
-            scope=self.current_scope()
-            proofs=self.source.violations_by_ids(sorted(proof_ids))
-            proof_lineages,proof_sources=self.lineage_data([str(r['ad_id']) for r in proofs],proofs)
-            evidence=build_evidence(proofs,proof_lineages,proof_sources,scope,manifest['window_start'],manifest['window_end'])
-            rows,sources=self.lineage_data([candidate['ad_id']])
-            matching=[r for r in rows.get(candidate['ad_id'],[]) if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
-            users={numeric_id(self.source.selected_credential(r)) for r in matching}
+            context=self.source.current_ad_context(candidate['ad_id'],candidate['creative_id'])
+            rows=context['rows'];sources=context['sources'];scope=context['scope']
+            users={numeric_id(uid) for uid in context['credential_users']}
         if users!={candidate['user_id']}:
             return {'eligible':False,'reason':'credential_lineage_changed'}
         ad=self.execution_graph.get_ad(candidate['ad_id'],candidate['user_id'])
         if str(ad.get('account_id','')).removeprefix('act_') != candidate['account_id'].removeprefix('act_') or object_id(ad)!=candidate['creative_id']:
             return {'eligible':False,'reason':'account_or_creative_changed'}
-        identity=material_identity(rows[candidate['ad_id']],sources,scope,creative_id=candidate['creative_id'])
+        identity=material_identity(rows,sources,scope,creative_id=candidate['creative_id'])
         decision=evaluate_ad(ad,identity,evidence)
         if decision['eligible'] and (decision['root_id']!=candidate['root_id'] or set(decision['material_ids'])!=set(candidate['material_ids'])
                 or set(identity['product_ids'])!=set(candidate['identity']['product_ids'])):
             return {'eligible':False,'reason':'frozen_material_or_product_changed'}
         if decision['eligible']:
-            # Keep exactly the trigger evidence checked in this group. The Ad
+            # Keep exactly the frozen trigger evidence for this candidate. The Ad
             # guard must re-evaluate its current review/status after Creative
             # deletion or a legacy-task wait instead of assuming it stayed clear.
             decision['checked_evidence']=evidence
@@ -363,12 +354,9 @@ class Runner:
         allow a new content rejection or pending review through this boundary.
         """
         with self.sql_snapshot():
-            scope=self.current_scope()
-            rows,sources=self.lineage_data([candidate['ad_id']])
-            current=rows.get(candidate['ad_id'],[])
-            identity=material_identity(current,sources,scope,creative_id=candidate['creative_id'])
-            matched=[r for r in current if str(r.get('creative_id',''))==candidate['creative_id'] and str(r.get('product','')) in scope]
-            users={numeric_id(self.source.selected_credential(r)) for r in matched}
+            context=self.source.current_ad_context(candidate['ad_id'],candidate['creative_id'])
+            identity=material_identity(context['rows'],context['sources'],context['scope'],creative_id=candidate['creative_id'])
+            users={numeric_id(uid) for uid in context['credential_users']}
         if identity.get('reason') or identity['root_id']!=candidate['root_id'] or set(identity['material_ids'])!=set(candidate['material_ids']) or set(identity['product_ids'])!=set(candidate['identity']['product_ids']):
             return 'dependency_identity_changed'
         if users!={candidate['user_id']}:
@@ -452,7 +440,7 @@ class Runner:
                     try:
                         with legacy_delete_lock(self.config['legacy_lock'],self.stop) as lease:
                             admitted=[];decisions={};group_skipped=0
-                            for c in items:
+                            def checked_preflight(c,stage):
                                 self.check_stop()
                                 if lease is not None:lease.check()
                                 try:decision=self.preflight(c,manifest)
@@ -460,13 +448,31 @@ class Runner:
                                     if ledger_error(exc):raise
                                     decision={'eligible':False,'reason':'preflight_failed','error':safe_error(exc)}
                                 if lease is not None:lease.check()
-                                self.runtime.event(run_id,'preflight',{'ad_id':c['ad_id'],'decision':decision})
+                                self.runtime.event(run_id,'preflight',{'ad_id':c['ad_id'],'stage':stage,'decision':decision})
+                                return decision
+                            last_checked=None
+                            for c in items:
+                                decision=checked_preflight(c,'group')
+                                last_checked=c['ad_id']
                                 if decision['eligible']:admitted.append(c);decisions[c['ad_id']]=decision
                                 else:group_skipped+=1
+                            previous=old['creative:'+cid]
+                            # Use the most recently checked eligible Ad as the
+                            # Creative basis. Later rejected checks also age an
+                            # earlier success, so refresh that one Ad. If it no
+                            # longer qualifies, remove it and freshly check the
+                            # next basis instead of falling back to stale proof.
+                            if previous['status']=='pending':
+                                while admitted and admitted[-1]['ad_id']!=last_checked:
+                                    c=admitted[-1]
+                                    decision=checked_preflight(c,'creative_basis')
+                                    last_checked=c['ad_id']
+                                    if decision['eligible']:decisions[c['ad_id']]=decision
+                                    else:
+                                        admitted.pop();decisions.pop(c['ad_id']);group_skipped+=1
                             if admitted:
-                                previous=old['creative:'+cid]
                                 if previous['status']=='pending':
-                                    result=self.attempt(job_id,shared_run,'creative',cid,admitted[0],run_id,lease)
+                                    result=self.attempt(job_id,shared_run,'creative',cid,admitted[-1],run_id,lease)
                                 else:
                                     result={'status':previous['status'],'request_sent':False,'reason':'previous_attempt_preserved','prior_result':previous.get('result',{})}
                         break
