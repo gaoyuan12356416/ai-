@@ -116,12 +116,13 @@ class Worker:
         try:
             snap, prepared = json.loads(task["snapshot_json"]), json.loads(task["prepared_json"])
             if self.sources is not None:
-                self.sources.get_pages(snap["actor"], [task["page_id"]])
+                manual = task.get("source_kind") == "manual" and "pool" not in snap
+                self.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
                 # Only operator-created tasks waive the blacklist. Pool tasks
                 # keep their admission policy when this shared worker executes.
                 enforce_blacklist = task.get("source_kind") != "manual" or "pool" in snap
                 fresh = self.sources.get_materials([task["material_id"]], need_desc=False,
-                                                   enforce_blacklist=enforce_blacklist)[task["material_id"]]
+                                                   enforce_blacklist=enforce_blacklist, manual=manual)[task["material_id"]]
                 if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                     raise DomainError("material_identity_changed", "素材来源身份已变化，未向平台发布", 409)
             media_url = str(prepared.get("media_url") or "")

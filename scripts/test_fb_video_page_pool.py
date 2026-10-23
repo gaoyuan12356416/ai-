@@ -51,8 +51,8 @@ class V2Tests(Fixture):
         self.assertEqual(["2026-10-20", "2026-10-21"], [r["planned_bj_date"] for r in rows])
         self.assertEqual([r["planned_at_utc"] for r in rows], [r["planned_at_utc"] for r in before["items"]])
         self.store.daily_limit = 1
-        with self.assertRaises(DomainError):
-            self.submit(self.v2([("22", "11")]))
+        self.submit(self.v2([("22", "11")]))
+        self.assertEqual(3, len(self.tasks()))
 
     def test_v2_immediate_is_submission_time(self):
         r = self.v2()
@@ -69,14 +69,10 @@ class V2Tests(Fixture):
         r = self.v2()
         pre = self.preflight(r)
         self.now += timedelta(minutes=2)
-        with self.assertRaises(DomainError) as raised:
-            self.service.handle("POST", PREFIX + "/batches", self.actor,
-                                {**r, "preview_token": pre["preview_token"], "allow_repeat": False})
-        self.assertEqual("daily_capacity_exceeded", raised.exception.code)
-        with self.assertRaises(DomainError) as raised:
-            self.preflight(r)
-        self.assertEqual("daily_capacity_exceeded", raised.exception.code)
-        self.assertEqual(1, len(self.tasks()))
+        self.service.handle("POST", PREFIX + "/batches", self.actor,
+                            {**r, "preview_token": pre["preview_token"], "allow_repeat": False})
+        self.assertEqual(2, len(self.tasks()))
+        self.assertEqual("2026-10-21", self.tasks()[1]["planned_bj_date"])
 
     def test_v2_complete_map_timezone_and_expiry(self):
         r = self.v2()

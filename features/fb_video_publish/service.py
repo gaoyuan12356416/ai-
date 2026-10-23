@@ -9,7 +9,7 @@ import re
 from datetime import timedelta
 
 from .core import DomainError, actor_checked, canonical, digest, id_text, normalize_batch, plan_pairs, stamp
-from .templates import render_preview
+from .templates import render_preview, manual_text
 
 PREFIX = "/api/fb-video-publish"
 PLACEHOLDER = "[提交后生成独立短链]"
@@ -67,16 +67,16 @@ class Service:
     def resolve(self, actor, request):
         if not re.fullmatch("[1-9][0-9]{0,30}", actor["sub_user_id"]):
             raise DomainError("actor_mapping_missing", "发布人邮箱未唯一映射到有效sub_user_id", 403)
-        pages = self.sources.get_pages(actor, request["page_ids"])
+        pages = self.sources.get_pages(actor, request["page_ids"], manual=True)
         if request["processing_mode"] == "random_overlay" and not self.prepare_enabled:
             raise DomainError("prepare_gate_closed", "视频加工服务未启用，请选择不加工", 409)
-        materials = self.sources.get_materials(request["material_ids"], need_desc=False, enforce_blacklist=False)
+        materials = self.sources.get_materials(request["material_ids"], need_desc=False, enforce_blacklist=False, manual=True)
         if set(pages) != set(request["page_ids"]) or set(materials) != set(request["material_ids"]):
             raise DomainError("source_scope_changed", "素材或Page不再可用", 409)
         return {"pages": pages, "materials": materials}
 
     def preflight(self, actor, raw):
-        request = normalize_batch(raw)
+        request = normalize_batch(raw, manual=True)
         if request.get("schema_version") == 2 and not self.v2_enabled:
             raise DomainError("v2_gate_closed", "逐素材预约功能暂时关闭", 409)
         resolved = self.resolve(actor, request)
@@ -84,16 +84,16 @@ class Service:
         plans = plan_pairs(request, now)
         with self.store.connect() as conn:
             conn.execute("BEGIN")
-            configs, repeats = self.store.check_plan(conn, actor, request, resolved)
-            self.store.check_quota(conn, plans)
+            configs, repeats = self.store.check_plan(conn, actor, request, resolved, manual=True)
             facts = {"actor": actor, "request": request, "resolved": resolved, "configs": configs, "repeats": repeats}
         items = []
         for _, p, _, when, _ in plans:
             pid, mid = p["page_id"], p["material_id"]
             material, page = resolved["materials"][mid], resolved["pages"][pid]
-            items.append({"material_id": mid, "page_id": pid, "material_name": material["material_name"],
+            caption, title = manual_text(p, configs[pid])
+            items.append({"title": title, "material_id": mid, "page_id": pid, "material_name": material["material_name"],
                           "page_name": page["page_name"], "config_version": p["config_version"],
-                          "caption": render_preview(p["caption_template"], material, PLACEHOLDER),
+                          "caption": render_preview(caption, material, PLACEHOLDER, manual=True),
                           "short_url": PLACEHOLDER, "short_url_is_placeholder": True,
                           "long_url_parameters": {
                               "c": "yingliang_post_CLV_VL_facebook_" + pid
@@ -111,8 +111,11 @@ class Service:
                 "preview_hash": digest(facts), "items": items, "repeat_required": bool(repeats),
                 "repeat_fingerprint": digest(repeats), "landing_url": "https://www.dramawavew2a.com/ads/101/2310/view"}
 
-    def configured_pages(self, actor):
+    def configured_pages(self, actor, *, for_publish=False):
         configs = self.store.configs(actor)
+        if for_publish:
+            visible = self.sources.list_pages(actor)
+            return {"ok": True, "items": [{**p, **configs.get(p["page_id"], self.store.unconfigured(p["page_id"]))} for p in visible]}
         if not configs:
             return {"ok": True, "items": []}
         visible = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=list(configs))}
@@ -154,10 +157,10 @@ class Service:
             if route == "/pages/available":
                 return {"ok": True, "items": self.sources.list_pages(actor, q=str(query.get("q", ""))[:200])}
             if route == "/pages":
-                return self.configured_pages(actor)
+                return self.configured_pages(actor, for_publish=query.get("purpose") == "publish")
             if route == "/materials":
                 return {"ok": True, **self.sources.search_materials(
-                    {**query, "search": query.get("q", query.get("search", ""))}, enforce_blacklist=False)}
+                    {**query, "search": query.get("q", query.get("search", ""))}, enforce_blacklist=False, manual=True)}
             if route == "/draft":
                 return self.store.draft(actor)
             if route in {"/batches", "/tasks"}:
@@ -190,29 +193,29 @@ class Service:
                 self._keys(payload, {"draft"})
                 return self.store.draft(actor, payload["draft"])
             if route == "/pages":
-                self._keys(payload, {"page_ids", "language", "caption_template"})
+                self._keys(payload, {"page_ids", "language", "caption_template"} | ({"title"} if "title" in payload else set()))
                 if not isinstance(payload["page_ids"], list):
                     raise DomainError("invalid_request", "Page列表无效")
                 ids = [id_text(v) for v in payload["page_ids"]]
                 self._config_access(actor, ids)
-                return {"ok": True, "items": self.store.save_configs(actor, ids, payload["language"], payload["caption_template"])}
+                return {"ok": True, "items": self.store.save_configs(actor, ids, payload["language"], payload["caption_template"], title=payload.get("title"))}
             match = re.fullmatch(r"/pages/([1-9][0-9]{0,30})(/delete)?", route)
             if match:
                 expected = {"config_instance_id", "expected_version"}
-                self._keys(payload, expected if match[2] else expected | {"language", "caption_template"})
+                self._keys(payload, expected if match[2] else expected | {"language", "caption_template"} | ({"title"} if "title" in payload else set()))
                 self._config_access(actor, [match[1]])
                 if type(payload["expected_version"]) is not int or payload["expected_version"] < 1:
                     raise DomainError("invalid_request", "配置版本无效")
                 if match[2]:
                     return self.store.delete_config(actor, match[1], payload["config_instance_id"], payload["expected_version"])
                 return {"ok": True, "items": self.store.save_configs(actor, [match[1]], payload["language"], payload["caption_template"],
-                         expected=(payload["config_instance_id"], payload["expected_version"]))}
+                         expected=(payload["config_instance_id"], payload["expected_version"]), title=payload.get("title"))}
             if route == "/preflight":
                 return self.preflight(actor, payload)
             if route == "/batches":
                 if not isinstance(payload, dict) or type(payload.get("allow_repeat")) is not bool:
                     raise DomainError("invalid_request", "提交确认字段无效")
-                request = normalize_batch({k: v for k, v in payload.items() if k not in {"preview_token", "allow_repeat"}})
+                request = normalize_batch({k: v for k, v in payload.items() if k not in {"preview_token", "allow_repeat"}}, manual=True)
                 existing = self.store.existing(actor, request["operation_id"], digest(request))
                 if existing:
                     return existing

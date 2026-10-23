@@ -30,8 +30,10 @@ def _text(value: Any) -> str:
     return value.strip()
 
 
-def validate_template(template: str) -> str:
+def validate_template(template: str, *, manual=False) -> str:
     value = _text(template)
+    if manual:
+        return value
     if not value:
         raise TemplateError("required_text", "请填写发布文案")
     if len(value.encode("utf-8")) > TEMPLATE_MAX_BYTES:
@@ -42,12 +44,12 @@ def validate_template(template: str) -> str:
     return value
 
 
-def render_template(template: str, material: Mapping[str, Any], short_url: str = "") -> str:
-    return _render(template, material, short_url)
+def render_template(template: str, material: Mapping[str, Any], short_url: str = "", *, manual=False) -> str:
+    return _render(template, material, short_url, manual=manual)
 
 
-def _render(template: str, material: Mapping[str, Any], short_url: str, *, preview: bool = False) -> str:
-    value = validate_template(template)
+def _render(template: str, material: Mapping[str, Any], short_url: str, *, preview: bool = False, manual=False) -> str:
+    value = validate_template(template, manual=manual)
     values = {
         "name": str(material.get("drama_name") or "").strip(),
         "desc": str(material.get("drama_description") or "").strip(),
@@ -58,6 +60,8 @@ def _render(template: str, material: Mapping[str, Any], short_url: str, *, previ
         key = match.group(1)
         replacement = values[key]
         if not replacement:
+            if manual and key != "url":
+                return ""
             raise TemplateError("macro_source_missing", "素材缺少 " + match.group(0) + " 的有效值", 409)
         if key == "url" and not preview:
             parsed = urlsplit(replacement)
@@ -69,12 +73,20 @@ def _render(template: str, material: Mapping[str, Any], short_url: str, *, previ
         return _text(replacement)
 
     rendered = TOKEN_RE.sub(replace, value).strip()
-    if len(rendered.encode("utf-8")) > CAPTION_MAX_BYTES:
+    if not manual and len(rendered.encode("utf-8")) > CAPTION_MAX_BYTES:
         raise TemplateError("text_too_long", "替换后的发布文案超过5000 UTF-8字节", 409)
     return rendered
 
 
-def render_preview(template: str, material: Mapping[str, Any], placeholder: str = PREVIEW_LINK) -> str:
+def render_preview(template: str, material: Mapping[str, Any], placeholder: str = PREVIEW_LINK, *, manual=False) -> str:
     """Read-only preview: budget the maximum real ID, never allocate a link."""
-    _render(template, material, "https://gy.g2flow.com/s2l/facebook/9223372036854775807.html")
-    return _render(template, material, placeholder, preview=True)
+    _render(template, material, "https://gy.g2flow.com/s2l/facebook/9223372036854775807.html", manual=manual)
+    return _render(template, material, placeholder, preview=True, manual=manual)
+
+
+def manual_text(pair, config):
+    """Resolve each field separately, before preview and immutable task freezing."""
+    caption = validate_template(pair.get("caption_template", ""), manual=True)
+    title = _text(pair.get("title", ""))
+    return (caption or validate_template(config.get("caption_template", ""), manual=True),
+            title or _text(config.get("title", "")))

@@ -192,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self) -> Dict[str, Any]:
         try: length = int(self.headers.get("Content-Length", "0"))
         except ValueError: length = -1
-        maximum = 4 * 1024 * 1024 if self.path.startswith("/api/fb-video-publish/") else 256 * 1024
+        maximum = 64 * 1024 * 1024 if self.path.startswith("/api/fb-video-publish/") else 256 * 1024
         if not 0 <= length <= maximum: raise ServiceError("invalid_request", "请求体大小无效", 400)
         try: value = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except (UnicodeError, ValueError): raise ServiceError("invalid_request", "请求体不是有效JSON", 400) from None

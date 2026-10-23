@@ -111,7 +111,7 @@ class ExcelTests(Fixture):
     def test_unconfigured_page_all_rows_skip_other_page_continues(self):
         preview = self.preview_excel([row(pid='99'), row(pid='99', mid='22'), row(pid='12')])
         self.assertEqual(preview['summary'], {'total': 3, 'valid': 1, 'skipped': 2})
-        self.assertEqual([x['code'] for x in preview['skipped']], ['page_not_configured'] * 2)
+        self.assertEqual([x['code'] for x in preview['skipped']], ['page_not_found'] * 2)
         self.submit_excel(preview)
         self.assertNotIn('99', self.store.configs(self.actor))
 
@@ -123,8 +123,8 @@ class ExcelTests(Fixture):
     def test_invalid_language_and_macro_are_partial(self):
         self.sources.materials['22']['language'] = 'en'
         preview = self.preview_excel([row(mid='22'), row(caption='{unsupported}'), row(pid='12')])
-        self.assertEqual(preview['summary']['valid'], 1)
-        self.assertEqual({x['code'] for x in preview['skipped']}, {'language_mismatch', 'unknown_macro'})
+        self.assertEqual(preview['summary']['valid'], 3)
+        self.assertEqual(preview['skipped'], [])
 
     def test_private_credentials_missing_skips_only_own_rows(self):
         with patch.object(self.sources.pages, 'owner_credential_counts', return_value={}):
@@ -239,9 +239,7 @@ class ExcelTests(Fixture):
 
     def test_capacity_and_gate_blocks_without_writes(self):
         self.store.daily_limit = 0
-        with self.assertRaises(DomainError) as caught:
-            self.preview_excel()
-        self.assertEqual(caught.exception.code, 'daily_capacity_exceeded')
+        self.assertEqual(self.preview_excel()['summary']['valid'], 1)
         self.service.excel_enabled = False
         with self.assertRaises(DomainError) as caught:
             self.preview_excel()
@@ -253,16 +251,15 @@ class ParserTests(unittest.TestCase):
         for filename, content, code in [('x.xls', xlsx([]), 'invalid_excel_file'),
                 ('x.xlsx', xlsx([]), 'excel_empty'), ('x.xlsx', '%%%%', 'invalid_excel_file'),
                 ('x.xlsx', xlsx([], headers=['bad']), 'excel_headers_invalid'),
-                ('x.xlsx', 'A' * (3 * 1024 * 1024), 'excel_too_large')]:
+                ('x.xlsx', 'A' * (3 * 1024 * 1024), 'invalid_excel_file')]:
             with self.subTest(code=code):
                 with self.assertRaises(DomainError) as caught:
                     read_workbook(filename, content)
                 self.assertEqual(caught.exception.code, code)
 
     def test_max_rows_no_truncation(self):
-        with self.assertRaises(DomainError) as caught:
-            read_workbook('x.xlsx', xlsx([row()] * 201))
-        self.assertEqual(caught.exception.code, 'excel_rows_exceeded')
+        _, rows, errors, total = read_workbook('x.xlsx', xlsx([row()] * 201))
+        self.assertEqual((len(rows), total, errors), (201, 201, []))
 
     def test_numeric_precision_and_formula(self):
         _, rows, errors, total = read_workbook('x.xlsx', xlsx([row(pid='1234567890123456'), row(pid=1234567890123456),

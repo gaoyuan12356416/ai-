@@ -1,6 +1,5 @@
 (() => {
   "use strict";
-  const MAX_FILE_BYTES = 2 * 1024 * 1024;
   const modeLabel = value => value === "random_overlay" ? "随机模板" : value === "mixed" ? "逐行加工" : "原片";
   const tokenLabel = value => value === "operator" ? "当前操作人 Token" : "默认 Token 自动轮换";
 
@@ -17,10 +16,10 @@
       }
     } catch (_) { storageError = "无法读取待核对操作，请保留当前页面，恢复浏览器会话存储后再试。"; }
     const modal = dialog("excelPublish", "Excel 批量发布",
-      `<div class="notice">每行发布一个素材到一个 Page，仅支持 Dramawave。未配置的 Page 会跳过，请先配置后重新提交对应行。发布时间均为北京时间。</div>
+      `<div class="notice">每行发布一个素材到一个 Page，仅支持 Dramawave。无需提前配置 Page。文案和标题留空时分别使用 Page 默认值；Page 也未设置则留空。发布时间均为北京时间。</div>
        <div id="excelError" class="error" role="alert" hidden></div>
        <div id="excelPendingPanel" class="notice warning" hidden><strong>发布结果待核对</strong><p id="excelPendingText">保留原操作查询，避免重复发布。</p><div class="actions"><button id="excelQueryOperation" class="button">查询原操作</button><button id="excelRetryOperation" class="button">按原操作重试</button></div></div>
-       <fieldset id="excelUploadFields"><div class="row spread excel-upload"><label class="field"><span>上传 Excel</span><input id="excelFile" type="file" accept=".xlsx" aria-label="上传 Excel 批量发布文件"></label><a class="button" href="/fb-excel-template.xlsx" download="批量发布模板.xlsx">下载模板</a><button id="excelPreview" class="button primary">上传并校验</button></div><p class="helper">仅支持 .xlsx，最多 200 行、2 MiB。Page ID 和素材 ID 请使用文本格式。加工方式留空为原片，默认 Token 留空为是。</p></fieldset>
+       <fieldset id="excelUploadFields"><div class="row spread excel-upload"><label class="field"><span>上传 Excel</span><input id="excelFile" type="file" accept=".xlsx" aria-label="上传 Excel 批量发布文件"></label><a class="button" href="/fb-excel-template.xlsx" download="批量发布模板.xlsx">下载模板</a><button id="excelPreview" class="button primary">上传并校验</button></div><p class="helper">仅支持 .xlsx。Page ID 和素材 ID 请使用文本格式。加工方式留空为原片，默认 Token 留空为是。</p></fieldset>
        <div id="excelPreviewPanel" hidden><div id="excelSummary" class="summary" role="status"></div><div id="excelSkipped"></div><div id="excelRepeatPanel" class="notice warning" hidden><strong>部分素材已有历史成功发布记录</strong><label class="check"><input id="excelAllowRepeat" type="checkbox">我已核对，允许这些素材再次发布</label><p class="helper">不勾选将跳过历史成功行，其他有效行继续提交。</p></div><div id="excelPreviewRows"></div></div>
        <div id="excelResult" hidden></div>`,
       `<button class="button" data-close>关闭</button><button id="excelNextBatch" class="button" hidden>导入下一批</button><button id="excelSubmit" class="button primary" hidden>确认发布有效行</button>`);
@@ -124,7 +123,7 @@
       if (pending) return;
       const file = $("excelFile").files[0];
       if (!file || !/\.xlsx$/i.test(file.name)) throw new Error("请选择 .xlsx 格式的 Excel 文件。");
-      if (!file.size || file.size > MAX_FILE_BYTES) throw new Error("Excel 文件不能为空，且不能超过 2 MiB。");
+      if (!file.size) throw new Error("Excel 文件不能为空。");
       preview = null; $("excelPreviewPanel").hidden = true;
       const content = await new Promise((resolve, reject) => {
         const reader = new FileReader();

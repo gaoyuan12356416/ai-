@@ -13,8 +13,8 @@ from features.fb_auto_posts.client import contains_sensitive_key
 from features.fb_auto_posts.validation import valid_internal_bearer
 
 PREFIX = "/api/fb-video-publish"
-MAX_BYTES = 4 * 1024 * 1024
-MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_BYTES = 64 * 1024 * 1024
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class GatewayError(RuntimeError):

@@ -84,7 +84,7 @@ class GatewayTests(unittest.TestCase):
         for edit, status in (
             (lambda h: h.headers.add_header("Content-Length", "2"), 411),
             (lambda h: h.headers.add_header("Transfer-Encoding", "chunked"), 411),
-            (lambda h: h.headers.replace_header("Content-Length", str(4 * 1024 * 1024 + 1)), 413),
+            (lambda h: h.headers.replace_header("Content-Length", str(64 * 1024 * 1024 + 1)), 413),
         ):
             handler = Handler()
             edit(handler)

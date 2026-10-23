@@ -10,13 +10,11 @@ import zipfile
 from datetime import datetime, timedelta
 
 from .core import BJ, DomainError, canonical, digest, id_text, normalize_batch, parse_time, plan_pairs, stamp
-from .templates import render_preview, validate_template
+from .templates import render_preview, validate_template, manual_text
 
 HEADERS = ("product", "page_id", "制作模板id", "是否使用默认token", "resource_id", "desc", "发布时间", "标题")
-MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_ROWS = 200
-MAX_EXPANDED_BYTES = 16 * 1024 * 1024
-MAX_SCANNED_CELLS = 200000
+MAX_EXPANDED_BYTES = 256 * 1024 * 1024
+MAX_SCANNED_CELLS = 4000000
 PAIR_KEYS = {"material_id", "page_id", "config_instance_id", "config_version", "caption_template",
              "row_number", "processing_mode", "credential_mode", "title", "scheduled_at_utc"}
 OPERATION = re.compile(r"(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})")
@@ -32,7 +30,7 @@ def text(value, label, *, maximum=16000):
     if not isinstance(value, str) or any(ord(c) < 32 and c not in "\r\n\t" for c in value):
         fail("invalid_cell", label + "必须为有效文本")
     value = value.strip()
-    if len(value.encode("utf-8")) > maximum:
+    if maximum is not None and len(value.encode("utf-8")) > maximum:
         fail("invalid_cell", label + "内容过长")
     return value
 
@@ -76,14 +74,14 @@ def read_workbook(filename, content_base64):
     filename = text(filename, "文件名", maximum=512)
     if not filename.lower().endswith(".xlsx") or not filename or any(c in filename for c in "/\\"):
         fail("invalid_excel_file", "请选择.xlsx文件")
-    if not isinstance(content_base64, str) or len(content_base64) > ((MAX_FILE_BYTES + 2) // 3) * 4:
-        fail("excel_too_large", "Excel文件不能超过2 MiB", 413)
+    if not isinstance(content_base64, str):
+        fail("excel_too_large", "Excel文件无效", 413)
     try:
         raw = base64.b64decode(content_base64, validate=True)
     except (ValueError, binascii.Error):
         fail("invalid_excel_file", "Excel文件内容无效")
-    if not raw or len(raw) > MAX_FILE_BYTES:
-        fail("excel_too_large", "Excel文件为空或超过2 MiB", 413)
+    if not raw:
+        fail("excel_too_large", "Excel文件为空", 413)
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             members = archive.infolist()
@@ -123,13 +121,9 @@ def read_workbook(filename, content_base64):
             if scanned > MAX_SCANNED_CELLS:
                 fail("invalid_excel_file", "工作表包含过多空白格式单元格，请使用下载模板")
             values = [c.value for c in cells]
-            if number > 10001:
-                fail("excel_rows_exceeded", "工作表行号过大，请删除多余空行后重试")
             if all(v is None or (isinstance(v, str) and not v.strip()) for v in values):
                 continue
             total += 1
-            if total > MAX_ROWS:
-                fail("excel_rows_exceeded", "单次最多导入200个数据行，请拆分文件")
             values += [None] * max(0, 8 - len(values))
             pid, mid = values[1], values[4]
             try:
@@ -148,13 +142,11 @@ def read_workbook(filename, content_base64):
                     fail("invalid_processing_mode", "制作模板id仅支持原片或随机模板")
                 if credential not in {"是", "否"}:
                     fail("invalid_credential_mode", "是否使用默认token仅支持是或否")
-                title = text(values[7], "标题", maximum=1020)
-                if len(title) > 255:
-                    fail("invalid_title", "标题不能超过255个字符")
+                title = text(values[7], "标题", maximum=None)
                 rows.append({"row_number": number, "page_id": pid, "material_id": mid,
                              "processing_mode": "original" if mode == "原片" else "random_overlay",
                              "credential_mode": "page_pool" if credential == "是" else "operator",
-                             "caption_template": text(values[5], "desc"), "title": title,
+                             "caption_template": text(values[5], "desc", maximum=None), "title": title,
                              "scheduled_at_utc": scheduled(values[6])})
             except (DomainError, ValueError, OverflowError) as exc:
                 errors.append(skipped_row(number, pid, mid, exc))
@@ -174,19 +166,17 @@ def normalize_request(raw):
     if not isinstance(raw, dict) or set(raw) != keys or type(raw["schema_version"]) is not int or raw["schema_version"] != 3:
         fail("invalid_request", "Excel批次字段无效")
     pairs = raw["pairs"]
-    if not isinstance(pairs, list) or not 1 <= len(pairs) <= MAX_ROWS:
-        fail("invalid_request", "请选择1至200个有效行")
+    if not isinstance(pairs, list) or not pairs:
+        fail("invalid_request", "请选择有效行")
     clean, seen_rows = [], set()
     for p in pairs:
         if not isinstance(p, dict) or set(p) != PAIR_KEYS:
             fail("invalid_request", "Excel行字段无效")
-        if type(p["row_number"]) is not int or not 2 <= p["row_number"] <= 10001 or p["row_number"] in seen_rows:
+        if type(p["row_number"]) is not int or p["row_number"] < 2 or p["row_number"] in seen_rows:
             fail("invalid_request", "Excel行号无效或重复")
         if p["processing_mode"] not in {"original", "random_overlay"} or p["credential_mode"] not in {"page_pool", "operator"}:
             fail("invalid_request", "加工方式或Token策略无效")
-        title = text(p["title"], "标题", maximum=1020)
-        if len(title) > 255:
-            fail("invalid_title", "标题不能超过255个字符")
+        title = text(p["title"], "标题", maximum=None)
         when = p["scheduled_at_utc"]
         if when is not None:
             when = stamp(parse_time(when))
@@ -198,19 +188,19 @@ def normalize_request(raw):
     base = normalize_batch({"schema_version": 2, "operation_id": raw["operation_id"],
         "material_ids": raw["material_ids"], "page_ids": raw["page_ids"], "processing_mode": "original",
         "material_schedules": {m: None for m in raw["material_ids"]} if isinstance(raw["material_ids"], list) else {},
-        "pairs": [{k: p[k] for k in ("material_id", "page_id", "config_instance_id", "config_version", "caption_template")} for p in clean]})
+        "pairs": [{k: p[k] for k in ("material_id", "page_id", "config_instance_id", "config_version", "caption_template")} for p in clean]}, manual=True)
     by_pair = {(p["material_id"], p["page_id"]): p for p in base["pairs"]}
     clean = [{**p, **by_pair[(str(p["material_id"]), str(p["page_id"]))]} for p in clean]
     mode = aggregate_mode(clean)
     meta = raw["excel"]
     if (raw["processing_mode"] != mode or not isinstance(meta, dict) or set(meta) != {"filename", "total_rows", "skipped"}
-            or type(meta["total_rows"]) is not int or not 1 <= meta["total_rows"] <= MAX_ROWS
+            or type(meta["total_rows"]) is not int or meta["total_rows"] < 1
             or not isinstance(meta["skipped"], list) or len(meta["skipped"]) + len(clean) != meta["total_rows"]):
         fail("invalid_request", "Excel摘要无效")
     text(meta["filename"], "文件名", maximum=512)
     for item in meta["skipped"]:
         if (not isinstance(item, dict) or set(item) != {"row_number", "page_id", "material_id", "code", "message"}
-                or type(item["row_number"]) is not int or not 2 <= item["row_number"] <= 10001 or item["row_number"] in seen_rows):
+                or type(item["row_number"]) is not int or item["row_number"] < 2 or item["row_number"] in seen_rows):
             fail("invalid_request", "跳过行信息无效")
         for key, limit in (("page_id", 256), ("material_id", 256), ("code", 128), ("message", 2000)):
             text(item[key], key, maximum=limit)
@@ -258,10 +248,10 @@ class ExcelService:
             fail("actor_mapping_missing", "当前操作人尚未完成唯一用户映射", 403)
         filename, rows, skipped, total = read_workbook(payload["filename"], payload["content_base64"])
         configs = self.store.configs(actor)
-        ids = list(dict.fromkeys(r["page_id"] for r in rows if r["page_id"] in configs))
+        ids = list(dict.fromkeys(r["page_id"] for r in rows))
         pages = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=ids)} if ids else {}
         mids = list(dict.fromkeys(r["material_id"] for r in rows if r["page_id"] in pages))
-        lookup = self.sources.resolve_materials(mids, need_desc=False, enforce_blacklist=False) if mids else {"items": {}, "errors": {}}
+        lookup = self.sources.resolve_materials(mids, need_desc=False, enforce_blacklist=False, manual=True) if mids else {"items": {}, "errors": {}}
         counts = self._operator_counts(actor, [r for r in rows if r["page_id"] in pages])
         materials, accepted, seen, now = lookup["items"], [], set(), self.store.now_fn()
         with self.store.connect() as conn:
@@ -269,8 +259,6 @@ class ExcelService:
             for row in rows:
                 pid, mid = row["page_id"], row["material_id"]
                 try:
-                    if pid not in configs:
-                        fail("page_not_configured", "请先配置该Page，再重新提交这些行", 409)
                     if pid not in pages:
                         fail("page_not_found", "Page不在当前账号可访问范围内", 404)
                     if pages[pid].get("blocked_reason") or not pages[pid].get("eligible_token_count"):
@@ -282,13 +270,13 @@ class ExcelService:
                         fail("operator_authorization_unavailable", "当前操作人没有该Page的有效个人Token，请选择默认Token或补充授权", 409)
                     if row["processing_mode"] == "random_overlay" and not self.service.prepare_enabled:
                         fail("prepare_gate_closed", "随机模板加工服务未启用", 409)
-                    config = configs[pid]
+                    config = configs.get(pid, self.store.unconfigured(pid))
                     pair = {**row, "config_instance_id": config["config_instance_id"], "config_version": config["version"],
-                            "caption_template": validate_template(row["caption_template"] or config["caption_template"])}
+                            "caption_template": validate_template(row["caption_template"], manual=True)}
                     candidate = {"schema_version": 3, "pairs": [pair]}
                     plan_pairs(candidate, now)
-                    self.store.check_plan(conn, actor, candidate, {"pages": pages, "materials": materials})
-                    render_preview(pair["caption_template"], materials[mid])
+                    self.store.check_plan(conn, actor, candidate, {"pages": pages, "materials": materials}, manual=True)
+                    render_preview(manual_text(pair, config)[0], materials[mid], manual=True)
                     if (pid, mid) in seen:
                         fail("duplicate_pair", "相同Page和素材已出现在前面的有效行，本行跳过", 409)
                     accepted.append(pair)
@@ -308,15 +296,14 @@ class ExcelService:
                 "excel": {"filename": filename, "total_rows": total, "skipped": skipped}})
             resolved = {"pages": {p: pages[p] for p in request["page_ids"]},
                         "materials": {m: materials[m] for m in request["material_ids"]}}
-            current_configs, repeats = self.store.check_plan(conn, actor, request, resolved)
+            current_configs, repeats = self.store.check_plan(conn, actor, request, resolved, manual=True)
             plans = plan_pairs(request, now)
-            self.store.check_quota(conn, plans)
             facts = self.facts(actor, request, resolved, current_configs, repeats)
         times = {p["row_number"]: when for _, p, _, when, _ in plans}
         items = [{"row_number": p["row_number"], "page_id": p["page_id"], "material_id": p["material_id"],
             "page_name": pages[p["page_id"]]["page_name"], "material_name": materials[p["material_id"]]["material_name"],
-            "caption": render_preview(p["caption_template"], materials[p["material_id"]]),
-            "processing_mode": p["processing_mode"], "credential_mode": p["credential_mode"], "title": p["title"],
+            "caption": render_preview(manual_text(p, current_configs[p["page_id"]])[0], materials[p["material_id"]], manual=True),
+            "processing_mode": p["processing_mode"], "credential_mode": p["credential_mode"], "title": manual_text(p, current_configs[p["page_id"]])[1],
             "planned_at_utc": stamp(times[p["row_number"]]), "schedule_kind": "scheduled" if p["scheduled_at_utc"] else "immediate",
             "repeat_required": p["page_id"] + ":" + p["material_id"] in repeats} for p in request["pairs"]]
         return {"ok": True, "request": request, "items": items, "skipped": skipped, "summary": summary,
@@ -346,7 +333,7 @@ class ExcelService:
                     fail("operation_conflict", "同一操作标识不可用于不同提交内容", 409)
                 return {"ok": True, "batch_id": old["batch_id"], "operation_id": request["operation_id"],
                         "idempotent": True, "batch": self.store._batch_dto(conn, old)}
-            configs, repeats = self.store.check_plan(conn, actor, request, resolved)
+            configs, repeats = self.store.check_plan(conn, actor, request, resolved, manual=True)
             if digest(self.facts(actor, request, resolved, configs, repeats)) != signed:
                 fail("preview_changed", "配置、素材或历史记录发生变化，请重新核对；尚未创建任务", 409)
             frozen = copy.deepcopy(request)

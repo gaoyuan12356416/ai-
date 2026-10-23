@@ -23,7 +23,8 @@ class BlacklistCatalog(Catalog):
         if 'ads_custom_source' in sql and 'drama_released' not in sql:
             self.calls.append((sql, params))
             enforcing = 'ads_facebook_post_blacklist' in sql
-            ids = [str(mid) for mid in params[5 if enforcing else 4:-1]]
+            offset = 5 if enforcing else (4 if 'd.release_status=1' in sql else 2)
+            ids = [str(mid) for mid in params[offset:-1]]
             self.last = [self.rows[mid] for mid in reversed(ids) if mid in self.rows
                          and not (enforcing and (self.rows[mid]['content_blocked'] or self.rows[mid]['series_blocked']))]
             return self.last

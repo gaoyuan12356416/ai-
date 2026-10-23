@@ -73,7 +73,7 @@ def read_json(handler):
         raise GatewayError("valid_content_length_required", "请求长度无效", 411)
     length = int(lengths[0])
     if length > MAX_BYTES:
-        raise GatewayError("request_too_large", "请求不能超过 4 MiB", 413)
+        raise GatewayError("request_too_large", "请求超过传输层容量（64 MiB），请分批提交", 413)
     if length < 2:
         raise GatewayError("invalid_json", "请求必须为 JSON 对象", 400)
     source = str(handler.headers.get("Origin") or handler.headers.get("Referer") or "")

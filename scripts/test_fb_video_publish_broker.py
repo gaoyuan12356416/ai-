@@ -262,10 +262,10 @@ class ClientBoundaryTests(unittest.TestCase):
         with self.assertRaises(client.GatewayError) as raised:
             self.call(Response(409, {"code": "config_changed", "message": "changed", "accepted": False}))
         self.assertIs(raised.exception.accepted, False)
-        self.assertEqual(client.MAX_BYTES, 4 * 1024 * 1024)
+        self.assertEqual(client.MAX_BYTES, 64 * 1024 * 1024)
         self.assertGreaterEqual(client.MAX_RESPONSE_BYTES, 16 * 1024 * 1024)
         result, _ = self.call(Response(body={"ok": True, "caption": "x" * (4 * 1024 * 1024 + 1)}))
-        self.assertGreater(len(result["caption"]), client.MAX_BYTES)
+        self.assertGreater(len(result["caption"]), 4 * 1024 * 1024)
 
     def test_oversized_and_sensitive_response_fail_unknown(self):
         for response in (

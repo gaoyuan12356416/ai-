@@ -63,7 +63,7 @@ def id_text(value):
     return str(value)
 
 
-def normalize_batch(raw):
+def normalize_batch(raw, *, manual=False):
     v2 = isinstance(raw, dict) and raw.get("schema_version") == 2
     required = {"operation_id", "material_ids", "page_ids", "pairs", "processing_mode"}
     required |= {"schema_version", "material_schedules"} if v2 else {"schedule_mode", "scheduled_at_utc", "interval_minutes"}
@@ -75,7 +75,7 @@ def normalize_batch(raw):
     result = dict(raw)
     for field in ("material_ids", "page_ids"):
         values = raw[field]
-        if not isinstance(values, list) or not 1 <= len(values) <= 200:
+        if not isinstance(values, list) or (not values or (not manual and len(values) > 200)):
             raise DomainError("invalid_request", "请选择1至200个素材/Page")
         normalized = [id_text(v) for v in values]
         if len(set(normalized)) != len(normalized):
@@ -100,21 +100,24 @@ def normalize_batch(raw):
             raise DomainError("invalid_request", "同Page间隔应为0至1440整数分钟")
         result["scheduled_at_utc"] = stamp(parse_time(raw["scheduled_at_utc"])) if raw["schedule_mode"] == "scheduled" else ""
     pairs = raw["pairs"]
-    if not isinstance(pairs, list) or not 1 <= len(pairs) <= 200:
+    if not isinstance(pairs, list) or (not pairs or (not manual and len(pairs) > 200)):
         raise DomainError("invalid_request", "每批请选择1至200个素材与Page配对")
     from .templates import validate_template
     seen, clean = set(), []
     for p in pairs:
-        if not isinstance(p, dict) or set(p) != {"material_id", "page_id", "config_instance_id", "config_version", "caption_template"}:
+        if not isinstance(p, dict) or (set(p) - ({"title"} if manual else set())) != {"material_id", "page_id", "config_instance_id", "config_version", "caption_template"}:
             raise DomainError("invalid_request", "配对字段无效")
         mid, pid = id_text(p["material_id"]), id_text(p["page_id"])
         key = (mid, pid)
         if mid not in result["material_ids"] or pid not in result["page_ids"] or key in seen:
             raise DomainError("invalid_request", "配对重复或超出本批选择范围")
-        if not re.fullmatch(r"[a-f0-9]{32}", str(p["config_instance_id"])) or type(p["config_version"]) is not int or p["config_version"] < 1:
+        unconfigured = manual and p["config_instance_id"] == "" and type(p["config_version"]) is int and p["config_version"] == 0
+        if not unconfigured and (not re.fullmatch(r"[a-f0-9]{32}", str(p["config_instance_id"])) or type(p["config_version"]) is not int or p["config_version"] < 1):
             raise DomainError("invalid_request", "Page配置版本无效")
+        if "title" in p:
+            p = {**p, "title": validate_template(p["title"], manual=True)}
         seen.add(key)
-        clean.append({**p, "material_id": mid, "page_id": pid, "caption_template": validate_template(p["caption_template"])})
+        clean.append({**p, "material_id": mid, "page_id": pid, "caption_template": validate_template(p["caption_template"], manual=manual)})
     if {p[0] for p in seen} != set(result["material_ids"]):
         raise DomainError("material_unassigned", "存在未分配Page的素材，请分配或移除")
     if {p[1] for p in seen} != set(result["page_ids"]):
@@ -221,6 +224,7 @@ class Store:
             # Additive migrations leave all prior snapshots and task facts intact.
             for table, column, definition in (
                 ("fb_video_page", "created_by_name", "TEXT NOT NULL DEFAULT ''"),
+                ("fb_video_page", "title", "TEXT NOT NULL DEFAULT ''"),
                 ("fb_video_task", "source_kind", "TEXT NOT NULL DEFAULT 'manual'"),
                 ("fb_video_task", "pool_instance_id", "TEXT NOT NULL DEFAULT ''"),
                 ("fb_video_task", "pool_sequence", "INTEGER NOT NULL DEFAULT 0"),
@@ -250,12 +254,12 @@ class Store:
         with self.connect() as conn:
             return {r["page_id"]: dict(r) for r in conn.execute("SELECT * FROM fb_video_page WHERE tenant_key=? AND deleted=0 ORDER BY page_id", (actor["tenant_key"],))}
 
-    def save_configs(self, actor, page_ids, language, caption, *, expected=None):
+    def save_configs(self, actor, page_ids, language, caption, *, expected=None, title=None):
         from .templates import validate_template
         from features.fb_auto_posts.languages import page_language
-        caption, language = validate_template(caption), page_language(language)
-        if not language:
-            raise DomainError("invalid_language", "请选择有效剧语言")
+        caption, language = validate_template(caption, manual=True), page_language(language)
+        if title is not None:
+            title = validate_template(title, manual=True)
         ids = [id_text(v) for v in page_ids]
         if not ids or len(ids) > 200 or len(set(ids)) != len(ids):
             raise DomainError("invalid_request", "请选择不重复的Page")
@@ -280,6 +284,8 @@ class Store:
                     created_at_utc=excluded.created_at_utc,updated_at_utc=excluded.updated_at_utc""",
                     (actor["tenant_key"], pid, instance, version, language, caption, old["created_by"] if old else actor["user_id"],
                      actor["user_id"], created, now, old["created_by_name"] if old else actor["user_name"]))
+                conn.execute("UPDATE fb_video_page SET title=? WHERE tenant_key=? AND page_id=?",
+                             (title if title is not None else (old["title"] if old else ""), actor["tenant_key"], pid))
                 if old and old["language"] != language:
                     conn.execute("""UPDATE fb_video_pool SET status='paused',pause_reason='page_language_changed',
                         version=version+1,updated_at_utc=? WHERE config_instance_id=? AND status<>'archived'""", (now, instance))
@@ -308,22 +314,26 @@ class Store:
                 if value is not None and not isinstance(value, dict):
                     raise DomainError("invalid_request", "草稿格式无效")
                 encoded = canonical(value)
-                if len(encoded.encode()) > 2 * 1024 * 1024:
+                if len(encoded.encode()) > 64 * 1024 * 1024:
                     raise DomainError("request_too_large", "草稿过大", 413)
                 conn.execute("INSERT INTO fb_video_draft VALUES(?,?,?,?) ON CONFLICT(tenant_key,owner_user_id) DO UPDATE SET draft_json=excluded.draft_json,updated_at_utc=excluded.updated_at_utc",
                              (actor["tenant_key"], actor["user_id"], encoded, stamp(self.now_fn())))
             row = conn.execute("SELECT draft_json FROM fb_video_draft WHERE tenant_key=? AND owner_user_id=?", (actor["tenant_key"], actor["user_id"])).fetchone()
             return {"ok": True, "draft": json.loads(row[0]) if row else None}
 
-    def check_plan(self, conn, actor, request, resolved):
+    @staticmethod
+    def unconfigured(pid):
+        return {"page_id": pid, "config_instance_id": "", "version": 0, "language": "", "caption_template": "", "title": ""}
+
+    def check_plan(self, conn, actor, request, resolved, *, manual=False):
         repeats, configs = {}, {}
         for pair in request["pairs"]:
             pid, mid = pair["page_id"], pair["material_id"]
             row = conn.execute("SELECT * FROM fb_video_page WHERE tenant_key=? AND page_id=? AND deleted=0", (actor["tenant_key"], pid)).fetchone()
-            if not row or row["version"] != pair["config_version"] or row["config_instance_id"] != pair["config_instance_id"]:
+            config = dict(row) if row else (self.unconfigured(pid) if manual else None)
+            if not config or config["version"] != pair["config_version"] or config["config_instance_id"] != pair["config_instance_id"]:
                 raise DomainError("config_version_conflict", "Page配置已改变，请重新预览", 409)
-            config = dict(row)
-            if config["language"] != resolved["materials"][mid]["language"]:
+            if not manual and config["language"] != resolved["materials"][mid]["language"]:
                 raise DomainError("language_mismatch", "素材与Page配置剧语言不一致", 409)
             for reason in (automatic_block(conn, pid, mid), manual_block(conn, pid, mid)):
                 if reason:
@@ -356,7 +366,7 @@ class Store:
                     raise DomainError("operation_conflict", "同一操作标识不能用于不同批次内容", 409)
                 conn.commit()
                 return {"ok": True, "batch_id": old["batch_id"], "operation_id": old["operation_id"], "idempotent": True, "batch": self._batch_dto(conn, old)}
-            configs, repeats = self.check_plan(conn, actor, request, resolved)
+            configs, repeats = self.check_plan(conn, actor, request, resolved, manual=True)
             facts = {"actor": actor, "request": request, "resolved": resolved, "configs": configs, "repeats": repeats}
             if digest(facts) != signed_facts:
                 raise DomainError("preview_changed", "配置、素材或历史发布记录已变化，请重新预览", 409)
@@ -369,11 +379,12 @@ class Store:
     def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None, request_hash=None):
         """Caller owns BEGIN IMMEDIATE and all admission checks; never commits."""
         from .links import short_url, build_attribution_url
-        from .templates import render_template
+        from .templates import render_template, manual_text
         if not conn.in_transaction:
             raise RuntimeError("Task freezing requires the caller transaction")
         now = stamp(self.now_fn())
-        self.check_quota(conn, plans)
+        if pool:
+            self.check_quota(conn, plans)
         bid = uuid.uuid4().hex
         conn.execute("INSERT INTO fb_video_batch VALUES(?,?,?,?,?,?,?,?)",
                      (bid, actor["tenant_key"], actor["user_id"], actor["user_name"], request["operation_id"], request_hash or digest(request), canonical(request), now))
@@ -386,18 +397,23 @@ class Store:
                        "material_name": material["material_name"], "content_id": material["content_id"],
                        "language": material["language"], "drama_name": material["drama_name"],
                        "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
+            if not pool:
+                context["drama_name"] = str(context["drama_name"] or "none").replace("*", " ")[:512]
             long = build_attribution_url(context, lid, now)
-            caption = render_template(pair["caption_template"], material, short)
+            caption_template, title = manual_text(pair, config) if not pool else (pair["caption_template"], "")
+            caption = render_template(caption_template, material, short, manual=not pool)
             snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
-                        "template_version": config["version"], "caption_template": pair["caption_template"],
+                        "template_version": config["version"], "caption_template": caption_template,
                         "language": config["language"], "actor": actor, "attribution": context,
                         "repeat_history": repeats.get(pid + ":" + mid, [])}
+            if not pool:
+                snapshot.update(title=title, manual_policy="operator-v2")
             if pool:
                 snapshot["pool"] = pool
             mode = request["processing_mode"]
             if request.get("schema_version") == 3:
                 mode = pair["processing_mode"]
-                snapshot.update(row_number=pair["row_number"], title=pair["title"],
+                snapshot.update(row_number=pair["row_number"], title=title,
                                 credential_mode=pair["credential_mode"],
                                 credential_owner_id=actor["sub_user_id"] if pair["credential_mode"] == "operator" else "")
             job = "fb-page-" + hashlib.sha256(("fb-manual:v1|" + actor["tenant_key"] + "|" + tid + "|" + pid + "|" + mid).encode()).hexdigest()[:48]
