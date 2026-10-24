@@ -105,6 +105,9 @@ class Runner:
         if batch:yield batch
 
     def scan(self, run_id, start, end):
+        if self.config.get('scanner') == 'material_indexed':
+            from .material_scan import scan
+            return scan(self, run_id, start, end)
         settings=self.source.products();scope=product_scope(settings)
         known_products={str(row.get('id')) for row in settings
             if re.fullmatch(r'[1-9][0-9]{0,31}',str(row.get('id','')))}

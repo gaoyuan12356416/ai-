@@ -219,6 +219,8 @@ def load_manifest(runtime, run_id):
 
 def scan_or_run(args, config, runtime, stop):
     live = args.command == "run"
+    if live and config.get('comparison_baseline_run_id'):
+        raise CliError('comparison_config_is_read_only')
     if live and config.get("live_enabled") is not True:
         raise CliError("live_execution_disabled")
     run_id = validate_run_id(args.run_id or datetime.now(CST).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])
@@ -233,6 +235,8 @@ def scan_or_run(args, config, runtime, stop):
         if previous["status"] not in ("previewed", "partial", "interrupted"):
             raise CliError("existing_run_requires_recovery")
         manifest = load_manifest(runtime, run_id)
+        if manifest.get('comparison_only'):
+            raise CliError('comparison_manifest_is_read_only')
         start, end = manifest["window_start"], manifest["window_end"]
     else:
         start, end = start.isoformat(), end.isoformat()

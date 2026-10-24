@@ -509,6 +509,53 @@ class GraphClient:
         identifier = _object_id(ad_id)
         return self._record(self._get(identifier, user_id, {"fields": AD_FIELDS}), identifier)
 
+    def _target_ads(self, item):
+        user, account, identifiers = item
+        reader = self._reader()
+        try:
+            try:
+                data = reader._get('', user, {'ids': ','.join(identifiers), 'fields': AD_FIELDS})
+            except GraphError as exc:
+                return item, {}, {identifier: exc.as_dict() for identifier in identifiers}
+            records, errors = {}, {}
+            if not isinstance(data, dict):
+                return item, {}, {identifier: {'code': 'invalid_batch'} for identifier in identifiers}
+            for identifier in identifiers:
+                value = data.get(identifier)
+                if isinstance(value, dict) and value.get('error'):
+                    error = value['error']
+                    errors[identifier] = {'code': error.get('code'),
+                        'detail': reader._clean({k: error[k] for k in ERROR_FIELDS if k in error})}
+                    continue
+                try:
+                    records[identifier] = reader._record(value, identifier, account)
+                except GraphError as exc:
+                    errors[identifier] = exc.as_dict()
+            return item, records, errors
+        finally:
+            self._release_reader(reader)
+
+    def iter_target_ads(self, targets, stop=lambda: False):
+        """Only exact SQL-selected IDs; batch GETs share one selected identity."""
+        groups = {}
+        for target in targets:
+            user = _object_id(target['user_id'])
+            account = _object_id(target['account_id'], account=True)
+            groups.setdefault((user, account), set()).add(_object_id(target['ad_id']))
+        items = []
+        for (user, account), ids in sorted(groups.items()):
+            ids = sorted(ids)
+            items.extend((user, account, ids[n:n+50]) for n in range(0, len(ids), 50))
+        yield from self._bounded_reads(self._target_ads, items, stop)
+
+    def account_diagnostic(self, account_id, user_id):
+        account = _object_id(account_id, account=True)
+        data = self._get('act_' + account, user_id,
+                         {'fields': 'id,account_id,account_status,disable_reason'})
+        if not isinstance(data, dict) or _object_id(data.get('account_id') or data.get('id'), account=True) != account:
+            raise GraphError('account_mismatch', 'Account diagnostic identity mismatch')
+        return self._clean(data)
+
     def get_creative(self, creative_id, user_id):
         identifier = _object_id(creative_id)
         return self._record(self._get(identifier, user_id, {"fields": CREATIVE_FIELDS}),
