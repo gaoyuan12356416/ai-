@@ -61,7 +61,7 @@ class MaterialScanTests(unittest.TestCase):
         predicate=complex_value('source_id')
         self.assertIn("LOCATE(',',source_id)",predicate)
         self.assertIn("LEFT(TRIM(source_id),1)='['",predicate)
-        self.assertIn('source_id<>TRIM(source_id)',predicate)
+        self.assertIn("source_id REGEXP '[[:space:]]'",predicate)
 
 
 if __name__=='__main__':unittest.main()

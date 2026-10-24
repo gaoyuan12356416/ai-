@@ -33,10 +33,13 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 `graph_read_workers` 仅控制 Meta GET，支持整数 1–16，默认 4；不会并发删除或 SQL。
 生产可在只读吞吐验证后提高该值。`status` 的 `graph_metrics` 保存 GET、重试、限流
 及 usage header 数字统计；某类 header 的 observation 为 0 表示未取得该统计，不能视为零占用。
-每批账户的素材与凭据查询共用一个 SQL 快照，完成分页后再持有 SQL 会话，避免等待 Meta 时占用 FIFO。
-最多聚合 32 个完整账户，目标不超过 20,000 条库存广告；超过此目标的单个大账户独占
-一批并完整处理，不能截断。查询结束后每个账户仍分别提交库存与扫描结果，不能把
-合批查询视为合并账户的完成状态。
+生产使用 `scanner=material_indexed`：违规素材 → `ads_source` 别名 → 发布表的
+`ad_id` / `creative_id` → 指定 ID 的 Meta GET，每次至多 50 个 ID。
+标量原始素材和 source ID 使用已有索引；CSV、JSON、空白编码单独完整补查，按产品
+和主键分段，避免稀疏条件导致单条查询超时。每段最多 50,000 个索引 ID 的聚合只用于
+确定边界，段内结果仍每页最多 2,000 行，不能把边界当成全量截断。
+发布记录不限 30 天；完整读取每个目标 Ad 的当前关联和凭据，再核对 Meta 返回的
+当前 Creative。SQL 会话在 Meta 读取前释放。常规扫描不再遍历全部账户库存。
 `mysql_compress=true` 默认请求 MySQL 协议压缩，已在 FIFO 只读端点以完整行哈希验证等价；
 不改变 SQL 门禁、端口或查询条件。广告关联按最多 1,900 个 Ad ID 查询，素材/凭据关系
 仍按最多 1,000 个 ID 批量查询，
@@ -49,10 +52,18 @@ Creative 精确核对产品及直属根产品、素材、发布队列和凭据�
 重读整个产品目录。查询共用一条 FIFO 只读快照，在读取 Meta 当前审核、广告和父级状态前释放。
 当前产品、素材、Creative 或凭据与冻结清单不一致即拒绝该对象。
 
-Creative 组全部候选预核完成后，以最后通过者作为删除依据。如果该候选之后还有其他
-检查，临删前单独重核该候选；若已变化则移除，并重新核验前一通过者，直到取得当前
-合格依据或跳过整组。等待旧任务释放锁后仍重新预核。每条 Ad 删除前再次核验，不复用
-Creative 删除前的当前状态。此优化不提高 DELETE 并发，也不改变 unknown 隔离。
+`execution_order=ads_first` 执行三个阶段：先全部合格 Ad，再全部 Creative，最后处理
+Creative 明确共享引用失败（3858800）的依赖。只有最后阶段才枚举相关账户的当前 Ad，
+核对精确引用及当前审核状态，删除正常的共享 Ad 后重试 Creative。用户 2026-10-24
+已授权删除此类共享 Ad，包括原素材规则之外的共享引用。当前违规或待审的共享 Ad
+记录状态并留到下轮重新核实；不能根据上轮状态直接删除。
+
+每条 Ad 删除前把 Creative 的来源、清单 hash 和冻结证据保存到本地 `cleanup_backlog`；
+已删除 Ad 的共享账本 receipt 与实时 SQL 关系共同支持后续 Creative 清理。新一轮
+即使该 Ad 已删或原违规窗口已过，仍加载此队列。只有确认 Creative 已删才移除。
+确认账号 `account_status=2` 后，Ad 无法操作时仍对准确归属的 Creative 尝试删除；
+不假设账号被封就一定能删或一定不能删，保存 Meta 实际返回。权限错误本身不证明封号。
+此修改不提高 DELETE 并发，也不改变 unknown 隔离和旧任务锁优先级。
 
 ## 常用命令
 
@@ -133,10 +144,13 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
 3. 验证 service/timer 文法及北京时间调度，运行预演并保存清单/hash、政策证据、
    账户覆盖率、未知/跳过分类。相同素材的不同违规 ad 去重；阈值 3 不触发规则 2，
    阈值 4 才触发；暂停含父级暂停。无法确定的多素材归因必须排除。
-4. 按已授权范围开启 `live_enabled`，进行同轮受限 live 验证，再按既定范围继续。
-   检查 Creative→Ad 顺序、共享对象 claim、删除接受响应与最终状态回读、开始/结束
-   飞书回执。共享 Creative 按用户要求删除，不能扩大到非规则 Ad。
-5. 确认完成后启用 timer，读回 `ActiveState/UnitFileState/NEXT` 和当前 release。
+4. 用单独的 live=false 配置设置 `comparison_baseline_run_id`，复用旧清单的冻结
+   违规证据进行完整只读对照。检查 `comparison-retrieval.json` 的无法解释漏选为 0，
+   再检查 `comparison.json` 的当前候选差异及耗时。对照配置和清单禁止转真实执行。
+   随后去掉 comparison 配置完成新的当前 30 天预演，核对 hash/范围/错误分类。
+5. 按已授权范围开启 `live_enabled` 并执行新鲜预演的完整清单。检查全局 Ad→Creative
+   →共享补删顺序、共享 claim、DELETE 接受与精确 DELETED 回读、飞书开始/结束回执。
+   启用 timer，读回 `ActiveState/UnitFileState/NEXT` 和当前 release。
    `Persistent=true` 意味着补偿错过的调度可能立即触发，安装时必须考虑这一点。
    后续一次真实定时运行的审计记录才证明调度执行，NEXT 本身不是执行成功证据。
 6. 将 Skill 目录链接到 `/root/.codex/skills/meta-violation-material-cleanup`，目标为
@@ -191,7 +205,12 @@ unit，并执行 `daemon-reload`。先保持 live 关闭，核对健康与账本
 删除已发生的 Meta 对象不能通过代码回退恢复。保留 unknown fence，使用 GET-only 核对。
 如果旧版本不兼容当前账本，保持停用并修复兼容性，不能降级数据库。
 
-## 首次上线的持久验收任务
+## 原 v1 首次上线的持久验收任务（历史流程）
+
+下面的 `bootstrap.py` 仅适配原 v1 策略，不用于 `20261024-v2`。保留原失败状态和
+通知记录，不删除它们来重放旧验收。v2 使用上方的只读对照、当前窗口预演和正式服务
+启动流程。首次启动可以用 `/run/systemd/system/...service.d/` 临时指定新鲜预演 run ID，
+服务确认启动后移除该临时覆盖并 daemon-reload；后续定时仍启动新扫描。不得永久绑定旧清单。
 
 `bootstrap.py` 只编排已运行的完整预演、少量真实验证、继续执行和 timer 启用；实际删除
 始终经过同一 `run.py`、开始消息回执、共享对象锁及未知结果隔离。它不新增公共接口。

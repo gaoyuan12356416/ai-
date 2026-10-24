@@ -268,6 +268,36 @@ class Runtime:
         return [json.loads(r['data']) for r in self.db.execute(
             'SELECT data FROM inventory WHERE run_id=? AND creative_id=?', (run_id, creative))]
 
+    def _cleanup_queue_schema(self):
+        self._healthy()
+        if getattr(self,'_cleanup_queue_ready',False):return
+        with self._transaction():
+            self.db.execute('CREATE TABLE IF NOT EXISTS cleanup_backlog '
+                            '(creative_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated TEXT NOT NULL)')
+        self._cleanup_queue_ready=True
+
+    def cleanup_backlog(self):
+        self._cleanup_queue_schema()
+        return [json.loads(row['data']) for row in self.db.execute(
+            'SELECT data FROM cleanup_backlog ORDER BY creative_id')]
+
+    def queue_creative(self, entry):
+        self._cleanup_queue_schema()
+        cid=str(entry['basis']['creative_id'])
+        if not re.fullmatch(r'[1-9][0-9]{0,31}',cid): raise ValueError('invalid_creative_identity')
+        with self._transaction():
+            previous=self.db.execute('SELECT data FROM cleanup_backlog WHERE creative_id=?',(cid,)).fetchone()
+            data=json.loads(previous['data']) if previous else {}
+            if data and data['basis']['account_id']!=entry['basis']['account_id']:
+                raise ValueError('backlog_account_conflict')
+            data.update(entry)
+            self.db.execute('INSERT OR REPLACE INTO cleanup_backlog VALUES(?,?,?)',(cid,canonical(data),now()))
+
+    def complete_creative(self, creative_id):
+        self._cleanup_queue_schema()
+        with self._transaction():
+            self.db.execute('DELETE FROM cleanup_backlog WHERE creative_id=?',(str(creative_id),))
+
     def _artifact_path(self, run_id, name):
         validate_run_id(run_id)
         if not isinstance(name, str) or not _ARTIFACT.fullmatch(name) or '..' in name:

@@ -10,7 +10,7 @@ from .sql_source import _inside, _quote, _chunks, _ids, SqlSourceError
 
 
 def complex_value(column):
-    return "(LOCATE(',',{c})>0 OR LEFT(TRIM({c}),1)='[' OR {c}<>TRIM({c}))".format(c=column)
+    return "(LOCATE(',',{c})>0 OR LEFT(TRIM({c}),1)='[' OR {c} REGEXP '[[:space:]]')".format(c=column)
 
 
 def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=lambda: False):
@@ -80,17 +80,44 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
         ('original_source_id',materials,'ads_facebook_auto_created_data_original_source_id'),
         ('source_id',aliases,'ads_facebook_auto_created_data_source_id')):
         for part in _chunks(sorted(values),1000):
+            # A valid nonempty original set must equal the source wrapper's
+            # material set. Scalar originals were already found above; arrays
+            # are covered by the complete composite pass below.
+            absent_original=(" AND (original_source_id IS NULL OR TRIM(original_source_id) IN ('','0'))"
+                             if column=='source_id' else '')
             for rows in pages('ads_facebook_auto_created_data FORCE INDEX('+index+')',expressions,
-                              column+' IN '+_inside(part)+' AND product IN '+_inside(products),column):
+                              column+' IN '+_inside(part)+' AND product IN '+_inside(products)+absent_original,column):
                 accept(rows)
             progress(stage='material_lookup',publication_rows=len(found),lookup_metrics=dict(metrics))
     # This completes the inverse lookup for CSV/JSON arrays without using a
     # non-indexable per-material FIND_IN_SET over the publication table.
     composite='('+complex_value('source_id')+' OR '+complex_value('original_source_id')+')'
     for number,pid in enumerate(sorted(products)):
-        for rows in pages('ads_facebook_auto_created_data FORCE INDEX(idx_product)',expressions,
-                          'product='+_quote(pid)+' AND '+composite):
-            accept(rows,True)
+        # Find bounded index ranges BEFORE applying non-sargable predicates.
+        # A sparse composite filter over a large product otherwise reads the
+        # entire product before returning even its first (possibly empty) page.
+        low=0
+        while True:
+            if stop():raise InterruptedError('stop_requested')
+            table='`'+source.schema+'`.ads_facebook_auto_created_data FORCE INDEX(idx_product)'
+            base='product='+_quote(pid)+' AND id>'+str(low)
+            with source._session() as session:
+                bounds=session.query("SELECT JSON_OBJECT('high',MAX(id),'count',COUNT(*)) FROM "
+                    '(SELECT id FROM '+table+' WHERE '+base+' ORDER BY id LIMIT 50000) AS bounded_ids')
+            if len(bounds)!=1:raise SqlSourceError('ad_lineage_incomplete')
+            bound=bounds[0];high=bound.get('high')
+            if not high:break
+            high=int(high)
+            if high<=low:raise SqlSourceError('ad_lineage_incomplete')
+            for rows in pages('ads_facebook_auto_created_data FORCE INDEX(idx_product)',expressions,
+                              base+' AND id<='+str(high)+' AND '+composite):
+                accept(rows,True)
+            low=high
+            metrics['composite_ranges']+=1
+            metrics['publication_rows_examined_for_composites']+=int(bound['count'])
+            progress(stage='material_lookup_composite',product_id=pid,products_finished=number,
+                     publication_rows=len(found),lookup_metrics=dict(metrics))
+            if int(bound['count'])<50000:break
         progress(stage='material_lookup_composite',products_finished=number+1,
                  products_total=len(products),publication_rows=len(found),lookup_metrics=dict(metrics))
     metrics['publication_rows']=len(found)

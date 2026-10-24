@@ -93,7 +93,8 @@ def summary(runtime, run_id):
     for key in ("vio_rows", "policy_rows", "material_count", "candidate_ads", "candidate_creatives",
                 "accounts_total", "accounts_finished", "coverage_errors", "rule1_ads", "rule2_ads",
                 "identities_total", "identities_finished", "identities_failed", "accounts_discovered",
-                "shared_creatives", "remaining_ads"):
+                "shared_creatives", "remaining_ads", "deferred_creatives", "blocked_account_creatives",
+                "target_ads", "target_ads_checked", "publication_rows", "recovery_creatives"):
         if isinstance(data.get(key), int):
             result[key] = data[key]
     for key in ("result_counts", "product_candidate_ads", "skip_counts", "reconciliation_counts"):
@@ -101,6 +102,8 @@ def summary(runtime, run_id):
             result[key] = _safe_counts(data[key])
     if "graph_metrics" in data:
         result["graph_metrics"] = _safe_graph_metrics(data["graph_metrics"])
+    for key in ('scan_timings','lookup_metrics'):
+        if key in data:result[key]=data[key]
     attempt = data.get("execution_attempt", 1)
     attempt = attempt if isinstance(attempt, int) and attempt > 0 else 1
     result["notifications"] = {}
@@ -274,6 +277,11 @@ def scan_or_run(args, config, runtime, stop):
         status, error = "interrupted", type(exc).__name__
     except Exception as exc:
         status, error = "failed", type(exc).__name__
+        # Controlled internal error labels are useful without logging SQL,
+        # database credentials, Graph bodies or arbitrary exception messages.
+        label=str(exc)
+        if re.fullmatch(r'[a-z][a-z0-9_]{0,95}',label):
+            runtime.event(run_id,'failure',{'type':error,'code':label})
     finally:
         try:
             runtime.update(run_id, status=status, stage="finished", error_type=error,

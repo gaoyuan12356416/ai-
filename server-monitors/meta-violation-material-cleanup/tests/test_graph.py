@@ -68,6 +68,14 @@ def page(rows, cursor=None, path="act_100/ads"):
 
 
 class GraphTests(unittest.TestCase):
+    def test_final_binding_check_prevents_delete_after_creative_changes(self):
+        session=Session([Response(ad(creative='21'))])
+        client=GraphClient({'1':'synthetic-token'},session=session)
+        result=client.delete('ad','10','1','100',expected_creative_id='20')
+        self.assertEqual(result['code'],'creative_changed_before_delete')
+        self.assertFalse(result['request_sent'])
+        self.assertEqual([c[0] for c in session.calls],['GET'])
+
     def test_read_worker_configuration_bounds_and_injected_session_serial(self):
         for value in (0, 17, True, '16', 2.5, None):
             with self.subTest(value=value), self.assertRaises(ValueError):

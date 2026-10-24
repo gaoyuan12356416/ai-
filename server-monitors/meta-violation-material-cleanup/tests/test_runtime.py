@@ -14,6 +14,24 @@ from meta_violation_cleanup.runtime import Runtime, RuntimeLedgerError
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_creative_queue_survives_restart_and_rejects_account_change(self):
+        entry={'basis':{'creative_id':'20','account_id':'100'},'blocked_ads':[{'ad_id':'10','state':'violating'}]}
+        self.runtime.queue_creative(entry)
+        self.runtime.close()
+        self.runtime=Runtime(self.tmp.name)
+        self.assertEqual(self.runtime.cleanup_backlog(),[entry])
+        with self.assertRaisesRegex(ValueError,'backlog_account_conflict'):
+            self.runtime.queue_creative({'basis':{'creative_id':'20','account_id':'101'}})
+        self.assertEqual(self.runtime.cleanup_backlog(),[entry])
+        self.runtime.complete_creative('20')
+        self.assertEqual(self.runtime.cleanup_backlog(),[])
+
+    def test_creative_queue_schema_failure_fences_writes(self):
+        self.runtime.db.execute('PRAGMA query_only=ON')
+        with self.assertRaises(RuntimeLedgerError):self.runtime.cleanup_backlog()
+        self.runtime.db.execute('PRAGMA query_only=OFF')
+        with self.assertRaises(RuntimeLedgerError):self.runtime.write_barrier('run-1')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.runtime = Runtime(self.tmp.name)

@@ -36,12 +36,19 @@ GitHub `gaoyuan12356416/ai-`, directory
   and the candidate ad or its AdSet or Campaign is paused.
 - Rule 2: at least four distinct qualifying violating ads for a material in the
   window, regardless of whether the currently valid candidate ad is paused.
-- A current ad containing a matched material can be deleted as a whole. Delete
-  its frozen current Creative first, then that ad. **The operator explicitly
-  permits deletion of shared Creatives.** Record outside references/impact, but
-  do not protect or skip a Creative merely because it is shared. Do not add any
-  nonqualifying ad to the deletion set. Do not delete Videos, images, Campaigns,
-  AdSets, material-library records, or business-database rows.
+- A current ad containing a matched material can be deleted as a whole.
+  **The operator's 2026-10-24 instruction supersedes the original order and
+  shared-Ad restriction:** delete all qualifying Ads first, then their Creatives.
+  Collect definite shared-reference Creative failures for a final remediation
+  phase. Enumerate references only in those accounts, freshly verify each Ad's
+  exact Creative/account and current review state, delete currently clear shared
+  Ads (including outside the original material rule), then retry the Creative.
+  Currently violating/review-pending shared Ads stay in a durable queue and must
+  be freshly checked next run. Never replay an unknown DELETE.
+- For a confirmed disabled account, attempt deletion of an exact, attributable
+  Creative even when Ads cannot be operated. Permission/read errors alone do not
+  prove account disability or deletion; retain the actual result for recovery.
+  Do not delete Videos, images, Campaigns, AdSets, library records or source rows.
 
 ## Runtime and inspection
 
@@ -71,11 +78,16 @@ only against a complete read-only throughput run and current rate-limit evidence
 MySQL protocol compression is requested by default (`mysql_compress=true`),
 with identical full-row hashes verified against the FIFO read endpoint. Keep
 all pages at or below 2,000 rows, lineage batches at or below 1,900 Ad IDs, and
-source/credential batches at or below 1,000 IDs. Account aggregation targets
-20,000 inventory Ads across at most 32 fully paginated accounts; an oversized
-account stays complete in its own batch. Release SQL before any further Graph
-wait and commit each account's inventory/result separately. Product/credential/
-lineage directories use keyset pagination, never truncation.
+source/credential batches at or below 1,000 IDs. The production scanner is
+`scanner=material_indexed`: canonical violation materials -> source aliases ->
+publication Ad/Creative IDs -> exact-ID Meta GETs (up to 50 per request).
+Scalar original/source IDs use their existing indexes. CSV, JSON and whitespace
+encodings have a separate complete pass, split into bounded product/primary-key
+ranges; its 50,000-row covering-index aggregate defines a range, not a cutoff.
+Do not limit publication history to the violation window. Read all current rows
+for each candidate Ad before accepting its current Creative, scope and route.
+Release SQL before Graph waits. The legacy scanner remains available for
+comparison; do not enumerate every account during normal material scans.
 
 ## Execution and recovery
 
@@ -96,23 +108,32 @@ limit is smaller than every group. Continuation executes pending objects only.
 After manifest SHA verification, use its complete frozen-window violation proof
 throughout that run. Do not reread historical vio/Ad rows for each candidate or
 silently change the threshold evidence; later historical edits enter the next
-complete scan. Both the Creative-group preflight and each Ad's immediate delete
-guard must freshly read the current Ad lineage, exact product/root relationship,
+complete scan. Each Ad's immediate delete guard and each Creative basis check
+must freshly read the current Ad lineage, exact product/root relationship,
 materials, publish-queue credentials and Meta review/parent status. Release the
 single FIFO snapshot before Graph reads; do not cache these current relationships.
-Use the last eligible group preflight as the Creative basis. If other checks
-followed it, recheck that candidate immediately; discard changed candidates and
-freshly check any earlier fallback. A legacy-lock wait repeats qualification.
+After an Ad has been verified deleted, its durable receipt plus freshly checked
+source identity can establish the Creative basis. Save that basis and frozen
+material evidence to `cleanup_backlog` before any Ad deletion so an interruption
+cannot strand its Creative. New scans load this queue even if the original
+violation has aged out. A legacy-lock wait repeats qualification.
 
 Every platform write follows a committed shared-Store claim. Report API-accepted
 deletions separately from exact-ID/account `DELETED` readback verification.
 
-For the initial durable rollout, `bootstrap.py` waits for a complete existing
+The original v1 rollout used `bootstrap.py`, which waits for a complete existing
 preview, independently checks its hash/coverage/policy, validates at most three
 Ads in a whole Creative group with real API acceptance, exact DELETED readbacks
 and start/end receipts, then continues the frozen run and enables the timer only
 after ledger verification. Zero candidates require real zero-result messages
-and must be labeled as no actual deletion validation. A preview lasting ten
+and must be labeled as no actual deletion validation. This bootstrap is v1-only;
+do not use it for `policy_version=20261024-v2` or erase its old failure state.
+For v2, run a read-only material comparison using the old manifest's frozen
+evidence and require zero unexplained retrieval omissions. Comparison manifests
+cannot execute. Then complete a fresh-window preview, deploy the tested GitHub
+release, use that fresh manifest for the authorized immediate full run, and
+reenable the normal timer. Read back actual service/ledger and timer state.
+A preview lasting ten
 hours or more blocks activation of the eleven-hour scheduled service. See
 `../../OPERATIONS.md` for the exact release/SHA invocation and acceptance files.
 Do not describe a waiting bootstrap as an active production timer. Its saved

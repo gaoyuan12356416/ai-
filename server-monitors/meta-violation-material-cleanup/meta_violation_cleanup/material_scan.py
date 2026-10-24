@@ -99,31 +99,23 @@ def scan(runner, run_id, start, end):
             if options:
                 # A read may use the selected identity of a historical binding;
                 # its returned current Creative must have its OWN frozen route.
-                targets.append(options[-1])
+                targets.extend(options)
             else: skips['no_confirmed_material_route']+=1
         progress(stage='publication_context',target_ads=len(targets),processed_publication_ads=len(identities))
     timing['publication_context_seconds']=round(time.monotonic()-phase,3)
     phase=time.monotonic(); candidates=[]; blocked=[]; checked={}; account_diagnostics={}
+    read_failures=defaultdict(list); read_success=set(); accepted_ids=set()
     for (user,account,requested),records,failures in runner.graph.iter_target_ads(targets,runner.stop):
         runner.check_stop()
         cov=coverage.setdefault(account,{'account_id':account,'status':'complete','ads':0,'candidates':0,'read_user_id':user})
         cov['ads']+=len(requested)
         for aid,error in failures.items():
-            errors.append({'ad_id':aid,'account_id':account,'stage':'target_get','error':error})
-            checked[aid]={'reason':'meta_read_unavailable','error':error}
-            key=(account,user)
-            if key not in account_diagnostics:
-                try: account_diagnostics[key]=runner.graph.account_diagnostic(account,user)
-                except Exception as exc: account_diagnostics[key]={'error':safe_error(exc)}
-            diagnostic=account_diagnostics[key]
-            if diagnostic.get('account_status')==2:
-                for candidate in by_ad[aid]:
-                    if candidate['account_id']!=account: continue
-                    blocked.append(dict(candidate,root_id=candidate['identity']['root_id'],
-                        material_ids=candidate['identity']['material_ids'],rules=['disabled_account_creative_only'],
-                        account_diagnostic=diagnostic,ad_read_error=error))
+            read_failures[aid].append((account,user,error))
+            if aid not in read_success:checked[aid]={'reason':'meta_read_unavailable','error':error}
         accepted_records=[]
         for aid,ad in records.items():
+            if aid in accepted_ids:continue
+            read_success.add(aid)
             candidate=identities.get((aid,object_id(ad)))
             if not candidate:
                 skips['current_creative_lineage_missing']+=1
@@ -134,11 +126,27 @@ def scan(runner, run_id, start, end):
             if not decision['eligible']:
                 skips[decision['reason']]+=1; continue
             candidates.append(dict(candidate,**{k:v for k,v in decision.items() if k not in candidate},ad_snapshot=ad))
+            accepted_ids.add(aid)
             cov['candidates']+=1; accepted_records.append(ad)
         if accepted_records: runner.runtime.inventory(run_id,account,accepted_records)
         progress(stage='target_verification',target_ads=len(targets),target_ads_checked=len(checked),
             candidate_ads=len(candidates),coverage_errors=len(errors),
             graph_metrics=runner.graph.safe_metrics,sql_metrics=runner.source.safe_metrics)
+    for aid,failed_routes in read_failures.items():
+        if aid in read_success:continue
+        for account,user,error in failed_routes:
+            errors.append({'ad_id':aid,'account_id':account,'stage':'target_get','error':error})
+            key=(account,user)
+            if key not in account_diagnostics:
+                try:account_diagnostics[key]=runner.graph.account_diagnostic(account,user)
+                except Exception as exc:account_diagnostics[key]={'error':safe_error(exc)}
+            diagnostic=account_diagnostics[key]
+            if diagnostic.get('account_status')==2:
+                for candidate in by_ad[aid]:
+                    if candidate['account_id']!=account:continue
+                    blocked.append(dict(candidate,root_id=candidate['identity']['root_id'],
+                        material_ids=candidate['identity']['material_ids'],rules=['disabled_account_creative_only'],
+                        account_diagnostic=diagnostic,ad_read_error=error))
     timing['meta_verification_seconds']=round(time.monotonic()-phase,3)
     candidates.sort(key=lambda c:(int(c['account_id']),int(c['ad_id'])))
     by_creative=defaultdict(list)
@@ -172,6 +180,8 @@ def scan(runner, run_id, start, end):
         candidate_creatives=len(by_creative),accounts_total=len(coverage),accounts_finished=len(coverage),
         coverage_errors=len(errors),material_count=len(evidence['materials']),
         product_candidate_ads=dict(Counter(c['root_id'] for c in candidates)),skip_counts=dict(skips),
+        rule1_ads=sum('rule1' in c['rules'] for c in candidates),
+        rule2_ads=sum('rule2' in c['rules'] for c in candidates),
         scan_timings=timing,lookup_metrics=lookup,blocked_account_creatives=len(blocked),
         recovery_creatives=len(backlog),remaining_ads=len(candidates))
     return manifest

@@ -570,7 +570,7 @@ class GraphClient:
             raise GraphError("account_mismatch", "Meta returned a different account")
         return record
 
-    def delete(self, kind, object_id, user_id, account_id):
+    def delete(self, kind, object_id, user_id, account_id, *, expected_creative_id=None):
         """Verify identity, then send at most one DELETE; never rotate tokens."""
         if self.delete_stop():
             return {'status': 'failed', 'code': 'cancelled_before_delete', 'request_sent': False}
@@ -583,10 +583,12 @@ class GraphClient:
                 return {"status": "deleted_verified", "code": "already_deleted",
                         "confirmed_deleted": True, "request_sent": False, "object": record}
             if kind == 'ad':
+                if expected_creative_id is not None and str((record.get('creative') or {}).get('id')) != str(expected_creative_id):
+                    return {'status':'failed','code':'creative_changed_before_delete','request_sent':False}
                 # This is the final identity GET immediately before DELETE.
                 # Never ignore a newly observed rejection after runner preflight.
                 try:
-                    clear = _feedback_empty(record.get('ad_review_feedback'))
+                    clear = all(_feedback_empty(record.get(k)) for k in ('ad_review_feedback','issues_info'))
                 except (TypeError, ValueError):
                     clear = False
                 if (not clear or record.get('effective_status') not in

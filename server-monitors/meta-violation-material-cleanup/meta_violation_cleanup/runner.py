@@ -317,7 +317,10 @@ class Runner:
             self.runtime.write_barrier(run_id)
             self.check_stop()
             request_started=True
-            result=self.execution_graph.delete(kind,identifier,uid,account)
+            if self.config.get('execution_order')=='ads_first' and kind=='ad' and isinstance(self.execution_graph,GraphClient):
+                result=self.execution_graph.delete(kind,identifier,uid,account,expected_creative_id=candidate['creative_id'])
+            else:
+                result=self.execution_graph.delete(kind,identifier,uid,account)
             result=dict(result,**context,account_id=account)
             status=result['status']
             result['delete_status']=status
@@ -375,6 +378,9 @@ class Runner:
         return ''
 
     def execute(self, run_id, manifest, max_ads=None, start_phase='start'):
+        if self.config.get('execution_order') == 'ads_first':
+            from .phased_execution import execute
+            return execute(self, run_id, manifest, max_ads, start_phase)
         plain={k:v for k,v in manifest.items() if k!='sha256'}
         if digest(plain)!=manifest['sha256']:raise ValueError('manifest_hash_mismatch')
         if manifest.get('run_id')!=run_id:raise ValueError('manifest_run_mismatch')
@@ -538,11 +544,14 @@ class Runner:
         return final
 
     def start_text(self, run_id, start, end):
+        order=('先处理全部Ad，再处理Creative；共享引用失败在最后补删当前非违规Ad并重试Creative，'
+               '违规共享Ad留待下轮复核。' if self.config.get('execution_order')=='ads_first' else
+               '先删Creative再删Ad；共享Creative亦删除。')
         return ('Meta违规素材清理｜开始\n运行：%s\n启动：%s\n产品：DramaWave、HotDrama（含W2A）\n窗口：%s 至 %s（北京时间）\n'
                 '规则1：指定原因≥1次，清理当前未违规的已关闭广告（含上层暂停）。\n'
                 '规则2：同素材≥4个不同违规广告，清理其全部当前未违规广告。\n'
                 '原因：成人裸露及性行为、成人性招揽及露骨性语言、成人性剥削、人口剥削、垃圾内容、暴力与血腥内容、毒品与药品。\n'
-                '先删Creative再删Ad；共享Creative亦删除。')%(run_id,now(),start,end)
+                '%s')%(run_id,now(),start,end,order)
 
     def end_text(self, run_id):
         run=self.runtime.get(run_id);d=run['data']
@@ -570,6 +579,17 @@ class Runner:
                 counts.get(kind+'_api_accepted',0),counts.get(kind+'_deleted_verified',0),counts.get(kind+'_failed',0),
                 counts.get(kind+'_unknown',0),counts.get(kind+'_already_deleted',0)+counts.get(kind+'_deleted',0)))
         impacts=manifest.get('shared_creative_impacts',{})
+        if manifest.get('policy_version')=='20261024-v2':
+            lines.append('待下轮复核Creative：%s；封禁账户Creative候选：%s'%(
+                d.get('deferred_creatives',0),len(manifest.get('blocked_account_creatives',[]))))
+            try:pending=self.runtime.load_artifact(run_id,'deferred-cleanup.json')
+            except ValueError:pending=[]
+            for entry in pending:
+                for blocked in entry.get('blocked_ads',[]):
+                    result=blocked.get('result',{})
+                    if blocked.get('ad_id'):
+                        lines.append('待复核 Ad %s｜Creative %s｜状态 %s'%(blocked['ad_id'],
+                            entry['basis']['creative_id'],result.get('reason',result.get('status','unknown'))))
         lines.append('共享Creative：%s；引用覆盖：%s'%(len(impacts),manifest.get('shared_reference_coverage','未完成')))
         for cid,refs in impacts.items():
             lines.append('Creative '+cid+' 的其他引用（这些Ad不因共享关系删除）：')
