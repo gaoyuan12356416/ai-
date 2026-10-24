@@ -83,7 +83,7 @@ source/credential batches at or below 1,000 IDs. The production scanner is
 publication Ad/Creative IDs -> exact-ID Meta GETs (up to 50 per request).
 Scalar original/source IDs use their existing indexes. CSV, JSON and whitespace
 encodings have a separate complete pass, split into bounded product/primary-key
-ranges; its 50,000-row covering-index aggregate defines a range, not a cutoff.
+ranges; its 200,000-row covering-index aggregate defines a range, not a cutoff.
 Do not limit publication history to the violation window. Read all current rows
 for each candidate Ad before accepting its current Creative, scope and route.
 Release SQL before Graph waits. The legacy scanner remains available for

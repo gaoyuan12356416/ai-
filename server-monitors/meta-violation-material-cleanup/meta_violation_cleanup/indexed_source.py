@@ -8,6 +8,7 @@ from collections import Counter
 from .policy import parse_ids
 from .sql_source import _inside, _quote, _chunks, _ids, SqlSourceError
 
+COMPOSITE_RANGE_SIZE=200000
 
 def complex_value(column):
     return "(LOCATE(',',{c})>0 OR LEFT(TRIM({c}),1)='[' OR {c} REGEXP '[[:space:]]')".format(c=column)
@@ -103,21 +104,23 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
             base='product='+_quote(pid)+' AND id>'+str(low)
             with source._session() as session:
                 bounds=session.query("SELECT JSON_OBJECT('high',MAX(id),'count',COUNT(*)) FROM "
-                    '(SELECT id FROM '+table+' WHERE '+base+' ORDER BY id LIMIT 50000) AS bounded_ids')
-            if len(bounds)!=1:raise SqlSourceError('ad_lineage_incomplete')
-            bound=bounds[0];high=bound.get('high')
-            if not high:break
-            high=int(high)
-            if high<=low:raise SqlSourceError('ad_lineage_incomplete')
-            for rows in pages('ads_facebook_auto_created_data FORCE INDEX(idx_product)',expressions,
-                              base+' AND id<='+str(high)+' AND '+composite):
-                accept(rows,True)
+                    '(SELECT id FROM '+table+' WHERE '+base+' ORDER BY id LIMIT '+str(COMPOSITE_RANGE_SIZE)+') AS bounded_ids')
+                if len(bounds)!=1:raise SqlSourceError('ad_lineage_incomplete')
+                bound=bounds[0];high=bound.get('high')
+                if not high:break
+                high=int(high)
+                if high<=low:raise SqlSourceError('ad_lineage_incomplete')
+                # Range boundary and its pages share one short read-only
+                # snapshot; release the FIFO between ranges for other jobs.
+                for rows in pages('ads_facebook_auto_created_data FORCE INDEX(idx_product)',expressions,
+                                  base+' AND id<='+str(high)+' AND '+composite):
+                    accept(rows,True)
             low=high
             metrics['composite_ranges']+=1
             metrics['publication_rows_examined_for_composites']+=int(bound['count'])
             progress(stage='material_lookup_composite',product_id=pid,products_finished=number,
                      publication_rows=len(found),lookup_metrics=dict(metrics))
-            if int(bound['count'])<50000:break
+            if int(bound['count'])<COMPOSITE_RANGE_SIZE:break
         progress(stage='material_lookup_composite',products_finished=number+1,
                  products_total=len(products),publication_rows=len(found),lookup_metrics=dict(metrics))
     metrics['publication_rows']=len(found)

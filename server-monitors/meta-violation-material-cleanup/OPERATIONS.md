@@ -36,7 +36,7 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 生产使用 `scanner=material_indexed`：违规素材 → `ads_source` 别名 → 发布表的
 `ad_id` / `creative_id` → 指定 ID 的 Meta GET，每次至多 50 个 ID。
 标量原始素材和 source ID 使用已有索引；CSV、JSON、空白编码单独完整补查，按产品
-和主键分段，避免稀疏条件导致单条查询超时。每段最多 50,000 个索引 ID 的聚合只用于
+和主键分段，避免稀疏条件导致单条查询超时。每段最多 200,000 个索引 ID 的聚合只用于
 确定边界，段内结果仍每页最多 2,000 行，不能把边界当成全量截断。
 发布记录不限 30 天；完整读取每个目标 Ad 的当前关联和凭据，再核对 Meta 返回的
 当前 Creative。SQL 会话在 Meta 读取前释放。常规扫描不再遍历全部账户库存。
