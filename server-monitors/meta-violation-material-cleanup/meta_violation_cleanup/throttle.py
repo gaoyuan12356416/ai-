@@ -44,7 +44,9 @@ class Governor:
                     self.next_request=now+1/self.rps;self.max_seen=max(self.max_seen,self.active)
                     self.metrics['request_wait_milliseconds']+=round((now-started)*1000)
                     break
-            self.stopped_wait(stop)
+                deadline=max(self.global_until,self.account_until.get(account,0),self.next_request)
+                delay=deadline-now if deadline>now else .01
+            self.stopped_wait(stop,delay)
         try:yield
         finally:
             with self.lock:self.active-=1;self.accounts[account]-=1

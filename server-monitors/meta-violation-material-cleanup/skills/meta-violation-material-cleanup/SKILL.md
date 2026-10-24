@@ -78,9 +78,9 @@ run concurrently within a phase. Inspect `graph_metrics` for requests, retries,
 rate-limit responses and usage header maxima; zero header observations means
 the platform supplied no usable measurement, not zero usage. Tune read workers
 only against a complete read-only throughput run and current rate-limit evidence.
-Execution uses one joined SQL batch and one source lookup for up to 32 contexts.
+Execution uses one joined SQL batch and one source lookup for up to 64 contexts.
 Never reuse contexts across waves; a context older than 30 seconds cannot write.
-Set execution_workers=16, execution_per_account=2, execution_batch_size=32,
+Set execution_workers=16, execution_per_account=2, execution_batch_size=64,
 execution_context_ttl_seconds=30, execution_max_rps=24 in production. The default
 execution_workers=1 preserves the serial fallback. The shared governor starts
 at 4 concurrent HTTP requests, ramps by 2 after 20 seconds of low observed usage,
@@ -223,3 +223,8 @@ deploy an immutable release, verify its hashes and run output. Restart only this
 job when needed. Roll back code/config and preserve current ledgers and run
 artifacts; never restore an old SQLite backup over deletion progress or restart
 unrelated publishers.
+
+Execution waves start at at most 4 times the current request concurrency and
+expand to the configured batch maximum (64) as observed headroom permits.
+Request scheduling waits for the exact next rate-budget deadline, rather than
+using a coarse polling interval that unintentionally caps throughput.

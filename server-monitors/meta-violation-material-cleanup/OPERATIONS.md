@@ -264,7 +264,7 @@ live/timer，保留所有证据，并通过独立 `PREVIEW_RUN_ID-bootstrap` 通
 
 The operator authorized concurrent deletion after the first live run measured
 roughly 4 seconds for per-Ad SQL/preflight and 2 seconds for mutation/readback.
-Production: execution_workers=16, execution_per_account=2, execution_batch_size=32,
+Production: execution_workers=16, execution_per_account=2, execution_batch_size=64,
 execution_context_ttl_seconds=30, execution_max_rps=24. Setting workers to 1 keeps
 the serial fallback. Workers do network I/O only. SQL and both durable ledgers
 stay on the owner thread. Each wave freshly reads joined publication, product,
@@ -285,3 +285,8 @@ immutable GitHub release, and continue the same run within its original one-hour
 conversion deadline. Never renew a manifest timestamp/hash. Preserve unknown
 fences, receipts and backlog. Observe accepted+verified throughput, usage and
 rate responses before quoting an ETA. The 11-hour service limit stays in place.
+
+Execution waves start at at most 4 times the current request concurrency and
+expand to the configured batch maximum (64) as observed headroom permits.
+Request scheduling waits for the exact next rate-budget deadline, rather than
+using a coarse polling interval that unintentionally caps throughput.

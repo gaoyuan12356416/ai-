@@ -132,6 +132,21 @@ class ContextBatchTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    def test_start_rate_waits_for_exact_budget_instead_of_polling_at_ten_per_second(self):
+        clock=[0.];g=Governor(rps=24,clock=lambda:clock[0])
+        def advance(stop,delay):clock[0]+=delay
+        g.stopped_wait=advance
+        for _ in range(10):
+            with g.slot('100',lambda:False):pass
+        self.assertAlmostEqual(clock[0],9/24)
+
+    def test_wave_width_adapts_between_waves(self):
+        size=[2];items=[{'account_id':str(i)} for i in range(10)]
+        iterator=waves(items,lambda:size[0],2)
+        self.assertEqual(len(next(iterator)),2);size[0]=6
+        self.assertEqual(len(next(iterator)),6)
+        self.assertEqual(len(next(iterator)),2)
+
     def test_global_and_per_account_limits_apply_to_real_concurrent_slots(self):
         from concurrent.futures import ThreadPoolExecutor
         from collections import Counter

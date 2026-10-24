@@ -22,8 +22,10 @@ def waves(items,size,per_account):
     order=deque(accounts)
     while order:
         batch=[];selected=defaultdict(int);rounds=len(order)*per_account
+        width=size() if callable(size) else size
+        if type(width) is not int or width<1:raise ValueError('invalid_execution_wave_size')
         for _ in range(rounds):
-            if not order or len(batch)>=size:break
+            if not order or len(batch)>=width:break
             account=order.popleft()
             if selected[account]<per_account:
                 batch.append(accounts[account].popleft());selected[account]+=1
@@ -141,7 +143,8 @@ class ConcurrentExecutor:
 
     def phase(self,kind,items):
         from .phased_execution import object_state,has_ad_receipt
-        for batch in waves(items,self.batch_size,self.per_account):
+        # Keep startup/cooldown waves small; widen only with observed headroom.
+        for batch in waves(items,lambda:min(self.batch_size,self.governor.limit*4),self.per_account):
             self.runner.check_stop();self.governor.wait_ready(self.stopped)
             with legacy_delete_lock(self.runner.config['legacy_lock'],self.runner.stop) as lease:
                 checked_at=time.monotonic()
