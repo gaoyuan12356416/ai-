@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timedelta
 import pathlib
 import sys
 import unittest
@@ -16,6 +17,23 @@ class MaterialScanTests(unittest.TestCase):
     setUp=fixtures.RunnerTests.setUp
     tearDown=fixtures.RunnerTests.tearDown
     fixture=fixtures.RunnerTests.fixture
+    def test_three_day_scan_with_no_new_violations_keeps_old_creative_backlog(self):
+        runner,source,graph,runtime=self.fixture()
+        old=runner.scan('old30',START,END)
+        entry={'basis':copy.deepcopy(old['candidates'][0]),'origin_run_id':'old30',
+               'origin_manifest_sha256':old['sha256'],'evidence':copy.deepcopy(old['evidence'])}
+        runtime.cleanup_backlog=lambda:[copy.deepcopy(entry)]
+        source.vios.clear()
+        graph.safe_metrics={};source.safe_metrics={}
+        graph.iter_target_ads=lambda *args:iter([])
+        start=(datetime.fromisoformat(END)-timedelta(days=3)).isoformat()
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=([],{})):
+            fresh=scan(runner,'new3',start,END)
+        self.assertEqual(fresh['candidates'],[])
+        self.assertEqual(fresh['evidence']['materials'],{})
+        self.assertEqual(fresh['recovery_creatives'],[entry])
+        self.assertEqual(fresh['window_start'],start)
+
     def test_reference_comparison_keeps_old_threshold_separate_from_fresh_candidates(self):
         runner,source,graph,runtime=self.fixture([ad(status='ACTIVE')])
         old=runner.scan('baseline',START,END)
