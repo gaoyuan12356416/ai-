@@ -260,7 +260,8 @@ def scan_or_run(args, config, runtime, stop):
     end_phase = "end" if attempt == 1 else "end-%d" % attempt
     try:
         runtime.update(run_id, status="running", execution_mode=args.command,
-                       execution_attempt=attempt, stage="starting",
+                       execution_attempt=attempt, stage="starting", error_type=None,
+                       execution_status="running",
                        execution_started_at=datetime.now(CST).isoformat(timespec="seconds"))
         runner.check_stop()
         if live:

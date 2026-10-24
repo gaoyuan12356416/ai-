@@ -152,6 +152,8 @@ class CliTests(unittest.TestCase):
                 return manifest
             def execute(self, run_id, manifest, max_ads=None, start_phase="start"):
                 test.events.append("execute")
+                test.assertIsNone(self.runtime.get(run_id)['data'].get('error_type'))
+                test.assertEqual(self.runtime.get(run_id)['data']['execution_status'], 'running')
                 test.executed_manifest = manifest
                 test.assertEqual(self.runtime.notice(run_id, start_phase)["status"], "sent")
                 self.runtime.update(run_id, shared_job_id="policy-cleanup-" + run_id,
@@ -280,6 +282,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.invoke('preview','--run-id','next3')[0],0)
         fresh=self.runtime.artifacts[('next3','manifest.json')]
         self.assertEqual(datetime.fromisoformat(fresh['window_end'])-datetime.fromisoformat(fresh['window_start']),timedelta(days=3))
+
+    def test_continuation_clears_stale_interrupted_error_before_execution(self):
+        self.invoke('preview','--run-id','r1')
+        self.runtime.update('r1',status='interrupted',execution_status='interrupted',error_type='InterruptedError')
+        self.assertEqual(self.invoke('run','--run-id','r1')[0],0)
 
     def test_lookback_setting_is_bounded_integer(self):
         with tempfile.TemporaryDirectory() as directory:
