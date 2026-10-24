@@ -11,6 +11,7 @@ import test_sql_source as sql_fixtures
 from test_graph import Response,Session,ad as graph_ad
 from meta_violation_cleanup.current_contexts import current_contexts
 from meta_violation_cleanup.concurrent_execution import waves
+from meta_violation_cleanup.concurrent_execution import ConcurrentExecutor
 from meta_violation_cleanup.throttle import Governor,GovernedSession,RequestNotSent
 from meta_violation_cleanup.graph import GraphClient
 from meta_violation_cleanup.runtime import digest
@@ -132,6 +133,26 @@ class ContextBatchTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    def test_stop_still_drains_exact_readback_of_an_already_sent_delete(self):
+        from types import SimpleNamespace
+        stop=threading.Event()
+        class StoppingSession(Session):
+            def request(self,method,*args,**kwargs):
+                result=super().request(method,*args,**kwargs)
+                if method=='DELETE':stop.set()
+                return result
+        session=StoppingSession([Response(graph_ad()),Response({'success':True}),Response(graph_ad(status='DELETED'))])
+        graph=GraphClient({'1':'synthetic'},session=session);graph.stop=stop.is_set;graph.delete_stop=stop.is_set
+        graph.http=GovernedSession(session,Governor(rps=10000),stop.is_set);graph.http.account='100'
+        executor=object.__new__(ConcurrentExecutor);executor.ttl=30;executor.stopped=stop.is_set
+        executor.graph=lambda *args:graph;executor.manifest={}
+        executor.runner=SimpleNamespace(preflight=lambda *args,**kwargs:{'eligible':True})
+        candidate={'ad_id':'10','creative_id':'20','account_id':'100','user_id':'1'}
+        result=executor.write('ad',candidate,None,time.monotonic(),{})
+        self.assertTrue(result['confirmed_deleted']);self.assertTrue(result['api_accepted'])
+        self.assertEqual([c[0] for c in session.calls],['GET','DELETE','GET'])
+        self.assertTrue(graph.stop())
+
     def test_start_rate_waits_for_exact_budget_instead_of_polling_at_ten_per_second(self):
         clock=[0.];g=Governor(rps=24,clock=lambda:clock[0])
         def advance(stop,delay):clock[0]+=delay

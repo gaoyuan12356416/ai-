@@ -112,7 +112,15 @@ class ConcurrentExecutor:
             result=graph.delete(kind,identifier,candidate['user_id'],candidate['account_id'],**kwargs)
             result=dict(result,**context,delete_status=result['status'],api_accepted=result['status']=='api_accepted')
             if result['status'] in ('api_accepted','unknown'):
-                verification=graph.reconcile(kind,identifier,candidate['user_id'],candidate['account_id'])
+                # Stop prevents new DELETEs, but drain the readback of writes
+                # already sent. Keep this GET bounded even during a long cooldown.
+                if isinstance(graph,GraphClient):
+                    previous_stop=graph.stop;previous_http_stop=graph.http.stop
+                    verification_deadline=time.monotonic()+20
+                    graph.stop=graph.http.stop=lambda:time.monotonic()>verification_deadline
+                    try:verification=graph.reconcile(kind,identifier,candidate['user_id'],candidate['account_id'])
+                    finally:graph.stop=previous_stop;graph.http.stop=previous_http_stop
+                else:verification=graph.reconcile(kind,identifier,candidate['user_id'],candidate['account_id'])
                 result['verification']=verification
                 if verification.get('status')=='deleted_verified':result.update(status='deleted_verified',confirmed_deleted=True)
                 else:result['status']='unknown'
