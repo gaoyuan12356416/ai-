@@ -45,6 +45,13 @@ class PhasedExecutionTests(unittest.TestCase):
             ('delete','creative','20'),('delete','creative','21')])
         self.assertEqual(runtime.queue,{})
 
+    def test_skipped_first_member_does_not_strand_a_later_deleted_ads_creative(self):
+        runner,source,graph,runtime,m=self.prepare([ad(),ad('11','20')])
+        graph.ads['10']['effective_status']='DISAPPROVED'
+        runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[('delete','ad','11'),('delete','creative','20')])
+        self.assertEqual(runtime.queue,{})
+
     def test_definite_dependency_rejection_collects_shared_ads_then_retries(self):
         runner,source,graph,runtime,m=self.prepare()
         graph.ads['12']=ad('12','20',status='ACTIVE')

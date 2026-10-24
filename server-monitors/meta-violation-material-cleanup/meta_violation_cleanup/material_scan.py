@@ -135,6 +135,7 @@ def scan(runner, run_id, start, end):
     for aid,failed_routes in read_failures.items():
         if aid in read_success:continue
         for account,user,error in failed_routes:
+            coverage[account]['status']='partial'
             errors.append({'ad_id':aid,'account_id':account,'stage':'target_get','error':error})
             key=(account,user)
             if key not in account_diagnostics:

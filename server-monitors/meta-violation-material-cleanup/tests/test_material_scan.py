@@ -16,6 +16,18 @@ class MaterialScanTests(unittest.TestCase):
     setUp=fixtures.RunnerTests.setUp
     tearDown=fixtures.RunnerTests.tearDown
     fixture=fixtures.RunnerTests.fixture
+    def test_comparison_stops_before_meta_when_still_eligible_old_ad_is_missing(self):
+        runner,source,graph,runtime=self.fixture()
+        old=runner.scan('baseline',START,END)
+        runtime.load_artifact=lambda run,name:copy.deepcopy(old)
+        runner.config['comparison_baseline_run_id']='baseline'
+        graph.iter_target_ads=lambda *args:self.fail('missing retrieval must block verification')
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=([],{})):
+            with self.assertRaisesRegex(ValueError,'material_lookup_lost_baseline_candidates'):
+                scan(runner,'comparison',START,END)
+        report=runtime.artifacts[('comparison','comparison-retrieval.json')]
+        self.assertEqual(report['unexplained_retrieval_missing_ids'],['10'])
+
     def test_material_path_never_enumerates_accounts_and_current_creative_wins(self):
         runner,source,graph,runtime=self.fixture([ad(),ad('11','21')])
         for aid,rows in source.rows.items():

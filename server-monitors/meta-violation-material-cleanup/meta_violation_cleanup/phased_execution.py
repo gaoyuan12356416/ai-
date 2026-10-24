@@ -228,7 +228,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                         if state!='clear':
                             return {'status':'deferred','request_sent':False,'reason':state,'observed_ad':fresh}
                         append_shared_ad(runner.store,job_id,shared_run,cid,fresh,uid,ACTOR)
-                        dependency=dict(basis,ad_id=str(ad['id']))
+                        dependency=dict(basis,ad_id=str(ad['id']),shared_dependency=True)
                         if lease is not None:lease.check()
                         return runner.attempt(job_id,shared_run,'ad',str(ad['id']),dependency,run_id,lease)
                     result=locked(delete_reference);record('ad',str(ad['id']),result,'shared_ads')
@@ -260,9 +260,10 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
         finished=runner.store.finish_run(shared_run,final,dict(counts));final=finished['status']
         current=runner.store.get_job(job_id)
         remaining=sum(o['kind']=='ad' and o['status']=='pending' for o in current['objects'])
+        unresolved=sum(o['kind']=='ad' and o['status'] not in ('deleted','already_deleted') for o in current['objects'])
         runner.runtime.artifact(run_id,'execution-results-'+shared_run+'.json',results)
         runner.runtime.artifact(run_id,'execution-results.json',results)
         runner.runtime.artifact(run_id,'deferred-cleanup.json',runner.runtime.cleanup_backlog())
-        runner.runtime.update(run_id,execution_status=final,result_counts=dict(counts),remaining_ads=remaining,
+        runner.runtime.update(run_id,execution_status=final,result_counts=dict(counts),remaining_ads=remaining,unresolved_ads=unresolved,
             deferred_creatives=len(runner.runtime.cleanup_backlog()),stage='execution_finished')
     return final

@@ -307,7 +307,8 @@ class Runner:
             return {'status':claim['status'],'reason':claim.get('reason','existing_receipt_or_fence'),
                 'request_sent':False,'prior_result':claim.get('result',{})}
         uid=numeric_id(candidate['user_id']);account=numeric_id(candidate['account_id'])
-        context={'credential_kind':'user','credential_user_id':uid,'credential_relation':'frozen_publish_queue'}
+        context={'credential_kind':'user','credential_user_id':uid,
+            'credential_relation':('shared_creative_account' if candidate.get('shared_dependency') else 'frozen_publish_queue')}
         self.store.record_object_credential(job_id,key,shared_run,context)
         result=None;request_started=False
         try:
