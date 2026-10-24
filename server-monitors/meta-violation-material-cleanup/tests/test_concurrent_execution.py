@@ -205,6 +205,12 @@ class ThrottleTests(unittest.TestCase):
         g=Governor(clock=lambda:100);g.last_change=0
         g.observe(Response({}),'100');self.assertEqual(g.limit,4)
 
+    def test_expired_or_missing_usage_never_recovers_concurrency(self):
+        clock=[0.];g=Governor(clock=lambda:clock[0])
+        g.observe(Response({},headers={'x-app-usage':'{"call_count":20}'}),'100')
+        clock[0]=180;g.limit=2
+        g.observe(Response({}),'100');self.assertEqual(g.limit,2)
+
     def test_low_usage_gradually_restores_limit(self):
         g=Governor(clock=lambda:100);g.last_change=0
         g.observe(Response({},headers={'x-app-usage':'{"call_count":20}'}),'100')
