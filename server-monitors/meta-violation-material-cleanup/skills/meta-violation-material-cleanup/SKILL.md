@@ -42,7 +42,8 @@ GitHub `gaoyuan12356416/ai-`, directory
   Collect definite shared-reference Creative failures for a final remediation
   phase. Enumerate references only in those accounts, freshly verify each Ad's
   exact Creative/account and current review state, delete currently clear shared
-  Ads (including outside the original material rule), then retry the Creative.
+  Ads (including outside the original material rule), then retry Creatives only
+  after the complete shared-Ad phase has finished.
   Currently violating/review-pending shared Ads stay in a durable queue and must
   be freshly checked next run. Never replay an unknown DELETE.
 - For a confirmed disabled account, attempt deletion of an exact, attributable

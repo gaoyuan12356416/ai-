@@ -88,6 +88,24 @@ class PhasedExecutionTests(unittest.TestCase):
         self.assertEqual(self.deletes(graph).count(('delete','ad','12')),1)
         self.assertEqual(runtime.queue,{})
 
+    def test_all_shared_ads_precede_every_creative_retry(self):
+        runner,source,graph,runtime,m=self.prepare([ad(),ad('11','21')])
+        graph.ads['12']=ad('12','20');graph.ads['13']=ad('13','21')
+        tries={}
+        def on_delete(kind,identifier):
+            if kind=='creative':
+                tries[identifier]=tries.get(identifier,0)+1
+                graph.results[(kind,identifier)]=({'status':'failed','request_sent':True,
+                    'response':{'error_subcode':3858800}} if tries[identifier]==1 else
+                    {'status':'api_accepted','request_sent':True})
+        graph.on_delete=on_delete
+        runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','11'),
+            ('delete','creative','20'),('delete','creative','21'),
+            ('delete','ad','12'),('delete','ad','13'),
+            ('delete','creative','20'),('delete','creative','21')])
+        self.assertEqual(runtime.queue,{})
+
     def test_unknown_creative_does_not_trigger_reference_deletes_or_retry(self):
         runner,source,graph,runtime,m=self.prepare()
         graph.results[('creative','20')]={'status':'unknown','request_sent':True}

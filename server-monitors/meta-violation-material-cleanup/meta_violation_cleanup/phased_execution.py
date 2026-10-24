@@ -208,6 +208,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                 if dependency_failure(result):failures[cid]=entry
                 else:deferred[cid]=result
         runner.runtime.update(run_id,stage='shared_reference_remediation',dependency_failures=len(failures))
+        retry_entries={}
         for cid,entry in failures.items():
             runner.check_stop();basis=entry['basis'];account=basis['account_id'];uid=basis['user_id']
             key=(account,uid);blocked=[]
@@ -234,23 +235,32 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                     result=locked(delete_reference);record('ad',str(ad['id']),result,'shared_ads')
                     if result['status'] not in SUCCESS:blocked.append({'ad_id':str(ad['id']),'result':result})
                 if not blocked:
-                    # The first rejection was definite. A fresh Creative GET in
-                    # attempt() precedes this single post-dependency retry.
-                    def retry_creative(lease):
-                        eligible,reason=basis_valid(runner,basis,entry['evidence'],entry.get('disabled_account',False))
-                        if not eligible:return {'status':'deferred','request_sent':False,'reason':reason}
-                        if lease is not None:lease.check()
-                        return runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease)
-                    result=locked(retry_creative)
-                    record('creative',cid,result,'creative_retry')
-                    if result['status'] in SUCCESS:
-                        runner.runtime.complete_creative(cid);continue
-                    entry['last_result']=result
+                    retry_entries[cid]=entry
             except Exception as exc:
                 if ledger_error(exc) or isinstance(exc,InterruptedError):raise
                 blocked.append({'reason':'reference_check_failed','error':safe_error(exc)})
             entry.update(blocked_ads=blocked,last_checked_at=now())
             runner.runtime.queue_creative(entry);deferred[cid]=entry.get('last_result',{})
+        # Finish ALL newly discovered shared Ads before any Creative retry.
+        runner.runtime.update(run_id,stage='retrying_creatives')
+        for cid,entry in retry_entries.items():
+            runner.check_stop();basis=entry['basis']
+            try:
+                def retry_creative(lease):
+                    eligible,reason=basis_valid(runner,basis,entry['evidence'],entry.get('disabled_account',False))
+                    if not eligible:return {'status':'deferred','request_sent':False,'reason':reason}
+                    if lease is not None:lease.check()
+                    return runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease)
+                result=locked(retry_creative)
+            except Exception as exc:
+                if ledger_error(exc) or isinstance(exc,InterruptedError):raise
+                result={'status':'deferred','request_sent':False,'reason':'creative_retry_check_failed','error':safe_error(exc)}
+            record('creative',cid,result,'creative_retry')
+            if result['status'] in SUCCESS:
+                runner.runtime.complete_creative(cid);deferred.pop(cid,None)
+            else:
+                entry.update(last_result=result,last_checked_at=now())
+                runner.runtime.queue_creative(entry);deferred[cid]=result
         final='partial' if limited or deferred or manifest['coverage']['errors'] or counts['skipped_ads'] else 'completed'
     except BaseException:
         final='interrupted';raise
