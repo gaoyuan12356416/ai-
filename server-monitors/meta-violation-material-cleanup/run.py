@@ -48,6 +48,12 @@ def load_config(path):
             raise CliError("missing_config_path")
     if not isinstance(config.get("live_enabled", False), bool):
         raise CliError("invalid_live_setting")
+    for key,default,minimum,maximum in (
+            ('execution_workers',1,1,16),('execution_per_account',2,1,2),
+            ('execution_batch_size',32,1,64),('execution_context_ttl_seconds',30,5,30),
+            ('execution_max_rps',24,1,30)):
+        value=config.get(key,default)
+        if type(value) is not int or not minimum<=value<=maximum:raise CliError('invalid_'+key)
     return config
 
 
@@ -102,7 +108,7 @@ def summary(runtime, run_id):
             result[key] = _safe_counts(data[key])
     if "graph_metrics" in data:
         result["graph_metrics"] = _safe_graph_metrics(data["graph_metrics"])
-    for key in ('scan_timings','lookup_metrics'):
+    for key in ('scan_timings','lookup_metrics','execution_metrics'):
         if key in data:result[key]=data[key]
     attempt = data.get("execution_attempt", 1)
     attempt = attempt if isinstance(attempt, int) and attempt > 0 else 1

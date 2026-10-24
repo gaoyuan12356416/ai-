@@ -266,7 +266,7 @@ class Runner:
             mapping_gap_counts=dict(mapping_gaps),product_scanned_ads=dict(product_counts))
         return manifest
 
-    def preflight(self, candidate, manifest):
+    def preflight(self, candidate, manifest, *, context=None, graph=None, ad=None):
         # execute() verifies the whole manifest SHA before any preflight. The
         # complete fixed-window proof is immutable for this run; refreshing
         # historical rows here would silently change its authorization basis.
@@ -275,13 +275,14 @@ class Runner:
             for mid in candidate['material_ids'] if mid in manifest['evidence']['materials']}}
         # Refresh current identity and credentials in one short FIFO snapshot,
         # then release it before Graph I/O. No historical proof/directory scan.
-        with self.sql_snapshot():
-            context=self.source.current_ad_context(candidate['ad_id'],candidate['creative_id'])
-            rows=context['rows'];sources=context['sources'];scope=context['scope']
-            users={numeric_id(uid) for uid in context['credential_users']}
+        if context is None:
+            with self.sql_snapshot():
+                context=self.source.current_ad_context(candidate['ad_id'],candidate['creative_id'])
+        rows=context['rows'];sources=context['sources'];scope=context['scope']
+        users={numeric_id(uid) for uid in context['credential_users']}
         if users!={candidate['user_id']}:
             return {'eligible':False,'reason':'credential_lineage_changed'}
-        ad=self.execution_graph.get_ad(candidate['ad_id'],candidate['user_id'])
+        if ad is None:ad=(graph or self.execution_graph).get_ad(candidate['ad_id'],candidate['user_id'])
         if str(ad.get('account_id','')).removeprefix('act_') != candidate['account_id'].removeprefix('act_') or object_id(ad)!=candidate['creative_id']:
             return {'eligible':False,'reason':'account_or_creative_changed'}
         identity=material_identity(rows,sources,scope,creative_id=candidate['creative_id'])
@@ -318,6 +319,19 @@ class Runner:
             self.runtime.write_barrier(run_id)
             self.check_stop()
             request_started=True
+            http=getattr(self.execution_graph,'http',None)
+            if hasattr(http,'write_check'):
+                from .throttle import RequestNotSent
+                http.account=account
+                checked_at=getattr(self,'serial_context_checked_at',time.monotonic()) if kind=='creative' else time.monotonic()
+                deadline=checked_at+30
+                def write_check():
+                    if self.stop():raise RequestNotSent('cancelled_before_request')
+                    if time.monotonic()>deadline:raise RequestNotSent('execution_context_expired')
+                    try:
+                        if lease is not None:lease.check()
+                    except InterruptedError:raise RequestNotSent('legacy_priority_before_request') from None
+                http.write_check=write_check
             if self.config.get('execution_order')=='ads_first' and kind=='ad' and isinstance(self.execution_graph,GraphClient):
                 result=self.execution_graph.delete(kind,identifier,uid,account,expected_creative_id=candidate['creative_id'])
             else:

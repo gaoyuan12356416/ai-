@@ -258,3 +258,30 @@ live/timer，保留所有证据，并通过独立 `PREVIEW_RUN_ID-bootstrap` 通
 只停 timer 不会停止首次验收。若 bootstrap 正在等待预演，停止后要保留预演及通知证据。
 回退代码前先停止这两个本任务 unit，保留共享账本和本地 SQLite，不能让旧验收任务
 在回退后继续自动启用 timer。
+
+
+## Bounded concurrent execution (2026-10-24)
+
+The operator authorized concurrent deletion after the first live run measured
+roughly 4 seconds for per-Ad SQL/preflight and 2 seconds for mutation/readback.
+Production: execution_workers=16, execution_per_account=2, execution_batch_size=32,
+execution_context_ttl_seconds=30, execution_max_rps=24. Setting workers to 1 keeps
+the serial fallback. Workers do network I/O only. SQL and both durable ledgers
+stay on the owner thread. Each wave freshly reads joined publication, product,
+credential and source relations through the existing FIFO read-only endpoint.
+The exact final Meta GET checks the full frozen policy and also acts as the
+identity guard, removing a duplicate preflight GET.
+
+The governor starts at 4 and ramps by 2 after 20 seconds of observed low usage.
+GET and DELETE share its global and per-account concurrency/rate budget.
+High usage and explicit rate errors reduce concurrency and apply cooldown.
+A phase drains all workers before the next phase starts. Unknown DELETEs never
+replay. Only provably unsent requests due to stale context or legacy priority
+may refresh SQL and retry at most twice. Shared remediation retains its global
+Ad-before-Creative-retry barrier and uses the same mutation governor.
+
+Rollout: gracefully stop the service, inspect claims and receipts, deploy an
+immutable GitHub release, and continue the same run within its original one-hour
+conversion deadline. Never renew a manifest timestamp/hash. Preserve unknown
+fences, receipts and backlog. Observe accepted+verified throughput, usage and
+rate responses before quoting an ETA. The 11-hour service limit stays in place.

@@ -72,10 +72,30 @@ Gate with `SQL_GATE_BYPASS=0` and confirmed `@@read_only=1`. Never bypass the Ga
 with a direct driver, `mysql.real`, or a write endpoint.
 
 `graph_read_workers` controls only GET concurrency: integer 1–16, default 4.
-DELETE and SQL remain serial. Inspect `graph_metrics` for requests, retries,
+The operator subsequently authorized bounded concurrent deletion on 2026-10-24.
+SQL/FIFO and ledger writes stay serial on the owner thread; execution HTTP may
+run concurrently within a phase. Inspect `graph_metrics` for requests, retries,
 rate-limit responses and usage header maxima; zero header observations means
 the platform supplied no usable measurement, not zero usage. Tune read workers
 only against a complete read-only throughput run and current rate-limit evidence.
+Execution uses one joined SQL batch and one source lookup for up to 32 contexts.
+Never reuse contexts across waves; a context older than 30 seconds cannot write.
+Set execution_workers=16, execution_per_account=2, execution_batch_size=32,
+execution_context_ttl_seconds=30, execution_max_rps=24 in production. The default
+execution_workers=1 preserves the serial fallback. The shared governor starts
+at 4 concurrent HTTP requests, ramps by 2 after 20 seconds of low observed usage,
+and never exceeds 16 globally or 2 per account. GET and DELETE share this budget.
+Usage >=70% reduces concurrency; >=85% cools down the affected account or the
+whole app. Explicit rate errors pause all new requests for at least 60 seconds,
+honoring longer Retry-After and estimated_time_to_regain_access. Missing headers
+do not permit ramp-up. Workers do network I/O only; the owner commits each claim,
+credential and write barrier before dispatch and persists each exact receipt.
+Stop/ledger errors stop new writes and drain workers before releasing the legacy
+lock. All Ad workers finish before any Creative worker starts; shared Ads finish
+before any Creative retry. Unknown writes never replay. Only provably unsent
+requests caused by expiry/legacy priority can refresh context and retry twice.
+Inspect execution_metrics for SQL/wave timing, concurrency, usage and cooldown.
+
 MySQL protocol compression is requested by default (`mysql_compress=true`),
 with identical full-row hashes verified against the FIFO read endpoint. Keep
 all pages at or below 2,000 rows, lineage batches at or below 1,900 Ad IDs, and

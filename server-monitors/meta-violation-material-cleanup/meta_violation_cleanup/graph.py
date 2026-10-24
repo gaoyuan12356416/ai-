@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.parse import parse_qs, urlsplit
 
 import requests
+from .throttle import RequestNotSent
 from requests.adapters import HTTPAdapter
 from .policy import _feedback_empty
 
@@ -577,7 +578,7 @@ class GraphClient:
             raise GraphError("account_mismatch", "Meta returned a different account")
         return record
 
-    def delete(self, kind, object_id, user_id, account_id, *, expected_creative_id=None):
+    def delete(self, kind, object_id, user_id, account_id, *, expected_creative_id=None, ad_guard=None):
         """Verify identity, then send at most one DELETE; never rotate tokens."""
         if self.delete_stop():
             return {'status': 'failed', 'code': 'cancelled_before_delete', 'request_sent': False}
@@ -592,6 +593,11 @@ class GraphClient:
             if kind == 'ad':
                 if expected_creative_id is not None and str((record.get('creative') or {}).get('id')) != str(expected_creative_id):
                     return {'status':'failed','code':'creative_changed_before_delete','request_sent':False}
+                if ad_guard is not None:
+                    decision=ad_guard(record)
+                    if not isinstance(decision,dict) or decision.get('eligible') is not True:
+                        return {'status':'failed','code':'current_policy_changed','request_sent':False,
+                            'decision':decision}
                 # This is the final identity GET immediately before DELETE.
                 # Never ignore a newly observed rejection after runner preflight.
                 try:
@@ -612,12 +618,15 @@ class GraphClient:
                 headers={"Authorization": "Bearer " + token},
                 timeout=self.timeout, allow_redirects=False,
             )
+        except RequestNotSent as exc:
+            return {'status':'failed','request_sent':False,'code':exc.code}
         except requests.RequestException:
             return {"status": "unknown", "request_sent": True, "code": "transport_uncertain"}
         try:
             data = response.json()
         except (TypeError, ValueError):
             data = None
+        self._observe_usage(response)
         detail = self._detail(data, response)
         result = {"status": "unknown", "request_sent": True, "response": detail}
         if response.status_code >= 500 or response.status_code == 408 or 300 <= response.status_code < 400:

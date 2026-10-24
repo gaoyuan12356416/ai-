@@ -6,6 +6,7 @@ Unknown results are never replayed. The local recovery queue survives new scans.
 from collections import Counter, defaultdict
 from copy import deepcopy
 import uuid
+import time
 
 from .dependency_store import append_shared_ad
 from .graph import GraphClient, GraphError
@@ -43,11 +44,15 @@ def has_ad_receipt(store,identifier):
                             ('ad:'+identifier,)).fetchone() is not None
 
 
-def basis_valid(runner,basis,evidence,disabled=False):
+def basis_valid(runner,basis,evidence,disabled=False,*,context=None,graph=None,receipt=None):
     """Recheck the exact material/account/credential even after Ad deletion."""
     from .runner import numeric_id, object_id
-    with runner.sql_snapshot():
-        context=runner.source.current_ad_context(basis['ad_id'],basis['creative_id'])
+    if context is None:
+        runner.serial_context_checked_at=time.monotonic()
+        with runner.sql_snapshot():
+            context=runner.source.current_ad_context(basis['ad_id'],basis['creative_id'])
+    graph=graph or runner.execution_graph
+    if hasattr(getattr(graph,'http',None),'account'):graph.http.account=basis['account_id']
     identity=material_identity(context['rows'],context['sources'],context['scope'],basis['creative_id'])
     if (identity['reason'] or identity['root_id']!=basis['root_id'] or
             set(identity['material_ids'])!=set(basis['material_ids']) or
@@ -55,13 +60,13 @@ def basis_valid(runner,basis,evidence,disabled=False):
             {numeric_id(x) for x in context['credential_users']}!={basis['user_id']}):
         return False,'creative_basis_changed'
     if disabled:
-        diagnostic=runner.execution_graph.account_diagnostic(basis['account_id'],basis['user_id'])
+        diagnostic=graph.account_diagnostic(basis['account_id'],basis['user_id'])
         if diagnostic.get('account_status')==2: return True,'disabled_account_creative_probe'
-    if has_ad_receipt(runner.store,basis['ad_id']): return True,'confirmed_ad_deleted'
+    if (receipt if receipt is not None else has_ad_receipt(runner.store,basis['ad_id'])): return True,'confirmed_ad_deleted'
     try:
-        ad=runner.execution_graph.get_ad(basis['ad_id'],basis['user_id'])
+        ad=graph.get_ad(basis['ad_id'],basis['user_id'])
     except GraphError:
-        diagnostic=runner.execution_graph.account_diagnostic(basis['account_id'],basis['user_id'])
+        diagnostic=graph.account_diagnostic(basis['account_id'],basis['user_id'])
         if diagnostic.get('account_status')==2:return True,'disabled_account_creative_probe'
         raise
     if str(ad.get('account_id'))!=basis['account_id'] or object_id(ad)!=basis['creative_id']:
@@ -134,7 +139,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
             else:limited+=len(pending)
     shared=runner.store.claim_run(job_id,manifest['sha256'],ACTOR,['ad','creative'],job_id+'-'+uuid.uuid4().hex)
     shared_run=shared['run_id'];counts=Counter();results=[];final='partial';isolated=None
-    failures={};deferred={};account_inventory={}
+    failures={};deferred={};account_inventory={};parallel=None
     def record(kind,identifier,result,stage):
         row={'kind':kind,'id':identifier,'result':result,'stage':stage}
         results.append(row);counts[kind+'_'+result['status']]+=1
@@ -158,62 +163,95 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
             isolated.share_read_metrics(runner.graph);isolated.delete_stop=runner.stop
             runner.execution_graph=isolated
         runner.runtime.update(run_id,stage='deleting_ads',shared_job_id=job_id,shared_run_id=shared_run)
-        for cid,items in groups.items():
-            if cid not in chosen:continue
-            for candidate in items:
-                if old['ad:'+candidate['ad_id']]['status']!='pending':continue
-                def delete_ad(lease):
-                    try:decision=runner.preflight(candidate,manifest)
+        if runner.config.get('execution_workers',1)>1:
+            from .concurrent_execution import ConcurrentExecutor
+            parallel=ConcurrentExecutor(runner,run_id,manifest,job_id,shared_run,entries,groups,record,counts)
+        if parallel:
+            pending=[c for cid,items in groups.items() if cid in chosen for c in items
+                if old['ad:'+c['ad_id']]['status']=='pending']
+            for candidate,result in parallel.phase('ad',pending):
+                record('ad',candidate['ad_id'],result,'ads')
+        else:
+            for cid,items in groups.items():
+                if cid not in chosen:continue
+                for candidate in items:
+                    if old['ad:'+candidate['ad_id']]['status']!='pending':continue
+                    def delete_ad(lease):
+                        try:decision=runner.preflight(candidate,manifest)
+                        except Exception as exc:
+                            if ledger_error(exc) or isinstance(exc,InterruptedError):raise
+                            decision={'eligible':False,'reason':'preflight_failed','error':safe_error(exc)}
+                        runner.runtime.event(run_id,'preflight',{'ad_id':candidate['ad_id'],'stage':'ad','decision':decision})
+                        if not decision['eligible']:
+                            counts['skipped_ads']+=1;return None
+                        # Preserve the last actually eligible basis, not a skipped
+                        # first group member. Commit before the destructive boundary.
+                        entries[cid]['basis']=candidate
+                        entries[cid]['evidence']={'materials':{mid:manifest['evidence']['materials'][mid]
+                            for mid in candidate['material_ids'] if mid in manifest['evidence']['materials']}}
+                        runner.runtime.queue_creative(entries[cid])
+                        if lease is not None:lease.check()
+                        return runner.attempt(job_id,shared_run,'ad',candidate['ad_id'],candidate,run_id,lease)
+                    result=locked(delete_ad)
+                    if result is not None:record('ad',candidate['ad_id'],result,'ads')
+        runner.runtime.update(run_id,stage='deleting_creatives')
+        if parallel:
+            pending=[]
+            for cid in sorted(chosen):
+                state=old['creative:'+cid]
+                if state['status'] in ('deleted','already_deleted'):
+                    runner.runtime.complete_creative(cid);continue
+                if state['status']=='unknown':
+                    counts['creative_unknown']+=1;continue
+                pending.append(entries[cid]['basis'])
+            for basis,result in parallel.phase('creative',pending):
+                cid=basis['creative_id'];entry=entries[cid]
+                record('creative',cid,result,'creatives')
+                if result['status'] in SUCCESS:
+                    runner.runtime.complete_creative(cid);failures.pop(cid,None);deferred.pop(cid,None)
+                else:
+                    entry.update(last_result=result,last_checked_at=now());runner.runtime.queue_creative(entry)
+                    if dependency_failure(result):failures[cid]=entry
+                    else:deferred[cid]=result
+        else:
+            for cid in sorted(chosen):
+                runner.check_stop();entry=entries[cid];basis=entry['basis']
+                state=object_state(runner.store,job_id,'creative:'+cid)
+                if state['status'] in ('deleted','already_deleted'):
+                    runner.runtime.complete_creative(cid);continue
+                if state['status']=='unknown':
+                    counts['creative_unknown']+=1;continue
+                runner.runtime.queue_creative(entry)
+                def delete_creative(lease):
+                    # Do not mutate a dependency while one of its Ad writes is unknown.
+                    for c in groups.get(cid,[]):
+                        if object_state(runner.store,job_id,'ad:'+c['ad_id'])['status'] in ('unknown','in_progress'):
+                            return {'status':'deferred','request_sent':False,'reason':'ad_result_unknown'}
+                    try:eligible,reason=basis_valid(runner,basis,entry['evidence'],entry.get('disabled_account',False))
                     except Exception as exc:
                         if ledger_error(exc) or isinstance(exc,InterruptedError):raise
-                        decision={'eligible':False,'reason':'preflight_failed','error':safe_error(exc)}
-                    runner.runtime.event(run_id,'preflight',{'ad_id':candidate['ad_id'],'stage':'ad','decision':decision})
-                    if not decision['eligible']:
-                        counts['skipped_ads']+=1;return None
-                    # Preserve the last actually eligible basis, not a skipped
-                    # first group member. Commit before the destructive boundary.
-                    entries[cid]['basis']=candidate
-                    entries[cid]['evidence']={'materials':{mid:manifest['evidence']['materials'][mid]
-                        for mid in candidate['material_ids'] if mid in manifest['evidence']['materials']}}
-                    runner.runtime.queue_creative(entries[cid])
+                        return {'status':'deferred','request_sent':False,'reason':'creative_basis_unavailable','error':safe_error(exc)}
+                    if not eligible:return {'status':'deferred','request_sent':False,'reason':reason}
                     if lease is not None:lease.check()
-                    return runner.attempt(job_id,shared_run,'ad',candidate['ad_id'],candidate,run_id,lease)
-                result=locked(delete_ad)
-                if result is not None:record('ad',candidate['ad_id'],result,'ads')
-        runner.runtime.update(run_id,stage='deleting_creatives')
-        for cid in sorted(chosen):
-            runner.check_stop();entry=entries[cid];basis=entry['basis']
-            state=object_state(runner.store,job_id,'creative:'+cid)
-            if state['status'] in ('deleted','already_deleted'):
-                runner.runtime.complete_creative(cid);continue
-            if state['status']=='unknown':
-                counts['creative_unknown']+=1;continue
-            runner.runtime.queue_creative(entry)
-            def delete_creative(lease):
-                # Do not mutate a dependency while one of its Ad writes is unknown.
-                for c in groups.get(cid,[]):
-                    if object_state(runner.store,job_id,'ad:'+c['ad_id'])['status'] in ('unknown','in_progress'):
-                        return {'status':'deferred','request_sent':False,'reason':'ad_result_unknown'}
-                try:eligible,reason=basis_valid(runner,basis,entry['evidence'],entry.get('disabled_account',False))
-                except Exception as exc:
-                    if ledger_error(exc) or isinstance(exc,InterruptedError):raise
-                    return {'status':'deferred','request_sent':False,'reason':'creative_basis_unavailable','error':safe_error(exc)}
-                if not eligible:return {'status':'deferred','request_sent':False,'reason':reason}
-                if lease is not None:lease.check()
-                return runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease)
-            result=locked(delete_creative);record('creative',cid,result,'creatives')
-            if result['status'] in SUCCESS:runner.runtime.complete_creative(cid)
-            else:
-                entry.update(last_result=result,last_checked_at=now());runner.runtime.queue_creative(entry)
-                if dependency_failure(result):failures[cid]=entry
-                else:deferred[cid]=result
+                    return runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease)
+                result=locked(delete_creative);record('creative',cid,result,'creatives')
+                if result['status'] in SUCCESS:runner.runtime.complete_creative(cid)
+                else:
+                    entry.update(last_result=result,last_checked_at=now());runner.runtime.queue_creative(entry)
+                    if dependency_failure(result):failures[cid]=entry
+                    else:deferred[cid]=result
         runner.runtime.update(run_id,stage='shared_reference_remediation',dependency_failures=len(failures))
+        if parallel and isinstance(runner.graph,GraphClient):
+            from .throttle import GovernedSession
+            runner.graph.http=GovernedSession(runner.graph.http,parallel.governor,parallel.stopped)
         retry_entries={}
         for cid,entry in failures.items():
             runner.check_stop();basis=entry['basis'];account=basis['account_id'];uid=basis['user_id']
+            if hasattr(getattr(runner.execution_graph,'http',None),'account'):runner.execution_graph.http.account=account
             key=(account,uid);blocked=[]
             try:
                 if key not in account_inventory:
+                    if hasattr(getattr(runner.graph,'http',None),'account'):runner.graph.http.account=account
                     # Only accounts whose Creative explicitly failed dependency
                     # deletion are enumerated, once each for this final phase.
                     account_inventory[key]=runner.graph.list_ads(account,uid)
@@ -265,6 +303,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
     except BaseException:
         final='interrupted';raise
     finally:
+        if parallel is not None:parallel.close()
         runner.execution_graph=runner.graph
         if isolated is not None:isolated.close()
         finished=runner.store.finish_run(shared_run,final,dict(counts));final=finished['status']
