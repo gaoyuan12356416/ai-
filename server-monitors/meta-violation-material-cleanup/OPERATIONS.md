@@ -25,7 +25,10 @@
 Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH 为
 `/usr/local/bin:/usr/bin:/bin`；部署前核实此 PATH 实际解析到已验证的 CPU Python。
 
-窗口是每轮截止时间向前 `30 * 24` 小时，按 vio `created_at` 的半开区间统计。
+窗口是每轮截止时间向前 `lookback_days * 24` 小时，按 vio `created_at` 的半开区间统计。
+用户 2026-10-24 要求当前这轮完整保留 30 天清单，完成后新扫描改为近 3 天。
+生产配置 `lookback_days=3` 只影响后续新扫描；已冻结清单继续使用原窗口和证据。
+字段支持整数 1–30，缺省 30 兼容旧配置。Creative 待办队列不按该窗口清除。
 每轮按实际存在的各 `delete_status` 状态完整读取窗口内记录；索引为 `dc(delete_status,created_at)`，
 按状态分开 keyset 读取。不能只按新增 ID 或 `updated_at` 增量，旧违规记录会更新。
 所有定时 SQL 走 `63350` 只读端点和 `/usr/bin/mysql` FIFO Gate。
@@ -39,7 +42,7 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 分别补查。相邻字符串范围覆盖所有非 NULL 值，利用已验证的 Index Condition Pushdown
 先在二级索引中筛选，再读取匹配行的产品和完整字段，避免读取数千万条产品历史宽行。
 每页最多 2,000 行，保留完整 keyset 分页；范围边界不是数量截断。
-发布记录不限 30 天；完整读取每个目标 Ad 的当前关联和凭据，再核对 Meta 返回的
+发布记录不受违规筛选窗口限制；完整读取每个目标 Ad 的当前关联和凭据，再核对 Meta 返回的
 当前 Creative。SQL 会话在 Meta 读取前释放。常规扫描不再遍历全部账户库存。
 `mysql_compress=true` 默认请求 MySQL 协议压缩，已在 FIFO 只读端点以完整行哈希验证等价；
 不改变 SQL 门禁、端口或查询条件。广告关联按最多 1,900 个 Ad ID 查询，素材/凭据关系
@@ -157,7 +160,7 @@ Meta multi-ID GET 遇到一个非法对象可能返回整批 `100/803`。新版�
 4. 用单独的 live=false 配置设置 `comparison_baseline_run_id`，复用旧清单的冻结
    违规证据进行完整只读对照。检查 `comparison-retrieval.json` 的无法解释漏选为 0，
    再检查 `comparison.json` 的当前候选差异及耗时。对照配置和清单禁止转真实执行。
-   随后去掉 comparison 配置完成新的当前 30 天预演，核对 hash/范围/错误分类。
+   随后去掉 comparison 配置完成按配置窗口的新预演，核对 hash/范围/错误分类。
    也可用 `comparison_reference_run_id` 一次完成两份结果：反查素材取新旧证据并集，
    用旧冻结阈值单独生成对照；真实执行清单只使用本轮新窗口证据。验收要求对照无
    无法解释的漏选，且产品范围相同；对照状态差异单独报告。正式配置移除 reference

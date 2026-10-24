@@ -152,6 +152,7 @@ class CliTests(unittest.TestCase):
                 return manifest
             def execute(self, run_id, manifest, max_ads=None, start_phase="start"):
                 test.events.append("execute")
+                test.executed_manifest = manifest
                 test.assertEqual(self.runtime.notice(run_id, start_phase)["status"], "sent")
                 self.runtime.update(run_id, shared_job_id="policy-cleanup-" + run_id,
                                     result_counts={"ad_deleted_verified": 1})
@@ -266,6 +267,29 @@ class CliTests(unittest.TestCase):
         self.events.clear()
         self.invoke("run", "--run-id", "r1")
         self.assertEqual(self.events, ["start-2", "execute", "end-2"])
+
+    def test_three_day_next_scan_does_not_shorten_existing_frozen_run(self):
+        self.invoke('preview','--run-id','current30')
+        frozen=json.loads(json.dumps(self.runtime.artifacts[('current30','manifest.json')]))
+        self.assertEqual(datetime.fromisoformat(frozen['window_end'])-datetime.fromisoformat(frozen['window_start']),timedelta(days=30))
+        self.config['lookback_days']=3
+        self.events.clear()
+        self.assertEqual(self.invoke('run','--run-id','current30')[0],0)
+        self.assertNotIn('scan',self.events)
+        self.assertEqual(self.executed_manifest,frozen)
+        self.assertEqual(self.invoke('preview','--run-id','next3')[0],0)
+        fresh=self.runtime.artifacts[('next3','manifest.json')]
+        self.assertEqual(datetime.fromisoformat(fresh['window_end'])-datetime.fromisoformat(fresh['window_start']),timedelta(days=3))
+
+    def test_lookback_setting_is_bounded_integer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'config.json'
+            for days in (1,3,30):
+                path.write_text(json.dumps(dict(self.config,lookback_days=days)),encoding='utf-8')
+                self.assertEqual(real_load_config(path)['lookback_days'],days)
+            for days in (0,31,True,'3',3.5):
+                path.write_text(json.dumps(dict(self.config,lookback_days=days)),encoding='utf-8')
+                with self.subTest(days=days),self.assertRaises(cli.CliError):real_load_config(path)
 
     def test_expired_manifest_never_notifies_or_executes(self):
         self.invoke("preview", "--run-id", "r1")

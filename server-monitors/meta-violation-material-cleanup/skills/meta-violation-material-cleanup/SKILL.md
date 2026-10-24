@@ -15,8 +15,13 @@ GitHub `gaoyuan12356416/ai-`, directory
 - Scope: DramaWave root product `1479`, HotDrama root product `3302`, and each
   root's direct `ads_apps_setting.ads_app_id` children. Do not expand by names,
   native app IDs, descendants of children, or account membership alone.
-- Every run freezes the preceding `30 * 24` hours, using vio `created_at` in the
-  half-open interval from window start through, but excluding, run cutoff.
+- Every new run freezes the preceding `lookback_days * 24` hours, using vio
+  `created_at` in the half-open interval from window start through, but excluding,
+  run cutoff. The operator instructed on 2026-10-24: finish the current 30-day
+  backlog first, then use 3 days for subsequent scans. Set production
+  `lookback_days=3`; it affects new scans only, never an existing frozen manifest.
+  The field accepts integers 1–30 and defaults to 30 for old configurations.
+  Preserve unfinished Creative/shared-reference backlog regardless of window age.
   Refresh the complete window on both runs; late updates to old vio rows matter.
 - Match only seven exact `issues_info.global` policy names: `Adult Nudity and
   Sexual Activity`, `Adult Sexual Solicitation and Sexually Explicit Language`,

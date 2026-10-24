@@ -49,6 +49,7 @@ def load_config(path):
     if not isinstance(config.get("live_enabled", False), bool):
         raise CliError("invalid_live_setting")
     for key,default,minimum,maximum in (
+            ('lookback_days',30,1,30),
             ('execution_workers',1,1,32),('execution_per_account',2,1,2),
             ('execution_batch_size',32,1,64),('execution_context_ttl_seconds',30,5,30),
             ('execution_max_rps',24,1,30)):
@@ -234,7 +235,7 @@ def scan_or_run(args, config, runtime, stop):
         raise CliError("live_execution_disabled")
     run_id = validate_run_id(args.run_id or datetime.now(CST).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])
     end = datetime.now(CST).replace(microsecond=0)
-    start = end - timedelta(days=30)
+    start = end - timedelta(days=config.get('lookback_days',30))
     created = runtime.begin(run_id, args.command, {"window_start": start.isoformat(), "window_end": end.isoformat(), "stage": "starting"})
     manifest = None
     if not created:

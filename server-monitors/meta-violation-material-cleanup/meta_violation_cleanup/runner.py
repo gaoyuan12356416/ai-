@@ -580,7 +580,7 @@ class Runner:
         lines=['Meta违规素材清理｜结束','运行：'+run_id,'状态：'+labels.get(run['status'],run['status']),
             '窗口：%s 至 %s（北京时间）'%(d.get('window_start',''),d.get('window_end','')),
             '账户：%s/%s；覆盖异常：%s'%(d.get('accounts_finished',0),d.get('accounts_total',0),d.get('coverage_errors',0)),
-            '30天命中素材：%s；候选广告去重：%s'%(d.get('material_count',0),d.get('candidate_ads',0)),
+            '窗口命中素材：%s；候选广告去重：%s'%(d.get('material_count',0),d.get('candidate_ads',0)),
             '规则1：%s；规则2：%s（可重叠）'%(d.get('rule1_ads',0),d.get('rule2_ads',0))]
         candidates=manifest.get('candidates',[])
         for root,name in [('1479','DramaWave'),('3302','HotDrama')]:
