@@ -156,6 +156,20 @@ class ContextBatchTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    def test_snapshot_separates_recent_feedback_from_lifetime_peak(self):
+        clock=[0.];g=Governor(maximum=32,clock=lambda:clock[0])
+        g.observe(Response({},headers={'x-app-usage':'{"call_count":50}'}),'100')
+        clock[0]=21
+        g.observe(Response({},headers={'x-app-usage':'{"call_count":29}'}),'100')
+        snapshot=g.snapshot()
+        self.assertEqual(snapshot['x_app_usage_max_percent'],50)
+        self.assertEqual(snapshot['recent_usage_max_percent'],29)
+        self.assertEqual(snapshot['per_account_limit'],2)
+        self.assertEqual(snapshot['request_starts_per_second'],24)
+        clock[0]=142
+        self.assertIsNone(g.snapshot()['recent_usage_max_percent'])
+        self.assertEqual(g.snapshot()['recent_usage_scopes'],0)
+
     def test_32_cap_ramps_on_fresh_feedback_and_halves_on_pressure(self):
         clock=[0.];g=Governor(maximum=32,clock=lambda:clock[0])
         for _ in range(25):

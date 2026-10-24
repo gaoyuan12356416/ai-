@@ -109,8 +109,16 @@ class Governor:
                 self.metrics['increases']+=1
 
     def snapshot(self):
-        with self.lock:return dict(self.metrics,concurrency_limit=self.limit,maximum=self.maximum,
-            max_in_flight=self.max_seen,active=self.active,global_cooldown_seconds=max(0,round(self.global_until-self.clock(),1)))
+        with self.lock:
+            now=self.clock()
+            recent=[v for v,t in self.usage.values() if now-t<=120]
+            return dict(self.metrics,concurrency_limit=self.limit,maximum=self.maximum,
+                per_account_limit=self.per_account,request_starts_per_second=self.rps,
+                recent_usage_max_percent=max(recent) if recent else None,
+                recent_usage_scopes=len(recent),
+                account_cooldowns_active=sum(until>now for until in self.account_until.values()),
+                max_in_flight=self.max_seen,active=self.active,
+                global_cooldown_seconds=max(0,round(self.global_until-now,1)))
 
 
 class GovernedSession:
