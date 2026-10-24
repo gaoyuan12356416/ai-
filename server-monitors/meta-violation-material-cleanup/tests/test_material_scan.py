@@ -90,6 +90,25 @@ class MaterialScanTests(unittest.TestCase):
         self.assertEqual(errors['11']['code'],100)
         self.assertEqual(errors['12']['code'],'account_mismatch')
 
+    def test_global_bad_id_error_isolated_without_losing_good_ids(self):
+        from test_graph import Response,Session
+        session=Session([Response({'error':{'code':100}},400),Response({'10':ad()}),
+                         Response({'error':{'code':100}},400)])
+        graph=GraphClient({'1':'secret'},session=session)
+        with patch.object(graph,'_reader',return_value=graph),patch.object(graph,'_release_reader'):
+            _,records,errors=graph._target_ads(('1','100',['10','11']))
+        self.assertEqual(set(records),{'10'});self.assertEqual(set(errors),{'11'})
+        self.assertEqual([call[0] for call in session.calls],['GET']*3)
+
+    def test_invalid_token_does_not_fan_out_into_individual_reads(self):
+        from test_graph import Response,Session
+        session=Session([Response({'error':{'code':190}},400)])
+        graph=GraphClient({'1':'secret'},session=session)
+        with patch.object(graph,'_reader',return_value=graph),patch.object(graph,'_release_reader'):
+            _,records,errors=graph._target_ads(('1','100',['10','11']))
+        self.assertEqual(records,{});self.assertEqual(set(errors),{'10','11'})
+        self.assertEqual(len(session.calls),1)
+
     def test_composite_predicate_includes_csv_json_and_padding(self):
         predicate=complex_value('source_id')
         self.assertIn("LOCATE(',',source_id)",predicate)

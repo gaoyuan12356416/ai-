@@ -509,28 +509,35 @@ class GraphClient:
         identifier = _object_id(ad_id)
         return self._record(self._get(identifier, user_id, {"fields": AD_FIELDS}), identifier)
 
-    def _target_ads(self, item):
+    def _target_ads(self, item, stop=lambda:False):
         user, account, identifiers = item
         reader = self._reader()
         try:
-            try:
-                data = reader._get('', user, {'ids': ','.join(identifiers), 'fields': AD_FIELDS})
-            except GraphError as exc:
-                return item, {}, {identifier: exc.as_dict() for identifier in identifiers}
             records, errors = {}, {}
-            if not isinstance(data, dict):
-                return item, {}, {identifier: {'code': 'invalid_batch'} for identifier in identifiers}
-            for identifier in identifiers:
-                value = data.get(identifier)
-                if isinstance(value, dict) and value.get('error'):
-                    error = value['error']
-                    errors[identifier] = {'code': error.get('code'),
-                        'detail': reader._clean({k: error[k] for k in ERROR_FIELDS if k in error})}
-                    continue
+            pending=[list(identifiers)]
+            while pending:
+                if stop():raise InterruptedError('stop_requested')
+                part=pending.pop()
                 try:
-                    records[identifier] = reader._record(value, identifier, account)
+                    data=reader._get('',user,{'ids':','.join(part),'fields':AD_FIELDS})
                 except GraphError as exc:
-                    errors[identifier] = exc.as_dict()
+                    # Meta can reject an entire ids= request for one bad node.
+                    # Bisect definite object errors; do not amplify token,
+                    # rate-limit or transport failures, and never rotate users.
+                    if len(part)>1 and exc.code in (100,803):
+                        middle=len(part)//2;pending.extend((part[middle:],part[:middle]));continue
+                    errors.update({identifier:exc.as_dict() for identifier in part});continue
+                if not isinstance(data,dict):
+                    errors.update({identifier:{'code':'invalid_batch'} for identifier in part});continue
+                for identifier in part:
+                    value=data.get(identifier)
+                    if isinstance(value,dict) and value.get('error'):
+                        error=value['error']
+                        errors[identifier]={'code':error.get('code'),
+                            'detail':reader._clean({k:error[k] for k in ERROR_FIELDS if k in error})}
+                        continue
+                    try:records[identifier]=reader._record(value,identifier,account)
+                    except GraphError as exc:errors[identifier]=exc.as_dict()
             return item, records, errors
         finally:
             self._release_reader(reader)
@@ -546,7 +553,7 @@ class GraphClient:
         for (user, account), ids in sorted(groups.items()):
             ids = sorted(ids)
             items.extend((user, account, ids[n:n+50]) for n in range(0, len(ids), 50))
-        yield from self._bounded_reads(self._target_ads, items, stop)
+        yield from self._bounded_reads(lambda item:self._target_ads(item,stop), items, stop)
 
     def account_diagnostic(self, account_id, user_id):
         account = _object_id(account_id, account=True)
