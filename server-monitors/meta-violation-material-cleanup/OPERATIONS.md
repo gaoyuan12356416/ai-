@@ -194,7 +194,7 @@ systemctl enable --now meta-violation-material-cleanup.timer
   不自动换 Token 重放。已经成功的对象不能因新一轮而再次写入。
 - 通知失败与清理结果分开报告。仅通知失败时不重新执行清理；查看回执后使用
   `notify --phase end` 恢复。
-- service 最长运行 11 小时、无自动重启，收到 SIGINT 后有 180 秒收尾。停止前后
+- service 最长运行 48 小时、无自动重启，收到 SIGINT 后有 180 秒收尾。停止前后
   比较共享账本和 run 状态，不能把被中断工作改成全部成功。
 - `status` 只查看状态，不运行 owner 恢复。恢复必须先取得本任务 `process.lock`，
   仅确认原进程 PID 与启动身份已终止后，标记本运行为 interrupted；未知存活状态保留
@@ -264,7 +264,7 @@ live/timer，保留所有证据，并通过独立 `PREVIEW_RUN_ID-bootstrap` 通
 
 The operator authorized concurrent deletion after the first live run measured
 roughly 4 seconds for per-Ad SQL/preflight and 2 seconds for mutation/readback.
-Production: execution_workers=16, execution_per_account=2, execution_batch_size=64,
+Production: execution_workers=32, execution_per_account=2, execution_batch_size=64,
 execution_context_ttl_seconds=30, execution_max_rps=24. Setting workers to 1 keeps
 the serial fallback. Workers do network I/O only. SQL and both durable ledgers
 stay on the owner thread. Each wave freshly reads joined publication, product,
@@ -282,9 +282,15 @@ Ad-before-Creative-retry barrier and uses the same mutation governor.
 
 Rollout: gracefully stop the service, inspect claims and receipts, deploy an
 immutable GitHub release, and continue the same run within its original one-hour
-conversion deadline. Never renew a manifest timestamp/hash. Preserve unknown
+conversion deadline. If expired, keep the active job running while a separate
+read-only staging preview refreshes the complete window. At cutover, stop and
+drain the old owner, verify the fresh manifest and complete backlog coverage,
+and import only the new preview into the production runtime under its lock.
+Never renew a manifest timestamp/hash. Preserve unknown
 fences, receipts and backlog. Observe accepted+verified throughput, usage and
-rate responses before quoting an ETA. The 11-hour service limit stays in place.
+rate responses before quoting an ETA. The operator extended the service runtime limit to 48 hours on 2026-10-24,
+so the Creative and shared-reference phases have time to drain. The timer does
+not launch a second process while this service is active; retain both locks.
 
 Execution waves start at at most 4 times the current request concurrency and
 expand to the configured batch maximum (64) as observed headroom permits.

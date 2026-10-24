@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE))
 spec = importlib.util.spec_from_file_location("cleanup_cli", HERE / "run.py")
 cli = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cli)
+real_load_config = cli.load_config
 from meta_violation_cleanup.runtime import Runtime as RealRuntime
 from meta_violation_cleanup import runtime as runtime_module
 
@@ -195,6 +196,18 @@ class CliTests(unittest.TestCase):
         with patch.object(cli, 'GraphClient') as constructor:
             cli.open_graph(self.config, FakeSource(self.config))
             self.assertEqual(constructor.call_args.kwargs['read_workers'], 4)
+
+    def test_execution_config_allows_32_but_rejects_unbounded_concurrency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'config.json'
+            for workers in (1,16,32):
+                path.write_text(json.dumps(dict(self.config,execution_workers=workers)),encoding='utf-8')
+                self.assertEqual(real_load_config(path)['execution_workers'],workers)
+            for workers in (0,33,True,'32',32.5):
+                path.write_text(json.dumps(dict(self.config,execution_workers=workers)),encoding='utf-8')
+                with self.subTest(workers=workers),self.assertRaises(cli.CliError) as caught:
+                    real_load_config(path)
+                self.assertEqual(caught.exception.code,'invalid_execution_workers')
 
     def test_final_graph_metrics_and_status_are_numeric_whitelist_only(self):
         metrics = {'get_requests': 45, 'get_retries': 2, 'rate_limit_responses': 1,

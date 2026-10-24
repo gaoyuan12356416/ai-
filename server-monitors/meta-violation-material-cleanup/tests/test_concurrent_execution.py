@@ -50,6 +50,29 @@ class ParallelTests(phased_fixtures.PhasedExecutionTests):
         self.assertGreater(peak,1)
         self.assertEqual(runtime.queue,{})
 
+    def test_32_workers_drain_all_ads_before_creatives_across_multiple_waves(self):
+        ads=[ad(str(10+i),str(200+i),str(1000+i)) for i in range(80)]
+        runner,source,graph,runtime,m=self.prepare(ads)
+        runner.config.update(execution_workers=32,execution_batch_size=64)
+        lock=threading.Lock();finished=set();active_ads=set()
+        original=graph.delete
+        def delete(kind,identifier,*args):
+            with lock:
+                if kind=='creative':
+                    self.assertEqual(len(finished),80)
+                    self.assertEqual(active_ads,set())
+                else:active_ads.add(identifier)
+            if kind=='ad':time.sleep(.01 if int(identifier)%7 else .05)
+            try:return original(kind,identifier,*args)
+            finally:
+                if kind=='ad':
+                    with lock:active_ads.remove(identifier);finished.add(identifier)
+        graph.delete=delete
+        runner.execute('test-run',m)
+        self.assertEqual(len(finished),80)
+        self.assertEqual(len(self.deletes(graph)),160)
+        self.assertEqual(runtime.queue,{})
+
     def test_last_changed_ad_does_not_replace_confirmed_creative_basis(self):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','20')])
         graph.ads['11']['effective_status']='DISAPPROVED'
@@ -133,6 +156,29 @@ class ContextBatchTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    def test_32_cap_ramps_on_fresh_feedback_and_halves_on_pressure(self):
+        clock=[0.];g=Governor(maximum=32,clock=lambda:clock[0])
+        for _ in range(25):
+            clock[0]+=21
+            g.observe(Response({},headers={'x-app-usage':'{"call_count":29}'}),'100')
+        self.assertEqual(g.limit,32)
+        g.observe(Response({},headers={'x-app-usage':'{"call_count":71}'}),'100')
+        self.assertEqual(g.limit,16)
+        g.observe(Response({'error':{'code':80004}},400,{'Retry-After':'180'}),'100')
+        self.assertEqual(g.limit,8)
+        self.assertEqual(g.global_until,clock[0]+180)
+
+    def test_32_concurrent_requests_keep_two_per_account(self):
+        from concurrent.futures import ThreadPoolExecutor
+        g=Governor(maximum=32,per_account=2,rps=10000);g.limit=32
+        barrier=threading.Barrier(32)
+        def work(index):
+            with g.slot(str(index%16),lambda:False):barrier.wait(timeout=10)
+        with ThreadPoolExecutor(max_workers=32) as pool:list(pool.map(work,range(32)))
+        self.assertEqual(g.max_seen,32)
+        self.assertEqual(g.active,0)
+        self.assertFalse(any(g.accounts.values()))
+
     def test_stop_still_drains_exact_readback_of_an_already_sent_delete(self):
         from types import SimpleNamespace
         stop=threading.Event()

@@ -61,7 +61,9 @@ GitHub `gaoyuan12356416/ai-`, directory
   Preserve its receipts, object claims and unknown fences across all tasks.
 - Service/timer: `meta-violation-material-cleanup.service` and `.timer`;
   `09:00` and `21:00 Asia/Shanghai`. Timer has catch-up enabled. The internal
-  run lock and legacy repair lock prevent overlapping execution.
+  run lock and legacy repair lock prevent overlapping execution. The operator
+  extended RuntimeMaxSec to 48 hours on 2026-10-24 for the initial Ad/Creative
+  backlog; keep graceful stop and request timeouts in place.
 - Skill installation is a symlink at
   `/root/.codex/skills/meta-violation-material-cleanup` into the current release.
 
@@ -80,11 +82,11 @@ the platform supplied no usable measurement, not zero usage. Tune read workers
 only against a complete read-only throughput run and current rate-limit evidence.
 Execution uses one joined SQL batch and one source lookup for up to 64 contexts.
 Never reuse contexts across waves; a context older than 30 seconds cannot write.
-Set execution_workers=16, execution_per_account=2, execution_batch_size=64,
+Set execution_workers=32, execution_per_account=2, execution_batch_size=64,
 execution_context_ttl_seconds=30, execution_max_rps=24 in production. The default
 execution_workers=1 preserves the serial fallback. The shared governor starts
 at 4 concurrent HTTP requests, ramps by 2 after 20 seconds of low observed usage,
-and never exceeds 16 globally or 2 per account. GET and DELETE share this budget.
+and never exceeds 32 globally or 2 per account. GET and DELETE share this budget.
 Usage >=70% reduces concurrency; >=85% cools down the affected account or the
 whole app. Explicit rate errors pause all new requests for at least 60 seconds,
 honoring longer Retry-After and estimated_time_to_regain_access. Missing headers

@@ -49,7 +49,7 @@ def load_config(path):
     if not isinstance(config.get("live_enabled", False), bool):
         raise CliError("invalid_live_setting")
     for key,default,minimum,maximum in (
-            ('execution_workers',1,1,16),('execution_per_account',2,1,2),
+            ('execution_workers',1,1,32),('execution_per_account',2,1,2),
             ('execution_batch_size',32,1,64),('execution_context_ttl_seconds',30,5,30),
             ('execution_max_rps',24,1,30)):
         value=config.get(key,default)
