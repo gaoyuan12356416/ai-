@@ -16,6 +16,27 @@ class MaterialScanTests(unittest.TestCase):
     setUp=fixtures.RunnerTests.setUp
     tearDown=fixtures.RunnerTests.tearDown
     fixture=fixtures.RunnerTests.fixture
+    def test_reference_comparison_keeps_old_threshold_separate_from_fresh_candidates(self):
+        runner,source,graph,runtime=self.fixture([ad(status='ACTIVE')])
+        old=runner.scan('baseline',START,END)
+        self.assertEqual(len(old['candidates']),1)
+        runtime.load_artifact=lambda run,name:copy.deepcopy(old)
+        runner.config['comparison_reference_run_id']='baseline'
+        source.vios.pop() # Fresh evidence has 3 violations; old control still has 4.
+        for aid,rows in source.rows.items():
+            for row in rows:row.update(id=aid,ad_account_id='100')
+        source.selected_credentials=lambda rows:{r['id']:{'user_id':'1','error':''} for r in rows}
+        graph.safe_metrics={};source.safe_metrics={}
+        graph.iter_target_ads=lambda *args:iter([(('1','100',['10']),{'10':ad(status='ACTIVE')},{})])
+        raw=[dict(source.rows['10'][0])]
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=(raw,{})):
+            result=scan(runner,'fresh',START,END)
+        self.assertFalse(result['comparison_only'])
+        self.assertEqual(result['candidates'],[])
+        self.assertEqual(result['comparison']['common_candidates'],1)
+        self.assertEqual(result['comparison']['fresh_window_candidates'],0)
+        self.assertEqual(result['comparison']['unexplained_retrieval_missing_ids'],[])
+
     def test_comparison_stops_before_meta_when_still_eligible_old_ad_is_missing(self):
         runner,source,graph,runtime=self.fixture()
         old=runner.scan('baseline',START,END)

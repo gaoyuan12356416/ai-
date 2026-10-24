@@ -8,7 +8,9 @@ from collections import Counter
 from .policy import parse_ids
 from .sql_source import _inside, _quote, _chunks, _ids, SqlSourceError
 
-COMPOSITE_RANGE_SIZE=200000
+# Adjacent, exhaustive string ranges permit InnoDB index-condition pushdown.
+# Include the open-ended first/last ranges, including whitespace and JSON.
+COMPOSITE_BOUNDS=('0','1','2','3','4','5','6','7','8','9','A','G','N','U')
 
 def complex_value(column):
     return "(LOCATE(',',{c})>0 OR LEFT(TRIM({c}),1)='[' OR {c} REGEXP '[[:space:]]')".format(c=column)
@@ -25,6 +27,7 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
 
     def pages(table, fields, predicate, order_column='id'):
         cursor=None
+        seen_ids=set()
         with source._session() as session:
             while True:
                 if stop(): raise InterruptedError('stop_requested')
@@ -39,8 +42,11 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
                 if len(rows)>source.page_size: raise SqlSourceError('ad_lineage_incomplete')
                 for row in rows:
                     rid=int(row['id']); current=(str(row.get(order_column,'')),rid)
-                    if cursor is not None and (rid<=cursor[1] if order_column=='id' else current<=cursor):
+                    # String ordering belongs to MySQL's column collation,
+                    # not Python Unicode ordering (notably JSON/whitespace).
+                    if rid in seen_ids or (cursor is not None and order_column=='id' and rid<=cursor[1]):
                         raise SqlSourceError('ad_lineage_incomplete')
+                    seen_ids.add(rid)
                     cursor=current
                 metrics['sql_pages']+=1
                 yield rows
@@ -90,38 +96,22 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
                               column+' IN '+_inside(part)+' AND product IN '+_inside(products)+absent_original,column):
                 accept(rows)
             progress(stage='material_lookup',publication_rows=len(found),lookup_metrics=dict(metrics))
-    # This completes the inverse lookup for CSV/JSON arrays without using a
-    # non-indexable per-material FIND_IN_SET over the publication table.
-    composite='('+complex_value('source_id')+' OR '+complex_value('original_source_id')+')'
-    for number,pid in enumerate(sorted(products)):
-        # Find bounded index ranges BEFORE applying non-sargable predicates.
-        # A sparse composite filter over a large product otherwise reads the
-        # entire product before returning even its first (possibly empty) page.
-        low=0
-        while True:
-            if stop():raise InterruptedError('stop_requested')
-            table='`'+source.schema+'`.ads_facebook_auto_created_data FORCE INDEX(idx_product)'
-            base='product='+_quote(pid)+' AND id>'+str(low)
-            with source._session() as session:
-                bounds=session.query("SELECT JSON_OBJECT('high',MAX(id),'count',COUNT(*)) FROM "
-                    '(SELECT id FROM '+table+' WHERE '+base+' ORDER BY id LIMIT '+str(COMPOSITE_RANGE_SIZE)+') AS bounded_ids')
-                if len(bounds)!=1:raise SqlSourceError('ad_lineage_incomplete')
-                bound=bounds[0];high=bound.get('high')
-                if not high:break
-                high=int(high)
-                if high<=low:raise SqlSourceError('ad_lineage_incomplete')
-                # Range boundary and its pages share one short read-only
-                # snapshot; release the FIFO between ranges for other jobs.
-                for rows in pages('ads_facebook_auto_created_data FORCE INDEX(idx_product)',expressions,
-                                  base+' AND id<='+str(high)+' AND '+composite):
-                    accept(rows,True)
-            low=high
+    # Complete both indexed columns independently. A product-index pass fetches
+    # tens of millions of full records; these range scans reject ordinary
+    # scalar values in the secondary index before fetching product/full rows.
+    # EXPLAIN on the live reader confirms range + index_condition + no filesort.
+    bounds=(None,)+COMPOSITE_BOUNDS+(None,)
+    for column,index in (('source_id','ads_facebook_auto_created_data_source_id'),
+                         ('original_source_id','ads_facebook_auto_created_data_original_source_id')):
+        for low,high in zip(bounds,bounds[1:]):
+            predicates=[complex_value(column),'product IN '+_inside(products)]
+            if low is not None:predicates.append(column+'>='+_quote(low))
+            if high is not None:predicates.append(column+'<'+_quote(high))
+            for rows in pages('ads_facebook_auto_created_data FORCE INDEX('+index+')',expressions,
+                              ' AND '.join(predicates),column):
+                accept(rows,True)
             metrics['composite_ranges']+=1
-            metrics['publication_rows_examined_for_composites']+=int(bound['count'])
-            progress(stage='material_lookup_composite',product_id=pid,products_finished=number,
+            progress(stage='material_lookup_composite',composite_column=column,
                      publication_rows=len(found),lookup_metrics=dict(metrics))
-            if int(bound['count'])<COMPOSITE_RANGE_SIZE:break
-        progress(stage='material_lookup_composite',products_finished=number+1,
-                 products_total=len(products),publication_rows=len(found),lookup_metrics=dict(metrics))
     metrics['publication_rows']=len(found)
     return list(found.values()),dict(metrics)

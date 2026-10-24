@@ -82,8 +82,9 @@ source/credential batches at or below 1,000 IDs. The production scanner is
 `scanner=material_indexed`: canonical violation materials -> source aliases ->
 publication Ad/Creative IDs -> exact-ID Meta GETs (up to 50 per request).
 Scalar original/source IDs use their existing indexes. CSV, JSON and whitespace
-encodings have a separate complete pass, split into bounded product/primary-key
-ranges; its 200,000-row covering-index aggregate defines a range, not a cutoff.
+encodings have a separate complete pass over both source-field indexes, split
+into exhaustive adjacent string ranges. Verified index-condition pushdown
+filters ordinary scalar keys before fetching full publication records.
 Do not limit publication history to the violation window. Read all current rows
 for each candidate Ad before accepting its current Creative, scope and route.
 Release SQL before Graph waits. The legacy scanner remains available for
@@ -132,7 +133,13 @@ For v2, run a read-only material comparison using the old manifest's frozen
 evidence and require zero unexplained retrieval omissions. Comparison manifests
 cannot execute. Then complete a fresh-window preview, deploy the tested GitHub
 release, use that fresh manifest for the authorized immediate full run, and
-reenable the normal timer. Read back actual service/ledger and timer state.
+reenable the normal timer. Alternatively, `comparison_reference_run_id` performs
+both in one preview: discover the union of old/fresh materials, independently
+evaluate old frozen thresholds for comparison, and use ONLY fresh-window
+evidence for executable candidates. Require zero unexplained retrieval misses
+and identical product scope, and inspect current-state differences. Remove the
+reference parameter from production config after acceptance. Read back actual
+service/ledger and timer state.
 A preview lasting ten
 hours or more blocks activation of the eleven-hour scheduled service. See
 `../../OPERATIONS.md` for the exact release/SHA invocation and acceptance files.

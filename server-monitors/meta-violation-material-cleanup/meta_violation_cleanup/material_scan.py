@@ -12,12 +12,14 @@ def scan(runner, run_id, start, end):
     from .runner import chunks, numeric_id, object_id, safe_error, ledger_error
     began=time.monotonic(); timing={}; errors=[]; skips=Counter(); coverage={}
     progress=lambda **kw: runner.runtime.update(run_id,**kw)
-    baseline_id=runner.config.get('comparison_baseline_run_id')
+    frozen_comparison=bool(runner.config.get('comparison_baseline_run_id'))
+    baseline_id=runner.config.get('comparison_baseline_run_id') or runner.config.get('comparison_reference_run_id')
     baseline=None
     if baseline_id:
         baseline=runner.runtime.load_artifact(baseline_id,'manifest.json')
         if digest({k:v for k,v in baseline.items() if k!='sha256'})!=baseline['sha256']:
             raise ValueError('baseline_hash_mismatch')
+    if frozen_comparison:
         start,end=baseline['window_start'],baseline['window_end']
         scope=baseline['scope']; evidence=baseline['evidence']
         violation_ids=baseline['violation_ids_by_ad']
@@ -36,7 +38,12 @@ def scan(runner, run_id, start, end):
     timing['evidence_seconds']=round(time.monotonic()-began,3)
     progress(stage='material_lookup',material_count=len(evidence['materials']))
     phase=time.monotonic()
-    raw,lookup=material_rows(runner.source,evidence['materials'],scope,progress,runner.stop)
+    lookup_materials=set(evidence['materials'])
+    lookup_scope=dict(scope)
+    if baseline:
+        lookup_materials.update(baseline['evidence']['materials'])
+        lookup_scope=dict(baseline['scope'],**scope)
+    raw,lookup=material_rows(runner.source,lookup_materials,lookup_scope,progress,runner.stop)
     timing['reverse_lookup_seconds']=round(time.monotonic()-phase,3)
     ids=set()
     for row in raw:
@@ -51,22 +58,23 @@ def scan(runner, run_id, start, end):
         # Missing IDs are independently looked up by Ad index; a still-eligible
         # old snapshot MUST be retrieved by the new material path.
         for part in chunks(missing):
-            rows,sources=runner.lineage_data(part,scope=scope)
+            rows,sources=runner.lineage_data(part,scope=lookup_scope)
             for aid in part:
                 candidate=old[aid]
-                identity=material_identity(rows.get(aid,[]),sources,scope,candidate['creative_id'])
-                decision=evaluate_ad(candidate['ad_snapshot'],identity,evidence)
+                identity=material_identity(rows.get(aid,[]),sources,baseline['scope'],candidate['creative_id'])
+                decision=evaluate_ad(candidate['ad_snapshot'],identity,baseline['evidence'])
                 (unresolved if decision['eligible'] else changed).append(aid)
         comparison={'baseline_run_id':baseline_id,'baseline_sha256':baseline['sha256'],
             'baseline_candidate_ads':len(old),'retrieved_old_candidates':len(set(old)&ids),
             'retrieval_missing_ids':missing,'source_changed_ids':changed,
             'unexplained_retrieval_missing_ids':unresolved,
             'legacy_scan_seconds':20507 if baseline_id=='preview-20261023-v5' else None,
-            'same_frozen_evidence':True}
+            'same_frozen_evidence':True,'baseline_window_start':baseline['window_start'],
+            'baseline_window_end':baseline['window_end'],'same_product_scope':baseline['scope']==scope}
         runner.runtime.artifact(run_id,'comparison-retrieval.json',comparison)
         if unresolved: raise ValueError('material_lookup_lost_baseline_candidates')
     phase=time.monotonic(); targets=[]; identities={}; by_ad=defaultdict(list)
-    material_set=set(evidence['materials'])
+    material_set=lookup_materials
     # Read every current publication row for each retrieved Ad, so an older
     # matched row cannot override a later Creative/product/material binding.
     for part in chunks(sorted(ids)):
@@ -104,6 +112,7 @@ def scan(runner, run_id, start, end):
         progress(stage='publication_context',target_ads=len(targets),processed_publication_ads=len(identities))
     timing['publication_context_seconds']=round(time.monotonic()-phase,3)
     phase=time.monotonic(); candidates=[]; blocked=[]; checked={}; account_diagnostics={}
+    baseline_checked={};baseline_current=set()
     read_failures=defaultdict(list); read_success=set(); accepted_ids=set()
     for (user,account,requested),records,failures in runner.graph.iter_target_ads(targets,runner.stop):
         runner.check_stop()
@@ -121,6 +130,11 @@ def scan(runner, run_id, start, end):
                 skips['current_creative_lineage_missing']+=1
                 checked[aid]={'reason':'current_creative_lineage_missing'}; continue
             decision=evaluate_ad(ad,candidate['identity'],evidence)
+            if baseline:
+                control=evaluate_ad(ad,candidate['identity'],baseline['evidence'])
+                baseline_checked[aid]={'reason':control['reason'],'status':ad.get('status'),
+                    'effective_status':ad.get('effective_status'),'creative_id':object_id(ad)}
+                if control['eligible']:baseline_current.add(aid)
             checked[aid]={'reason':decision['reason'],'status':ad.get('status'),
                           'effective_status':ad.get('effective_status'),'creative_id':object_id(ad)}
             if not decision['eligible']:
@@ -145,6 +159,7 @@ def scan(runner, run_id, start, end):
             if diagnostic.get('account_status')==2:
                 for candidate in by_ad[aid]:
                     if candidate['account_id']!=account:continue
+                    if not set(candidate['identity']['material_ids'])&set(evidence['materials']):continue
                     blocked.append(dict(candidate,root_id=candidate['identity']['root_id'],
                         material_ids=candidate['identity']['material_ids'],rules=['disabled_account_creative_only'],
                         account_diagnostic=diagnostic,ad_read_error=error))
@@ -165,13 +180,14 @@ def scan(runner, run_id, start, end):
         'blocked_account_creatives':blocked,'recovery_creatives':backlog,
         'qualified_violation_ads':len({a for e in evidence['materials'].values() for a in e['violating_ad_ids']}),
         'skip_counts':dict(skips),'mapping_gap_counts':{},'product_scanned_ads':{},
-        'lookup_metrics':lookup,'timings':timing,'comparison_only':bool(baseline)}
+        'lookup_metrics':lookup,'timings':timing,'comparison_only':frozen_comparison}
     if baseline:
         new={c['ad_id'] for c in candidates}; old_ids=set(old)
-        comparison.update(current_candidates=len(new),common_candidates=len(new&old_ids),
-            new_candidate_count=len(new-old_ids))
-        comparison['current_missing_old']=[dict(ad_id=aid,**checked.get(aid,{'reason':'publication_route_unavailable'}))
-            for aid in sorted(old_ids-new)]
+        comparison.update(current_candidates=len(baseline_current),common_candidates=len(baseline_current&old_ids),
+            new_candidate_count=len(baseline_current-old_ids),fresh_window_candidates=len(new),
+            fresh_window_start=start,fresh_window_end=end)
+        comparison['current_missing_old']=[dict(ad_id=aid,**baseline_checked.get(aid,
+            checked.get(aid,{'reason':'publication_route_unavailable'}))) for aid in sorted(old_ids-baseline_current)]
         comparison['timings']=timing
         runner.runtime.artifact(run_id,'comparison.json',comparison)
         manifest['comparison']=comparison

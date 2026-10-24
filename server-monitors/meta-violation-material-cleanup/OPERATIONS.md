@@ -35,9 +35,10 @@ Python 要求 3.9 或以上。service 用 `/usr/bin/env python3`，明确 PATH �
 及 usage header 数字统计；某类 header 的 observation 为 0 表示未取得该统计，不能视为零占用。
 生产使用 `scanner=material_indexed`：违规素材 → `ads_source` 别名 → 发布表的
 `ad_id` / `creative_id` → 指定 ID 的 Meta GET，每次至多 50 个 ID。
-标量原始素材和 source ID 使用已有索引；CSV、JSON、空白编码单独完整补查，按产品
-和主键分段，避免稀疏条件导致单条查询超时。每段最多 200,000 个索引 ID 的聚合只用于
-确定边界，段内结果仍每页最多 2,000 行，不能把边界当成全量截断。
+标量原始素材和 source ID 使用已有索引；CSV、JSON、空白编码沿这两个字段的索引
+分别补查。相邻字符串范围覆盖所有非 NULL 值，利用已验证的 Index Condition Pushdown
+先在二级索引中筛选，再读取匹配行的产品和完整字段，避免读取数千万条产品历史宽行。
+每页最多 2,000 行，保留完整 keyset 分页；范围边界不是数量截断。
 发布记录不限 30 天；完整读取每个目标 Ad 的当前关联和凭据，再核对 Meta 返回的
 当前 Creative。SQL 会话在 Meta 读取前释放。常规扫描不再遍历全部账户库存。
 `mysql_compress=true` 默认请求 MySQL 协议压缩，已在 FIFO 只读端点以完整行哈希验证等价；
@@ -148,6 +149,11 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
    违规证据进行完整只读对照。检查 `comparison-retrieval.json` 的无法解释漏选为 0，
    再检查 `comparison.json` 的当前候选差异及耗时。对照配置和清单禁止转真实执行。
    随后去掉 comparison 配置完成新的当前 30 天预演，核对 hash/范围/错误分类。
+   也可用 `comparison_reference_run_id` 一次完成两份结果：反查素材取新旧证据并集，
+   用旧冻结阈值单独生成对照；真实执行清单只使用本轮新窗口证据。验收要求对照无
+   无法解释的漏选，且产品范围相同；对照状态差异单独报告。正式配置移除 reference
+   参数，后续定时无需持续对照旧清单。`comparison_baseline_run_id` 仍是禁止执行的
+   纯旧窗口对照模式。
 5. 按已授权范围开启 `live_enabled` 并执行新鲜预演的完整清单。检查全局 Ad→Creative
    →共享补删顺序、共享 claim、DELETE 接受与精确 DELETED 回读、飞书开始/结束回执。
    启用 timer，读回 `ActiveState/UnitFileState/NEXT` 和当前 release。

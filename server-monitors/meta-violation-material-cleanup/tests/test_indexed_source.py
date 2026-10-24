@@ -61,8 +61,8 @@ class IndexedSourceTests(unittest.TestCase):
             material_identity([r],mapping,{'1479':'1479'},r['creative_id']))}
         self.assertEqual(expected,{str(n) for n in range(1,11)})
         self.assertTrue(expected<=found,expected-found)
-        self.assertEqual(metrics['publication_rows_examined_for_composites'],len(rows))
-        self.assertTrue(any('AS bounded_ids' in q for q in source.queries))
+        self.assertEqual(metrics['composite_ranges'],30)
+        self.assertFalse(any('FORCE INDEX(idx_product)' in q for q in source.queries))
         source.db.close()
 
 
