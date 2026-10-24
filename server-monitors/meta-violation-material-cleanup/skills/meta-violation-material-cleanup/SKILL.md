@@ -141,6 +141,13 @@ evidence for executable candidates. Require zero unexplained retrieval misses
 and identical product scope, and inspect current-state differences. Remove the
 reference parameter from production config after acceptance. Read back actual
 service/ledger and timer state.
+Multi-ID GET errors 100/803 are bisected to isolate invalid IDs; token, transport
+and rate-limit errors must not fan out. A completed older preview can use the
+read-only `verify_preview_batches.py` within its original one-hour deadline.
+The derived preview preserves the original window and frozen_at, records the
+source manifest hash, and freshly checks publication context for recovered
+potential candidates. It never edits the original manifest or renews expiry.
+Inspect its comparison and remaining read errors before live conversion.
 A preview lasting ten
 hours or more blocks activation of the eleven-hour scheduled service. See
 `../../OPERATIONS.md` for the exact release/SHA invocation and acceptance files.

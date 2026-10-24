@@ -119,6 +119,15 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/m
 `reconcile` 只做 Meta GET；`notify` 只恢复该轮通知，不重新扫描或触发删除。
 通知请求结果不明确时先核对发送记录/回执；不得用重新 `run` 来补播报。
 
+Meta multi-ID GET 遇到一个非法对象可能返回整批 `100/803`。新版会二分拆查这种明确
+对象错误，不放大 Token、限流或网络失败。旧版已完成预演可在原 3600 秒期限内，用
+`verify_preview_batches.py --config READ_ONLY_CONFIG --source-run-id SOURCE_RUN --run-id VERIFIED_RUN`
+进行 GET-only 补核；可加 `--wait` 等待源预演结束。它只处理受影响的读取结果，并对
+恢复可读且当前状态可能合格的 Ad 重新查询完整发布关系和凭据。派生清单保留原窗口、
+原 `frozen_at` 和原 manifest hash，不修改原清单，也不续期。超过期限仍必须完整重扫。
+补核后检查 `batch-verification.json`、剩余不可读对象及更新后的 `comparison.json`；
+正式执行使用新的 verified run ID。该程序不打开删除账本、不发送通知、不修改定时器。
+
 同一运行 ID 的第 1 次 live 使用通知 phase `start` / `end`；第 2 次使用
 `start-2` / `end-2`，后续依此类推。`status --run-id` 返回 `execution_attempt`
 和当前这次的通知 phase。`notify --phase end` **不会自动选择最近一次**；例如补第 2 次
