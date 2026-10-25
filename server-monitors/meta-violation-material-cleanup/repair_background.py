@@ -61,6 +61,13 @@ def may_start(run,service):
     return run['status'] in ('completed','partial') and service['ActiveState']=='inactive' and service['MainPID']=='0'
 
 
+def ledger_age(value):
+    # Store uses RFC3339 Z; Python 3.9 fromisoformat requires +00:00.
+    stamp=datetime.fromisoformat(value.replace('Z','+00:00'))
+    if stamp.tzinfo is None:raise ValueError('timezone_required')
+    return time.time()-stamp.timestamp()
+
+
 class ReadOnlySession(GovernedSession):
     def request(self,method,*args,**kwargs):
         if method!='GET':raise RuntimeError('read_only_reconciliation_transport')
@@ -161,7 +168,7 @@ class Repair:
                     self.mark(target,'already_resolved');processed+=1;continue
                 if obj['status']=='in_progress':continue
                 # Give the main DELETE readback time to settle; never race its claim.
-                try:age=time.time()-datetime.fromisoformat(obj['updated_at']).timestamp()
+                try:age=ledger_age(obj['updated_at'])
                 except ValueError:raise RuntimeError('invalid_ledger_timestamp')
                 if age<120 and not final:continue
                 payload=json.loads(obj['payload']);result=json.loads(obj['result'])
@@ -190,6 +197,7 @@ class Repair:
         if STOP:raise InterruptedError('stop_requested')
 
     def execute(self):
+        self.checkpoint(stage='following_new_run' if self.state.get('followup') else 'reconciling_live')
         self.discover()
         if 'start' not in self.state['notices']:
             self.notify('start','1487235 已纳入共享引用补删。当前主任务继续运行，回查任务仅 GET；'
