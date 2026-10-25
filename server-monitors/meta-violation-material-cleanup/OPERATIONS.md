@@ -305,3 +305,27 @@ Execution waves start at at most 4 times the current request concurrency and
 expand to the configured batch maximum (64) as observed headroom permits.
 Request scheduling waits for the exact next rate-budget deadline, rather than
 using a coarse polling interval that unintentionally caps throughput.
+# 2026-10-25: dependency 1487235 and live reconciliation
+
+Both definite dependency rejections `1487235` and `3858800` enter shared-reference
+remediation. A saved rejection skips the redundant first Creative DELETE. All
+shared Ads finish before any Creative retry. Global receipts suppress every
+subsequent DELETE; unknown/in-progress fences prevent dependency cleanup.
+
+`repair_background.py` is a one-shot CPU operation for `scale32-20261024-v2`.
+It leaves the live process running and uses GET-only batches (50 objects, serial,
+at most 2 request starts/second, with Meta usage/cooldown feedback). It snapshots
+all unknown Ads/Creatives and the 9,514 old pending Ads absent from the new job.
+Only exact ID/account/status=DELETED proof atomically updates the shared ledger
+and global receipt. In-progress or changed rows are untouched. Source credentials
+are read through the FIFO SQL gate, and that session closes before Graph calls.
+
+The operation's durable state and target ledger live under
+`/mnt/data-disk/codex/tasks/meta-cleanup-indexed-20261024/repair1487235/`.
+After natural completion and service exit it starts the normal service once,
+using the configured 3-day window plus the complete durable recovery queue from
+the 30-day run. It never modifies an expired manifest or its frozen timestamp.
+An uncertain service start is not replayed. Private start, first-pass, completion,
+and exception notices use the existing fixed recipient and durable message UUIDs.
+The original run's in-memory counters remain historical; the repair target ledger
+and shared object ledger are the authoritative reconciled counts.

@@ -145,5 +145,53 @@ class PhasedExecutionTests(unittest.TestCase):
         value=ad();value['effective_status']='PENDING_REVIEW'
         self.assertEqual(shared_state(value),'state_not_eligible')
 
+    def test_1487235_uses_same_shared_ad_before_creative_order(self):
+        runner,source,graph,runtime,m=self.prepare()
+        graph.ads['12']=ad('12','20',status='ACTIVE')
+        calls=[]
+        def on_delete(kind,identifier):
+            if kind=='creative':
+                calls.append(identifier)
+                graph.results[(kind,identifier)]=({'status':'failed','request_sent':True,
+                    'response':{'code':200,'error_subcode':1487235}} if len(calls)==1 else
+                    {'status':'api_accepted','request_sent':True})
+        graph.on_delete=on_delete
+        runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20'),
+                                            ('delete','ad','12'),('delete','creative','20')])
+
+    def test_known_dependency_backlog_skips_creative_probe_until_shared_ads_finish(self):
+        runner,source,graph,runtime,m=self.prepare([ad(),ad('11','21')])
+        graph.ads['12']=ad('12','20');graph.ads['13']=ad('13','21')
+        m['recovery_creatives']=[{'basis':c,'origin_run_id':'old','origin_manifest_sha256':'proof',
+            'evidence':m['evidence'],'last_result':{'status':'failed','response':{'error_subcode':1487235}}}
+            for c in m['candidates']]
+        m['sha256']=digest({k:v for k,v in m.items() if k!='sha256'})
+        runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','11'),
+            ('delete','ad','12'),('delete','ad','13'),('delete','creative','20'),('delete','creative','21')])
+
+    def test_stale_dependency_backlog_cannot_override_global_unknown(self):
+        runner,source,graph,runtime,m=self.prepare()
+        graph.results[('creative','20')]={'status':'unknown','request_sent':True}
+        graph.verifications[('creative','20')]={'status':'unknown'}
+        runner.execute('test-run',m)
+        runtime.queue['20']['last_result']={'status':'failed','response':{'error_subcode':1487235}}
+        second=self.next_manifest(m,runtime)
+        graph.list_ads=lambda *args:self.fail('Global unknown must prevent shared Ad deletion')
+        runner.execute('second-run',second)
+        self.assertEqual(self.deletes(graph).count(('delete','creative','20')),1)
+
+    def test_global_success_prevents_shared_deletion_from_stale_backlog(self):
+        runner,source,graph,runtime,m=self.prepare()
+        entry={'basis':copy.deepcopy(m['candidates'][0]),'origin_run_id':'test-run',
+               'origin_manifest_sha256':m['sha256'],'evidence':copy.deepcopy(m['evidence']),
+               'last_result':{'status':'failed','response':{'error_subcode':1487235}}}
+        runner.execute('test-run',m);runtime.queue['20']=entry
+        second=self.next_manifest(m,runtime)
+        graph.list_ads=lambda *args:self.fail('Already deleted Creative must not delete shared Ads')
+        runner.execute('second-run',second)
+        self.assertEqual(self.deletes(graph).count(('delete','creative','20')),1)
+
 
 if __name__=='__main__':unittest.main()

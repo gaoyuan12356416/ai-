@@ -30,7 +30,17 @@ def shared_state(ad):
 
 
 def dependency_failure(result):
-    return result.get('status')=='failed' and result.get('response',{}).get('error_subcode')==3858800
+    return (result.get('status')=='failed' and
+            result.get('response',{}).get('error_subcode') in (3858800,1487235))
+
+
+def global_creative_state(store, creative_id):
+    with store._transaction(False) as conn:
+        key='creative:'+creative_id
+        if conn.execute('SELECT 1 FROM fb_asset_delete_v2_receipts WHERE object_key=?',(key,)).fetchone():
+            return 'deleted'
+        lock=conn.execute('SELECT status FROM fb_asset_delete_v2_object_locks WHERE object_key=?',(key,)).fetchone()
+        return lock['status'] if lock else None
 
 
 def object_state(store,job,key):
@@ -103,10 +113,13 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                          if mid in manifest['evidence']['materials']}}}
     for cid,items in groups.items():
         first=items[0]
+        previous=entries.get(cid,{})
         if any(c['account_id']!=first['account_id'] for c in items):raise ValueError('creative_account_conflict')
         entries[cid]={'basis':first,'origin_run_id':run_id,'origin_manifest_sha256':manifest['sha256'],
                      'evidence':{'materials':{mid:manifest['evidence']['materials'][mid]
                          for mid in first['material_ids'] if mid in manifest['evidence']['materials']}}}
+        if dependency_failure(previous.get('last_result',{})):
+            entries[cid]['last_result']=deepcopy(previous['last_result'])
     for cid,entry in entries.items():
         basis=entry['basis']
         for k in ('ad_id','creative_id','account_id','user_id'):numeric_id(basis[k])
@@ -195,9 +208,32 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                     result=locked(delete_ad)
                     if result is not None:record('ad',candidate['ad_id'],result,'ads')
         runner.runtime.update(run_id,stage='deleting_creatives')
+        normal_creatives=[]
+        for cid in sorted(chosen):
+            state=object_state(runner.store,job_id,'creative:'+cid)
+            global_state=global_creative_state(runner.store,cid)
+            if state['status'] in ('deleted','already_deleted') or global_state=='deleted':
+                if state['status'] not in ('deleted','already_deleted'):
+                    settled=runner.store.claim_object(job_id,'creative:'+cid,shared_run)
+                    if settled.get('claimed') or settled['status'] not in ('deleted','already_deleted'):
+                        raise RuntimeError('creative_receipt_changed')
+                record('creative',cid,{'status':'already_deleted','request_sent':False},'creatives')
+                runner.runtime.complete_creative(cid);continue
+            if state['status']=='unknown' or global_state in ('unknown','in_progress'):
+                counts['creative_unknown']+=1
+                deferred[cid]={'status':'deferred','reason':'creative_result_unknown','request_sent':False}
+                continue
+            prior=state.get('result') or entries[cid].get('last_result',{})
+            if dependency_failure(prior):
+                entries[cid]['last_result']=deepcopy(prior)
+                failures[cid]=entries[cid]
+                runner.runtime.event(run_id,'known_shared_dependency',{'creative_id':cid,
+                    'error_subcode':prior['response']['error_subcode']})
+                continue
+            normal_creatives.append(cid)
         if parallel:
             pending=[]
-            for cid in sorted(chosen):
+            for cid in normal_creatives:
                 state=old['creative:'+cid]
                 if state['status'] in ('deleted','already_deleted'):
                     runner.runtime.complete_creative(cid);continue
@@ -214,7 +250,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                     if dependency_failure(result):failures[cid]=entry
                     else:deferred[cid]=result
         else:
-            for cid in sorted(chosen):
+            for cid in normal_creatives:
                 runner.check_stop();entry=entries[cid];basis=entry['basis']
                 state=object_state(runner.store,job_id,'creative:'+cid)
                 if state['status'] in ('deleted','already_deleted'):
