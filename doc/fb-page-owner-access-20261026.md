@@ -64,3 +64,32 @@ python3 scripts/deploy_fb_page_owner_access.py --rollback /mnt/data-disk/fb-vide
 
 回退会缩小权限，因此存在待执行/未决任务或启用池时拒绝执行，并在排空后再次检查。
 先完成相应业务对账和计划处理，保留现库、历史任务和短链；不能为回退清空这些事实。
+
+## 已上线验收
+
+2026-10-26 11:54 北京时间，CPU `43.166.187.96` 已从 GitHub 获取并部署
+`4c0a31ac8b5c72afa3fc3e68b1977896fc09ca1a`；权限实现提交 `4053e13`。
+release 为 `/mnt/data-disk/fb-video-publish/releases/4c0a31a`。
+两处 runtime 的 source/broker 共四个文件 SHA256 与 release 一致。
+主 API PID 从 962891 变为 1007623，FB sidecar 从 1181097 变为 1007668；
+二者均 active，保存的所有 timer/worker active/enabled 状态均恢复。
+
+11:54:44 起的只读验收通过：主 API 内部身份接口重新核验目标普通账号的有效状态、
+模块权限、Page 管理入口与唯一负责人映射，确认为非管理员；据此调用线上候选接口。
+完整目标 ID 和 Page 名称各返回 HTTP 200、精确1条，耗时2.054/2.262秒；
+空搜索返回36条，2.594秒；管理员对照仍返回目标1条。没有登录切换、创建配置或测试发布。
+
+与排空后的在线备份对比，126条任务的冻结字段、25个批次完整保持，126条短链记录
+保持，126个既有短链文件 SHA256 全部与账本一致；SQLite quick_check=ok。
+原个人授权、原池负责人、管理员和未关联用户的真实只读数据对照已在上线前通过。
+CPU 来源/权限相关49项测试通过。独立效果采集四份源码哈希核验通过。
+
+证据：`/mnt/data-disk/fb-video-publish/evidence/page-owner-candidate-20261026.json`
+和 `/mnt/data-disk/fb-video-publish/evidence/page-owner-deployed-20261026.json`。
+备份清单：`/mnt/data-disk/fb-video-publish/backups/page-owner-20261026T035413Z-4c0a31ac/manifest.json`。
+
+准确回滚命令（先满足上文的业务对账和启用池处理条件，保留现库与短链）：
+
+```bash
+python3 /mnt/data-disk/fb-video-publish/releases/4c0a31a/scripts/deploy_fb_page_owner_access.py --rollback /mnt/data-disk/fb-video-publish/backups/page-owner-20261026T035413Z-4c0a31ac/manifest.json
+```
