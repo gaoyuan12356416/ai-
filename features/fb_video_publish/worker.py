@@ -118,9 +118,9 @@ class Worker:
             if self.sources is not None:
                 manual = task.get("source_kind") == "manual" and "pool" not in snap
                 self.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
-                # Only operator-created tasks waive the blacklist. Pool tasks
-                # keep their admission policy when this shared worker executes.
-                enforce_blacklist = task.get("source_kind") != "manual" or "pool" in snap
+                # Manual and Page-pool tasks both waive the blacklist. Keep
+                # pool release/language/metadata checks on the strict path.
+                enforce_blacklist = task.get("source_kind") not in {"manual", "pool"}
                 fresh = self.sources.get_materials([task["material_id"]], need_desc=False,
                                                    enforce_blacklist=enforce_blacklist, manual=manual)[task["material_id"]]
                 if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
