@@ -270,7 +270,7 @@ class SourceAdapter:
             JOIN `{reader.schema}`.ads_facebook_page_ins p ON p.page_id=i.page_id
             WHERE g.id IN ({slots(self.groups)}) AND g.is_delete=0
               AND i.deleted_at=0 AND p.status=0{restriction}
-            ORDER BY i.page_id,g.id LIMIT {QUERY_LIMIT + 1}""",
+            ORDER BY page_id,group_id LIMIT {QUERY_LIMIT + 1}""",
             [*self.groups, *([identifier(page_id)] if page_id else [])])
         pages = {}
         for row in rows:
