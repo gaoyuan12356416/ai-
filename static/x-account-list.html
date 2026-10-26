@@ -174,7 +174,7 @@
         ["fr","Français"], ["de","Deutsch"], ["ru","Русский"],
         ["ja","日本語"], ["ko","한국어"], ["ar","العربية"],
         ["th","ไทย"], ["id","Bahasa Indonesia"], ["vi","Tiếng Việt"],
-        ["zh","中文"], ["tr","Türkçe"], ["it","Italiano"],
+        ["zh-TW","繁体中文"], ["tr","Türkçe"], ["it","Italiano"],
         ["ms","Bahasa Melayu"], ["fil","Filipino"],
       ];
       const statusMeta = {
@@ -200,8 +200,11 @@
       const dramaLanguageOptions = value => {
         const current = canonicalLanguage(value);
         const options = dramaLanguages.slice();
-        if (!options.some(([code]) => code === current)) options.unshift([current, current]);
-        return options.map(([code,label]) => `<option value="${escapeHtml(code)}" ${code === current ? "selected" : ""}>${escapeHtml(label)} (${escapeHtml(code)})</option>`).join("");
+        if (!options.some(([code]) => canonicalLanguage(code) === current)) options.unshift([current, current]);
+        return options.map(([code,label]) => {
+          const normalizedCode = canonicalLanguage(code);
+          return `<option value="${escapeHtml(normalizedCode)}" ${normalizedCode === current ? "selected" : ""}>${escapeHtml(label)} (${escapeHtml(code)})</option>`;
+        }).join("");
       };
       const formatTime = value => {
         if (!value) return "—";
