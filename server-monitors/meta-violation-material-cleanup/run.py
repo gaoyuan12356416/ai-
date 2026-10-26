@@ -287,8 +287,12 @@ def scan_or_run(args, config, runtime, stop):
         status, error = "failed", type(exc).__name__
         # Controlled internal error labels are useful without logging SQL,
         # database credentials, Graph bodies or arbitrary exception messages.
-        label=str(exc)
-        if re.fullmatch(r'[a-z][a-z0-9_]{0,95}',label):
+        # StoreError messages can contain SQLite/SQL details, whereas its code
+        # is a controlled label. Never persist the message when a code exists.
+        label=getattr(exc,'code',None)
+        if label is None:
+            label=str(exc)
+        if isinstance(label,str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}',label):
             runtime.event(run_id,'failure',{'type':error,'code':label})
     finally:
         try:

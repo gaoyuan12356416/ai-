@@ -233,6 +233,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.events, ["start", "scan", "execute", "end"])
         self.assertEqual(result["status"], "completed")
 
+    def test_execution_failure_records_safe_store_code_without_message(self):
+        error = cli.StoreError('SQL synthetic-token-never-print /private/.env', 'ledger_error')
+        with patch.object(cli.Runner, 'execute', side_effect=error):
+            code, result = self.invoke('run', '--run-id', 'store-error')
+        self.assertEqual(code, 1)
+        self.assertEqual(result['error_type'], 'StoreError')
+        self.assertEqual(self.runtime.logged, [('store-error', 'failure',
+            {'type': 'StoreError', 'code': 'ledger_error'})])
+        self.assertNotIn('synthetic-token', json.dumps(self.runtime.rows) + json.dumps(self.runtime.logged))
+
+    def test_execution_failure_rejects_unsafe_or_nonstring_code_without_fallback(self):
+        for unsafe_code in ('SQL synthetic-token-never-print', 'x' * 97, {'secret': 'synthetic-token-never-print'}):
+            with self.subTest(code=unsafe_code):
+                error = cli.StoreError('safe_message_must_not_replace_invalid_code')
+                error.code = unsafe_code
+                run_id = 'bad-code-' + str(len(self.runtime.rows))
+                with patch.object(cli.Runner, 'execute', side_effect=error):
+                    code, result = self.invoke('run', '--run-id', run_id)
+                self.assertEqual(code, 1)
+                self.assertEqual(result['error_type'], 'StoreError')
+                self.assertEqual(self.runtime.logged, [])
+                self.assertNotIn('synthetic-token', json.dumps(self.runtime.rows))
+
+    def test_execution_failure_without_code_keeps_safe_message_label(self):
+        with patch.object(cli.Runner, 'execute', side_effect=ValueError('controlled_failure')):
+            code, result = self.invoke('run', '--run-id', 'safe-label')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.runtime.logged, [('safe-label', 'failure',
+            {'type': 'ValueError', 'code': 'controlled_failure'})])
+
     def test_disabled_live_never_opens_source_or_notifies(self):
         self.config["live_enabled"] = False
         code, result = self.invoke("run", "--run-id", "r1")
