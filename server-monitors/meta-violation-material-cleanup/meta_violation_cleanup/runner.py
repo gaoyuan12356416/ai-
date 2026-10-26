@@ -50,6 +50,7 @@ class Runner:
         self.config=config;self.source=source;self.graph=graph;self.runtime=runtime
         self.store=shared_store;self.notifier=notifier;self.stop=stop
         self.execution_graph=graph
+        self.skip_policy=None
 
     def check_stop(self):
         if self.stop():raise InterruptedError('stop_requested')
@@ -303,13 +304,25 @@ class Runner:
         key=kind+':'+identifier
         claim=self.store.claim_object(job_id,key,shared_run)
         if not claim.get('claimed'):
-            return {'status':claim['status'],'reason':claim.get('reason','existing_receipt_or_fence'),
-                'request_sent':False,'prior_result':claim.get('result',{})}
+            prior=claim.get('result',{})
+            result={'status':claim['status'],'reason':claim.get('reason','existing_receipt_or_fence'),
+                'request_sent':False,'prior_result':prior}
+            if claim['status']=='blocked' and prior.get('policy_skip_reason'):
+                result.update(policy_skip_reason=prior['policy_skip_reason'],policy_skip_source=prior.get('policy_skip_source'))
+            return result
         uid=numeric_id(candidate['user_id']);account=numeric_id(candidate['account_id'])
         context={'credential_kind':'user','credential_user_id':uid,
             'credential_relation':('shared_creative_account' if candidate.get('shared_dependency') else 'frozen_publish_queue')}
         self.store.record_object_credential(job_id,key,shared_run,context)
+        policy=self.skip_policy
+        source={'job_id':job_id,'run_id':shared_run,'attempt_id':claim['attempt_id'],'object_key':key}
+        skipped=policy.result(kind,candidate) if policy else None
+        if skipped is not None:
+            result=dict(skipped,**context,account_id=account)
+            self.store.finish_object(job_id,key,shared_run,'blocked',result)
+            return result
         result=None;request_started=False
+        original_http=None
         try:
             self.check_stop()
             # This write is a real durable health check immediately before the
@@ -318,12 +331,16 @@ class Runner:
             self.check_stop()
             request_started=True
             http=getattr(self.execution_graph,'http',None)
+            if policy and isinstance(self.execution_graph,GraphClient) and not hasattr(http,'write_check'):
+                from .skip_policy import RequestBoundarySession
+                original_http=http;http=RequestBoundarySession(http);self.execution_graph.http=http
             if hasattr(http,'write_check'):
                 from .throttle import RequestNotSent
                 http.account=account
                 checked_at=getattr(self,'serial_context_checked_at',time.monotonic()) if kind=='creative' else time.monotonic()
                 deadline=checked_at+30
                 def write_check():
+                    if policy:policy.check(kind,candidate)
                     if self.stop():raise RequestNotSent('cancelled_before_request')
                     if time.monotonic()>deadline:raise RequestNotSent('execution_context_expired')
                     try:
@@ -335,6 +352,7 @@ class Runner:
             else:
                 result=self.execution_graph.delete(kind,identifier,uid,account)
             result=dict(result,**context,account_id=account)
+            if policy:result=policy.outcome(kind,candidate,result,source)
             status=result['status']
             result['delete_status']=status
             result['api_accepted']=status=='api_accepted'
@@ -345,7 +363,7 @@ class Runner:
                     result.update(status='deleted_verified',confirmed_deleted=True)
                 else:
                     result['status']='unknown'
-            ledger_status='deleted' if result['status']=='deleted_verified' else ('failed' if result['status']=='failed' else 'unknown')
+            ledger_status='deleted' if result['status']=='deleted_verified' else (result['status'] if result['status'] in ('failed','blocked') else 'unknown')
             self.store.finish_object(job_id,key,shared_run,ledger_status,result)
             return result
         except BaseException as exc:
@@ -363,6 +381,8 @@ class Runner:
             self.store.finish_object(job_id,key,shared_run,'unknown',unknown)
             if isinstance(exc,(KeyboardInterrupt,SystemExit,InterruptedError)):raise
             return unknown
+        finally:
+            if original_http is not None:self.execution_graph.http=original_http
 
     def dependency_guard(self,candidate,decision):
         """Recheck identity and pause eligibility after our Creative mutation.

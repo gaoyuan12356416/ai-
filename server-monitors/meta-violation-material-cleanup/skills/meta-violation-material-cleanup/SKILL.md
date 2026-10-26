@@ -51,9 +51,24 @@ GitHub `gaoyuan12356416/ai-`, directory
   after the complete shared-Ad phase has finished.
   Currently violating/review-pending shared Ads stay in a durable queue and must
   be freshly checked next run. Never replay an unknown DELETE.
-- For a confirmed disabled account, attempt deletion of an exact, attributable
-  Creative even when Ads cannot be operated. Permission/read errors alone do not
-  prove account disability or deletion; retain the actual result for recovery.
+- The operator's 2026-10-26 instruction supersedes disabled-account Creative
+  probing once a definite `200/2490592` rejection exists: skip further Ad/Creative
+  writes on that account, including probes. Also skip content unavailable
+  rejections `100/2446289`. Account status 2 alone, without the exact rejection,
+  does not establish this skip and retains the existing qualified first attempt.
+  Generic permission/read errors or subcodes alone do not prove either reason.
+  Preserve each original request and response.
+  First definite rejections keep `failed` and true `request_sent`; attach
+  `policy_skip_reason=content_unavailable` or `account_not_writable`. Cached skips
+  use `blocked` and `request_sent=false`, with source evidence retained separately.
+  Never classify unknowns from nested historical errors, erase backlog/fences, or
+  count a skip as successful deletion. Content skips bind exact Ad/account/Creative;
+  externally changed Creative bindings require a complete fresh preflight, never
+  automatic Creative replacement or deletion of old skip evidence. A changed
+  account-status field does not automatically lift a definite account skip.
+  Shared-reference remediation remains enabled for definite `1487235`/`3858800`
+  rejections, using freshly eligible references and the all-Ads-before-retry
+  barrier. Keep failures, unknowns and pending references distinct.
   Do not delete Videos, images, Campaigns, AdSets, library records or source rows.
 
 ## Runtime and inspection
@@ -204,11 +219,18 @@ Ads added during remediation. Never count result_counts events as objects;
 repeated failures followed by success contribute only their final outcome.
 Use mutually exclusive categories: exact ID/account DELETED proof, API accepted
 awaiting verification, previous success receipt, definite platform failure,
-provably unsent/skipped, unknown, and pending. A ledger deleted label or a
+policy skip, provably unsent/skipped, unknown, and pending. A ledger deleted label or a
 success flag alone is not exact verification. A previous_task_deleted receipt
-must stay historical even when its nested proof is verified. Unsent policy
-changes are skipped; pending/blocked objects do not establish a failed DELETE.
-Rank only final platform failures. For preview, missing job or unreadable/invalid
+must stay historical even when its nested proof is verified. Qualification/context
+changes with no request stay unsent/skipped. The two operator-approved skip causes
+get one brief count line and never enter the top failure causes. Explicit markers
+on failed/blocked results, or historical final definite exact-pair rejections with
+request_sent=true, establish a policy skip. Preserve the actual request truth.
+Receipts, exact deletion, API acceptance and unknown status take precedence over
+skip markers; do not traverse historical/nested errors. Other pending/blocked
+objects do not establish a failed DELETE. Use the final ledger for remaining work,
+not the older deferred count. Rank only final platform failures.
+For preview, missing job or unreadable/invalid
 ledger, explicitly state that final execution statistics are unavailable; never
 substitute zeros or event counts. Reporting failures must not break execution.
 
@@ -251,6 +273,11 @@ deploy an immutable release, verify its hashes and run output. Restart only this
 job when needed. Roll back code/config and preserve current ledgers and run
 artifacts; never restore an old SQLite backup over deletion progress or restart
 unrelated publishers.
+For the 2026-10-26 policy adjustment, gracefully stop only this service and drain
+in-flight requests before switching the verified release, then start a complete
+fresh scan. Verify owner exit, claims, receipts, unknown fences and complete
+backlog coverage across the handoff. Never renew an old manifest's timestamp/hash,
+overwrite ledgers, or rewrite/resend historical notices during deployment.
 
 Execution waves start at at most 4 times the current request concurrency and
 expand to the configured batch maximum (64) as observed headroom permits.

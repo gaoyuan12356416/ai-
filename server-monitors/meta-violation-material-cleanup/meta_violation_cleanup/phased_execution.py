@@ -12,6 +12,7 @@ from .dependency_store import append_shared_ad
 from .graph import GraphClient, GraphError
 from .policy import material_identity, evaluate_ad, _feedback_empty
 from .runtime import digest, legacy_delete_lock, now
+from .skip_policy import SkipPolicy
 
 
 SUCCESS={'deleted_verified','deleted','already_deleted'}
@@ -97,6 +98,7 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
         raise ValueError('max_ads_must_be_positive')
     if (runner.runtime.notice(run_id,start_phase) or {}).get('status')!='sent':
         raise RuntimeError('start_notification_not_confirmed')
+    runner.skip_policy=SkipPolicy.from_store(runner.store)
     groups=defaultdict(list);entries={};objects=[];seen=set()
     for candidate in manifest['candidates']:
         for k in ('ad_id','creative_id','account_id','user_id'):numeric_id(candidate[k])
@@ -190,6 +192,8 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                 for candidate in items:
                     if old['ad:'+candidate['ad_id']]['status']!='pending':continue
                     def delete_ad(lease):
+                        if runner.skip_policy.result('ad',candidate) is not None:
+                            return runner.attempt(job_id,shared_run,'ad',candidate['ad_id'],candidate,run_id,lease)
                         try:decision=runner.preflight(candidate,manifest)
                         except Exception as exc:
                             if ledger_error(exc) or isinstance(exc,InterruptedError):raise
@@ -263,6 +267,8 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
                     for c in groups.get(cid,[]):
                         if object_state(runner.store,job_id,'ad:'+c['ad_id'])['status'] in ('unknown','in_progress'):
                             return {'status':'deferred','request_sent':False,'reason':'ad_result_unknown'}
+                    if runner.skip_policy.result('creative',basis) is not None:
+                        return runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease)
                     try:eligible,reason=basis_valid(runner,basis,entry['evidence'],entry.get('disabled_account',False))
                     except Exception as exc:
                         if ledger_error(exc) or isinstance(exc,InterruptedError):raise
@@ -283,6 +289,12 @@ def execute(runner,run_id,manifest,max_ads=None,start_phase='start'):
         retry_entries={}
         for cid,entry in failures.items():
             runner.check_stop();basis=entry['basis'];account=basis['account_id'];uid=basis['user_id']
+            if runner.skip_policy.result('creative',basis) is not None:
+                result=locked(lambda lease:runner.attempt(job_id,shared_run,'creative',cid,basis,run_id,lease))
+                record('creative',cid,result,'shared_account_skip')
+                entry.update(last_result=result,last_checked_at=now())
+                runner.runtime.queue_creative(entry);deferred[cid]=result
+                continue
             if hasattr(getattr(runner.execution_graph,'http',None),'account'):runner.execution_graph.http.account=account
             key=(account,uid);blocked=[]
             try:

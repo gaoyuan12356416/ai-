@@ -7,15 +7,19 @@ from .runtime import CST, now
 
 CATEGORIES = (
     ('verified', '已确认删除'), ('accepted', '已接受待核验'),
-    ('receipt', '历史已删回执'), ('failed', '平台失败'),
+    ('receipt', '历史已删回执'), ('failed', '平台失败'), ('policy_skip', '按策略跳过'),
     ('skipped', '未提交跳过'), ('unknown', '未知'), ('pending', '待处理'),
 )
 FAILURES = {
-    (100, 2446289): ('内容失效/无权限', '先核查内容可见性；另评估Creative修复'),
-    (200, 2490592): ('账户不可写入', '先处理账户限制，再评估重试'),
-    (200, 1487235): ('共享引用阻塞', '复核引用广告；仍违规的保留待办'),
-    (100, 3858800): ('共享引用阻塞', '复核引用广告；仍违规的保留待办'),
+    (200, 1487235): ('共享引用阻塞', '先清理当前合格引用，再重试Creative'),
+    (100, 3858800): ('共享引用阻塞', '先清理当前合格引用，再重试Creative'),
 }
+POLICY_SKIPS = {
+    'content_unavailable': '帖子失效/无权限',
+    'account_not_writable': '账户不可写入',
+}
+POLICY_SKIP_ERRORS = {(100, 2446289): 'content_unavailable',
+                      (200, 2490592): 'account_not_writable'}
 
 
 def _date(value):
@@ -75,6 +79,12 @@ def classify(row):
         return 'receipt'
     if result.get('api_accepted') is True or result.get('delete_status') == 'api_accepted':
         return 'accepted'
+    if (status in ('unknown', 'in_progress') or result.get('status') == 'unknown'
+            or result.get('reason') == 'unknown_fence'):
+        return 'unknown'
+    if status in ('failed', 'blocked') and _policy_skip_reason(result, row.get('kind'),
+                                                            allow_rejection=status == 'failed'):
+        return 'policy_skip'
     if status in ('pending', 'blocked'):
         return 'pending'
     if status == 'failed' and result.get('request_sent') is False:
@@ -82,6 +92,24 @@ def classify(row):
     if status == 'failed' and result.get('request_sent') is True:
         return 'failed'
     return 'unknown'
+
+
+def _policy_skip_reason(result, kind, allow_rejection=True):
+    """Only current, explicit policy markers or definite exact-code rejections."""
+    reason = result.get('policy_skip_reason')
+    if (isinstance(reason, str) and reason in POLICY_SKIPS
+            and (reason != 'content_unavailable' or kind == 'ad')):
+        return reason
+    # Historical final rejections can be summarized under the current policy,
+    # without changing their saved result, notice body or request_sent truth.
+    response = result.get('response')
+    if allow_rejection and result.get('request_sent') is True and isinstance(response, dict):
+        code, subcode = response.get('code'), response.get('error_subcode')
+        if type(code) is int and type(subcode) is int:
+            reason = POLICY_SKIP_ERRORS.get((code, subcode))
+            if reason != 'content_unavailable' or kind == 'ad':
+                return reason
+    return None
 
 
 def _failure(result):
@@ -144,6 +172,11 @@ def _summary_lines(runner, run_id, run):
         total = sum(counts[kind].values())
         lines.append('%s（最终唯一%s）：' % (label, total) + '；'.join(
             '%s%s' % (title, counts[kind][key]) for key, title in CATEGORIES))
+    policy_skips = Counter(_policy_skip_reason(row['result'], row['kind']) for row in job['objects']
+                           if classify(row) == 'policy_skip')
+    if policy_skips:
+        lines.append('策略跳过：' + '；'.join('%s%s' % (label, policy_skips[reason])
+                     for reason, label in POLICY_SKIPS.items()) + '。')
     # Failure event retries are deliberately excluded: a later success removes
     # the object from this ranking, and multiple failures still count once.
     ranked = sorted(failures.items(), key=lambda item: (-item[1], item[0][0]))[:3]

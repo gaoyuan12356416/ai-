@@ -46,6 +46,7 @@ class ConcurrentExecutor:
         self.timings=defaultdict(float);self.completed=0;self.started=time.monotonic()
         self.safe_retries=defaultdict(int)
         self.confirmed_basis={}
+        self.claim_sources={}
         # Shared-reference writes use the same budget after the parallel phases.
         if isinstance(runner.execution_graph,GraphClient):
             runner.execution_graph.http=GovernedSession(runner.execution_graph.http,self.governor,self.stopped)
@@ -93,7 +94,9 @@ class ConcurrentExecutor:
 
     def write(self,kind,candidate,lease,checked_at,sql_context):
         identifier=candidate['ad_id'] if kind=='ad' else candidate['creative_id']
+        policy=getattr(self.runner,'skip_policy',None)
         def check():
+            if policy:policy.check(kind,candidate)
             if self.stopped():raise RequestNotSent('cancelled_before_request')
             if time.monotonic()-checked_at>self.ttl:raise RequestNotSent('execution_context_expired')
             try:
@@ -109,8 +112,11 @@ class ConcurrentExecutor:
             if kind=='ad' and not isinstance(graph,GraphClient):
                 decision=guard(graph.get_ad(identifier,candidate['user_id']))
                 if not decision['eligible']:return dict(context,status='failed',code='current_policy_changed',request_sent=False,decision=decision)
+            check()
             result=graph.delete(kind,identifier,candidate['user_id'],candidate['account_id'],**kwargs)
             result=dict(result,**context,delete_status=result['status'],api_accepted=result['status']=='api_accepted')
+            if policy:
+                result=policy.outcome(kind,candidate,result,self.claim_sources[(kind,identifier)])
             if result['status'] in ('api_accepted','unknown'):
                 # Stop prevents new DELETEs, but drain the readback of writes
                 # already sent. Keep this GET bounded even during a long cooldown.
@@ -126,7 +132,11 @@ class ConcurrentExecutor:
                 else:result['status']='unknown'
             return result
         except RequestNotSent as exc:
-            if result is None:return dict(context,status='failed',request_sent=False,code=exc.code,api_accepted=False)
+            if result is None:
+                result=dict(context,status='failed',request_sent=False,code=exc.code,api_accepted=False)
+                if policy:
+                    result=policy.outcome(kind,candidate,result,self.claim_sources[(kind,identifier)])
+                return result
             return dict(context,status='unknown',prior_result=result,api_accepted=result.get('api_accepted',False),requires_reconciliation=True)
         except BaseException as exc:
             return dict(context,status='unknown',error=safe_error(exc),prior_result=result,
@@ -137,16 +147,28 @@ class ConcurrentExecutor:
         self.runner.check_stop()
         claim=self.runner.store.claim_object(self.job,key,self.shared)
         if not claim.get('claimed'):
-            return {'status':claim['status'],'reason':claim.get('reason','existing_receipt_or_fence'),
-                'request_sent':False,'prior_result':claim.get('result',{})}
+            prior=claim.get('result',{})
+            result={'status':claim['status'],'reason':claim.get('reason','existing_receipt_or_fence'),
+                'request_sent':False,'prior_result':prior}
+            if claim['status']=='blocked' and prior.get('policy_skip_reason'):
+                result.update(policy_skip_reason=prior['policy_skip_reason'],policy_skip_source=prior.get('policy_skip_source'))
+            return result
         self.runner.store.record_object_credential(self.job,key,self.shared,{
             'credential_kind':'user','credential_user_id':candidate['user_id'],'credential_relation':'frozen_publish_queue'})
+        self.claim_sources[(kind,identifier)]={'job_id':self.job,'run_id':self.shared,
+            'attempt_id':claim['attempt_id'],'object_key':key}
+        skipped=self.runner.skip_policy.result(kind,candidate) if self.runner.skip_policy else None
+        if skipped is not None:
+            skipped=dict(skipped,credential_kind='user',credential_user_id=candidate['user_id'],
+                credential_relation='frozen_publish_queue',account_id=candidate['account_id'])
+            self.persist(kind,candidate,skipped)
+            return skipped
         self.runner.runtime.write_barrier(self.run_id)
         return None
 
     def persist(self,kind,candidate,result):
         identifier=candidate['ad_id'] if kind=='ad' else candidate['creative_id']
-        status='deleted' if result['status']=='deleted_verified' else 'failed' if result['status']=='failed' else 'unknown'
+        status='deleted' if result['status']=='deleted_verified' else result['status'] if result['status'] in ('failed','blocked') else 'unknown'
         self.runner.store.finish_object(self.job,kind+':'+identifier,self.shared,status,result)
 
     def phase(self,kind,items):
@@ -167,6 +189,8 @@ class ConcurrentExecutor:
                         if kind=='creative' and any(object_state(self.runner.store,self.job,'ad:'+a['ad_id'])['status']
                                 in ('unknown','in_progress') for a in self.groups.get(c['creative_id'],[])):
                             yield c,{'status':'deferred','request_sent':False,'reason':'ad_result_unknown'};continue
+                        if self.runner.skip_policy and self.runner.skip_policy.result(kind,c) is not None:
+                            yield c,self.claim(kind,c);continue
                         receipt=has_ad_receipt(self.runner.store,c['ad_id']) if kind=='creative' else None
                         future=self.pool.submit(self.preflight,kind,c,contexts[(c['ad_id'],c['creative_id'])],receipt)
                         pending[future]=('preflight',c)

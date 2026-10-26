@@ -75,14 +75,16 @@ class ReportTests(unittest.TestCase):
         self.store.objects = [row('10', 'deleted', verified('10')),
             row('11', 'unknown', {'api_accepted': True, 'verification': {'status': 'unknown'}}),
             row('12', 'already_deleted', {'reason': 'previous_task_deleted', 'proof': verified('12')}),
-            row('13', 'failed', failed()),
+            row('13', 'failed', failed(10, 999)),
             row('14', 'failed', {'request_sent': False, 'code': 'current_policy_changed'}),
             row('15', 'unknown', {'reason': 'unknown_fence', 'verification': {'status': 'present',
                 'object': {'id': '15', 'account_id': '100', 'status': 'ACTIVE'}}}),
-            row('16'), row('20', 'deleted', verified('20'), kind='creative')]
+            row('16'), row('17', 'blocked', {'status': 'blocked', 'request_sent': False,
+                'policy_skip_reason': 'content_unavailable'}),
+            row('20', 'deleted', verified('20'), kind='creative')]
         text = self.runner.end_text('report')
-        for expected in ('广告（最终唯一7）：已确认删除1；已接受待核验1；历史已删回执1；平台失败1；未提交跳过1；未知1；待处理1',
-                         'Creative（最终唯一1）：已确认删除1', '失败主因1：内容失效/无权限 1个',
+        for expected in ('广告（最终唯一8）：已确认删除1；已接受待核验1；历史已删回执1；平台失败1；按策略跳过1；未提交跳过1；未知1；待处理1',
+                         'Creative（最终唯一1）：已确认删除1', '失败主因1：其他平台拒绝 1个',
                          'DramaWave 1；HotDrama 1', '2026-10-25 09:00:00 → 2026-10-25 10:01:02', '耗时：1时1分2秒'):
             self.assertIn(expected, text)
         self.assertNotIn('8836', text)
@@ -141,11 +143,86 @@ class ReportTests(unittest.TestCase):
         self.store.objects += [row('40', 'failed', failed(200, 1487235)), row('41', 'failed', failed(100, 3858800)),
             row('50', 'failed', failed(10, 999)), row('60', 'failed', dict(failed(), request_sent=False))]
         text = self.runner.end_text('report')
-        for expected in ('失败主因1：内容失效/无权限 5个', '失败主因2：账户不可写入 4个', '失败主因3：共享引用阻塞 2个',
-                         '平台失败12；未提交跳过1'):
+        for expected in ('失败主因1：共享引用阻塞 2个', '失败主因2：其他平台拒绝 1个',
+                         '平台失败3；按策略跳过9；未提交跳过1',
+                         '策略跳过：帖子失效/无权限5；账户不可写入4。'):
             self.assertIn(expected, text)
-        self.assertNotIn('失败主因4', text)
-        self.assertNotIn('其他平台拒绝', text)
+        self.assertNotIn('失败主因3', text)
+        self.assertNotIn('失败主因1：内容', text)
+        self.assertNotIn('失败主因2：账户', text)
+
+    def test_policy_skip_keeps_actual_request_truth_and_counts_both_kinds(self):
+        initial = dict(failed(), policy_skip_reason='content_unavailable')
+        cached = {'status': 'blocked', 'request_sent': False,
+                  'policy_skip_reason': 'account_not_writable',
+                  'policy_skip_source': {'source_result': failed(200, 2490592)}}
+        self.store.objects = [row('10', 'failed', initial),
+                              row('20', 'blocked', cached, kind='creative')]
+        before = copy.deepcopy(self.store.objects)
+        counts, failures = summarize_objects(self.store.objects)
+        self.assertEqual(counts['ad']['policy_skip'], 1)
+        self.assertEqual(counts['creative']['policy_skip'], 1)
+        self.assertFalse(failures)
+        text = self.runner.end_text('report')
+        self.assertIn('策略跳过：帖子失效/无权限1；账户不可写入1。', text)
+        self.assertNotIn('失败主因', text)
+        self.assertNotIn('2446289', text)
+        self.assertNotIn('2490592', text)
+        self.assertEqual(self.store.objects, before)
+        self.assertTrue(self.store.objects[0]['result']['request_sent'])
+        self.assertFalse(self.store.objects[1]['result']['request_sent'])
+
+    def test_unknown_accepted_and_receipts_precede_policy_skip(self):
+        marker = {'policy_skip_reason': 'content_unavailable'}
+        cases = [
+            (row('10', 'unknown', dict(failed(), **marker)), 'unknown'),
+            (row('10', 'in_progress', dict(failed(), **marker)), 'unknown'),
+            (row('10', 'failed', dict(failed(), status='unknown', **marker)), 'unknown'),
+            (row('10', 'blocked', dict(failed(), reason='unknown_fence', **marker)), 'unknown'),
+            (row('10', 'unknown', {'policy_skip_source': {'source_result': failed()}}), 'unknown'),
+            (row('10', 'unknown', dict(failed(), api_accepted=True, **marker)), 'accepted'),
+            (row('10', 'deleted', verified('10', **marker)), 'verified'),
+            (row('10', 'already_deleted', dict(marker, reason='previous_task_deleted',
+                proof=verified('10'))), 'receipt'),
+            (row('10', 'pending', marker), 'pending'),
+        ]
+        for final_row, expected in cases:
+            with self.subTest(status=final_row['status'], result=final_row['result']):
+                self.assertEqual(classify(final_row), expected)
+
+    def test_historical_policy_skip_requires_exact_pair_sent_and_final_failure(self):
+        for code, subcode in ((200, 2446289), (100, 2490592), ('100', 2446289), (100, '2446289')):
+            with self.subTest(code=code, subcode=subcode):
+                self.assertEqual(classify(row('10', 'failed', failed(code, subcode))), 'failed')
+        self.assertEqual(classify(row('10', 'failed', dict(failed(), request_sent=False))), 'skipped')
+        self.assertEqual(classify(row('10', 'blocked', failed())), 'pending')
+        self.assertEqual(classify(row('10', 'blocked', {'source_result': failed()})), 'pending')
+        self.assertEqual(classify(row('10', 'failed', {'request_sent': True,
+            'policy_skip_source': {'source_result': failed()}})), 'failed')
+
+    def test_content_skip_is_ad_only_but_account_skip_applies_to_creative(self):
+        for result in (failed(), dict(failed(), policy_skip_reason='content_unavailable')):
+            self.assertEqual(classify(row('20', 'failed', result, kind='creative')), 'failed')
+        self.assertEqual(classify(row('20', 'blocked', {'request_sent': False,
+            'policy_skip_reason': 'content_unavailable'}, kind='creative')), 'pending')
+        self.assertEqual(classify(row('20', 'failed', failed(200, 2490592), kind='creative')), 'policy_skip')
+
+    def test_repeated_policy_skip_uses_final_unique_objects_not_events(self):
+        store = Store(str(pathlib.Path(self.temp.name) / 'policy-shared.sqlite3'))
+        store.create_job({'job_id': 'policy-cleanup-report', 'preview_id': 'hash', 'actor': ACTOR,
+                          'objects': [row('10')]})
+        with patch('features.fb_ad_asset_delete.store._process_start', return_value=(True, 'test-owner')):
+            run = store.claim_run('policy-cleanup-report', 'hash', ACTOR, ['ad'], 'policy-request')['run_id']
+        for result in (failed(), dict(failed(), policy_skip_reason='content_unavailable')):
+            self.assertTrue(store.claim_object('policy-cleanup-report', 'ad:10', run)['claimed'])
+            store.finish_object('policy-cleanup-report', 'ad:10', run, 'failed', result)
+        store.finish_run(run, 'partial', {'ad_failed': 2})
+        self.runner.store = store
+        text = self.runner.end_text('report')
+        self.assertIn('广告（最终唯一1）', text)
+        self.assertIn('平台失败0；按策略跳过1', text)
+        self.assertIn('策略跳过：帖子失效/无权限1；账户不可写入0。', text)
+        self.assertNotIn('失败主因', text)
 
     def test_zero_objects_are_zero_only_with_valid_ledger_snapshot(self):
         text = self.runner.end_text('report')
@@ -210,6 +287,11 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('SECRET', text)
 
     def test_large_reference_details_stay_in_artifacts_and_old_notices_untouched(self):
+        self.store.objects = [row('10', 'failed', failed()),
+            row('11', 'failed', failed(200, 2490592)),
+            row('12', 'failed', failed(200, 1487235)),
+            row('13', 'failed', {'request_sent': True, 'code': 'rate_limited'}),
+            row('14', 'failed', failed(10, 999))]
         refs = [{'ad_id': '9999999999' + str(i), 'product_ids': ['9999']} for i in range(20000)]
         self.manifest.update(shared_creative_impacts={'888888888888': refs},
                              shared_reference_coverage='partial', coverage={'errors': [{'stage': 'read'}]})
