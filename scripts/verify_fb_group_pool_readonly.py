@@ -37,7 +37,7 @@ def verify(after_deploy=False):
     with closing(sqlite3.connect("file:" + str(DB) + "?mode=ro", uri=True)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("BEGIN")
-        rows = conn.execute("SELECT material_id,snapshot_json FROM fb_video_task WHERE status='published' ORDER BY created_at_utc DESC LIMIT 20").fetchall()
+        rows = conn.execute("SELECT material_id,snapshot_json FROM fb_video_task ORDER BY created_at_utc DESC LIMIT 1000").fetchall()
         counts = {name: conn.execute("SELECT count(*) FROM " + name).fetchone()[0]
                   for name in ("fb_video_task", "fb_video_link", "fb_video_batch")}
     actors = {}
@@ -45,19 +45,24 @@ def verify(after_deploy=False):
         actor = json.loads(snapshot)["actor"]
         actors[(actor["tenant_key"], actor["user_id"])] = actor
     client = IdentityClient(env)
+    mysql = BrokerReadOnlyMySQL(env)
+    source = GroupPoolSource(SourceRepository(PagePoolRepository(mysql), MaterialRepository(mysql)))
     current = None
-    for tenant, user in actors:
+    groups = []
+    for tenant, user in sorted(actors, key=lambda key: actors[key].get("is_admin") is not True):
         try:
-            current = client.resolve(tenant, user, navigation_key="fbPostMaterialPool" if after_deploy else "fbPageManagement")
-            break
+            candidate = client.resolve(tenant, user, navigation_key="fbPostMaterialPool" if after_deploy else "fbPageManagement")
+            candidate_groups = source.list_groups(candidate)
+            current, groups = candidate, candidate_groups
+            if groups:
+                break
         except Exception:
             continue
     if current is None:
         raise RuntimeError("No current publishing identity available for read-only verification")
-    mysql = BrokerReadOnlyMySQL(env)
-    source = GroupPoolSource(SourceRepository(PagePoolRepository(mysql), MaterialRepository(mysql)))
-    groups = source.list_groups(current)
-    group_ids = [str(group["id"]) for group in groups[:2]]
+    # A bounded real sample is sufficient; do not walk every Page in large groups.
+    sampled_groups = sorted((g for g in groups if 0 < g["total_pages"] <= 30), key=lambda g: g["total_pages"])[:2]
+    group_ids = [str(group["id"]) for group in sampled_groups]
     scope = source.resolve_scope(current, group_ids) if group_ids else {"pages": {}, "excluded": []}
     mids = list(dict.fromkeys(str(row[0]) for row in rows))[:5]
     result = source.resolve_materials(mids, need_desc=False)
