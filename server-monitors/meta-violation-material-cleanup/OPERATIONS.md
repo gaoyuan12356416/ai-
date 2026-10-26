@@ -233,6 +233,11 @@ systemctl enable --now meta-violation-material-cleanup.timer
   错误流最多保留 64 KiB，超长单行整体省略；不保存 stdout、密码、Token 或查询返回值。
   错误摘要写入运行记录，通知只显示已验证的数字错误码。日志写入失败仍保留原 SQL 失败，
   标记 `sql_diagnostic_write_failed`；任何不完整 SQL 流继续阻止生成候选/执行删除。
+- 仅连接初始化（只读属性证明和只读事务建立）允许最多 3 次尝试，间隔 1、3 秒，
+  先关闭失败进程并释放 FIFO 名额再等待，每次重新证明 `@@read_only=1`。
+  仅重试临时连接错误 1040/1203/2002/2003/2006/2013/2055，或初始化时未取得原生错误码的
+  EOF/超时；权限/语法错误、非只读证明和结构错误不重试。业务 SELECT 已开始后，任何
+  断流仍终止整个快照，禁止从中间页换连接续读。`connection_retries` 记录实际重试次数。
 - `diagnose_sql.py --config CONFIG --source-run RUN_ID --output NEW_DIRECTORY` 使用原批
   `violation-evidence.json` 的素材集合，完整复查素材反查和当前发布关系/凭据路由。
   只走原 FIFO 只读连接，不创建 Graph 客户端、不访问删除账本、不发送通知。

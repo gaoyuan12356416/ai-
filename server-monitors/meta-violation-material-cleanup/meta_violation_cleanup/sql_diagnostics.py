@@ -40,10 +40,11 @@ class StderrCapture:
     def _append(self, line):
         with self.lock:
             self.text += line
-            if len(self.text) > LIMIT:
+            encoded = self.text.encode('utf-8')
+            if len(encoded) > LIMIT:
                 # Drop complete sanitized lines, never retain a partial secret.
                 self.truncated = True
-                self.text = self.text[-LIMIT:]
+                self.text = encoded[-LIMIT:].decode('utf-8', errors='ignore')
                 self.text = self.text.partition('\n')[2]
 
     def _read(self):

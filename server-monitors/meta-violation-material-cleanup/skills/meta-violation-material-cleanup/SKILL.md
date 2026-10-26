@@ -142,6 +142,11 @@ Use `diagnose_sql.py` for a SQL-only replay of saved violation materials; it
 does not create a Graph client, touch deletion ledgers or send notices. Preserve
 the original failed run; keep replay inputs, batch checkpoints and verification
 in a new diagnostic directory. A truncated query still fails closed.
+Only connection initialization may retry temporary connection failures, at most
+three attempts with 1/3-second backoff after releasing the failed FIFO permit.
+Each attempt proves read-only and starts a new consistent read-only transaction.
+Never retry/reconnect after a business SELECT has started or combine partial
+pages across snapshots; permanent SQL errors and invalid read-only proofs stop.
 
 The saved schedule operates within the user's authorized rules. Maintenance or
 inspection alone does not start an extra deletion run. When a manual run is

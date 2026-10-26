@@ -300,7 +300,7 @@ class SqlSource:
             # protocol compression ON; no endpoint or query semantics change.
             self._command.append("--compress")
         self._metrics = {"query_count": 0, "query_failures": 0, "query_seconds": 0.0,
-                         "sessions": 0, "violation_pages": 0}
+                         "sessions": 0, "violation_pages": 0, "connection_retries": 0}
         self._active = None
         self._active_owner = None
         self.diagnostic_path = get('sql_diagnostic_path')
@@ -318,6 +318,17 @@ class SqlSource:
     @property
     def safe_metrics(self):
         return dict(self._metrics, query_seconds=round(self._metrics["query_seconds"], 3))
+
+    def _retryable_open_failure(self, error):
+        # Only session initialization is retried. No business SELECT has run,
+        # so this cannot combine rows from different read-only snapshots.
+        if error.code not in ('sql_stream_incomplete', 'sql_query_timeout', 'sql_query_failed'):
+            return False
+        diagnostic = self.last_diagnostic or {}
+        codes = {e['errno'] for e in diagnostic.get('mysql_errors', [])}
+        if codes:
+            return codes <= {1040, 1203, 2002, 2003, 2006, 2013, 2055}
+        return bool(diagnostic) and error.code in ('sql_stream_incomplete', 'sql_query_timeout')
 
     @contextmanager
     def _session(self):
@@ -341,15 +352,29 @@ class SqlSource:
             # thread. Reject that case rather than open a second SQL connection.
             if _ACTIVE_SESSION is not None:
                 raise SqlSourceError("another_source_snapshot_active")
-            session = _Session(self)
-            self._active = _ACTIVE_SESSION = session
+            session = None
             self._active_owner = owner
-            self._metrics["sessions"] += 1
             try:
-                yield session.open()
+                for attempt in range(3):
+                    session = _Session(self)
+                    self._active = _ACTIVE_SESSION = session
+                    self._metrics['sessions'] += 1
+                    try:
+                        session.open()
+                        break
+                    except SqlSourceError as exc:
+                        # open() has closed the failed process and released its
+                        # FIFO permit before this bounded backoff. Permanent SQL
+                        # errors and a missing read-only proof are never retried.
+                        if attempt == 2 or not self._retryable_open_failure(exc):
+                            raise
+                        self._metrics['connection_retries'] += 1
+                        time.sleep((1, 3)[attempt])
+                yield session
             finally:
                 try:
-                    session.close()
+                    if session is not None:
+                        session.close()
                 finally:
                     self._active = _ACTIVE_SESSION = None
                     self._active_owner = None
