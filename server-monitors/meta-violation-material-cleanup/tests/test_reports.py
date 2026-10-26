@@ -71,6 +71,15 @@ class ReportTests(unittest.TestCase):
         self.assertIn('批次：report', text)
         self.assertIn('2026-10-23 09:00:00 至 2026-10-26 09:00:00', text)
 
+    def test_database_failure_names_native_error_without_raw_sensitive_text(self):
+        self.runtime.update('report', status='failed', error_type='SqlSourceError',
+                            mysql_error_codes=[3024, 'synthetic-secret', True, -1, 999999],
+                            failure_code='sql_stream_incomplete', stderr='synthetic-secret')
+        text = self.runner.end_text('report')
+        self.assertIn('数据库查询超时（MySQL 3024）', text)
+        self.assertIn('mysql-errors.jsonl', text)
+        self.assertNotIn('synthetic-secret', text)
+
     def test_final_unique_categories_are_mutually_exclusive_and_ignore_event_counts(self):
         self.store.objects = [row('10', 'deleted', verified('10')),
             row('11', 'unknown', {'api_accepted': True, 'verification': {'status': 'unknown'}}),

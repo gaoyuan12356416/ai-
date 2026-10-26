@@ -135,6 +135,14 @@ comparison; do not enumerate every account during normal material scans.
 
 ## Execution and recovery
 
+SQL failures retain bounded, redacted native MySQL stderr in each run's
+`mysql-errors.jsonl`, alongside errno/SQLSTATE, process exit codes, query hash,
+literal-free query shape and callsite. Never log query result rows or secrets.
+Use `diagnose_sql.py` for a SQL-only replay of saved violation materials; it
+does not create a Graph client, touch deletion ledgers or send notices. Preserve
+the original failed run; keep replay inputs, batch checkpoints and verification
+in a new diagnostic directory. A truncated query still fails closed.
+
 The saved schedule operates within the user's authorized rules. Maintenance or
 inspection alone does not start an extra deletion run. When a manual run is
 already requested/authorized, use the existing frozen run and its durable

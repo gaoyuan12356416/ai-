@@ -227,6 +227,18 @@ systemctl enable --now meta-violation-material-cleanup.timer
 
 ## 结果口径与故障处理
 
+- SQL 进程的 stderr 由独立线程持续读取，失败保存到本批
+  `runs/<run_id>/mysql-errors.jsonl`（0600）。保留 MySQL 错误码/SQLSTATE、脱敏原始错误、
+  关闭前后退出码、查询耗时、丢弃的部分行数、查询 SHA256、去除字面值后的 SQL 结构和调用位置。
+  错误流最多保留 64 KiB，超长单行整体省略；不保存 stdout、密码、Token 或查询返回值。
+  错误摘要写入运行记录，通知只显示已验证的数字错误码。日志写入失败仍保留原 SQL 失败，
+  标记 `sql_diagnostic_write_failed`；任何不完整 SQL 流继续阻止生成候选/执行删除。
+- `diagnose_sql.py --config CONFIG --source-run RUN_ID --output NEW_DIRECTORY` 使用原批
+  `violation-evidence.json` 的素材集合，完整复查素材反查和当前发布关系/凭据路由。
+  只走原 FIFO 只读连接，不创建 Graph 客户端、不访问删除账本、不发送通知。
+  保存原证据 SHA、反查输入、当前批次和进度；可用 `--reuse-inputs .../inputs.json`
+  与 `--batch-index N`（从 0 开始）精确复查失败批次。使用新的输出目录，保留历史结果。
+
 - 扫描范围按实际成功分页的账户、广告和时间区间报告；不可读取账户、分页中断、
   产品/素材关系不明均单列。未发现目标不等于完成全范围扫描。
 - `API accepted` 表示平台明确接受删除请求；`verified deleted` 表示对精确对象与

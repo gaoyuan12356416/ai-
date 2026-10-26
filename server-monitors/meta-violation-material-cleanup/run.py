@@ -261,6 +261,8 @@ def scan_or_run(args, config, runtime, stop):
     try:
         runtime.update(run_id, status="running", execution_mode=args.command,
                        execution_attempt=attempt, stage="starting", error_type=None,
+                       failure_code=None, mysql_error_codes=[], sql_diagnostic_id=None,
+                       sql_diagnostic_write_failed=False,
                        execution_status="running",
                        execution_started_at=datetime.now(CST).isoformat(timespec="seconds"))
         runner.check_stop()
@@ -270,7 +272,8 @@ def scan_or_run(args, config, runtime, stop):
             if not notice or notice["status"] != "sent":
                 raise CliError("start_notification_not_confirmed")
             runner.store = open_store(config)
-        source = SqlSource(config)
+        source = SqlSource(dict(config, sql_diagnostic_path=str(
+            Path(config['runtime_dir']) / 'runs' / run_id / 'mysql-errors.jsonl')))
         graph = open_graph(config, source)
         runner.source, runner.graph = source, graph
         runner.check_stop()
@@ -294,6 +297,11 @@ def scan_or_run(args, config, runtime, stop):
             label=str(exc)
         if isinstance(label,str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}',label):
             runtime.event(run_id,'failure',{'type':error,'code':label})
+            diagnostic = getattr(source, 'last_diagnostic', None) or {}
+            runtime.update(run_id, failure_code=label,
+                           mysql_error_codes=[e['errno'] for e in diagnostic.get('mysql_errors', [])],
+                           sql_diagnostic_id=diagnostic.get('id'),
+                           sql_diagnostic_write_failed=bool(diagnostic.get('diagnostic_write_failed')))
     finally:
         try:
             runtime.update(run_id, status=status, stage="finished", error_type=error,

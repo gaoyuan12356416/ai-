@@ -55,6 +55,7 @@ class FakeInput:
     def close(self):
         self.process.returncode = self.process.returncode or 0
         self.process.stdout.items.put("")
+        self.process.stderr.items.put("")
 
 
 class FakeMysql:
@@ -62,6 +63,7 @@ class FakeMysql:
         self.responder = responder
         self.readonly = readonly
         self.stdout = FakeOutput()
+        self.stderr = FakeOutput()
         self.stdin = FakeInput(self)
         self.returncode = None
         self.commands = []
@@ -151,7 +153,7 @@ class SqlSourceTests(unittest.TestCase):
         self.assertNotIn("-e", command)
         self.assertEqual(popen.call_args.kwargs["env"]["MYSQL_PWD"], "synthetic-secret")
         self.assertEqual(popen.call_args.kwargs["env"]["SQL_GATE_BYPASS"], "0")
-        self.assertIs(popen.call_args.kwargs["stderr"], source.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], source.subprocess.PIPE)
         self.assertIn("SET SESSION time_zone='+08:00'", process.commands[1])
         self.assertIn("SET SESSION max_execution_time=30000", process.commands[1])
         self.assertIn("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY", process.commands[1])

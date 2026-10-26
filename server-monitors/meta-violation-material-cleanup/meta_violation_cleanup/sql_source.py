@@ -16,6 +16,8 @@ import threading
 import time
 import uuid
 
+from .sql_diagnostics import StderrCapture, record_failure
+
 
 _SQL_LOCK = threading.RLock()
 _ACTIVE_SESSION = None
@@ -130,18 +132,20 @@ class _Session:
         self.lines = queue.Queue()
         self.started = time.monotonic()
         self.closed = False
+        self.stderr_capture = None
 
     def open(self):
         try:
             self.proc = subprocess.Popen(
                 self.source._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, env=self.source._process_env(),
+                stderr=subprocess.PIPE, env=self.source._process_env(),
                 text=True, encoding="utf-8", errors="strict", bufsize=1,
             )
         except (OSError, ValueError):
             raise SqlSourceError("gated_mysql_unavailable") from None
         self.reader = threading.Thread(target=self._read_stdout, daemon=True)
         self.reader.start()
+        self.stderr_capture = StderrCapture(self.proc.stderr, (self.source._password,))
         try:
             proof = self.query("SELECT JSON_OBJECT('read_only',@@read_only)", first=True)
             if proof != [{"read_only": 1}]:
@@ -210,13 +214,17 @@ class _Session:
                 if not isinstance(row, dict):
                     raise SqlSourceError("unexpected_sql_frame")
                 rows.append(row)
-        except SqlSourceError:
+        except SqlSourceError as exc:
             self.source._metrics["query_failures"] += 1
+            returncode = self.proc.poll() if self.proc else None
             self.close()
+            record_failure(self.source, self, sql, exc.code, time.monotonic()-started, len(rows), returncode)
             raise
         except Exception:
             self.source._metrics["query_failures"] += 1
+            returncode = self.proc.poll() if self.proc else None
             self.close()
+            record_failure(self.source, self, sql, 'sql_query_failed', time.monotonic()-started, len(rows), returncode)
             raise SqlSourceError("sql_query_failed") from None
         finally:
             self.source._metrics["query_seconds"] += time.monotonic() - started
@@ -243,6 +251,10 @@ class _Session:
                 self.proc.kill()
                 self.proc.wait(timeout=5)
         finally:
+            if self.stderr_capture:
+                self.stderr_capture.finish()
+            if getattr(self.proc, 'stderr', None):
+                self.proc.stderr.close()
             if self.proc.stdout:
                 self.proc.stdout.close()
 
@@ -291,6 +303,8 @@ class SqlSource:
                          "sessions": 0, "violation_pages": 0}
         self._active = None
         self._active_owner = None
+        self.diagnostic_path = get('sql_diagnostic_path')
+        self.last_diagnostic = None
 
     def _process_env(self):
         env = os.environ.copy()

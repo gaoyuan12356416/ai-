@@ -221,6 +221,16 @@ def end_text(runner, run_id):
         lines = ['Meta违规素材清理｜' + labels.get(run.get('status'), '状态待核对'),
                  '北京时间：%s → %s｜耗时：%s' % (_time(start), _time(end), _elapsed(start, end)),
                  '批次：' + run_id, _candidates(manifest, data)]
+        if run.get('status') == 'failed' and data.get('error_type') == 'SqlSourceError':
+            codes = data.get('mysql_error_codes')
+            codes = sorted({v for v in codes if type(v) is int and 0 < v < 65536}) if isinstance(codes, list) else []
+            label = '数据库读取失败'
+            if 3024 in codes:
+                label = '数据库查询超时'
+            elif set(codes) & {2006, 2013}:
+                label = '数据库连接中断'
+            suffix = '（MySQL %s）' % ','.join(map(str, codes[:5])) if codes else ''
+            lines.append('运行错误：' + label + suffix + '；脱敏原始错误见本批 mysql-errors.jsonl。')
         lines.extend(_summary_lines(runner, run_id, run))
         notes = []
         coverage = _count(data.get('coverage_errors'))
