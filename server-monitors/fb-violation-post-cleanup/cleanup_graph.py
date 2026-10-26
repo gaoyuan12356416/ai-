@@ -154,32 +154,34 @@ class PageGraph:
             return {"complete": False, "reason": "verified_post_time_invalid"}
         query = {"since": center - 86400, "until": center + 86400, "limit": 100}
         observed, cursors = set(), set()
+        def incomplete(reason, **details):
+            return dict(complete=False, present=post_id in observed, reason=reason, **details)
         for page in range(10):
             response = self._request("GET", self.page_id + "/posts", "id,created_time", query)
             if response.get("http_status") != 200 or not isinstance(response.get("data"), list):
-                return {"complete": False, "reason": "publication_list_unreadable", "response": response}
+                return incomplete("publication_list_unreadable", response=response)
             for row in response["data"]:
                 if not re.fullmatch(re.escape(self.page_id) + r"_[0-9]+", row["id"]):
-                    return {"complete": False, "reason": "publication_list_identity_invalid"}
+                    return incomplete("publication_list_identity_invalid")
+                observed.add(row["id"])
                 try:
                     parsed = dt.datetime.fromisoformat(re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", str(row["created_time"]).replace("Z", "+00:00")))
                     if parsed.tzinfo is None:
                         raise ValueError()
                     timestamp = parsed.timestamp()
                 except (ValueError, TypeError):
-                    return {"complete": False, "reason": "publication_list_time_invalid"}
+                    return incomplete("publication_list_time_invalid")
                 if timestamp < query["since"] - 1 or timestamp > query["until"] + 1:
-                    return {"complete": False, "reason": "publication_list_time_filter_unconfirmed"}
-                observed.add(row["id"])
+                    return incomplete("publication_list_time_filter_unconfirmed")
             if not response.get("has_next"):
                 return {"complete": True, "present": post_id in observed, "pages": page + 1,
                         "since": query["since"], "until": query["until"], "post_ids": sorted(observed)}
             cursor = response.get("after")
             if not cursor or cursor in cursors:
-                return {"complete": False, "reason": "publication_pagination_unconfirmed"}
+                return incomplete("publication_pagination_unconfirmed")
             cursors.add(cursor)
             query["after"] = cursor
-        return {"complete": False, "reason": "publication_page_limit_reached"}
+        return incomplete("publication_page_limit_reached")
 
     def resolve(self, raw_id, allow_post_suffix=True):
         """Read both documented video linkage and a possible stored Post suffix.

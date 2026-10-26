@@ -152,5 +152,18 @@ class GraphTests(unittest.TestCase):
         graph, _ = self.graph(Response({"data": [{"id": "123_99", "created_time": "2026-10-01T00:00:00+0000"}]}))
         self.assertFalse(graph.window_presence("123_456", "2026-08-02T23:25:30+0000")["complete"])
 
+    def test_partial_list_preserves_visible_target_if_later_page_fails(self):
+        graph, _ = self.graph(Response({"error": {"code": 10}}, 400), Response({"id": "123"}),
+                              Response({"data": [{"id": "123_456", "created_time": "2026-08-02T23:25:30+0000"}],
+                                        "paging": {"next": "not-followed", "cursors": {"after": "next"}}}),
+                              Response({"error": {"code": 10}}, 400))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        graph.publication_membership["123_456"] = {"complete": True, "present": True}
+        graph.acknowledged_posts.add("123_456")
+        result = graph.inspect("123_456")
+        self.assertFalse(result["absent"])
+        self.assertTrue(result["published_window"]["present"])
+        self.assertFalse(result["receipt_validated"])
+
 
 if __name__ == "__main__": unittest.main()
