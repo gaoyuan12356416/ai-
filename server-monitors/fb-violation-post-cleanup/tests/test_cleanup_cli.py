@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cleanup
+from cleanup_core import parse_timestamp
 from cleanup_source import PageCredential
 
 
@@ -24,6 +25,10 @@ def row(**kwargs):
 
 
 class CliTests(unittest.TestCase):
+    def test_meta_compact_timezone_is_supported_on_python39(self):
+        self.assertEqual(parse_timestamp("2026-08-21T11:58:55+0000").isoformat(),
+                         "2026-08-21T11:58:55+00:00")
+
     def test_cross_log_real_suffix_dedup_preserves_source_namespace(self):
         rows = [row(), row(raw_post_id="456", real_post_id="", log_id="2")]
         evidence, unresolved = cleanup.normalized_evidence({"candidates": rows}, Source(), "v25.0")

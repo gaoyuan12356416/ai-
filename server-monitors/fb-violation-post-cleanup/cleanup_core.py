@@ -29,7 +29,10 @@ def parse_timestamp(value):
     if isinstance(value, dt.datetime):
         parsed = value
     else:
-        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        text = str(value).replace("Z", "+00:00")
+        # Meta emits +0000, which Python 3.9's fromisoformat does not accept.
+        text = re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", text)
+        parsed = dt.datetime.fromisoformat(text)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include an explicit timezone")
     return parsed.astimezone(dt.timezone.utc)
