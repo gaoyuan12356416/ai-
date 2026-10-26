@@ -23,6 +23,25 @@ release.STATIC_FILES = set()
 release.ALLOWED = release.BACKEND_FILES
 base, pool = release.base, release.pool_release
 _restore_files, _rollback = release.restore_files, release.rollback
+_active_work = base.active_work
+
+
+def verify_independent_effects():
+    # This collector queries Meta/MySQL and writes its own effect tables. These
+    # reviewed files do not import the changed source/broker or call either API.
+    for relative in ("scripts/fb_auto_post_effect_runner.py", "scripts/fb_auto_post_metric_runner.py",
+                     "features/fb_auto_posts/effect_collector.py", "features/fb_auto_posts/effects.py"):
+        expected = base.sha(release.ROOT / relative)
+        base.require(expected and base.sha(base.FB / relative) == expected,
+                     "Independent effects source drift; cannot skip its drain: " + relative)
+
+
+def active_work():
+    busy, count = _active_work()
+    if "fb-auto-post-effects.service" in busy:
+        verify_independent_effects()
+        busy = [unit for unit in busy if unit != "fb-auto-post-effects.service"]
+    return busy, count
 
 
 def assert_rollback_clear():
@@ -113,6 +132,7 @@ def apply_release(targets, commit):
 release.apply_release = apply_release
 release.restore_files = guarded_restore
 release.rollback = rollback
+base.active_work = active_work
 
 if __name__ == "__main__":
     release.main()

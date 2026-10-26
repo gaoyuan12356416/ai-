@@ -43,6 +43,16 @@ class OwnerAccessDeploymentTests(unittest.TestCase):
         self.assertTrue(self.manifest()["main_api_restarted"])
         self.assertFalse(self.manifest()["database_migrated"])
 
+    def test_only_verified_independent_effects_are_exempt_from_drain(self):
+        with patch.object(owner_release, "_active_work", return_value=(
+                ["fb-auto-post-effects.service", "fb-auto-post-runner.service"], 2)), \
+                patch.object(owner_release, "verify_independent_effects") as verify:
+            self.assertEqual(owner_release.active_work(), (["fb-auto-post-runner.service"], 2))
+            verify.assert_called_once()
+            verify.side_effect = RuntimeError("Independent effects source drift")
+            with self.assertRaisesRegex(RuntimeError, "source drift"):
+                owner_release.active_work()
+
     def test_drain_failure_resumes_without_changing_files_or_restarting_main(self):
         self.stop.side_effect = RuntimeError("busy")
         with self.assertRaisesRegex(RuntimeError, "busy"):
