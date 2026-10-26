@@ -681,9 +681,84 @@ class PersonAndScreenshotTests(OfflineTest):
                "ADMIN_MAPPING_MYSQL_USER": "qa", "ADMIN_MAPPING_MYSQL_PASSWORD": TOKEN}
         catalog = material.Catalog(env)
         completed = mock.Mock(returncode=1, stdout="", stderr="ERROR 2013 " + TOKEN)
-        with mock.patch.object(material.subprocess, "run", return_value=completed):
+        with mock.patch.object(material.subprocess, "run", return_value=completed), \
+                mock.patch.object(material.time, "sleep"), self.assertLogs(level="WARNING") as logs:
             with self.assertRaisesRegex(RuntimeError, "^catalog_read_failed_2013$"):
                 catalog.query("SELECT 1")
+        self.assertNotIn(TOKEN, " ".join(logs.output))
+
+    def test_transient_connection_failure_retries_read_with_fresh_guarded_process(self):
+        env = {"ADMIN_MAPPING_MYSQL_HOST": "101.32.56.53",
+               "ADMIN_MAPPING_MYSQL_USER": "qa", "ADMIN_MAPPING_MYSQL_PASSWORD": TOKEN}
+        for code in (2002, 2003, 2006, 2013, 2055):
+            with self.subTest(code=code):
+                failed = mock.Mock(returncode=1, stdout='1\n{"partial":true}\n',
+                                   stderr="ERROR %s %s" % (code, TOKEN))
+                ok = mock.Mock(returncode=0, stdout='1\n{"id":248}\n', stderr="")
+                with mock.patch.object(material.subprocess, "run", side_effect=[failed, ok]) as run, \
+                        mock.patch.object(material.time, "sleep") as sleep, \
+                        self.assertLogs(level="WARNING") as logs:
+                    result = material.Catalog(env).query("SELECT JSON_OBJECT('id',248)")
+                self.assertEqual(result, [{"id": 248}])
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_args_list[0], run.call_args_list[1])
+                self.assertEqual(run.call_args.args[0][0], "/usr/bin/mysql")
+                self.assertIn("START TRANSACTION", run.call_args.kwargs["input"])
+                sleep.assert_called_once_with(1)
+                self.assertNotIn(TOKEN, " ".join(logs.output))
+
+    def test_connection_retries_are_bounded_and_never_return_partial_results(self):
+        env = {"ADMIN_MAPPING_MYSQL_HOST": "101.32.56.53",
+               "ADMIN_MAPPING_MYSQL_USER": "qa", "ADMIN_MAPPING_MYSQL_PASSWORD": TOKEN}
+        failed = mock.Mock(returncode=1, stdout='1\n{"id":248}\n', stderr="ERROR 2013")
+        with mock.patch.object(material.subprocess, "run", return_value=failed) as run, \
+                mock.patch.object(material.time, "sleep") as sleep, self.assertLogs(level="WARNING"):
+            with self.assertRaisesRegex(RuntimeError, "^catalog_read_failed_2013$"):
+                material.Catalog(env).query("SELECT 1")
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(3)])
+
+    def test_non_connection_errors_and_gate_failures_are_not_retried(self):
+        env = {"ADMIN_MAPPING_MYSQL_HOST": "101.32.56.53",
+               "ADMIN_MAPPING_MYSQL_USER": "qa", "ADMIN_MAPPING_MYSQL_PASSWORD": TOKEN}
+        errors = ["ERROR 1045", "ERROR 1064", "ERROR 1205", "ERROR 3024", "ERROR 1040",
+                  "SQL_GATE_WAIT_TIMEOUT", "ERROR 2013\nSQL_GATE_EXECUTION_TIMEOUT", "unrecognized"]
+        for error in errors:
+            with self.subTest(error=error):
+                failed = mock.Mock(returncode=1, stdout="", stderr=error)
+                with mock.patch.object(material.subprocess, "run", return_value=failed) as run, \
+                        mock.patch.object(material.time, "sleep") as sleep:
+                    with self.assertRaisesRegex(RuntimeError, "catalog_read_failed_"):
+                        material.Catalog(env).query("SELECT 1")
+                run.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_pre_and_post_upload_disconnects_never_duplicate_material_submission(self):
+        env = {"ADMIN_MAPPING_MYSQL_HOST": "101.32.56.53",
+               "ADMIN_MAPPING_MYSQL_USER": "qa", "ADMIN_MAPPING_MYSQL_PASSWORD": TOKEN}
+        catalog = material.Catalog(env)
+        catalog.person = mock.Mock(return_value=248)
+        record = source()
+        request = material.make_payload(record, 248)
+        disconnected = mock.Mock(returncode=1, stdout="", stderr="ERROR 2013")
+        missing = mock.Mock(returncode=0, stdout="1\n", stderr="")
+        found = mock.Mock(returncode=0, stdout="1\n" + material.encoded(formal(request)) + "\n", stderr="")
+        client = mock.Mock()
+        client.post.return_value = ("accepted", {"api_id": 42})
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = material.Ledger(tmp)
+            try:
+                with mock.patch.object(material.subprocess, "run", side_effect=[disconnected, missing, disconnected, found]) as run, \
+                        mock.patch.object(material.time, "sleep"), self.assertLogs(level="WARNING"):
+                    result = material.submit(record, ledger, catalog, client, verify_image=mock.Mock())
+                    again = material.submit(record, ledger, catalog, client, verify_image=mock.Mock())
+                self.assertEqual((result["state"], result["attempts"], result["api_id"], result["final_id"]),
+                                 ("confirmed", 1, 42, 901))
+                self.assertEqual(again, result)
+                self.assertEqual(run.call_count, 4)
+                client.post.assert_called_once_with(request)
+            finally:
+                ledger.close()
 
     def test_catalog_unknown_or_writable_replica_is_not_empty_success(self):
         env = {"ADMIN_MAPPING_MYSQL_HOST": "101.32.56.53",

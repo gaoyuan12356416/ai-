@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -32,6 +33,8 @@ COUNTRIES = set(("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF
                  "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG "
                  "UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW").split())
 SPECS = (("square_1x1", "1:1"), ("landscape_1_91x1", "1.91:1"), ("portrait_4x5", "4:5"))
+CATALOG_CONNECTION_ERRORS = frozenset(("2002", "2003", "2006", "2013", "2055"))
+CATALOG_RETRY_DELAYS = (1, 3)
 
 
 def encoded(value):
@@ -165,11 +168,23 @@ class Catalog:
                 self.env.get("ADMIN_MAPPING_MYSQL_DATABASE", "kunlunads_dev")]
         sql = ("SET SESSION MAX_EXECUTION_TIME=10000; SELECT IF(@@read_only=1,1,JSON_EXTRACT('invalid','$')); "
                "SET SESSION TRANSACTION READ ONLY; START TRANSACTION; " + sql + "; COMMIT;")
-        result = subprocess.run(args, input=sql, env=env, capture_output=True, text=True,
-                                encoding="utf-8", timeout=40)
-        if result.returncode:
+        # Retry only this read-only transaction, with a new gated connection.
+        # Never replay material POSTs or interpret a failed read as an empty catalog.
+        for attempt in range(len(CATALOG_RETRY_DELAYS) + 1):
+            result = subprocess.run(args, input=sql, env=env, capture_output=True, text=True,
+                                    encoding="utf-8", timeout=40)
+            if not result.returncode:
+                break
             error = re.search(r"ERROR (\d+)", result.stderr)
-            raise RuntimeError("catalog_read_failed_" + (error.group(1) if error else "unknown"))
+            code = error.group(1) if error else "unknown"
+            gate_failure = re.search(r"\bSQL_GATE_[A-Z_]+\b", result.stderr)
+            if (code not in CATALOG_CONNECTION_ERRORS or gate_failure
+                    or attempt == len(CATALOG_RETRY_DELAYS)):
+                raise RuntimeError("catalog_read_failed_" + code)
+            delay = CATALOG_RETRY_DELAYS[attempt]
+            logging.warning("cover catalog connection error %s; read-only retry %s/%s in %ss",
+                            code, attempt + 1, len(CATALOG_RETRY_DELAYS), delay)
+            time.sleep(delay)
         lines = result.stdout.splitlines()
         if not lines or lines[0] != "1":
             raise RuntimeError("catalog_not_readonly")
