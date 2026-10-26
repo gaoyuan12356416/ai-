@@ -1,5 +1,6 @@
 """Offline verification of the exact-job reconciliation and concurrent-change guard."""
 import importlib.util
+import contextlib
 import json
 from pathlib import Path
 import sqlite3
@@ -25,7 +26,7 @@ class RecoveryTests(unittest.TestCase):
                              finished_at="2026-10-26 03:09:51", updated_at="2026-10-26 03:09:51",
                              elapsed_seconds=272, token_total=123)
         self.original.update({size + "_url": "https://example.invalid/" + size for size, _ in recovery.material.SPECS})
-        with sqlite3.connect(recovery.DB) as conn:
+        with contextlib.closing(sqlite3.connect(recovery.DB)) as conn, conn:
             conn.execute("CREATE TABLE drama_screenshot_job(" + ",".join(
                 key + (" INTEGER" if isinstance(value, int) else " TEXT") for key, value in self.original.items()) + ")")
             conn.execute("INSERT INTO drama_screenshot_job VALUES(" + ",".join("?" for _ in self.original) + ")", list(self.original.values()))
@@ -58,7 +59,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue((recovery.STATE / "recovered.json").is_file())
 
     def test_preexisting_state_drift_blocks_callback(self):
-        with sqlite3.connect(recovery.DB) as conn:
+        with contextlib.closing(sqlite3.connect(recovery.DB)) as conn, conn:
             conn.execute("UPDATE drama_screenshot_job SET token_total=124")
         with self.assertRaisesRegex(RuntimeError, "frozen_state_drifted"):
             recovery.recover()
@@ -66,7 +67,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_concurrent_operator_change_is_never_overwritten_after_callback(self):
         def callback(*_args):
-            with sqlite3.connect(recovery.DB) as conn:
+            with contextlib.closing(sqlite3.connect(recovery.DB)) as conn, conn:
                 conn.execute("UPDATE drama_screenshot_job SET status='queued'")
             return {"confirmed_ids": [1, 2, 3]}
         self.post.side_effect = callback

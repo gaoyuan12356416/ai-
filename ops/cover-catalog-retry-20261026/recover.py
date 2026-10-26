@@ -74,7 +74,7 @@ def freeze():
         dest = STATE / (label + "-before.sqlite3")
         if dest.exists():
             raise RuntimeError("backup_already_exists")
-        with contextlib.closing(material.readonly(original)) as src, sqlite3.connect(dest) as dst:
+        with contextlib.closing(material.readonly(original)) as src, contextlib.closing(sqlite3.connect(dest)) as dst, dst:
             src.backup(dst)
             if dst.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise RuntimeError("backup_integrity_failed")
@@ -104,7 +104,7 @@ def recover():
     save("callback-result.json", {"result": result, "uploads": after, "images": public, "at": material.utcnow()})
     # Compare the complete row under SQLite's writer lock. A concurrent operator
     # action must not be overwritten, even after successful callback completion.
-    with sqlite3.connect(DB, timeout=15) as conn:
+    with contextlib.closing(sqlite3.connect(DB, timeout=15)) as conn, conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN IMMEDIATE")
         latest = conn.execute("SELECT * FROM drama_screenshot_job WHERE job_id=?", (JOB_ID,)).fetchone()
