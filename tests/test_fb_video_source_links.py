@@ -215,7 +215,7 @@ class SourceTests(unittest.TestCase):
     def test_authorization_owner_scope_and_disabled_page_visibility(self):
         repo, mysql, pages = source()
         items = repo.list_pages(self.actor)
-        self.assertEqual(mysql.calls[0][1], ["789", "789"])
+        self.assertEqual(mysql.calls[0][1], ["789", "789", "789"])
         self.assertIn("f.user_id=%s", mysql.calls[0][0])
         self.assertIn("OR p.page_id IN (", mysql.calls[0][0])
         self.assertFalse(pages.calls)
@@ -253,7 +253,7 @@ class SourceTests(unittest.TestCase):
         page = repo.get_pages(self.actor, ["123456"])["123456"]
         self.assertEqual(len(mysql.calls), 1)
         sql, params = mysql.calls[0]
-        self.assertEqual(params, ["789", "789", "123456"])
+        self.assertEqual(params, ["789", "789", "789", "123456"])
         self.assertIn("TRIM(p.page_id) IN (%s)", sql)
         self.assertIn("p.status<>1", sql)
         self.assertIn("TRIM(p.page_access_token)<>''", sql)
@@ -290,8 +290,8 @@ class SourceTests(unittest.TestCase):
         ids = [str(i) for i in range(1000, 1201)]
         self.assertEqual(repo.list_pages(self.actor, page_ids=ids), [])
         self.assertEqual(len(mysql.calls), 2)
-        self.assertEqual(mysql.calls[0][1], ["789", "789"] + ids[:200])
-        self.assertEqual(mysql.calls[1][1], ["789", "789"] + ids[200:])
+        self.assertEqual(mysql.calls[0][1], ["789", "789", "789"] + ids[:200])
+        self.assertEqual(mysql.calls[1][1], ["789", "789", "789"] + ids[200:])
 
     def test_selected_page_filter_matches_existing_identity_trimming(self):
         repo, mysql, _ = source()
