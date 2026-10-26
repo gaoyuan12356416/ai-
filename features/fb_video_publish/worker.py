@@ -39,13 +39,41 @@ def public_link_readback(url, expected_sha):
 class Worker:
     def __init__(self, store, pages, gpu, graph, *, sources=None, live_enabled=False, prepare_enabled=False,
                  short_link_root="", short_link_owner="", link_writer=publish_link,
-                 readback=public_link_readback, rng=None, rate_limit=None):
+                 readback=public_link_readback, rng=None, rate_limit=None,
+                 group_sources=None, group_identity_resolver=None):
         self.store, self.pages, self.gpu, self.graph, self.sources = store, pages, gpu, graph, sources
         self.live_enabled, self.prepare_enabled = bool(live_enabled), bool(prepare_enabled)
         self.short_link_root, self.short_link_owner = short_link_root, short_link_owner
         self.link_writer, self.readback, self.rng = link_writer, readback, rng or random.SystemRandom()
         self.rate_limit = rate_limit or (lambda: None)
+        self.group_sources, self.group_identity_resolver = group_sources, group_identity_resolver
         self._prepare_lock = threading.Lock()
+
+    def _group_preflight(self, task, snap):
+        from .core import actor_checked
+        from .group_pool import POLICY_VERSION
+        policy = snap.get("group_pool")
+        if (not isinstance(policy, dict) or policy.get("policy_version") != POLICY_VERSION
+                or not isinstance(policy.get("group_ids"), list) or not policy["group_ids"]
+                or "manual_policy" in snap or "pool" in snap
+                or self.group_sources is None or self.group_identity_resolver is None):
+            raise DomainError("group_pool_policy_invalid", "组素材池冻结政策或复核服务无效，未调用平台", 409)
+        actor = actor_checked(self.group_identity_resolver(task["tenant_key"], task["owner_user_id"]))
+        frozen_actor = snap.get("actor", {})
+        if (actor["tenant_key"] != task["tenant_key"] or actor["user_id"] != task["owner_user_id"]
+                or any(actor.get(k) != frozen_actor.get(k) for k in ("tenant_key", "user_id", "sub_user_id", "business_owner_id"))):
+            raise DomainError("group_pool_identity_changed", "计划发布人身份已改变，未调用平台", 403)
+        scope = self.group_sources.resolve_scope(actor, policy["group_ids"])
+        page = scope["pages"].get(task["page_id"])
+        frozen_page = snap["page"]
+        if (not page or page.get("language") != frozen_page.get("language")
+                or sorted(page.get("group_ids", [])) != sorted(frozen_page.get("group_ids", []))):
+            raise DomainError("group_pool_membership_changed", "Page组成员、语言或授权已改变，未调用平台", 409)
+        fresh = self.group_sources.get_materials([task["material_id"]], need_desc=False)[task["material_id"]]
+        if any(str(fresh.get(k, "")) != str(snap["material"].get(k, "")) for k in ("material_id", "content_id", "language", "media_url")):
+            raise DomainError("material_identity_changed", "素材来源身份已变化，未调用平台", 409)
+        if fresh["language"] != page["language"]:
+            raise DomainError("language_mismatch", "Page与素材当前语言不匹配，未调用平台", 409)
 
     def _task_credentials(self, task, snapshot=None):
         """Re-read only the credential scope frozen for this publication."""
@@ -115,7 +143,9 @@ class Worker:
             return {"ok": True, "status": "no_pending"}
         try:
             snap, prepared = json.loads(task["snapshot_json"]), json.loads(task["prepared_json"])
-            if self.sources is not None:
+            if task.get("source_kind") == "group_pool":
+                self._group_preflight(task, snap)
+            elif self.sources is not None:
                 manual = task.get("source_kind") == "manual" and "pool" not in snap
                 self.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
                 # Manual and Page-pool tasks both waive the blacklist. Keep
@@ -141,12 +171,16 @@ class Worker:
             credentials = self._task_credentials(task, snap)
             self.rng.shuffle(credentials)
         except DomainError as exc:
+            if task.get("source_kind") == "group_pool":
+                return self.store.record_outcome(task, GraphResult("definite_failure", error_code=exc.code, message=str(exc)))
             if exc.code in {"credential_policy_invalid", "operator_identity_invalid", "title_invalid"}:
                 return self.store.record_outcome(task, GraphResult("definite_failure", error_code=exc.code,
                                                                  message=str(exc)))
             return self.store.record_outcome(task, GraphResult("definite_failure", error_code="publish_preflight_failed",
                                                              message="发布前Page、素材或成片复核失败，未调用平台"))
-        except Exception:
+        except Exception as exc:
+            if task.get("source_kind") == "group_pool" and hasattr(exc, "code"):
+                return self.store.record_outcome(task, GraphResult("definite_failure", error_code=exc.code, message=str(exc)))
             return self.store.record_outcome(task, GraphResult("definite_failure", error_code="publish_preflight_failed",
                                                              message="发布前Page、素材或成片复核失败，未调用平台"))
         if not credentials:

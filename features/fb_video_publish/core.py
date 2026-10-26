@@ -233,6 +233,8 @@ class Store:
                     conn.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
             from .pool import install_schema
             install_schema(conn)
+            from .group_pool import install_schema as install_group_schema
+            install_group_schema(conn)
             install_backstops(conn)
 
     def connect(self):
@@ -376,14 +378,16 @@ class Store:
             conn.commit()
             return result
 
-    def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None, request_hash=None):
+    def freeze(self, conn, actor, request, resolved, configs, repeats, plans, *, pool=None, group_pool=None, request_hash=None):
         """Caller owns BEGIN IMMEDIATE and all admission checks; never commits."""
         from .links import short_url, build_attribution_url
         from .templates import render_template, manual_text
         if not conn.in_transaction:
             raise RuntimeError("Task freezing requires the caller transaction")
         now = stamp(self.now_fn())
-        if pool:
+        if pool and group_pool:
+            raise ValueError("Task cannot belong to two pool policies")
+        if pool or group_pool:
             self.check_quota(conn, plans)
         bid = uuid.uuid4().hex
         conn.execute("INSERT INTO fb_video_batch VALUES(?,?,?,?,?,?,?,?)",
@@ -397,19 +401,22 @@ class Store:
                        "material_name": material["material_name"], "content_id": material["content_id"],
                        "language": material["language"], "drama_name": material["drama_name"],
                        "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
-            if not pool:
+            if not pool and not group_pool:
                 context["drama_name"] = str(context["drama_name"] or "none").replace("*", " ")[:512]
             long = build_attribution_url(context, lid, now)
-            caption_template, title = manual_text(pair, config) if not pool else (pair["caption_template"], "")
-            caption = render_template(caption_template, material, short, manual=not pool)
+            caption_template, title = manual_text(pair, config) if not pool and not group_pool else (pair["caption_template"], "")
+            caption = render_template(caption_template, material, short, manual=not pool and not group_pool)
             snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
                         "template_version": config["version"], "caption_template": caption_template,
                         "language": config["language"], "actor": actor, "attribution": context,
                         "repeat_history": repeats.get(pid + ":" + mid, [])}
-            if not pool:
+            if not pool and not group_pool:
                 snapshot.update(title=title, manual_policy="operator-v2")
             if pool:
                 snapshot["pool"] = pool
+            if group_pool:
+                snapshot["group_pool"] = group_pool
+                snapshot["title"] = ""
             mode = request["processing_mode"]
             if request.get("schema_version") == 3:
                 mode = pair["processing_mode"]
@@ -425,7 +432,7 @@ class Store:
                 source_kind,pool_instance_id,pool_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (tid, bid, actor["tenant_key"], actor["user_id"], pid, mid, material["content_id"], index, page_seq,
                  stamp(when), day, mode, canonical(snapshot), lid, short, long, caption,
-                 job, prep_state, canonical(prep), now, now, "pool" if pool else "manual",
+                 job, prep_state, canonical(prep), now, now, "group_pool" if group_pool else "pool" if pool else "manual",
                  pool["config_instance_id"] if pool else "", pool["slot_id"] if pool else 0))
             conn.execute("UPDATE fb_video_link SET long_url=?,short_url=? WHERE id=?", (long, short, lid))
         batch = conn.execute("SELECT * FROM fb_video_batch WHERE batch_id=?", (bid,)).fetchone()
@@ -561,6 +568,9 @@ class Store:
                     AND NOT EXISTS(SELECT 1 FROM fb_video_task pp WHERE x.source_kind='pool'
                       AND pp.tenant_key=x.tenant_key AND pp.page_id=x.page_id AND pp.pool_sequence<x.pool_sequence
                       AND pp.source_kind='pool' AND pp.status NOT IN ('published','failed','cancelled'))
+                    AND NOT EXISTS(SELECT 1 FROM fb_video_task gp WHERE x.source_kind='group_pool'
+                      AND gp.tenant_key=x.tenant_key AND gp.page_id=x.page_id AND gp.source_kind='group_pool'
+                      AND gp.planned_at_utc<x.planned_at_utc AND gp.status NOT IN ('published','failed','cancelled'))
                     ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now,)).fetchall()
                 row = None
                 for candidate in rows:

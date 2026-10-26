@@ -753,6 +753,7 @@
     // FB_VIDEO_PUBLISH_NAVIGATION_V1
     delete facebookPlatform.module;
     const fbVideoItems = [{"key": "fbPageManagement", "label": "Page 管理", "description": "设置 Page 剧语言和发布文案", "kind": "page", "href": "/fb-pages.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 30}, {"key": "fbVideoPublish", "label": "视频批量发布", "description": "按剧语言匹配素材与 Page", "kind": "page", "href": "/fb-video-publish.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 40}, {"key": "fbVideoPublishRecords", "label": "批量发布记录", "description": "查看批次、冻结文案和发布结果", "kind": "page", "href": "/fb-video-publish-records.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 50}];
+    fbVideoItems.push({key: "fbPostMaterialPool", label: "FB Post 素材池", description: "按语言分配素材到 Page 组定时发布", kind: "page", href: "/fb-post-material-pool.html", module: "fb_video_publish", adminOnly: false, enabled: true, order: 45});
     fbVideoItems.forEach(item => {
       if (!facebookPlatform.items.some(existing => existing && existing.key === item.key)) facebookPlatform.items.push(item);
     });

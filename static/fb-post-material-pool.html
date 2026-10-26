@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <title>FB Post 素材池 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css">
+  <link rel="stylesheet" href="/fb-video-publish.css?v=20261023-manual-gates-v1">
+  <link rel="stylesheet" href="/fb-post-material-pool.css?v=20261026-group-pool-v1">
+</head>
+<body>
+  <div class="fb-shell">
+    <aside class="fb-sidebar" id="sidebar"><div class="fb-brand"><b>AI</b><div><strong>AI自动后台</strong><small>ai.yingliangads.com</small></div></div><nav id="quickNav"></nav><button class="button mobile-nav" id="hideNav">收起导航</button></aside>
+    <main class="fb-main">
+      <header class="topbar"><div><button class="button small mobile-nav" id="showNav">☰ 导航</button><h1>FB Post 素材池</h1><p class="muted">按素材语言分配到 Page 组，每批每个 Page 最多发布一条。</p></div><div class="top-actions"><div id="userCard" class="user-card"></div><button class="button" id="refreshPage">刷新</button><button class="button" id="authButton">登录</button></div></header>
+      <div id="gate" class="panel gate">正在读取登录状态…</div>
+      <div id="pageError" class="error" role="alert" hidden></div>
+      <div id="content" hidden>
+        <div id="featureNotice" class="notice warning" hidden>组素材池维护中，可查看记录与预览；已生成的任务继续保留。</div>
+        <div class="pool-overview"><div><span class="eyebrow">每日发布计划</span><div class="overview-title"><strong id="scheduleState">加载中…</strong><span id="scheduleOwner" class="helper"></span></div><p id="scheduleEffective" class="helper"></p></div><button class="button small" id="refreshData">刷新数据并保留输入</button></div>
+        <div id="pendingPanel" class="notice warning" role="status" hidden><strong>上次操作结果待核对</strong><p id="pendingText">请先核对原操作，避免重复提交。</p><div class="actions"><button class="button" id="queryOperation">查询原操作</button><button class="button" id="retryOperation">重试原操作</button></div></div>
+        <div id="poolStats" class="pool-stats" aria-label="素材统计"></div>
+        <section class="panel">
+          <div class="section-head"><div><h2>发布设置</h2><p>同租户共用素材池和计划，首次保存为暂停；修改 Page 组后需重新启用。</p></div><span id="dirtyHint" class="badge" hidden>有未保存修改</span></div>
+          <fieldset id="settingsControls" disabled>
+            <div class="form-grid">
+              <div class="field"><label for="groupSearch">选择 Page 组</label><input id="groupSearch" type="search" placeholder="搜索组名或组 ID"><div id="groupChoices" class="group-choices" role="group" aria-label="Page 组"></div><p id="groupSummary" class="helper"></p><p class="helper">使用组成员语言及现有授权，不需要先到 Page 管理创建配置。</p></div>
+              <div class="field"><label for="scheduleMode">排期方式（北京时间）</label><select id="scheduleMode"><option value="fixed">每日固定时点</option><option value="random">每日随机批次</option></select><div id="fixedSettings"><label class="field"><span>每天的发布时间</span><textarea id="fixedTimes" rows="2" placeholder="09:00, 18:00" autocomplete="off" style="min-height:70px"></textarea></label><p class="helper">多个时点以逗号或换行分隔，从下一个未来时点生效。</p></div><div id="randomSettings" hidden><label class="field"><span>每天批次数</span><input id="dailyBatches" type="number" min="1" max="24" step="1" value="1"></label><p class="helper">每天 1–24 批，相邻批次至少间隔 60 分钟并避开整点；次日生效。</p></div><div class="notice compact">原片发布 · 同一条素材只分配给一个 Page。空池和错过时点不补发。</div></div>
+              <label class="field full"><span>发布文案模板</span><textarea id="captionTemplate" rows="3" aria-label="发布文案模板">{name}
+{desc}
+{url}</textarea><span class="helper">支持 {name} 剧名、{desc} 简介、{url} 独立 FB 短链；视频标题留空。</span></label>
+            </div>
+            <div class="row spread settings-footer"><span id="settingsHint" class="helper"></span><div class="actions"><button class="button" id="saveSchedule">保存设置</button><button class="button primary" id="enableSchedule">启用计划</button><button class="button danger" id="pauseSchedule">暂停计划</button></div></div>
+          </fieldset>
+          <div id="dayPlan" class="helper day-plan"></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><h2>按语言配对预览</h2><p>查看当前设置下可用的配对和缺口；预览不会创建发布任务。</p></div><button id="previewPairs" class="button">预览配对</button></div>
+          <div id="previewError" class="error" role="alert" hidden></div><div id="previewStale" class="notice warning" hidden>设置或素材已变化，请重新预览。</div><div id="previewResult" class="empty">选择 Page 组并添加素材后，可预览语言分配。</div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><h2>池内素材</h2><p>最新入池优先，同语言配对。无匹配 Page 的素材继续留池。</p></div></div>
+          <fieldset id="admissionControls" disabled><label class="field"><span>批量添加素材 ID</span><textarea id="materialIds" rows="4" placeholder="每行一个素材 ID，最多 200 条；也支持逗号或空格分隔" aria-label="批量素材 ID"></textarea></label><div class="row spread admission-actions"><span class="helper">入池时校验视频、剧目语言及投放时间；逐条显示结果。</span><div class="actions"><button id="resolveMaterials" class="button">校验素材</button><button id="addMaterials" class="button primary">添加入池</button></div></div></fieldset>
+          <div id="admissionResult" class="notice" role="status" hidden></div>
+          <div class="filters"><select id="itemState" aria-label="素材状态"><option value="pending">待发布</option><option value="all">全部状态</option><option value="bound">已绑定任务</option><option value="published">已发布</option><option value="failed">失败</option><option value="unknown">结果待核对</option><option value="cancelled">已取消</option><option value="removed">已移除</option></select><select id="itemLanguage" aria-label="素材语言"><option value="">全部语言</option></select><button id="removeItems" class="button danger">移除选中素材</button><span id="selectedCount" class="helper"></span></div>
+          <div id="materialList" class="material-list" aria-live="polite"></div>
+          <div class="pager"><span class="helper">已绑定的素材保留占用，失败、取消或结果待核对均不自动重发。</span><div class="actions"><button class="button small" id="itemsPrev">上一页</button><button class="button small" id="itemsNext">下一页</button></div></div>
+        </section>
+        <section class="panel"><div class="section-head"><div><h2>批次记录</h2><p>计划时点、冻结配对和发布结果，均按北京时间展示。</p></div><button class="button small" id="refreshRuns">刷新记录</button></div><div id="runList" class="run-list"></div><div class="pager"><span id="runsHint" class="helper"></span><div class="actions"><button class="button small" id="runsPrev">上一页</button><button class="button small" id="runsNext">下一页</button></div></div></section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="fb-toast" role="status" hidden></div><noscript>请启用 JavaScript 后使用 FB Post 素材池。</noscript>
+  <script src="/quick-nav.js?v=20261026-fb-group-pool-v1"></script><script src="/ui-topbar.js"></script><script src="/fb-post-material-pool.js?v=20261026-group-pool-v2"></script>
+</body>
+</html>
