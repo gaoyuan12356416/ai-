@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -13,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from features.fb_video_publish.group_sources import GroupPoolSource, POLICY_VERSION, normalize_language
+from features.fb_video_publish.group_language import (
+    LEGACY_POLICY, POLICY_VERSION as SCOPE_POLICY_VERSION, default_selection, normalize_selection,
+)
 from features.fb_video_publish.query_broker import validate_query
 from features.fb_video_publish.runtime_source import GatedReadOnlyMySQL
 from features.fb_video_publish.sources import SourceError, SourceRepository
@@ -79,8 +83,11 @@ class Catalog:
             return copy.deepcopy([item for item in self.pages if item["page_id"] in ids
                                   and (not scoped or item["owner_user_id"] == params[0])])
         if "ads_facebook_page_group g" in sql:
-            owner = params[-1] if "g.user_id=%s" in sql else None
-            ids = params[:-1] if owner else params
+            group_filter = re.search(r"g.id IN \(([^)]+)\)", sql)
+            group_count = group_filter.group(1).count("%s") if group_filter else 0
+            owner = params[group_count] if "g.user_id=%s" in sql else None
+            ids = params[:group_count]
+            page_ids = params[group_count + (1 if owner else 0):] if "i.page_id IN (" in sql else None
             groups = [g for g in self.groups if g["is_delete"] == 0 and g["group_type"] in (0, 1)
                       and g["app_id"] == "1479" and g["product"].lower() == "dramawave"
                       and (not owner or g["owner_user_id"] == owner)
@@ -90,7 +97,8 @@ class Catalog:
                 return [{**g, "total_pages": len({m["page_id"] for m in self.members
                                                   if m["group_id"] == g["group_id"] and not m["deleted_at"]})}
                         for g in groups]
-            return copy.deepcopy([m for m in self.members if m["group_id"] in gids and not m["deleted_at"]])
+            return copy.deepcopy([m for m in self.members if m["group_id"] in gids and not m["deleted_at"]
+                                  and (page_ids is None or m["page_id"] in page_ids)])
         if "ads_custom_source" in sql:
             return copy.deepcopy([self.materials[mid] for mid in params[:-1] if mid in self.materials])
         if "ads_drama_resource" in sql:
@@ -113,6 +121,36 @@ class LanguageTests(unittest.TestCase):
 
     def test_constructor_does_not_access_legacy_fake_sources(self):
         GroupPoolSource(object())
+
+    def test_selection_defaults_are_fresh_and_material_policy_is_unchanged(self):
+        selection = default_selection()
+        self.assertEqual({"mode": "all", "codes": [], "include_blank": False}, selection)
+        selection["codes"].append("en")
+        self.assertEqual([], default_selection()["codes"])
+        self.assertEqual("group_pool_v1", POLICY_VERSION)
+        self.assertEqual("group_pool_v1", LEGACY_POLICY)
+        self.assertEqual("group_pool_v2", SCOPE_POLICY_VERSION)
+
+    def test_selection_canonicalizes_deduplicates_sorts_and_supports_blank_only(self):
+        self.assertEqual({"mode": "selected", "codes": ["en", "ja", "zh", "zh-cn", "zh-tw"], "include_blank": True},
+                         normalize_selection({"mode": "selected", "codes": ["zh_TW", "English", "jp", "ja", "zh", "zh-cn"], "include_blank": True}))
+        self.assertEqual({"mode": "selected", "codes": [], "include_blank": True},
+                         normalize_selection({"mode": "selected", "codes": [], "include_blank": True}))
+        self.assertEqual({"mode": "all", "codes": [], "include_blank": True},
+                         normalize_selection({"mode": "all", "codes": [], "include_blank": True}))
+
+    def test_selection_rejects_invalid_shape_values_and_empty_selected_scope(self):
+        invalid = [None, {}, {**default_selection(), "extra": 1}, {**default_selection(), "mode": "bad"},
+                   {**default_selection(), "mode": []}, {**default_selection(), "include_blank": 1},
+                   {**default_selection(), "codes": "en"}, {**default_selection(), "codes": ["en"]},
+                   {**default_selection(), "mode": "selected"}]
+        invalid += [{"mode": "selected", "codes": [code], "include_blank": True}
+                    for code in (None, "", " ", "unknown", "中文", "en+us", 12)]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(SourceError) as raised:
+                normalize_selection(value)
+            self.assertEqual("invalid_page_language_selection", raised.exception.code)
+            self.assertEqual(400, raised.exception.status)
 
 
 class GroupScopeTests(unittest.TestCase):
@@ -181,6 +219,147 @@ class GroupScopeTests(unittest.TestCase):
         self.db.pages[0]["owner_user_id"] = "84"
         result = self.source.resolve_scope({**ACTOR, "business_owner_id": "", "is_admin": True}, ["1"])
         self.assertEqual(["11"], list(result["pages"]))
+
+
+class GroupScopeV2Tests(unittest.TestCase):
+    def setUp(self):
+        self.db = Catalog()
+        self.source = self.db.source()
+        self.db.groups = [group("1"), group("2")]
+        self.db.members = [
+            member("11", "1", ""), member("11", "2", None),
+            member("12", "1", "English"), member("12", "2", " "),
+            member("13", "1", "jp"), member("13", "2", "ja"),
+            member("14", "1", "en"), member("14", "2", "es"),
+            member("15", "1", "unknown"), member("15", "2", ""),
+            member("16", "1", "en"), member("16", "2", "bad language"),
+            member("17", "1", None), member("17", "2", " \t\n"),
+            member("18", "1", "zh-cn"), member("18", "2", "zh-tw"),
+            member("19", "1", "fr"), member("20", "1", "es"),
+        ]
+        self.db.pages = [page(str(pid), eligible_token_count=0 if pid == 19 else 1) for pid in range(11, 21)]
+
+    def scope(self, selection=None, **kwargs):
+        return self.source.resolve_scope(ACTOR, ["1", "2"], page_language_selection=selection,
+                                         policy_version=SCOPE_POLICY_VERSION, **kwargs)
+
+    def authorization_ids(self):
+        return [pid for sql, params in self.db.calls if "GROUP BY p.page_id" in sql for pid in params[3:]]
+
+    def test_v2_default_aggregates_specific_languages_and_excludes_blank_invalid_conflict(self):
+        result = self.scope()
+        self.assertEqual(["12", "13", "20"], list(result["pages"]))
+        self.assertEqual("en", result["pages"]["12"]["language"])
+        self.assertEqual("specific", result["pages"]["12"]["language_kind"])
+        self.assertEqual(["1", "2"], result["pages"]["12"]["group_ids"])
+        self.assertEqual({"11": "page_language_not_selected", "14": "page_language_conflict",
+                          "15": "page_language_invalid", "16": "page_language_invalid",
+                          "17": "page_language_not_selected", "18": "page_language_conflict",
+                          "19": "page_unavailable"}, {r["page_id"]: r["code"] for r in result["excluded"]})
+        self.assertEqual(["12", "13", "19", "20"], self.authorization_ids())
+        unavailable = next(r for r in result["excluded"] if r["page_id"] == "19")
+        self.assertEqual(("Page 19", "fr", "specific"),
+                         (unavailable["page_name"], unavailable["language"], unavailable["language_kind"]))
+        self.assertNotIn("fixture-private-value", repr(result))
+        self.assertNotIn("access_token", repr(result))
+
+    def test_v2_blank_pages_are_unrestricted_only_with_explicit_include_blank(self):
+        result = self.scope({"mode": "all", "codes": [], "include_blank": True})
+        self.assertEqual(["11", "12", "13", "17", "20"], list(result["pages"]))
+        for pid in ("11", "17"):
+            self.assertEqual("", result["pages"][pid]["language"])
+            self.assertEqual("unrestricted", result["pages"][pid]["language_kind"])
+        self.assertEqual("en", result["pages"]["12"]["language"])
+        for pid in ("15", "16"):
+            invalid = next(r for r in result["excluded"] if r["page_id"] == pid)
+            self.assertEqual("invalid", invalid["language_kind"])
+            self.assertEqual("page_language_invalid", invalid["code"])
+
+    def test_selected_languages_filter_before_any_authorization_lookup(self):
+        result = self.scope({"mode": "selected", "codes": ["English"], "include_blank": True})
+        self.assertEqual(["11", "12", "17"], list(result["pages"]))
+        self.assertEqual(["11", "12", "17"], self.authorization_ids())
+        filtered = {r["page_id"]: r for r in result["excluded"] if r["code"] == "page_language_not_selected"}
+        self.assertEqual({"13", "19", "20"}, set(filtered))
+        self.assertEqual("ja", filtered["13"]["language"])
+        self.assertEqual("specific", filtered["13"]["language_kind"])
+        self.assertTrue(all(r["page_name"] for r in result["excluded"]))
+
+    def test_blank_only_selection_does_not_reclassify_invalid_nonempty_language(self):
+        result = self.scope({"mode": "selected", "codes": [], "include_blank": True})
+        self.assertEqual(["11", "17"], list(result["pages"]))
+        self.assertEqual(["11", "17"], self.authorization_ids())
+        errors = {r["page_id"]: r["code"] for r in result["excluded"]}
+        self.assertEqual("page_language_invalid", errors["15"])
+        self.assertEqual("page_language_invalid", errors["16"])
+        self.assertEqual("page_language_not_selected", errors["12"])
+
+    def test_summary_is_deduplicated_before_mode_selection_and_authorization(self):
+        all_result = self.scope()
+        selected_result = self.scope({"mode": "selected", "codes": [], "include_blank": True})
+        self.assertEqual(all_result["language_summary"], selected_result["language_summary"])
+        summary = all_result["language_summary"]
+        self.assertEqual({"total_page_count": 10, "conflict_page_count": 2,
+                          "invalid_page_count": 2, "missing_page_count": 0},
+                         {key: value for key, value in summary.items() if key != "items"})
+        self.assertEqual({("", "unrestricted"): 2, ("en", "specific"): 1, ("ja", "specific"): 1,
+                          ("fr", "specific"): 1, ("es", "specific"): 1},
+                         {(row["language"], row["language_kind"]): row["page_count"] for row in summary["items"]})
+
+    def test_v1_default_still_rejects_empty_plus_specific_and_invalid_as_missing(self):
+        result = self.source.resolve_scope(ACTOR, ["1", "2"])
+        self.assertEqual(["13", "20"], list(result["pages"]))
+        excluded = {r["page_id"]: r["code"] for r in result["excluded"]}
+        for pid in ("11", "12", "15", "16", "17"):
+            self.assertEqual("page_language_missing", excluded[pid])
+        self.assertEqual("page_language_conflict", excluded["14"])
+        self.assertEqual([str(pid) for pid in range(11, 21)], self.authorization_ids())
+        self.assertEqual(5, result["language_summary"]["missing_page_count"])
+
+    def test_page_id_recheck_limits_reads_but_includes_all_selected_group_members(self):
+        result = self.scope(page_ids=["12"])
+        self.assertEqual(["1", "2"], [g["id"] for g in result["groups"]])
+        self.assertEqual(["12"], list(result["pages"]))
+        self.assertEqual(["1", "2"], result["pages"]["12"]["group_ids"])
+        self.assertEqual(["12"], self.authorization_ids())
+        membership_sql = [sql for sql, _ in self.db.calls if "TRIM(i.page_id) page_id" in sql]
+        self.assertEqual(1, len(membership_sql))
+        self.assertIn("AND i.page_id IN (%s)", membership_sql[0])
+        self.db.members[3]["language"] = "es"
+        self.db.calls.clear()
+        result = self.scope(page_ids=["12"])
+        self.assertEqual({}, result["pages"])
+        self.assertEqual("page_language_conflict", result["excluded"][0]["code"])
+        self.assertEqual([], self.authorization_ids())
+
+    def test_page_id_recheck_still_denies_entire_scope_for_lost_group_permission(self):
+        self.db.groups[1]["owner_user_id"] = "84"
+        with self.assertRaises(SourceError) as raised:
+            self.scope(page_ids=["20"])
+        self.assertEqual("group_not_found", raised.exception.code)
+        self.assertEqual(403, raised.exception.status)
+        self.assertEqual(1, len(self.db.calls))
+        self.assertEqual([], self.authorization_ids())
+
+    def test_empty_or_absent_target_never_expands_into_all_pages(self):
+        for target in ([], ["999"]):
+            with self.subTest(target=target):
+                self.db.calls.clear()
+                result = self.scope(page_ids=target)
+                self.assertEqual({}, result["pages"])
+                self.assertEqual([], result["excluded"])
+                self.assertEqual([], self.authorization_ids())
+                self.assertEqual(0, result["language_summary"]["total_page_count"])
+                self.assertEqual(["1", "2"], [g["id"] for g in result["groups"]])
+
+    def test_unknown_policy_and_v1_nondefault_selection_fail_closed(self):
+        for policy in (None, [], "group_pool_v999"):
+            with self.subTest(policy=policy), self.assertRaises(SourceError) as raised:
+                self.source.resolve_scope(ACTOR, ["1"], policy_version=policy)
+            self.assertEqual("group_pool_policy_invalid", raised.exception.code)
+        with self.assertRaises(SourceError) as raised:
+            self.source.resolve_scope(ACTOR, ["1"], page_language_selection={"mode": "all", "codes": [], "include_blank": True})
+        self.assertEqual("group_pool_policy_invalid", raised.exception.code)
 
 
 class MaterialTests(unittest.TestCase):

@@ -52,7 +52,7 @@ def route(method, path):
         if re.fullmatch(r"/operations/[a-fA-F0-9-]{32,36}", suffix):
             return ("fbVideoPublish", "fbVideoPublishRecords"), False
     if method == "POST":
-        if suffix in {"/material-pool/items/resolve", "/material-pool/items", "/material-pool/items/remove", "/material-pool/schedule", "/material-pool/enable", "/material-pool/pause", "/material-pool/preview"}:
+        if suffix in {"/material-pool/items/resolve", "/material-pool/items", "/material-pool/items/remove", "/material-pool/schedule", "/material-pool/enable", "/material-pool/pause", "/material-pool/preview", "/material-pool/pages/preview"}:
             return ("fbPostMaterialPool",), True
         if suffix in ("/excel/preview", "/excel/batches"):
             return ("fbPageManagement",), True

@@ -58,9 +58,10 @@ class GroupRouteTests(unittest.TestCase):
         prefix = "/api/fb-video-publish"
         for method, suffix in [("GET", "/page-groups"), ("GET", "/material-pool"), ("GET", "/material-pool/schedule"),
                                ("GET", "/material-pool/runs"), ("GET", "/material-pool/operations/" + "a" * 32),
-                               *[("POST", "/material-pool/" + part) for part in ("items", "items/resolve", "items/remove", "schedule", "preview", "enable", "pause")]]:
+                               *[("POST", "/material-pool/" + part) for part in ("items", "items/resolve", "items/remove", "schedule", "preview", "pages/preview", "enable", "pause")]]:
             self.assertEqual(route(method, prefix + suffix)[0], ("fbPostMaterialPool",))
         self.assertTrue(route("POST", prefix + "/material-pool/enable")[1])
+        self.assertTrue(route("POST", prefix + "/material-pool/pages/preview")[1])
         self.assertFalse(route("GET", prefix + "/material-pool/runs")[1])
         for method, suffix in [("DELETE", "/material-pool"), ("POST", "/material-pool/run-now"), ("GET", "/material-pool/unsafe"), ("GET", "/page-groups/")]:
             with self.assertRaises(GatewayError):

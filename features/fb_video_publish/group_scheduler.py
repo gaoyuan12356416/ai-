@@ -8,7 +8,7 @@ import uuid
 from datetime import timedelta
 
 from .core import BJ, DomainError, actor_checked, canonical, parse_time, stamp
-from .group_pool import POLICY_VERSION, exclusion, pool_row, random_times
+from .group_pool import exclusion, pool_row, random_times, routing
 
 
 class GroupScheduler:
@@ -74,6 +74,7 @@ class GroupScheduler:
 
     def _finish(self, candidate, actor, facts, error):
         pool, at = candidate["pool"], candidate["at"]
+        policy_version, selection = routing(pool)
         now = stamp(self.now_fn())
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -97,7 +98,7 @@ class GroupScheduler:
             run_id = conn.execute("""INSERT INTO fb_group_pool_run(tenant_key,slot_at_utc,schedule_revision,
                     publisher_user_id,max_item_id,policy_version,status,reason,pairs_json,excluded_json,created_at_utc)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (pool["tenant_key"], stamp(at), pool["schedule_revision"],
-                    pool["publisher_user_id"], candidate["max_item_id"], POLICY_VERSION, status, reason,
+                    pool["publisher_user_id"], candidate["max_item_id"], policy_version, status, reason,
                     canonical(selected["pairs"]), canonical(selected["excluded"]), now)).lastrowid
             if error and getattr(error, "status", 500) == 403 and not stale:
                 conn.execute("UPDATE fb_group_pool SET status='paused',pause_reason=?,version=version+1,updated_at_utc=? WHERE tenant_key=?",
@@ -116,7 +117,8 @@ class GroupScheduler:
                 configs = {pid: {"config_instance_id": "", "version": pool["schedule_revision"], "language": page["language"]}
                            for pid, page in resolved["pages"].items()}
                 plans = [(n, p, 1, at, at.astimezone(BJ).date().isoformat()) for n, p in enumerate(pairs, 1)]
-                snapshot = {"policy_version": POLICY_VERSION, "run_id": run_id, "group_ids": json.loads(pool["group_ids_json"]),
+                snapshot = {"policy_version": policy_version, "run_id": run_id, "group_ids": json.loads(pool["group_ids_json"]),
+                            "page_language_selection": selection,
                             "schedule_revision": pool["schedule_revision"], "slot_at_utc": stamp(at), "max_item_id": candidate["max_item_id"]}
                 result = self.store.freeze(conn, actor, request, resolved, configs, {}, plans, group_pool=snapshot)
                 item_ids = {p["material_id"]: int(p["item_id"]) for p in selected["pairs"]}

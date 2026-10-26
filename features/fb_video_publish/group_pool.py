@@ -6,13 +6,14 @@ import random
 import re
 import time
 import uuid
+from collections import Counter, deque
 from datetime import timedelta
 
 from .core import BJ, DomainError, actor_checked, canonical, digest, id_text, parse_time, stamp
 from .guards import automatic_block, has_table, manual_block
+from .group_language import LEGACY_POLICY, POLICY_VERSION, default_selection, normalize_selection
 from .templates import render_preview, validate_template
 
-POLICY_VERSION = "group_pool_v1"
 SCAN_LIMIT = 5000
 DEFAULT_CAPTION = "{name}\n{desc}\n{url}"
 MUTATION = {"operation_id", "expected_version"}
@@ -59,6 +60,15 @@ def install_schema(conn):
         PRIMARY KEY(tenant_key,material_id));
       CREATE INDEX IF NOT EXISTS idx_fb_group_pool_runs ON fb_group_pool_run(tenant_key,id);
     """)
+    # Existing rows keep their original routing policy; new pools explicitly
+    # insert v2. Never rewrite old snapshots or persisted daily plans.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fb_group_pool)")}
+    for column, definition in (
+        ("page_language_selection_json", "TEXT NOT NULL DEFAULT '{\"mode\":\"all\",\"codes\":[],\"include_blank\":false}'"),
+        ("routing_policy_version", "TEXT NOT NULL DEFAULT 'group_pool_v1'"),
+    ):
+        if column not in columns:
+            conn.execute("ALTER TABLE fb_group_pool ADD COLUMN " + column + " " + definition)
 
 
 def pool_row(conn, tenant):
@@ -68,13 +78,28 @@ def pool_row(conn, tenant):
     return {"tenant_key": tenant, "version": 0, "schedule_revision": 0, "status": "paused",
             "group_ids_json": "[]", "schedule_mode": "fixed", "times_json": "[]", "daily_batches": 1,
             "caption_template": DEFAULT_CAPTION, "processing_mode": "original", "publisher_user_id": "",
-            "publisher_name": "", "pause_reason": "", "effective_at_utc": "", "created_at_utc": "", "updated_at_utc": ""}
+            "publisher_name": "", "pause_reason": "", "effective_at_utc": "", "created_at_utc": "", "updated_at_utc": "",
+            "page_language_selection_json": canonical(default_selection()), "routing_policy_version": POLICY_VERSION}
 
 
 def pool_dto(row):
     return {k: row[k] for k in ("version", "status", "schedule_mode", "daily_batches", "caption_template",
             "processing_mode", "publisher_user_id", "publisher_name", "pause_reason", "effective_at_utc")} | {
-            "group_ids": json.loads(row["group_ids_json"]), "times": json.loads(row["times_json"])}
+            "group_ids": json.loads(row["group_ids_json"]), "times": json.loads(row["times_json"]),
+            "page_language_selection": normalize_selection(json.loads(row["page_language_selection_json"])),
+            "routing_policy_version": row["routing_policy_version"]}
+
+
+def routing(pool):
+    policy = pool.get("routing_policy_version", LEGACY_POLICY)
+    if policy not in {LEGACY_POLICY, POLICY_VERSION}:
+        raise DomainError("group_pool_policy_invalid", "素材池语言路由政策无效", 409)
+    selection = normalize_selection(json.loads(pool.get("page_language_selection_json", canonical(default_selection()))))
+    return policy, selection
+
+
+def unrestricted(page, policy):
+    return policy == POLICY_VERSION and page.get("language_kind") == "unrestricted" and page.get("language") == ""
 
 
 def ids(values, *, maximum=5000):
@@ -107,7 +132,7 @@ def random_times(tenant, day, revision, count):
     A deterministic seed makes pre-persistence calculation stable; the stored
     day plan remains authoritative after it has been inserted.
     """
-    rng = random.Random(digest([tenant, day, revision, POLICY_VERSION]))
+    rng = random.Random(digest([tenant, day, revision, LEGACY_POLICY]))
     slack = 1439 - 60 * (count - 1)
     for _ in range(1000):
         offsets = sorted(rng.choices(range(slack + 1), k=count))
@@ -159,8 +184,9 @@ class GroupPoolService:
         if row["version"] != payload["expected_version"]:
             raise DomainError("pool_version_conflict", "素材池已改变，请刷新后重试", 409)
         now = stamp(self.store.now_fn())
-        conn.execute("""INSERT OR IGNORE INTO fb_group_pool(tenant_key,caption_template,created_at_utc,updated_at_utc)
-                        VALUES(?,?,?,?)""", (actor["tenant_key"], DEFAULT_CAPTION, now, now))
+        conn.execute("""INSERT OR IGNORE INTO fb_group_pool(tenant_key,caption_template,created_at_utc,updated_at_utc,
+                        page_language_selection_json,routing_policy_version) VALUES(?,?,?,?,?,?)""",
+                        (actor["tenant_key"], DEFAULT_CAPTION, now, now, row["page_language_selection_json"], row["routing_policy_version"]))
         return row
 
     def _finish(self, conn, actor, op, hashed, **result):
@@ -177,6 +203,8 @@ class GroupPoolService:
         extras = {"/items": {"material_ids"}, "/items/remove": {"item_ids"},
                   "/schedule": {"group_ids", "schedule_mode", "times", "daily_batches", "caption_template", "processing_mode"},
                   "/enable": set(), "/pause": set()}[suffix]
+        if suffix == "/schedule" and "page_language_selection" in payload:
+            extras.add("page_language_selection")
         self._keys(payload, MUTATION | extras)
         op, hashed, prior = self._operation(actor, suffix, payload)
         if prior:
@@ -190,7 +218,12 @@ class GroupPoolService:
             clean = ids(payload["item_ids"])
         elif suffix == "/schedule":
             group_ids = sorted(ids(payload["group_ids"], maximum=200), key=int)
-            self.sources.resolve_scope(actor, group_ids)
+            with self.store.connect() as conn:
+                previous = pool_row(conn, actor["tenant_key"])
+            policy, selection = routing(previous)
+            if "page_language_selection" in payload:
+                policy, selection = POLICY_VERSION, normalize_selection(payload["page_language_selection"])
+            self.sources.resolve_scope(actor, group_ids, policy_version=policy, page_language_selection=selection)
             mode, times, count = payload["schedule_mode"], payload["times"], payload["daily_batches"]
             if mode not in {"fixed", "random"} or type(count) is not int or not 1 <= count <= 24:
                 raise DomainError("invalid_schedule", "排期模式或每日批次数无效")
@@ -201,7 +234,7 @@ class GroupPoolService:
             if payload["processing_mode"] != "original":
                 raise DomainError("invalid_request", "组素材池当前使用原片发布")
             clean = {"groups": canonical(group_ids), "mode": mode, "times": canonical(sorted(times)), "count": count,
-                     "caption": validate_template(payload["caption_template"])}
+                     "caption": validate_template(payload["caption_template"]), "selection": canonical(selection), "policy": policy}
         elif suffix == "/enable":
             if self.identity_resolver is None:
                 raise DomainError("identity_unavailable", "启用前身份复核尚未配置", 503)
@@ -217,7 +250,9 @@ class GroupPoolService:
                 raise DomainError("schedule_incomplete", "请先保存Page组和排期", 409)
             if not re.fullmatch(r"[1-9][0-9]{0,30}", actor["sub_user_id"]):
                 raise DomainError("identity_attribution_invalid", "发布人缺少有效归因身份", 403)
-            self.sources.resolve_scope(actor, json.loads(row["group_ids_json"]))
+            policy, selection = routing(row)
+            self.sources.resolve_scope(actor, json.loads(row["group_ids_json"]),
+                                       policy_version=policy, page_language_selection=selection)
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             prior = self._prior(conn, actor, op, hashed)
@@ -256,12 +291,16 @@ class GroupPoolService:
                 if clean["mode"] == "random":
                     effective = (effective.astimezone(BJ) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                 changed_groups = row["group_ids_json"] != clean["groups"]
+                changed_selection = canonical(normalize_selection(json.loads(row["page_language_selection_json"]))) != clean["selection"]
+                changed_policy = row["routing_policy_version"] != clean["policy"]
+                pause_reason = ("groups_changed" if changed_groups else "page_language_selection_changed" if changed_selection
+                                else "routing_policy_changed" if changed_policy else "")
                 conn.execute("""UPDATE fb_group_pool SET group_ids_json=?,schedule_mode=?,times_json=?,daily_batches=?,
                     caption_template=?,processing_mode='original',schedule_revision=schedule_revision+1,effective_at_utc=?,
-                    status=?,pause_reason=? WHERE tenant_key=?""",
+                    status=?,pause_reason=?,page_language_selection_json=?,routing_policy_version=? WHERE tenant_key=?""",
                     (clean["groups"], clean["mode"], clean["times"], clean["count"], clean["caption"],
-                     effective.isoformat(timespec="microseconds"), "paused" if changed_groups else row["status"],
-                     "groups_changed" if changed_groups else row["pause_reason"], actor["tenant_key"]))
+                     effective.isoformat(timespec="microseconds"), "paused" if pause_reason else row["status"],
+                     pause_reason or row["pause_reason"], clean["selection"], clean["policy"], actor["tenant_key"]))
             elif suffix == "/enable":
                 effective = self.store.now_fn()
                 if row["schedule_mode"] == "random":
@@ -326,7 +365,9 @@ class GroupPoolService:
 
     def candidates(self, actor, pool, *, seed, max_item_id=None):
         """Freeze a bounded snapshot, then resolve current external facts unlocked."""
-        scope = self.sources.resolve_scope(actor, json.loads(pool["group_ids_json"]))
+        policy, selection = routing(pool)
+        scope = self.sources.resolve_scope(actor, json.loads(pool["group_ids_json"]),
+                                           policy_version=policy, page_language_selection=selection)
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             if max_item_id is None:
@@ -337,19 +378,39 @@ class GroupPoolService:
             scan_truncated = len(rows) > SCAN_LIMIT
             rows = rows[:SCAN_LIMIT]
             occupied = historical_materials(conn, [r["material_id"] for r in rows])
+            page_blocks = {pid: automatic_block(conn, pid) or manual_block(conn, pid) for pid in scope["pages"]}
+            day = self.store.now_fn().astimezone(BJ).date().isoformat()
+            used = conn.execute("SELECT COUNT(*) FROM fb_video_task WHERE planned_bj_date=? AND status<>'cancelled'", (day,)).fetchone()[0]
         available = [r for r in rows if r["material_id"] not in occupied]
-        materials, excluded = {}, list(scope["excluded"])
+        materials = {}
+        excluded = [row for row in scope["excluded"] if row.get("code") != "page_language_not_selected"]
+        not_selected = sum(row.get("code") == "page_language_not_selected" for row in scope["excluded"])
+        if not_selected:
+            excluded.append(exclusion("page_languages_not_selected", "部分Page未符合当前语言选择，不参与本批配对", page_count=not_selected))
         if scan_truncated:
             excluded.append(exclusion("candidate_scan_limit", "本批仅扫描最新5000条待发素材，更早素材继续留池", scan_limit=SCAN_LIMIT))
         excluded += [exclusion("material_previously_bound", "素材已有FB任务历史", material_id=r["material_id"]) for r in rows if r["material_id"] in occupied]
-        pages = dict(scope["pages"])
-        needed = {}
-        for page in pages.values():
-            needed[page["language"]] = needed.get(page["language"], 0) + 1
+        pages = {pid: page for pid, page in scope["pages"].items() if not page_blocks[pid]}
+        excluded.extend(exclusion(reason, "Page存在结果不明的任务，先完成核对", page_id=pid)
+                        for pid, reason in page_blocks.items() if reason)
+        specific_needed = Counter(page["language"] for page in pages.values() if not unrestricted(page, policy))
+        blank_needed = sum(unrestricted(page, policy) for page in pages.values())
+        resolved_counts = Counter()
+
+        def spare_count():
+            return sum(max(0, count - specific_needed.get(lang, 0)) for lang, count in resolved_counts.items())
+
+        def need_language(language):
+            return (resolved_counts[language] < specific_needed.get(language, 0)
+                    or spare_count() < blank_needed)
+
+        def need_more():
+            return (any(resolved_counts[lang] < count for lang, count in specific_needed.items())
+                    or spare_count() < blank_needed)
         # Resolve newest candidates in bounded chunks. Invalid newest rows must
         # not hide a valid older row; languages with no target need no query.
         deadline, offset = time.monotonic() + 25, 0
-        while offset < len(available) and any(needed.values()):
+        while offset < len(available) and used < self.store.daily_limit and need_more():
             if time.monotonic() >= deadline:
                 excluded.append(exclusion("source_scan_budget_exceeded", "本轮素材检查已到时间上限，其余素材继续留池"))
                 break
@@ -357,7 +418,7 @@ class GroupPoolService:
             while offset < len(available) and len(chunk) < 100:
                 row = available[offset]
                 offset += 1
-                if needed.get(row["language"], 0):
+                if need_language(row["language"]):
                     chunk.append(row)
             if not chunk:
                 continue
@@ -366,7 +427,7 @@ class GroupPoolService:
             fresh = {str(m["material_id"]): m for m in resolved["items"]}
             for row in chunk:
                 material = fresh.get(row["material_id"])
-                if material is None or not needed.get(row["language"], 0):
+                if material is None or not need_language(row["language"]):
                     continue
                 frozen = json.loads(row["material_json"])
                 if any(str(material.get(k, "")) != str(frozen.get(k, "")) for k in ("material_id", "content_id", "language", "media_url")):
@@ -380,11 +441,14 @@ class GroupPoolService:
                     excluded.append(exclusion(exc.code, str(exc), material_id=row["material_id"]))
                     continue
                 materials[row["material_id"]] = material
-                needed[material["language"]] -= 1
-        ordered_pages = sorted(pages, key=lambda pid: digest([seed, pid]))
+                resolved_counts[material["language"]] += 1
+        # Explicit language Pages receive their newest matching items first;
+        # unrestricted Pages then receive the newest remaining material.
+        ordered_pages = sorted(pages, key=lambda pid: (unrestricted(pages[pid], policy), digest([seed, pid])))
         return {"scope": scope, "pages": pages, "page_order": ordered_pages, "materials": materials,
                 "rows": available, "excluded": excluded, "max_item_id": max_item_id,
-                "scan_limit": SCAN_LIMIT, "scan_truncated": scan_truncated}
+                "scan_limit": SCAN_LIMIT, "scan_truncated": scan_truncated, "routing_policy_version": policy,
+                "page_language_selection": selection}
 
     def match(self, conn, actor, pool, facts, *, day):
         """Recheck local reservations, quota and guards within the caller transaction."""
@@ -396,43 +460,58 @@ class GroupPoolService:
         live_ids = {r[0] for r in conn.execute("""SELECT id FROM fb_group_pool_item WHERE tenant_key=? AND id<=?
                    AND id>=? AND status='pending' AND task_id='' ORDER BY id DESC LIMIT ?""",
                    (actor["tenant_key"], facts["max_item_id"], min_item_id, SCAN_LIMIT))}
-        queues = {}
+        policy, selection = routing(pool)
+        queues, all_materials = {}, deque()
         for row in facts["rows"]:
             material = facts["materials"].get(row["material_id"])
             if row["id"] in live_ids and material and row["material_id"] not in occupied:
-                queues.setdefault(material["language"], []).append((row, material))
-        pairs = []
+                queues.setdefault(material["language"], deque()).append((row, material))
+                all_materials.append((row, material))
+        pairs, consumed = [], set()
         for pid in facts["page_order"]:
             page = facts["pages"][pid]
             reason = automatic_block(conn, pid) or manual_block(conn, pid)
             if reason:
                 excluded.append(exclusion(reason, "Page存在结果不明的任务，先完成核对", page_id=pid))
                 continue
-            queue = queues.get(page["language"], [])
-            if not queue:
-                excluded.append(exclusion("language_material_unavailable", "没有可用的同语言素材", page_id=pid, language=page["language"]))
-                continue
             if len(pairs) >= remaining:
                 excluded.append(exclusion("daily_capacity_exceeded", "本日发布额度不足", page_id=pid))
                 continue
-            row, material = queue.pop(0)
+            is_blank = unrestricted(page, policy)
+            queue = all_materials if is_blank else queues.get(page["language"], deque())
+            while queue and queue[0][0]["material_id"] in consumed:
+                queue.popleft()
+            if not queue:
+                excluded.append(exclusion("material_unavailable" if is_blank else "language_material_unavailable",
+                    "没有可用的剩余素材" if is_blank else "没有可用的同语言素材", page_id=pid, language=page["language"]))
+                continue
+            row, material = queue.popleft()
+            consumed.add(row["material_id"])
             pairs.append({"item_id": str(row["id"]), "material_id": row["material_id"], "material_name": material["material_name"],
                           "language": material["language"], "page_id": pid, "page_name": page["page_name"],
+                          "page_language": page["language"], "language_kind": "unrestricted" if is_blank else "specific",
                           "caption": render_preview(pool["caption_template"], material)})
-        languages = {p["language"] for p in facts["pages"].values()}
+        languages = {p["language"] for p in facts["pages"].values() if not unrestricted(p, policy)}
+        blank_pages = sum(unrestricted(p, policy) for p in facts["pages"].values())
         for row in facts["rows"]:
-            if row["language"] not in languages:
+            if row["language"] not in languages and not blank_pages:
                 excluded.append(exclusion("language_page_unavailable", "所选组没有同语言可用Page，素材继续留池", material_id=row["material_id"], language=row["language"]))
         all_languages = sorted(languages | {r["language"] for r in facts["rows"]})
-        capacity = [{"language": lang, "page_count": sum(p["language"] == lang for p in facts["pages"].values()),
+        capacity = [{"language": lang, "language_kind": "specific", "page_count": sum(p["language"] == lang for p in facts["pages"].values()),
                      "material_count": sum(r["language"] == lang and r["material_id"] not in occupied for r in facts["rows"]),
-                     "matched_count": sum(p["language"] == lang for p in pairs)} for lang in all_languages]
+                     "matched_count": sum(p["page_language"] == lang and p["language_kind"] == "specific" for p in pairs)} for lang in all_languages]
+        if blank_pages:
+            capacity.append({"language": "", "language_kind": "unrestricted", "page_count": blank_pages,
+                             "material_count": max(0, sum(r["material_id"] not in occupied for r in facts["rows"])
+                                                   - sum(p["language_kind"] == "specific" for p in pairs)),
+                             "matched_count": sum(p["language_kind"] == "unrestricted" for p in pairs)})
         return {"ok": True, "pairs": pairs, "excluded": excluded, "max_item_id": facts["max_item_id"],
                 "quota_remaining": remaining, "language_capacity": capacity,
-                "scan_limit": facts["scan_limit"], "scan_truncated": facts["scan_truncated"]}
+                "scan_limit": facts["scan_limit"], "scan_truncated": facts["scan_truncated"],
+                "routing_policy_version": policy, "page_language_selection": selection}
 
     def preview(self, actor, payload):
-        if not isinstance(payload, dict) or set(payload) - {"group_ids", "caption_template"}:
+        if not isinstance(payload, dict) or set(payload) - {"group_ids", "caption_template", "page_language_selection"}:
             raise DomainError("invalid_request", "预览字段无效")
         with self.store.connect() as conn:
             pool = pool_row(conn, actor["tenant_key"])
@@ -440,12 +519,48 @@ class GroupPoolService:
             pool["group_ids_json"] = canonical(sorted(ids(payload["group_ids"], maximum=200), key=int))
         if "caption_template" in payload:
             pool["caption_template"] = validate_template(payload["caption_template"])
+        if "page_language_selection" in payload:
+            pool["page_language_selection_json"] = canonical(normalize_selection(payload["page_language_selection"]))
+            pool["routing_policy_version"] = POLICY_VERSION
         if not json.loads(pool["group_ids_json"]):
             raise DomainError("schedule_incomplete", "请先选择Page组", 409)
         facts = self.candidates(actor, pool, seed=[actor["tenant_key"], pool["schedule_revision"], "preview"])
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             return self.match(conn, actor, pool, facts, day=self.store.now_fn().astimezone(BJ).date().isoformat())
+
+    def pages_preview(self, actor, payload):
+        if (not isinstance(payload, dict) or not {"group_ids", "page_language_selection"} <= set(payload)
+                or set(payload) - {"group_ids", "page_language_selection", "q", "cursor", "limit"}):
+            raise DomainError("invalid_request", "Page预览字段无效")
+        groups = sorted(ids(payload["group_ids"], maximum=200), key=int)
+        selection = normalize_selection(payload["page_language_selection"])
+        query, cursor, limit = payload.get("q", ""), payload.get("cursor", ""), payload.get("limit", 50)
+        if (not isinstance(query, str) or len(query) > 200 or not isinstance(cursor, str)
+                or (cursor and not re.fullmatch(r"[1-9][0-9]{0,30}", cursor))
+                or type(limit) is not int or not 1 <= limit <= 100):
+            raise DomainError("invalid_request", "Page预览搜索或分页参数无效")
+        scope = self.sources.resolve_scope(actor, groups, policy_version=POLICY_VERSION,
+                                           page_language_selection=selection)
+        rows = []
+        for eligible, entries in ((True, scope["pages"].values()), (False, scope["excluded"])):
+            for page in entries:
+                if page.get("code") == "page_language_not_selected":
+                    continue
+                rows.append({"page_id": page["page_id"], "page_name": page.get("page_name", page["page_id"]),
+                             "language": page.get("language", ""), "language_kind": page.get("language_kind", "specific"),
+                             "group_ids": list(page.get("group_ids", [])), "eligible": eligible,
+                             "blocked_reason": "" if eligible else page.get("blocked_reason") or page.get("message") or "Page暂不可用",
+                             "code": "" if eligible else page.get("code", "page_unavailable")})
+        rows.sort(key=lambda row: int(row["page_id"]))
+        search = query.strip().casefold()
+        matched = [row for row in rows if not search or search in (row["page_id"] + " " + row["page_name"]).casefold()]
+        after = [row for row in matched if not cursor or int(row["page_id"]) > int(cursor)]
+        return {"ok": True, "items": after[:limit], "language_summary": scope.get("language_summary", {}),
+                "total": len(rows), "eligible_count": sum(row["eligible"] for row in rows),
+                "excluded_count": sum(not row["eligible"] for row in rows), "matching_count": len(matched),
+                "has_more": len(after) > limit, "next_cursor": after[limit - 1]["page_id"] if len(after) > limit else None,
+                "routing_policy_version": POLICY_VERSION, "page_language_selection": selection}
 
     def runs(self, actor, query):
         limit, cursor = self._pagination(query)
@@ -495,6 +610,8 @@ class GroupPoolService:
             return {"ok": True, **self.sources.resolve_materials(ids(payload["material_ids"]), need_desc=False)}
         if method == "POST" and suffix == "/preview":
             return self.preview(actor, payload)
+        if method == "POST" and suffix == "/pages/preview":
+            return self.pages_preview(actor, payload)
         if method == "POST" and suffix in {"/items", "/items/remove", "/schedule", "/enable", "/pause"}:
             if not self.enabled:
                 raise DomainError("group_pool_gate_closed", "组素材池写入开关未开启", 409)

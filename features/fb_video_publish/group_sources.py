@@ -12,29 +12,19 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-from features.fb_auto_posts.validation import LANGUAGE_ALIASES, LANGUAGE_RE
-
+from .group_language import (
+    LEGACY_POLICY, POLICY_VERSION as SCOPE_POLICY_VERSION,
+    default_selection, normalize_language, normalize_selection,
+)
 from .sources import SourceError, _ids, _thumbnail, prepare_source_url
 
-POLICY_VERSION = "group_pool_v1"
+# Material admission has not changed. Keep its frozen policy independent of
+# the new Page-language selection and unrestricted-Page matching policy.
+POLICY_VERSION = LEGACY_POLICY
 QUERY_BATCH_SIZE = 100
 MAX_SCOPE_ROWS = 20000
 MAX_METADATA_ROWS = 10000
 ID_RE = re.compile(r"[1-9][0-9]{0,30}")
-
-
-def normalize_language(value: Any) -> str:
-    """Normalize known aliases without guessing a missing or invalid language."""
-    if not isinstance(value, str):
-        return ""
-    text = value.strip().lower().replace("_", "-")
-    text = LANGUAGE_ALIASES.get(text, text)
-    if text == "jp" or text.startswith("jp-"):
-        text = "ja" + text[2:]
-    # In particular zh, zh-cn and zh-tw remain separate routing languages.
-    if text in {"und", "unknown", "null", "none"}:
-        return ""
-    return text if len(text) <= 32 and LANGUAGE_RE.fullmatch(text) and text[0].isalpha() else ""
 
 
 def _chunks(values):
@@ -140,8 +130,15 @@ class GroupPoolSource:
     def list_groups(self, actor) -> list[dict]:
         return list(self._groups(actor).values())
 
-    def resolve_scope(self, actor, group_ids) -> dict:
+    def resolve_scope(self, actor, group_ids, *, page_language_selection=None,
+                      policy_version=LEGACY_POLICY, page_ids=None) -> dict:
         wanted = _ids(group_ids, None, "Page组")
+        if not isinstance(policy_version, str) or policy_version not in {LEGACY_POLICY, SCOPE_POLICY_VERSION}:
+            raise SourceError("group_pool_policy_invalid", "Page语言选择政策无效", 409)
+        selection = normalize_selection(default_selection() if page_language_selection is None else page_language_selection)
+        if policy_version == LEGACY_POLICY and selection != default_selection():
+            raise SourceError("group_pool_policy_invalid", "旧版组素材池不支持Page语言筛选", 409)
+        selected_ids = None if page_ids is None else ([] if page_ids == [] else _ids(page_ids, None, "Page"))
         admin, owner = self._owner(actor)
         groups = self._groups(actor, wanted)
         if set(groups) != set(wanted):
@@ -151,31 +148,77 @@ class GroupPoolSource:
         members = defaultdict(list)
         total = 0
         for chunk in _chunks(wanted):
-            slots = ",".join("%s" for _ in chunk)
-            owner_clause = "" if admin else " AND g.user_id=%s"
-            rows = self._select(f"""
-                SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(g.id AS CHAR) group_id,
-                       TRIM(i.page_id) page_id,COALESCE(i.language,'') language,
-                       COALESCE(i.timezone,'') timezone
-                  FROM `{self.mysql.schema}`.ads_facebook_page_group g
-                  JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
-                  JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
-                 WHERE g.is_delete=0 AND g.type IN (0,1) AND g.app_id=1479
-                   AND LOWER(a.name)='dramawave' AND i.deleted_at=0 AND TRIM(i.page_id)<>''
-                   AND g.id IN ({slots}){owner_clause}
-                 ORDER BY g.id,i.page_id LIMIT 20001
-            """, chunk + ([] if admin else [owner]), maximum=MAX_SCOPE_ROWS)
-            total += len(rows)
-            if total > MAX_SCOPE_ROWS:
-                raise SourceError("group_pool_source_too_large", "Page组成员超过安全范围，请缩小选择范围", 503)
-            for row in rows:
-                gid, pid = str(row.get("group_id") or ""), str(row.get("page_id") or "").strip()
-                if gid not in chunk or not ID_RE.fullmatch(pid):
-                    raise SourceError("group_source_invalid", "Page组成员来源范围或ID无效", 503)
-                members[pid].append({"group_id": gid, "language": normalize_language(row.get("language")),
-                                     "timezone": str(row.get("timezone") or "")[:64]})
+            for page_chunk in ([None] if selected_ids is None else _chunks(selected_ids)):
+                slots = ",".join("%s" for _ in chunk)
+                owner_clause = "" if admin else " AND g.user_id=%s"
+                page_clause = "" if page_chunk is None else " AND i.page_id IN (" + ",".join("%s" for _ in page_chunk) + ")"
+                rows = self._select(f"""
+                    SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(g.id AS CHAR) group_id,
+                           TRIM(i.page_id) page_id,COALESCE(i.language,'') language,
+                           COALESCE(i.timezone,'') timezone
+                      FROM `{self.mysql.schema}`.ads_facebook_page_group g
+                      JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
+                      JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
+                     WHERE g.is_delete=0 AND g.type IN (0,1) AND g.app_id=1479
+                       AND LOWER(a.name)='dramawave' AND i.deleted_at=0 AND TRIM(i.page_id)<>''
+                       AND g.id IN ({slots}){owner_clause}{page_clause}
+                     ORDER BY g.id,i.page_id LIMIT 20001
+                """, chunk + ([] if admin else [owner]) + (page_chunk or []), maximum=MAX_SCOPE_ROWS)
+                total += len(rows)
+                if total > MAX_SCOPE_ROWS:
+                    raise SourceError("group_pool_source_too_large", "Page组成员超过安全范围，请缩小选择范围", 503)
+                for row in rows:
+                    gid, pid = str(row.get("group_id") or ""), str(row.get("page_id") or "").strip()
+                    if gid not in chunk or not ID_RE.fullmatch(pid) or (page_chunk is not None and pid not in page_chunk):
+                        raise SourceError("group_source_invalid", "Page组成员来源范围或ID无效", 503)
+                    raw_language = row.get("language")
+                    members[pid].append({"group_id": gid, "language": normalize_language(raw_language),
+                                         "blank": raw_language is None or (isinstance(raw_language, str) and not raw_language.strip()),
+                                         "timezone": str(row.get("timezone") or "")[:64]})
+        aggregated, summary_counts = {}, defaultdict(int)
+        summary = {"items": [], "total_page_count": len(members), "conflict_page_count": 0,
+                   "invalid_page_count": 0, "missing_page_count": 0}
+        for pid in sorted(members, key=int):
+            records = members[pid]
+            gids = sorted({row["group_id"] for row in records}, key=int)
+            languages = {row["language"] for row in records}
+            specific = languages - {""}
+            invalid = any(not row["blank"] and not row["language"] for row in records)
+            code, message = "", ""
+            language = next(iter(specific)) if len(specific) == 1 else ""
+            kind = "specific" if language else "unrestricted"
+            if len(specific) > 1:
+                code, message, kind = "page_language_conflict", "Page在所选组中的成员语言冲突", "conflict"
+                summary["conflict_page_count"] += 1
+            elif policy_version == LEGACY_POLICY and "" in languages:
+                code, message, kind = "page_language_missing", "Page组成员缺少有效语言", "missing"
+                summary["missing_page_count"] += 1
+            elif invalid:
+                code, message, kind = "page_language_invalid", "Page组成员包含非法非空语言，请修正成员语言", "invalid"
+                summary["invalid_page_count"] += 1
+            else:
+                summary_counts[(language, kind)] += 1
+            aggregated[pid] = {"page_id": pid, "page_name": pid, "group_ids": gids, "group_id": gids[0],
+                               "language": language, "language_kind": kind, "timezone": records[0]["timezone"],
+                               "code": code, "message": message}
+        summary["items"] = [{"language": language, "language_kind": kind, "page_count": count}
+                            for (language, kind), count in sorted(summary_counts.items())]
+        # v1 keeps its historical authorization read and exclusion semantics.
+        # v2 rejects malformed/conflicting and unselected languages before any
+        # token lookup, while the complete selected group scope was checked above.
+        eligible_ids = []
+        for pid, item in aggregated.items():
+            if policy_version == LEGACY_POLICY:
+                eligible_ids.append(pid)
+            elif not item["code"]:
+                selected = (selection["include_blank"] if item["language_kind"] == "unrestricted" else
+                            selection["mode"] == "all" or item["language"] in selection["codes"])
+                if selected:
+                    eligible_ids.append(pid)
+                else:
+                    item["code"], item["message"] = "page_language_not_selected", "Page语言未在本次发布选择范围内"
         authorized = {}
-        for chunk in _chunks(sorted(members, key=int)):
+        for chunk in _chunks(eligible_ids):
             try:
                 rows = self.source.list_pages(actor, page_ids=chunk)
             except SourceError:
@@ -188,30 +231,23 @@ class GroupPoolSource:
                     raise SourceError("group_source_invalid", "Page授权来源范围无效", 503)
                 authorized[pid] = row
         pages, excluded = {}, []
-        for pid in sorted(members, key=int):
-            records = members[pid]
-            gids = sorted({row["group_id"] for row in records}, key=int)
-            languages = {row["language"] for row in records}
+        for pid, item in aggregated.items():
             page = authorized.get(pid, {})
             try:
                 token_count = _integer(page.get("eligible_token_count") or 0)
             except ValueError:
                 token_count = 0
-            code, message = "", ""
-            if len(languages - {""}) > 1:
-                code, message = "page_language_conflict", "Page在所选组中的成员语言冲突"
-            elif "" in languages:
-                code, message = "page_language_missing", "Page组成员缺少有效语言"
-            elif not page or token_count < 1 or page.get("blocked_reason"):
+            code, message = item["code"], item["message"]
+            if not code and (not page or token_count < 1 or page.get("blocked_reason")):
                 code, message = "page_unavailable", "Page不在当前授权范围内或缺少有效授权"
-            base = {"page_id": pid, "page_name": str(page.get("page_name") or pid).strip()[:255],
-                    "group_ids": gids, "group_id": gids[0]}
+            base = {key: value for key, value in item.items() if key not in {"code", "message"}}
+            base["page_name"] = str(page.get("page_name") or pid).strip()[:255]
             if code:
                 excluded.append({**base, "code": code, "message": message, "blocked_reason": message})
                 continue
-            pages[pid] = {**base, "language": next(iter(languages)), "eligible_token_count": token_count,
-                          "timezone": records[0]["timezone"], "blocked_reason": "", "legacy_conflict": False}
-        return {"groups": [groups[gid] for gid in wanted], "pages": pages, "excluded": excluded}
+            pages[pid] = {**base, "eligible_token_count": token_count, "blocked_reason": "", "legacy_conflict": False}
+        return {"groups": [groups[gid] for gid in wanted], "pages": pages, "excluded": excluded,
+                "language_summary": summary}
 
     def _material_rows(self, ids):
         slots = ",".join("%s" for _ in ids)

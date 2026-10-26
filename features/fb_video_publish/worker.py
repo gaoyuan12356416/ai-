@@ -51,28 +51,40 @@ class Worker:
 
     def _group_preflight(self, task, snap):
         from .core import actor_checked
-        from .group_pool import POLICY_VERSION
+        from .group_language import LEGACY_POLICY, POLICY_VERSION, default_selection, normalize_selection
         policy = snap.get("group_pool")
-        if (not isinstance(policy, dict) or policy.get("policy_version") != POLICY_VERSION
+        if (not isinstance(policy, dict) or policy.get("policy_version") not in {LEGACY_POLICY, POLICY_VERSION}
                 or not isinstance(policy.get("group_ids"), list) or not policy["group_ids"]
                 or "manual_policy" in snap or "pool" in snap
                 or self.group_sources is None or self.group_identity_resolver is None):
             raise DomainError("group_pool_policy_invalid", "组素材池冻结政策或复核服务无效，未调用平台", 409)
+        policy_version = policy["policy_version"]
+        selection = normalize_selection(policy.get("page_language_selection", default_selection()))
+        if policy_version == POLICY_VERSION and "page_language_selection" not in policy:
+            raise DomainError("group_pool_policy_invalid", "任务缺少冻结的Page语言选择，未调用平台", 409)
         actor = actor_checked(self.group_identity_resolver(task["tenant_key"], task["owner_user_id"]))
         frozen_actor = snap.get("actor", {})
         if (actor["tenant_key"] != task["tenant_key"] or actor["user_id"] != task["owner_user_id"]
                 or any(actor.get(k) != frozen_actor.get(k) for k in ("tenant_key", "user_id", "sub_user_id", "business_owner_id"))):
             raise DomainError("group_pool_identity_changed", "计划发布人身份已改变，未调用平台", 403)
-        scope = self.group_sources.resolve_scope(actor, policy["group_ids"])
+        scope = self.group_sources.resolve_scope(actor, policy["group_ids"], policy_version=policy_version,
+                    page_language_selection=selection, page_ids=[task["page_id"]])
         page = scope["pages"].get(task["page_id"])
         frozen_page = snap["page"]
         if (not page or page.get("language") != frozen_page.get("language")
                 or sorted(page.get("group_ids", [])) != sorted(frozen_page.get("group_ids", []))):
             raise DomainError("group_pool_membership_changed", "Page组成员、语言或授权已改变，未调用平台", 409)
+        if policy_version == POLICY_VERSION:
+            kind = frozen_page.get("language_kind")
+            if kind not in {"specific", "unrestricted"} or page.get("language_kind") != kind:
+                raise DomainError("group_pool_membership_changed", "Page语言规则已改变，未调用平台", 409)
+            if (kind == "unrestricted") != (page.get("language") == ""):
+                raise DomainError("group_pool_policy_invalid", "Page语言规则与冻结语言不一致，未调用平台", 409)
         fresh = self.group_sources.get_materials([task["material_id"]], need_desc=False)[task["material_id"]]
         if any(str(fresh.get(k, "")) != str(snap["material"].get(k, "")) for k in ("material_id", "content_id", "language", "media_url")):
             raise DomainError("material_identity_changed", "素材来源身份已变化，未调用平台", 409)
-        if fresh["language"] != page["language"]:
+        is_unrestricted = policy_version == POLICY_VERSION and page.get("language_kind") == "unrestricted"
+        if not is_unrestricted and fresh["language"] != page["language"]:
             raise DomainError("language_mismatch", "Page与素材当前语言不匹配，未调用平台", 409)
 
     def _task_credentials(self, task, snapshot=None):

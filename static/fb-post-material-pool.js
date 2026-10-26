@@ -2,11 +2,14 @@
   "use strict";
   const BASE = "/api/fb-video-publish", POOL = BASE + "/material-pool";
   const $ = id => document.getElementById(id);
-  const state = {auth:{},pool:null,groups:[],languages:new Map(),selectedGroups:new Set(),selectedItems:new Set(),items:[],dirty:false,ready:false,featureEnabled:true,recordAccess:false,writing:false,reading:false,pending:null,itemCursor:"",itemStack:[],itemNext:"",runCursor:"",runStack:[],runNext:"",itemGeneration:0,runGeneration:0,previewGeneration:0,hasPreview:false};
+  const state = {auth:{},pool:null,groups:[],languages:new Map(),selectedGroups:new Set(),selectedPageLanguages:new Set(),pageLanguageSummary:null,selectedItems:new Set(),items:[],dirty:false,ready:false,featureEnabled:true,recordAccess:false,writing:false,reading:false,pending:null,itemCursor:"",itemStack:[],itemNext:"",runCursor:"",runStack:[],runNext:"",itemGeneration:0,runGeneration:0,previewGeneration:0,hasPreview:false,previewLoading:false,targetGeneration:0,targetLoading:false,targetStale:true,hasTargets:false,targetCursor:"",targetStack:[],targetNext:"",targetLoadedQuery:""};
   const labels = {pending:"待发布",bound:"已绑定任务",queued:"待处理",preparing:"加工中",processing:"处理中",ready:"待发布",running:"发布中",publishing:"发布中",submitted:"平台处理中",published:"已发布",completed:"已完成",partial:"部分完成",partial_failed:"部分失败",failed:"失败",cancelled:"已取消",unknown:"结果待核对",unknown_outcome:"结果待核对",removed:"已移除",blocked:"已阻止",skipped:"已跳过",frozen:"已安排",created:"已安排",empty:"无可发布素材",enabled:"已启用",paused:"已暂停"};
   const reasons = {groups_changed:"Page 组已变更，请重新启用计划。",operator_paused:"已手动暂停；已生成的任务继续保留。",no_eligible_pairs:"本批没有可用的语言配对。",configuration_changed:"发布设置已变化，本时点不再执行。",slot_expired:"已错过计划时点，本批不补发。",group_not_found:"部分 Page 组不存在或发布人已无访问权限，请重新选择后启用。",group_access_denied:"Page 组访问权限已失效，请重新核对后启用。",identity_inactive:"发布人身份已失效，请由有权限的账号重新启用。",identity_attribution_invalid:"发布人归因身份不完整，请联系管理员核对。",identity_unavailable:"暂时无法复核发布人身份，请稍后重试。",invalid_actor:"发布人身份无效，请重新登录后核对。",fb_auto_owner_mapping_missing:"当前账号未关联到唯一的 Page 组负责人，请联系管理员核对。",group_source_unavailable:"Page 组或素材查询暂不可用，请稍后重试。",group_pool_source_unavailable:"Page 组或素材查询暂不可用，请稍后重试。",group_source_invalid:"Page 组数据发生变化，请刷新后核对。",group_pool_source_too_large:"所选范围过大，请减少 Page 组后重试。",source_scan_budget_exceeded:"本轮素材检查已到时间上限，其余素材继续留池。",language_material_unavailable:"没有可用的同语言素材。",language_page_unavailable:"所选组没有同语言可用 Page，素材继续留池。",daily_capacity_exceeded:"本日发布额度不足。",material_previously_bound:"素材已有 FB 任务历史，不能自动重复发布。",material_identity_changed:"入池后素材身份或语言改变，请移除后重新导入。",fb_video_page_unknown:"Page 存在结果待核对的任务，请先完成核对。",permission_denied:"发布权限已失效，请联系管理员核对。",group_pool_gate_closed:"组素材池维护中，暂时无法修改。"};
   const reasonText=(value,fallback="当前条件不满足，请查看配对与缺口详情。")=>{const text=String(value||"");return reasons[text] || (/^[a-z][a-z0-9_:-]*$/i.test(text)?fallback:text);};
+  reasons.page_language_selection_changed="目标 Page 语言范围已变更，请重新启用计划。";
+  reasons.routing_policy_changed="语言分配设置已更新，请重新启用计划。";
   const language = value => state.languages.get(value) || value || "未设置语言";
+  const pageLanguage=(value,kind)=>kind==="unrestricted"||value===""?"空语言 · 不限素材语言":language(value);
   const bj = value => { if (!value) return "—"; const date=new Date(value); return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date) : "—"; };
   const node = (tag, text, className) => { const el=document.createElement(tag); if(text!==undefined)el.textContent=String(text??""); if(className)el.className=className; return el; };
   const errorAt = (id,error) => { $(id).textContent=error?.message || String(error || ""); $(id).hidden=!$(id).textContent; };
@@ -14,14 +17,15 @@
   function toast(message){ $("toast").textContent=message;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,5000); }
   class ApiError extends Error { constructor(status,data){super(data.message || data.error || `请求失败（${status}）`);this.status=status;this.data=data;} }
   async function api(path,options={}){
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),45000);
+    const readonly=!options.method||options.method==="GET"||["/preview","/pages/preview","/items/resolve"].some(suffix=>path===POOL+suffix);
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),readonly?90000:45000);
     try{
       const response=await fetch(path,{credentials:"same-origin",cache:"no-store",...options,signal:controller.signal,headers:{...(options.body?{"Content-Type":"application/json"}:{}),...(options.headers||{})}});
       let data;try{data=await response.json();}catch(_){throw new Error("服务返回内容无效，请保留输入并查询操作结果。");}
       if(!response.ok || data.ok===false)throw new ApiError(response.status,data);
       if(!data || typeof data!=="object")throw new Error("服务返回内容无效。");
       return data;
-    }finally{clearTimeout(timer);}
+    }catch(error){if(error.name==="AbortError")throw new Error(readonly?"读取超时，请保留当前筛选后重试。":"请求超时，请查询原操作结果，避免重复提交。");throw error;}finally{clearTimeout(timer);}
   }
   const post=(path,data)=>api(path,{method:"POST",body:JSON.stringify(data)});
   async function loadRecordAccess(){
@@ -41,11 +45,19 @@
   }
   function paintLocks(){
     const locked=!state.ready||!state.featureEnabled||state.writing||state.reading||!!state.pending;
+    const validSelection=pageSelectionValid(),readBlocked=!state.ready||state.writing||state.reading;
     $("settingsControls").disabled=locked;$("admissionControls").disabled=locked;
-    $("enableSchedule").disabled=locked||state.dirty||state.pool?.status==="enabled"||!state.selectedGroups.size;
+    $("saveSchedule").disabled=locked||!validSelection;
+    $("enableSchedule").disabled=locked||!validSelection||state.dirty||state.pool?.status==="enabled"||!state.selectedGroups.size;
     $("pauseSchedule").disabled=locked||state.pool?.status!=="enabled";
     $("removeItems").disabled=locked||!state.selectedItems.size;
-    $("previewPairs").disabled=!state.ready||state.writing||state.reading||!state.selectedGroups.size;
+    $("previewPairs").disabled=readBlocked||state.previewLoading||state.targetLoading||!state.selectedGroups.size||!validSelection;
+    $("previewPairs").textContent=state.previewLoading?"正在预览…":"预览配对";$("pairLoading").hidden=!state.previewLoading;
+    $("refreshTargetPages").disabled=readBlocked||state.targetLoading||state.previewLoading||!state.selectedGroups.size||!validSelection;
+    $("refreshTargetPages").textContent=state.targetLoading?"正在读取…":"刷新目标 Page";$("targetLoading").hidden=!state.targetLoading;
+    $("searchTargetPages").disabled=$("refreshTargetPages").disabled;
+    $("targetPagesPrev").disabled=readBlocked||state.targetLoading||state.targetStale||!state.targetStack.length;
+    $("targetPagesNext").disabled=readBlocked||state.targetLoading||state.targetStale||!state.targetNext;
     $("queryOperation").disabled=state.writing||state.reading;$("retryOperation").disabled=!state.ready||!state.featureEnabled||state.writing||state.reading;
     $("refreshData").disabled=state.writing||state.reading;$("pendingPanel").hidden=!state.pending;
     if(state.pending)$("pendingText").textContent=`“${state.pending.label}”的结果尚未确认。已保存原操作，可查询结果或原样重试。`;
@@ -57,7 +69,25 @@
     $("settingsHint").textContent=state.dirty?"请先保存修改，再启用计划。":"启用后从未来计划时点执行；暂停不撤销已生成的任务。";
   }
   function invalidatePreview(){++state.previewGeneration;$("previewStale").hidden=!state.hasPreview;}
-  function markDirty(){state.dirty=true;invalidatePreview();paintLocks();}
+  function invalidateTargets(){++state.targetGeneration;state.targetStale=true;state.targetCursor="";state.targetStack=[];state.targetNext="";$("targetStale").hidden=!state.hasTargets;$("targetStale").textContent="Page 组或语言范围已变化，请刷新目标 Page。";}
+  function markDirty(scopeChanged=false){state.dirty=true;invalidatePreview();if(scopeChanged===true)invalidateTargets();paintLocks();}
+  function pageSelectionValid(){return $("pageLanguageMode").value==="all"||state.selectedPageLanguages.size>0||$("includeBlankLanguage").checked;}
+  function pageSelection(){
+    if(!pageSelectionValid())throw new Error("请至少选择一种 Page 语言，或勾选空语言。");
+    return {mode:$("pageLanguageMode").value,codes:$("pageLanguageMode").value==="selected"?[...state.selectedPageLanguages].sort():[],include_blank:$("includeBlankLanguage").checked};
+  }
+  function scopeKey(){return JSON.stringify({groups:[...state.selectedGroups].sort(),mode:$("pageLanguageMode").value,codes:[...state.selectedPageLanguages].sort(),blank:$("includeBlankLanguage").checked});}
+  function paintPageLanguages(){
+    const codes=new Set([...state.languages.keys(),...state.selectedPageLanguages]),counts=new Map();
+    for(const entry of state.pageLanguageSummary?.items||[]){if(entry.language_kind!=="unrestricted"&&entry.language){codes.add(entry.language);counts.set(entry.language,entry.page_count);}}
+    const fragment=document.createDocumentFragment();for(const code of [...codes].sort()){
+      const label=node("label",undefined,"page-language-option"),input=node("input");input.type="checkbox";input.dataset.pageLanguage=code;input.checked=state.selectedPageLanguages.has(code);
+      label.append(input,node("span",`${language(code)}${language(code)!==code?` · ${code}`:""}`));if(counts.has(code))label.append(node("small",`${counts.get(code)} 个 Page`));fragment.append(label);
+    }
+    $("pageLanguageChoices").replaceChildren(fragment);$("pageLanguageChoices").hidden=$("pageLanguageMode").value!=="selected";
+    errorAt("pageLanguageError",pageSelectionValid()?"":"请至少选择一种 Page 语言，或勾选空语言。");
+  }
+  function restorePageSelection(selection){const value=selection||{mode:"all",codes:[],include_blank:false};$("pageLanguageMode").value=value.mode||"all";state.selectedPageLanguages=new Set((value.codes||[]).map(String));$("includeBlankLanguage").checked=value.include_blank===true;paintPageLanguages();}
   function modeChanged(){const random=$("scheduleMode").value==="random";$("randomSettings").hidden=!random;$("fixedSettings").hidden=random;}
   function paintGroups(){
     const search=$("groupSearch").value.trim().toLowerCase(),fragment=document.createDocumentFragment();
@@ -74,7 +104,7 @@
     $("scheduleState").textContent=pool.status==="enabled"?"计划已启用":"计划已暂停";$("scheduleState").classList.toggle("paused",pool.status!=="enabled");
     $("scheduleOwner").textContent=pool.publisher_name?`发布人：${pool.publisher_name}`:"尚未启用发布";
     $("scheduleEffective").textContent=pool.pause_reason?reasonText(pool.pause_reason,"计划已暂停，请核对发布人和 Page 组后重新启用。"):pool.effective_at_utc?`生效时间：${bj(pool.effective_at_utc)}（北京）`:"保存设置后启用，按计划自动分配。";
-    if(replaceDraft){state.selectedGroups=new Set((pool.group_ids||[]).map(String));$("scheduleMode").value=pool.schedule_mode || "fixed";$("fixedTimes").value=(pool.times||[]).join(", ");$("dailyBatches").value=pool.daily_batches || 1;$("captionTemplate").value=pool.caption_template ?? "{name}\n{desc}\n{url}";state.dirty=false;modeChanged();paintGroups();}
+    if(replaceDraft){const previousScope=scopeKey();state.selectedGroups=new Set((pool.group_ids||[]).map(String));$("scheduleMode").value=pool.schedule_mode || "fixed";$("fixedTimes").value=(pool.times||[]).join(", ");$("dailyBatches").value=pool.daily_batches || 1;$("captionTemplate").value=pool.caption_template ?? "{name}\n{desc}\n{url}";restorePageSelection(pool.page_language_selection);state.dirty=false;modeChanged();paintGroups();if(previousScope!==scopeKey())invalidateTargets();}
     paintLocks();
   }
   function paintStats(counts){
@@ -97,24 +127,56 @@
     state.items=result.items||[];state.itemNext=result.next_cursor||"";state.selectedItems.clear();paintStats(result.counts||{});paintItems();
   }
   function exclusions(rows){const list=node("ul",undefined,"excluded-list");for(const row of rows||[])list.append(node("li",`${row.page_id?`Page ${row.page_id}：`:row.material_id?`素材 ${row.material_id}：`:""}${reasonText(row.message||row.reason||row.code||"暂不可用")}`));return list;}
-  function pairNode(pair){const card=node("article",undefined,"preview-pair");card.append(node("strong",`${pair.material_name||pair.material_id} → ${pair.page_name||pair.page_id}`),node("p",`${language(pair.language)} · 素材 ${pair.material_id} · Page ${pair.page_id}`,"helper"));if(pair.caption){const detail=node("details");detail.append(node("summary","查看文案"),node("pre",pair.caption));card.append(detail);}return card;}
+  function targetSummary(summary){
+    const root=$("targetLanguageSummary"),distribution=node("div",undefined,"capacity-list");root.hidden=false;
+    for(const entry of summary.items||[])distribution.append(node("span",`${pageLanguage(entry.language,entry.language_kind)}：${entry.page_count} 个 Page`,"capacity"));
+    root.replaceChildren(node("strong","所选组语言分布（筛选前）"),node("p",`共 ${Number(summary.total_page_count||0)} 个 Page · 语言冲突 ${Number(summary.conflict_page_count||0)} · 无效语言 ${Number(summary.invalid_page_count||0)}${summary.missing_page_count?` · 缺少有效语言 ${summary.missing_page_count}`:""}`),distribution);
+  }
+  function paintTargets(result,query){
+    const fragment=document.createDocumentFragment();for(const page of result.items){
+      const card=node("article",undefined,"target-page"),title=node("div",undefined,"material-title");title.append(node("strong",page.page_name||page.page_id),node("span",page.eligible?"可发布":"不可用",`badge ${page.eligible?"good":"bad"}`));
+      const pageLang=({invalid:"语言无效",conflict:"语言冲突",missing:"缺少有效语言"})[page.language_kind] || (page.language_kind==="unrestricted"?pageLanguage("","unrestricted"):page.language?language(page.language):"语言不可用");
+      card.append(title,node("p",`Page ${page.page_id} · ${pageLang}`),node("p",`所属组：${(page.group_ids||[]).map(id=>state.groups.find(group=>String(group.id)===String(id))?.name||id).join("、") || "—"}`));
+      if(!page.eligible)card.append(node("p",reasonText(page.blocked_reason||page.code||"当前不可用"),"target-blocked"));fragment.append(card);
+    }
+    if(!result.items.length)fragment.append(node("div",query?"没有匹配名称或 ID 的目标 Page。":"当前组和语言范围下没有目标 Page。","empty"));$("targetPageList").replaceChildren(fragment);
+    $("targetCounts").textContent=`发布范围 ${Number(result.total||0)} 个 Page · 可发布 ${Number(result.eligible_count||0)} · 不可用 ${Number(result.excluded_count||0)}${query?` · 搜索命中 ${Number(result.matching_count??result.items.length)}`:""}`;
+    $("targetPageHint").textContent=`本页 ${result.items.length} 条 · ${query?"搜索结果":"目标范围"}共 ${Number(result.matching_count??result.total??result.items.length)} 条`;
+  }
+  async function loadTargetPages(reset=true){
+    if(state.targetLoading||state.previewLoading||!state.ready||state.writing||state.reading)return;
+    errorAt("targetError","");let selection;
+    try{selection=pageSelection();if(!state.selectedGroups.size)throw new Error("请至少选择一个 Page 组。");}catch(error){errorAt("targetError",error);return;}
+    if(reset){state.targetCursor="";state.targetStack=[];}
+    const generation=++state.targetGeneration,query=$("targetPageSearch").value.trim(),payload={group_ids:[...state.selectedGroups],page_language_selection:selection,q:query,cursor:state.targetCursor,limit:50};
+    state.targetLoading=true;$("targetPageList").setAttribute("aria-busy","true");paintLocks();
+    try{
+      const result=await post(POOL+"/pages/preview",payload);if(generation!==state.targetGeneration)return;
+      if(!Array.isArray(result.items))throw new Error("目标 Page 返回内容不完整，请刷新重试。");
+      state.targetNext=result.next_cursor||"";state.targetLoadedQuery=query;state.targetStale=false;state.hasTargets=true;state.pageLanguageSummary=result.language_summary||{items:[]};
+      targetSummary(state.pageLanguageSummary);paintPageLanguages();paintTargets(result,query);$("targetStale").hidden=true;
+    }catch(error){if(generation===state.targetGeneration){state.targetStale=true;state.targetNext="";errorAt("targetError",error);}}
+    finally{state.targetLoading=false;$("targetPageList").setAttribute("aria-busy","false");paintLocks();}
+  }
+  function pairNode(pair){const card=node("article",undefined,"preview-pair");card.append(node("strong",`${pair.material_name||pair.material_id} → ${pair.page_name||pair.page_id}`),node("p",`素材 ${pair.material_id} · ${language(pair.language)} → Page ${pair.page_id}${pair.language_kind||pair.page_language!==undefined?` · ${pageLanguage(pair.page_language,pair.language_kind)}`:""}`,"helper"));if(pair.caption){const detail=node("details");detail.append(node("summary","查看文案"),node("pre",pair.caption));card.append(detail);}return card;}
   async function preview(){
-    errorAt("previewError","");const generation=++state.previewGeneration;$("previewPairs").disabled=true;
-    try{const result=await post(POOL+"/preview",{group_ids:[...state.selectedGroups],caption_template:$("captionTemplate").value});if(generation!==state.previewGeneration)return;
+    if(state.previewLoading||state.targetLoading||!state.ready||state.writing||state.reading)return;
+    errorAt("previewError","");let selection;try{selection=pageSelection();}catch(error){errorAt("previewError",error);return;}const generation=++state.previewGeneration;state.previewLoading=true;paintLocks();
+    try{const result=await post(POOL+"/preview",{group_ids:[...state.selectedGroups],caption_template:$("captionTemplate").value,page_language_selection:selection});if(generation!==state.previewGeneration)return;
       const fragment=document.createDocumentFragment(),pairs=result.pairs||[],counts=new Map();for(const pair of pairs)counts.set(pair.language,(counts.get(pair.language)||0)+1);
       fragment.append(node("p",`本批可配对 ${pairs.length} 条${Number.isFinite(result.quota_remaining)?` · 剩余额度 ${result.quota_remaining} 条`:""}`,"helper"));
-      const capacities=node("div",undefined,"capacity-list");if(Array.isArray(result.language_capacity)){for(const entry of result.language_capacity)capacities.append(node("span",`${language(entry.language)}：可用 Page ${entry.page_count} · 池内待发 ${entry.material_count} · 配对 ${entry.matched_count}`,"capacity"));}else{for(const [lang,count] of counts)capacities.append(node("span",`${language(lang)}：${count} 个 Page / ${count} 条素材`,"capacity"));}fragment.append(capacities);
+      const capacities=node("div",undefined,"capacity-list");if(Array.isArray(result.language_capacity)){for(const entry of result.language_capacity)capacities.append(node("span",`${pageLanguage(entry.language,entry.language_kind)}：可用 Page ${entry.page_count} · 本轮待发 ${entry.material_count} · 配对 ${entry.matched_count}`,"capacity"));}else{for(const [lang,count] of counts)capacities.append(node("span",`${language(lang)}：${count} 个 Page / ${count} 条素材`,"capacity"));}fragment.append(capacities);
       const list=node("div",undefined,"pair-list");for(const pair of pairs)list.append(pairNode(pair));fragment.append(list);
       if(!pairs.length)fragment.append(node("p","当前没有可分配的素材，请查看下方原因或添加相应语言的素材。","preview-empty"));
       if(result.excluded?.length){const notice=node("div",undefined,"notice warning");notice.append(node("strong",`未参与配对 ${result.excluded.length} 项`),exclusions(result.excluded));fragment.append(notice);}
       $("previewResult").className="";$("previewResult").replaceChildren(fragment);state.hasPreview=true;$("previewStale").hidden=true;
-    }catch(error){if(generation===state.previewGeneration)errorAt("previewError",error);}finally{paintLocks();}
+    }catch(error){if(generation===state.previewGeneration)errorAt("previewError",error);}finally{state.previewLoading=false;paintLocks();}
   }
   async function loadRuns(){
     const generation=++state.runGeneration,result=await api(POOL+"/runs?"+new URLSearchParams({limit:"20",cursor:state.runCursor}));if(generation!==state.runGeneration)return;state.runNext=result.next_cursor||"";
     const fragment=document.createDocumentFragment();for(const run of result.items||[]){const card=node("article",undefined,"run-card"),head=node("div",undefined,"row spread");head.append(node("strong",`${bj(run.slot_at_utc)}（北京）`),node("span",labels[run.status]||run.status,"badge"),node("span",`批次 ${run.id}`,"mono"));card.append(head);
       const counts=Object.entries(run.task_counts||{}).map(([k,v])=>`${labels[k]||k} ${v}`).join(" · ");if(counts)card.append(node("p",counts,"task-counts"));if(run.reason)card.append(node("p",reasonText(run.reason),"helper"));
-      if(run.pairs?.length||run.excluded?.length){const details=node("details");details.append(node("summary",`查看 ${run.pairs?.length||0} 条冻结配对与缺口`));for(const pair of run.pairs||[])details.append(node("p",`${pair.material_id} → ${pair.page_name||pair.page_id} · ${language(pair.language)}`,"run-pair"));if(run.excluded?.length)details.append(exclusions(run.excluded));card.append(details);}
+      if(run.pairs?.length||run.excluded?.length){const details=node("details");details.append(node("summary",`查看 ${run.pairs?.length||0} 条冻结配对与缺口`));for(const pair of run.pairs||[])details.append(node("p",`${pair.material_id}（${language(pair.language)}）→ ${pair.page_name||pair.page_id}${pair.language_kind||pair.page_language!==undefined?` · ${pageLanguage(pair.page_language,pair.language_kind)}`:""}`,"run-pair"));if(run.excluded?.length)details.append(exclusions(run.excluded));card.append(details);}
       if(state.recordAccess&&run.can_view_tasks&&run.batch_id)card.append(safeRecordLink(run.batch_id));fragment.append(card);
     }$("runList").replaceChildren(fragment);paintLocks();
   }
@@ -172,7 +234,7 @@
     if([...state.selectedGroups].some(id=>!state.groups.some(g=>String(g.id)===id)))throw new Error("所选组中有当前不可访问的 Page 组，请重新选择。");
     if(mode==="fixed"&&(!times.length||times.some(t=>!/^([01]\d|2[0-3]):[0-5]\d$/.test(t))))throw new Error("请填写有效时点，例如 09:00, 18:00。");
     if(!Number.isInteger(daily)||daily<1||daily>24)throw new Error("每日随机批次数必须是 1–24 的整数。");
-    return {group_ids:[...state.selectedGroups],schedule_mode:mode,times,daily_batches:daily,caption_template:$("captionTemplate").value,processing_mode:"original"};
+    return {group_ids:[...state.selectedGroups],page_language_selection:pageSelection(),schedule_mode:mode,times,daily_batches:daily,caption_template:$("captionTemplate").value,processing_mode:"original"};
   }
   async function queryOperation(){
     if(!state.pending||state.writing)return;const operation=state.pending;state.writing=true;paintLocks();errorAt("pageError","");
@@ -183,13 +245,19 @@
     if(!state.pending)return;const operation=state.pending;
     if(operation.path==="/items")$("materialIds").value=(operation.input_ids||operation.payload.material_ids||[]).join("\n");
     if(operation.path==="/schedule"){
-      const draft=operation.payload;state.selectedGroups=new Set((draft.group_ids||[]).map(String));$("scheduleMode").value=draft.schedule_mode;$("fixedTimes").value=(draft.times||[]).join(", ");$("dailyBatches").value=draft.daily_batches;$("captionTemplate").value=draft.caption_template;state.dirty=true;modeChanged();paintGroups();paintLocks();
+      const draft=operation.payload;state.selectedGroups=new Set((draft.group_ids||[]).map(String));$("scheduleMode").value=draft.schedule_mode;$("fixedTimes").value=(draft.times||[]).join(", ");$("dailyBatches").value=draft.daily_batches;$("captionTemplate").value=draft.caption_template;restorePageSelection(draft.page_language_selection);state.dirty=true;modeChanged();paintGroups();invalidateTargets();paintLocks();
     }
   }
   function run(fn){return async()=>{try{await fn();}catch(error){errorAt("pageError",error);}};}
   function bind(){
     $("showNav").onclick=()=>$("sidebar").classList.add("open");$("hideNav").onclick=()=>$("sidebar").classList.remove("open");$("refreshData").onclick=run(refresh);
-    $("groupSearch").oninput=paintGroups;$("groupChoices").onchange=e=>{const id=e.target.dataset.group;if(!id)return;e.target.checked?state.selectedGroups.add(id):state.selectedGroups.delete(id);paintGroups();markDirty();};
+    $("groupSearch").oninput=paintGroups;$("groupChoices").onchange=e=>{const id=e.target.dataset.group;if(!id)return;e.target.checked?state.selectedGroups.add(id):state.selectedGroups.delete(id);state.pageLanguageSummary=null;paintGroups();paintPageLanguages();markDirty(true);};
+    $("pageLanguageMode").onchange=()=>{paintPageLanguages();markDirty(true);};$("includeBlankLanguage").onchange=()=>{paintPageLanguages();markDirty(true);};
+    $("pageLanguageChoices").onchange=e=>{const code=e.target.dataset.pageLanguage;if(!code)return;e.target.checked?state.selectedPageLanguages.add(code):state.selectedPageLanguages.delete(code);paintPageLanguages();markDirty(true);};
+    $("refreshTargetPages").onclick=()=>loadTargetPages(true);$("searchTargetPages").onclick=()=>loadTargetPages(true);
+    $("targetPageSearch").oninput=()=>{++state.targetGeneration;state.targetStale=true;state.targetCursor="";state.targetStack=[];state.targetNext="";$("targetStale").hidden=!state.hasTargets;$("targetStale").textContent="搜索条件已变化，请点击搜索；发布范围保持不变。";paintLocks();};
+    $("targetPageSearch").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();loadTargetPages(true);}};
+    $("targetPagesNext").onclick=()=>{state.targetStack.push(state.targetCursor);state.targetCursor=state.targetNext;loadTargetPages(false);};$("targetPagesPrev").onclick=()=>{state.targetCursor=state.targetStack.pop()||"";loadTargetPages(false);};
     $("scheduleMode").onchange=()=>{modeChanged();markDirty();};["fixedTimes","dailyBatches","captionTemplate"].forEach(id=>$(id).oninput=markDirty);
     $("saveSchedule").onclick=run(()=>mutate("/schedule",settings(),"保存设置"));$("enableSchedule").onclick=run(()=>mutate("/enable",{},"启用计划"));$("pauseSchedule").onclick=run(()=>mutate("/pause",{},"暂停计划"));
     $("previewPairs").onclick=preview;$("resolveMaterials").onclick=()=>resolveMaterials(false);$("addMaterials").onclick=()=>resolveMaterials(true);
