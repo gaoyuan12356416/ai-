@@ -224,7 +224,8 @@ class ReportTests(unittest.TestCase):
         text = self.runner.end_text('report')
         self.assertLessEqual(len(text), 1200)
         self.assertLessEqual(len(text.splitlines()), 15)
-        for expected in ('扫描覆盖异常1项', '共享引用覆盖未完成', '待下轮复核Creative 1个', '共享Creative 1个'):
+        self.assertNotIn('待下轮复核Creative', text)
+        for expected in ('扫描覆盖异常1项', '共享引用覆盖未完成', '共享Creative 1个'):
             self.assertIn(expected, text)
         self.assertNotIn('888888888888', text)
         self.assertNotIn('9999999999', text)

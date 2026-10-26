@@ -201,9 +201,9 @@ def end_text(runner, run_id):
         reference_coverage = manifest.get('shared_reference_coverage')
         if reference_coverage not in ('complete', 'checked_on_dependency_failure', None):
             notes.append('共享引用覆盖未完成')
-        deferred = _count(data.get('deferred_creatives'))
-        if deferred:
-            notes.append('待下轮复核Creative %s个' % deferred)
+        # The saved deferred count predates later GET reconciliation. Final
+        # pending/failed/unknown objects above are authoritative for this notice;
+        # do not repeat the stale backlog snapshot as current outstanding work.
         impacts = manifest.get('shared_creative_impacts', {})
         if isinstance(impacts, dict) and impacts:
             notes.append('共享Creative %s个' % len(impacts))
