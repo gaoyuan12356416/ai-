@@ -48,12 +48,15 @@ class PageGraph:
         self.version = version
         self.session = session or requests.Session()
         self.before_delete = None
+        self.verified_times = {}
+        self.publication_membership = {}
+        self.acknowledged_posts = set()
 
     def close(self):
         self.session.close()
 
-    def _request(self, method, node, fields=None):
-        if node != "me" and not ID.fullmatch(str(node)):
+    def _request(self, method, node, fields=None, query=None):
+        if node not in ("me", self.page_id + "/posts") and not ID.fullmatch(str(node)):
             raise ValueError("invalid_graph_node")
         self.budget.wait()
         if method == "DELETE" and self.before_delete is not None:
@@ -64,7 +67,7 @@ class PageGraph:
             response = self.session.request(
                 method, "https://graph.facebook.com/" + self.version + "/" + str(node),
                 headers={"Authorization": "Bearer " + self._token},
-                params={"fields": fields} if fields else None,
+                params=dict(query or {}, **({"fields": fields} if fields else {})),
                 timeout=(5, 20), allow_redirects=False,
             )
         except requests.RequestException as exc:
@@ -96,6 +99,15 @@ class PageGraph:
                     safe[key] = body[key]
             if isinstance(body.get("from"), dict):
                 safe["from"] = {"id": str(body["from"].get("id", ""))}
+            if "data" in body:
+                if not isinstance(body["data"], list) or any(not isinstance(row, dict) for row in body["data"]):
+                    safe["invalid_data"] = True
+                else:
+                    safe["data"] = [{"id": str(row.get("id", "")), "created_time": row.get("created_time")}
+                                    for row in body["data"]]
+                    paging = body.get("paging", {})
+                    safe["has_next"] = bool(paging.get("next"))
+                    safe["after"] = paging.get("cursors", {}).get("after")
         else:
             safe["unexpected_body"] = True
         return safe
@@ -114,14 +126,60 @@ class PageGraph:
             result.update(ok=True, id=str(response["id"]),
                           page_id=str(response.get("from", {}).get("id", "")),
                           created_at=response.get("created_time"))
-        elif response.get("error", {}).get("code") == 100 and response.get("error", {}).get("error_subcode") == 33:
-            # Absence alone is not proof of deletion. Core requires a prior
-            # durable, explicit DELETE success and retains unknown otherwise.
+            if result["id"] == post_id and result["page_id"] == self.page_id and result["created_at"]:
+                self.verified_times[post_id] = result["created_at"]
+        elif response.get("error", {}).get("code") in (10, 100) and post_id in self.verified_times:
             identity = self.identity()
-            result.update(absent=identity["ok"], page_identity=identity)
+            baseline = self.publication_membership.get(post_id, {})
+            covered_before = baseline.get("complete") and baseline.get("present")
+            listing = (self.window_presence(post_id, self.verified_times[post_id])
+                       if identity["ok"] and covered_before else {"complete": False, "reason": "no_predelete_list_membership"})
+            result.update(absent=bool(identity["ok"] and covered_before and listing.get("complete") and not listing.get("present")),
+                          page_identity=identity, published_window=listing,
+                          receipt_validated=bool(post_id in self.acknowledged_posts and identity["ok"]
+                                                 and not listing.get("present")))
         else:
             result["error"] = response.get("error", response.get("transport_error", "graph_read_unconfirmed"))
         return result
+
+    def window_presence(self, post_id, created_at):
+        """Complete bounded Page publication listing, not an error-as-absence test."""
+        try:
+            text = re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", str(created_at).replace("Z", "+00:00"))
+            created = dt.datetime.fromisoformat(text)
+            if created.tzinfo is None:
+                raise ValueError()
+            center = int(created.timestamp())
+        except (ValueError, TypeError):
+            return {"complete": False, "reason": "verified_post_time_invalid"}
+        query = {"since": center - 86400, "until": center + 86400, "limit": 100}
+        observed, cursors = set(), set()
+        for page in range(10):
+            response = self._request("GET", self.page_id + "/posts", "id,created_time", query)
+            if response.get("http_status") != 200 or not isinstance(response.get("data"), list):
+                return {"complete": False, "reason": "publication_list_unreadable", "response": response}
+            for row in response["data"]:
+                if not re.fullmatch(re.escape(self.page_id) + r"_[0-9]+", row["id"]):
+                    return {"complete": False, "reason": "publication_list_identity_invalid"}
+                try:
+                    parsed = dt.datetime.fromisoformat(re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", str(row["created_time"]).replace("Z", "+00:00")))
+                    if parsed.tzinfo is None:
+                        raise ValueError()
+                    timestamp = parsed.timestamp()
+                except (ValueError, TypeError):
+                    return {"complete": False, "reason": "publication_list_time_invalid"}
+                if timestamp < query["since"] - 1 or timestamp > query["until"] + 1:
+                    return {"complete": False, "reason": "publication_list_time_filter_unconfirmed"}
+                observed.add(row["id"])
+            if not response.get("has_next"):
+                return {"complete": True, "present": post_id in observed, "pages": page + 1,
+                        "since": query["since"], "until": query["until"], "post_ids": sorted(observed)}
+            cursor = response.get("after")
+            if not cursor or cursor in cursors:
+                return {"complete": False, "reason": "publication_pagination_unconfirmed"}
+            cursors.add(cursor)
+            query["after"] = cursor
+        return {"complete": False, "reason": "publication_page_limit_reached"}
 
     def resolve(self, raw_id, allow_post_suffix=True):
         """Read both documented video linkage and a possible stored Post suffix.
@@ -156,6 +214,7 @@ class PageGraph:
             kind = "failure"
         elif response.get("success") is True and 200 <= response.get("http_status", 0) < 300:
             kind = "success"
+            self.acknowledged_posts.add(post_id)
         elif response.get("uncertain") or response.get("http_status", 0) >= 500:
             kind = "unknown"
         elif response.get("error"):

@@ -27,7 +27,13 @@ The manifest is immutable and bound to one FULL-synchronous SQLite ledger.
 An independent process lock prevents concurrent invocations. A global execution
 binding also refuses a fresh ledger, so a rescan cannot bypass unknown writes.
 The first five actual deletions must have explicit API success plus a subsequent
-unavailable Post with a still-readable matching Page identity. Remaining work
+readback. A restricted readback can validate the receipt only while the same
+credential still identifies the matching Page and no readback shows the Post.
+`canary_validated` records this gate; `canary_verified` counts independent absence
+only. Permission errors alone never validate a deletion. List-based absence
+requires the same credential to have seen the target in a complete pre-delete
+list and a complete post-delete list without it. Missing baseline or unreadable
+lists retain `unconfirmed_after_ack`, even with an explicit success receipt. Remaining work
 uses at most two workers, one worker per Page, with shared Graph pacing/cooldown.
 Current scope/material flags are checked again at the request boundary.
 

@@ -164,6 +164,26 @@ def _validate_manifest(manifest):
             raise ValueError("manifest target requires material IDs")
 
 
+def _canary_validated(row):
+    """A receipt can validate the canary without proving independent absence.
+
+    The Graph adapter may validate a deterministic unreadable-object response
+    against the same credential's live Page identity. It must retain that raw
+    readback and never label it absence. An explicit DELETE acknowledgement is
+    still mandatory; unknown outcomes and still-visible objects never pass.
+    """
+    if row["status"] != "deleted":
+        return False
+    if row["verification"] == "verified_absent_after_ack":
+        return True
+    readback = row.get("readback") or {}
+    return bool(row["verification"] == "unconfirmed_after_ack"
+                and readback.get("receipt_validated") is True
+                and readback.get("ok") is not True
+                and readback.get("published_window", {}).get("present") is not True
+                and readback.get("page_identity", {}).get("ok") is True)
+
+
 class Ledger:
     """SQLite FULL-synchronous intent and result journal, safe across worker threads."""
 
@@ -339,6 +359,9 @@ class Ledger:
             "canary_attempted": sum(row["is_canary"] for row in rows),
             "canary_verified": sum(row["is_canary"] and row["status"] == "deleted" and
                                    row["verification"] == "verified_absent_after_ack" for row in rows),
+            "canary_validated": sum(row["is_canary"] and _canary_validated(row) for row in rows),
+            "canary_readback_unconfirmed": sum(row["is_canary"] and row["status"] == "deleted" and
+                                               row["verification"] == "unconfirmed_after_ack" for row in rows),
             "per_group": per_group,
         }
 
@@ -450,24 +473,22 @@ def execute(manifest, ledger, adapter, stage="all", workers=2, canary_size=5, li
         for row in ledger.rows():
             summary = ledger.summary()
             canaries = [item for item in ledger.rows() if item["is_canary"]]
-            if any(item["status"] != "deleted" or item["verification"] != "verified_absent_after_ack"
-                   for item in canaries):
+            if any(not _canary_validated(item) for item in canaries):
                 return dict(summary, halted="canary_failed_unknown_or_unverified")
-            if summary["canary_verified"] >= canary_size:
+            if summary["canary_validated"] >= canary_size:
                 break
             if limit is not None and summary["actual_requests"] - initial_attempts >= limit:
                 return dict(summary, halted="request_limit_reached")
             if row["status"] != "pending":
                 continue
             result = _process_target(target_map[row["post_id"]], manifest, ledger, adapter, is_canary=True)
-            if result["is_canary"] and (result["status"] != "deleted" or
-                                        result["verification"] != "verified_absent_after_ack"):
+            if result["is_canary"] and not _canary_validated(result):
                 return dict(ledger.summary(), halted="canary_failed_unknown_or_unverified")
         if stage == "canary":
             summary = ledger.summary()
-            return dict(summary, halted=None if summary["canary_verified"] >= canary_size else "insufficient_verified_canaries")
+            return dict(summary, halted=None if summary["canary_validated"] >= canary_size else "insufficient_validated_canaries")
     summary = ledger.summary()
-    if summary["canary_verified"] < canary_size or summary["canary_attempted"] != summary["canary_verified"]:
+    if summary["canary_validated"] < canary_size or summary["canary_attempted"] != summary["canary_validated"]:
         return dict(summary, halted="canary_gate_not_satisfied")
     remaining_budget = None if limit is None else limit - (summary["actual_requests"] - initial_attempts)
     if remaining_budget is not None and remaining_budget <= 0:

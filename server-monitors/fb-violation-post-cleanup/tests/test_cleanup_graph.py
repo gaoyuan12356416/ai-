@@ -82,10 +82,20 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(graph.resolve("456")["id"], "123_456")
         self.assertEqual(len(session.calls), 2)
 
-    def test_unavailable_requires_live_same_page_identity(self):
+    def test_unavailable_without_predelete_evidence_never_proves_absence(self):
         graph, _ = self.graph(Response({"error": {"code": 100, "error_subcode": 33}}, 400),
                               Response({"id": "999"}))
-        self.assertFalse(graph.inspect("123_456")["absent"])
+        self.assertFalse(graph.inspect("123_456").get("absent"))
+
+    def test_target_still_in_list_cannot_validate_canary_receipt(self):
+        graph, _ = self.graph(Response({"error": {"code": 10}}, 400), Response({"id": "123"}),
+                              Response({"data": [{"id": "123_456", "created_time": "2026-08-02T23:25:30+0000"}]}))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        graph.publication_membership["123_456"] = {"complete": True, "present": True}
+        graph.acknowledged_posts.add("123_456")
+        result = graph.inspect("123_456")
+        self.assertFalse(result["absent"])
+        self.assertFalse(result["receipt_validated"])
 
     def test_success_is_only_explicit_ack(self):
         for body in ({"success": True}, True):
@@ -93,6 +103,54 @@ class GraphTests(unittest.TestCase):
             self.assertEqual(graph.delete("123_456")["kind"], "success")
         graph, _ = self.graph(Response({"success": False}))
         self.assertEqual(graph.delete("123_456")["kind"], "unknown")
+
+    def test_mixed_permission_error_needs_complete_publication_listing(self):
+        graph, session = self.graph(Response({"error": {"code": 10}}, 400),
+                                    Response({"id": "123"}), Response({"data": []}))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        graph.publication_membership["123_456"] = {"complete": True, "present": True}
+        result = graph.inspect("123_456")
+        self.assertTrue(result["absent"])
+        self.assertTrue(result["published_window"]["complete"])
+        self.assertEqual(session.calls[-1][1], "https://graph.facebook.com/v25.0/123/posts")
+        self.assertIn("since", session.calls[-1][2]["params"])
+
+    def test_unreadable_publication_list_is_not_absence(self):
+        graph, _ = self.graph(Response({"error": {"code": 10}}, 400),
+                              Response({"id": "123"}), Response({"error": {"code": 10}}, 400))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        graph.publication_membership["123_456"] = {"complete": True, "present": True}
+        self.assertFalse(graph.inspect("123_456")["absent"])
+
+    def test_no_predelete_membership_keeps_readback_unconfirmed_despite_ack(self):
+        graph, session = self.graph(Response({"error": {"code": 10}}, 400), Response({"id": "123"}))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        graph.acknowledged_posts.add("123_456")
+        result = graph.inspect("123_456")
+        self.assertFalse(result["absent"])
+        self.assertTrue(result["receipt_validated"])
+        self.assertEqual(len(session.calls), 2)
+
+    def test_permission_error_without_ack_is_never_receipt_validation(self):
+        graph, _ = self.graph(Response({"error": {"code": 10}}, 400), Response({"id": "123"}))
+        graph.verified_times["123_456"] = "2026-08-02T23:25:30+0000"
+        result = graph.inspect("123_456")
+        self.assertFalse(result["absent"])
+        self.assertFalse(result["receipt_validated"])
+
+    def test_listing_requires_complete_pagination_and_preserves_present_target(self):
+        graph, session = self.graph(Response({"data": [], "paging": {"next": "SECRET_URL", "cursors": {"after": "cursor1"}}}),
+                                    Response({"data": [{"id": "123_456", "created_time": "2026-08-02T23:25:30+0000"}]}))
+        result = graph.window_presence("123_456", "2026-08-02T23:25:30+0000")
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["present"])
+        self.assertEqual(result["pages"], 2)
+        self.assertNotIn("SECRET_URL", str(result))
+        self.assertEqual(session.calls[1][2]["params"]["after"], "cursor1")
+
+    def test_ignored_time_filter_is_not_absence(self):
+        graph, _ = self.graph(Response({"data": [{"id": "123_99", "created_time": "2026-10-01T00:00:00+0000"}]}))
+        self.assertFalse(graph.window_presence("123_456", "2026-08-02T23:25:30+0000")["complete"])
 
 
 if __name__ == "__main__": unittest.main()

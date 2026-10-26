@@ -111,6 +111,8 @@ class BoundTarget:
             inspection = candidate.inspect(self.target["post_id"]) if identity.get("ok") else None
             tried.append({"context": context, "identity": identity, "inspection": inspection})
             if identity.get("ok") and inspection and inspection.get("ok"):
+                membership = candidate.window_presence(self.target["post_id"], inspection["created_at"])
+                candidate.publication_membership[self.target["post_id"]] = membership
                 fresh = self._source_check()
                 if not fresh.get("ok"):
                     candidate.close()
@@ -118,7 +120,7 @@ class BoundTarget:
                 self.client = candidate
                 self.first_inspection = inspection
                 return {"ok": True, "credential_id": str(context.get("credential_id", context.get("id", ""))),
-                        "context": context, "source_check": fresh}
+                        "context": context, "source_check": fresh, "publication_membership": membership}
             candidate.close()
             if len(seen) >= 3:
                 break
@@ -147,6 +149,9 @@ class BoundTarget:
 
     def reconcile_precheck(self):
         credentials = self.adapter.source.credentials(self.target["page_id"])
+        prior = self.adapter.ledger.get(self.target["post_id"]) if self.adapter.ledger is not None else None
+        if prior and prior.get("credential_id"):
+            credentials = [item for item in credentials if item.credential_id == prior["credential_id"]]
         for credential in credentials[:3]:
             context = safe_credential(credential)
             candidate = PageGraph(self.target["page_id"], credential.token, context,
@@ -154,6 +159,16 @@ class BoundTarget:
             result = candidate.identity()
             if result.get("ok"):
                 self.client = candidate
+                if self.adapter.ledger is not None:
+                    for event in self.adapter.ledger.events(self.target["post_id"]):
+                        if event["event"] == "delete_intent":
+                            intent = json.loads(event["data_json"])
+                            old = intent["inspection"]
+                            if old.get("id") == self.target["post_id"] and old.get("page_id") == self.target["page_id"]:
+                                candidate.verified_times[self.target["post_id"]] = old["created_at"]
+                                candidate.publication_membership[self.target["post_id"]] = intent.get("precheck", {}).get("publication_membership", {})
+                    if prior["status"] == "deleted":
+                        candidate.acknowledged_posts.add(self.target["post_id"])
                 return {"ok": True, "credential_id": context["credential_id"], "context": context}
             candidate.close()
         return {"ok": False, "reason": "no_readable_page_credential"}
@@ -172,9 +187,10 @@ class BoundTarget:
 
 
 class Adapter:
-    def __init__(self, source, version="v25.0"):
+    def __init__(self, source, version="v25.0", ledger=None):
         self.source = source
         self.version = version
+        self.ledger = ledger
         self.budget = RateBudget()
 
     def for_target(self, target):
@@ -325,7 +341,7 @@ def main():
             if args.command == "report":
                 summary = ledger.summary()
             else:
-                adapter = Adapter(SourceAdapter.from_env(), args.version)
+                adapter = Adapter(SourceAdapter.from_env(), args.version, ledger)
                 if args.command == "execute":
                     summary = execute(manifest, ledger, adapter, stage=args.stage, workers=2, canary_size=5)
                 else:

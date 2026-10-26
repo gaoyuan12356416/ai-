@@ -248,6 +248,46 @@ class CoreTests(unittest.TestCase):
                 finally:
                     ledger.close()
 
+    def test_acknowledgement_and_live_page_receipt_validate_without_claiming_absence(self):
+        frozen = manifest(8)
+        adapter = FakeAdapter(self.ledger)
+        adapter.readbacks["100_1"] = {
+            "ok": False, "receipt_validated": True,
+            "page_identity": {"ok": True, "response": {"id": "100", "http_status": 200}},
+            "response": {"http_status": 400, "error": {"code": 10}},
+        }
+        canary = core.execute(frozen, self.ledger, adapter, stage="canary")
+        self.assertEqual(5, canary["canary_validated"])
+        self.assertEqual(4, canary["canary_verified"])
+        self.assertEqual(1, canary["canary_readback_unconfirmed"])
+        self.assertEqual("unconfirmed_after_ack", self.ledger.get("100_1")["verification"])
+        self.assertFalse(self.ledger.get("100_1")["readback"].get("absent", False))
+        complete = core.execute(frozen, self.ledger, adapter, stage="remaining")
+        self.assertEqual(8, complete["counts"]["deleted"])
+        self.assertIsNone(complete["halted"])
+
+    def test_receipt_validation_cannot_bypass_unknown_visible_or_identity_failure(self):
+        for case in ("unknown", "failure", "visible", "identity_unreadable"):
+            with self.subTest(case=case):
+                ledger = core.Ledger(Path(self.temp.name) / ("receipt_" + case + ".sqlite"))
+                try:
+                    frozen = manifest(8)
+                    adapter = FakeAdapter(ledger)
+                    readback = {"ok": case == "visible", "receipt_validated": True,
+                                "page_identity": {"ok": case != "identity_unreadable"},
+                                "response": {"http_status": 400, "error": {"code": 10}}}
+                    adapter.readbacks["100_1"] = readback
+                    if case in ("unknown", "failure"):
+                        adapter.results["100_1"] = {"kind": case, "error": {"code": 10}}
+                    result = core.execute(frozen, ledger, adapter)
+                    if case == "unknown":
+                        ledger.record_readback("100_1", readback)
+                    self.assertEqual(0, ledger.summary()["canary_validated"])
+                    self.assertEqual("canary_failed_unknown_or_unverified", result["halted"])
+                    self.assertEqual(["100_1"], adapter.delete_calls)
+                finally:
+                    ledger.close()
+
     def test_crash_after_intent_becomes_unknown_and_is_not_retried(self):
         frozen = manifest(6)
         adapter = FakeAdapter(self.ledger)
