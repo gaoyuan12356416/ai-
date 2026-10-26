@@ -24,6 +24,7 @@ class AuthorizationDB:
         # Empty Page pools prove personal access does not require membership.
         self.conn.executescript("""
             CREATE TABLE ads_facebook_info(user_id TEXT, facebookUserID TEXT);
+            CREATE TABLE ads_facebook_page_ins(page_id TEXT, user_id INTEGER);
             CREATE TABLE ads_facebook_page_post(page_id TEXT, fb_user_id TEXT,
                 page_name TEXT, language TEXT, status INTEGER, page_access_token TEXT);
             CREATE TABLE ads_facebook_page_group(id INTEGER, user_id TEXT, app_id INTEGER,
@@ -105,7 +106,7 @@ class AuthorizedPageTests(unittest.TestCase):
         self.assertEqual(len(self.sources.list_pages(self.actor, "1481898564996632")), 1)
         sql, params = self.db.calls[-1]
         self.assertIn("p.page_id=%s", sql)
-        self.assertEqual(params, ["803", "803", "1481898564996632"])
+        self.assertEqual(params, ["803", "803", "803", "1481898564996632"])
         self.assertEqual(self.sources.list_pages(self.actor, "148189856499663"), [])
         self.assertEqual(len(self.sources.list_pages(self.actor, "BILLIONAIRE")), 1)
         for query in ("%", "' OR 1=1 --", "_"):
@@ -152,6 +153,67 @@ class AuthorizedPageTests(unittest.TestCase):
             self.db.conn.execute(update)
             self.assertEqual(self.sources.list_pages(delegated), [])
             self.db.conn.execute(restore)
+
+    def test_page_responsible_user_can_search_without_personal_authorization_or_pool(self):
+        pid = "1418318351365171"
+        self.db.conn.execute("INSERT INTO ads_facebook_page_ins VALUES (?,?)", (pid, 904))
+        owner = dict(self.actor, business_owner_id="904", sub_user_id="904")
+        for query in ("", pid, "Unmapped Facebook identity"):
+            pages = self.sources.list_pages(owner, query)
+            self.assertEqual([p["page_id"] for p in pages], [pid])
+        self.assertEqual(self.sources.get_pages(owner, [pid])[pid]["eligible_token_count"], 1)
+        self.assertEqual(self.sources.list_pages(self.actor, pid), [])
+        other = dict(owner, business_owner_id="905", sub_user_id="905")
+        with self.assertRaises(SourceError) as denied:
+            self.sources.get_pages(other, [pid])
+        self.assertEqual(denied.exception.code, "page_not_found")
+
+    def test_page_responsibility_changes_revoke_access_and_filter_shared_configs(self):
+        pid = "1418318351365171"
+        self.db.conn.execute("INSERT INTO ads_facebook_page_ins VALUES (?,?)", (pid, 904))
+        owner = dict(self.actor, user_id="assigned-owner", business_owner_id="904", sub_user_id="904")
+        successor = dict(owner, user_id="successor", business_owner_id="905", sub_user_id="905")
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "store.sqlite")
+            service = Service(store, self.sources, "x" * 48, live_enabled=True)
+            service.handle("POST", PREFIX + "/pages", owner,
+                           dict(page_ids=[pid], language="en", caption_template="{name} {url}"))
+            self.assertEqual([p["page_id"] for p in service.configured_pages(owner)["items"]], [pid])
+            self.assertEqual(service.configured_pages(dict(owner, tenant_key="other-tenant"))["items"], [])
+            self.db.conn.execute("UPDATE ads_facebook_page_ins SET user_id=905 WHERE page_id=?", (pid,))
+            self.assertEqual(service.configured_pages(owner)["items"], [])
+            self.assertEqual([p["page_id"] for p in service.configured_pages(successor)["items"]], [pid])
+            with self.assertRaises(SourceError):
+                self.sources.get_pages(owner, [pid])
+            self.db.conn.execute("DELETE FROM ads_facebook_page_ins WHERE page_id=?", (pid,))
+            self.assertEqual(self.sources.list_pages(successor, pid), [])
+
+    def test_page_assignment_does_not_create_authorization_or_bypass_token_eligibility(self):
+        owner = dict(self.actor, business_owner_id="904", sub_user_id="904")
+        missing, empty = "9999999999999999", "1357160340818434"
+        self.db.conn.executemany("INSERT INTO ads_facebook_page_ins VALUES (?,?)",
+                                [(missing, 904), (empty, 904)])
+        self.assertEqual(self.sources.list_pages(owner, missing), [])
+        page = self.sources.list_pages(owner, empty)[0]
+        self.assertEqual(page["eligible_token_count"], 0)
+        self.assertTrue(page["blocked_reason"])
+        with self.assertRaises(SourceError) as unavailable:
+            self.sources.get_pages(owner, [empty])
+        self.assertEqual(unavailable.exception.code, "page_unavailable")
+
+    def test_overlapping_owner_grants_do_not_duplicate_pages_or_credentials(self):
+        pid = "1481898564996632"
+        self.db.conn.executescript("""
+            INSERT INTO ads_facebook_page_group VALUES (1,'803',1479,0,0);
+            INSERT INTO ads_facebook_page_group_ins VALUES (1,'1481898564996632',0);
+            INSERT INTO ads_facebook_page_ins VALUES ('1481898564996632',803);
+            INSERT INTO ads_facebook_page_ins VALUES ('1481898564996632',803);
+        """)
+        pages = self.sources.list_pages(self.actor, pid)
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["eligible_token_count"], 2)
+        self.db.conn.execute("DELETE FROM ads_facebook_page_ins")
+        self.assertEqual(self.sources.get_pages(self.actor, [pid])[pid]["eligible_token_count"], 2)
 
 
 if __name__ == "__main__":

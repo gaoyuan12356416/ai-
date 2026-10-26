@@ -94,9 +94,9 @@ class SourceRepository:
         for batch in batches:
             page_sql = "" if batch is None else " AND TRIM(p.page_id) IN (" + ",".join("%s" for _ in batch) + ")"
             # The trusted email mapping resolves the same business user used by
-            # operator-only credentials. Also preserve existing pool-owner grants
-            # so accepted tasks do not lose access; membership is never required
-            # when the current user has a personal Facebook authorization.
+            # operator-only credentials. Keep existing pool-owner grants and add
+            # the current per-Page responsible user as another delegated grant.
+            # Neither delegation changes operator-only credential selection.
             owner_sql = "" if admin else f""" AND (EXISTS (
                 SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_info f
                  WHERE f.user_id=%s
@@ -107,8 +107,11 @@ class SourceRepository:
                     JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
                     JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
                      WHERE g.user_id=%s AND g.is_delete=0 AND g.type IN (0,1)
-                       AND g.app_id=1479 AND LOWER(a.name)='dramawave' AND i.deleted_at=0))"""
-            params = ([] if admin else [owner, owner]) + (batch or [])
+                       AND g.app_id=1479 AND LOWER(a.name)='dramawave' AND i.deleted_at=0)
+                OR EXISTS (
+                    SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_page_ins pi
+                     WHERE pi.page_id=p.page_id AND pi.user_id=%s))"""
+            params = ([] if admin else [owner, owner, owner]) + (batch or [])
             exact_id = bool(re.fullmatch(r"[1-9][0-9]{0,30}", search))
             search_sql, having = "", ""
             if search:
