@@ -27,6 +27,10 @@ def route(method, path):
     """Return authorized navigation keys and whether fresh mapping is needed."""
     suffix = path[len(PREFIX):] if path.startswith(PREFIX + "/") else ""
     if method == "GET":
+        if suffix == "/page-groups":
+            return ("fbPostMaterialPool",), True
+        if suffix in {"/material-pool", "/material-pool/schedule", "/material-pool/runs"} or re.fullmatch(r"/material-pool/operations/[a-fA-F0-9-]{32,36}", suffix):
+            return ("fbPostMaterialPool",), False
         if re.fullmatch(r"/excel/(?:operations/[a-f0-9-]{32,36}|batches/[a-f0-9]{32})", suffix):
             return ("fbPageManagement",), False
         if suffix == "/pages/available":
@@ -38,7 +42,7 @@ def route(method, path):
         if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool(?:/operations/[a-fA-F0-9-]{32,36})?", suffix):
             return ("fbPageManagement",), True
         if suffix == "/languages":
-            return ("fbPageManagement", "fbVideoPublish"), False
+            return ("fbPageManagement", "fbVideoPublish", "fbPostMaterialPool"), False
         if suffix == "/draft":
             return ("fbVideoPublish",), False
         if suffix == "/batches" or re.fullmatch(r"/batches/[a-f0-9]{32}", suffix):
@@ -48,6 +52,8 @@ def route(method, path):
         if re.fullmatch(r"/operations/[a-fA-F0-9-]{32,36}", suffix):
             return ("fbVideoPublish", "fbVideoPublishRecords"), False
     if method == "POST":
+        if suffix in {"/material-pool/items/resolve", "/material-pool/items", "/material-pool/items/remove", "/material-pool/schedule", "/material-pool/enable", "/material-pool/pause", "/material-pool/preview", "/material-pool/pages/preview"}:
+            return ("fbPostMaterialPool",), True
         if suffix in ("/excel/preview", "/excel/batches"):
             return ("fbPageManagement",), True
         if re.fullmatch(r"/pages/[1-9][0-9]{0,40}/pool/(?:settings|enable|pause|items(?:/preview|/resolve)?|remove|move)", suffix):

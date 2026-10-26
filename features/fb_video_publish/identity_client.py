@@ -17,15 +17,20 @@ class IdentityClient:
         env = os.environ if environ is None else environ
         self.token = str(env.get("FB_AUTO_POST_INTERNAL_TOKEN") or "")
 
-    def resolve(self, tenant_key, user_id):
+    def resolve(self, tenant_key, user_id, *, navigation_key="fbPageManagement"):
         identity_keys(tenant_key, user_id)
+        if navigation_key not in {"fbPageManagement", "fbPostMaterialPool"}:
+            raise GatewayError("invalid_identity", "发布入口无效", 400)
+        payload = {"tenant_key": tenant_key, "user_id": user_id}
+        if navigation_key != "fbPageManagement":
+            payload["navigation_key"] = navigation_key
         if not valid_internal_bearer(self.token):
             raise GatewayError("identity_unavailable", "发布人身份验证暂不可用", 503)
         try:
             with requests.Session() as session:
                 session.trust_env = False
                 with session.post("http://127.0.0.1:8787" + IDENTITY_PATH,
-                                  json={"tenant_key": tenant_key, "user_id": user_id},
+                                  json=payload,
                                   headers={"Authorization": "Bearer " + self.token, "Accept": "application/json"},
                                   timeout=(3, 35), allow_redirects=False, stream=True) as response:
                     raw = bytearray()

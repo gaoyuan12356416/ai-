@@ -77,7 +77,7 @@ class PoolScheduler:
         pages = self.sources.get_pages(actor, [pool["page_id"]])
         if not item:
             return actor, {"pages": pages, "materials": {}}
-        materials = self.sources.get_materials([item["material_id"]], need_desc=False)
+        materials = self.sources.get_materials([item["material_id"]], need_desc=False, enforce_blacklist=False)
         if materials[item["material_id"]]["language"] != candidate["config"]["language"]:
             raise DomainError("language_mismatch", "素材与当前Page剧语言不一致", 409)
         render_preview(candidate["config"]["caption_template"], materials[item["material_id"]])

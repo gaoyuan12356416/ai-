@@ -302,7 +302,7 @@ class PoolService:
     def preview(self, actor, pid, payload):
         self._identity(payload, ("material_ids",))
         payload = {**payload, "material_ids": normalized_ids(payload["material_ids"])}
-        materials = self.sources.get_materials(payload["material_ids"], need_desc=False)
+        materials = self.sources.get_materials(payload["material_ids"], need_desc=False, enforce_blacklist=False)
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             facts, config, _, histories = self._facts(conn, actor, pid, payload, materials)
@@ -329,7 +329,7 @@ class PoolService:
                 skipped.append({**entry, "code": "invalid_material_id", "message": "素材ID必须为不超过19位的正整数"})
             elif mid not in wanted:
                 wanted.append(mid)
-        resolved = self.sources.resolve_materials(wanted, need_desc=False) if wanted else {"items": {}, "errors": {}}
+        resolved = self.sources.resolve_materials(wanted, need_desc=False, enforce_blacklist=False) if wanted else {"items": {}, "errors": {}}
         materials, failures = resolved["items"], resolved["errors"]
         invalid_rows = {item["row_number"] for item in skipped}
         accepted, histories, items = {}, {}, []
@@ -394,7 +394,7 @@ class PoolService:
         if not self.service.pool_enabled:
             raise DomainError("pool_gate_closed", "素材池暂时关闭", 409)
         signed = self.service._verify(payload["preview_token"])
-        materials = self.sources.get_materials(clean["material_ids"], need_desc=False)
+        materials = self.sources.get_materials(clean["material_ids"], need_desc=False, enforce_blacklist=False)
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("""SELECT * FROM fb_video_pool_operation

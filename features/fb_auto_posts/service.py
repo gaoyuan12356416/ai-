@@ -223,15 +223,16 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/internal/fb-video-publish/"):
             if method != "POST" or not self.internal():
                 raise ServiceError("forbidden", "内部请求未授权", 403)
-            if parsed.path in {"/internal/fb-video-publish/pool-start", "/internal/fb-video-publish/pool-tick"}:
-                if not hasattr(self.runtime, "video_pool_scheduler"):
+            if parsed.path in {"/internal/fb-video-publish/pool-start", "/internal/fb-video-publish/pool-tick", "/internal/fb-video-publish/group-pool-start", "/internal/fb-video-publish/group-pool-tick"}:
+                scheduler_name = "group_pool_scheduler" if "/group-pool-" in parsed.path else "video_pool_scheduler"
+                if not hasattr(self.runtime, scheduler_name):
                     raise ServiceError("pool_unavailable", "素材池调度尚未配置", 503)
                 payload = self.read_json()
                 if (set(payload) != {"worker_id"} or not isinstance(payload["worker_id"], str)
                         or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", payload["worker_id"])):
                     raise ServiceError("invalid_request", "调度实例标识无效", 400)
-                scheduler = self.runtime.video_pool_scheduler
-                result = scheduler.start(payload["worker_id"]) if parsed.path.endswith("/pool-start") else scheduler.tick(payload["worker_id"])
+                scheduler = getattr(self.runtime, scheduler_name)
+                result = scheduler.start(payload["worker_id"]) if parsed.path.endswith("-start") else scheduler.tick(payload["worker_id"])
                 self.send_json(200, result)
                 return
             if not hasattr(self.runtime, "manual_worker"):
@@ -370,6 +371,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     from features.fb_video_publish.worker import Worker as ManualWorker
     from features.fb_video_publish.identity_client import IdentityClient
     from features.fb_video_publish.pool_scheduler import PoolScheduler
+    from features.fb_video_publish.group_scheduler import GroupScheduler
     manual_store = ManualStore(operational_path, daily_limit=int(env.get("FB_VIDEO_DAILY_LIMIT", "1000")))
     manual_mysql = BrokerReadOnlyMySQL(env)
     manual_pages = PagePoolRepository(manual_mysql)
@@ -379,12 +381,19 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     pool_enabled = str(env.get("FB_VIDEO_POOL_ENABLED", "0")) == "1"
     runtime.manual = ManualService(manual_store, manual_sources, token, live_enabled=manual_live,
         prepare_enabled=prebuild_enabled, v2_enabled=str(env.get("FB_VIDEO_V2_ENABLED", "0")) == "1",
-        pool_enabled=pool_enabled, excel_enabled=str(env.get("FB_VIDEO_EXCEL_ENABLED", "0")) == "1")
-    identity_resolver = IdentityClient(env).resolve
+        pool_enabled=pool_enabled, excel_enabled=str(env.get("FB_VIDEO_EXCEL_ENABLED", "0")) == "1",
+        group_pool_enabled=str(env.get("FB_VIDEO_GROUP_POOL_ENABLED", "0")) == "1")
+    identity_client = IdentityClient(env)
+    identity_resolver = identity_client.resolve
+    def group_identity_resolver(tenant_key, user_id):
+        return identity_client.resolve(tenant_key, user_id, navigation_key="fbPostMaterialPool")
+    runtime.manual.group_pool.identity_resolver = group_identity_resolver
+    runtime.group_pool_scheduler = GroupScheduler(runtime.manual.group_pool, group_identity_resolver)
     runtime.manual.pool.identity_resolver = identity_resolver
     runtime.video_pool_scheduler = PoolScheduler(runtime.manual, identity_resolver,
         live_enabled=manual_live and pool_enabled)
     runtime.manual_worker = ManualWorker(manual_store, manual_pages, gpu, graph, sources=manual_sources,
+        group_sources=runtime.manual.group_sources, group_identity_resolver=group_identity_resolver,
         live_enabled=manual_live, prepare_enabled=prebuild_enabled, short_link_root=manual_root,
         short_link_owner=str(env.get("FB_VIDEO_SHORT_LINK_OWNER", "fb-auto-post")), rate_limit=executor._rate_limit)
     return runtime

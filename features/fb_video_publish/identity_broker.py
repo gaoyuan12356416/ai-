@@ -22,9 +22,11 @@ def identity_keys(tenant_key, user_id):
     return tenant_key, user_id
 
 
-def resolve_identity(app, tenant_key, user_id):
+def resolve_identity(app, tenant_key, user_id, *, navigation_key="fbPageManagement"):
     """Re-read active tenant membership, permissions, navigation and attribution."""
     tenant_key, user_id = identity_keys(tenant_key, user_id)
+    if navigation_key not in {"fbPageManagement", "fbPostMaterialPool"}:
+        raise GatewayError("invalid_identity", "发布入口无效", 400)
     try:
         with closing(sqlite3.connect("file:" + str(app["JOB_DB_PATH"]) + "?mode=ro", uri=True, timeout=5)) as conn:
             conn.row_factory = sqlite3.Row
@@ -39,8 +41,8 @@ def resolve_identity(app, tenant_key, user_id):
         if not app["has_module_permission"](account, "fb_video_publish"):
             raise GatewayError("identity_permission_denied", "原发布人已失去 Facebook 视频发布权限", 403)
         nav = app["load_navigation_config"]()
-        if not app["navigation_item_access"](account, "fbPageManagement", nav).get("allowed"):
-            raise GatewayError("identity_permission_denied", "原发布人的 Page 管理入口已不可用", 403)
+        if not app["navigation_item_access"](account, navigation_key, nav).get("allowed"):
+            raise GatewayError("identity_permission_denied", "原发布人的发布入口已不可用", 403)
         actor = {"tenant_key": tenant_key, "user_id": user_id, "user_name": str(account["name"] or "")[:200],
                  "is_admin": account["role"] == "admin", "business_owner_id": "", "sub_user_id": ""}
         # Import here to avoid the public gateway/broker import cycle.
@@ -109,9 +111,9 @@ def dispatch(handler, app):
         if len(raw) != int(lengths[0]):
             raise ValueError()
         payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict) or set(payload) != {"tenant_key", "user_id"}:
+        if not isinstance(payload, dict) or set(payload) not in ({"tenant_key", "user_id"}, {"tenant_key", "user_id", "navigation_key"}):
             raise ValueError()
-        actor = resolve_identity(app, payload["tenant_key"], payload["user_id"])
+        actor = resolve_identity(app, payload["tenant_key"], payload["user_id"], navigation_key=payload.get("navigation_key", "fbPageManagement"))
         respond(200, {"ok": True, "actor": actor})
     except GatewayError as exc:
         handler.close_connection = True

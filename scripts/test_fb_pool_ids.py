@@ -118,7 +118,8 @@ class SourceResolutionTests(unittest.TestCase):
 class PoolIDTests(Fixture):
     def setUp(self):
         super().setUp()
-        def resolve(ids, need_desc=False):
+        def resolve(ids, need_desc=False, *, enforce_blacklist=True):
+            self.assertFalse(enforce_blacklist, "Page pool explicitly waives the blacklist")
             return {"items": copy.deepcopy({mid: self.sources.materials[mid] for mid in ids if mid in self.sources.materials}),
                     "errors": {mid: {"code": "material_not_found", "message": "素材ID不存在"}
                                for mid in ids if mid not in self.sources.materials}}
@@ -154,7 +155,7 @@ class PoolIDTests(Fixture):
         self.assertEqual([4, 5, 6], [r["row_number"] for r in result["skipped"]])
         self.assertEqual(["duplicate_material_id", "invalid_material_id", "material_not_found"],
                          [r["code"] for r in result["skipped"]])
-        self.sources.resolve_materials.assert_called_once_with(["22", "21", "999"], need_desc=False)
+        self.sources.resolve_materials.assert_called_once_with(["22", "21", "999"], need_desc=False, enforce_blacklist=False)
         added, payload = self.add_resolved(result, base)
         self.assertEqual(["22", "21"], [r["material_id"] for r in self.call(method="GET")["items"]])
         replay = self.call("/items", payload)

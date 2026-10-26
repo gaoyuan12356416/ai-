@@ -195,7 +195,8 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(result[0]["enabled"])
         self.assertEqual(result[0]["items"][0]["module"], "fb_page_posts")
         self.assertFalse(result[0]["items"][1]["enabled"])
-        self.assertEqual(len(result[0]["items"]), 4)
+        self.assertEqual(len(result[0]["items"]), 5)
+        self.assertEqual(next(item for item in result[0]["items"] if item["key"] == "fbPostMaterialPool")["module"], "fb_video_publish")
         self.assertEqual(ensure_navigation(result), result)
         self.assertIn("module", original[0])
 
