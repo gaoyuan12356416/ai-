@@ -191,6 +191,27 @@ Missing objects or permission failures alone do not prove deletion. Preserve
 successful work and explicitly report unscanned accounts and skipped objects.
 
 Start and completion broadcasts go to 郜远 through the configured Feishu App.
+Keep the start at three lines and the completion normally at 8–12 lines, under
+1,200 characters. Show Beijing start/end time and duration, batch ID, product
+candidate counts, final unique Ad/Creative outcomes, at most three actionable
+failure causes, and any coverage/deferred warning. Do not expand object IDs,
+raw JSON, skip dictionaries or absolute server paths into the broadcast. Keep
+all detail in the existing manifest, deferred-cleanup, execution artifacts and
+shared ledger; never rewrite historical notices or receipts.
+
+Read final unique objects from Store.get_job for this batch, including shared
+Ads added during remediation. Never count result_counts events as objects;
+repeated failures followed by success contribute only their final outcome.
+Use mutually exclusive categories: exact ID/account DELETED proof, API accepted
+awaiting verification, previous success receipt, definite platform failure,
+provably unsent/skipped, unknown, and pending. A ledger deleted label or a
+success flag alone is not exact verification. A previous_task_deleted receipt
+must stay historical even when its nested proof is verified. Unsent policy
+changes are skipped; pending/blocked objects do not establish a failed DELETE.
+Rank only final platform failures. For preview, missing job or unreadable/invalid
+ledger, explicitly state that final execution statistics are unavailable; never
+substitute zeros or event counts. Reporting failures must not break execution.
+
 If only the completion broadcast failed, use `notify --run-id ... --phase end`;
 this must not trigger scanning or deletion. Inspect saved send receipts before
 recovering an uncertain notification to avoid duplicate broadcasts.
@@ -201,9 +222,9 @@ then `start-2`/`end-2`, and so on. Read `execution_attempt` and `notifications` 
 Use the exact saved phase and body. Failed notices may retry with the original
 provider UUID; sending/unknown notices must not automatically replay.
 
-Large broadcasts are one logical notice with durable child phases such as
+Historical frozen large broadcasts retain one logical notice with durable child phases such as
 `end-2-part-001`. Each complete serialized UTF-8 JSON request is at most 100,000
-bytes; all reference information is retained across parts. Every child has a
+bytes; all frozen body information is retained across parts. Every child has a
 stable UUID/body/receipt, and the parent becomes sent only after every child is
 sent. Retry a known-failed parent phase to reuse its frozen plan and skip sent
 children. Any sending/unknown child or parent requires receipt reconciliation,

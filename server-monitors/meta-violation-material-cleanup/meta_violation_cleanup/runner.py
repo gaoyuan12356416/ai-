@@ -1,14 +1,12 @@
 """Frozen-scope scanner and serial Creative -> Ad executor."""
 from collections import Counter, defaultdict
 from contextlib import nullcontext
-from datetime import datetime, timedelta
-import json
 import re
 import sqlite3
 import time
 import uuid
 from .policy import product_scope, parse_ids, material_identity, qualifying_policies, build_evidence, evaluate_ad
-from .runtime import CST, digest, legacy_delete_lock, now
+from .runtime import digest, legacy_delete_lock, now
 from .graph import GraphClient
 
 ACTOR='automation:meta-violation-material-cleanup'
@@ -559,62 +557,9 @@ class Runner:
         return final
 
     def start_text(self, run_id, start, end):
-        order=('先处理全部Ad，再处理Creative；共享引用失败在最后补删当前非违规Ad并重试Creative，'
-               '违规共享Ad留待下轮复核。' if self.config.get('execution_order')=='ads_first' else
-               '先删Creative再删Ad；共享Creative亦删除。')
-        return ('Meta违规素材清理｜开始\n运行：%s\n启动：%s\n产品：DramaWave、HotDrama（含W2A）\n窗口：%s 至 %s（北京时间）\n'
-                '规则1：指定原因≥1次，清理当前未违规的已关闭广告（含上层暂停）。\n'
-                '规则2：同素材≥4个不同违规广告，清理其全部当前未违规广告。\n'
-                '原因：成人裸露及性行为、成人性招揽及露骨性语言、成人性剥削、人口剥削、垃圾内容、暴力与血腥内容、毒品与药品。\n'
-                '%s')%(run_id,now(),start,end,order)
+        from .reports import start_text
+        return start_text(run_id, start, end)
 
     def end_text(self, run_id):
-        run=self.runtime.get(run_id);d=run['data']
-        try:manifest=self.runtime.load_artifact(run_id,'manifest.json')
-        except ValueError:manifest={}
-        labels={'completed':'完成','partial':'部分完成','interrupted':'中断','failed':'失败','previewed':'预演完成','running':'执行中'}
-        started=d.get('execution_started_at') or run['started']
-        ended=run['ended'] or now()
-        try:seconds=max(0,int((datetime.fromisoformat(ended)-datetime.fromisoformat(started)).total_seconds()))
-        except (TypeError,ValueError):seconds=0
-        lines=['Meta违规素材清理｜结束','运行：'+run_id,'状态：'+labels.get(run['status'],run['status']),
-            '窗口：%s 至 %s（北京时间）'%(d.get('window_start',''),d.get('window_end','')),
-            '账户：%s/%s；覆盖异常：%s'%(d.get('accounts_finished',0),d.get('accounts_total',0),d.get('coverage_errors',0)),
-            '窗口命中素材：%s；候选广告去重：%s'%(d.get('material_count',0),d.get('candidate_ads',0)),
-            '规则1：%s；规则2：%s（可重叠）'%(d.get('rule1_ads',0),d.get('rule2_ads',0))]
-        candidates=manifest.get('candidates',[])
-        for root,name in [('1479','DramaWave'),('3302','HotDrama')]:
-            selected=[c for c in candidates if c['root_id']==root]
-            lines.append('%s：已识别广告%s，候选%s（规则1=%s，规则2=%s）'%(name,
-                d.get('product_scanned_ads',{}).get(root,0),len(selected),
-                sum('rule1' in c['rules'] for c in selected),sum('rule2' in c['rules'] for c in selected)))
-        counts=d.get('result_counts',{})
-        for kind,label in [('creative','Creative'),('ad','Ad')]:
-            lines.append('本次%s：API接受%s，回读确认删除%s，明确失败%s，未知%s，既有成功回执%s'%(label,
-                counts.get(kind+'_api_accepted',0),counts.get(kind+'_deleted_verified',0),counts.get(kind+'_failed',0),
-                counts.get(kind+'_unknown',0),counts.get(kind+'_already_deleted',0)+counts.get(kind+'_deleted',0)))
-        impacts=manifest.get('shared_creative_impacts',{})
-        if manifest.get('policy_version')=='20261024-v2':
-            lines.append('待下轮复核Creative：%s；封禁账户Creative候选：%s'%(
-                d.get('deferred_creatives',0),len(manifest.get('blocked_account_creatives',[]))))
-            try:pending=self.runtime.load_artifact(run_id,'deferred-cleanup.json')
-            except ValueError:pending=[]
-            for entry in pending:
-                for blocked in entry.get('blocked_ads',[]):
-                    result=blocked.get('result',{})
-                    if blocked.get('ad_id'):
-                        lines.append('待复核 Ad %s｜Creative %s｜状态 %s'%(blocked['ad_id'],
-                            entry['basis']['creative_id'],result.get('reason',result.get('status','unknown'))))
-        lines.append('共享Creative：%s；引用覆盖：%s'%(len(impacts),manifest.get('shared_reference_coverage','未完成')))
-        for cid,refs in impacts.items():
-            lines.append('Creative '+cid+' 的其他引用（这些Ad不因共享关系删除）：')
-            for ref in refs:
-                products=ref.get('product_ids') or []
-                outside=any(pid not in manifest.get('scope',{}) for pid in products)
-                lines.append('Ad %s｜产品 %s%s'%(ref['ad_id'],','.join(products) or '未识别','（包含范围外产品）' if outside else ''))
-        lines.extend(['跳过原因：'+json.dumps(d.get('skip_counts',{}),ensure_ascii=False),
-            '执行时资格变化/跳过：%s'%counts.get('skipped_ads',0),
-            '剩余待处理：%s；未解决（含失败及未知）：%s'%(d.get('remaining_ads',0),d.get('unresolved_ads',0)),
-            '本次启动：%s；结束：%s；耗时：%s分%s秒'%(started,ended,seconds//60,seconds%60),
-            '完整证据：/mnt/data-disk/meta-violation-material-cleanup/runs/'+run_id+'/'])
-        return '\n'.join(lines)
+        from .reports import end_text
+        return end_text(self, run_id)
