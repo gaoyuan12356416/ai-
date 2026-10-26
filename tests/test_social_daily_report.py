@@ -305,17 +305,18 @@ class PresentationTests(unittest.TestCase):
                              for card in cards for item in card["elements"]), 180)
 
     def test_collector_calls_shared_campaign_report(self):
-        import sys
-        import types
+        from features.social_analytics.adapters import CatalogErrors
         from features.social_daily_report.collector import collect
         captured = []
         def build_report(app, actor, query, **kwargs):
             captured.append((app, actor, query, kwargs))
             return fixture()
-        routes = types.ModuleType("features.social_analytics.routes")
-        routes.build_report = build_report
-        with patch.dict(sys.modules, {"features.social_analytics.routes": routes}), \
-             patch("features.social_daily_report.collector.read_settings", return_value={}):
+        snapshot = ([], CatalogErrors())
+        with patch("features.social_analytics.routes.build_report", side_effect=build_report), \
+             patch("features.social_analytics.adapters.read_catalogs", return_value=snapshot), \
+             patch("features.social_daily_report.collector.read_settings", return_value={}), \
+             patch("features.social_daily_report.billing.collect_financials",
+                   side_effect=lambda report, app, catalog: report) as financials:
             result = collect(DAY, "/main.sqlite", "/not-read.env", "/x.sqlite",
                              "/fb.sqlite", "/attribution.sqlite")
         self.assertEqual(result["totals"]["revenue_cents"], 169079)
@@ -327,6 +328,8 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(query["group_by"], ["owner,platform"])
         self.assertEqual(query["start"], [DAY])
         self.assertFalse(options["include_titles"])
+        self.assertIs(options["catalog_snapshot"], snapshot)
+        financials.assert_called_once_with(result, app, snapshot[0])
 
     def test_shared_backend_and_daily_reconcile_same_campaign_snapshot(self):
         from features.social_analytics.adapters import normalized

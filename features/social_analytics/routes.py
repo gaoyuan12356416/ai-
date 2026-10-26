@@ -109,12 +109,16 @@ def source(app, start, end, platform, site_id=None):
     return result, fetched
 
 
-def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False):
+def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
+                 catalog_snapshot=None):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
     if ai_backend_only and actor.get("_system_report") is not True:
         raise ReportError("AI 后台日报范围仅供内部采集", 400)
-    catalog, catalog_errors = read_catalogs(app, params["platforms"])
+    if catalog_snapshot is not None and actor.get("_system_report") is not True:
+        raise ReportError("冻结归属快照仅供内部采集", 400)
+    catalog, catalog_errors = (catalog_snapshot if catalog_snapshot is not None
+                               else read_catalogs(app, params["platforms"]))
     metrics, errors, fetched = [], {}, []
     for platform in params["platforms"]:
         for spec in PLATFORMS[platform]["sources"]:
