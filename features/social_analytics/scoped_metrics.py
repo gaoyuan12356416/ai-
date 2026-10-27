@@ -10,6 +10,7 @@ from .report import ReportError, campaign_index, selected, validate_metrics
 
 BATCH_SIZE = 100
 WINDOW_DAYS = 14
+NARROW_CAMPAIGNS = 10
 QUERY_BUDGET_SECONDS = 40
 
 
@@ -83,9 +84,13 @@ def source(app, start, end, platform, site, campaigns):
             not isinstance(day, str) or not start <= day <= end for day in populated):
         raise ReportError("源数据日期覆盖不完整，待核实", 503)
     result = []
+    # A few exact IDs use a tiny range scan even over 93 days. Avoid repeated
+    # SQL-gate/connection overhead for a single-post drill-down; broad candidate
+    # sets still use bounded date windows.
+    periods = [(start, end)] if len(campaigns) <= NARROW_CAMPAIGNS else list(windows(start, end))
     for batch_start in range(0, len(campaigns), BATCH_SIZE):
         batch = campaigns[batch_start:batch_start + BATCH_SIZE]
-        for first, last in windows(start, end):
+        for first, last in periods:
             if not any(first <= day <= last for day in populated):
                 continue
             if time.monotonic() >= settings["SOCIAL_ANALYTICS_QUERY_DEADLINE"]:

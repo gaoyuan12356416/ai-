@@ -9,7 +9,8 @@ from test_social_analytics import ACTOR, DAY, SYSTEM, catalog, metric as raw_met
 
 
 def metric(**changes):
-    return raw_metric(**dict(site_id='2284', **changes)) if 'site_id' not in changes else raw_metric(**changes)
+    changes.setdefault('site_id', '2284')
+    return raw_metric(**changes)
 
 
 def published(**changes):
@@ -59,6 +60,13 @@ class ScopedMetricTests(unittest.TestCase):
         self.assertEqual(list(scoped.windows('2026-09-01', '2026-10-26')), [
             ('2026-09-01', '2026-09-14'), ('2026-09-15', '2026-09-28'),
             ('2026-09-29', '2026-10-12'), ('2026-10-13', '2026-10-26')])
+
+    def test_single_post_long_range_avoids_empty_window_round_trips(self):
+        with patch.object(routes, 'query_source_rows', side_effect=[[dict(date=DAY)], [metric()]]) as read:
+            scoped.source({}, '2026-09-01', '2026-10-26', 'youtube', '2284', ['campaign'])
+        self.assertEqual(read.call_count, 2)
+        self.assertIn("dt BETWEEN '2026-09-01' AND '2026-10-26'", read.call_args.args[1])
+        self.assertIn('FORCE INDEX(c_id_dt)', read.call_args.args[1])
 
     def test_success_cache_is_scoped_to_ids_and_source_site(self):
         def query(app, sql, limit):
