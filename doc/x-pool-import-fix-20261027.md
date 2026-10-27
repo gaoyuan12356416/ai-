@@ -71,3 +71,19 @@ Exact rollback on CPU (code only, current publication data retained):
 cd /mnt/data-disk/x-personal-publishing/pool-import-15709ca
 python3 scripts/deploy_x_pool_import_fix.py --rollback /mnt/data-disk/x-post-automation/backups/20261027T090229Z-pool-import-15709cab/manifest.json
 ```
+
+## Interrupted-admission recovery
+
+A browser may retain an operation after a network/503 response. Querying 404
+alone does not prove no commit, so it still keeps the original operation. On
+an exact retry after that query, an explicit `accepted=false` rejection (for
+example an expired proof) now unlocks fresh admission. Unknown responses and
+authorization/query errors retain the original operation. Successful readback
+clears it normally. This static fix changes no publisher data.
+
+The shipped-script frontend suite passes all 17 cases, including expiry,
+unknown retry, query-only 404, authorization failure and committed readback.
+Deploy/rollback via `scripts/deploy_x_pool_recovery_ui.py`; it checks exact
+GitHub/live baselines, backs up the nine static copies and verifies public
+hashes. No service restart is performed. The two entry pages use the updated
+`20261027pool-import` shared-script cache version.
