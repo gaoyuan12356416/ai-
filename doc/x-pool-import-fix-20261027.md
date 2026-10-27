@@ -87,3 +87,24 @@ Deploy/rollback via `scripts/deploy_x_pool_recovery_ui.py`; it checks exact
 GitHub/live baselines, backs up the nine static copies and verifies public
 hashes. No service restart is performed. The two entry pages use the updated
 `20261027pool-import` shared-script cache version.
+
+Static production acceptance at 17:06 Beijing time:
+
+- Commit `45535163c309bcdc456a4409fd0380cb44872e7b` fetched from GitHub.
+- All nine main/runtime/Nginx copies installed; the three public asset hashes
+  matched the pushed source. No service or timer was restarted.
+- Manifest:
+  `/mnt/data-disk/x-post-automation/backups/20261027T090657Z-pool-ui-45535163/manifest.json`.
+- Source repair remains at implementation commit `15709cab548ab83e3dd6ba9c0b15bfce5470f9fd`.
+
+Exact static rollback on CPU:
+
+```sh
+cd /mnt/data-disk/x-personal-publishing/pool-ui-4553516
+python3 scripts/deploy_x_pool_recovery_ui.py --rollback /mnt/data-disk/x-post-automation/backups/20261027T090657Z-pool-ui-45535163/manifest.json
+```
+
+Operator recovery: hard-refresh the page. If the old browser operation is still
+held, use the exact-operation retry. An explicit expired-preview rejection
+unlocks a new preview; unknown responses continue to retain the original key.
+Then run the ordinary validate-and-admit action and confirm the displayed list.
