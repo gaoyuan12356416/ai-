@@ -140,6 +140,12 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
     # authenticated tenant/owner actor; only scheduled collection is global.
     catalog, catalog_errors = read_catalogs(app, params["platforms"])
     metrics, errors, fetched = [], {}, []
+    query_coverage, scoped_sources = {}, []
+    web_scoped = ai_backend_only and actor.get("_system_report") is not True
+    if web_scoped:
+        app = dict(app)
+        app["SOCIAL_ANALYTICS_QUERY_DEADLINE"] = min(
+            app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
     for platform in params["platforms"]:
         for spec in PLATFORMS[platform]["sources"]:
             key = source_key(platform, spec["site_id"])
@@ -150,6 +156,13 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
                     candidates = None if actor.get("_system_report") is True else catalog
                     channel_rows, channel_fetched = scoped_facebook_source(
                         app, params["start"], params["end"], spec["site_id"], candidates)
+                elif web_scoped and platform in {"youtube", "x"}:
+                    from .scoped_metrics import campaign_scope, source as scoped_source
+                    candidates = campaign_scope(catalog, actor, params, platform, spec["site_id"])
+                    channel_rows, channel_fetched, populated = scoped_source(
+                        app, params["start"], params["end"], platform, spec["site_id"], candidates)
+                    query_coverage[key] = populated
+                    scoped_sources.append(key)
                 else:
                     channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
                 metrics.extend(channel_rows)
@@ -165,6 +178,8 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
     if ai_backend_only:
         from .backend_scope import restrict
         catalog, metrics, coverage, scope_audit = restrict(catalog, metrics, params["end"])
+        for key, days in query_coverage.items():
+            coverage.setdefault(key, set()).update(days)
     report = summarize(catalog, metrics, actor, params,
                        min(fetched) if fetched else datetime.now(timezone.utc).isoformat(),
                        errors=errors, catalog_errors=catalog_errors,
@@ -180,6 +195,13 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
             report["scope_audit"] = scope_audit
     if include_titles:
         enrich(report, lambda statement: query_rows(app, statement), export=export)
+    if scoped_sources:
+        report["meta"]["indexed_effect_sources"] = scoped_sources
+        for key in scoped_sources:
+            platform, site = key.split(":", 1)
+            quality = report["quality"]["platforms"][platform]
+            quality["reconciliation"] = "selected_visible_candidates_only"
+            quality["sources"][site]["reconciliation"] = "selected_visible_candidates_only"
     return report
 
 

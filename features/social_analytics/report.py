@@ -93,6 +93,14 @@ def visible(row, actor):
             and (actor.get("role") == "admin" or row.get("owner") == actor["user_id"]))
 
 
+def selected(row, actor, params):
+    """One predicate for both indexed query planning and report rendering."""
+    return visible(row, actor) and row["platform"] in params["platforms"] and all(
+        not values or row.get(key) in values for key, values in params["filters"].items()) and (
+        not params["search"] or params["search"] in
+        (str(row.get("drama_label") or "") + " " + row["drama"]).casefold())
+
+
 def campaign_index(catalog):
     result = defaultdict(list)
     for row in catalog:
@@ -217,11 +225,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         return (value.get("state", "complete") in {"complete", "available", "ok"}
                 and value.get("freshness", "fresh") in {"fresh", "current"})
 
-    def selected(row):
-        return visible(row, actor) and row["platform"] in platforms and all(
-            not values or row.get(key) in values for key, values in params["filters"].items()) and (
-            not params["search"] or params["search"] in
-            (str(row.get("drama_label") or "") + " " + row["drama"]).casefold())
+    def is_selected(row):
+        return selected(row, actor, params)
 
     def emit(row, value):
         key = tuple(row[dimension] for dimension in params["groups"])
@@ -268,7 +273,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         if row:
             if quality_visible:
                 add(quality["attributed"], metric)
-            if selected(row):
+            if is_selected(row):
                 emit(dict(row, date=day), metric)
                 if key[2] != row["key"][0]:
                     quality["corrected_keys"].add(key[2])
@@ -289,10 +294,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             publications[fact["id"]].append((row, fact))
         if not resolved.get(key):
             continue
-        if selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
+        if is_selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
             counted_links.add(row["link_id"])
             emit(row, {"links": 1})
-        if selected(row) and "date" not in params["groups"]:
+        if is_selected(row) and "date" not in params["groups"]:
             emit(dict(row, date=days[0]), {})
     publication_conflicts = 0
     publication_conflicts_by_platform = defaultdict(int)
@@ -311,7 +316,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                     publication_conflicts_by_source[source_id] += 1
             continue
         row, fact = candidates[0]
-        if selected(row) and fact["date"] in trend:
+        if is_selected(row) and fact["date"] in trend:
             emit(dict(row, date=fact["date"]), {
                 "published_count": 1, "post_count": int(row["platform"] == "x" and fact["kind"] == "post"),
                 "repost_count": int(row["platform"] == "x" and fact["kind"] == "repost")})
