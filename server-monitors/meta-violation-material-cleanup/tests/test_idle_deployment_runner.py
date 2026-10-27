@@ -15,10 +15,23 @@ class DeploymentTimerTests(unittest.TestCase):
         host.command.assert_not_called()
 
     def test_preflight_does_not_retire_timer(self):
+        for code in (0, 1):
+            host = Mock()
+            with self.subTest(code=code), patch.object(wrapper.deploy_when_idle, 'main', return_value=code):
+                self.assertEqual(wrapper.run([], host), code)
+            host.command.assert_not_called()
+
+    def test_apply_failure_retires_only_own_timer_without_retry(self):
+        host = Mock()
+        with patch.object(wrapper.deploy_when_idle, 'main', return_value=1):
+            self.assertEqual(wrapper.run(['--apply'], host), 1)
+        host.command.assert_called_once_with(['systemctl', 'disable', '--now', wrapper.TIMER])
+
+    def test_unconfirmed_apply_completion_retires_only_own_timer(self):
         host = Mock()
         with patch.object(wrapper.deploy_when_idle, 'main', return_value=0):
-            self.assertEqual(wrapper.run([], host), 0)
-        host.command.assert_not_called()
+            self.assertEqual(wrapper.run(['--apply'], host), 1)
+        host.command.assert_called_once_with(['systemctl', 'disable', '--now', wrapper.TIMER])
 
     def test_applied_receipt_retires_only_own_timer(self):
         host = Mock(); sha = '1' * 40

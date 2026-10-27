@@ -160,6 +160,7 @@ class IdleDeployer:
         self.sha, self.config_path = expected_sha, Path(config)
         self.current = self.base / 'current'
         self.receipt_path = self.base / 'deployments' / (str(expected_sha) + '.json')
+        self.attention_path = self.receipt_path.with_suffix('.needs-attention')
 
     def validate(self):
         if not re.fullmatch('[0-9a-f]{40}', self.sha or ''):
@@ -263,8 +264,45 @@ class IdleDeployer:
             receipt.update(timer_restore_pending=False, timer_restored_at=timestamp())
             atomic_json(self.receipt_path, receipt)
 
+    def hold_for_attention(self, receipt):
+        # Preserve the actual link/config and every ledger. A separate fence
+        # also blocks replay if the main receipt cannot be replaced.
+        receipt = dict(receipt or {}, status='needs_attention', commit=self.sha,
+                       candidate_release=str(self.candidate), failure_at=timestamp(),
+                       error='cutover_failed', timer_restore_pending=False)
+        try:
+            self.receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            atomic_bytes(self.attention_path, json_bytes({
+                'commit': self.sha, 'status': 'needs_attention', 'failure_at': receipt['failure_at']}))
+        except Exception:
+            pass
+        try:
+            atomic_json(self.receipt_path, receipt)
+        except Exception:
+            pass
+        try:
+            self.host.timer_stop()
+        except Exception:
+            pass
+
+    def check_attention(self):
+        if self.attention_path.exists():
+            raise DeploymentError('cutover_failed_manual_reconciliation_required')
+        if self.receipt_path.is_file():
+            current_receipt = json.loads(self.receipt_path.read_text(encoding='utf-8'))
+            if current_receipt.get('status') == 'needs_attention':
+                raise DeploymentError('cutover_failed_manual_reconciliation_required')
+
+    def restore_timer_or_hold(self, receipt):
+        try:
+            self.check_attention()
+            self.restore_timer(receipt)
+        except Exception:
+            self.hold_for_attention(receipt)
+            raise DeploymentError('cutover_failed_manual_reconciliation_required') from None
+
     def recover_intent(self, receipt):
-        if (receipt.get('status') not in ('prepared', 'rolled_back')
+        if (receipt.get('status') != 'prepared'
                 or receipt.get('commit') != self.sha
                 or receipt.get('candidate_release') != str(self.candidate)
                 or receipt.get('previous_release') != str(self.expected_current)
@@ -289,6 +327,7 @@ class IdleDeployer:
         return original, encoded
 
     def run(self, apply=False):
+        self.check_attention()
         # Busy retries must not repeatedly hash a prepared release while the
         # old worker is still running. This fast check performs no mutation.
         if self.current.resolve() != self.candidate.resolve():
@@ -302,7 +341,7 @@ class IdleDeployer:
             if (receipt.get('status') == 'applied' and receipt.get('commit') == self.sha
                     and receipt.get('candidate_release') == str(self.candidate) and current == self.candidate):
                 if apply:
-                    self.restore_timer(receipt)
+                    self.restore_timer_or_hold(receipt)
                 return {'status': 'already_applied', 'commit': self.sha,
                         'timer_restore_pending': receipt.get('timer_restore_pending', False)}
             original, encoded = self.recover_intent(receipt)
@@ -314,8 +353,8 @@ class IdleDeployer:
             encoded = json_bytes(dict(self.config, lookback_days=3, shared_reference_scan_workers=4))
         self.check_idle()
         failure = None
-        rollback_safe = True
         with self.host.lock(self.base / 'process.lock'):
+            self.check_attention()
             self.check_idle()
             if self.current.resolve() != current or self.config_path.read_bytes() != self.config_bytes:
                 raise DeploymentError('state_changed_before_cutover')
@@ -326,24 +365,26 @@ class IdleDeployer:
             if not apply:
                 return {'status': 'ready', 'commit': self.sha, 'timer_was_active': timer_was_active,
                         'recovering_prepared_cutover': recovering}
-            # Persist original timer intent and a verified config backup BEFORE
-            # stopping it. A crash at any following boundary can be resumed.
-            if not recovering:
-                backups = self.base / 'backups' / ('v3-idle-' + self.sha + '-' + uuid.uuid4().hex[:12])
-                backups.mkdir(mode=0o700, parents=True)
-                atomic_bytes(backups / 'config.json', original)
-                atomic_json(backups / 'state.json', {'current_release': str(self.expected_current),
-                    'config_sha256': digest(original), 'service': self.host.properties(SERVICE),
-                    'timer': timer, 'created_at': timestamp()})
-                self.receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                receipt = {'status': 'prepared', 'commit': self.sha, 'candidate_release': str(self.candidate),
-                    'previous_release': str(self.expected_current), 'release_proof_sha256': self.proof_hash,
-                    'backup': str(backups), 'created_at': timestamp(), 'timer_was_active': timer_was_active,
-                    'previous_config_sha256': digest(original), 'candidate_config_sha256': digest(encoded)}
-            receipt.update(status='prepared', timer_restore_pending=timer_was_active)
-            atomic_json(self.receipt_path, receipt)
-            switched = False
+            mutations_attempted = False
+            intent_saved = False
             try:
+                # Persist original timer intent and a verified config backup
+                # BEFORE stopping it. BaseException crashes remain resumable.
+                if not recovering:
+                    backups = self.base / 'backups' / ('v3-idle-' + self.sha + '-' + uuid.uuid4().hex[:12])
+                    backups.mkdir(mode=0o700, parents=True)
+                    atomic_bytes(backups / 'config.json', original)
+                    atomic_json(backups / 'state.json', {'current_release': str(self.expected_current),
+                        'config_sha256': digest(original), 'service': self.host.properties(SERVICE),
+                        'timer': timer, 'created_at': timestamp()})
+                    self.receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    receipt = {'status': 'prepared', 'commit': self.sha, 'candidate_release': str(self.candidate),
+                        'previous_release': str(self.expected_current), 'release_proof_sha256': self.proof_hash,
+                        'backup': str(backups), 'created_at': timestamp(), 'timer_was_active': timer_was_active,
+                        'previous_config_sha256': digest(original), 'candidate_config_sha256': digest(encoded)}
+                receipt.update(status='prepared', timer_restore_pending=timer_was_active)
+                atomic_json(self.receipt_path, receipt)
+                intent_saved = True
                 if timer['ActiveState'] == 'active':
                     self.host.timer_stop()
                     if self.host.properties(TIMER).get('ActiveState') != 'inactive':
@@ -351,40 +392,36 @@ class IdleDeployer:
                 self.check_idle()
                 if self.current.resolve() != current or self.config_path.read_bytes() != self.config_bytes:
                     raise DeploymentError('state_changed_before_cutover')
-                switched = True
+                # An I/O error may occur after an atomic replacement succeeds;
+                # set this BEFORE attempting either write, never after it.
+                mutations_attempted = True
                 atomic_bytes(self.config_path, encoded)
                 atomic_link(self.current, self.candidate)
                 receipt.update(status='applied', applied_at=timestamp(), config_sha256=digest(encoded))
                 atomic_json(self.receipt_path, receipt)
             except Exception as exc:
-                failure = exc
-                if switched:
+                # Only an actual worker race before any config/link attempt
+                # can retain the original schedule and retry automatically.
+                safe_busy = (isinstance(exc, DeploymentError) and exc.busy and intent_saved
+                        and not mutations_attempted and current == self.expected_current
+                        and self.config_bytes == original)
+                if safe_busy:
                     try:
-                        self.check_idle()
-                        # Once candidate was already present on entry, never
-                        # downgrade it to the old active-Ad deletion policy.
-                        target = self.candidate if current == self.candidate else self.expected_current
-                        content = encoded if current == self.candidate else original
-                        atomic_bytes(self.config_path, content)
-                        atomic_link(self.current, target)
+                        safe_busy = (self.current.resolve() == self.expected_current
+                                     and self.config_path.read_bytes() == original)
                     except Exception:
-                        rollback_safe = False
-                receipt.update(status=('prepared' if current == self.candidate else 'rolled_back')
-                               if rollback_safe else 'needs_attention',
-                               failure_at=timestamp(), error='cutover_failed')
-                try:
-                    atomic_json(self.receipt_path, receipt)
-                except Exception:
-                    pass  # Preserve the original failure and timer intent.
+                        safe_busy = False
+                if safe_busy:
+                    failure = exc
+                else:
+                    self.hold_for_attention(receipt)
+                    raise DeploymentError('cutover_failed_manual_reconciliation_required') from None
         # Starting a persistent timer under process.lock could launch a worker
         # that immediately fails its nonblocking lock. Restore only after exit.
         if failure is not None:
-            if rollback_safe:
-                self.restore_timer(receipt)
-            else:
-                raise DeploymentError('cutover_failed_manual_reconciliation_required') from None
+            self.restore_timer_or_hold(receipt)
             raise failure
-        self.restore_timer(receipt)
+        self.restore_timer_or_hold(receipt)
         return {'status': 'applied', 'commit': self.sha, 'receipt': str(self.receipt_path)}
 
 

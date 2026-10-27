@@ -360,6 +360,8 @@ class V3ReportTests(unittest.TestCase):
     def finish(self, run, identifier, result, status='deleted', kind='ad', job_id='policy-cleanup-report'):
         key = kind + ':' + identifier
         self.assertTrue(self.store.claim_object(job_id, key, run)['claimed'])
+        result = dict(result)
+        result.setdefault('account_id', '100')
         self.store.finish_object(job_id, key, run, status, result)
 
     def test_v3_origin_and_actual_results_separated_without_mutation(self):
@@ -423,12 +425,85 @@ class V3ReportTests(unittest.TestCase):
         self.assertIn('本批实际确认删除：广告0；Creative 0', text)
         self.assertIn('广告其余：已接受待核验0；历史/非本批已删2', text)
 
-    def test_unknown_without_acceptance_is_not_new_delete_after_readback(self):
+    def test_current_sent_unknown_counts_after_exact_readback_without_acceptance(self):
         run = self.create_job()
-        self.finish(run, '10', {'request_sent': True, 'status': 'unknown', 'api_accepted': False}, 'unknown')
+        self.finish(run, '10', {'request_sent': True, 'status': 'unknown',
+                              'delete_status': 'unknown', 'code': 'transport_uncertain',
+                              'api_accepted': False}, 'unknown')
         self.store.reconcile_object('policy-cleanup-report', 'ad:10', 'deleted', {
             'request_sent': False, 'proof': {'id': '10', 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告1；Creative 0', self.runner.end_text('report'))
+
+    def test_unknown_confirmed_in_same_attempt_keeps_original_delete_outcome(self):
+        run = self.create_job()
+        self.finish(run, '10', verified('10', api_accepted=False, delete_status='unknown',
+                                      code='transport_uncertain'))
+        self.assertIn('本批实际确认删除：广告1；Creative 0', self.runner.end_text('report'))
+
+    def test_original_unknown_status_without_delete_status_can_be_reconciled(self):
+        run = self.create_job()
+        self.finish(run, '10', {'request_sent': True, 'status': 'unknown',
+                              'api_accepted': False, 'code': 'transport_uncertain'}, 'unknown')
+        self.store.reconcile_object('policy-cleanup-report', 'ad:10', 'deleted', {
+            'request_sent': False, 'proof': {'id': '10', 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告1；Creative 0', self.runner.end_text('report'))
+
+    def test_definite_rejection_then_external_deleted_get_is_not_current_deletion(self):
+        run = self.create_job()
+        self.finish(run, '10', dict(failed(100, 3858800), delete_status='failed'), 'failed')
+        self.finish(run, '10', verified('10', request_sent=False, api_accepted=False,
+                                      code='already_deleted', delete_status='deleted_verified'))
         self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_rejection_marker_cannot_be_overridden_by_later_deleted_proof(self):
+        run = self.create_job()
+        self.finish(run, '10', verified('10', delete_status='failed'))
+        self.finish(run, '11', dict(verified('11'), status='failed', delete_status='unknown'))
+        self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_unsent_unknown_or_missing_account_cannot_claim_current_deletion(self):
+        run = self.create_job()
+        self.finish(run, '10', {'status': 'unknown', 'delete_status': 'unknown',
+                              'request_sent': False}, 'unknown')
+        self.finish(run, '11', {'status': 'unknown', 'delete_status': 'unknown',
+                              'request_sent': True, 'account_id': None}, 'unknown')
+        for identifier in ('10', '11'):
+            self.store.reconcile_object('policy-cleanup-report', 'ad:' + identifier, 'deleted', {
+                'request_sent': False, 'proof': {'id': identifier, 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_old_job_unknown_reconciled_later_never_becomes_current_deletion(self):
+        old = self.create_job([row('12')], job_id='policy-cleanup-old', request='old')
+        self.finish(old, '12', {'request_sent': True, 'status': 'unknown',
+                              'delete_status': 'unknown'}, 'unknown', job_id='policy-cleanup-old')
+        self.store.finish_run(old, 'partial', {})
+        run = self.create_job()
+        claim = self.store.claim_object('policy-cleanup-report', 'ad:12', run)
+        self.assertFalse(claim['claimed'])
+        self.assertEqual(claim['status'], 'unknown')
+        self.store.reconcile_object('policy-cleanup-old', 'ad:12', 'deleted', {
+            'request_sent': False, 'proof': {'id': '12', 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_unknown_needs_exact_object_and_account_deleted_proof(self):
+        run = self.create_job()
+        for identifier,proof in (('10', {'id': '999', 'account_id': '100', 'status': 'DELETED'}),
+                                 ('11', {'id': '11', 'account_id': '999', 'status': 'DELETED'})):
+            self.finish(run, identifier, {'request_sent': True, 'status': 'unknown',
+                                         'delete_status': 'unknown'}, 'unknown')
+            self.store.reconcile_object('policy-cleanup-report', 'ad:' + identifier, 'deleted', {
+                'request_sent': False, 'proof': proof})
+        self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_failed_retries_then_unknown_confirmed_count_one_final_object(self):
+        run = self.create_job()
+        self.finish(run, '10', failed(200, 1487235), 'failed')
+        self.finish(run, '10', failed(100, 3858800), 'failed')
+        self.finish(run, '10', {'request_sent': True, 'status': 'unknown',
+                              'delete_status': 'unknown'}, 'unknown')
+        self.store.reconcile_object('policy-cleanup-report', 'ad:10', 'deleted', {
+            'request_sent': False, 'proof': {'id': '10', 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告1；Creative 0', self.runner.end_text('report'))
 
     def test_same_job_retries_are_counted_once(self):
         run = self.create_job()

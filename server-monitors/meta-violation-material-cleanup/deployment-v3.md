@@ -15,6 +15,9 @@ The default is read-only preflight. Add `--apply` for the approved cutover.
 Exit `75` means a worker or lock is busy: an independent five-minute deployment
 timer may retry. Exit `1` requires examination; do not force the switch or clear
 claims. Exit `0` reports `ready`, `applied`, or `already_applied`.
+The scheduled `run_idle_deployment.py` wrapper disables only its independent
+deployment timer after success or an apply error. Busy `75` keeps retrying;
+read-only preflight never changes either timer.
 
 Apply requires the mounted data disk UUID, at least 1 GiB free, exact old/current
 release, no live runtime/shared owner, no unresolved active claim, and the
@@ -31,9 +34,17 @@ timer state and verified config backup **before stopping the timer**. Reruns
 resume a prepared cutover only if the config hash is exactly the saved old or
 new value and the link is exactly the saved old or candidate release. This covers
 crashes after timer stop, config replacement or release-link replacement.
-Applied reruns only finish a pending timer restore; they do not switch again.
-An unexpected config/link or `needs_attention` receipt requires manual
-reconciliation. Never delete the receipt to force a retry.
+Applied crash recovery only finishes a pending timer restore; it does not switch
+again. Ordinary exceptions during backup, cutover, receipt writing or timer
+restoration preserve the exact current config/link, best-effort stop future
+cleanup scheduling, and record `needs_attention` plus an independent
+`deployments/<FULL_SHA>.needs-attention` fence. They never restore the old policy
+and never automatically restore the timer or retry the cutover. The only retry
+exception is a confirmed worker race before any config/link write was attempted,
+with both still at their original values: keep the prepared intent, restore the
+original timer state after unlocking, and return `75` without touching the worker.
+An unexpected config/link, failure fence or `needs_attention` receipt requires
+manual reconciliation. Never delete deployment evidence to force a retry.
 
 No extra cleanup run is launched. Verify the next normal 09:00/21:00 Beijing
 batch's policy, source counts, exact deletion proofs, reference scan peak and

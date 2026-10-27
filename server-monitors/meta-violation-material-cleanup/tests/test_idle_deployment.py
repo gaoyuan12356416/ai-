@@ -169,6 +169,24 @@ class IdleDeploymentTests(unittest.TestCase):
             self.assertEqual(before, self.files())
         self.assertFalse(any(e[0] in ('start','stop') for e in self.host.events))
 
+    def test_new_failure_fence_or_receipt_is_rechecked_under_worker_lock(self):
+        worker = self.worker()
+        original_lock = self.host.lock
+        for path in (worker.attention_path, worker.receipt_path):
+            @contextmanager
+            def locked_with_new_failure(lock_path):
+                with original_lock(lock_path):
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_text(json.dumps({'status': 'needs_attention'}))
+                    yield
+            with self.subTest(path=path.name), patch.object(self.host, 'lock', side_effect=locked_with_new_failure):
+                with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
+                    worker.run(apply=True)
+            self.assertEqual(self.link.target, self.old)
+            self.assertEqual(json.loads(self.config.read_text()), self.original_config)
+            self.assertFalse(any(e[0] in ('start','stop') for e in self.host.events))
+            path.unlink()
+
     def test_runtime_owner_and_unknown_owner_are_busy_even_when_systemd_inactive(self):
         with closing(sqlite3.connect(self.base/'runs.sqlite3')) as conn:
             conn.execute('INSERT INTO runs VALUES (?,?)', ('running', json.dumps({'_owner': {'pid': 42, 'start': 'ticks'}})))
@@ -207,7 +225,12 @@ class IdleDeploymentTests(unittest.TestCase):
         after = self.files()
         self.assertEqual(before, {path: after[path] for path in before})
         self.assertTrue(json.loads(self.worker().receipt_path.read_text())['timer_was_active'])
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'prepared')
+        self.assertFalse(self.worker().attention_path.exists())
         self.assertEqual(self.link.target, self.old)
+        self.host.on_timer_stop = lambda: None
+        self.host.service.update(ActiveState='inactive', MainPID='0')
+        self.assertEqual(self.worker().run(apply=True)['status'], 'applied')
 
     def test_inactive_timer_stays_inactive_and_second_call_is_idempotent(self):
         self.host.timer['ActiveState'] = 'inactive'
@@ -218,20 +241,94 @@ class IdleDeploymentTests(unittest.TestCase):
         self.assertEqual(before, self.files())
         self.assertFalse(any(e[0] in ('start','stop') for e in self.host.events))
 
-    def test_partial_switch_failure_restores_config_and_link_only_while_idle(self):
+    def test_busy_race_with_changed_config_preserves_worker_but_holds_schedule(self):
+        changed = dict(self.original_config, operator_change=123)
+        def busy_and_changed():
+            self.config.write_text(json.dumps(changed))
+            self.host.service.update(ActiveState='active', MainPID='42')
+        self.host.on_timer_stop = busy_and_changed
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required') as error:
+            self.worker().run(apply=True)
+        self.assertFalse(error.exception.busy)
+        self.assertEqual(self.host.service['MainPID'], '42')
+        self.assertEqual(json.loads(self.config.read_text()), changed)
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertTrue(self.worker().attention_path.is_file())
+        self.assertFalse(any(e[0] == 'start' for e in self.host.events))
+
+    def test_partial_switch_failure_preserves_mixed_state_and_holds_schedule(self):
+        before = {p: p.read_bytes() for p in (self.shared, self.base/'runs.sqlite3')}
+        with patch.object(deploy, 'atomic_link', side_effect=OSError('simulated link failure')) as link, self.assertRaisesRegex(
+                deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+        link.assert_called_once()
+        self.assertEqual(json.loads(self.config.read_text())['shared_reference_scan_workers'], 4)
+        self.assertEqual(self.link.target, self.old)
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'needs_attention')
+        self.assertTrue(self.worker().attention_path.is_file())
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+
+    def test_applied_receipt_write_failure_never_restores_old_policy(self):
+        original_write = deploy.atomic_json
+        def fail_applied_receipt(path, value):
+            if path == self.worker().receipt_path and value.get('status') == 'applied':
+                raise OSError('receipt write failed')
+            original_write(path, value)
+        with patch.object(deploy, 'atomic_json', side_effect=fail_applied_receipt), self.assertRaisesRegex(
+                deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+        self.assertEqual(self.link.target, self.candidate)
+        self.assertEqual(json.loads(self.config.read_text())['shared_reference_scan_workers'], 4)
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'needs_attention')
+
+    def test_failed_receipt_cannot_leave_prepared_intent_automatically_replayable(self):
+        original_write = deploy.atomic_json
+        def fail_after_prepared(path, value):
+            if path == self.worker().receipt_path and value.get('status') != 'prepared':
+                raise OSError('receipt cannot be replaced')
+            original_write(path, value)
+        with patch.object(deploy, 'atomic_json', side_effect=fail_after_prepared), self.assertRaisesRegex(
+                deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'prepared')
+        self.assertTrue(self.worker().attention_path.is_file())
+        before = self.files()
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+        self.assertEqual(before, self.files())
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+
+    def test_backup_failure_holds_timer_without_changing_config_or_link(self):
+        original_write = deploy.atomic_bytes
         original = self.config.read_bytes()
-        count = [0]
-        def failed_link(link, target):
-            count[0] += 1
-            if count[0] == 1:
-                raise OSError('simulated link failure')
-            link.target = target
-        with patch.object(deploy, 'atomic_link', side_effect=failed_link), self.assertRaises(OSError):
+        def fail_backup(path, content, mode=0o600):
+            if path.name == 'config.json' and path != self.config:
+                raise OSError('backup unavailable')
+            original_write(path, content, mode)
+        with patch.object(deploy, 'atomic_bytes', side_effect=fail_backup), self.assertRaisesRegex(
+                deploy.DeploymentError, 'manual_reconciliation_required'):
             self.worker().run(apply=True)
         self.assertEqual(self.config.read_bytes(), original)
         self.assertEqual(self.link.target, self.old)
-        self.assertEqual(self.host.timer['ActiveState'], 'active')
-        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'rolled_back')
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'needs_attention')
+
+    def test_busy_error_during_first_config_attempt_is_a_failure_not_a_retry(self):
+        original_write = deploy.atomic_bytes
+        def busy_write(path, content, mode=0o600):
+            if path == self.config:
+                raise deploy.DeploymentError('worker_service_busy', busy=True)
+            original_write(path, content, mode)
+        with patch.object(deploy, 'atomic_bytes', side_effect=busy_write), self.assertRaisesRegex(
+                deploy.DeploymentError, 'manual_reconciliation_required') as error:
+            self.worker().run(apply=True)
+        self.assertFalse(error.exception.busy)
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertTrue(self.worker().attention_path.is_file())
 
     def test_cannot_restore_old_release_if_worker_appears_during_failure(self):
         def failed_link(link, target):
@@ -244,18 +341,39 @@ class IdleDeploymentTests(unittest.TestCase):
         self.assertEqual(self.host.timer['ActiveState'], 'inactive')
         self.assertEqual(json.loads(self.config.read_text())['shared_reference_scan_workers'], 4)
 
-    def test_timer_restore_failure_is_retryable_without_second_cutover(self):
+    def test_timer_restore_failure_holds_schedule_without_second_cutover(self):
         self.host.fail_timer_start = True
-        with self.assertRaises(deploy.DeploymentError):
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
             self.worker().run(apply=True)
         receipt = json.loads(self.worker().receipt_path.read_text())
-        self.assertEqual(receipt['status'], 'applied')
-        self.assertTrue(receipt['timer_restore_pending'])
+        self.assertEqual(receipt['status'], 'needs_attention')
+        self.assertFalse(receipt['timer_restore_pending'])
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
+        self.assertEqual(self.link.target, self.candidate)
         backups = list((self.base/'backups').iterdir())
         self.host.fail_timer_start = False
-        self.assertEqual(self.worker().run(apply=True)['status'], 'already_applied')
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
         self.assertEqual(list((self.base/'backups').iterdir()), backups)
-        self.assertFalse(json.loads(self.worker().receipt_path.read_text())['timer_restore_pending'])
+
+    def test_crash_at_timer_restore_preserves_applied_intent_for_resume(self):
+        with patch.object(self.host, 'timer_start', side_effect=SimulatedCrash()), self.assertRaises(SimulatedCrash):
+            self.worker().run(apply=True)
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'applied')
+        self.assertTrue(json.loads(self.worker().receipt_path.read_text())['timer_restore_pending'])
+        self.assertFalse(self.worker().attention_path.exists())
+        self.assertEqual(self.worker().run(apply=True)['status'], 'already_applied')
+        self.assertEqual(self.host.timer['ActiveState'], 'active')
+
+    def test_applied_crash_recovery_timer_restore_failure_requires_attention(self):
+        with patch.object(self.host, 'timer_start', side_effect=SimulatedCrash()), self.assertRaises(SimulatedCrash):
+            self.worker().run(apply=True)
+        self.host.fail_timer_start = True
+        with self.assertRaisesRegex(deploy.DeploymentError, 'manual_reconciliation_required'):
+            self.worker().run(apply=True)
+        self.assertEqual(json.loads(self.worker().receipt_path.read_text())['status'], 'needs_attention')
+        self.assertEqual(self.link.target, self.candidate)
+        self.assertEqual(self.host.timer['ActiveState'], 'inactive')
 
     def test_bad_mount_release_hash_and_policy_fail_before_timer_actions(self):
         self.host.mount_ok = False
@@ -340,7 +458,7 @@ class IdleDeploymentTests(unittest.TestCase):
         host = deploy.Host()
         with patch.object(host, 'command') as command, self.assertRaisesRegex(
                 deploy.DeploymentError, 'outside_data_disk'):
-            host.verify_mount(self.base)
+            host.verify_mount(Path('/outside-required-data-disk/test-cleanup'))
         command.assert_not_called()
         with patch.object(host, 'command', side_effect=[deploy.DATA_UUID, 'other-device']), self.assertRaisesRegex(
                 deploy.DeploymentError, 'data_disk_unavailable'):

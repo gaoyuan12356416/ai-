@@ -143,11 +143,14 @@ class ConcurrentExecutor:
                 if policy:
                     result=policy.outcome(kind,candidate,result,self.claim_sources[(kind,identifier)])
                 return result
-            return dict(context,status='unknown',prior_result=result,api_accepted=result.get('api_accepted',False),requires_reconciliation=True)
+            # A failed GET must not erase the original DELETE's sent/outcome
+            # evidence; later reconciliation reads the immutable attempt audit.
+            return dict(result,**context,status='unknown',prior_result=result,
+                api_accepted=result.get('api_accepted',False),requires_reconciliation=True)
         except BaseException as exc:
             if not isinstance(exc,Exception):
                 self.abort.set()
-            return dict(context,status='unknown',error=safe_error(exc),prior_result=result,
+            return dict(result or {},**context,status='unknown',error=safe_error(exc),prior_result=result,
                 api_accepted=bool(result and result.get('api_accepted')),requires_reconciliation=True,
                 interrupted=not isinstance(exc,Exception))
 

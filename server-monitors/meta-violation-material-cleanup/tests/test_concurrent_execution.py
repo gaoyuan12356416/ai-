@@ -102,7 +102,23 @@ class ParallelTests(phased_fixtures.PhasedExecutionTests):
         runner.execute('test-run',m)
         row=next(o for o in self.store.get_job('policy-cleanup-test-run')['objects'] if o['key']=='ad:10')
         self.assertEqual(row['status'],'unknown');self.assertTrue(row['result']['api_accepted'])
+        self.assertTrue(row['result']['request_sent'])
+        self.assertEqual(row['result']['delete_status'],'api_accepted')
+        self.assertIn('pre_delete_ad_snapshot',row['result'])
         self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+
+    def test_unknown_write_readback_cancel_retains_original_attempt_truth(self):
+        runner,source,graph,runtime,m=self.prepare()
+        graph.results[('ad','10')]={'status':'unknown','request_sent':True}
+        graph.verifications[('ad','10')]=RequestNotSent('readback_cancelled')
+        runner.execute('test-run',m)
+        row=next(o for o in self.store.get_job('policy-cleanup-test-run')['objects'] if o['key']=='ad:10')
+        self.assertEqual(row['status'],'unknown')
+        self.assertTrue(row['result']['request_sent'])
+        self.assertEqual(row['result']['delete_status'],'unknown')
+        self.assertFalse(row['result']['api_accepted'])
         runner.execute('test-run',m)
         self.assertEqual(self.deletes(graph),[('delete','ad','10')])
 

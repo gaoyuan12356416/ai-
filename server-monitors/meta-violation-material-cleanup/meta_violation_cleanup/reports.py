@@ -148,11 +148,13 @@ def summarize_objects(objects, accepted_writes=None):
 
 
 def _accepted_writes(store, job_id, objects):
-    """Original sent/accepted writes, scoped to this job's exact attempts.
+    """Original submitted, accepted-or-unknown writes from this job's attempts.
 
     GET reconciliation may rewrite attempts.result.  The append-only
     object_finished audit retains what the write actually returned.  Neither
     current object flags nor nested receipts can create new-write provenance.
+    An unknown DELETE may later be confirmed by exact GET evidence; a definite
+    rejection cannot. The caller still requires final object/account DELETED.
     """
     by_key = {row['kind'] + ':' + str(row['object_id']): row for row in objects}
     accepted = set()
@@ -168,14 +170,21 @@ def _accepted_writes(store, job_id, objects):
             if (key not in by_key or attempts.get(entry.get('attempt_id')) != (key, entry.get('run_id'))):
                 continue
             result = entry.get('result')
-            if (not isinstance(result, dict) or result.get('request_sent') is not True
-                    or not (result.get('api_accepted') is True or result.get('delete_status') == 'api_accepted')):
+            if not isinstance(result, dict) or result.get('request_sent') is not True:
+                continue
+            original_status = result.get('delete_status')
+            if (original_status in ('failed', 'blocked')
+                    or result.get('status') in ('failed', 'blocked')
+                    or entry.get('status') in ('failed', 'blocked')):
+                continue
+            if original_status is None:
+                original_status = 'api_accepted' if result.get('api_accepted') is True else result.get('status')
+            if original_status not in ('api_accepted', 'unknown'):
                 continue
             row = by_key[key]
             accounts = row.get('account_ids')
             if (not isinstance(accounts, list) or len(accounts) != 1
-                    or (result.get('account_id') is not None
-                        and str(result['account_id']) != str(accounts[0]))):
+                    or str(result.get('account_id')) != str(accounts[0])):
                 continue
             accepted.add((row['kind'], str(row['object_id'])))
     return accepted
