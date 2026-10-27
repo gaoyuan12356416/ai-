@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
@@ -16,6 +17,8 @@ from features.x_posts.service import XPostError
 from features.x_video_publish.core import PersonalStore
 from features.x_video_publish.pool import PoolService
 from features.x_video_publish.scheduler import PoolScheduler
+from features.x_video_publish.sources import SourceRepository
+from scripts.test_x_video_publish_gateway import FakeMySQL
 
 
 class PoolTests(unittest.TestCase):
@@ -43,6 +46,11 @@ class PoolTests(unittest.TestCase):
     def material_resolver(self, actor, mids):
         return {"items": {mid: copy.deepcopy(self.materials[mid]) for mid in mids if mid in self.materials},
                 "errors": {mid: {"code": "material_not_found", "message": "Fixture material unavailable"} for mid in mids if mid not in self.materials}}
+
+    def use_real_source(self, count=5):
+        # Exercise the production repository and selector, mocking only MySQL.
+        source = SourceRepository(FakeMySQL(count))
+        self.pool.material_resolver = lambda actor, mids: source.resolve(mids)
 
     def identity(self, tenant, user):
         self.identity_calls.append((tenant, user))
@@ -117,14 +125,78 @@ class PoolTests(unittest.TestCase):
             self.pool.add(self.actor, "1", {"expected_version": version, "preview_id": proof["preview_id"], "idempotency_key": "expired-admission"})
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 0)
 
+    def test_skipped_reserved_material_does_not_invalidate_remaining_positions(self):
+        self.settings()
+        self.use_real_source()
+        other = {**self.account, "id": 2, "x_user_id": "9000000000000000002"}
+        proof = self.store.preview(self.actor, {"source": "manual", "rows": [
+            {"account_id": "2", "material_id": "102"}]}, {"2": other}, self.materials, now=self.now)
+        self.store.commit(self.actor, proof["preview_token"], "existing-reservation",
+                          accounts={"2": other}, materials=self.materials, now=self.now)
+        result, preview, body = self.add(["101", "102", "103", "101", "104"])
+        self.assertEqual([r["material_id"] for r in result["items"]], ["101", "103", "104"])
+        self.assertEqual([r["code"] for r in preview["skipped"]],
+                         ["x_post_manual_material_unavailable", "duplicate_material_id"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_post_manual_material_reservation WHERE state='active'"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_task"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_post_queue"), 0)
+        self.assertTrue(self.pool.add(self.actor, "1", body)["idempotent"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 3)
+
+    def test_occupied_and_missing_rows_across_source_pages_preserve_admission_order(self):
+        self.settings()
+        self.use_real_source(60)
+        self.add(["102"])
+        submitted = ["999", *map(str, range(101, 161))]
+        result, preview, _ = self.add(submitted)
+        self.assertEqual([r["material_id"] for r in result["items"]], [mid for mid in submitted if mid not in {"999", "102"}])
+        self.assertEqual([r["code"] for r in preview["skipped"]], ["material_not_found", "pool_material_exists"])
+
+    def test_legacy_proof_requires_fresh_preview_without_rewriting_history(self):
+        self.settings()
+        self.use_real_source()
+        version = self.version()
+        proof = self.pool.preview(self.actor, "1", {"expected_version": version, "material_ids": ["999", "101", "103"]})
+        with self.pool.connection() as conn:
+            raw = json.loads(conn.execute("SELECT material_facts FROM x_video_publish_pool_preview WHERE preview_id=?", (proof["preview_id"],)).fetchone()[0])
+            raw["101"]["manual_item_id"], raw["103"]["manual_item_id"] = 2, 3
+            conn.execute("UPDATE x_video_publish_pool_preview SET material_facts=? WHERE preview_id=?", (json.dumps(raw), proof["preview_id"]))
+        with self.assertRaises(XPostError) as caught:
+            self.pool.add(self.actor, "1", {"expected_version": version, "preview_id": proof["preview_id"], "idempotency_key": "legacy-proof-admission"})
+        self.assertEqual(caught.exception.code, "pool_preview_changed")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 0)
+        result, _, _ = self.add(["999", "101", "103"])
+        self.assertEqual([r["material_id"] for r in result["items"]], ["101", "103"])
+
+    def test_new_reservation_after_preview_still_blocks_entire_admission(self):
+        self.settings()
+        version = self.version()
+        proof = self.pool.preview(self.actor, "1", {"expected_version": version, "material_ids": ["101", "103"]})
+        other = self.store.preview(self.actor, {"source": "manual", "rows": [
+            {"account_id": "1", "material_id": "103"}]}, {"1": self.account}, self.materials, now=self.now)
+        self.store.commit(self.actor, other["preview_token"], "concurrent-reservation",
+                          accounts={"1": self.account}, materials=self.materials, now=self.now)
+        with self.assertRaises(XPostError) as caught:
+            self.pool.add(self.actor, "1", {"expected_version": version, "preview_id": proof["preview_id"], "idempotency_key": "blocked-admission"})
+        self.assertEqual(caught.exception.code, "pool_preview_changed")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 0)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_operation"), 0)
+
     def test_preview_material_change_requires_recheck(self):
         self.settings()
         version = self.version()
         proof = self.pool.preview(self.actor, "1", {"expected_version": version, "material_ids": ["101"]})
-        self.materials["101"]["drama_description"] = "Changed"
-        with self.assertRaises(XPostError):
-            self.pool.add(self.actor, "1", {"expected_version": version, "preview_id": proof["preview_id"], "idempotency_key": "changed-admission"})
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 0)
+        original = copy.deepcopy(self.materials["101"])
+        for field, value in {"drama_description": "Changed", "material_name": "Different video",
+                             "material_url": "https://example.invalid/changed.mp4", "content_id": "999",
+                             "duration_seconds": 46, "language": "ja", "material_id": "999"}.items():
+            with self.subTest(field=field):
+                self.materials["101"] = {**original, field: value}
+                with self.assertRaises(XPostError) as caught:
+                    self.pool.add(self.actor, "1", {"expected_version": version, "preview_id": proof["preview_id"], "idempotency_key": "changed-admission"})
+                self.assertEqual(caught.exception.code, "pool_preview_changed")
+                self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item"), 0)
+        self.materials["101"] = original
 
     def test_move_remove_keep_order_and_preserve_history(self):
         self.settings()

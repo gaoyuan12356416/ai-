@@ -180,7 +180,11 @@ class SourceRepository:
                 if r.get('media_kind') != 'video':
                     errors[mid] = {'code':'material_not_video','message':'该发布入口仅支持视频'}
                     continue
-                result[mid] = {**r,'id':mid,'language':r['material_language'],
+                # Request/page position is not a material fact. Pool admission
+                # resolves the accepted subset again after skipping bad rows;
+                # propagating this ordinal makes unchanged materials differ.
+                material = {key:value for key,value in r.items() if key != 'manual_item_id'}
+                result[mid] = {**material,'id':mid,'language':r['material_language'],
                     'duration_seconds':r['source_duration'],'drama_description':r['description'],
                     'thumbnail_url':safe_url(raw[mid].get('thumbnail_url')),
                     'preview_url':safe_url(r['material_url'])}
